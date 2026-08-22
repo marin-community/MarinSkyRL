@@ -87,10 +87,8 @@ _REQUIRED_CONTEXT_BUDGET_FIELDS = frozenset(
         "max_turns",
     }
 )
-_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | {
-    "generated_budget_fraction",
-    "overlong_cache_fraction",
-}
+_CONTEXT_BUDGET_FRACTION_FIELDS = frozenset({"generated_budget_fraction", "overlong_cache_fraction"})
+_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | _CONTEXT_BUDGET_FRACTION_FIELDS
 _DEFAULT_GENERATED_BUDGET_FRACTION = 0.5
 _DEFAULT_OVERLONG_CACHE_FRACTION = 0.25
 
@@ -207,11 +205,11 @@ def _require_positive_integer(value: Any, field_name: str, config_path: Path) ->
 
 
 def _require_fraction(value: Any, field_name: str, config_path: Path, *, allow_zero: bool) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        interval = "[0, 1]" if allow_zero else "(0, 1]"
-        raise ValueError(f"{config_path}: context_budget.{field_name} must be in {interval}, got {value!r}")
-    lower_bound_satisfied = value >= 0 if allow_zero else value > 0
-    if not lower_bound_satisfied or value > 1:
+    valid = False
+    if not isinstance(value, bool) and isinstance(value, (int, float)):
+        lower_bound_satisfied = value >= 0 if allow_zero else value > 0
+        valid = math.isfinite(value) and lower_bound_satisfied and value <= 1
+    if not valid:
         interval = "[0, 1]" if allow_zero else "(0, 1]"
         raise ValueError(f"{config_path}: context_budget.{field_name} must be in {interval}, got {value!r}")
     return float(value)
@@ -326,12 +324,12 @@ def apply_context_budget_overrides(
                 raise ValueError(f"Unsupported context budget override {key!r}")
             raw_value = override.partition("=")[2]
             try:
-                if field_name in {"generated_budget_fraction", "overlong_cache_fraction"}:
+                if field_name in _CONTEXT_BUDGET_FRACTION_FIELDS:
                     values[field_name] = float(raw_value)
                 else:
                     values[field_name] = int(raw_value)
             except ValueError as error:
-                expected_type = "a number" if field_name.endswith("_fraction") else "an integer"
+                expected_type = "a number" if field_name in _CONTEXT_BUDGET_FRACTION_FIELDS else "an integer"
                 raise ValueError(f"{key} must be {expected_type}, got {raw_value!r}") from error
             continue
         if key in derived_names:
