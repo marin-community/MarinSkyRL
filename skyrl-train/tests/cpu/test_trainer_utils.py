@@ -2,6 +2,7 @@
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer_utils.py
 """
 
+from skyrl_train.group_admission import GroupAdvantageInvariant, assert_training_groups_eligible
 from skyrl_train.utils.trainer_utils import (
     run_on_each_node,
     cleanup_old_checkpoints,
@@ -628,6 +629,49 @@ def test_handle_filter_sampling_accumulation():
     assert state2 is None
     assert len(result2_output["prompt_token_ids"]) == 4  # Both batches combined
     assert len(result2_uids) == 4
+
+
+def test_handle_filter_sampling_keeps_repeated_dataset_row_as_distinct_groups():
+    trajectory_batch = {
+        "prompt_token_ids": [[1, 2], [1, 2]],
+        "response_ids": [[3, 4], [5, 6]],
+        "rewards": [0.0, 1.0],
+        "unshaped_rewards": [0.0, 1.0],
+        "loss_masks": [[1, 1], [1, 1]],
+        "stop_reasons": ["stop", "stop"],
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    sampling_config = {
+        "train_batch_size": 2,
+        "n_samples_per_prompt": 2,
+        "max_sample_batches": 20,
+        "tis_lcs_alert_threshold": 0.005,
+    }
+
+    first_round = handle_filter_sampling(
+        trajectory_batch,
+        ["2069", "2069"],
+        sampling_config,
+        collected_state={"sample_batch_count": 1},
+    )
+    assert first_round.keep_sampling
+    assert first_round.state is not None
+
+    first_round.state["sample_batch_count"] = 2
+    second_round = handle_filter_sampling(
+        trajectory_batch,
+        ["2069", "2069"],
+        sampling_config,
+        collected_state=first_round.state,
+    )
+
+    assert len(set(second_round.uids)) == 2
+    assert_training_groups_eligible(
+        second_round.trajectory_batch,
+        second_round.uids,
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+    )
 
 
 def test_handle_filter_sampling_single_sample_per_prompt():

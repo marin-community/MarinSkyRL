@@ -496,6 +496,21 @@ def handle_filter_sampling(
     filtered_output = filter_trajectory_batch(trajectory_batch, kept_traj_idxs)
     filtered_uids = [uids[idx] for idx in kept_traj_idxs]
 
+    # Dataset UIDs repeat across epochs. Re-key only later draws that would merge with a collected training group.
+    collected_uids = collected_state.get("collected_uids")
+    if collected_uids is not None:
+        occupied_uids = set(collected_uids)
+        remapped_uids: dict[str, str] = {}
+        for uid in kept_uids:
+            candidate = uid
+            collision_index = 0
+            while candidate in occupied_uids:
+                collision_index += 1
+                candidate = f"{uid}:sample_batch_{collected_state['sample_batch_count']}:{collision_index}"
+            remapped_uids[uid] = candidate
+            occupied_uids.add(candidate)
+        filtered_uids = [remapped_uids[uid] for uid in filtered_uids]
+
     if "collected_trajectory_batch" not in collected_state:
         collected_state.update(
             {
