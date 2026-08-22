@@ -57,6 +57,7 @@ def _batch_assembly_state(
     accepted: int,
     *,
     dynamic_sampling_type: str | None = None,
+    informative_on: str = "shaped",
     max_sample_batches: int = 30,
 ):
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
@@ -67,7 +68,9 @@ def _batch_assembly_state(
     trainer._groups_rejected_since_step = 0
     trainer._rejection_reasons_since_step = collections.Counter()
     trainer._groups_inspected_since_step = 0
-    trainer._group_selection_policy = GroupSelectionPolicy.for_fully_async(dynamic_sampling_type)
+    trainer._group_selection_policy = GroupSelectionPolicy.for_fully_async(
+        dynamic_sampling_type, informative_on=informative_on
+    )
     trainer._dynamic_sampling_type = trainer._group_selection_policy.sampling_type
     trainer._dynamic_sampling_max_sample_batches = max_sample_batches
     trainer._dynamic_sampling_max_candidate_groups = max_sample_batches * mini_batch_size
@@ -190,7 +193,9 @@ async def test_batch_assembly_retries_fully_masked_group_and_waits_for_replaceme
 
 @pytest.mark.asyncio
 async def test_batch_assembly_discards_uniform_outcomes_and_waits_for_fresh_prompt():
-    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1, dynamic_sampling_type="filter")
+    trainer, queues = _batch_assembly_state(
+        mini_batch_size=1, accepted=1, dynamic_sampling_type="filter", informative_on="unshaped"
+    )
     queues.completed.put_nowait(
         _generated_group(
             "uniform",
@@ -217,7 +222,9 @@ async def test_batch_assembly_discards_uniform_outcomes_and_waits_for_fresh_prom
 
 @pytest.mark.asyncio
 async def test_batch_assembly_routes_stale_and_uniform_groups_differently():
-    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=2, dynamic_sampling_type="filter")
+    trainer, queues = _batch_assembly_state(
+        mini_batch_size=1, accepted=2, dynamic_sampling_type="filter", informative_on="unshaped"
+    )
     queues.completed.put_nowait(_generated_group("stale", earliest_model_step=7))
     queues.completed.put_nowait(_generated_group("uniform", earliest_model_step=10, unshaped_rewards=[1.0, 1.0]))
 
@@ -241,6 +248,7 @@ async def test_batch_assembly_fails_when_dynamic_sampling_exhausts_candidate_bud
         mini_batch_size=2,
         accepted=2,
         dynamic_sampling_type="filter",
+        informative_on="unshaped",
         max_sample_batches=1,
     )
     queues.completed.put_nowait(_generated_group("uniform-1", earliest_model_step=10, unshaped_rewards=[0.0, 0.0]))

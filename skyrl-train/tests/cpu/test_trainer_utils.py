@@ -518,6 +518,7 @@ def test_handle_filter_sampling_sufficient_prompts():
         "train_batch_size": 1,  # Only need 1 prompt
         "n_samples_per_prompt": 2,
         "max_sample_batches": 20,
+        "informative_on": "unshaped",
     }
 
     result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1})
@@ -534,6 +535,65 @@ def test_handle_filter_sampling_sufficient_prompts():
     assert len(result_output["prompt_token_ids"]) == 2
     assert len(result_uids) == 2
     assert all(uid == "uid2" for uid in result_uids)
+
+
+@pytest.mark.parametrize(
+    ("informative_on", "expected_uid"),
+    [("shaped", "shaped"), ("unshaped", "unshaped")],
+)
+def test_handle_filter_sampling_selects_configured_reward_source(informative_on, expected_uid):
+    trajectory_batch = {
+        "prompt_token_ids": [[1], [1], [2], [2]],
+        "response_ids": [[3], [4], [5], [6]],
+        "rewards": [0.0, 0.25, 0.0, 0.0],
+        "unshaped_rewards": [0.0, 0.0, 0.0, 1.0],
+        "loss_masks": [[1]] * 4,
+        "stop_reasons": ["stop"] * 4,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    sampling_config = {
+        "train_batch_size": 1,
+        "n_samples_per_prompt": 2,
+        "informative_on": informative_on,
+    }
+
+    result = handle_filter_sampling(
+        trajectory_batch,
+        ["shaped", "shaped", "unshaped", "unshaped"],
+        sampling_config,
+        collected_state={"sample_batch_count": 1},
+    )
+
+    assert result.uids == [expected_uid, expected_uid]
+
+
+@pytest.mark.parametrize("min_reward_std", [0.0, 0.1])
+def test_handle_filter_sampling_applies_minimum_reward_std(min_reward_std):
+    trajectory_batch = {
+        "prompt_token_ids": [[1]] * 4,
+        "response_ids": [[2]] * 4,
+        "rewards": [0.05, 0.05, 0.10, 0.05],
+        "loss_masks": [[1]] * 4,
+        "stop_reasons": ["stop"] * 4,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    sampling_config = {
+        "train_batch_size": 1,
+        "n_samples_per_prompt": 4,
+        "informative_on": "shaped",
+        "min_reward_std": min_reward_std,
+    }
+
+    result = handle_filter_sampling(
+        trajectory_batch,
+        ["uid"] * 4,
+        sampling_config,
+        collected_state={"sample_batch_count": 1},
+    )
+
+    assert result.keep_sampling is (min_reward_std > 0)
 
 
 def test_handle_filter_sampling_insufficient_prompts_continue():

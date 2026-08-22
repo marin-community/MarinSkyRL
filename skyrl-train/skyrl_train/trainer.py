@@ -1845,6 +1845,8 @@ class RayPPOTrainer:
             "type": self.cfg.trainer.algorithm.dynamic_sampling.type,
             "max_sample_batches": max_sample_batches,
             "min_replace_ratio": self.cfg.trainer.algorithm.dynamic_sampling.min_replace_ratio,
+            "informative_on": self.cfg.trainer.algorithm.dynamic_sampling.informative_on,
+            "min_reward_std": self.cfg.trainer.algorithm.dynamic_sampling.min_reward_std,
             "train_batch_size": self.cfg.trainer.train_batch_size,
             "n_samples_per_prompt": self.cfg.generator.n_samples_per_prompt,
             "tis_lcs_alert_threshold": self.cfg.trainer.algorithm.tis_lcs_alert_threshold,

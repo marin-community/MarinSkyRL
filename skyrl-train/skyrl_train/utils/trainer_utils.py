@@ -12,7 +12,13 @@ import json
 import torch
 import numpy as np
 from collections import defaultdict
-from skyrl_train.dynamic_sampling import DynamicSamplingType, group_is_informative_for_dynamic_sampling
+from skyrl_train.dynamic_sampling import (
+    DEFAULT_DYNAMIC_SAMPLING_MIN_REWARD_STD,
+    DEFAULT_DYNAMIC_SAMPLING_REWARD_SOURCE,
+    DynamicSamplingType,
+    group_is_informative_for_dynamic_sampling,
+    resolve_dynamic_sampling_criteria,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
     concatenate_trajectory_batches,
@@ -495,10 +501,18 @@ def handle_filter_sampling(
     uid2indices = defaultdict(list)
     for row_index, uid in enumerate(uids):
         uid2indices[uid].append(row_index)
+    criteria = resolve_dynamic_sampling_criteria(
+        sampling_config.get("informative_on", DEFAULT_DYNAMIC_SAMPLING_REWARD_SOURCE),
+        float(sampling_config.get("min_reward_std", DEFAULT_DYNAMIC_SAMPLING_MIN_REWARD_STD)),
+    )
     kept_uids = [
         uid
         for uid, row_indices in uid2indices.items()
-        if group_is_informative_for_dynamic_sampling(trajectory_batch, row_indices)
+        if group_is_informative_for_dynamic_sampling(
+            trajectory_batch,
+            row_indices,
+            criteria=criteria,
+        )
     ]
     kept_uids_set = set(kept_uids)
 
