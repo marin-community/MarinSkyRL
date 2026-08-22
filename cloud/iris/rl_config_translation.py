@@ -18,6 +18,7 @@ import binascii
 import copy
 import fsspec
 import json
+import math
 import os
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -79,13 +80,19 @@ class HPCGeometry(Protocol):
     gpus_per_node: int
 
 
-_CONTEXT_BUDGET_FIELDS = frozenset(
+_REQUIRED_CONTEXT_BUDGET_FIELDS = frozenset(
     {
         "request_window_tokens",
         "max_new_tokens_per_turn",
         "max_turns",
     }
 )
+_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | {
+    "generated_budget_fraction",
+    "overlong_cache_fraction",
+}
+_DEFAULT_GENERATED_BUDGET_FRACTION = 0.5
+_DEFAULT_OVERLONG_CACHE_FRACTION = 0.25
 
 _DERIVED_CONTEXT_FIELDS = (
     ("trainer", "max_prompt_length"),
@@ -97,6 +104,8 @@ _DERIVED_CONTEXT_FIELDS = (
     ("terminal_bench", "harbor", "max_turns"),
     ("terminal_bench", "model_info", "max_input_tokens"),
     ("terminal_bench", "model_info", "max_output_tokens"),
+    ("generator", "trajectory_reward_shaping", "overlong", "l_max"),
+    ("generator", "trajectory_reward_shaping", "overlong", "l_cache"),
 )
 
 
@@ -107,6 +116,8 @@ class ContextBudget:
     request_window_tokens: int
     max_new_tokens_per_turn: int
     max_turns: int
+    generated_budget_fraction: float = _DEFAULT_GENERATED_BUDGET_FRACTION
+    overlong_cache_fraction: float = _DEFAULT_OVERLONG_CACHE_FRACTION
 
     @property
     def max_input_tokens(self) -> int:
@@ -131,13 +142,29 @@ class ContextBudget:
         margin = min(1024, max(0, self.max_input_tokens - output - 1))
         return max(1, self.max_input_tokens - output - margin)
 
-    def as_dict(self) -> Dict[str, int]:
+    @property
+    def generated_tokens_per_trajectory(self) -> int:
+        """Return the generated-token allowance used by trajectory-level shaping."""
+        if self.max_turns == 1:
+            return self.max_new_tokens_per_turn
+        return max(1, int(self.request_window_tokens * self.generated_budget_fraction))
+
+    @property
+    def overlong_cache_tokens(self) -> int:
+        """Return the soft-overlong transition width."""
+        return int(self.generated_tokens_per_trajectory * self.overlong_cache_fraction)
+
+    def as_dict(self) -> Dict[str, int | float]:
         """Return the persisted representation, including derived client input."""
         return {
             "request_window_tokens": self.request_window_tokens,
             "max_new_tokens_per_turn": self.max_new_tokens_per_turn,
             "max_turns": self.max_turns,
+            "generated_budget_fraction": self.generated_budget_fraction,
+            "overlong_cache_fraction": self.overlong_cache_fraction,
             "max_input_tokens": self.max_input_tokens,
+            "generated_tokens_per_trajectory": self.generated_tokens_per_trajectory,
+            "overlong_cache_tokens": self.overlong_cache_tokens,
             "opencode_limit_context": self.opencode_limit_context,
             "opencode_limit_output": self.opencode_limit_output,
         }
@@ -179,6 +206,17 @@ def _require_positive_integer(value: Any, field_name: str, config_path: Path) ->
     return value
 
 
+def _require_fraction(value: Any, field_name: str, config_path: Path, *, allow_zero: bool) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        interval = "[0, 1]" if allow_zero else "(0, 1]"
+        raise ValueError(f"{config_path}: context_budget.{field_name} must be in {interval}, got {value!r}")
+    lower_bound_satisfied = value >= 0 if allow_zero else value > 0
+    if not lower_bound_satisfied or value > 1:
+        interval = "[0, 1]" if allow_zero else "(0, 1]"
+        raise ValueError(f"{config_path}: context_budget.{field_name} must be in {interval}, got {value!r}")
+    return float(value)
+
+
 def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBudget:
     """Validate and resolve the single public context budget declaration.
 
@@ -193,7 +231,7 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
     unknown = set(config) - _CONTEXT_BUDGET_FIELDS
     if unknown:
         raise ValueError(f"{config_path}: unknown context_budget fields: {', '.join(sorted(unknown))}")
-    missing = _CONTEXT_BUDGET_FIELDS - set(config)
+    missing = _REQUIRED_CONTEXT_BUDGET_FIELDS - set(config)
     if missing:
         raise ValueError(f"{config_path}: missing context_budget fields: {', '.join(sorted(missing))}")
 
@@ -205,6 +243,18 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
             config["max_new_tokens_per_turn"], "max_new_tokens_per_turn", config_path
         ),
         max_turns=_require_positive_integer(config["max_turns"], "max_turns", config_path),
+        generated_budget_fraction=_require_fraction(
+            config.get("generated_budget_fraction", _DEFAULT_GENERATED_BUDGET_FRACTION),
+            "generated_budget_fraction",
+            config_path,
+            allow_zero=False,
+        ),
+        overlong_cache_fraction=_require_fraction(
+            config.get("overlong_cache_fraction", _DEFAULT_OVERLONG_CACHE_FRACTION),
+            "overlong_cache_fraction",
+            config_path,
+            allow_zero=True,
+        ),
     )
     if budget.max_input_tokens <= 0:
         raise ValueError(
@@ -228,6 +278,10 @@ def _materialize_context_budget(
     generator["max_turns"] = budget.max_turns
     generator.setdefault("sampling_params", {})["max_generate_length"] = budget.max_new_tokens_per_turn
     generator.setdefault("engine_init_kwargs", {})["max_model_len"] = budget.request_window_tokens
+    generator.setdefault("trajectory_reward_shaping", {})["overlong"] = {
+        "l_max": budget.generated_tokens_per_trajectory,
+        "l_cache": budget.overlong_cache_tokens,
+    }
 
     if terminal_bench is not None:
         terminal_bench.setdefault("harbor", {})["max_turns"] = budget.max_turns
@@ -272,15 +326,20 @@ def apply_context_budget_overrides(
                 raise ValueError(f"Unsupported context budget override {key!r}")
             raw_value = override.partition("=")[2]
             try:
-                values[field_name] = int(raw_value)
+                if field_name in {"generated_budget_fraction", "overlong_cache_fraction"}:
+                    values[field_name] = float(raw_value)
+                else:
+                    values[field_name] = int(raw_value)
             except ValueError as error:
-                raise ValueError(f"{key} must be an integer, got {raw_value!r}") from error
+                expected_type = "a number" if field_name.endswith("_fraction") else "an integer"
+                raise ValueError(f"{key} must be {expected_type}, got {raw_value!r}") from error
             continue
         if key in derived_names:
             raise ValueError(
                 f"{key} is derived from context_budget and cannot be overridden directly. "
                 "Override context_budget.request_window_tokens, context_budget.max_new_tokens_per_turn, "
-                "or context_budget.max_turns instead."
+                "context_budget.max_turns, context_budget.generated_budget_fraction, or "
+                "context_budget.overlong_cache_fraction instead."
             )
         passthrough.append(override)
 
