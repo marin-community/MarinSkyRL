@@ -1,6 +1,4 @@
 import copy
-import sys
-import types
 
 import pytest
 import torch
@@ -11,28 +9,13 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBl
 from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextTopKRouter
 
 from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeRouter
-
-try:
-    from skyrl_train.models.layers.moe import TokenChoiceTopKRouter
-except ModuleNotFoundError as error:
-    if error.name != "torchtitan":
-        raise
-    torchtitan = types.ModuleType("torchtitan")
-    torchtitan_distributed = types.ModuleType("torchtitan.distributed")
-    torchtitan_ep = types.ModuleType("torchtitan.distributed.expert_parallel")
-    torchtitan_ep.expert_parallel = lambda function: function
-    sys.modules["torchtitan"] = torchtitan
-    sys.modules["torchtitan.distributed"] = torchtitan_distributed
-    sys.modules["torchtitan.distributed.expert_parallel"] = torchtitan_ep
-    from skyrl_train.models.layers.moe import TokenChoiceTopKRouter
-
-    del sys.modules["torchtitan.distributed.expert_parallel"]
-    del sys.modules["torchtitan.distributed"]
-    del sys.modules["torchtitan"]
 from skyrl_train.models.router_instrumentation import (
     instrument_moe_routers,
     observe_router_forwards,
 )
+from tests.cpu.models.moe_test_imports import import_grouped_moe_module
+
+TokenChoiceTopKRouter = import_grouped_moe_module().TokenChoiceTopKRouter
 
 
 def _grug_config() -> GrugMoeConfig:
@@ -72,7 +55,8 @@ def _qwen_config() -> Qwen3MoeConfig:
 
 def test_grouped_qwen_router_observation_matches_native_routing() -> None:
     router = TokenChoiceTopKRouter(dim=4, num_experts=4, top_k=2, route_norm=True)
-    assert instrument_moe_routers(router) == 1
+    with instrument_moe_routers(router) as instrumentation:
+        assert instrumentation.router_count == 1
     with torch.no_grad():
         router.gate.weight.copy_(
             torch.tensor(
@@ -132,7 +116,8 @@ def test_grouped_qwen_router_observation_distinguishes_replayed_route() -> None:
 
 def test_grug_router_observation_uses_biased_selection_and_native_weights() -> None:
     router = GrugMoeRouter(_grug_config())
-    assert instrument_moe_routers(router) == 1
+    with instrument_moe_routers(router) as instrumentation:
+        assert instrumentation.router_count == 1
     with torch.no_grad():
         router.weight.copy_(torch.eye(4, 8))
         router.bias.copy_(torch.tensor([0.0, 0.5, -0.25, 0.75]))
@@ -169,10 +154,10 @@ def test_qwen_eager_instrumentation_preserves_output_and_router_gradients() -> N
     expected = reference(hidden)
     observations = []
 
-    assert instrument_moe_routers(instrumented) == 1
-    assert instrument_moe_routers(instrumented) == 1
-    with observe_router_forwards(observations.append):
-        actual = instrumented(hidden)
+    with instrument_moe_routers(instrumented) as instrumentation:
+        assert instrumentation.router_count == 1
+        with observe_router_forwards(observations.append):
+            actual = instrumented(hidden)
 
     router_logits, routing_weights, selected_experts = instrumented.gate(hidden.reshape(-1, hidden.shape[-1]))
     assert len(observations) == 1
@@ -205,9 +190,10 @@ def test_other_qwen_router_variants_preserve_their_native_return_tuple(config_ty
     expected = router(hidden)
     observations = []
 
-    assert instrument_moe_routers(router) == 1
-    with observe_router_forwards(observations.append):
-        actual = router(hidden)
+    with instrument_moe_routers(router) as instrumentation:
+        assert instrumentation.router_count == 1
+        with observe_router_forwards(observations.append):
+            actual = router(hidden)
 
     assert len(observations) == 1
     for actual_tensor, expected_tensor in zip(actual, expected, strict=True):

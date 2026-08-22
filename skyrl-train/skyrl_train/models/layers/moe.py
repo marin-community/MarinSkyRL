@@ -55,7 +55,7 @@ from torch.distributed.tensor import DTensor
 
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.models.ep_gradient import ExpertGradientAveraging
-from skyrl_train.models.router_instrumentation import emit_router_forward
+from skyrl_train.models.router_instrumentation import NativeRouterObserverEmitter, emit_router_forward
 from skyrl_train.models.layers.moe_routing import (
     TokenReorderer,
     grouped_expert_contributions,
@@ -268,12 +268,10 @@ class FeedForward(nn.Module):
 # --------------------------------------------------------------------------- #
 
 
-class TokenChoiceTopKRouter(nn.Module):
+class TokenChoiceTopKRouter(nn.Module, NativeRouterObserverEmitter):
     """Token-choice top-K router. The ``routed_experts`` arg forces the top-k
     expert selection while re-gathering ``top_scores`` from the LIVE softmax —
     the R3 crux (gradients flow through ``self.gate``)."""
-
-    _emits_router_observations = True
 
     def __init__(
         self,

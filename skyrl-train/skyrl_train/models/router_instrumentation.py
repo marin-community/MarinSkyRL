@@ -10,12 +10,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from weakref import WeakSet
+from dataclasses import dataclass, field
+from types import TracebackType
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.hooks import RemovableHandle
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,35 @@ class RouterObservation:
 
 RouterObserver = Callable[[RouterObservation], None]
 _active_observer: ContextVar[RouterObserver | None] = ContextVar("router_observer", default=None)
-_instrumented_qwen_routers: WeakSet[nn.Module] = WeakSet()
+
+
+class NativeRouterObserverEmitter:
+    """Marker base for routers that emit observations without an adapter hook."""
+
+
+@dataclass
+class RouterInstrumentation:
+    """Own the adapter hooks installed for one model."""
+
+    router_count: int
+    _handles: list[RemovableHandle] = field(default_factory=list)
+
+    def close(self) -> None:
+        """Remove all adapter hooks owned by this instance."""
+
+        while self._handles:
+            self._handles.pop().remove()
+
+    def __enter__(self) -> RouterInstrumentation:
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
 
 @contextmanager
@@ -95,23 +124,32 @@ def _observe_qwen_router(
     )
 
 
-def instrument_moe_routers(model: nn.Module) -> int:
+def _qwen_router_types() -> tuple[type[nn.Module], ...]:
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeTopKRouter
+    from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextTopKRouter
+
+    return Qwen3MoeTopKRouter, Qwen3NextTopKRouter, Qwen3_5MoeTopKRouter
+
+
+def instrument_moe_routers(model: nn.Module) -> RouterInstrumentation:
     """Enable observations for every supported MoE router under ``model``.
 
     Native MarinSkyRL routers emit observations directly. Hugging Face Qwen
-    routers need an idempotent forward hook. The return value is the number of
-    supported routers found, including routers enabled by an earlier call.
+    routers need forward hooks. The returned object owns those hooks and must
+    remain alive until instrumentation is no longer needed. Use it as a context
+    manager or call :meth:`RouterInstrumentation.close` to remove the hooks.
     """
 
     router_count = 0
+    handles = []
+    qwen_router_types = _qwen_router_types()
     for module in model.modules():
-        if getattr(module, "_emits_router_observations", False):
+        if isinstance(module, NativeRouterObserverEmitter):
             router_count += 1
             continue
-        if not (type(module).__name__.startswith("Qwen") and type(module).__name__.endswith("TopKRouter")):
+        if not isinstance(module, qwen_router_types):
             continue
         router_count += 1
-        if module not in _instrumented_qwen_routers:
-            module.register_forward_hook(_observe_qwen_router)
-            _instrumented_qwen_routers.add(module)
-    return router_count
+        handles.append(module.register_forward_hook(_observe_qwen_router))
+    return RouterInstrumentation(router_count=router_count, _handles=handles)
