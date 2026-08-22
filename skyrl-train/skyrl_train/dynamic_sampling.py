@@ -31,6 +31,12 @@ class DynamicSamplingCriteria:
     min_reward_std: float
 
 
+DEFAULT_DYNAMIC_SAMPLING_CRITERIA = DynamicSamplingCriteria(
+    reward_source=DEFAULT_DYNAMIC_SAMPLING_REWARD_SOURCE,
+    min_reward_std=DEFAULT_DYNAMIC_SAMPLING_MIN_REWARD_STD,
+)
+
+
 def resolve_dynamic_sampling_criteria(
     informative_on: str = DEFAULT_DYNAMIC_SAMPLING_REWARD_SOURCE,
     min_reward_std: float = DEFAULT_DYNAMIC_SAMPLING_MIN_REWARD_STD,
@@ -109,15 +115,13 @@ class GroupSelectionPolicy:
         cls,
         sampling_type: str | None,
         *,
-        informative_on: str = DEFAULT_DYNAMIC_SAMPLING_REWARD_SOURCE,
-        min_reward_std: float = DEFAULT_DYNAMIC_SAMPLING_MIN_REWARD_STD,
+        criteria: DynamicSamplingCriteria = DEFAULT_DYNAMIC_SAMPLING_CRITERIA,
     ) -> GroupSelectionPolicy:
         resolved_type = DynamicSamplingType(sampling_type) if sampling_type is not None else None
         if resolved_type not in (None, DynamicSamplingType.FILTER):
             raise ValueError(
                 f"fully asynchronous training supports dynamic_sampling.type=filter or null; got {sampling_type!r}"
             )
-        criteria = resolve_dynamic_sampling_criteria(informative_on, min_reward_std)
         return cls(resolved_type, criteria=criteria)
 
     def evaluate(self, group: GeneratedGroup) -> GroupSelectionResult:

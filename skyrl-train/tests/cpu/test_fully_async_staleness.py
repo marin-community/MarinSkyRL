@@ -12,7 +12,7 @@ from skyrl_train.fully_async_trainer import (
     _AsyncStalenessManager,
     _GenerationQueues,
 )
-from skyrl_train.dynamic_sampling import GroupSelectionPolicy
+from skyrl_train.dynamic_sampling import GroupSelectionPolicy, resolve_dynamic_sampling_criteria
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
@@ -69,7 +69,7 @@ def _batch_assembly_state(
     trainer._rejection_reasons_since_step = collections.Counter()
     trainer._groups_inspected_since_step = 0
     trainer._group_selection_policy = GroupSelectionPolicy.for_fully_async(
-        dynamic_sampling_type, informative_on=informative_on
+        dynamic_sampling_type, criteria=resolve_dynamic_sampling_criteria(informative_on)
     )
     trainer._dynamic_sampling_type = trainer._group_selection_policy.sampling_type
     trainer._dynamic_sampling_max_sample_batches = max_sample_batches
@@ -192,7 +192,7 @@ async def test_batch_assembly_retries_fully_masked_group_and_waits_for_replaceme
 
 
 @pytest.mark.asyncio
-async def test_batch_assembly_discards_uniform_outcomes_and_waits_for_fresh_prompt():
+async def test_batch_assembly_discards_insufficient_reward_spread_and_waits_for_fresh_prompt():
     trainer, queues = _batch_assembly_state(
         mini_batch_size=1, accepted=1, dynamic_sampling_type="filter", informative_on="unshaped"
     )

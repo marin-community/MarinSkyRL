@@ -58,6 +58,7 @@ from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import GroupAdvantageInvariant, assert_training_groups_eligible
+from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
@@ -1845,8 +1846,10 @@ class RayPPOTrainer:
             "type": self.cfg.trainer.algorithm.dynamic_sampling.type,
             "max_sample_batches": max_sample_batches,
             "min_replace_ratio": self.cfg.trainer.algorithm.dynamic_sampling.min_replace_ratio,
-            "informative_on": self.cfg.trainer.algorithm.dynamic_sampling.informative_on,
-            "min_reward_std": self.cfg.trainer.algorithm.dynamic_sampling.min_reward_std,
+            "criteria": resolve_dynamic_sampling_criteria(
+                self.cfg.trainer.algorithm.dynamic_sampling.informative_on,
+                float(self.cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
+            ),
             "train_batch_size": self.cfg.trainer.train_batch_size,
             "n_samples_per_prompt": self.cfg.generator.n_samples_per_prompt,
             "tis_lcs_alert_threshold": self.cfg.trainer.algorithm.tis_lcs_alert_threshold,

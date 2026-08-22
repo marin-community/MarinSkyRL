@@ -1,7 +1,11 @@
 import pytest
 
 from skyrl_train.fully_async_trainer import GeneratedOutputGroup
-from skyrl_train.dynamic_sampling import GroupSelectionPolicy, GroupSelectionResult
+from skyrl_train.dynamic_sampling import (
+    GroupSelectionPolicy,
+    GroupSelectionResult,
+    resolve_dynamic_sampling_criteria,
+)
 from skyrl_train.group_admission import (
     AdmissionRejection,
     GroupAdmissionPolicy,
@@ -208,7 +212,7 @@ def test_grpo_rejects_unused_group_floor():
 
 
 def test_dynamic_filter_uses_final_unshaped_outcomes():
-    policy = GroupSelectionPolicy.for_fully_async("filter", informative_on="unshaped")
+    policy = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("unshaped"))
     group = _group(loss_masks=[[1], [1], [1], [1]])
     group.trajectory_batch.update(
         {
@@ -224,7 +228,7 @@ def test_dynamic_filter_uses_final_unshaped_outcomes():
 
 
 def test_dynamic_filter_requires_unshaped_outcomes():
-    policy = GroupSelectionPolicy.for_fully_async("filter", informative_on="unshaped")
+    policy = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("unshaped"))
 
     with pytest.raises(ValueError, match="requires unshaped_rewards"):
         policy.evaluate(_group(loss_masks=[[1], [1]]))
@@ -239,8 +243,8 @@ def test_dynamic_filter_can_admit_shaped_reward_variance():
         }
     )
 
-    shaped = GroupSelectionPolicy.for_fully_async("filter", informative_on="shaped")
-    unshaped = GroupSelectionPolicy.for_fully_async("filter", informative_on="unshaped")
+    shaped = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("shaped"))
+    unshaped = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("unshaped"))
 
     assert shaped.evaluate(group) is GroupSelectionResult.KEEP
     assert unshaped.evaluate(group) is GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD
@@ -250,8 +254,10 @@ def test_dynamic_filter_applies_minimum_reward_std():
     group = _group(loss_masks=[[1], [1], [1], [1]])
     group.trajectory_batch["rewards"] = [0.05, 0.05, 0.10, 0.05]
 
-    default_floor = GroupSelectionPolicy.for_fully_async("filter", informative_on="shaped")
-    high_floor = GroupSelectionPolicy.for_fully_async("filter", informative_on="shaped", min_reward_std=0.1)
+    default_floor = GroupSelectionPolicy.for_fully_async("filter")
+    high_floor = GroupSelectionPolicy.for_fully_async(
+        "filter", criteria=resolve_dynamic_sampling_criteria("shaped", 0.1)
+    )
 
     assert default_floor.evaluate(group) is GroupSelectionResult.KEEP
     assert high_floor.evaluate(group) is GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD

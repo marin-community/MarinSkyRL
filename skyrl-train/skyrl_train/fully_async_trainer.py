@@ -41,6 +41,7 @@ from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
     GroupSelectionPolicy,
     GroupSelectionResult,
+    resolve_dynamic_sampling_criteria,
 )
 from skyrl_train.group_admission import AdmissionDecision, AdmissionRejection, GroupAdmissionPolicy
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
@@ -332,8 +333,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             raise ValueError("trainer.fully_async.admission_stall_timeout must be positive")
         self._group_selection_policy = GroupSelectionPolicy.for_fully_async(
             cfg.trainer.algorithm.dynamic_sampling.type,
-            informative_on=cfg.trainer.algorithm.dynamic_sampling.informative_on,
-            min_reward_std=float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
+            criteria=resolve_dynamic_sampling_criteria(
+                cfg.trainer.algorithm.dynamic_sampling.informative_on,
+                float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
+            ),
         )
         self._dynamic_sampling_type = self._group_selection_policy.sampling_type
         max_sample_batches = int(cfg.trainer.algorithm.dynamic_sampling.max_sample_batches)

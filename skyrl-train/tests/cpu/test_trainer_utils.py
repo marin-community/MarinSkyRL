@@ -3,6 +3,7 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer_utils.py
 """
 
 from skyrl_train.group_admission import GroupAdvantageInvariant, assert_training_groups_eligible
+from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from skyrl_train.utils.trainer_utils import (
     run_on_each_node,
     cleanup_old_checkpoints,
@@ -518,7 +519,7 @@ def test_handle_filter_sampling_sufficient_prompts():
         "train_batch_size": 1,  # Only need 1 prompt
         "n_samples_per_prompt": 2,
         "max_sample_batches": 20,
-        "informative_on": "unshaped",
+        "criteria": resolve_dynamic_sampling_criteria("unshaped"),
     }
 
     result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1})
@@ -555,7 +556,7 @@ def test_handle_filter_sampling_selects_configured_reward_source(informative_on,
     sampling_config = {
         "train_batch_size": 1,
         "n_samples_per_prompt": 2,
-        "informative_on": informative_on,
+        "criteria": resolve_dynamic_sampling_criteria(informative_on),
     }
 
     result = handle_filter_sampling(
@@ -582,8 +583,7 @@ def test_handle_filter_sampling_applies_minimum_reward_std(min_reward_std):
     sampling_config = {
         "train_batch_size": 1,
         "n_samples_per_prompt": 4,
-        "informative_on": "shaped",
-        "min_reward_std": min_reward_std,
+        "criteria": resolve_dynamic_sampling_criteria("shaped", min_reward_std),
     }
 
     result = handle_filter_sampling(
@@ -614,6 +614,7 @@ def test_handle_filter_sampling_insufficient_prompts_continue():
         "n_samples_per_prompt": 2,
         "max_sample_batches": 20,
         "tis_lcs_alert_threshold": 0.005,
+        "criteria": resolve_dynamic_sampling_criteria(),
     }
 
     collected_state = {"sample_batch_count": 1}
@@ -666,6 +667,7 @@ def test_handle_filter_sampling_accumulation():
         "n_samples_per_prompt": 2,
         "max_sample_batches": 20,
         "tis_lcs_alert_threshold": 0.005,
+        "criteria": resolve_dynamic_sampling_criteria(),
     }
 
     collected_state = {"sample_batch_count": 1}
@@ -707,6 +709,7 @@ def test_handle_filter_sampling_keeps_repeated_dataset_row_as_distinct_groups():
         "n_samples_per_prompt": 2,
         "max_sample_batches": 20,
         "tis_lcs_alert_threshold": 0.005,
+        "criteria": resolve_dynamic_sampling_criteria(),
     }
 
     first_round = handle_filter_sampling(
@@ -751,6 +754,7 @@ def test_handle_filter_sampling_single_sample_per_prompt():
         "train_batch_size": 2,
         "n_samples_per_prompt": 1,
         "max_sample_batches": 20,
+        "criteria": resolve_dynamic_sampling_criteria(),
     }
 
     result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1})

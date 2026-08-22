@@ -211,7 +211,6 @@ trainer:
       type: null
       max_sample_batches: 30
       min_replace_ratio: 0.3
-      # Select groups using the reward seen by the advantage estimator unless explicitly overridden.
       informative_on: shaped
       min_reward_std: 0.0
     
