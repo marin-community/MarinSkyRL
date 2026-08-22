@@ -457,6 +457,21 @@ def handle_replace_sampling(
         return DynamicSamplingResult(trajectory_batch, uids, True, None)
 
 
+def _rekey_collected_uid_collisions(uids: List[str], collected_uids: List[str], sample_batch_count: int) -> List[str]:
+    """Keep later draws of a dataset row distinct from groups collected in earlier sampling rounds."""
+    occupied_uids = set(collected_uids)
+    remapped_uids: dict[str, str] = {}
+    for uid in dict.fromkeys(uids):
+        candidate = uid
+        collision_index = 0
+        while candidate in occupied_uids:
+            collision_index += 1
+            candidate = f"{uid}:sample_batch_{sample_batch_count}:{collision_index}"
+        remapped_uids[uid] = candidate
+        occupied_uids.add(candidate)
+    return [remapped_uids[uid] for uid in uids]
+
+
 def handle_filter_sampling(
     trajectory_batch: TrajectoryBatch,
     uids: List[str],
@@ -499,17 +514,9 @@ def handle_filter_sampling(
     # Dataset UIDs repeat across epochs. Re-key only later draws that would merge with a collected training group.
     collected_uids = collected_state.get("collected_uids")
     if collected_uids is not None:
-        occupied_uids = set(collected_uids)
-        remapped_uids: dict[str, str] = {}
-        for uid in kept_uids:
-            candidate = uid
-            collision_index = 0
-            while candidate in occupied_uids:
-                collision_index += 1
-                candidate = f"{uid}:sample_batch_{collected_state['sample_batch_count']}:{collision_index}"
-            remapped_uids[uid] = candidate
-            occupied_uids.add(candidate)
-        filtered_uids = [remapped_uids[uid] for uid in filtered_uids]
+        filtered_uids = _rekey_collected_uid_collisions(
+            filtered_uids, collected_uids, collected_state["sample_batch_count"]
+        )
 
     if "collected_trajectory_batch" not in collected_state:
         collected_state.update(
