@@ -138,6 +138,8 @@ RENDEZVOUS_WRITE_ATTEMPTS = 5
 RENDEZVOUS_WRITE_TIMEOUT = 30  # seconds per attempt
 # Bound `ray start --head` so a hung Ray CLI fails loud (TimeoutExpired).
 RAY_START_HEAD_TIMEOUT = 300  # seconds
+# Failure reporting must never keep an Iris task alive after its driver exits.
+FAILURE_ARTIFACT_TIMEOUT_SECONDS = 30
 
 
 def _log(msg: str) -> None:
@@ -1557,6 +1559,15 @@ def launch_training_driver(train_argv: list[str], env: dict[str, str]) -> subpro
     return subprocess.Popen(train_argv, env=env, cwd=runtime_checkout, start_new_session=True)
 
 
+def _persist_failure_artifacts_bounded(action, timeout: float) -> None:
+    """Give failure evidence a bounded upload window without delaying task failure indefinitely."""
+    artifact_thread = threading.Thread(target=action, daemon=True, name="failure-artifact-sync")
+    artifact_thread.start()
+    artifact_thread.join(timeout)
+    if artifact_thread.is_alive():
+        _log(f"Failure artifact upload exceeded {timeout}s; continuing task teardown")
+
+
 def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifname: str | None = None) -> int:
     num_tasks = _num_tasks()
     head_ip = _own_ip()
@@ -1652,7 +1663,21 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
 
         exit_code = process.wait()
         if exit_code != 0:
-            capture_termination_artifacts(args.rendezvous_dir, f"driver exit_code={exit_code} (head rank 0)")
+            if ray_log_sync_stop is not None:
+                ray_log_sync_stop.set()
+
+            def persist_failure_artifacts() -> None:
+                reason = f"driver exit_code={exit_code} (head rank 0)"
+                capture_termination_artifacts(args.rendezvous_dir, reason)
+                ray_log_sync.sync_bounded(reason)
+                sync_debug_artifacts(args.rendezvous_dir, node_id, reason)
+
+            _persist_failure_artifacts_bounded(
+                persist_failure_artifacts,
+                timeout=FAILURE_ARTIFACT_TIMEOUT_SECONDS,
+            )
+            ray_stop()
+            return exit_code
         # Final flush of this node's Ray session logs before teardown reaps them.
         if ray_log_sync_stop is not None:
             ray_log_sync_stop.set()

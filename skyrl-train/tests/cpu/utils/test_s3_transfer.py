@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from botocore.exceptions import ReadTimeoutError
+from botocore.exceptions import ClientError, ReadTimeoutError
 from fsspec.exceptions import FSTimeoutError
 import pytest
 
@@ -73,6 +73,61 @@ def test_s3_transfer_retries_timeout_with_backoff(monkeypatch, transfer_error):
     assert s3fs.call_with_s3_retry(object(), flaky_transfer) == "complete"
     assert attempts == 3
     assert delays == [1.0, 2.0]
+
+
+@pytest.mark.parametrize(
+    "transfer_error",
+    [
+        OSError(5, "An error occurred (Forbidden) when calling ListObjectsV2: AccessDenied"),
+        ClientError(
+            {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
+            "ListObjectsV2",
+        ),
+    ],
+)
+def test_s3_transfer_retries_transient_access_denied_and_refreshes_credentials(monkeypatch, transfer_error):
+    class RefreshableFilesystem:
+        def __init__(self):
+            self.refreshes = 0
+
+        def connect(self, *, refresh):
+            assert refresh is True
+            self.refreshes += 1
+
+    filesystem = RefreshableFilesystem()
+    attempts = 0
+    delays = []
+
+    def flaky_transfer():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise transfer_error
+        return "complete"
+
+    monkeypatch.setattr(s3fs.time, "sleep", delays.append)
+    monkeypatch.setattr(s3fs.random, "uniform", lambda low, high: 1.0)
+
+    assert s3fs.call_with_s3_retry(filesystem, flaky_transfer) == "complete"
+    assert attempts == 3
+    assert filesystem.refreshes == 2
+    assert delays == [1.0, 2.0]
+
+
+def test_s3_transfer_raises_after_access_denied_retry_budget(monkeypatch):
+    attempts = 0
+
+    def denied_transfer():
+        nonlocal attempts
+        attempts += 1
+        raise OSError(5, "Forbidden: AccessDenied")
+
+    monkeypatch.setattr(s3fs.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(OSError, match="AccessDenied"):
+        s3fs.call_with_s3_retry(object(), denied_transfer)
+
+    assert attempts == 5
 
 
 def test_local_read_files_downloads_only_requested_objects(monkeypatch):

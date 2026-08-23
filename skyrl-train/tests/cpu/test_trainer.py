@@ -145,6 +145,35 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     assert trainer.inference_engine_client.wake_tags == [["weights"], ["kv_cache"]]
 
 
+def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    attempts = 0
+    saved_steps = []
+
+    async def save_with_residency():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("AccessDenied")
+
+    async def call_event_async(event, state, control, **_kwargs):
+        assert event == "on_save"
+        saved_steps.append(state.global_step)
+        return control
+
+    trainer._save_checkpoints_with_residency = save_with_residency
+    trainer.callback_handler = SimpleNamespace(call_event_async=call_event_async)
+    trainer._control = SimpleNamespace()
+    state = SimpleNamespace(global_step=6)
+
+    assert not asyncio.run(trainer._save_intermediate_checkpoint(state))
+    assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
+    assert asyncio.run(trainer._save_intermediate_checkpoint(state))
+    assert saved_steps == [6]
+
+
 def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypatch):
     trainer = object.__new__(RayPPOTrainer)
     trainer.cfg = OmegaConf.create(

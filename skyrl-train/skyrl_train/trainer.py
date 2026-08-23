@@ -430,6 +430,23 @@ class RayPPOTrainer:
         finally:
             await self._sync_policy_for_rollouts()
 
+    async def _save_intermediate_checkpoint(self, state: TrainerState) -> bool:
+        """Save one requested step checkpoint without terminating training on storage failure."""
+        try:
+            with Timer("save_checkpoints", self.all_timings):
+                await self._save_checkpoints_with_residency()
+        except Exception:
+            failures = float(getattr(self, "_checkpoint_save_failures", 0)) + 1.0
+            self._checkpoint_save_failures = failures
+            self.all_metrics["trainer/checkpoint_save_failures"] = failures
+            logger.opt(exception=True).error(
+                f"Checkpoint save failed at global step {state.global_step}; continuing from the last complete checkpoint"
+            )
+            return False
+
+        await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
+        return True
+
     async def _sync_weights_and_restore_rollout_residency(self) -> None:
         await self.inference_engine_client.wake_up(tags=["weights"])
         with Timer("sync_weights", self.all_timings):
@@ -633,10 +650,7 @@ class RayPPOTrainer:
 
                 # Handle checkpoint saving
                 if self._control.should_save:
-                    with Timer("save_checkpoints", self.all_timings):
-                        await self._save_checkpoints_with_residency()
-                    # Call on_save callbacks
-                    await self.callback_handler.call_event_async("on_save", step_state, self._control, trainer=self)
+                    await self._save_intermediate_checkpoint(step_state)
                     self._control.should_save = False
 
                 # Handle HF model saving

@@ -29,6 +29,22 @@ _S3_SDK_MAX_ATTEMPTS = 10
 _S3_TRANSFER_MAX_ATTEMPTS = 5
 _S3_RETRY_BASE_SECONDS = 1.0
 _S3_ADDRESSING_STYLE_ENV = "OT_AGENT_S3_ADDRESSING_STYLE"
+_RETRYABLE_AUTH_CODES = {
+    "403",
+    "AccessDenied",
+    "ExpiredToken",
+    "ExpiredTokenException",
+    "Forbidden",
+    "RequestExpired",
+}
+_RETRYABLE_TRANSLATED_ERROR_MARKERS = (
+    "accessdenied",
+    "forbidden",
+    "internalerror",
+    "requesttimeout",
+    "serviceunavailable",
+    "slowdown",
+)
 
 
 def get_s3_fs():
@@ -79,22 +95,43 @@ def s3_refresh_if_expiring(fs) -> None:
             pass
 
 
+def _retryable_s3_error(error: Exception) -> tuple[bool, bool]:
+    """Return whether an error is retryable and whether credentials should refresh."""
+    if isinstance(error, ClientError):
+        response = getattr(error, "response", {})
+        code = str(response.get("Error", {}).get("Code", ""))
+        status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        auth_error = code in _RETRYABLE_AUTH_CODES or status == 403
+        return auth_error or (isinstance(status, int) and status >= 500), auth_error
+    if isinstance(error, _TRANSIENT_S3_ERRORS):
+        return True, False
+    if isinstance(error, OSError):
+        message = str(error).lower()
+        auth_error = "accessdenied" in message or "forbidden" in message
+        return any(marker in message for marker in _RETRYABLE_TRANSLATED_ERROR_MARKERS), auth_error
+    return False, False
+
+
+def _refresh_s3_credentials(fs) -> None:
+    if not hasattr(fs, "connect"):
+        return
+    try:
+        fs.connect(refresh=True)
+    except Exception:
+        logger.opt(exception=True).warning("Failed to refresh S3 credentials before retry")
+
+
 def call_with_s3_retry(fs, fn, *args, **kwargs):
     """Call an S3 operation with bounded retries for credentials and transient transport failures."""
     for attempt in range(1, _S3_TRANSFER_MAX_ATTEMPTS + 1):
         try:
             return fn(*args, **kwargs)
-        except ClientError as error:
-            code = getattr(error, "response", {}).get("Error", {}).get("Code")
-            if code not in {"ExpiredToken", "ExpiredTokenException", "RequestExpired"}:
+        except Exception as error:
+            retryable, refresh_credentials = _retryable_s3_error(error)
+            if not retryable:
                 raise
-            if hasattr(fs, "connect"):
-                try:
-                    fs.connect(refresh=True)
-                except Exception:
-                    logger.opt(exception=True).warning("Failed to refresh S3 credentials before retry")
-            retry_error = error
-        except _TRANSIENT_S3_ERRORS as error:
+            if refresh_credentials:
+                _refresh_s3_credentials(fs)
             retry_error = error
 
         if attempt == _S3_TRANSFER_MAX_ATTEMPTS:
