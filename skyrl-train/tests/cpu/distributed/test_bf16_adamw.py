@@ -15,7 +15,6 @@ from torch.distributed.tensor import DTensor, distribute_tensor
 from torch.distributed.tensor.placement_types import Replicate
 from transformers import PretrainedConfig
 
-from skyrl_train.config.utils import get_default_config
 from skyrl_train.distributed.bf16_adamw import BFloat16AdamW, BFloat16UpdateMode, build_adamw
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy, resolve_fsdp_parameter_storage_dtype
 from skyrl_train.distributed.utils import get_free_port
@@ -159,13 +158,6 @@ def test_checkpoint_rejects_an_explicit_update_mode_change() -> None:
         kahan.load_state_dict(stochastic.state_dict())
 
 
-def test_default_config_enables_stochastic_updates_for_policy_and_critic() -> None:
-    config = get_default_config()
-
-    assert config.trainer.policy.optimizer_config.bf16_update_mode == "stochastic"
-    assert config.trainer.critic.optimizer_config.bf16_update_mode == "stochastic"
-
-
 def test_fp32_parameters_use_torch_adamw_for_every_low_precision_mode() -> None:
     for mode in (BFloat16UpdateMode.STOCHASTIC, BFloat16UpdateMode.KAHAN, BFloat16UpdateMode.FP32_MASTER):
         parameter = torch.nn.Parameter(torch.ones(2, dtype=torch.float32))
@@ -174,27 +166,42 @@ def test_fp32_parameters_use_torch_adamw_for_every_low_precision_mode() -> None:
 
 
 def test_fp32_master_mode_controls_fsdp_parameter_storage() -> None:
-    assert resolve_fsdp_parameter_storage_dtype("AdamW", None, "fp32_master") is torch.float32
-    assert resolve_fsdp_parameter_storage_dtype("AdamW", "float32", "fp32_master") is torch.float32
+    mode = BFloat16UpdateMode.FP32_MASTER
+    assert resolve_fsdp_parameter_storage_dtype("AdamW", None, mode) is torch.float32
+    assert resolve_fsdp_parameter_storage_dtype("AdamW", "float32", mode) is torch.float32
     with pytest.raises(ValueError, match="conflicts with non-FP32"):
-        resolve_fsdp_parameter_storage_dtype("AdamW", "bfloat16", "fp32_master")
+        resolve_fsdp_parameter_storage_dtype("AdamW", "bfloat16", mode)
+
+
+def _fsdp_optimizer_config(**overrides) -> _Config:
+    values = {
+        "optimizer": "AdamW",
+        "fsdp_parameter_storage_dtype": "bfloat16",
+        "lr": 1e-5,
+        "weight_decay": 0.0,
+        "adam_betas": (0.9, 0.999),
+        "max_grad_norm": 0.0,
+        "offload_after_step": False,
+        "num_warmup_steps": 0,
+        "scheduler": "constant",
+        "optimizer_kwargs": {},
+    }
+    values.update(overrides)
+    return _Config(values)
+
+
+def test_fsdp_strategy_rejects_an_explicit_mode_for_an_unsupported_optimizer() -> None:
+    with pytest.raises(ValueError, match="applies only to AdamW"):
+        FSDPStrategy(
+            fsdp_config=_Config(cpu_offload=False),
+            optimizer_config=_fsdp_optimizer_config(optimizer="SGD", bf16_update_mode="stochastic"),
+            fsdp_strategy="fsdp2",
+        )
 
 
 def test_fsdp_strategy_builds_stochastic_adamw_for_bf16_parameters(monkeypatch: pytest.MonkeyPatch) -> None:
     model = torch.nn.Linear(2, 2).to(torch.bfloat16)
-    optimizer_config = _Config(
-        optimizer="AdamW",
-        fsdp_parameter_storage_dtype="bfloat16",
-        bf16_update_mode="stochastic",
-        lr=1e-5,
-        weight_decay=0.0,
-        adam_betas=(0.9, 0.999),
-        max_grad_norm=0.0,
-        offload_after_step=False,
-        num_warmup_steps=0,
-        scheduler="constant",
-        optimizer_kwargs={},
-    )
+    optimizer_config = _fsdp_optimizer_config()
     strategy = FSDPStrategy(
         fsdp_config=_Config(cpu_offload=False),
         optimizer_config=optimizer_config,
@@ -248,19 +255,7 @@ def _fsdp_checkpoint_worker(rank: int, world_size: int, port: int, checkpoint_ro
         mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("fsdp",))
         strategy = FSDPStrategy(
             fsdp_config=_Config(cpu_offload=False),
-            optimizer_config=_Config(
-                optimizer="AdamW",
-                fsdp_parameter_storage_dtype="bfloat16",
-                bf16_update_mode="stochastic",
-                lr=1e-5,
-                weight_decay=0.0,
-                adam_betas=(0.9, 0.999),
-                max_grad_norm=0.0,
-                offload_after_step=False,
-                num_warmup_steps=0,
-                scheduler="constant",
-                optimizer_kwargs={},
-            ),
+            optimizer_config=_fsdp_optimizer_config(),
             model_config=SimpleNamespace(lora=SimpleNamespace(rank=0)),
             fsdp_strategy="fsdp2",
             seed=20260823,
@@ -294,6 +289,19 @@ def _fsdp_checkpoint_worker(rank: int, world_size: int, port: int, checkpoint_ro
             torch.testing.assert_close(parameter.to_local(), expected_local, rtol=0, atol=0)
             assert optimizer.param_groups[0]["bf16_update_step"] == 12
 
+    finally:
+        dist.destroy_process_group()
+
+
+def _replicated_rounding_worker(rank: int, world_size: int, port: int) -> None:
+    dist.init_process_group(
+        "gloo",
+        rank=rank,
+        world_size=world_size,
+        init_method=f"tcp://127.0.0.1:{port}",
+    )
+    try:
+        mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("replicate",))
         replicated = nn.Parameter(
             distribute_tensor(
                 torch.full((4_096,), 0.1, dtype=torch.bfloat16),
@@ -316,6 +324,15 @@ def test_two_rank_fsdp2_checkpoint_preserves_low_precision_updates(tmp_path: Pat
     mp.spawn(
         _fsdp_checkpoint_worker,
         args=(2, get_free_port(), str(tmp_path / "checkpoint")),
+        nprocs=2,
+        join=True,
+    )
+
+
+def test_two_rank_replicated_parameters_use_identical_rounding() -> None:
+    mp.spawn(
+        _replicated_rounding_worker,
+        args=(2, get_free_port()),
         nprocs=2,
         join=True,
     )

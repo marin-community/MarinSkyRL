@@ -17,7 +17,7 @@ the explicit nearest mode use ``torch.optim.AdamW``. The composite proxies
 that code which iterates ``optimizer.param_groups`` (scheduler lr, StaleClip lr
 scaling) and ``optimizer.state[param]`` (CPU offload/backload) operates on the
 union transparently. We deliberately reuse the shipped optimizers rather than
-re-implement their kernels.
+wrapping their state or changing their external optimizer contract.
 
 FSDP2 note: under FSDP2 the 2-D weights arrive as row-sharded ``DTensor``s. The
 Newton-Schulz iteration (``G @ G.T`` plus a global ``.norm()``) runs correctly on
@@ -163,7 +163,7 @@ class HybridMuon(_CompositeOptimizer):
         adamw_eps: float = 1e-8,
         adamw_weight_decay: float = 0.0,
         bf16_update_mode: BFloat16UpdateMode = BFloat16UpdateMode.STOCHASTIC,
-        seed: int = 42,
+        seed: int,
     ) -> None:
         muon_params = [p for p in muon_params]
         adamw_params = [p for p in adamw_params]
@@ -219,7 +219,7 @@ class HybridMuon(_CompositeOptimizer):
         self._refresh_composite_views()
 
 
-def build_hybrid_muon(named_parameters, optim_config, *, seed: int = 42) -> HybridMuon:
+def build_hybrid_muon(named_parameters, optim_config, *, seed: int) -> HybridMuon:
     """Split ``named_parameters`` into Muon (2-D hidden weights) vs AdamW (rest)
     groups and construct a :class:`HybridMuon` from ``optim_config``.
 

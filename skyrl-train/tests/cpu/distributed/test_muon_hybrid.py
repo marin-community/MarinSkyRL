@@ -73,7 +73,7 @@ def test_build_split_counts():
         adam_betas=[0.9, 0.999],
         optimizer_kwargs={"muon_lr": 0.02, "muon_momentum": 0.95, "ns_steps": 5},
     )
-    opt = build_hybrid_muon(m.named_parameters(), cfg)
+    opt = build_hybrid_muon(m.named_parameters(), cfg, seed=42)
     # Muon should get exactly mlp_up.weight + mlp_down.weight (2 tensors)
     assert set(opt._muon_param_names) == {"mlp_up.weight", "mlp_down.weight"}
     # everything else -> AdamW
@@ -97,7 +97,7 @@ def test_build_split_counts():
 def test_is_optimizer_and_scheduler_attaches():
     m = TinyModel()
     cfg = _Cfg(lr=8e-6, weight_decay=0.0, adam_betas=[0.9, 0.999], optimizer_kwargs={})
-    opt = build_hybrid_muon(m.named_parameters(), cfg)
+    opt = build_hybrid_muon(m.named_parameters(), cfg, seed=42)
     assert isinstance(opt, torch.optim.Optimizer)
     assert {group["lr"] for group in opt.param_groups} == {cfg.lr}
     # transformers' get_scheduler -> LRScheduler does isinstance(opt, Optimizer)
@@ -113,14 +113,14 @@ def test_zero_param_muon_raises():
     only_norms = nn.LayerNorm(8)  # weight + bias, both 1-D -> no Muon params
     cfg = _Cfg(lr=8e-6, weight_decay=0.0, adam_betas=[0.9, 0.999], optimizer_kwargs={})
     with pytest.raises(ValueError):
-        build_hybrid_muon(only_norms.named_parameters(), cfg)
+        build_hybrid_muon(only_norms.named_parameters(), cfg, seed=42)
 
 
 def test_step_updates_and_finite():
     torch.manual_seed(0)
     m = TinyModel()
     cfg = _Cfg(lr=1e-3, weight_decay=0.01, adam_betas=[0.9, 0.999], optimizer_kwargs={"muon_lr": 0.02, "ns_steps": 5})
-    opt = build_hybrid_muon(m.named_parameters(), cfg)
+    opt = build_hybrid_muon(m.named_parameters(), cfg, seed=42)
 
     before = {n: p.detach().clone() for n, p in m.named_parameters()}
     idx = torch.randint(0, 16, (4, 5))
@@ -140,7 +140,7 @@ def test_state_dict_roundtrip():
     torch.manual_seed(0)
     m = TinyModel()
     cfg = _Cfg(lr=1e-3, weight_decay=0.0, adam_betas=[0.9, 0.999], optimizer_kwargs={"muon_lr": 0.02})
-    opt = build_hybrid_muon(m.named_parameters(), cfg)
+    opt = build_hybrid_muon(m.named_parameters(), cfg, seed=42)
     idx = torch.randint(0, 16, (4, 5))
     m(idx).sum().backward()
     opt.step()
@@ -149,7 +149,7 @@ def test_state_dict_roundtrip():
 
     m2 = TinyModel()
     m2.load_state_dict(m.state_dict())
-    opt2 = build_hybrid_muon(m2.named_parameters(), cfg)
+    opt2 = build_hybrid_muon(m2.named_parameters(), cfg, seed=42)
     opt2.load_state_dict(sd)
     # momentum buffer restored for a muon param
     muon_param = dict(m2.named_parameters())["mlp_up.weight"]
@@ -163,7 +163,7 @@ def test_offload_backload_utils_compatible():
     torch.manual_seed(0)
     m = TinyModel()
     cfg = _Cfg(lr=1e-3, weight_decay=0.0, adam_betas=[0.9, 0.999], optimizer_kwargs={})
-    opt = build_hybrid_muon(m.named_parameters(), cfg)
+    opt = build_hybrid_muon(m.named_parameters(), cfg, seed=42)
     m(torch.randint(0, 16, (4, 5))).sum().backward()
     opt.step()
     # Should traverse without error (CPU "device" no-op move).
@@ -174,7 +174,7 @@ def test_offload_backload_utils_compatible():
 def test_per_group_lr_mutation_routes_to_child():
     m = TinyModel()
     cfg = _Cfg(lr=8e-6, weight_decay=0.0, adam_betas=[0.9, 0.999], optimizer_kwargs={"muon_lr": 0.02})
-    opt = build_hybrid_muon(m.named_parameters(), cfg)
+    opt = build_hybrid_muon(m.named_parameters(), cfg, seed=42)
     # StaleClip path scales pg["lr"] in place; verify it reaches the child opt.
     for pg in opt.param_groups:
         pg["lr"] = pg["lr"] * 0.5

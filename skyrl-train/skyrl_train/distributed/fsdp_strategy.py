@@ -58,14 +58,13 @@ _MUONH_OPTIMIZER_NAME = "MuonH"
 def resolve_fsdp_parameter_storage_dtype(
     optimizer_name: str,
     configured_dtype: str | None,
-    bf16_update_mode: str | BFloat16UpdateMode | None = None,
+    bf16_update_mode: BFloat16UpdateMode = BFloat16UpdateMode.STOCHASTIC,
 ) -> torch.dtype:
     """Return the FSDP parameter storage dtype.
 
     An unset dtype preserves MuonH parameters in FP32 and stores parameters for every other optimizer in BF16.
     """
-    update_mode = parse_bf16_update_mode(bf16_update_mode)
-    if update_mode is BFloat16UpdateMode.FP32_MASTER:
+    if bf16_update_mode is BFloat16UpdateMode.FP32_MASTER:
         if configured_dtype is not None and not PrecisionType.is_fp32(configured_dtype):
             raise ValueError("bf16_update_mode=fp32_master conflicts with non-FP32 parameter storage")
         return torch.float32
@@ -119,9 +118,14 @@ class FSDPStrategy(DistributedStrategy):
             if optimizer_config is not None
             else _DEFAULT_OPTIMIZER_NAME
         )
-        self.bf16_update_mode = parse_bf16_update_mode(
+        configured_update_mode = (
             optimizer_config.get("bf16_update_mode", None) if optimizer_config is not None else None
         )
+        if configured_update_mode is not None and self.optimizer_name not in {_DEFAULT_OPTIMIZER_NAME, "Muon"}:
+            raise ValueError(
+                f"bf16_update_mode applies only to AdamW and Muon's AdamW child, not {self.optimizer_name!r}"
+            )
+        self.bf16_update_mode = parse_bf16_update_mode(configured_update_mode)
         configured_storage_dtype = (
             optimizer_config.get("fsdp_parameter_storage_dtype", None) if optimizer_config is not None else None
         )

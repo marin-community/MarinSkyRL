@@ -45,7 +45,9 @@ def _parameter_shard_coordinate(parameter: Tensor) -> tuple[int, ...]:
         coordinate = parameter.device_mesh.get_coordinate()
         if coordinate is None:
             raise RuntimeError("the current rank is not part of the parameter DTensor mesh")
-        return tuple(value for value, placement in zip(coordinate, parameter.placements) if not isinstance(placement, Replicate))
+        return tuple(
+            value for value, placement in zip(coordinate, parameter.placements) if not isinstance(placement, Replicate)
+        )
     if dist.is_available() and dist.is_initialized():
         return (dist.get_rank(),)
     return (0,)
@@ -190,13 +192,9 @@ class BFloat16AdamW(Optimizer):
                     state["exp_avg"] = torch.zeros_like(parameter_local, memory_format=torch.preserve_format)
                     state["exp_avg_sq"] = torch.zeros_like(parameter_local, memory_format=torch.preserve_format)
                 if group["amsgrad"] and "max_exp_avg_sq" not in state:
-                    state["max_exp_avg_sq"] = torch.zeros_like(
-                        parameter_local, memory_format=torch.preserve_format
-                    )
+                    state["max_exp_avg_sq"] = torch.zeros_like(parameter_local, memory_format=torch.preserve_format)
                 if self._configured_mode is BFloat16UpdateMode.KAHAN and "rounding_residual" not in state:
-                    state["rounding_residual"] = torch.zeros_like(
-                        parameter_local, memory_format=torch.preserve_format
-                    )
+                    state["rounding_residual"] = torch.zeros_like(parameter_local, memory_format=torch.preserve_format)
 
                 step = self._state_step(state) + 1
                 state["step"] = step
@@ -262,20 +260,19 @@ class BFloat16AdamW(Optimizer):
 def build_adamw(
     params: Iterable[Tensor],
     *,
-    update_mode: str | BFloat16UpdateMode | None,
+    update_mode: BFloat16UpdateMode,
     seed: int,
     **kwargs: Any,
 ) -> Optimizer:
     """Build AdamW with the selected parameter-write behavior."""
 
     parameters = list(params)
-    mode = parse_bf16_update_mode(update_mode)
     dtypes = {parameter.dtype for parameter in parameters}
-    if mode in (BFloat16UpdateMode.STOCHASTIC, BFloat16UpdateMode.KAHAN) and torch.bfloat16 in dtypes:
+    if update_mode in (BFloat16UpdateMode.STOCHASTIC, BFloat16UpdateMode.KAHAN) and torch.bfloat16 in dtypes:
         if dtypes != {torch.bfloat16}:
             raise ValueError(f"low-precision AdamW requires uniform BF16 parameters, got {sorted(map(str, dtypes))}")
-        return BFloat16AdamW(parameters, update_mode=mode, seed=seed, **kwargs)
-    if mode is BFloat16UpdateMode.FP32_MASTER and torch.bfloat16 in dtypes:
+        return BFloat16AdamW(parameters, update_mode=update_mode, seed=seed, **kwargs)
+    if update_mode is BFloat16UpdateMode.FP32_MASTER and torch.bfloat16 in dtypes:
         raise ValueError("fp32_master requires FSDP parameter storage dtype float32")
     return AdamW(parameters, **kwargs)
 

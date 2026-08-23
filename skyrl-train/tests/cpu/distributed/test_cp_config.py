@@ -119,7 +119,6 @@ EXPERT_LOADER_FIELDS = {
 }
 ADDITIVE_TRAINING_OPTIMIZER_FIELDS = {
     "fsdp_parameter_storage_dtype": None,
-    "bf16_update_mode": "stochastic",
 }
 
 
