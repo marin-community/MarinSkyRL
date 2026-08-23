@@ -144,6 +144,9 @@ class RayPPOTrainer:
 
         self.all_metrics = {}
         self.all_timings = {}
+        # `all_timings` is cleared after every step, so a span that runs once before the step loop
+        # would be reported as part of step 1. Startup spans accumulate here and are published once.
+        self.all_startup_timings = {}
         self.global_step = 0
 
         # initialized in `build_models`
@@ -456,7 +459,7 @@ class RayPPOTrainer:
         points in the training loop to allow extensibility.
         """
         # Initialize weight sync state between policy model and inference engines.
-        with Timer("init_weight_sync_state"):
+        with Timer("init_weight_sync_state", self.all_startup_timings):
             self.init_weight_sync_state()
 
         # Load policy model to GPU before loading checkpoint.
@@ -465,7 +468,7 @@ class RayPPOTrainer:
 
         # Load checkpoint state if resumption is enabled.
         if self.resume_mode != ResumeMode.NONE:
-            with Timer("load_checkpoints"):
+            with Timer("load_checkpoints", self.all_startup_timings):
                 self.global_step, _ = self.load_checkpoints()
 
             # Resume-overshoot guard: if we resumed AT or PAST max_steps the run is
@@ -480,7 +483,10 @@ class RayPPOTrainer:
                 await self._handle_resume_at_max_steps()
                 return
 
-        await self._sync_policy_for_rollouts()
+        with Timer("sync_policy_for_rollouts", self.all_startup_timings):
+            await self._sync_policy_for_rollouts()
+
+        self._log_startup_timings()
 
         # initialize kl controller
         if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -2162,6 +2168,16 @@ class RayPPOTrainer:
         )
         request_path = write_hf_export_request(request)
         logger.info(f"Queued out-of-band HF export for global_step_{self.global_step}: {request_path}")
+
+    def _log_startup_timings(self) -> None:
+        """Publish the spans that ran once before the step loop."""
+        if not self.all_startup_timings:
+            return
+        payload = {f"startup/{name}": duration for name, duration in self.all_startup_timings.items()}
+        self._log_metrics_stdout(payload, step=self.global_step, kind="startup")
+        # commit=False: the next tracker.log at this step (pre-train eval, or step 1) flushes it.
+        # Committing here would be a second commit at a step wandb has already been given.
+        self.tracker.log(payload, step=self.global_step)
 
     def _log_metrics_stdout(self, payload: Dict[str, Any], step: int, kind: str = "train") -> None:
         """Mirror the wandb/tracker payload to stdout so metrics are recoverable without wandb access."""

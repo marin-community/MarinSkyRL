@@ -546,7 +546,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Data consumption state is loaded via DataTrackingCallback.load_from_checkpoint()
         # into self.data_tracker, which the async dataloader reads for skip-on-resume.
         if self.resume_mode != ResumeMode.NONE:
-            with Timer("load_checkpoints"):
+            with Timer("load_checkpoints", self.all_startup_timings):
                 self.global_step, checkpoint_path = self.load_checkpoints()
                 logger.info(f"Resumed training from global_step {self.global_step}")
 
@@ -597,16 +597,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 return
 
         # Initialize weight sync state
-        with Timer("init_weight_sync_state"):
+        with Timer("init_weight_sync_state", self.all_startup_timings):
             self.init_weight_sync_state()
 
         # sync weights to inference engines
-        with Timer("sync_weights_to_inference_engines"):
+        with Timer("sync_weights_to_inference_engines", self.all_startup_timings):
             await self.async_sync_policy_weights_to_inference_engines()
             # Drain the policy workers' event loops to a hard sync point so every FSDP
             # shard rank is free before the step-1 forward is dispatched (the MoE-RL
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             await self._drain_policy_event_loops()
+
+        self._log_startup_timings()
 
         # Create initial trainer state for on_train_begin callback
         start_epoch = self.global_step // self.num_steps_per_epoch
