@@ -62,24 +62,10 @@ def test_head_returns_driver_abort_when_failure_artifact_upload_blocks(tmp_path,
         def open(self, _path, _mode):
             return BlockingWrite()
 
-    args = SimpleNamespace(
-        ray_port=6379,
-        ray_log_dir=None,
-        rendezvous_dir="s3://incident/rendezvous",
-        ray_spill_backend=task_runtime.RaySpillBackend.LOCAL,
-        ray_spill_dir=str(tmp_path / "spill"),
-        cluster_join_timeout=1,
-        driver_liveness_timeout_seconds=0,
-    )
+    args = _runtime_args(tmp_path, rendezvous_dir="s3://incident/rendezvous")
+    _isolate_head_runtime(tmp_path, monkeypatch)
     monkeypatch.setattr(task_runtime, "FAILURE_ARTIFACT_TIMEOUT", 0.01)
-    monkeypatch.setattr(task_runtime, "_num_tasks", lambda: 1)
-    monkeypatch.setattr(task_runtime, "_own_ip", lambda: "127.0.0.1")
-    monkeypatch.setattr(task_runtime, "ray_start_head", lambda *_args: None)
-    monkeypatch.setattr(task_runtime, "ray_stop", lambda: None)
-    monkeypatch.setattr(task_runtime.signal, "signal", lambda *_args: None)
     monkeypatch.setattr(task_runtime, "fs_and_path", lambda _uri: (BlockingFilesystem(), "incident/report"))
-    monkeypatch.setattr(task_runtime, "training_driver_env", lambda _ifname: {"SKYRL_HOME": str(tmp_path)})
-    monkeypatch.setattr(task_runtime, "ray_metrics_telemetry", lambda *_args: contextlib.nullcontext())
 
     result = []
 
@@ -97,7 +83,12 @@ def test_head_returns_driver_abort_when_failure_artifact_upload_blocks(tmp_path,
         runtime_thread.join(timeout=5)
 
 
-def _runtime_args(tmp_path: Path, *, liveness_timeout: float, rendezvous_dir: str | None = None) -> SimpleNamespace:
+def _runtime_args(
+    tmp_path: Path,
+    *,
+    liveness_timeout: float = 0,
+    rendezvous_dir: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         ray_port=6379,
         ray_log_dir=None,
@@ -105,7 +96,7 @@ def _runtime_args(tmp_path: Path, *, liveness_timeout: float, rendezvous_dir: st
         ray_spill_backend=task_runtime.RaySpillBackend.LOCAL,
         ray_spill_dir=str(tmp_path / "spill"),
         cluster_join_timeout=1,
-        driver_liveness_timeout_seconds=liveness_timeout,
+        driver_liveness_timeout=liveness_timeout,
     )
 
 

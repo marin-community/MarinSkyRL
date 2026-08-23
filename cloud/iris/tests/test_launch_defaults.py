@@ -368,19 +368,19 @@ def test_resolve_launch_defaults_rejects_non_path_trace_configuration(tmp_path):
 
 
 def test_task_command_forwards_driver_liveness_timeout(tmp_path):
-    args = _args(tmp_path, "opencode", ["--driver-liveness-timeout-seconds", "600"])
+    args = _args(tmp_path, "opencode", ["--driver-liveness-timeout", "600"])
     normalize(args)
     resolve_launch_defaults(args)
 
     options = _shell_options(build_task_command(args)[-1])
 
-    assert options["--driver-liveness-timeout-seconds"] == ["600"]
+    assert options["--driver-liveness-timeout"] == ["600"]
 
 
 def test_normalize_rejects_negative_driver_liveness_timeout(tmp_path):
-    args = _args(tmp_path, "opencode", ["--driver-liveness-timeout-seconds", "-1"])
+    args = _args(tmp_path, "opencode", ["--driver-liveness-timeout", "-1"])
 
-    with pytest.raises(SystemExit, match="driver-liveness-timeout-seconds must be >= 0"):
+    with pytest.raises(SystemExit, match="driver-liveness-timeout must be >= 0"):
         normalize(args)
 
 

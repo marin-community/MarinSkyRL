@@ -1576,6 +1576,16 @@ class DriverOutputActivity:
             self.condition.notify_all()
 
 
+@dataclass(frozen=True)
+class DriverExited:
+    exit_code: int
+
+
+@dataclass(frozen=True)
+class DriverStalled:
+    silence: float
+
+
 def launch_training_driver(train_argv: list[str], env: dict[str, str]) -> subprocess.Popen:
     """Start the driver from the immutable runtime checkout, not the bootstrap bundle."""
     runtime_checkout = env.get("SKYRL_HOME")
@@ -1617,19 +1627,19 @@ def wait_for_driver(
     process: subprocess.Popen,
     activity: DriverOutputActivity,
     timeout: float,
-) -> int | None:
-    """Return the child status, or ``None`` after the configured output silence."""
+) -> DriverExited | DriverStalled:
+    """Return the named child exit or output-stall outcome."""
     if timeout <= 0:
-        return process.wait()
+        return DriverExited(process.wait())
 
     while True:
         exit_code = process.poll()
         if exit_code is not None:
-            return exit_code
+            return DriverExited(exit_code)
         with activity.condition:
             silence = time.monotonic() - activity.last_progress_at
             if silence >= timeout:
-                return None
+                return DriverStalled(silence)
             activity.condition.wait(timeout=min(timeout - silence, DRIVER_WATCHDOG_POLL_INTERVAL))
 
 
@@ -1755,17 +1765,11 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         process = launch_training_driver(train_argv, env)
         driver_activity = DriverOutputActivity()
         output_thread = start_driver_output_tee(process, driver_activity)
-        if args.driver_liveness_timeout_seconds > 0:
-            _log(
-                "Driver liveness watchdog armed: "
-                f"{args.driver_liveness_timeout_seconds:g}s maximum stdout/stderr silence"
-            )
-        exit_code = wait_for_driver(process, driver_activity, args.driver_liveness_timeout_seconds)
-        if exit_code is None:
-            reason = (
-                f"driver stalled after {args.driver_liveness_timeout_seconds:g}s "
-                "without stdout/stderr progress (head rank 0)"
-            )
+        if args.driver_liveness_timeout > 0:
+            _log(f"Driver liveness watchdog armed: {args.driver_liveness_timeout:g}s maximum stdout/stderr silence")
+        wait_result = wait_for_driver(process, driver_activity, args.driver_liveness_timeout)
+        if isinstance(wait_result, DriverStalled):
+            reason = f"driver stalled after {wait_result.silence:.0f}s without stdout/stderr progress (head rank 0)"
             _log(reason)
 
             def persist_stall_artifacts() -> None:
@@ -1778,6 +1782,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
             ray_stop()
             return DRIVER_STALLED_EXIT_CODE
         output_thread.join(timeout=DRIVER_KILL_TIMEOUT)
+        exit_code = wait_result.exit_code
         if exit_code != 0:
 
             def persist_failure_artifacts() -> None:
@@ -1922,7 +1927,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help=f"Seconds to wait for all nodes to join the Ray cluster (default {DEFAULT_CLUSTER_JOIN_TIMEOUT}).",
     )
     parser.add_argument(
-        "--driver-liveness-timeout-seconds",
+        "--driver-liveness-timeout",
         type=int,
         default=DEFAULT_DRIVER_LIVENESS_TIMEOUT,
         help="Maximum driver stdout/stderr silence before the controller records diagnostics, "
