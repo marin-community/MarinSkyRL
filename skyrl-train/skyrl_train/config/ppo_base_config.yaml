@@ -73,6 +73,7 @@ trainer:
     optimizer_config:
       optimizer: "AdamW"
       fsdp_parameter_storage_dtype: null
+      bf16_update_mode: "stochastic"
       lr: 1.0e-6
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2
@@ -136,6 +137,7 @@ trainer:
     optimizer_config:
       optimizer: "AdamW"
       fsdp_parameter_storage_dtype: null
+      bf16_update_mode: "stochastic"
       lr: 5.0e-6
       adam_betas: [0.9, 0.999]
       weight_decay: 1e-2

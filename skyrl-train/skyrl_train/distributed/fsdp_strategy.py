@@ -18,6 +18,7 @@ from torch.distributed.fsdp import CPUOffload, MixedPrecision
 
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.distributed.grug_muonh import build_grug_muonh
+from skyrl_train.distributed.bf16_adamw import BFloat16UpdateMode, build_adamw, parse_bf16_update_mode
 from skyrl_train.distributed.optimizer_learning_rates import validate_optimizer_learning_rates
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
@@ -54,11 +55,20 @@ _DEFAULT_OPTIMIZER_NAME = "AdamW"
 _MUONH_OPTIMIZER_NAME = "MuonH"
 
 
-def resolve_fsdp_parameter_storage_dtype(optimizer_name: str, configured_dtype: str | None) -> torch.dtype:
+def resolve_fsdp_parameter_storage_dtype(
+    optimizer_name: str,
+    configured_dtype: str | None,
+    bf16_update_mode: str | BFloat16UpdateMode | None = None,
+) -> torch.dtype:
     """Return the FSDP parameter storage dtype.
 
     An unset dtype preserves MuonH parameters in FP32 and stores parameters for every other optimizer in BF16.
     """
+    update_mode = parse_bf16_update_mode(bf16_update_mode)
+    if update_mode is BFloat16UpdateMode.FP32_MASTER:
+        if configured_dtype is not None and not PrecisionType.is_fp32(configured_dtype):
+            raise ValueError("bf16_update_mode=fp32_master conflicts with non-FP32 parameter storage")
+        return torch.float32
     if configured_dtype is None:
         return torch.float32 if optimizer_name == _MUONH_OPTIMIZER_NAME else torch.bfloat16
     if PrecisionType.is_fp32(configured_dtype):
@@ -109,11 +119,16 @@ class FSDPStrategy(DistributedStrategy):
             if optimizer_config is not None
             else _DEFAULT_OPTIMIZER_NAME
         )
+        self.bf16_update_mode = parse_bf16_update_mode(
+            optimizer_config.get("bf16_update_mode", None) if optimizer_config is not None else None
+        )
         configured_storage_dtype = (
             optimizer_config.get("fsdp_parameter_storage_dtype", None) if optimizer_config is not None else None
         )
         self.parameter_storage_dtype = resolve_fsdp_parameter_storage_dtype(
-            self.optimizer_name, configured_storage_dtype
+            self.optimizer_name,
+            configured_storage_dtype,
+            self.bf16_update_mode,
         )
 
         # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually offload weights/optimizer to cpu
@@ -523,7 +538,7 @@ class FSDPStrategy(DistributedStrategy):
                 # match full-tensor NS within bf16 tolerance).
                 from skyrl_train.distributed.muon_hybrid import build_hybrid_muon
 
-                new_optimizer = build_hybrid_muon(fsdp_module.named_parameters(), optim_config)
+                new_optimizer = build_hybrid_muon(fsdp_module.named_parameters(), optim_config, seed=self.seed)
                 logger.info(
                     f"[Muon] hybrid optimizer: {len(new_optimizer._muon_param_names)} 2-D "
                     f"weights -> Muon (lr={new_optimizer.muon.param_groups[0]['lr']}, "
@@ -567,7 +582,15 @@ class FSDPStrategy(DistributedStrategy):
                 if extra:
                     optimizer_kwargs.update(extra)
 
-                new_optimizer = optimizer_cls(fsdp_module.parameters(), **optimizer_kwargs)
+                if optimizer_name == "AdamW":
+                    new_optimizer = build_adamw(
+                        fsdp_module.parameters(),
+                        update_mode=self.bf16_update_mode,
+                        seed=self.seed,
+                        **optimizer_kwargs,
+                    )
+                else:
+                    new_optimizer = optimizer_cls(fsdp_module.parameters(), **optimizer_kwargs)
 
             validate_optimizer_learning_rates(
                 new_optimizer,

@@ -26,6 +26,7 @@ from skyrl_train.distributed.muon_hybrid import (
     build_hybrid_muon,
     is_muon_param,
 )
+from skyrl_train.distributed.bf16_adamw import BFloat16AdamW
 
 
 class _Cfg(dict):
@@ -179,3 +180,13 @@ def test_per_group_lr_mutation_routes_to_child():
         pg["lr"] = pg["lr"] * 0.5
     assert any(pg["lr"] == pytest.approx(0.01) for pg in opt.muon.param_groups)
     assert any(pg["lr"] == pytest.approx(4e-6) for pg in opt.adamw.param_groups)
+
+
+def test_bf16_adamw_route_uses_stochastic_updates_by_default():
+    model = TinyModel().to(torch.bfloat16)
+    config = _Cfg(lr=8e-6, weight_decay=0.0, adam_betas=[0.9, 0.999], optimizer_kwargs={})
+
+    optimizer = build_hybrid_muon(model.named_parameters(), config, seed=37)
+
+    assert isinstance(optimizer.adamw, BFloat16AdamW)
+    assert optimizer.adamw.param_groups[0]["rounding_seed"] == 37
