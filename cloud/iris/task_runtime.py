@@ -140,6 +140,12 @@ RENDEZVOUS_WRITE_TIMEOUT = 30  # seconds per attempt
 RAY_START_HEAD_TIMEOUT = 300  # seconds
 # Failure reporting must never keep an Iris task alive after its driver exits.
 FAILURE_ARTIFACT_TIMEOUT = 30
+# Allow healthy policy phases longer than one hour while bounding a live but silent driver.
+DEFAULT_DRIVER_LIVENESS_TIMEOUT = 9000
+DRIVER_WATCHDOG_POLL_INTERVAL = 1.0
+DRIVER_KILL_TIMEOUT = 30
+DRIVER_STALLED_EXIT_CODE = 124
+IGNORED_DRIVER_OUTPUT_MARKERS = (b"[fd-monitor]",)
 
 
 def _log(msg: str) -> None:
@@ -1551,12 +1557,93 @@ class RayLogSyncSession:
         return stop
 
 
+@dataclass
+class DriverOutputActivity:
+    """Track child output that provides evidence of training progress."""
+
+    last_progress_at: float = field(default_factory=time.monotonic)
+    condition: threading.Condition = field(default_factory=threading.Condition)
+
+    def record(self, line: bytes) -> None:
+        if not line.strip() or any(marker in line for marker in IGNORED_DRIVER_OUTPUT_MARKERS):
+            return
+        with self.condition:
+            self.last_progress_at = time.monotonic()
+            self.condition.notify_all()
+
+    def stream_closed(self) -> None:
+        with self.condition:
+            self.condition.notify_all()
+
+
 def launch_training_driver(train_argv: list[str], env: dict[str, str]) -> subprocess.Popen:
     """Start the driver from the immutable runtime checkout, not the bootstrap bundle."""
     runtime_checkout = env.get("SKYRL_HOME")
     if not runtime_checkout:
         raise RuntimeError("SKYRL_HOME must identify the immutable MarinSkyRL runtime checkout")
-    return subprocess.Popen(train_argv, env=env, cwd=runtime_checkout, start_new_session=True)
+    return subprocess.Popen(
+        train_argv,
+        env=env,
+        cwd=runtime_checkout,
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def start_driver_output_tee(
+    process: subprocess.Popen,
+    activity: DriverOutputActivity,
+) -> threading.Thread:
+    """Forward child output to the task log and update its liveness signal."""
+    if process.stdout is None:
+        raise RuntimeError("Training driver stdout must be piped for liveness supervision")
+
+    def forward_output() -> None:
+        try:
+            for line in iter(process.stdout.readline, b""):
+                sys.stdout.write(line.decode(errors="replace"))
+                sys.stdout.flush()
+                activity.record(line)
+        finally:
+            activity.stream_closed()
+
+    output_thread = threading.Thread(target=forward_output, daemon=True, name="driver-output-tee")
+    output_thread.start()
+    return output_thread
+
+
+def wait_for_driver(
+    process: subprocess.Popen,
+    activity: DriverOutputActivity,
+    timeout: float,
+) -> int | None:
+    """Return the child status, or ``None`` after the configured output silence."""
+    if timeout <= 0:
+        return process.wait()
+
+    while True:
+        exit_code = process.poll()
+        if exit_code is not None:
+            return exit_code
+        with activity.condition:
+            silence = time.monotonic() - activity.last_progress_at
+            if silence >= timeout:
+                return None
+            activity.condition.wait(timeout=min(timeout - silence, DRIVER_WATCHDOG_POLL_INTERVAL))
+
+
+def kill_driver_process_group(process: subprocess.Popen) -> None:
+    """Kill a stalled driver and its descendants before the Iris task exits."""
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        process.poll()
+        return
+    try:
+        process.wait(timeout=DRIVER_KILL_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _log(f"Training driver did not become waitable within {DRIVER_KILL_TIMEOUT}s after SIGKILL")
 
 
 def _persist_failure_artifacts_bounded(action, timeout: float) -> None:
@@ -1666,8 +1753,31 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
         # `process` here arms its driver-teardown path (the closure reads this value).
         process = launch_training_driver(train_argv, env)
+        driver_activity = DriverOutputActivity()
+        output_thread = start_driver_output_tee(process, driver_activity)
+        if args.driver_liveness_timeout_seconds > 0:
+            _log(
+                "Driver liveness watchdog armed: "
+                f"{args.driver_liveness_timeout_seconds:g}s maximum stdout/stderr silence"
+            )
+        exit_code = wait_for_driver(process, driver_activity, args.driver_liveness_timeout_seconds)
+        if exit_code is None:
+            reason = (
+                f"driver stalled after {args.driver_liveness_timeout_seconds:g}s "
+                "without stdout/stderr progress (head rank 0)"
+            )
+            _log(reason)
 
-        exit_code = process.wait()
+            def persist_stall_artifacts() -> None:
+                capture_termination_artifacts(args.rendezvous_dir, reason)
+                persist_runtime_artifacts(reason)
+
+            _persist_failure_artifacts_bounded(persist_stall_artifacts, timeout=FAILURE_ARTIFACT_TIMEOUT)
+            kill_driver_process_group(process)
+            output_thread.join(timeout=DRIVER_KILL_TIMEOUT)
+            ray_stop()
+            return DRIVER_STALLED_EXIT_CODE
+        output_thread.join(timeout=DRIVER_KILL_TIMEOUT)
         if exit_code != 0:
 
             def persist_failure_artifacts() -> None:
@@ -1810,6 +1920,13 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         type=int,
         default=DEFAULT_CLUSTER_JOIN_TIMEOUT,
         help=f"Seconds to wait for all nodes to join the Ray cluster (default {DEFAULT_CLUSTER_JOIN_TIMEOUT}).",
+    )
+    parser.add_argument(
+        "--driver-liveness-timeout-seconds",
+        type=int,
+        default=DEFAULT_DRIVER_LIVENESS_TIMEOUT,
+        help="Maximum driver stdout/stderr silence before the controller records diagnostics, "
+        f"kills the driver, and exits nonzero (default {DEFAULT_DRIVER_LIVENESS_TIMEOUT}; zero disables).",
     )
     parser.add_argument(
         "--train-data",
