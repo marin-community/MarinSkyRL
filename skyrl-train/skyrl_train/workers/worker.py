@@ -26,6 +26,7 @@ from skyrl_train.config.query_bias import (
     GrugQueryBiasUpdateMode,
     resolve_grug_query_bias_target_weight,
     resolve_grug_query_bias_update_mode,
+    resolve_grug_query_bias_update_rate,
 )
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
@@ -57,6 +58,7 @@ from skyrl_train.training_batch import (
 from skyrl_train.utils.metrics import mean_metrics, policy_progress_metrics, policy_training_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.models.grug_query_bias import (
+    GrugLossFreeBiasWindow,
     GrugQueryBiasCapturePlan,
     GrugQueryBiasShardLayout,
     GrugQueryBiasWindow,
@@ -941,7 +943,7 @@ class PolicyWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
-        self._grug_query_bias_window: GrugQueryBiasWindow | None = None
+        self._grug_query_bias_window: GrugQueryBiasWindow | GrugLossFreeBiasWindow | None = None
 
     def _normalize_mini_batch_size(self):
         """
@@ -1069,7 +1071,13 @@ class PolicyWorkerBase(Worker):
         policy_update_steps = 0
         grug_causal_lm = self._grug_causal_lm()
         grug_query_bias_update_mode = resolve_grug_query_bias_update_mode(self.cfg.trainer.policy)
+        if grug_causal_lm is None and grug_query_bias_update_mode is not GrugQueryBiasUpdateMode.FROZEN:
+            raise ValueError("Grug query-bias updates require a Grug policy model")
         grug_query_bias_target_weight = resolve_grug_query_bias_target_weight(
+            self.cfg.trainer.policy,
+            grug_query_bias_update_mode,
+        )
+        grug_query_bias_update_rate = resolve_grug_query_bias_update_rate(
             self.cfg.trainer.policy,
             grug_query_bias_update_mode,
         )
@@ -1103,12 +1111,19 @@ class PolicyWorkerBase(Worker):
                     assert grug_capture_plan is not None
                     window_end = local_step + accumulation_steps
                     valid_tokens = sum(grug_capture_plan.valid_token_counts[local_step:window_end])
-                    self._grug_query_bias_window = GrugQueryBiasWindow(
-                        grug_causal_lm,
-                        valid_tokens,
-                        grug_capture_plan,
-                        target_weight=grug_query_bias_target_weight,
-                    )
+                    if grug_query_bias_update_mode is GrugQueryBiasUpdateMode.LOSS_FREE:
+                        self._grug_query_bias_window = GrugLossFreeBiasWindow(
+                            grug_causal_lm,
+                            grug_capture_plan,
+                            update_rate=grug_query_bias_update_rate,
+                        )
+                    else:
+                        self._grug_query_bias_window = GrugQueryBiasWindow(
+                            grug_causal_lm,
+                            valid_tokens,
+                            grug_capture_plan,
+                            target_weight=grug_query_bias_target_weight,
+                        )
                 diagnostic_mesh = self.strategy.device_mesh if _phase_diagnostics.enabled() else None
                 with _phase_diagnostics.region(
                     diagnostic_mesh,

@@ -14,6 +14,7 @@ class GrugQueryBiasUpdateMode(StrEnum):
 
     FROZEN = "frozen"
     INTERPOLATE = "interpolate"
+    LOSS_FREE = "loss_free"
     REPLACE = "replace"
 
 
@@ -39,14 +40,10 @@ def resolve_grug_query_bias_target_weight(
 
     config_key = "grug_query_bias_interpolation_weight"
     raw_weight = policy_config.get(config_key)
-    if mode is GrugQueryBiasUpdateMode.FROZEN:
+    if mode is not GrugQueryBiasUpdateMode.INTERPOLATE:
         if raw_weight is not None:
             raise ValueError(f"{config_key} is only valid when grug_query_bias_update_mode=interpolate")
-        return 0.0
-    if mode is GrugQueryBiasUpdateMode.REPLACE:
-        if raw_weight is not None:
-            raise ValueError(f"{config_key} is only valid when grug_query_bias_update_mode=interpolate")
-        return 1.0
+        return 1.0 if mode is GrugQueryBiasUpdateMode.REPLACE else 0.0
     if raw_weight is None:
         raise ValueError(f"{config_key} is required when grug_query_bias_update_mode=interpolate")
     try:
@@ -56,3 +53,26 @@ def resolve_grug_query_bias_target_weight(
     if not math.isfinite(weight) or not 0.0 < weight < 1.0:
         raise ValueError(f"{config_key} must be finite and between 0 and 1 exclusively; got {raw_weight}")
     return weight
+
+
+def resolve_grug_query_bias_update_rate(
+    policy_config: DictConfig,
+    mode: GrugQueryBiasUpdateMode,
+) -> float:
+    """Return the DeepSeek loss-free bias update rate."""
+
+    config_key = "grug_query_bias_update_rate"
+    raw_rate = policy_config.get(config_key)
+    if mode is not GrugQueryBiasUpdateMode.LOSS_FREE:
+        if raw_rate is not None:
+            raise ValueError(f"{config_key} is only valid when grug_query_bias_update_mode=loss_free")
+        return 0.0
+    if raw_rate is None:
+        raise ValueError(f"{config_key} is required when grug_query_bias_update_mode=loss_free")
+    try:
+        rate = float(raw_rate)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{config_key} must be a number; got {raw_rate}") from error
+    if not math.isfinite(rate) or rate <= 0.0:
+        raise ValueError(f"{config_key} must be finite and positive; got {raw_rate}")
+    return rate

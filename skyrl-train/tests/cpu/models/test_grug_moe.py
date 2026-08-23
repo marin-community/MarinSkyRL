@@ -19,9 +19,11 @@ from skyrl_train.models.grug_moe import (
     enable_grug_grouped_mm,
 )
 from skyrl_train.models.grug_query_bias import (
+    GrugLossFreeBiasAccumulator,
     GrugQueryBiasAccumulator,
     GrugQueryBiasLayerObservation,
     GrugQueryBiasObservation,
+    next_loss_free_query_bias,
     next_query_bias,
     query_bias_candidate_count,
 )
@@ -379,6 +381,46 @@ def test_query_bias_candidates_accumulate_exactly_and_change_next_routing():
     assert new_route.item() == 0
 
 
+def test_loss_free_bias_accumulates_assignments_and_corrects_overload():
+    accumulator = GrugLossFreeBiasAccumulator(num_layers=1, num_experts=4)
+    for selected_experts in (
+        torch.tensor([[0, 1], [0, 2]]),
+        torch.tensor([[0, 1], [0, 3]]),
+    ):
+        accumulator.observe(
+            GrugQueryBiasObservation(
+                layers=(
+                    GrugQueryBiasLayerObservation(
+                        candidates=torch.empty((4, 0)),
+                        selected_experts=selected_experts,
+                        combine_weights=torch.empty_like(selected_experts, dtype=torch.float32),
+                    ),
+                ),
+                candidate_count=0,
+            )
+        )
+
+    loads = accumulator.finalize_loads()
+    torch.testing.assert_close(loads, torch.tensor([[4.0, 2.0, 1.0, 1.0]]))
+
+    current_bias = torch.tensor([[0.3, -0.1, -0.1, -0.1]])
+    updated_bias = next_loss_free_query_bias(current_bias, loads, update_rate=0.001)
+    torch.testing.assert_close(updated_bias, torch.tensor([[0.29875, -0.10025, -0.09925, -0.09925]]))
+    torch.testing.assert_close(updated_bias.mean(dim=-1), torch.zeros(1), atol=1e-7, rtol=0)
+
+
+def test_loss_free_bias_does_not_move_when_expert_loads_are_balanced():
+    current_bias = torch.tensor([[0.2, -0.2]])
+    loads = torch.tensor([[3.0, 3.0]])
+
+    torch.testing.assert_close(
+        next_loss_free_query_bias(current_bias, loads, update_rate=0.001),
+        current_bias,
+        rtol=0,
+        atol=0,
+    )
+
+
 def test_query_bias_stays_finite_and_centered_across_optimizer_steps():
     torch.manual_seed(31)
     model = GrugMoeForCausalLM(tiny_config(num_hidden_layers=1, num_local_experts=4, num_experts_per_tok=2))
@@ -444,6 +486,22 @@ def _distributed_query_bias_worker(rank: int, init_file: str) -> None:
             )
         )
         torch.testing.assert_close(accumulator.finalize_betas(), torch.tensor([[1.5, 2.5]]))
+
+        load_accumulator = GrugLossFreeBiasAccumulator(num_layers=1, num_experts=2)
+        selected_experts = torch.tensor([[rank, rank]])
+        load_accumulator.observe(
+            GrugQueryBiasObservation(
+                layers=(
+                    GrugQueryBiasLayerObservation(
+                        candidates=torch.empty((2, 0)),
+                        selected_experts=selected_experts,
+                        combine_weights=torch.ones_like(selected_experts, dtype=torch.float32),
+                    ),
+                ),
+                candidate_count=0,
+            )
+        )
+        torch.testing.assert_close(load_accumulator.finalize_loads(), torch.tensor([[2.0, 2.0]]))
     finally:
         torch.distributed.destroy_process_group()
 

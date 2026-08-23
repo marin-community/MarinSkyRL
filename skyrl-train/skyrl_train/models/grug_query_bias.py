@@ -42,8 +42,9 @@ class GrugQueryBiasLayerObservation:
     """Compact routing data from one layer and one microbatch.
 
     ``candidates`` contains the largest ``q`` values of ``s - alpha`` for each
-    expert. Keeping only these values is sufficient to recover the exact q-th
-    value across a gradient-accumulation window.
+    expert during Quantile Balancing. Keeping only these values is sufficient
+    to recover the exact q-th value across a gradient-accumulation window. It
+    is empty when only selected-expert loads are captured.
     """
 
     candidates: torch.Tensor
@@ -182,6 +183,37 @@ class GrugQueryBiasAccumulator:
         return result
 
 
+class GrugLossFreeBiasAccumulator:
+    """Accumulate per-layer expert assignments for a policy optimizer window."""
+
+    def __init__(self, *, num_layers: int, num_experts: int) -> None:
+        self.num_layers = num_layers
+        self.num_experts = num_experts
+        self._loads: list[torch.Tensor | None] = [None] * num_layers
+
+    def observe(self, observation: GrugQueryBiasObservation) -> None:
+        if len(observation.layers) != self.num_layers:
+            raise ValueError(f"expected {self.num_layers} layer observations, got {len(observation.layers)}")
+
+        for layer_idx, layer in enumerate(observation.layers):
+            loads = torch.bincount(layer.selected_experts.reshape(-1), minlength=self.num_experts).float()
+            if loads.shape[0] != self.num_experts:
+                raise ValueError(f"layer {layer_idx} selected an expert outside [0, {self.num_experts})")
+            previous = self._loads[layer_idx]
+            self._loads[layer_idx] = loads if previous is None else previous + loads
+
+    @torch.no_grad()
+    def finalize_loads(self) -> torch.Tensor:
+        """Return global assignment counts with shape ``[layers, experts]``."""
+
+        if any(loads is None for loads in self._loads):
+            raise RuntimeError("cannot finalize loss-free bias before observing every layer")
+        result = torch.stack([loads for loads in self._loads if loads is not None], dim=0).float()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(result, op=torch.distributed.ReduceOp.SUM)
+        return result
+
+
 def next_query_bias(betas: torch.Tensor) -> torch.Tensor:
     """Apply Grug's ``bias = -beta`` update and center each layer."""
 
@@ -189,6 +221,30 @@ def next_query_bias(betas: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"betas must have shape [layers, experts], got {tuple(betas.shape)}")
     bias = -betas.float()
     return bias - bias.mean(dim=-1, keepdim=True)
+
+
+def next_loss_free_query_bias(
+    current_bias: torch.Tensor,
+    expert_loads: torch.Tensor,
+    *,
+    update_rate: float,
+) -> torch.Tensor:
+    """Apply DeepSeek's signed load-error update to an external router bias."""
+
+    if current_bias.ndim != 2 or expert_loads.shape != current_bias.shape:
+        raise ValueError(
+            "current_bias and expert_loads must have matching [layers, experts] shapes; "
+            f"got {tuple(current_bias.shape)} and {tuple(expert_loads.shape)}"
+        )
+    if not torch.isfinite(expert_loads).all() or (expert_loads < 0).any():
+        raise ValueError("expert_loads must be finite and non-negative")
+    if not 0.0 < update_rate < float("inf"):
+        raise ValueError(f"update_rate must be finite and positive, got {update_rate}")
+
+    mean_load = expert_loads.float().mean(dim=-1, keepdim=True)
+    load_error = mean_load - expert_loads.float()
+    updated_bias = current_bias.float() + update_rate * torch.sign(load_error)
+    return updated_bias - updated_bias.mean(dim=-1, keepdim=True)
 
 
 class GrugQueryBiasWindow:
@@ -249,4 +305,50 @@ class GrugQueryBiasWindow:
             current_bias = self.model.get_query_bias().float()
             target = next_query_bias(self.accumulator.finalize_betas()).to(current_bias)
             self.model.set_query_bias(torch.lerp(current_bias, target, self.target_weight))
+        self._closed = True
+
+
+class GrugLossFreeBiasWindow:
+    """Apply one DeepSeek loss-free bias update after an optimizer window."""
+
+    def __init__(
+        self,
+        model: GrugQueryBiasCaptureModel,
+        capture_plan: GrugQueryBiasCapturePlan,
+        *,
+        update_rate: float,
+    ) -> None:
+        if not 0.0 < update_rate < float("inf"):
+            raise ValueError(f"update_rate must be finite and positive, got {update_rate}")
+        config = model.config
+        self.model = model
+        self.capture_plan = capture_plan
+        self.update_rate = update_rate
+        self.accumulator = GrugLossFreeBiasAccumulator(
+            num_layers=config.num_hidden_layers,
+            num_experts=config.num_local_experts,
+        )
+        self._closed = False
+
+    def begin_microbatch(self, attention_mask: torch.Tensor, local_step: int) -> bool:
+        """Start load capture and return false when this EP shard owns no valid tokens."""
+
+        if self.capture_plan.valid_token_counts[local_step] == 0:
+            return False
+        capture_mask = self.capture_plan.shard_layout.mask_for(attention_mask, local_step)
+        self.model.begin_query_bias_capture(0, capture_mask)
+        return True
+
+    def observe_microbatch(self) -> None:
+        self.accumulator.observe(self.model.take_query_bias_observation(candidate_count=0))
+
+    def finish(self, *, optimizer_step_succeeded: bool) -> None:
+        """Apply a completed load window once, or discard it after a skipped step."""
+
+        if self._closed:
+            return
+        if optimizer_step_succeeded:
+            current_bias = self.model.get_query_bias().float()
+            loads = self.accumulator.finalize_loads().to(current_bias)
+            self.model.set_query_bias(next_loss_free_query_bias(current_bias, loads, update_rate=self.update_rate))
         self._closed = True

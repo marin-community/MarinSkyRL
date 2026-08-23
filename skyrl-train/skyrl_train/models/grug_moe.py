@@ -425,8 +425,8 @@ class GrugMoeRouter(nn.Module, NativeRouterObserverEmitter):
         self._observation: GrugQueryBiasLayerObservation | None = None
 
     def begin_query_bias_capture(self, candidate_count: int, token_mask: torch.Tensor) -> None:
-        if candidate_count < 1:
-            raise ValueError(f"candidate_count must be positive, got {candidate_count}")
+        if candidate_count < 0:
+            raise ValueError(f"candidate_count must be non-negative, got {candidate_count}")
         self._capture_q = candidate_count
         self._capture_mask = token_mask.reshape(-1).to(dtype=torch.bool)
         self._observation = None
@@ -468,14 +468,18 @@ class GrugMoeRouter(nn.Module, NativeRouterObserverEmitter):
                 if mask is None or mask.numel() != router_logits.shape[0]:
                     raise RuntimeError("query-bias token mask does not match the router token dimension")
                 with torch.no_grad():
-                    valid_scores = (router_logits.detach() - alpha.detach())[mask]
-                    if valid_scores.shape[0] == 0:
+                    valid_selected_experts = selected_experts[mask].detach()
+                    if valid_selected_experts.shape[0] == 0:
                         raise RuntimeError("query-bias capture requires at least one valid token")
-                    keep = min(self._capture_q, valid_scores.shape[0])
-                    candidates = torch.topk(valid_scores.transpose(0, 1), k=keep, dim=-1, sorted=True).values
+                    if self._capture_q:
+                        valid_scores = (router_logits.detach() - alpha.detach())[mask]
+                        keep = min(self._capture_q, valid_scores.shape[0])
+                        candidates = torch.topk(valid_scores.transpose(0, 1), k=keep, dim=-1, sorted=True).values
+                    else:
+                        candidates = router_logits.new_empty((self.num_experts, 0))
                     self._observation = GrugQueryBiasLayerObservation(
                         candidates=candidates,
-                        selected_experts=selected_experts[mask].detach(),
+                        selected_experts=valid_selected_experts,
                         combine_weights=combine_weights[mask].detach(),
                     )
 
