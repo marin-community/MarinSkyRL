@@ -36,9 +36,9 @@ from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
-from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, sync_registries
+from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, sync_registries
 from .logging_utils import format_exception_text
-from .loss_reduction import SUPPORTED_LOSS_REDUCTIONS
+from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTIONS
 from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
@@ -564,6 +564,13 @@ def validate_cfg(cfg: DictConfig):
         cfg.trainer.algorithm.dynamic_sampling.informative_on,
         float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
     )
+    if (
+        cfg.trainer.algorithm.policy_loss_type == PolicyLossType.GSPO
+        and cfg.trainer.algorithm.loss_reduction != SEQUENCE_MEAN_LOSS_REDUCTION
+    ):
+        raise ValueError(
+            f"GSPO requires trainer.algorithm.loss_reduction=sequence_mean; got {cfg.trainer.algorithm.loss_reduction}"
+        )
     runtime_values = {
         "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
         "trainer.distributed.worker_collective_timeout_seconds": cfg.trainer.distributed.worker_collective_timeout_seconds,

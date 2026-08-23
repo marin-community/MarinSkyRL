@@ -539,6 +539,15 @@ def test_validate_cfg_rejects_stacked_behavior_clip_and_tis():
         validate_cfg(cfg)
 
 
+def test_validate_cfg_rejects_gspo_without_sequence_mean_reduction():
+    cfg = _validatable_dummy_config()
+    cfg.trainer.algorithm.policy_loss_type = "gspo"
+    cfg.trainer.algorithm.loss_reduction = "token_mean"
+
+    with pytest.raises(ValueError, match="GSPO requires trainer.algorithm.loss_reduction=sequence_mean"):
+        validate_cfg(cfg)
+
+
 def test_validate_cfg_materializes_rloo_n_group_invariant():
     cfg = _validatable_dummy_config()
     cfg.generator.n_samples_per_prompt = 2
