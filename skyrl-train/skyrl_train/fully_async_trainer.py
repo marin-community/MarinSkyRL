@@ -520,6 +520,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             cpus_per_coordinator=cpus_per_coordinator,
             coordinator_rpc_timeout=coordinator_rpc_timeout,
         )
+        # The sink was attached in __init__, to the runner just replaced. Re-attach it here rather
+        # than at the call site: the swap is what detaches it.
+        self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
 
     async def train(self):
         """

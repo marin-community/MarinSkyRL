@@ -8,6 +8,8 @@ import pytest
 import ray
 from omegaconf import OmegaConf
 
+from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink
 from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import (
     RETAINED_RUNNER_NAME,
     RolloutCoordinatorRPCTimeoutError,
@@ -158,3 +160,39 @@ def test_the_retained_runner_name_still_matches_a_real_class():
     runner = Path(__file__).resolve().parents[2] / "skyrl_train" / "trajectory_runners" / "harbor" / "runner.py"
     classes = {node.name for node in ast.walk(ast.parse(runner.read_text())) if isinstance(node, ast.ClassDef)}
     assert RETAINED_RUNNER_NAME in classes, f"{RETAINED_RUNNER_NAME} is not a class in {runner.name}: {sorted(classes)}"
+
+
+def test_enabling_fanout_keeps_the_trainer_sink_attached():
+    """The swap in _maybe_enable_rollout_fanout is what detached it; #445.
+
+    Retention and fan-out are both on by default, so before this the trainer configured a sink,
+    replaced the runner holding it, and retained nothing while closing the sink at teardown.
+    """
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "rollout": {"fanout": {"enabled": True, "num_coordinators": 1, "coordinator_rpc_timeout": 30.0}},
+            "terminal_bench_config": {},
+            "generator": {},
+        }
+    )
+    trainer.trajectory_sink = Mock()
+
+    trainer._maybe_enable_rollout_fanout()
+
+    assert trainer.trajectory_runner._trajectory_sink is trainer.trajectory_sink
+
+
+def test_the_sink_survives_rebinding_across_the_swap():
+    """``bind_runner`` raises when rebound to a different name, so the swap must reuse the runner's.
+
+    ``__init__`` binds it to the injected ``HarborTrajectoryRunner``; the dispatcher rebinds to the
+    same literal. Naming the proxy instead would raise on every fan-out run.
+    """
+    sink = TrajectorySink.__new__(TrajectorySink)
+    sink._runner_name = None
+    sink.bind_runner("HarborTrajectoryRunner")  # what RayPPOTrainer.__init__ does
+
+    _dispatcher(_Coordinator(_noop_rpc), timeout=1).set_trajectory_sink(sink)
+
+    assert sink._runner_name == "HarborTrajectoryRunner"
