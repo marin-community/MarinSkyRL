@@ -24,6 +24,10 @@ class GrugQueryBiasCaptureModel(Protocol):
 
     def take_query_bias_observation(self, *, candidate_count: int) -> "GrugQueryBiasObservation": ...
 
+    def begin_loss_free_bias_capture(self, token_mask: torch.Tensor) -> None: ...
+
+    def take_loss_free_bias_observation(self) -> "GrugQueryBiasObservation": ...
+
     def get_query_bias(self) -> torch.Tensor: ...
 
     def set_query_bias(self, bias: torch.Tensor) -> None: ...
@@ -54,6 +58,8 @@ class GrugQueryBiasLayerObservation:
 
 @dataclass(frozen=True)
 class GrugQueryBiasObservation:
+    """Routing observations; candidate_count is zero for load-only capture."""
+
     layers: tuple[GrugQueryBiasLayerObservation, ...]
     candidate_count: int
 
@@ -247,22 +253,23 @@ def next_loss_free_query_bias(
     return updated_bias - updated_bias.mean(dim=-1, keepdim=True)
 
 
-class GrugQueryBiasWindow:
-    """Collect and apply query-bias observations for one optimizer window."""
+class GrugQueryBiasUpdater(Protocol):
+    """Update mechanism used by a Grug query-bias optimizer window."""
 
-    def __init__(
-        self,
-        model: GrugQueryBiasCaptureModel,
-        valid_tokens: int,
-        capture_plan: GrugQueryBiasCapturePlan,
-        *,
-        target_weight: float,
-    ) -> None:
+    def begin_capture(self, model: GrugQueryBiasCaptureModel, token_mask: torch.Tensor) -> None: ...
+
+    def observe(self, model: GrugQueryBiasCaptureModel) -> None: ...
+
+    def apply(self, model: GrugQueryBiasCaptureModel) -> None: ...
+
+
+class GrugQuantileBiasUpdater:
+    """Collect and apply a Quantile Balancing target."""
+
+    def __init__(self, model: GrugQueryBiasCaptureModel, valid_tokens: int, *, target_weight: float) -> None:
         if not 0.0 < target_weight <= 1.0:
             raise ValueError(f"target_weight must be in (0, 1], got {target_weight}")
         config = model.config
-        self.model = model
-        self.capture_plan = capture_plan
         self.target_weight = target_weight
         self.candidate_count = query_bias_candidate_count(
             valid_tokens,
@@ -274,27 +281,73 @@ class GrugQueryBiasWindow:
             num_layers=config.num_hidden_layers,
             num_experts=config.num_local_experts,
         )
+
+    def begin_capture(self, model: GrugQueryBiasCaptureModel, token_mask: torch.Tensor) -> None:
+        model.begin_query_bias_capture(self.candidate_count, token_mask)
+
+    def observe(self, model: GrugQueryBiasCaptureModel) -> None:
+        self.accumulator.observe(
+            model.take_query_bias_observation(
+                candidate_count=self.candidate_count,
+            )
+        )
+
+    def apply(self, model: GrugQueryBiasCaptureModel) -> None:
+        current_bias = model.get_query_bias().float()
+        target = next_query_bias(self.accumulator.finalize_betas()).to(current_bias)
+        model.set_query_bias(torch.lerp(current_bias, target, self.target_weight))
+
+
+class GrugLossFreeBiasUpdater:
+    """Collect expert loads and apply one DeepSeek loss-free update."""
+
+    def __init__(self, model: GrugQueryBiasCaptureModel, *, update_rate: float) -> None:
+        if not 0.0 < update_rate < float("inf"):
+            raise ValueError(f"update_rate must be finite and positive, got {update_rate}")
+        config = model.config
+        self.update_rate = update_rate
+        self.accumulator = GrugLossFreeBiasAccumulator(
+            num_layers=config.num_hidden_layers,
+            num_experts=config.num_local_experts,
+        )
+
+    def begin_capture(self, model: GrugQueryBiasCaptureModel, token_mask: torch.Tensor) -> None:
+        model.begin_loss_free_bias_capture(token_mask)
+
+    def observe(self, model: GrugQueryBiasCaptureModel) -> None:
+        self.accumulator.observe(model.take_loss_free_bias_observation())
+
+    def apply(self, model: GrugQueryBiasCaptureModel) -> None:
+        current_bias = model.get_query_bias().float()
+        loads = self.accumulator.finalize_loads().to(current_bias)
+        model.set_query_bias(next_loss_free_query_bias(current_bias, loads, update_rate=self.update_rate))
+
+
+class GrugQueryBiasWindow:
+    """Run one external query-bias update over an optimizer window."""
+
+    def __init__(
+        self,
+        model: GrugQueryBiasCaptureModel,
+        capture_plan: GrugQueryBiasCapturePlan,
+        updater: GrugQueryBiasUpdater,
+    ) -> None:
+        self.model = model
+        self.capture_plan = capture_plan
+        self.updater = updater
         self._closed = False
 
-    def begin_microbatch(
-        self,
-        attention_mask: torch.Tensor,
-        local_step: int,
-    ) -> bool:
+    def begin_microbatch(self, attention_mask: torch.Tensor, local_step: int) -> bool:
         """Start capture and return false when this EP shard owns no valid tokens."""
 
         if self.capture_plan.valid_token_counts[local_step] == 0:
             return False
         capture_mask = self.capture_plan.shard_layout.mask_for(attention_mask, local_step)
-        self.model.begin_query_bias_capture(self.candidate_count, capture_mask)
+        self.updater.begin_capture(self.model, capture_mask)
         return True
 
     def observe_microbatch(self) -> None:
-        self.accumulator.observe(
-            self.model.take_query_bias_observation(
-                candidate_count=self.candidate_count,
-            )
-        )
+        self.updater.observe(self.model)
 
     def finish(self, *, optimizer_step_succeeded: bool) -> None:
         """Apply a completed window once, or discard it after a skipped step."""
@@ -302,53 +355,5 @@ class GrugQueryBiasWindow:
         if self._closed:
             return
         if optimizer_step_succeeded:
-            current_bias = self.model.get_query_bias().float()
-            target = next_query_bias(self.accumulator.finalize_betas()).to(current_bias)
-            self.model.set_query_bias(torch.lerp(current_bias, target, self.target_weight))
-        self._closed = True
-
-
-class GrugLossFreeBiasWindow:
-    """Apply one DeepSeek loss-free bias update after an optimizer window."""
-
-    def __init__(
-        self,
-        model: GrugQueryBiasCaptureModel,
-        capture_plan: GrugQueryBiasCapturePlan,
-        *,
-        update_rate: float,
-    ) -> None:
-        if not 0.0 < update_rate < float("inf"):
-            raise ValueError(f"update_rate must be finite and positive, got {update_rate}")
-        config = model.config
-        self.model = model
-        self.capture_plan = capture_plan
-        self.update_rate = update_rate
-        self.accumulator = GrugLossFreeBiasAccumulator(
-            num_layers=config.num_hidden_layers,
-            num_experts=config.num_local_experts,
-        )
-        self._closed = False
-
-    def begin_microbatch(self, attention_mask: torch.Tensor, local_step: int) -> bool:
-        """Start load capture and return false when this EP shard owns no valid tokens."""
-
-        if self.capture_plan.valid_token_counts[local_step] == 0:
-            return False
-        capture_mask = self.capture_plan.shard_layout.mask_for(attention_mask, local_step)
-        self.model.begin_query_bias_capture(0, capture_mask)
-        return True
-
-    def observe_microbatch(self) -> None:
-        self.accumulator.observe(self.model.take_query_bias_observation(candidate_count=0))
-
-    def finish(self, *, optimizer_step_succeeded: bool) -> None:
-        """Apply a completed load window once, or discard it after a skipped step."""
-
-        if self._closed:
-            return
-        if optimizer_step_succeeded:
-            current_bias = self.model.get_query_bias().float()
-            loads = self.accumulator.finalize_loads().to(current_bias)
-            self.model.set_query_bias(next_loss_free_query_bias(current_bias, loads, update_rate=self.update_rate))
+            self.updater.apply(self.model)
         self._closed = True
