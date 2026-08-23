@@ -398,6 +398,16 @@ def test_successful_step_interpolates_toward_grug_query_bias_target():
     torch.testing.assert_close(causal_lm.query_bias, expected)
 
 
+def test_successful_step_moves_grug_query_bias_target_to_buffer_device():
+    accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
+    window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator, target_weight=0.25)
+    causal_lm.query_bias = causal_lm.query_bias.to("meta")
+
+    window.finish(optimizer_step_succeeded=True)
+
+    assert causal_lm.query_bias.device.type == "meta"
+
+
 def test_grug_query_bias_virtual_shards_partition_optimizer_window():
     attention_mask = torch.tensor(
         [

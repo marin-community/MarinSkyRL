@@ -246,6 +246,7 @@ class GrugQueryBiasWindow:
         if self._closed:
             return
         if optimizer_step_succeeded:
-            target = next_query_bias(self.accumulator.finalize_betas())
-            self.model.set_query_bias(torch.lerp(self.model.get_query_bias().float(), target, self.target_weight))
+            current_bias = self.model.get_query_bias().float()
+            target = next_query_bias(self.accumulator.finalize_betas()).to(current_bias)
+            self.model.set_query_bias(torch.lerp(current_bias, target, self.target_weight))
         self._closed = True
