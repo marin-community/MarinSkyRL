@@ -527,8 +527,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         self.global_step = 0
 
-        # Optionally swap the single-process runner for a K-actor rollout
-        # dispatcher (gated; default OFF => no-op, self.trajectory_runner unchanged).
+        # Swap the single-process runner for a K-actor rollout dispatcher. `rollout.fanout.enabled`
+        # defaults to TRUE, so this replaces self.trajectory_runner on a default config, and raises
+        # if `terminal_bench_config` is absent rather than falling back to the single-process runner.
         self._maybe_enable_rollout_fanout()
 
         await self._startup_trajectory_runner()
