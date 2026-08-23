@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+import errno
 import os
 import random
 import time
@@ -89,10 +90,7 @@ def s3_refresh_if_expiring(fs) -> None:
         return
     now = datetime.now(timezone.utc)
     if now >= exp - timedelta(seconds=300):
-        try:
-            fs.connect(refresh=True)  # rebuild session
-        except Exception:
-            pass
+        _refresh_s3_credentials(fs)
 
 
 def _retryable_s3_error(error: Exception) -> tuple[bool, bool]:
@@ -108,7 +106,10 @@ def _retryable_s3_error(error: Exception) -> tuple[bool, bool]:
     if isinstance(error, OSError):
         message = str(error).lower()
         auth_error = "accessdenied" in message or "forbidden" in message
-        return any(marker in message for marker in _RETRYABLE_TRANSLATED_ERROR_MARKERS), auth_error
+        translated_s3_error = error.errno == errno.EIO and any(
+            marker in message for marker in _RETRYABLE_TRANSLATED_ERROR_MARKERS
+        )
+        return translated_s3_error, auth_error and translated_s3_error
     return False, False
 
 
@@ -126,7 +127,7 @@ def call_with_s3_retry(fs, fn, *args, **kwargs):
     for attempt in range(1, _S3_TRANSFER_MAX_ATTEMPTS + 1):
         try:
             return fn(*args, **kwargs)
-        except Exception as error:
+        except (ClientError, *_TRANSIENT_S3_ERRORS, OSError) as error:
             retryable, refresh_credentials = _retryable_s3_error(error)
             if not retryable:
                 raise

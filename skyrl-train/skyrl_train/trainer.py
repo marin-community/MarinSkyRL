@@ -145,6 +145,7 @@ class RayPPOTrainer:
 
         self.all_metrics = {}
         self.all_timings = {}
+        self._checkpoint_save_failures = 0.0
         self.global_step = 0
 
         # initialized in `build_models`
@@ -430,22 +431,28 @@ class RayPPOTrainer:
         finally:
             await self._sync_policy_for_rollouts()
 
-    async def _save_intermediate_checkpoint(self, state: TrainerState) -> bool:
+    def _record_checkpoint_save_failure(self, state: TrainerState) -> None:
+        self._checkpoint_save_failures += 1.0
+        self.all_metrics["trainer/checkpoint_save_failures"] = self._checkpoint_save_failures
+        logger.opt(exception=True).error(
+            f"Checkpoint save failed at global step {state.global_step}; continuing from the last complete checkpoint"
+        )
+
+    async def _save_intermediate_checkpoint(self, state: TrainerState) -> None:
         """Save one requested step checkpoint without terminating training on storage failure."""
         try:
             with Timer("save_checkpoints", self.all_timings):
                 await self._save_checkpoints_with_residency()
-        except Exception:
-            failures = float(getattr(self, "_checkpoint_save_failures", 0)) + 1.0
-            self._checkpoint_save_failures = failures
-            self.all_metrics["trainer/checkpoint_save_failures"] = failures
-            logger.opt(exception=True).error(
-                f"Checkpoint save failed at global step {state.global_step}; continuing from the last complete checkpoint"
-            )
-            return False
+        except OSError:
+            self._record_checkpoint_save_failure(state)
+            return
+        except ray.exceptions.RayTaskError as error:
+            if not isinstance(error.as_instanceof_cause(), OSError):
+                raise
+            self._record_checkpoint_save_failure(state)
+            return
 
         await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
-        return True
 
     async def _sync_weights_and_restore_rollout_residency(self) -> None:
         await self.inference_engine_client.wake_up(tags=["weights"])

@@ -139,7 +139,7 @@ RENDEZVOUS_WRITE_TIMEOUT = 30  # seconds per attempt
 # Bound `ray start --head` so a hung Ray CLI fails loud (TimeoutExpired).
 RAY_START_HEAD_TIMEOUT = 300  # seconds
 # Failure reporting must never keep an Iris task alive after its driver exits.
-FAILURE_ARTIFACT_TIMEOUT_SECONDS = 30
+FAILURE_ARTIFACT_TIMEOUT = 30
 
 
 def _log(msg: str) -> None:
@@ -1578,6 +1578,12 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     ray_log_sync_stop: threading.Event | None = None
     ray_log_sync = RayLogSyncSession(args.ray_log_dir, node_id)
 
+    def persist_runtime_artifacts(reason: str) -> None:
+        if ray_log_sync_stop is not None:
+            ray_log_sync_stop.set()
+        ray_log_sync.sync_bounded(reason)
+        sync_debug_artifacts(args.rendezvous_dir, node_id, reason)
+
     # Install the SIGTERM/SIGINT handler + termination-artifact capture at the TOP of
     # bring-up (BEFORE clear_rendezvous / ray_start_head / rendezvous write), so a reap
     # ANYWHERE in bring-up produces the term artifact instead of dying silently.
@@ -1663,26 +1669,20 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
 
         exit_code = process.wait()
         if exit_code != 0:
-            if ray_log_sync_stop is not None:
-                ray_log_sync_stop.set()
 
             def persist_failure_artifacts() -> None:
                 reason = f"driver exit_code={exit_code} (head rank 0)"
                 capture_termination_artifacts(args.rendezvous_dir, reason)
-                ray_log_sync.sync_bounded(reason)
-                sync_debug_artifacts(args.rendezvous_dir, node_id, reason)
+                persist_runtime_artifacts(reason)
 
             _persist_failure_artifacts_bounded(
                 persist_failure_artifacts,
-                timeout=FAILURE_ARTIFACT_TIMEOUT_SECONDS,
+                timeout=FAILURE_ARTIFACT_TIMEOUT,
             )
             ray_stop()
             return exit_code
         # Final flush of this node's Ray session logs before teardown reaps them.
-        if ray_log_sync_stop is not None:
-            ray_log_sync_stop.set()
-        ray_log_sync.sync_bounded(f"driver exit_code={exit_code} (head)")
-        sync_debug_artifacts(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
+        persist_runtime_artifacts(f"driver exit_code={exit_code} (head)")
     # Signal workers to unpark, then tear down.
     if args.rendezvous_dir and num_tasks > 1:
         _set_marker(args.rendezvous_dir, DONE_FILENAME)

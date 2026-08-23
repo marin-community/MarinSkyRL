@@ -50,42 +50,25 @@ def test_s3_client_allows_addressing_style_override(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "transfer_error",
+    ("transfer_error", "expected_refreshes"),
     [
-        FSTimeoutError("injected fsspec timeout"),
-        ReadTimeoutError(endpoint_url="https://bucket.invalid/shard.pt", error="injected SDK timeout"),
-    ],
-)
-def test_s3_transfer_retries_timeout_with_backoff(monkeypatch, transfer_error):
-    attempts = 0
-    delays = []
-
-    def flaky_transfer():
-        nonlocal attempts
-        attempts += 1
-        if attempts < 3:
-            raise transfer_error
-        return "complete"
-
-    monkeypatch.setattr(s3fs.time, "sleep", delays.append)
-    monkeypatch.setattr(s3fs.random, "uniform", lambda low, high: 1.0)
-
-    assert s3fs.call_with_s3_retry(object(), flaky_transfer) == "complete"
-    assert attempts == 3
-    assert delays == [1.0, 2.0]
-
-
-@pytest.mark.parametrize(
-    "transfer_error",
-    [
-        OSError(5, "An error occurred (Forbidden) when calling ListObjectsV2: AccessDenied"),
-        ClientError(
-            {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
-            "ListObjectsV2",
+        (FSTimeoutError("injected fsspec timeout"), 0),
+        (ReadTimeoutError(endpoint_url="https://bucket.invalid/shard.pt", error="injected SDK timeout"), 0),
+        (OSError(5, "An error occurred (Forbidden) when calling ListObjectsV2: AccessDenied"), 2),
+        (
+            ClientError(
+                {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
+                "ListObjectsV2",
+            ),
+            2,
         ),
     ],
 )
-def test_s3_transfer_retries_transient_access_denied_and_refreshes_credentials(monkeypatch, transfer_error):
+def test_s3_transfer_retries_retryable_failure_with_backoff(
+    monkeypatch,
+    transfer_error,
+    expected_refreshes,
+):
     class RefreshableFilesystem:
         def __init__(self):
             self.refreshes = 0
@@ -110,7 +93,7 @@ def test_s3_transfer_retries_transient_access_denied_and_refreshes_credentials(m
 
     assert s3fs.call_with_s3_retry(filesystem, flaky_transfer) == "complete"
     assert attempts == 3
-    assert filesystem.refreshes == 2
+    assert filesystem.refreshes == expected_refreshes
     assert delays == [1.0, 2.0]
 
 
@@ -128,6 +111,20 @@ def test_s3_transfer_raises_after_access_denied_retry_budget(monkeypatch):
         s3fs.call_with_s3_retry(object(), denied_transfer)
 
     assert attempts == 5
+
+
+def test_s3_transfer_does_not_retry_unrelated_oserror(monkeypatch):
+    attempts = 0
+
+    def denied_local_operation():
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError("Forbidden local path")
+
+    with pytest.raises(PermissionError, match="Forbidden local path"):
+        s3fs.call_with_s3_retry(object(), denied_local_operation)
+
+    assert attempts == 1
 
 
 def test_local_read_files_downloads_only_requested_objects(monkeypatch):

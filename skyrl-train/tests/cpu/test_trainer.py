@@ -149,6 +149,7 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.all_metrics = {}
     trainer.all_timings = {}
+    trainer._checkpoint_save_failures = 0.0
     attempts = 0
     saved_steps = []
 
@@ -168,10 +169,28 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
     trainer._control = SimpleNamespace()
     state = SimpleNamespace(global_step=6)
 
-    assert not asyncio.run(trainer._save_intermediate_checkpoint(state))
+    asyncio.run(trainer._save_intermediate_checkpoint(state))
     assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
-    assert asyncio.run(trainer._save_intermediate_checkpoint(state))
+    asyncio.run(trainer._save_intermediate_checkpoint(state))
     assert saved_steps == [6]
+
+
+def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer._checkpoint_save_failures = 0.0
+
+    async def fail_save():
+        raise ValueError("invalid checkpoint state")
+
+    trainer._save_checkpoints_with_residency = fail_save
+    state = SimpleNamespace(global_step=6)
+
+    with pytest.raises(ValueError, match="invalid checkpoint state"):
+        asyncio.run(trainer._save_intermediate_checkpoint(state))
+
+    assert trainer.all_metrics == {}
 
 
 def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypatch):

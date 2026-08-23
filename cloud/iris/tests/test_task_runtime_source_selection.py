@@ -67,7 +67,7 @@ def test_head_returns_driver_abort_when_failure_artifact_upload_blocks(tmp_path,
         ray_spill_dir=str(tmp_path / "spill"),
         cluster_join_timeout=1,
     )
-    monkeypatch.setattr(task_runtime, "FAILURE_ARTIFACT_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(task_runtime, "FAILURE_ARTIFACT_TIMEOUT", 0.01)
     monkeypatch.setattr(task_runtime, "_num_tasks", lambda: 1)
     monkeypatch.setattr(task_runtime, "_own_ip", lambda: "127.0.0.1")
     monkeypatch.setattr(task_runtime, "ray_start_head", lambda *_args: None)
