@@ -103,9 +103,9 @@ class TelemetryConfig:
 def _task_attempt_uid() -> str | None:
     """Identify this task attempt from its own Iris task id.
 
-    The pinned Iris derives this from the task id and attempt number alone; newer Iris sets
-    IRIS_ATTEMPT_UID. Reading the variable first agrees with both and costs nothing on a runtime
-    that never sets it.
+    A resubmit can reuse the same task id and attempt number, so the derived form is not unique
+    across physical executions; IRIS_ATTEMPT_UID is the controller's own collision-free value.
+    Iris builds older than that variable leave the derived form as the only option.
     """
     if attempt_uid := os.environ.get("IRIS_ATTEMPT_UID"):
         return f"iris:{attempt_uid}"
