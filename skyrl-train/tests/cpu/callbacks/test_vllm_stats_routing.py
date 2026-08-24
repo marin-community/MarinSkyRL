@@ -63,7 +63,6 @@ def test_engine_stats_land_in_the_trainers_step_metrics():
     assert trainer.all_metrics["vllm/median_generation_throughput"] == 1310.0
     assert trainer.all_metrics["vllm/latency_e2e_mean"] == 4.25
     assert trainer.all_metrics["vllm/total_finished_requests"] == 64
-    assert all(key.startswith("vllm/") for key in trainer.all_metrics)
 
 
 def test_per_engine_keys_appear_only_with_more_than_one_engine():

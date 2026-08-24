@@ -560,7 +560,6 @@ def engine_metrics(stats: Dict[str, Any]) -> Dict[str, Any]:
     """
     metrics: Dict[str, Any] = {
         "vllm/num_engines": stats["num_engines"],
-        # Peak metrics
         "vllm/peak_running_reqs": stats.get("total_peak_running_reqs", stats.get("total_running_reqs", 0)),
         "vllm/peak_waiting_reqs": stats.get("total_peak_waiting_reqs", stats.get("total_waiting_reqs", 0)),
         "vllm/peak_prompt_throughput": stats.get("avg_peak_prompt_throughput", stats.get("avg_prompt_throughput", 0.0)),
@@ -573,7 +572,6 @@ def engine_metrics(stats: Dict[str, Any]) -> Dict[str, Any]:
         "vllm/peak_prefix_cache_hit_rate": stats.get(
             "avg_peak_prefix_cache_hit_rate", stats.get("avg_prefix_cache_hit_rate", 0.0)
         ),
-        # Median metrics
         "vllm/median_running_reqs": stats.get("avg_median_running_reqs", 0.0),
         "vllm/median_waiting_reqs": stats.get("avg_median_waiting_reqs", 0.0),
         "vllm/median_prompt_throughput": stats.get("avg_median_prompt_throughput", 0.0),
@@ -593,7 +591,6 @@ def engine_metrics(stats: Dict[str, Any]) -> Dict[str, Any]:
         "vllm/latency_ttft_p90": stats.get("max_latency_ttft_p90", 0.0),
         "vllm/total_finished_requests": stats.get("total_finished_requests", 0),
         "vllm/total_preempted_reqs": stats.get("total_preempted_reqs", 0),
-        # Metadata
         "vllm/total_samples": stats.get("total_samples", 0),
         "vllm/total_active_samples": stats.get("total_active_samples", 0),
     }
@@ -604,7 +601,6 @@ def engine_metrics(stats: Dict[str, Any]) -> Dict[str, Any]:
     for i, engine in enumerate(stats.get("engines", [])):
         metrics.update(
             {
-                # Peak metrics per engine
                 f"vllm/engine_{i}/peak_prompt_throughput": engine.get(
                     "peak_prompt_throughput", engine.get("avg_prompt_throughput", 0.0)
                 ),
@@ -620,12 +616,10 @@ def engine_metrics(stats: Dict[str, Any]) -> Dict[str, Any]:
                 f"vllm/engine_{i}/peak_gpu_cache_usage": engine.get(
                     "peak_gpu_cache_usage_perc", engine.get("gpu_cache_usage_perc", 0.0)
                 ),
-                # Median metrics per engine
                 f"vllm/engine_{i}/median_prompt_throughput": engine.get("median_prompt_throughput", 0.0),
                 f"vllm/engine_{i}/median_generation_throughput": engine.get("median_generation_throughput", 0.0),
                 f"vllm/engine_{i}/median_running_reqs": engine.get("median_running_reqs", 0.0),
                 f"vllm/engine_{i}/median_waiting_reqs": engine.get("median_waiting_reqs", 0.0),
-                # Per-engine latency stats
                 f"vllm/engine_{i}/latency_prefill_mean": engine.get("latency_prefill_mean", 0.0),
                 f"vllm/engine_{i}/latency_prefill_p90": engine.get("latency_prefill_p90", 0.0),
                 f"vllm/engine_{i}/latency_decode_mean": engine.get("latency_decode_mean", 0.0),
@@ -771,9 +765,6 @@ class VLLMStatsCallback(TrainerCallback):
                 logger.info(msg)
 
         if self.log_to_tracker:
-            if trainer is None:
-                logger.warning("VLLMStatsCallback: no trainer on the event; engine metrics are not recorded")
-                return
             trainer.all_metrics.update(metrics)
 
 
