@@ -536,6 +536,34 @@ class GenericOutputParser(OutputParser):
         )
 
 
+class PassRatioSummaryOutputParser(OutputParser):
+    """Parse verifier summaries such as ``Results: 13/20 passed (ratio=0.65)``."""
+
+    SUMMARY_PATTERN = re.compile(
+        r"^Results:\s*(\d+)\s*/\s*(\d+)\s+passed(?:\s*\(ratio\s*=\s*[\d.]+\))?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    @classmethod
+    def name(cls) -> str:
+        return "pass_ratio_summary"
+
+    def parse(self, output: str) -> Optional[ParsedTestResult]:
+        match = self.SUMMARY_PATTERN.search(output)
+        if match is None:
+            return None
+        passed = int(match.group(1))
+        total = int(match.group(2))
+        if passed > total:
+            return None
+        return ParsedTestResult(
+            passed=passed,
+            failed=total - passed,
+            raw_output=output,
+            metadata={"parse_method": "pass_ratio_summary"},
+        )
+
+
 # =============================================================================
 # Reward Shapers
 # =============================================================================
@@ -1831,6 +1859,7 @@ def register_shaper(shaper_cls: Type[RewardShaper]) -> Type[RewardShaper]:
 register_parser(PytestOutputParser)
 register_parser(UnittestOutputParser)
 register_parser(JestOutputParser)
+register_parser(PassRatioSummaryOutputParser)
 register_parser(GenericOutputParser)
 
 # Register built-in shapers
@@ -1909,7 +1938,7 @@ def auto_detect_parser(output: str) -> Optional[OutputParser]:
         Appropriate OutputParser or None if no parser matches
     """
     # Try in order of specificity
-    parser_order = ["pytest", "unittest", "generic"]
+    parser_order = ["pytest", "unittest", "pass_ratio_summary", "generic"]
 
     for parser_name in parser_order:
         parser = get_output_parser(parser_name)
@@ -1967,11 +1996,14 @@ def shape_reward_from_output(
         parser_name: Parser to use (None for auto-detection)
         shaper_name: Shaper to use (default: "pass_ratio")
         shaper_kwargs: Additional kwargs for shaper
-        fallback_to_original: If True, return original_reward on parse failure
+        fallback_to_original: Return original_reward on parse failure when True; raise ValueError when False
         chat_history: Agent conversation trajectory (for trajectory-based shapers)
 
     Returns:
         Shaped reward value in [0, 1]
+
+    Raises:
+        ValueError: The verifier output cannot be parsed and fallback_to_original is False.
     """
     kwargs = shaper_kwargs or {}
 
@@ -1994,19 +2026,19 @@ def shape_reward_from_output(
     if not stdout:
         if fallback_to_original:
             return original_reward
-        return 0.0
+        raise ValueError("could not parse verifier output: stdout is empty")
 
     # Parse output
     parsed = parse_test_output(stdout, parser_name)
 
     if parsed is None:
-        logger.debug(
-            f"Could not parse test output with parser={parser_name or 'auto'}. "
-            f"Falling back to original reward: {original_reward}"
-        )
         if fallback_to_original:
+            logger.debug(
+                f"Could not parse test output with parser={parser_name or 'auto'}. "
+                f"Falling back to original reward: {original_reward}"
+            )
             return original_reward
-        return 0.0
+        raise ValueError(f"could not parse verifier output with parser={parser_name or 'auto'}")
 
     # Log parse results
     logger.debug(
