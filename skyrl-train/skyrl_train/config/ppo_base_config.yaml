@@ -54,10 +54,11 @@ trainer:
     host_memory_monitor:
       enabled: true
       interval_seconds: 60
-    # frozen preserves the checkpoint bias; replace applies the full quantile target;
-    # interpolate moves partway toward that target after each successful optimizer step.
+    # frozen preserves the checkpoint bias; replace and interpolate use Quantile
+    # Balancing; loss_free uses DeepSeek's signed load-error update.
     grug_query_bias_update_mode: "frozen"
     grug_query_bias_interpolation_weight: null
+    grug_query_bias_update_rate: null
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
       source_uri: null

@@ -527,6 +527,25 @@ def test_validate_cfg_rejects_interpolation_weight_for_other_grug_query_bias_mod
         validate_cfg(cfg)
 
 
+@pytest.mark.parametrize("rate", [None, 0.0, -0.001, float("inf"), [0.001]])
+def test_validate_cfg_rejects_invalid_grug_loss_free_update_rate(rate):
+    cfg = _validatable_dummy_config()
+    cfg.trainer.policy.grug_query_bias_update_mode = "loss_free"
+    cfg.trainer.policy.grug_query_bias_update_rate = rate
+
+    with pytest.raises(AssertionError, match="grug_query_bias_update_rate"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_loss_free_update_rate_for_other_modes():
+    cfg = _validatable_dummy_config()
+    cfg.trainer.policy.grug_query_bias_update_mode = "replace"
+    cfg.trainer.policy.grug_query_bias_update_rate = 0.001
+
+    with pytest.raises(AssertionError, match="only valid"):
+        validate_cfg(cfg)
+
+
 def test_validate_cfg_rejects_stacked_behavior_clip_and_tis():
     pytest.importorskip("hydra")
     from skyrl_train.utils.utils import validate_cfg
@@ -536,6 +555,15 @@ def test_validate_cfg_rejects_stacked_behavior_clip_and_tis():
     cfg.trainer.algorithm.use_tis = True
 
     with pytest.raises(ValueError, match="cannot be combined with use_tis"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_gspo_without_sequence_mean_reduction():
+    cfg = _validatable_dummy_config()
+    cfg.trainer.algorithm.policy_loss_type = "gspo"
+    cfg.trainer.algorithm.loss_reduction = "token_mean"
+
+    with pytest.raises(ValueError, match="GSPO requires trainer.algorithm.loss_reduction=sequence_mean"):
         validate_cfg(cfg)
 
 

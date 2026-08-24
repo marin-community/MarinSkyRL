@@ -106,6 +106,7 @@ ADDITIVE_POLICY_MODEL_FIELDS = {
 }
 ADDITIVE_POLICY_FIELDS = {
     "grug_query_bias_interpolation_weight": None,
+    "grug_query_bias_update_rate": None,
 }
 # Additive MoE fsdp_config key (runtime grouped-mm MoE swap). Flag-off no-op
 # (default == False) and unrelated to CP; it landed after the pre-CP golden was

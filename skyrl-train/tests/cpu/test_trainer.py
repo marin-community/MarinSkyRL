@@ -26,9 +26,13 @@ from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.models.grug_query_bias import (
+    GrugLossFreeBiasAccumulator,
+    GrugLossFreeBiasUpdater,
+    GrugQuantileBiasUpdater,
     GrugQueryBiasCapturePlan,
     GrugQueryBiasShardLayout,
     GrugQueryBiasWindow,
+    next_loss_free_query_bias,
     next_query_bias,
 )
 import numpy as np
@@ -269,17 +273,31 @@ class _FixedQueryBiasAccumulator:
         return self.betas
 
 
+class _FixedExpertLoadAccumulator:
+    def __init__(self, loads):
+        self.loads = loads
+
+    def finalize_loads(self):
+        return self.loads
+
+
 def _window_with_grug_query_bias_accumulator(accumulator, *, target_weight=1.0):
     causal_lm = _ObservableGrugCausalLM()
     shard_layout = GrugQueryBiasShardLayout(micro_batch_size=1, accumulation_steps=1, ep_size=1, ep_rank=0)
     capture_plan = GrugQueryBiasCapturePlan.build(torch.ones((1, 1)), shard_layout)
-    window = GrugQueryBiasWindow(
-        causal_lm,
-        valid_tokens=1,
-        capture_plan=capture_plan,
-        target_weight=target_weight,
-    )
-    window.accumulator = accumulator
+    updater = GrugQuantileBiasUpdater(causal_lm, valid_tokens=1, target_weight=target_weight)
+    updater.accumulator = accumulator
+    window = GrugQueryBiasWindow(causal_lm, capture_plan, updater)
+    return window, causal_lm
+
+
+def _window_with_grug_loss_free_accumulator(accumulator, *, update_rate=0.001):
+    causal_lm = _ObservableGrugCausalLM()
+    shard_layout = GrugQueryBiasShardLayout(micro_batch_size=1, accumulation_steps=1, ep_size=1, ep_rank=0)
+    capture_plan = GrugQueryBiasCapturePlan.build(torch.ones((1, 1)), shard_layout)
+    updater = GrugLossFreeBiasUpdater(causal_lm, update_rate=update_rate)
+    updater.accumulator = accumulator
+    window = GrugQueryBiasWindow(causal_lm, capture_plan, updater)
     return window, causal_lm
 
 
@@ -395,6 +413,33 @@ def test_successful_step_interpolates_toward_grug_query_bias_target():
     window.finish(optimizer_step_succeeded=True)
 
     expected = torch.lerp(previous_bias, next_query_bias(betas), 0.25)
+    torch.testing.assert_close(causal_lm.query_bias, expected)
+
+
+def test_successful_step_moves_grug_query_bias_target_to_buffer_device():
+    accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
+    window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator, target_weight=0.25)
+    causal_lm.query_bias = causal_lm.query_bias.to("meta")
+
+    window.finish(optimizer_step_succeeded=True)
+
+    assert causal_lm.query_bias.device.type == "meta"
+
+
+@pytest.mark.parametrize("optimizer_step_succeeded", [False, True])
+def test_loss_free_bias_updates_only_after_successful_optimizer_step(optimizer_step_succeeded):
+    loads = torch.tensor([[3.0, 1.0]])
+    accumulator = _FixedExpertLoadAccumulator(loads)
+    window, causal_lm = _window_with_grug_loss_free_accumulator(accumulator)
+    previous_bias = causal_lm.query_bias.clone()
+
+    window.finish(optimizer_step_succeeded=optimizer_step_succeeded)
+
+    expected = (
+        next_loss_free_query_bias(previous_bias, loads, update_rate=0.001)
+        if optimizer_step_succeeded
+        else previous_bias
+    )
     torch.testing.assert_close(causal_lm.query_bias, expected)
 
 
@@ -1263,7 +1308,7 @@ def test_default_grug_ppo_train_keeps_query_bias_exact_across_optimizer_steps():
     assert not torch.equal(causal_lm.lm_head.weight, initial_lm_head)
 
 
-def _grug_query_bias_after_policy_training(mode, interpolation_weight=None):
+def _grug_query_bias_after_policy_training(mode, interpolation_weight=None, update_rate=None):
     torch.manual_seed(1234)
     causal_lm = GrugMoeForCausalLM.from_pretrained(
         ORACLE_FIXTURE_DIR,
@@ -1277,11 +1322,30 @@ def _grug_query_bias_after_policy_training(mode, interpolation_weight=None):
     cfg = get_default_config()
     cfg.trainer.policy.grug_query_bias_update_mode = mode
     cfg.trainer.policy.grug_query_bias_interpolation_weight = interpolation_weight
+    cfg.trainer.policy.grug_query_bias_update_rate = update_rate
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.algorithm.loss_reduction = "token_mean"
     OmegaConf.update(cfg, "trainer.algorithm.max_seq_len", 6, force_add=True)
     sequences = torch.arange(6).reshape(1, 6) % causal_lm.config.vocab_size
+    expected_loss_free_bias = None
+    if mode == "loss_free":
+        attention_mask = torch.ones_like(sequences)
+        causal_lm.begin_loss_free_bias_capture(attention_mask)
+        with torch.no_grad():
+            causal_lm(sequences, attention_mask=attention_mask)
+        observation = causal_lm.take_loss_free_bias_observation()
+        accumulator = GrugLossFreeBiasAccumulator(
+            num_layers=causal_lm.config.num_hidden_layers,
+            num_experts=causal_lm.config.num_local_experts,
+        )
+        accumulator.observe(observation)
+        assert update_rate is not None
+        expected_loss_free_bias = next_loss_free_query_bias(
+            initial_bias,
+            accumulator.finalize_loads(),
+            update_rate=update_rate,
+        )
     worker, batch = _grug_ppo_worker_and_batch(cfg, causal_lm, sequences)
     worker.policy_mini_batch_size_per_gpu = 1
     _enable_cpu_policy_training(worker, causal_lm)
@@ -1289,21 +1353,29 @@ def _grug_query_bias_after_policy_training(mode, interpolation_weight=None):
     _run_grug_ppo_train(worker, batch)
 
     actual_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers])
-    return initial_bias, actual_bias
+    return initial_bias, actual_bias, expected_loss_free_bias
 
 
 def test_replace_mode_updates_grug_query_bias_through_policy_training():
-    initial_bias, actual_bias = _grug_query_bias_after_policy_training("replace")
+    initial_bias, actual_bias, _ = _grug_query_bias_after_policy_training("replace")
 
     assert not torch.equal(actual_bias, initial_bias)
 
 
 def test_interpolate_mode_applies_configured_fraction_through_policy_training():
-    replace_initial, replace_bias = _grug_query_bias_after_policy_training("replace")
-    interpolate_initial, interpolate_bias = _grug_query_bias_after_policy_training("interpolate", 0.25)
+    replace_initial, replace_bias, _ = _grug_query_bias_after_policy_training("replace")
+    interpolate_initial, interpolate_bias, _ = _grug_query_bias_after_policy_training("interpolate", 0.25)
 
     torch.testing.assert_close(interpolate_initial, replace_initial, rtol=0, atol=0)
     torch.testing.assert_close(interpolate_bias, torch.lerp(replace_initial, replace_bias, 0.25), rtol=1e-6, atol=1e-7)
+
+
+def test_loss_free_mode_updates_grug_query_bias_through_policy_training():
+    initial_bias, actual_bias, expected_bias = _grug_query_bias_after_policy_training("loss_free", update_rate=0.001)
+
+    assert not torch.equal(actual_bias, initial_bias)
+    assert expected_bias is not None
+    torch.testing.assert_close(actual_bias, expected_bias, rtol=0, atol=0)
 
 
 def test_validate_batch_sizes_lcm_dp_requirement():

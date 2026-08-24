@@ -23,9 +23,9 @@ from ray.util.placement_group import (
 )
 
 from skyrl_train.config.query_bias import (
+    GrugQueryBiasUpdate,
     GrugQueryBiasUpdateMode,
-    resolve_grug_query_bias_target_weight,
-    resolve_grug_query_bias_update_mode,
+    resolve_grug_query_bias_update,
 )
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
@@ -57,8 +57,11 @@ from skyrl_train.training_batch import (
 from skyrl_train.utils.metrics import mean_metrics, policy_progress_metrics, policy_training_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.models.grug_query_bias import (
+    GrugLossFreeBiasUpdater,
+    GrugQuantileBiasUpdater,
     GrugQueryBiasCapturePlan,
     GrugQueryBiasShardLayout,
+    GrugQueryBiasUpdater,
     GrugQueryBiasWindow,
 )
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
@@ -71,6 +74,20 @@ from skyrl_train.utils.utils import (
 )
 from omegaconf import DictConfig
 from pathlib import Path
+
+
+def _grug_query_bias_updater(
+    model: GrugMoeForCausalLM,
+    valid_tokens: int,
+    update: GrugQueryBiasUpdate,
+) -> GrugQueryBiasUpdater:
+    if update.mode is GrugQueryBiasUpdateMode.LOSS_FREE:
+        assert update.update_rate is not None
+        return GrugLossFreeBiasUpdater(model, update_rate=update.update_rate)
+
+    target_weight = 1.0 if update.mode is GrugQueryBiasUpdateMode.REPLACE else update.interpolation_weight
+    assert target_weight is not None
+    return GrugQuantileBiasUpdater(model, valid_tokens, target_weight=target_weight)
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -1068,14 +1085,10 @@ class PolicyWorkerBase(Worker):
         all_metrics = defaultdict(list)
         policy_update_steps = 0
         grug_causal_lm = self._grug_causal_lm()
-        grug_query_bias_update_mode = resolve_grug_query_bias_update_mode(self.cfg.trainer.policy)
-        grug_query_bias_target_weight = resolve_grug_query_bias_target_weight(
-            self.cfg.trainer.policy,
-            grug_query_bias_update_mode,
-        )
-        grug_query_bias_updates_enabled = (
-            grug_causal_lm is not None and grug_query_bias_update_mode is not GrugQueryBiasUpdateMode.FROZEN
-        )
+        grug_query_bias_update = resolve_grug_query_bias_update(self.cfg.trainer.policy)
+        if grug_causal_lm is None and grug_query_bias_update.enabled:
+            raise ValueError("Grug query-bias updates require a Grug policy model")
+        grug_query_bias_updates_enabled = grug_query_bias_update.enabled
         grug_capture_plan = None
         if grug_query_bias_updates_enabled:
             micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
@@ -1101,13 +1114,18 @@ class PolicyWorkerBase(Worker):
             for local_step, experience in enumerate(pbar):
                 if grug_query_bias_updates_enabled and local_step % accumulation_steps == 0:
                     assert grug_capture_plan is not None
+                    assert grug_causal_lm is not None
                     window_end = local_step + accumulation_steps
                     valid_tokens = sum(grug_capture_plan.valid_token_counts[local_step:window_end])
-                    self._grug_query_bias_window = GrugQueryBiasWindow(
+                    updater = _grug_query_bias_updater(
                         grug_causal_lm,
                         valid_tokens,
+                        grug_query_bias_update,
+                    )
+                    self._grug_query_bias_window = GrugQueryBiasWindow(
+                        grug_causal_lm,
                         grug_capture_plan,
-                        target_weight=grug_query_bias_target_weight,
+                        updater,
                     )
                 diagnostic_mesh = self.strategy.device_mesh if _phase_diagnostics.enabled() else None
                 with _phase_diagnostics.region(

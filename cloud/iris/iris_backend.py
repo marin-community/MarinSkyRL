@@ -1512,6 +1512,13 @@ def create_parser() -> argparse.ArgumentParser:
         "killing the gang (the 80B rank-spread bring-up flake, 2026-07-11).",
     )
     parser.add_argument(
+        "--driver-liveness-timeout",
+        type=int,
+        default=None,
+        help="Maximum silence from the training driver's stdout/stderr before task_runtime "
+        "captures diagnostics, kills the driver, and exits nonzero. Unset uses the controller default; zero disables.",
+    )
+    parser.add_argument(
         "--trials-dir",
         "--trials_dir",
         dest="trials_dir",
@@ -1940,6 +1947,8 @@ def normalize(args: argparse.Namespace) -> None:
         raise SystemExit("--num-nodes must be >= 1.")
     if args.gpus_per_node < 1:
         raise SystemExit("--gpus-per-node must be >= 1.")
+    if args.driver_liveness_timeout is not None and args.driver_liveness_timeout < 0:
+        raise SystemExit("--driver-liveness-timeout must be >= 0.")
 
 
 def _build_task_shell(
@@ -2138,6 +2147,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # slow-but-not-hung head prestage completes before the workers give up + kill the gang.
     if args.rendezvous_timeout is not None:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
+    if args.driver_liveness_timeout is not None:
+        controller_cmd.extend(["--driver-liveness-timeout", str(args.driver_liveness_timeout)])
     # Per-NODE task-dataset staging. training_driver.py's resolve_rl_train_data() extracts the
     # HF task dataset to node-local task storage,
     # but it runs ONLY on rank 0 (the head), so the Ray-scheduled rollout workers on
