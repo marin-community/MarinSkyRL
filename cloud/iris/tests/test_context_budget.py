@@ -102,6 +102,106 @@ def test_context_budget_derives_all_hydra_length_arguments():
     assert "++terminal_bench_config.model_info.max_input_tokens=114688" in args
     assert "++terminal_bench_config.model_info.max_output_tokens=16384" in args
     assert "++terminal_bench_config.harbor.max_turns=90" in args
+    assert "generator.trajectory_reward_shaping.overlong.l_max=65536" in args
+    assert "generator.trajectory_reward_shaping.overlong.l_cache=16384" in args
+
+
+@pytest.mark.parametrize(
+    ("max_turns", "expected_l_max", "expected_l_cache"),
+    [(1, 4096, 1024), (30, 16384, 4096)],
+)
+def test_context_budget_derives_overlong_window_for_single_and_multi_turn(
+    tmp_path, max_turns, expected_l_max, expected_l_cache
+):
+    config = tmp_path / "overlong.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "context_budget": {
+                    "request_window_tokens": 32768,
+                    "max_new_tokens_per_turn": 4096,
+                    "max_turns": max_turns,
+                },
+                "generator": {"trajectory_reward_shaping": {"enabled": True}},
+            }
+        )
+    )
+
+    parsed = parse_rl_config(str(config))
+
+    assert parsed.context_budget.generated_tokens_per_trajectory == expected_l_max
+    assert parsed.generator["trajectory_reward_shaping"]["overlong"] == {
+        "l_max": expected_l_max,
+        "l_cache": expected_l_cache,
+    }
+
+
+def test_context_budget_allows_overlong_fraction_overrides(tmp_path):
+    config = tmp_path / "overlong.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "context_budget": {
+                    "request_window_tokens": 32768,
+                    "max_new_tokens_per_turn": 4096,
+                    "max_turns": 30,
+                    "generated_budget_fraction": 0.375,
+                    "overlong_cache_fraction": 0.25,
+                }
+            }
+        )
+    )
+
+    parsed = parse_rl_config(str(config))
+
+    assert parsed.generator["trajectory_reward_shaping"]["overlong"] == {"l_max": 12288, "l_cache": 3072}
+
+
+def test_context_budget_rejects_low_level_overlong_window(tmp_path):
+    config = tmp_path / "overlong.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "context_budget": {
+                    "request_window_tokens": 32768,
+                    "max_new_tokens_per_turn": 4096,
+                    "max_turns": 30,
+                },
+                "generator": {"trajectory_reward_shaping": {"overlong": {"l_max": 32768}}},
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="generator.trajectory_reward_shaping.overlong.l_max"):
+        parse_rl_config(str(config))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("generated_budget_fraction", 0),
+        ("generated_budget_fraction", 1.1),
+        ("overlong_cache_fraction", -0.1),
+        ("overlong_cache_fraction", "quarter"),
+    ],
+)
+def test_context_budget_rejects_invalid_overlong_fractions(tmp_path, field_name, value):
+    config = tmp_path / "overlong.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "context_budget": {
+                    "request_window_tokens": 32768,
+                    "max_new_tokens_per_turn": 4096,
+                    "max_turns": 30,
+                    field_name: value,
+                }
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match=field_name):
+        parse_rl_config(str(config))
 
 
 def test_context_budget_rejects_impossible_and_legacy_config_fields(tmp_path):
@@ -149,6 +249,15 @@ def test_context_budget_override_rederives_lengths_and_rejects_low_level_fields(
     assert overridden.terminal_bench["model_info"]["max_output_tokens"] == 2048
     assert passthrough == ["trainer.logger=console"]
 
+    overlong_override, _ = apply_context_budget_overrides(
+        parsed,
+        ["context_budget.generated_budget_fraction=0.375", "context_budget.overlong_cache_fraction=0.25"],
+    )
+    assert overlong_override.generator["trajectory_reward_shaping"]["overlong"] == {
+        "l_max": 49152,
+        "l_cache": 12288,
+    }
+
     with pytest.raises(ValueError, match="derived from context_budget"):
         apply_context_budget_overrides(parsed, ["generator.engine_init_kwargs.max_model_len=65536"])
 
@@ -162,12 +271,16 @@ def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
     assert json.loads(artifact.read_text()) == {
         "config_path": str(parsed.config_path),
         "context_budget": {
+            "generated_budget_fraction": 0.5,
+            "generated_tokens_per_trajectory": 65536,
             "max_input_tokens": 114688,
             "max_new_tokens_per_turn": 16384,
             "max_turns": 90,
-            "request_window_tokens": 131072,
             "opencode_limit_context": 97280,
             "opencode_limit_output": 16384,
+            "overlong_cache_fraction": 0.25,
+            "overlong_cache_tokens": 16384,
+            "request_window_tokens": 131072,
         },
     }
 
