@@ -959,8 +959,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             prompt = input_batch["prompts"][i]
             trajectory_id = input_batch["trajectory_ids"][i]
 
-            # Routes every turn of this trajectory to one engine, and is stable across steps,
-            # so that engine keeps its prefix cache for this task.
+            # Stable across steps, so the engine keeps this task's prefix cache warm.
             session_id = trajectory_id.to_string()
 
             trial_config = self._harbor_config_builder.build_trial_config(
