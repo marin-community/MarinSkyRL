@@ -508,8 +508,7 @@ class RayPPOTrainer:
                 await self._handle_resume_at_max_steps()
                 return
 
-        with Timer("sync_policy_for_rollouts", self.all_startup_timings):
-            await self._sync_policy_for_rollouts()
+        await self._sync_policy_for_rollouts()
 
         self._log_startup_timings()
 
@@ -2197,6 +2196,11 @@ class RayPPOTrainer:
 
     def _log_startup_timings(self) -> None:
         """Publish the spans that ran once before the step loop."""
+        # The startup weight sync records into all_timings, and Timer accumulates into whichever
+        # dict it is given. all_timings is not cleared until the first step ends, so those durations
+        # would be summed into step 1's timing/sync_weights.
+        self.all_startup_timings.update(self.all_timings)
+        self.all_timings.clear()
         if not self.all_startup_timings:
             return
         payload = {f"startup/{name}": duration for name, duration in self.all_startup_timings.items()}

@@ -12,12 +12,14 @@ of step 1. Those spans record into ``all_startup_timings``, which is published o
 """
 
 import ast
+import io
 from pathlib import Path
 from typing import NamedTuple
-from unittest.mock import Mock
 
 import pytest
+from loguru import logger
 
+from ci.marin_nightly.gate import StepMetrics, parse_metrics
 from skyrl_train.trainer import RayPPOTrainer
 
 TRAINER_SOURCES = ("trainer.py", "fully_async_trainer.py")
@@ -27,7 +29,6 @@ STARTUP_SPANS = frozenset(
     {
         "init_weight_sync_state",
         "load_checkpoints",
-        "sync_policy_for_rollouts",
         "sync_weights_to_inference_engines",
     }
 )
@@ -88,33 +89,65 @@ def test_every_startup_span_name_is_still_used():
     assert not unused, f"startup span names no longer matching any span: {sorted(unused)}"
 
 
-def _trainer_with_startup_timings(timings):
+@pytest.fixture
+def mirror_lines():
+    """Loguru writes to its own sinks, so pytest's caplog does not see the mirror line."""
+    stream = io.StringIO()
+    sink_id = logger.add(stream, format="{message}")
+    try:
+        yield stream
+    finally:
+        logger.remove(sink_id)
+
+
+class _RecordingTracker:
+    """Captures what the trainer publishes, in place of a live wandb run."""
+
+    def __init__(self):
+        self.calls = []
+
+    def log(self, data, step, commit=False):
+        self.calls.append((data, step, commit))
+
+
+def _trainer(startup_timings, step_timings=None):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.all_startup_timings = timings
+    trainer.all_startup_timings = startup_timings
+    trainer.all_timings = step_timings if step_timings is not None else {}
     trainer.global_step = 0
-    trainer.tracker = Mock()
-    trainer._log_metrics_stdout = Mock()
+    trainer.tracker = _RecordingTracker()
     return trainer
 
 
-def test_startup_payload_is_published_under_its_own_prefix_and_kind():
-    trainer = _trainer_with_startup_timings({"load_checkpoints": 12.5, "init_weight_sync_state": 3.0})
+def test_the_startup_payload_reaches_the_gate_parser_as_its_own_kind(mirror_lines):
+    trainer = _trainer({"load_checkpoints": 12.5, "init_weight_sync_state": 3.0})
 
     trainer._log_startup_timings()
 
     expected = {"startup/load_checkpoints": 12.5, "startup/init_weight_sync_state": 3.0}
-    trainer.tracker.log.assert_called_once_with(expected, step=0)
-    # gate.py parses `kind` off the mirror line and reads only `train`; a startup payload
-    # must not arrive labelled as a training step.
-    payload, kwargs = trainer._log_metrics_stdout.call_args
-    assert payload[0] == expected
-    assert kwargs["kind"] == "startup"
+    assert parse_metrics(mirror_lines.getvalue()) == [StepMetrics(kind="startup", step=0, values=expected)]
+    assert trainer.tracker.calls == [(expected, 0, False)]
 
 
-def test_nothing_is_published_when_no_startup_span_ran():
-    trainer = _trainer_with_startup_timings({})
+def test_startup_work_recorded_into_the_step_payload_is_moved_out_of_it(mirror_lines):
+    """The weight sync at startup writes to all_timings, and Timer accumulates into it.
+
+    Left there, step 1's ``timing/sync_weights`` would be the startup sync plus its own.
+    """
+    trainer = _trainer({"load_checkpoints": 1.0}, step_timings={"sync_weights": 8.0})
 
     trainer._log_startup_timings()
 
-    trainer.tracker.log.assert_not_called()
-    trainer._log_metrics_stdout.assert_not_called()
+    assert trainer.all_timings == {}
+    published = parse_metrics(mirror_lines.getvalue())[0].values
+    assert published["startup/sync_weights"] == 8.0
+    assert not any(key.startswith("timing/") for key in published)
+
+
+def test_nothing_is_published_when_no_startup_span_ran(mirror_lines):
+    trainer = _trainer({})
+
+    trainer._log_startup_timings()
+
+    assert parse_metrics(mirror_lines.getvalue()) == []
+    assert trainer.tracker.calls == []
