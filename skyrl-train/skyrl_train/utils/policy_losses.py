@@ -461,12 +461,7 @@ def gspo_policy_loss(
     The variant of GSPO used here is GSPO-token, a generalization which allows for token-level
     advantages [equations 14 and 15 in the paper].
     """
-    # GSPO has only been established as stable with sequence_mean reduction.
     loss_reduction = config.loss_reduction
-    if loss_reduction != SEQUENCE_MEAN_LOSS_REDUCTION:
-        loguru.logger.warning(
-            f"With GSPO it's recommended to use '{SEQUENCE_MEAN_LOSS_REDUCTION}' loss reduction; got {loss_reduction}"
-        )
 
     # Compute log ratios
     log_ratio = log_probs - old_log_probs

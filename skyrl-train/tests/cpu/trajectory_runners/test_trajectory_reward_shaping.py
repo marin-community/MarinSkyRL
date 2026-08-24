@@ -175,6 +175,22 @@ def test_soft_overlong_penalty_applies_to_successful_and_failed_responses():
     assert output["rollout_metrics"]["generate/reward_shaping/overlong_incidence"] == pytest.approx(0.75)
 
 
+@pytest.mark.parametrize(("penalty_scale", "expected_reward"), [(1.0, 0.0), (0.3, 0.7)])
+def test_soft_overlong_penalty_scale_matches_reward_range(penalty_scale, expected_reward):
+    output = _output([[1, 2, 3, 4]], [1.0], ["length"])
+
+    shape_trajectory_rewards(
+        output,
+        {
+            "enabled": True,
+            "overlong": {"l_max": 4, "l_cache": 2, "penalty_scale": penalty_scale},
+        },
+    )
+
+    assert output["rewards"] == pytest.approx([expected_reward])
+    assert output["reward_shaping_components"][0]["overlong"] == pytest.approx(-penalty_scale)
+
+
 def test_step_wise_soft_overlong_penalty_uses_full_trajectory_length():
     output = _output(
         responses=[[1, 2, 3, 4], [5, 6, 7, 8]],
@@ -361,6 +377,7 @@ async def test_trajectory_runner_applies_shared_shaping_after_generation():
         ({"successful_length": {"free_tokens": -1}}, "successful_length.free_tokens"),
         ({"overlong": {"l_max": 0, "l_cache": -1}}, "overlong.l_cache must be non-negative"),
         ({"overlong": {"l_max": 8, "l_cache": 9}}, "overlong.l_cache must not exceed overlong.l_max"),
+        ({"overlong": {"penalty_scale": -0.1}}, "overlong.penalty_scale must be non-negative"),
     ],
 )
 def test_invalid_shaping_config_fails_before_generation(config, message):

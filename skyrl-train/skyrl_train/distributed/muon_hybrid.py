@@ -9,13 +9,15 @@ else, exposed as a single ``torch.optim.Optimizer``-compatible object so the res
 of SkyRL (scheduler, grad-clip, CPU offload, checkpoint save/load, StaleClip
 lr-scaling) keeps working unchanged.
 
-Implementation: a thin composite over two real child optimizers —
-``torch.optim.Muon`` (2-D hidden weights) and ``torch.optim.AdamW`` (everything
-else). The composite proxies ``param_groups`` and ``state`` to the children so
+Implementation: a thin composite over two child optimizers — ``torch.optim.Muon``
+(2-D hidden weights) and MarinSkyRL's selected AdamW implementation (everything
+else). BF16 parameters use stochastic rounding by default; FP32 parameters and
+the explicit nearest mode use ``torch.optim.AdamW``. The composite proxies
+``param_groups`` and ``state`` to the children so
 that code which iterates ``optimizer.param_groups`` (scheduler lr, StaleClip lr
 scaling) and ``optimizer.state[param]`` (CPU offload/backload) operates on the
 union transparently. We deliberately reuse the shipped optimizers rather than
-re-implement their kernels.
+wrapping their state or changing their external optimizer contract.
 
 FSDP2 note: under FSDP2 the 2-D weights arrive as row-sharded ``DTensor``s. The
 Newton-Schulz iteration (``G @ G.T`` plus a global ``.norm()``) runs correctly on
@@ -30,8 +32,10 @@ from typing import Any, Iterable, Optional
 
 import torch
 from torch import Tensor
-from torch.optim import AdamW, Muon
+from torch.optim import Muon
 from torch.optim.optimizer import Optimizer
+
+from skyrl_train.distributed.bf16_adamw import BFloat16UpdateMode, build_adamw, parse_bf16_update_mode
 
 
 class _MergedState(Mapping):
@@ -136,8 +140,7 @@ class HybridMuon(_CompositeOptimizer):
     Subclasses ``torch.optim.Optimizer`` (required: ``LRScheduler`` does an
     ``isinstance(optimizer, Optimizer)`` check) but delegates ``step``,
     ``param_groups`` and ``state`` to two child optimizers (``torch.optim.Muon``
-    + ``torch.optim.AdamW``) so we reuse the shipped kernels rather than
-    re-implementing them. The call-sites SkyRL uses are: ``step``, ``zero_grad``,
+    + selected AdamW implementation). The call-sites SkyRL uses are: ``step``, ``zero_grad``,
     ``param_groups`` (read + per-group ``lr`` mutation by scheduler/StaleClip),
     ``state`` (per-param tensor offload), ``state_dict``/``load_state_dict``.
     """
@@ -159,6 +162,8 @@ class HybridMuon(_CompositeOptimizer):
         adamw_betas: tuple = (0.9, 0.999),
         adamw_eps: float = 1e-8,
         adamw_weight_decay: float = 0.0,
+        bf16_update_mode: BFloat16UpdateMode = BFloat16UpdateMode.STOCHASTIC,
+        seed: int,
     ) -> None:
         muon_params = [p for p in muon_params]
         adamw_params = [p for p in adamw_params]
@@ -185,8 +190,10 @@ class HybridMuon(_CompositeOptimizer):
         # AdamW group may legitimately be empty in some toy models; only build it
         # if there are params, but keep a stable child list either way.
         self.adamw = (
-            AdamW(
+            build_adamw(
                 adamw_params,
+                update_mode=bf16_update_mode,
+                seed=seed,
                 lr=adamw_lr,
                 betas=adamw_betas,
                 eps=adamw_eps,
@@ -212,7 +219,7 @@ class HybridMuon(_CompositeOptimizer):
         self._refresh_composite_views()
 
 
-def build_hybrid_muon(named_parameters, optim_config) -> HybridMuon:
+def build_hybrid_muon(named_parameters, optim_config, *, seed: int) -> HybridMuon:
     """Split ``named_parameters`` into Muon (2-D hidden weights) vs AdamW (rest)
     groups and construct a :class:`HybridMuon` from ``optim_config``.
 
@@ -254,6 +261,8 @@ def build_hybrid_muon(named_parameters, optim_config) -> HybridMuon:
         adamw_betas=adamw_betas,
         adamw_eps=float(extra.get("adamw_eps", 1e-8)),
         adamw_weight_decay=adamw_wd,
+        bf16_update_mode=parse_bf16_update_mode(optim_config.get("bf16_update_mode", None)),
+        seed=seed,
     )
     opt._muon_param_names = muon_names  # type: ignore[attr-defined]
     opt._adamw_param_names = adamw_names  # type: ignore[attr-defined]

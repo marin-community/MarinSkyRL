@@ -251,6 +251,9 @@ This section configures the policy model used for training, including optimizer,
 .. code-block:: yaml
 
    policy:
+     grug_query_bias_update_mode: "frozen"
+     grug_query_bias_interpolation_weight: null
+     grug_query_bias_update_rate: null
      model:
        path: "Qwen/Qwen2.5-1.5B-Instruct"  # Hugging Face model path for the policy model
        lora:
@@ -281,6 +284,9 @@ This section configures the policy model used for training, including optimizer,
      record_memory: false  # Dump memory snapshot for debugging
 
 - ``policy.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
+- ``policy.grug_query_bias_update_mode``: Grug's external router-bias update. ``frozen`` preserves the checkpoint bias, ``replace`` and ``interpolate`` apply Quantile Balancing, and ``loss_free`` applies the signed load-error update from `Loss-Free Balancing <https://arxiv.org/abs/2408.15664>`_. This option applies only to Grug under FSDP2.
+- ``policy.grug_query_bias_interpolation_weight``: Fraction of the Quantile Balancing target applied after each successful optimizer step. Required only for ``interpolate``.
+- ``policy.grug_query_bias_update_rate``: Positive bias step size used by ``loss_free``. Required only for that mode; the reference implementation uses ``0.001``.
 - ``policy.optimizer_config``: Optimizer configuration for the policy model
 - ``policy.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
 - ``policy.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_
@@ -446,7 +452,7 @@ Algorithm Configuration
 
   - ``regular``: Vanilla PPO loss with token-level importance sampling
   - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
-  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements the "GSPO-token" variant from the paper.
+  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements the "GSPO-token" variant from the paper and requires ``algorithm.loss_reduction=sequence_mean``.
   - ``clip_cov``: Clip-Cov combines standard PPO clipping with covariance-based correction masking for improved stability. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``kl_cov``: KL-Cov applies KL regularization to tokens selected based on covariance values. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``cispo``: Clipped Importance Sampling Weight Policy Optimization (CISPO) proposed in `MiniMax-M1 <https://arxiv.org/abs/2506.13585>`_.

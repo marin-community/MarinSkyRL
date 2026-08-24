@@ -138,6 +138,14 @@ RENDEZVOUS_WRITE_ATTEMPTS = 5
 RENDEZVOUS_WRITE_TIMEOUT = 30  # seconds per attempt
 # Bound `ray start --head` so a hung Ray CLI fails loud (TimeoutExpired).
 RAY_START_HEAD_TIMEOUT = 300  # seconds
+# Failure reporting must never keep an Iris task alive after its driver exits.
+FAILURE_ARTIFACT_TIMEOUT = 30
+# Allow healthy policy phases longer than one hour while bounding a live but silent driver.
+DEFAULT_DRIVER_LIVENESS_TIMEOUT = 9000
+DRIVER_WATCHDOG_POLL_INTERVAL = 1.0
+DRIVER_KILL_TIMEOUT = 30
+DRIVER_STALLED_EXIT_CODE = 124
+IGNORED_DRIVER_OUTPUT_MARKERS = (b"[fd-monitor]",)
 
 
 def _log(msg: str) -> None:
@@ -1549,12 +1557,112 @@ class RayLogSyncSession:
         return stop
 
 
+@dataclass
+class DriverOutputActivity:
+    """Track child output that provides evidence of training progress."""
+
+    last_progress_at: float = field(default_factory=time.monotonic)
+    condition: threading.Condition = field(default_factory=threading.Condition)
+
+    def record(self, line: bytes) -> None:
+        if not line.strip() or any(marker in line for marker in IGNORED_DRIVER_OUTPUT_MARKERS):
+            return
+        with self.condition:
+            self.last_progress_at = time.monotonic()
+            self.condition.notify_all()
+
+    def stream_closed(self) -> None:
+        with self.condition:
+            self.condition.notify_all()
+
+
+@dataclass(frozen=True)
+class DriverExited:
+    exit_code: int
+
+
+@dataclass(frozen=True)
+class DriverStalled:
+    silence: float
+
+
 def launch_training_driver(train_argv: list[str], env: dict[str, str]) -> subprocess.Popen:
     """Start the driver from the immutable runtime checkout, not the bootstrap bundle."""
     runtime_checkout = env.get("SKYRL_HOME")
     if not runtime_checkout:
         raise RuntimeError("SKYRL_HOME must identify the immutable MarinSkyRL runtime checkout")
-    return subprocess.Popen(train_argv, env=env, cwd=runtime_checkout, start_new_session=True)
+    return subprocess.Popen(
+        train_argv,
+        env=env,
+        cwd=runtime_checkout,
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def start_driver_output_tee(
+    process: subprocess.Popen,
+    activity: DriverOutputActivity,
+) -> threading.Thread:
+    """Forward child output to the task log and update its liveness signal."""
+    if process.stdout is None:
+        raise RuntimeError("Training driver stdout must be piped for liveness supervision")
+
+    def forward_output() -> None:
+        try:
+            for line in iter(process.stdout.readline, b""):
+                sys.stdout.write(line.decode(errors="replace"))
+                sys.stdout.flush()
+                activity.record(line)
+        finally:
+            activity.stream_closed()
+
+    output_thread = threading.Thread(target=forward_output, daemon=True, name="driver-output-tee")
+    output_thread.start()
+    return output_thread
+
+
+def wait_for_driver(
+    process: subprocess.Popen,
+    activity: DriverOutputActivity,
+    timeout: float,
+) -> DriverExited | DriverStalled:
+    """Return the named child exit or output-stall outcome."""
+    if timeout <= 0:
+        return DriverExited(process.wait())
+
+    while True:
+        exit_code = process.poll()
+        if exit_code is not None:
+            return DriverExited(exit_code)
+        with activity.condition:
+            silence = time.monotonic() - activity.last_progress_at
+            if silence >= timeout:
+                return DriverStalled(silence)
+            activity.condition.wait(timeout=min(timeout - silence, DRIVER_WATCHDOG_POLL_INTERVAL))
+
+
+def kill_driver_process_group(process: subprocess.Popen) -> None:
+    """Kill a stalled driver and its descendants before the Iris task exits."""
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        process.poll()
+        return
+    try:
+        process.wait(timeout=DRIVER_KILL_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _log(f"Training driver did not become waitable within {DRIVER_KILL_TIMEOUT}s after SIGKILL")
+
+
+def _persist_failure_artifacts_bounded(action, timeout: float) -> None:
+    """Give failure evidence a bounded upload window without delaying task failure indefinitely."""
+    artifact_thread = threading.Thread(target=action, daemon=True, name="failure-artifact-sync")
+    artifact_thread.start()
+    artifact_thread.join(timeout)
+    if artifact_thread.is_alive():
+        _log(f"Failure artifact upload exceeded {timeout}s; continuing task teardown")
 
 
 def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifname: str | None = None) -> int:
@@ -1566,6 +1674,12 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     _log(f"ROLE=head rank=0/{num_tasks} head_ip={head_ip} ray_port={ray_port}")
     ray_log_sync_stop: threading.Event | None = None
     ray_log_sync = RayLogSyncSession(args.ray_log_dir, node_id)
+
+    def persist_runtime_artifacts(reason: str) -> None:
+        if ray_log_sync_stop is not None:
+            ray_log_sync_stop.set()
+        ray_log_sync.sync_bounded(reason)
+        sync_debug_artifacts(args.rendezvous_dir, node_id, reason)
 
     # Install the SIGTERM/SIGINT handler + termination-artifact capture at the TOP of
     # bring-up (BEFORE clear_rendezvous / ray_start_head / rendezvous write), so a reap
@@ -1649,15 +1763,41 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
         # `process` here arms its driver-teardown path (the closure reads this value).
         process = launch_training_driver(train_argv, env)
+        driver_activity = DriverOutputActivity()
+        output_thread = start_driver_output_tee(process, driver_activity)
+        if args.driver_liveness_timeout > 0:
+            _log(f"Driver liveness watchdog armed: {args.driver_liveness_timeout:g}s maximum stdout/stderr silence")
+        wait_result = wait_for_driver(process, driver_activity, args.driver_liveness_timeout)
+        if isinstance(wait_result, DriverStalled):
+            reason = f"driver stalled after {wait_result.silence:.0f}s without stdout/stderr progress (head rank 0)"
+            _log(reason)
 
-        exit_code = process.wait()
+            def persist_stall_artifacts() -> None:
+                capture_termination_artifacts(args.rendezvous_dir, reason)
+                persist_runtime_artifacts(reason)
+
+            _persist_failure_artifacts_bounded(persist_stall_artifacts, timeout=FAILURE_ARTIFACT_TIMEOUT)
+            kill_driver_process_group(process)
+            output_thread.join(timeout=DRIVER_KILL_TIMEOUT)
+            ray_stop()
+            return DRIVER_STALLED_EXIT_CODE
+        output_thread.join(timeout=DRIVER_KILL_TIMEOUT)
+        exit_code = wait_result.exit_code
         if exit_code != 0:
-            capture_termination_artifacts(args.rendezvous_dir, f"driver exit_code={exit_code} (head rank 0)")
+
+            def persist_failure_artifacts() -> None:
+                reason = f"driver exit_code={exit_code} (head rank 0)"
+                capture_termination_artifacts(args.rendezvous_dir, reason)
+                persist_runtime_artifacts(reason)
+
+            _persist_failure_artifacts_bounded(
+                persist_failure_artifacts,
+                timeout=FAILURE_ARTIFACT_TIMEOUT,
+            )
+            ray_stop()
+            return exit_code
         # Final flush of this node's Ray session logs before teardown reaps them.
-        if ray_log_sync_stop is not None:
-            ray_log_sync_stop.set()
-        ray_log_sync.sync_bounded(f"driver exit_code={exit_code} (head)")
-        sync_debug_artifacts(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
+        persist_runtime_artifacts(f"driver exit_code={exit_code} (head)")
     # Signal workers to unpark, then tear down.
     if args.rendezvous_dir and num_tasks > 1:
         _set_marker(args.rendezvous_dir, DONE_FILENAME)
@@ -1785,6 +1925,13 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         type=int,
         default=DEFAULT_CLUSTER_JOIN_TIMEOUT,
         help=f"Seconds to wait for all nodes to join the Ray cluster (default {DEFAULT_CLUSTER_JOIN_TIMEOUT}).",
+    )
+    parser.add_argument(
+        "--driver-liveness-timeout",
+        type=int,
+        default=DEFAULT_DRIVER_LIVENESS_TIMEOUT,
+        help="Maximum driver stdout/stderr silence before the controller records diagnostics, "
+        f"kills the driver, and exits nonzero (default {DEFAULT_DRIVER_LIVENESS_TIMEOUT}; zero disables).",
     )
     parser.add_argument(
         "--train-data",

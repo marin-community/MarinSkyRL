@@ -133,4 +133,6 @@ jobs:
           triage-notes: >-
             The nightly runs dense H100 GRPO and a Grug GB200 rollout/train/broadcast
             cycle through WIF-authenticated Iris jobs. Separate Iris or cluster failures
-            from lock, native-extension, and training regressions.
+            from lock, native-extension, and training regressions. A repository-local PR
+            that fixes the tracked failure must end its body with a Fixes link to this
+            issue. Use Part of only when the PR does not restore the lane.

@@ -54,7 +54,11 @@ trainer:
     host_memory_monitor:
       enabled: true
       interval_seconds: 60
+    # frozen preserves the checkpoint bias; replace and interpolate use Quantile
+    # Balancing; loss_free uses DeepSeek's signed load-error update.
     grug_query_bias_update_mode: "frozen"
+    grug_query_bias_interpolation_weight: null
+    grug_query_bias_update_rate: null
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
       source_uri: null
@@ -208,6 +212,8 @@ trainer:
       type: null
       max_sample_batches: 30
       min_replace_ratio: 0.3
+      informative_on: shaped
+      min_reward_std: 0.0
     
     clip_cov:
       clip_ratio: 0.0002
@@ -387,6 +393,7 @@ generator:
     overlong:
       l_max: ${generator.sampling_params.max_generate_length}
       l_cache: 0
+      penalty_scale: 1.0
     successful_length:
       free_tokens: 0
       penalty_per_token: 0.0

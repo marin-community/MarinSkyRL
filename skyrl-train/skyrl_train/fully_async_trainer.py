@@ -41,6 +41,7 @@ from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
     GroupSelectionPolicy,
     GroupSelectionResult,
+    resolve_dynamic_sampling_criteria,
 )
 from skyrl_train.group_admission import AdmissionDecision, AdmissionRejection, GroupAdmissionPolicy
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
@@ -330,7 +331,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.admission_stall_timeout = int(cfg.trainer.fully_async.admission_stall_timeout)
         if self.admission_stall_timeout <= 0:
             raise ValueError("trainer.fully_async.admission_stall_timeout must be positive")
-        self._group_selection_policy = GroupSelectionPolicy.for_fully_async(cfg.trainer.algorithm.dynamic_sampling.type)
+        self._group_selection_policy = GroupSelectionPolicy.for_fully_async(
+            cfg.trainer.algorithm.dynamic_sampling.type,
+            criteria=resolve_dynamic_sampling_criteria(
+                cfg.trainer.algorithm.dynamic_sampling.informative_on,
+                float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
+            ),
+        )
         self._dynamic_sampling_type = self._group_selection_policy.sampling_type
         max_sample_batches = int(cfg.trainer.algorithm.dynamic_sampling.max_sample_batches)
         self._dynamic_sampling_max_sample_batches = max_sample_batches
@@ -759,9 +766,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # Handle checkpoint saving
                 if self._control.should_save:
-                    with Timer("save_checkpoints", self.all_timings):
-                        await asyncio.to_thread(self.save_checkpoints)
-                    await self.callback_handler.call_event_async("on_save", step_state, self._control, trainer=self)
+                    await self._save_intermediate_checkpoint(step_state)
                     self._control.should_save = False
 
                 # Handle HF model saving
