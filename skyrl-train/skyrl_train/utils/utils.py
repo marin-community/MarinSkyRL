@@ -18,7 +18,7 @@ from ray.util.placement_group import (
 )
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
-from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
+from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
@@ -29,12 +29,13 @@ from skyrl_train.trajectory_runners.trajectory_retention_config import parse_tra
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import EnvVarManager, EnvVarScope, write_process_manifest
 from skyrl_train.group_admission import resolve_group_advantage_invariant
+from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
-from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, sync_registries
+from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, sync_registries
 from .logging_utils import format_exception_text
-from .loss_reduction import SUPPORTED_LOSS_REDUCTIONS
+from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTIONS
 from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
@@ -556,6 +557,17 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    resolve_dynamic_sampling_criteria(
+        cfg.trainer.algorithm.dynamic_sampling.informative_on,
+        float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
+    )
+    if (
+        cfg.trainer.algorithm.policy_loss_type == PolicyLossType.GSPO
+        and cfg.trainer.algorithm.loss_reduction != SEQUENCE_MEAN_LOSS_REDUCTION
+    ):
+        raise ValueError(
+            f"GSPO requires trainer.algorithm.loss_reduction=sequence_mean; got {cfg.trainer.algorithm.loss_reduction}"
+        )
     runtime_values = {
         "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
         "trainer.distributed.worker_collective_timeout_seconds": cfg.trainer.distributed.worker_collective_timeout_seconds,
@@ -601,7 +613,7 @@ def validate_cfg(cfg: DictConfig):
     )
 
     try:
-        resolve_grug_query_bias_update_mode(cfg.trainer.policy)
+        resolve_grug_query_bias_update(cfg.trainer.policy)
     except ValueError as error:
         raise AssertionError(str(error)) from error
 
