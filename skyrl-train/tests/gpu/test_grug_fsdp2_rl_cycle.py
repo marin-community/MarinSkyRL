@@ -126,7 +126,8 @@ def _config(
     cfg.trainer.policy.fsdp_config.context_parallel_size = 1
     cfg.trainer.policy.fsdp_config.moe_router_replay = False
     cfg.trainer.policy.fsdp_config.moe_grouped_gemm = False
-    cfg.trainer.policy.grug_query_bias_update_mode = "replace"
+    cfg.trainer.policy.grug_query_bias_update_mode = "loss_free"
+    cfg.trainer.policy.grug_query_bias_update_rate = 0.001
     cfg.trainer.policy.fsdp_config.use_grouped_mm = expert_model_parallel_size > 1
     cfg.trainer.policy.optimizer_config.max_grad_norm = 0.0
     if expert_model_parallel_size > 1:

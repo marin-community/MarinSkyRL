@@ -58,6 +58,7 @@ from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import GroupAdvantageInvariant, assert_training_groups_eligible
+from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
@@ -144,6 +145,7 @@ class RayPPOTrainer:
 
         self.all_metrics = {}
         self.all_timings = {}
+        self._checkpoint_save_failures = 0.0
         self.global_step = 0
 
         # initialized in `build_models`
@@ -429,6 +431,29 @@ class RayPPOTrainer:
         finally:
             await self._sync_policy_for_rollouts()
 
+    def _record_checkpoint_save_failure(self, state: TrainerState) -> None:
+        self._checkpoint_save_failures += 1.0
+        self.all_metrics["trainer/checkpoint_save_failures"] = self._checkpoint_save_failures
+        logger.opt(exception=True).error(
+            f"Checkpoint save failed at global step {state.global_step}; continuing from the last complete checkpoint"
+        )
+
+    async def _save_intermediate_checkpoint(self, state: TrainerState) -> None:
+        """Save one requested step checkpoint without terminating training on storage failure."""
+        try:
+            with Timer("save_checkpoints", self.all_timings):
+                await self._save_checkpoints_with_residency()
+        except OSError:
+            self._record_checkpoint_save_failure(state)
+            return
+        except ray.exceptions.RayTaskError as error:
+            if not isinstance(error.as_instanceof_cause(), OSError):
+                raise
+            self._record_checkpoint_save_failure(state)
+            return
+
+        await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
+
     async def _sync_weights_and_restore_rollout_residency(self) -> None:
         await self.inference_engine_client.wake_up(tags=["weights"])
         with Timer("sync_weights", self.all_timings):
@@ -632,10 +657,7 @@ class RayPPOTrainer:
 
                 # Handle checkpoint saving
                 if self._control.should_save:
-                    with Timer("save_checkpoints", self.all_timings):
-                        await self._save_checkpoints_with_residency()
-                    # Call on_save callbacks
-                    await self.callback_handler.call_event_async("on_save", step_state, self._control, trainer=self)
+                    await self._save_intermediate_checkpoint(step_state)
                     self._control.should_save = False
 
                 # Handle HF model saving
@@ -1845,6 +1867,10 @@ class RayPPOTrainer:
             "type": self.cfg.trainer.algorithm.dynamic_sampling.type,
             "max_sample_batches": max_sample_batches,
             "min_replace_ratio": self.cfg.trainer.algorithm.dynamic_sampling.min_replace_ratio,
+            "criteria": resolve_dynamic_sampling_criteria(
+                self.cfg.trainer.algorithm.dynamic_sampling.informative_on,
+                float(self.cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
+            ),
             "train_batch_size": self.cfg.trainer.train_batch_size,
             "n_samples_per_prompt": self.cfg.generator.n_samples_per_prompt,
             "tis_lcs_alert_threshold": self.cfg.trainer.algorithm.tis_lcs_alert_threshold,
