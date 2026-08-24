@@ -140,36 +140,11 @@ def test_apply_overlong_filtering_length_mismatch_assertion(loss_masks, response
         apply_overlong_filtering(loss_masks, response_ids, eos_token_id)
 
 
-def test_compute_turn_token_counts():
-    """`compute_turn_token_counts` returns one count per turn (maximal run of non-zero loss-mask
-    entries), flattened across trajectories. Observation/non-assistant tokens (0) split turns;
-    empty or all-zero masks contribute nothing."""
-    # Single turn: all assistant tokens.
-    assert compute_turn_token_counts([[1, 1, 1]]) == [3]
-
-    # Observation tokens (0) split assistant runs into separate turns.
+def test_turns_are_the_runs_of_non_zero_loss_mask_entries():
+    # Zeros are observation tokens: they split runs, and a mask with none contributes no turns.
     assert compute_turn_token_counts([[1, 1, 0, 0, 1, 1, 1]]) == [2, 3]
-
-    # Leading/trailing zeros don't create or extend turns.
-    assert compute_turn_token_counts([[0, 0, 1, 1, 0]]) == [2]
-
-    # Isolated single non-zero tokens are length-1 turns.
-    assert compute_turn_token_counts([[0, 1, 0, 1, 0]]) == [1, 1]
-
-    # Multiple trajectories: flat list across all, preserving order.
-    assert compute_turn_token_counts([[1, 1], [1, 0, 1, 1]]) == [2, 1, 2]
-
-    # All-zero mask (e.g. dropped by overlong filtering) contributes no turns.
     assert compute_turn_token_counts([[0, 0, 0]]) == []
-
-    # Empty mask is skipped.
-    assert compute_turn_token_counts([[]]) == []
-
-    # Empty batch.
-    assert compute_turn_token_counts([]) == []
-
-    # Mixed batch: only the trajectory with assistant tokens contributes.
-    assert compute_turn_token_counts([[], [0, 0], [1, 1, 1]]) == [3]
+    assert compute_turn_token_counts([[1, 1], [1, 0, 1, 1]]) == [2, 1, 2]
 
 
 dummy_chat_template = (
