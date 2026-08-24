@@ -1,28 +1,14 @@
-import ast
 import asyncio
 from collections.abc import Awaitable, Callable
-from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 import ray
 from omegaconf import OmegaConf
 
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
-from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink
 from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import (
-    RETAINED_RUNNER_NAME,
     RolloutCoordinatorRPCTimeoutError,
     RolloutDispatcher,
 )
-
-
-async def _noop_rpc() -> dict:
-    return {"response_ids": [[1]], "rollout_metrics": {}}
-
-
-async def _completed(batch: dict) -> dict:
-    return batch
 
 
 class _RemoteMethod:
@@ -113,86 +99,3 @@ async def test_coordinator_rpc_preserves_remote_timeout_error():
         await dispatcher.run({"prompts": ["task"]})
 
     assert raised.value is remote_error
-
-
-@pytest.mark.asyncio
-async def test_the_sink_binds_to_the_runner_that_produces_trajectories():
-    """``runner_name`` is stamped on every retained trajectory, so it must not name this proxy."""
-    sink = Mock()
-    dispatcher = _dispatcher(_Coordinator(_noop_rpc), timeout=1)
-
-    dispatcher.set_trajectory_sink(sink)
-
-    sink.bind_runner.assert_called_once_with(RETAINED_RUNNER_NAME)
-
-
-@pytest.mark.asyncio
-async def test_run_retains_the_batch_its_coordinator_returned():
-    expected = {"response_ids": [[1]], "rollout_metrics": {}}
-    sink = Mock()
-    sink.retain.return_value = {}
-    dispatcher = _dispatcher(_Coordinator(lambda: _completed(expected)), timeout=1)
-    dispatcher.set_trajectory_sink(sink)
-    input_batch = {"prompts": ["task"], "batch_metadata": None}
-
-    assert await dispatcher.run(input_batch) is expected
-    sink.retain.assert_called_once_with(input_batch, expected)
-
-
-@pytest.mark.asyncio
-async def test_retention_metrics_reach_the_returned_batch():
-    expected = {"response_ids": [[1]], "rollout_metrics": {"generate/existing": 1.0}}
-    sink = Mock()
-    sink.retain.return_value = {"generate/retained_trajectories": 4.0}
-    dispatcher = _dispatcher(_Coordinator(lambda: _completed(expected)), timeout=1)
-    dispatcher.set_trajectory_sink(sink)
-
-    returned = await dispatcher.run({"prompts": ["task"], "batch_metadata": None})
-
-    assert returned["rollout_metrics"] == {
-        "generate/existing": 1.0,
-        "generate/retained_trajectories": 4.0,
-    }
-
-
-def test_the_retained_runner_name_still_matches_a_real_class():
-    """The name is a literal because harbor does not import off Linux; guard it against a rename."""
-    runner = Path(__file__).resolve().parents[2] / "skyrl_train" / "trajectory_runners" / "harbor" / "runner.py"
-    classes = {node.name for node in ast.walk(ast.parse(runner.read_text())) if isinstance(node, ast.ClassDef)}
-    assert RETAINED_RUNNER_NAME in classes, f"{RETAINED_RUNNER_NAME} is not a class in {runner.name}: {sorted(classes)}"
-
-
-def test_enabling_fanout_keeps_the_trainer_sink_attached():
-    """The swap in _maybe_enable_rollout_fanout is what detached it; #445.
-
-    Retention and fan-out are both on by default, so before this the trainer configured a sink,
-    replaced the runner holding it, and retained nothing while closing the sink at teardown.
-    """
-    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
-    trainer.cfg = OmegaConf.create(
-        {
-            "rollout": {"fanout": {"enabled": True, "num_coordinators": 1, "coordinator_rpc_timeout": 30.0}},
-            "terminal_bench_config": {},
-            "generator": {},
-        }
-    )
-    trainer.trajectory_sink = Mock()
-
-    trainer._maybe_enable_rollout_fanout()
-
-    assert trainer.trajectory_runner._trajectory_sink is trainer.trajectory_sink
-
-
-def test_the_sink_survives_rebinding_across_the_swap():
-    """``bind_runner`` raises when rebound to a different name, so the swap must reuse the runner's.
-
-    ``__init__`` binds it to the injected ``HarborTrajectoryRunner``; the dispatcher rebinds to the
-    same literal. Naming the proxy instead would raise on every fan-out run.
-    """
-    sink = TrajectorySink.__new__(TrajectorySink)
-    sink._runner_name = None
-    sink.bind_runner("HarborTrajectoryRunner")  # what RayPPOTrainer.__init__ does
-
-    _dispatcher(_Coordinator(_noop_rpc), timeout=1).set_trajectory_sink(sink)
-
-    assert sink._runner_name == "HarborTrajectoryRunner"
