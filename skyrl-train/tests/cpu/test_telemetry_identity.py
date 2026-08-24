@@ -1,11 +1,7 @@
 """Run identity on the resource every MarinSkyRL telemetry row carries.
 
-Finelog promotes a resource attribute to the ``telemetry_v1`` column of the same name,
-and every Grafana panel joins on ``run_id``. marin#8379 renamed the attribute from
-``root_run_uid``, which has no column and reaches ``resource_attributes_json`` only.
-
-Run:
-    python -m pytest skyrl-train/tests/cpu/test_telemetry_identity.py -v
+Finelog promotes a resource attribute to the ``telemetry_v1`` column of the same name, so the
+key has to be ``run_id``; ``root_run_uid`` has no column.
 """
 
 from skyrl_train.telemetry import TRAINER_ROLE, TelemetryConfig, _resources

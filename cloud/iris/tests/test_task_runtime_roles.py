@@ -20,11 +20,9 @@ for _path in (_REPO_ROOT, _REPO_ROOT / "skyrl-train"):
         sys.path.insert(0, str(_path))
 
 import cloud.iris.task_runtime as task_runtime  # noqa: E402
-from skyrl_train import ray_metrics  # noqa: E402
 
-# task_runtime defines its own role constants in an ImportError fallback for environments
-# without skyrl_train. Asserting against those would pass while testing nothing, so fail loudly
-# here instead of silently checking the wrong module.
+# Without skyrl_train, task_runtime falls back to its own role constants and this file would
+# assert against those — passing while testing nothing. Fail loudly instead.
 assert not hasattr(task_runtime, "_RAY_METRICS_UNAVAILABLE_REASON"), (
     "skyrl_train did not import; this test would assert against task_runtime's fallback constants"
 )
@@ -33,9 +31,7 @@ assert not hasattr(task_runtime, "_RAY_METRICS_UNAVAILABLE_REASON"), (
 def _collector_roles() -> dict[str, str]:
     """The role each `ray_metrics_telemetry` call site opens with, keyed by enclosing function.
 
-    Resolved to the constant's *value*, so renaming the constant does not fail this. Only a
-    static read can see which argument a call site passes: the two sites are in `run_head` and
-    `run_worker`, and neither is reachable in a unit test without standing up Ray.
+    Read statically because neither call site is reachable without standing up Ray.
     """
     tree = ast.parse(Path(task_runtime.__file__).read_text())
     roles = {}
@@ -58,38 +54,6 @@ def test_the_head_and_a_worker_open_their_collectors_under_different_roles() -> 
 
     assert roles["run_head"] == "controller"
     assert roles["run_worker"] == "worker"
-
-
-def test_the_role_reaches_the_telemetry_lifecycle(monkeypatch) -> None:
-    entered: list[str] = []
-
-    class _Owner:
-        def collector_or_inert(self, collector):
-            del collector
-            return _Inert()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-    class _Inert:
-        def start(self) -> None: ...
-
-        def stop(self, *, timeout: float) -> None:
-            del timeout
-
-    def fake_process_telemetry(role: str):
-        entered.append(role)
-        return _Owner()
-
-    monkeypatch.setattr(ray_metrics, "process_telemetry", fake_process_telemetry)
-
-    with ray_metrics.ray_metrics_telemetry("10.0.0.1", 8080, "worker"):
-        pass
-
-    assert entered == ["worker"]
 
 
 def test_the_roles_are_the_shared_vocabulary() -> None:

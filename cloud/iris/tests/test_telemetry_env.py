@@ -1,11 +1,6 @@
 """The writer for the telemetry variables ``skyrl_train.telemetry`` reads.
 
-The producers, their tests and their documentation all merged; nothing ever wrote
-``SKYRL_TELEMETRY_ENDPOINT`` or ``SKYRL_RUN_ID``, so every launch path exported
-nothing. These tests pin the writer and the scopes its values reach.
-
-Run:
-    python -m pytest cloud/iris/tests/test_telemetry_env.py -v
+Pins the resolver and the scopes each value reaches.
 """
 
 from __future__ import annotations
@@ -119,12 +114,8 @@ def test_the_endpoint_and_run_id_reach_ray_workers_and_the_execution_uid_does_no
 
 
 def test_the_writer_and_the_reader_agree_on_every_variable_name(monkeypatch) -> None:
-    """End-to-end across the package boundary: run the writer, read with the reader.
-
-    The writer spells these names with constants from `cloud.iris.env_vars`; `from_environment`
-    spells them as literals in another package. Nothing else asserts the two agree, so renaming a
-    constant would silently return the trainer to exporting nothing — the failure this PR exists
-    to fix.
+    """The writer spells these names with constants; the reader spells them as literals in
+    another package. Nothing else asserts the two agree.
     """
     from skyrl_train.telemetry import TelemetryConfig
 
