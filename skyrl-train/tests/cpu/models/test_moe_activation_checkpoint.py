@@ -1,31 +1,12 @@
-import sys
-import types
-
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint, set_checkpoint_early_stop
 
-from skyrl_train.models.layers.moe_checkpoint import moe_recompute_context_fn
-
-try:
-    from skyrl_train.models.layers.moe import MoE
-except ModuleNotFoundError as error:
-    if error.name != "torchtitan":
-        raise
-    torchtitan = types.ModuleType("torchtitan")
-    torchtitan_distributed = types.ModuleType("torchtitan.distributed")
-    torchtitan_ep = types.ModuleType("torchtitan.distributed.expert_parallel")
-    torchtitan_ep.expert_parallel = lambda function: function
-    sys.modules["torchtitan"] = torchtitan
-    sys.modules["torchtitan.distributed"] = torchtitan_distributed
-    sys.modules["torchtitan.distributed.expert_parallel"] = torchtitan_ep
-    from skyrl_train.models.layers.moe import MoE
-
-    del sys.modules["torchtitan.distributed.expert_parallel"]
-    del sys.modules["torchtitan.distributed"]
-    del sys.modules["torchtitan"]
-
 from skyrl_train.model_wrapper import HFModelWrapper
+from skyrl_train.models.layers.moe_checkpoint import moe_recompute_context_fn
+from tests.cpu.models.moe_test_imports import import_grouped_moe_module
+
+MoE = import_grouped_moe_module().MoE
 
 
 class _FlippingGate(nn.Module):

@@ -26,6 +26,7 @@ from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasObservation,
 )
 from skyrl_train.models.layers.moe_routing import TokenReorderer, grouped_expert_contributions
+from skyrl_train.models.router_instrumentation import NativeRouterObserverEmitter, emit_router_forward
 from skyrl_train.utils.flash_attention import (
     FLASH_ATTN_IMPORT_ERROR,
     flash_attn_func,
@@ -412,7 +413,7 @@ class GrugMoeRouterOutput(NamedTuple):
     combine_weights: torch.Tensor
 
 
-class GrugMoeRouter(nn.Module):
+class GrugMoeRouter(nn.Module, NativeRouterObserverEmitter):
     def __init__(self, config: GrugMoeConfig) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.empty(config.num_local_experts, config.hidden_size))
@@ -420,6 +421,7 @@ class GrugMoeRouter(nn.Module):
         self.top_k = config.num_experts_per_tok
         self.num_experts = config.num_local_experts
         self._capture_q: int | None = None
+        self._capture_active = False
         self._capture_mask: torch.Tensor | None = None
         self._observation: GrugQueryBiasLayerObservation | None = None
 
@@ -427,12 +429,20 @@ class GrugMoeRouter(nn.Module):
         if candidate_count < 1:
             raise ValueError(f"candidate_count must be positive, got {candidate_count}")
         self._capture_q = candidate_count
+        self._capture_active = True
+        self._capture_mask = token_mask.reshape(-1).to(dtype=torch.bool)
+        self._observation = None
+
+    def begin_loss_free_bias_capture(self, token_mask: torch.Tensor) -> None:
+        self._capture_q = None
+        self._capture_active = True
         self._capture_mask = token_mask.reshape(-1).to(dtype=torch.bool)
         self._observation = None
 
     def take_query_bias_observation(self) -> GrugQueryBiasLayerObservation:
         observation = self._observation
         self._capture_q = None
+        self._capture_active = False
         self._capture_mask = None
         self._observation = None
         if observation is None:
@@ -453,19 +463,32 @@ class GrugMoeRouter(nn.Module):
                 _ROUTING_RENORM_SUM / (combine_weights.sum(dim=-1, keepdim=True) + 1e-9)
             )
 
-            if self._capture_q is not None:
+            emit_router_forward(
+                router=self,
+                router_inputs=hidden_states,
+                selection_logits=biased_logits,
+                natural_selected_experts=selected_experts,
+                selected_experts=selected_experts,
+                combine_weights=combine_weights,
+            )
+
+            if self._capture_active:
                 mask = self._capture_mask
                 if mask is None or mask.numel() != router_logits.shape[0]:
                     raise RuntimeError("query-bias token mask does not match the router token dimension")
                 with torch.no_grad():
-                    valid_scores = (router_logits.detach() - alpha.detach())[mask]
-                    if valid_scores.shape[0] == 0:
+                    valid_selected_experts = selected_experts[mask].detach()
+                    if valid_selected_experts.shape[0] == 0:
                         raise RuntimeError("query-bias capture requires at least one valid token")
-                    keep = min(self._capture_q, valid_scores.shape[0])
-                    candidates = torch.topk(valid_scores.transpose(0, 1), k=keep, dim=-1, sorted=True).values
+                    if self._capture_q:
+                        valid_scores = (router_logits.detach() - alpha.detach())[mask]
+                        keep = min(self._capture_q, valid_scores.shape[0])
+                        candidates = torch.topk(valid_scores.transpose(0, 1), k=keep, dim=-1, sorted=True).values
+                    else:
+                        candidates = router_logits.new_empty((self.num_experts, 0))
                     self._observation = GrugQueryBiasLayerObservation(
                         candidates=candidates,
-                        selected_experts=selected_experts[mask].detach(),
+                        selected_experts=valid_selected_experts,
                         combine_weights=combine_weights[mask].detach(),
                     )
 
@@ -790,11 +813,26 @@ class GrugMoeModel(GrugMoePreTrainedModel):
         for layer in self.layers:
             layer.mlp.router.begin_query_bias_capture(candidate_count, token_mask)
 
+    def begin_loss_free_bias_capture(self, token_mask: torch.Tensor) -> None:
+        for layer in self.layers:
+            layer.mlp.router.begin_loss_free_bias_capture(token_mask)
+
     def take_query_bias_observation(self, *, candidate_count: int) -> GrugQueryBiasObservation:
         return GrugQueryBiasObservation(
             layers=tuple(layer.mlp.router.take_query_bias_observation() for layer in self.layers),
             candidate_count=candidate_count,
         )
+
+    def take_loss_free_bias_observation(self) -> GrugQueryBiasObservation:
+        return GrugQueryBiasObservation(
+            layers=tuple(layer.mlp.router.take_query_bias_observation() for layer in self.layers),
+            candidate_count=0,
+        )
+
+    def get_query_bias(self) -> torch.Tensor:
+        """Return the stacked FP32 router query-bias buffers."""
+
+        return torch.stack([layer.mlp.router.bias for layer in self.layers])
 
     @torch.no_grad()
     def set_query_bias(self, bias: torch.Tensor) -> None:
@@ -887,8 +925,17 @@ class GrugMoeForCausalLM(GrugMoePreTrainedModel):
     def begin_query_bias_capture(self, candidate_count: int, token_mask: torch.Tensor) -> None:
         self.model.begin_query_bias_capture(candidate_count, token_mask)
 
+    def begin_loss_free_bias_capture(self, token_mask: torch.Tensor) -> None:
+        self.model.begin_loss_free_bias_capture(token_mask)
+
     def take_query_bias_observation(self, *, candidate_count: int) -> GrugQueryBiasObservation:
         return self.model.take_query_bias_observation(candidate_count=candidate_count)
+
+    def take_loss_free_bias_observation(self) -> GrugQueryBiasObservation:
+        return self.model.take_loss_free_bias_observation()
+
+    def get_query_bias(self) -> torch.Tensor:
+        return self.model.get_query_bias()
 
     def set_query_bias(self, bias: torch.Tensor) -> None:
         self.model.set_query_bias(bias)

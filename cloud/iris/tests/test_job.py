@@ -34,6 +34,7 @@ from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch
 from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
 from cloud.iris.task_runtime import materialize_model_export  # noqa: E402
 from iris.client.client import JobFailedError  # noqa: E402
+from iris.client.workload_codec import job_status_from_proto  # noqa: E402
 from iris.cluster.types import JobName  # noqa: E402
 from iris.rpc import job_pb2  # noqa: E402
 
@@ -408,7 +409,9 @@ def test_execute_job_failure_records_attempt_without_terminal_model(tmp_path: Pa
 
 def test_execute_job_serializes_iris_job_failure(tmp_path: Path) -> None:
     envelope = _spec(tmp_path)
-    status = job_pb2.JobStatus(state=job_pb2.JOB_STATE_KILLED, error="Terminated by user")
+    status = job_status_from_proto(
+        job_pb2.JobStatus(job_id="/power/iceball-test", state=job_pb2.JOB_STATE_KILLED, error="Terminated by user")
+    )
     backend = FailedLaunchBackend(JobFailedError(JobName.from_string("/power/iceball-test"), status))
 
     response = execute_job(envelope, backend=backend)

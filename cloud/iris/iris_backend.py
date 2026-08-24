@@ -77,6 +77,7 @@ from iris.cluster.constraints import (
 )
 from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_level
 from iris.cluster.types import CoschedulingConfig, ResourceSpec, gpu_device
+from iris.resources.state import JobState
 from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
@@ -403,11 +404,6 @@ class IrisBackend:
                 storage_user=storage_user_from_resource_path(request.output.checkpoint_root),
             )
         )
-
-
-def iris_job_state_name(state: int) -> str:
-    """Return the protocol spelling for an Iris job state enum."""
-    return job_pb2.JobState.Name(state).removeprefix("JOB_STATE_").lower()
 
 
 def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:
@@ -1523,6 +1519,13 @@ def create_parser() -> argparse.ArgumentParser:
         "killing the gang (the 80B rank-spread bring-up flake, 2026-07-11).",
     )
     parser.add_argument(
+        "--driver-liveness-timeout",
+        type=int,
+        default=None,
+        help="Maximum silence from the training driver's stdout/stderr before task_runtime "
+        "captures diagnostics, kills the driver, and exits nonzero. Unset uses the controller default; zero disables.",
+    )
+    parser.add_argument(
         "--trials-dir",
         "--trials_dir",
         dest="trials_dir",
@@ -1951,6 +1954,8 @@ def normalize(args: argparse.Namespace) -> None:
         raise SystemExit("--num-nodes must be >= 1.")
     if args.gpus_per_node < 1:
         raise SystemExit("--gpus-per-node must be >= 1.")
+    if args.driver_liveness_timeout is not None and args.driver_liveness_timeout < 0:
+        raise SystemExit("--driver-liveness-timeout must be >= 0.")
 
 
 def _build_task_shell(
@@ -2149,6 +2154,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # slow-but-not-hung head prestage completes before the workers give up + kill the gang.
     if args.rendezvous_timeout is not None:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
+    if args.driver_liveness_timeout is not None:
+        controller_cmd.extend(["--driver-liveness-timeout", str(args.driver_liveness_timeout)])
     # Per-NODE task-dataset staging. training_driver.py's resolve_rl_train_data() extracts the
     # HF task dataset to node-local task storage,
     # but it runs ONLY on rank 0 (the head), so the Ray-scheduled rollout workers on
@@ -2589,8 +2596,8 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
         )
         try:
             status = job.wait(stream_logs=True, timeout=float("inf"), raise_on_failure=False)
-            exit_code = 0 if status.state == job_pb2.JOB_STATE_SUCCEEDED else 1
-            job_state = iris_job_state_name(status.state)
+            exit_code = 0 if status.state is JobState.SUCCEEDED else 1
+            job_state = status.state.value
         except KeyboardInterrupt:
             print(f"[rl-iris] Terminating job {full_job_id}...", file=sys.stderr, flush=True)
             job.terminate()

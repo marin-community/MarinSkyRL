@@ -12,7 +12,11 @@ import json
 import torch
 import numpy as np
 from collections import defaultdict
-from skyrl_train.dynamic_sampling import DynamicSamplingType, group_is_informative_for_dynamic_sampling
+from skyrl_train.dynamic_sampling import (
+    DynamicSamplingCriteria,
+    DynamicSamplingType,
+    group_is_informative_for_dynamic_sampling,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
     concatenate_trajectory_batches,
@@ -457,6 +461,21 @@ def handle_replace_sampling(
         return DynamicSamplingResult(trajectory_batch, uids, True, None)
 
 
+def _rekey_collected_uid_collisions(uids: List[str], collected_uids: List[str], sample_batch_count: int) -> List[str]:
+    """Keep later draws of a dataset row distinct from groups collected in earlier sampling rounds."""
+    occupied_uids = set(collected_uids)
+    remapped_uids: dict[str, str] = {}
+    for uid in dict.fromkeys(uids):
+        candidate = uid
+        collision_index = 0
+        while candidate in occupied_uids:
+            collision_index += 1
+            candidate = f"{uid}:sample_batch_{sample_batch_count}:{collision_index}"
+        remapped_uids[uid] = candidate
+        occupied_uids.add(candidate)
+    return [remapped_uids[uid] for uid in uids]
+
+
 def handle_filter_sampling(
     trajectory_batch: TrajectoryBatch,
     uids: List[str],
@@ -480,10 +499,17 @@ def handle_filter_sampling(
     uid2indices = defaultdict(list)
     for row_index, uid in enumerate(uids):
         uid2indices[uid].append(row_index)
+    criteria = sampling_config["criteria"]
+    if not isinstance(criteria, DynamicSamplingCriteria):
+        raise ValueError("dynamic sampling filter requires resolved DynamicSamplingCriteria")
     kept_uids = [
         uid
         for uid, row_indices in uid2indices.items()
-        if group_is_informative_for_dynamic_sampling(trajectory_batch, row_indices)
+        if group_is_informative_for_dynamic_sampling(
+            trajectory_batch,
+            row_indices,
+            criteria=criteria,
+        )
     ]
     kept_uids_set = set(kept_uids)
 
@@ -495,6 +521,13 @@ def handle_filter_sampling(
 
     filtered_output = filter_trajectory_batch(trajectory_batch, kept_traj_idxs)
     filtered_uids = [uids[idx] for idx in kept_traj_idxs]
+
+    # Dataset UIDs repeat across epochs. Re-key only later draws that would merge with a collected training group.
+    collected_uids = collected_state.get("collected_uids")
+    if collected_uids is not None:
+        filtered_uids = _rekey_collected_uid_collisions(
+            filtered_uids, collected_uids, collected_state["sample_batch_count"]
+        )
 
     if "collected_trajectory_batch" not in collected_state:
         collected_state.update(

@@ -23,7 +23,7 @@ from cloud.iris.artifacts import (
 from marinskyrl.checkpoint_paths import policy_export_path
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
-from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome, iris_job_state_name
+from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome
 from cloud.iris.protocol import (
     AttemptState,
     LaunchMode,
@@ -148,7 +148,7 @@ def execute_job(
         try:
             outcome = active_backend.launch(spec, config_file.name, mode=mode)
         except JobFailedError as error:
-            job_state = iris_job_state_name(error.status.state)
+            job_state = error.status.state.value
             outcome = IrisLaunchOutcome(job_id=str(error.job_id), job_state=job_state, exit_code=1)
 
         if outcome.exit_code != 0:
