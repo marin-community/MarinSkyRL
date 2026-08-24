@@ -531,8 +531,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.global_step = 0
 
         # Swap the single-process runner for a K-actor rollout dispatcher. `rollout.fanout.enabled`
-        # defaults to TRUE, so this replaces self.trajectory_runner on a default config, and raises
-        # if `terminal_bench_config` is absent rather than falling back to the single-process runner.
+        # defaults to TRUE, so the flag is not what gates this -- reaching this trainer is. That
+        # needs `entrypoint: terminal_bench` and `colocate_all: false`, which the production configs
+        # set and the base config does not. Absent `terminal_bench_config` it raises rather than
+        # falling back to the single-process runner.
         self._maybe_enable_rollout_fanout()
 
         await self._startup_trajectory_runner()
