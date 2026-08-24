@@ -2050,10 +2050,9 @@ def main() -> None:
     # name is node-local; training_driver_env keeps it out of the driver, which
     # would otherwise broadcast the head's name to every node.
     derived_gloo_ifname = pin_socket_ifname()
-    # Resolve the telemetry endpoint and run identity from THIS task's Iris context,
-    # before `ray start`, so the raylet and every actor it spawns inherit them. Nothing
-    # else writes them: skyrl_train.telemetry reads them and exports nothing when they
-    # are unset, which is why the merged emitters have produced no rows.
+    # Resolve from THIS task's Iris context before `ray start`, so the raylet and every
+    # actor it spawns inherit them. Nothing else writes them, and skyrl_train.telemetry
+    # exports nothing when they are unset.
     export_telemetry_environment(args.run_id)
     # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
     # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.

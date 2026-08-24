@@ -112,10 +112,31 @@ def test_the_endpoint_and_run_id_reach_ray_workers_and_the_execution_uid_does_no
     worker = manager.environment_for(EnvVarScope.RAY_WORKER)
     assert worker[TELEMETRY_ENDPOINT_ENV] == ambient[TELEMETRY_ENDPOINT_ENV]
     assert worker[RUN_ID_ENV] == ambient[RUN_ID_ENV]
-    # One attempt spans several pods. Broadcasting the driver's would misattribute every
-    # actor on every other node to the driver's task attempt.
+    # An attempt belongs to one task. Broadcasting the driver's would label actors in every
+    # other task with the driver's attempt.
     assert EXECUTION_UID_ENV not in worker
     assert manager.environment_for(EnvVarScope.TASK_RUNTIME)[EXECUTION_UID_ENV] == ambient[EXECUTION_UID_ENV]
+
+
+def test_the_writer_and_the_reader_agree_on_every_variable_name(monkeypatch) -> None:
+    """End-to-end across the package boundary: run the writer, read with the reader.
+
+    The writer spells these names with constants from `cloud.iris.env_vars`; `from_environment`
+    spells them as literals in another package. Nothing else asserts the two agree, so renaming a
+    constant would silently return the trainer to exporting nothing — the failure this PR exists
+    to fix.
+    """
+    from skyrl_train.telemetry import TelemetryConfig
+
+    _in_cluster(monkeypatch)
+    exported = telemetry_env.telemetry_environment()
+    for name, value in exported.items():
+        monkeypatch.setenv(name, value)
+
+    config = TelemetryConfig.from_environment()
+    assert config.endpoint == exported[TELEMETRY_ENDPOINT_ENV]
+    assert config.run_id == exported[RUN_ID_ENV]
+    assert config.execution_uid == exported[EXECUTION_UID_ENV]
 
 
 def test_the_execution_uid_matches_what_iris_stamps_for_the_same_attempt() -> None:

@@ -374,8 +374,6 @@ class EnvVarManager:
             values[LD_LIBRARY_PATH_ENV] = library_path
         if nvrtc_home := ambient.get(NVRTC_HOME_ENV):
             values[NVRTC_HOME_ENV] = nvrtc_home
-        # The task runtime resolved these from its own Iris context before Ray started.
-        # Carry them into the scopes the trainer's Ray actors and inference engines read.
         for telemetry_name in (TELEMETRY_ENDPOINT_ENV, RUN_ID_ENV, EXECUTION_UID_ENV):
             if telemetry_value := ambient.get(telemetry_name):
                 values[telemetry_name] = telemetry_value

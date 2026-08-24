@@ -103,12 +103,9 @@ class TelemetryConfig:
 def _task_attempt_uid() -> str | None:
     """Identify this task attempt from its own Iris task id.
 
-    One attempt spans several nodes, and Ray hands an actor its node's environment rather than
-    the driver's, so each process derives this rather than inheriting one node's value.
-
-    The pinned Iris builds this from the task id and attempt number alone; newer Iris prefers
-    IRIS_ATTEMPT_UID when the runtime sets it. Reading the variable first agrees with both, and
-    costs nothing on a runtime that never sets it.
+    The pinned Iris derives this from the task id and attempt number alone; newer Iris sets
+    IRIS_ATTEMPT_UID. Reading the variable first agrees with both and costs nothing on a runtime
+    that never sets it.
     """
     if attempt_uid := os.environ.get("IRIS_ATTEMPT_UID"):
         return f"iris:{attempt_uid}"
