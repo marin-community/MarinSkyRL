@@ -79,6 +79,13 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
 ADDITIVE_ALGORITHM_FIELDS = {
     "batch_invariant": False,
 }
+ADDITIVE_DYNAMIC_SAMPLING_FIELDS = {
+    "informative_on": "shaped",
+    "min_reward_std": 0.0,
+}
+ADDITIVE_OVERLONG_FIELDS = {
+    "penalty_scale": 1.0,
+}
 # Additive generator keys with behavior-preserving disabled defaults. Like the CP
 # fields, they are stripped before comparison with the pre-CP golden.
 ADDITIVE_GENERATOR_FIELDS = {
@@ -96,6 +103,10 @@ ADDITIVE_TEACHER_FIELDS = {
 ADDITIVE_POLICY_MODEL_FIELDS = {
     "source_uri": None,
     "source_identity": None,
+}
+ADDITIVE_POLICY_FIELDS = {
+    "grug_query_bias_interpolation_weight": None,
+    "grug_query_bias_update_rate": None,
 }
 # Additive MoE fsdp_config key (runtime grouped-mm MoE swap). Flag-off no-op
 # (default == False) and unrelated to CP; it landed after the pre-CP golden was
@@ -151,12 +162,18 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         container["trainer"].pop(k, None)
     for k in ADDITIVE_ALGORITHM_FIELDS:
         container["trainer"]["algorithm"].pop(k, None)
+    for k in ADDITIVE_DYNAMIC_SAMPLING_FIELDS:
+        container["trainer"]["algorithm"]["dynamic_sampling"].pop(k, None)
     for k in ADDITIVE_GENERATOR_FIELDS:
         container["generator"].pop(k, None)
     for k in ADDITIVE_TEACHER_FIELDS:
         container["teacher"].pop(k, None)
     for k in ADDITIVE_POLICY_MODEL_FIELDS:
         container["trainer"]["policy"]["model"].pop(k, None)
+    for k in ADDITIVE_POLICY_FIELDS:
+        container["trainer"]["policy"].pop(k, None)
+    for k in ADDITIVE_OVERLONG_FIELDS:
+        container["generator"]["trajectory_reward_shaping"]["overlong"].pop(k, None)
     container["trainer"]["placement"].pop("enable_numa_affinity", None)
     container["trainer"]["policy"].pop("host_memory_monitor", None)
     container["trainer"]["algorithm"].pop("tis_splice", None)

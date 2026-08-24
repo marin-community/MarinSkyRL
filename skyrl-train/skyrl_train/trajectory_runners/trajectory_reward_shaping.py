@@ -1,5 +1,6 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
+import math
 import re
 from typing import Any
 
@@ -55,6 +56,9 @@ class OverlongPenaltyConfig:
 
     l_cache: int = 0
     """Penalty-window width below ``l_max``; zero disables the component."""
+
+    penalty_scale: float = 1.0
+    """Maximum penalty magnitude, scaled to the optimization reward range."""
 
 
 @dataclass(frozen=True)
@@ -150,6 +154,7 @@ def parse_trajectory_reward_shaping_config(config: Mapping[str, Any] | None) -> 
         overlong=OverlongPenaltyConfig(
             l_max=int(overlong.get("l_max", defaults.overlong.l_max)),
             l_cache=int(overlong.get("l_cache", defaults.overlong.l_cache)),
+            penalty_scale=float(overlong.get("penalty_scale", defaults.overlong.penalty_scale)),
         ),
         successful_length=SuccessfulLengthPenaltyConfig(
             free_tokens=int(successful_length.get("free_tokens", defaults.successful_length.free_tokens)),
@@ -182,6 +187,8 @@ def _validate_config(config: TrajectoryRewardShapingConfig) -> None:
         raise ValueError("overlong.l_cache must be non-negative")
     if config.overlong.l_cache > config.overlong.l_max:
         raise ValueError("overlong.l_cache must not exceed overlong.l_max")
+    if not math.isfinite(config.overlong.penalty_scale) or config.overlong.penalty_scale < 0:
+        raise ValueError("overlong.penalty_scale must be non-negative and finite")
 
     magnitudes = {
         "loop.advantage_penalty_per_token": config.loop.advantage_penalty_per_token,
@@ -308,7 +315,7 @@ def _soft_overlong_penalty(response_length: int, config: OverlongPenaltyConfig) 
     if response_length <= penalty_start:
         return 0.0
     penalty_fraction = min((response_length - penalty_start) / config.l_cache, 1.0)
-    return -penalty_fraction
+    return -penalty_fraction * config.penalty_scale
 
 
 def _trajectory_groups(output: TrajectoryBatch, batch_size: int) -> list[list[int]]:
