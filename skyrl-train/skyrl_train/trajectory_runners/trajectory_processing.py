@@ -864,6 +864,7 @@ def get_rollout_metrics(
             }
         )
 
+        # Per-turn token stats: run lengths of consecutive non-zero loss-mask entries (one run per turn).
         turn_token_counts = compute_turn_token_counts(loss_masks)
         if turn_token_counts:
             turn_token_counts_arr = np.array(turn_token_counts)

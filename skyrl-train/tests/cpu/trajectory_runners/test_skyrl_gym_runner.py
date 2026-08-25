@@ -587,6 +587,9 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
     assert trajectory_batch["rollout_metrics"]["generate/tis/exact_match_fraction"] == 1.0
     assert trajectory_batch["rollout_metrics"]["generate/tis/lcs_fallback_fraction"] == 0.0
     assert trajectory_batch["rollout_metrics"]["generate/tis/lcs_fallback_alert"] == 0.0
+    # The metrics describe the batch that ships, so a fully-masked rollout reports no assistant
+    # tokens. Computing them before the filter reported the pre-truncation length instead.
+    assert trajectory_batch["rollout_metrics"]["generate/avg_assistant_tokens"] == 0
 
 
 @pytest.mark.asyncio
@@ -1270,6 +1273,10 @@ async def test_apply_overlong_filtering_batched(
         0,
         0,
     ], "Loss mask should be all zeros for response not ending with eos token"
+
+    # The metrics must describe the batch that ships: a fully-masked rollout reports no
+    # assistant tokens. Computed before the filter, this reported the pre-truncation length.
+    assert trajectory_batch["rollout_metrics"]["generate/avg_assistant_tokens"] == 0
 
 
 @pytest.mark.asyncio

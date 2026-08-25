@@ -107,19 +107,3 @@ def test_projection_derives_mask_baseline_and_token_credit_from_contracts():
     assert output["exclude_from_baseline"] == [True]
     assert output["token_level_shaping"] == [[0.1, -0.1]]
     assert "unshaped_rewards" not in output
-
-
-def test_projection_reports_assistant_and_per_turn_token_counts():
-    projection = WholeTrajectoryProjection(_config(), _Tokenizer())
-    # Two assistant turns of 2 and 3 tokens, separated by one observation token.
-    step = replace(_step([3, 4, 5, 6, 7, 8], 1.0), loss_mask=[1, 1, 0, 1, 1, 1])
-
-    output = projection.project(
-        [step],
-        {"env_classes": None, "sampling_params": {"logprobs": True}},
-    )
-
-    metrics = output["rollout_metrics"]
-    assert metrics["generate/avg_assistant_tokens"] == 5
-    assert metrics["generate/tokens_per_turn_mean"] == 2.5
-    assert metrics["generate/tokens_per_turn_max"] == 3

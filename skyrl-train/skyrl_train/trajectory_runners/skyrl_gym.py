@@ -631,6 +631,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             tokenize=True,
         )
         prompt_token_ids = prompt_encodings["input_ids"] if hasattr(prompt_encodings, "keys") else prompt_encodings
+        # Metrics after filtering: apply_overlong_filtering zeroes the masks a truncated rollout
+        # ships with, and the assistant-token counts describe what the trainer will learn from.
+        if self.trajectory_runner_cfg.apply_overlong_filtering:
+            loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
+
         rollout_metrics = get_rollout_metrics(
             responses,
             rewards,
@@ -639,9 +644,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             loss_masks=loss_masks,
             successes=successes,
         )
-
-        if self.trajectory_runner_cfg.apply_overlong_filtering:
-            loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
 
         trajectory_batch: TrajectoryBatch = {
             "prompt_token_ids": prompt_token_ids,
