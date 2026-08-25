@@ -865,15 +865,16 @@ def get_rollout_metrics(
         )
 
         turn_token_counts = compute_turn_token_counts(loss_masks)
-        if turn_token_counts:
-            turn_token_counts_arr = np.array(turn_token_counts)
-            rollout_metrics.update(
-                {
-                    "generate/tokens_per_turn_mean": np.mean(turn_token_counts_arr).item(),
-                    "generate/tokens_per_turn_std": np.std(turn_token_counts_arr).item(),
-                    "generate/tokens_per_turn_max": np.max(turn_token_counts_arr).item(),
-                }
-            )
+        # Emitted even when no turn survived, so the series stays continuous through a step whose
+        # rollouts were all filtered out, which is when it is most likely to be read.
+        turn_token_counts_arr = np.array(turn_token_counts or [0])
+        rollout_metrics.update(
+            {
+                "generate/tokens_per_turn_mean": np.mean(turn_token_counts_arr).item(),
+                "generate/tokens_per_turn_std": np.std(turn_token_counts_arr).item(),
+                "generate/tokens_per_turn_max": np.max(turn_token_counts_arr).item(),
+            }
+        )
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)

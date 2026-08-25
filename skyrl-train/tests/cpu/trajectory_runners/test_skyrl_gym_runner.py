@@ -1276,6 +1276,9 @@ async def test_apply_overlong_filtering_batched(
     # The metrics must describe the batch that ships: a fully-masked rollout reports no
     # assistant tokens. Computed before the filter, this reported the pre-truncation length.
     assert trajectory_batch["rollout_metrics"]["generate/avg_assistant_tokens"] == 0
+    # The three keys stay present when nothing survived filtering, so the series does not
+    # disappear on the step that most needs reading.
+    assert trajectory_batch["rollout_metrics"]["generate/tokens_per_turn_mean"] == 0
 
 
 @pytest.mark.asyncio
