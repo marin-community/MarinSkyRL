@@ -79,6 +79,23 @@ def test_an_explicit_run_id_wins_over_the_job_id(monkeypatch) -> None:
     assert resolved[RUN_ID_ENV] == "snowball-e6-muonh-0"
 
 
+def test_an_inherited_run_id_beats_the_job_id_and_loses_to_an_explicit_one(monkeypatch) -> None:
+    """Precedence: explicit argument, then inherited SKYRL_RUN_ID, then the Iris job id.
+
+    The wrapper resolves into a copy of its own environment, so without this an identity the
+    initiator already set would be overwritten by the job id and the rows would join under the
+    wrong run.
+    """
+    _in_cluster(monkeypatch)
+    monkeypatch.setenv(RUN_ID_ENV, "inherited-run")
+
+    assert telemetry_env.telemetry_environment()[RUN_ID_ENV] == "inherited-run"
+    assert telemetry_env.telemetry_environment(run_id="explicit-run")[RUN_ID_ENV] == "explicit-run"
+
+    monkeypatch.delenv(RUN_ID_ENV)
+    assert telemetry_env.telemetry_environment()[RUN_ID_ENV] == "/atqamar/iceball-micro-0"
+
+
 def test_no_cluster_context_leaves_telemetry_inert(monkeypatch) -> None:
     monkeypatch.setattr(telemetry_env, "get_job_info", lambda: None)
     monkeypatch.setattr(telemetry_env, "get_iris_ctx", lambda: None)
