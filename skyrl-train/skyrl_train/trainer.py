@@ -556,7 +556,10 @@ class RayPPOTrainer:
                     )
 
                     # 1.1 generation phase
-                    with Timer("generate", self.all_timings), critical_phase("rollout_or_inference_wait"):
+                    with (
+                        Timer("generate", self.all_timings),
+                        critical_phase("rollout_or_inference_wait", self.global_step),
+                    ):
                         trajectory_batch: TrajectoryBatch = await self.generate(trajectory_request)
 
                     if self.cfg.trainer.step_wise_training:
@@ -629,7 +632,10 @@ class RayPPOTrainer:
 
                     # 4. train policy/critic model
                     # Policy model is backloaded to GPU during training
-                    with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step"):
+                    with (
+                        Timer("train_critic_and_policy", self.all_timings),
+                        critical_phase("train_step", self.global_step),
+                    ):
                         status = self.train_critic_and_policy(training_input)
 
                     # 5. sync weights to inference engines (must happen before callbacks)
@@ -1272,7 +1278,7 @@ class RayPPOTrainer:
 
         if not self.cfg.trainer.step_wise_training:
             validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
-        record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"))
+        record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"), self.global_step)
 
         return trajectory_batch
 

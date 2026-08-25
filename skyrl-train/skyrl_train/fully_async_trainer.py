@@ -680,7 +680,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # 1. Discard every completed stale attempt and wait for a full fresh batch.
                     with (
                         Timer("wait_for_generation_buffer", self.all_timings),
-                        critical_phase("rollout_or_inference_wait"),
+                        critical_phase("rollout_or_inference_wait", self.global_step),
                     ):
                         cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
                             generation_queues,
@@ -940,7 +940,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
         # train policy/critic model
-        with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step"):
+        with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step", self.global_step):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
         return status
@@ -972,14 +972,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
                     trajectory_request, disable_tqdm=True
                 )
-                record_generated_work(
-                    cur_trajectory_batch["response_ids"],
-                    cur_trajectory_batch.get("is_last_step"),
-                )
-
                 # Prefer the earliest global step captured during inference over the fallback.
                 actual_step = cur_trajectory_batch.get("actual_global_step")
                 staleness_step = actual_step if actual_step is not None else global_step_at_start
+
+                # Attributed to the step whose weights produced it, which is what staleness uses:
+                # the producer runs concurrently, so self.global_step has usually moved on.
+                record_generated_work(
+                    cur_trajectory_batch["response_ids"],
+                    cur_trajectory_batch.get("is_last_step"),
+                    staleness_step,
+                )
                 completed_group = GeneratedOutputGroup(
                     trajectory_batch=cur_trajectory_batch,
                     uid=uids[0],
@@ -995,7 +998,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         inspected_count=1,
                     )
                     continue
-                record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize)
+                record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize, self.global_step)
                 await self._staleness_manager.on_rollout_accepted()
                 slot_acquired = False  # Slot properly released; safe for next iteration
         except asyncio.CancelledError:

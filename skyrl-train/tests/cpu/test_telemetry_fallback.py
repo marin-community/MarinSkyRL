@@ -13,7 +13,7 @@ import skyrl_train.telemetry as trainer_telemetry
 
 assert trainer_telemetry.telemetry is skyrl_train.inert_telemetry
 trainer_telemetry.record_policy_step(7)
-with trainer_telemetry.critical_phase("train_step"):
+with trainer_telemetry.critical_phase("train_step", 7):
     pass
 """
 
@@ -34,3 +34,31 @@ def test_rigging_without_telemetry_submodule_falls_back_to_inert(tmp_path: Path)
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_records_carry_the_step_they_describe(monkeypatch):
+    """`step` is what makes a run's producers groupable; without it each series stands alone."""
+    import skyrl_train.telemetry as trainer_telemetry
+
+    recorded: list[dict] = []
+
+    class _Recorder:
+        def add(self, _value, attributes):
+            recorded.append(attributes)
+
+        def set(self, _value, attributes):
+            recorded.append(attributes)
+
+        def record(self, _value, attributes):
+            recorded.append(attributes)
+
+    for name in ("work_completed", "progress_timestamp", "rollout_queue_depth", "rollout_capacity", "phase_duration"):
+        monkeypatch.setattr(trainer_telemetry, name, _Recorder())
+
+    trainer_telemetry.record_generated_work([[1, 2], [3]], [True, True], 41)
+    trainer_telemetry.record_rollout_buffer(3, 8, 41)
+    with trainer_telemetry.critical_phase("train_step", 41):
+        pass
+
+    assert recorded, "no telemetry records were emitted"
+    assert {attributes.get("step") for attributes in recorded} == {"41"}

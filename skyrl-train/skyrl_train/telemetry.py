@@ -166,7 +166,7 @@ def _resources(config: TelemetryConfig, role: str) -> dict[str, str]:
 
 
 @contextlib.contextmanager
-def critical_phase(phase: Literal["rollout_or_inference_wait", "train_step"]) -> Iterator[None]:
+def critical_phase(phase: Literal["rollout_or_inference_wait", "train_step"], step: int) -> Iterator[None]:
     started = time.perf_counter()
     outcome = "success"
     try:
@@ -182,6 +182,7 @@ def critical_phase(phase: Literal["rollout_or_inference_wait", "train_step"]) ->
                 "clock_domain": "critical_path",
                 "role": TRAINER_ROLE,
                 "outcome": outcome,
+                "step": str(step),
             },
         )
 
@@ -196,7 +197,9 @@ def record_policy_step(step: int) -> None:
     policy_step.set(step, attributes={"role": TRAINER_ROLE})
 
 
-def record_generated_work(response_ids: Sequence[Sequence[int]], is_last_step: Sequence[bool] | None) -> None:
+def record_generated_work(
+    response_ids: Sequence[Sequence[int]], is_last_step: Sequence[bool] | None, step: int
+) -> None:
     sample_count = len(response_ids)
     rollout_count = sample_count if is_last_step is None else sum(is_last_step)
     generated_token_count = sum(len(response) for response in response_ids)
@@ -209,18 +212,18 @@ def record_generated_work(response_ids: Sequence[Sequence[int]], is_last_step: S
         ("generated_token", generated_token_count),
     ):
         if count:
-            work_completed.add(count, attributes={"work_kind": work_kind, "role": TRAINER_ROLE})
+            work_completed.add(count, attributes={"work_kind": work_kind, "role": TRAINER_ROLE, "step": str(step)})
     if rollout_count:
         progress_timestamp.set(
             progress_time,
-            attributes={"work_kind": "rollout", "role": TRAINER_ROLE},
+            attributes={"work_kind": "rollout", "role": TRAINER_ROLE, "step": str(step)},
         )
 
 
-def record_rollout_buffer(depth: int, queue_capacity: int) -> None:
+def record_rollout_buffer(depth: int, queue_capacity: int, step: int) -> None:
     _process_state.queue_depth = depth
     _process_state.queue_capacity = queue_capacity
-    attributes = {"queue": "rollout_buffer", "role": TRAINER_ROLE}
+    attributes = {"queue": "rollout_buffer", "role": TRAINER_ROLE, "step": str(step)}
     rollout_queue_depth.set(depth, attributes=attributes)
     rollout_capacity.set(queue_capacity, attributes=attributes)
 
