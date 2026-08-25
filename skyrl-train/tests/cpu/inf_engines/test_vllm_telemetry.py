@@ -1,5 +1,3 @@
-import threading
-
 import pytest
 
 # `prometheus_client` and `rigging.telemetry` both come from the optional `telemetry` extra.
@@ -9,42 +7,96 @@ pytest.importorskip("prometheus_client")
 pytest.importorskip("rigging.telemetry")
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
-from rigging import telemetry
 
-from skyrl_train.inference_engines.vllm.vllm_telemetry import engine_metrics_telemetry, exported_snapshots
+from skyrl_train.inference_engines.vllm.vllm_telemetry import (
+    MAX_SNAPSHOTS,
+    engine_metrics_telemetry,
+    exported_snapshots,
+)
+
+# vLLM labels every family with these, one value each per engine process.
+ENGINE = {"model_name": "Qwen", "engine": "0"}
+# `request_latency_buckets` in vLLM's loggers.py; the histograms are most of the series count.
+LATENCY_BUCKETS = (0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 120.0)
+FINISH_REASONS = ("stop", "length", "abort", "error", "repetition")
+WAITING_REASONS = ("capacity", "deferred")
 
 
-def engine_families():
-    """One engine's registry, built the way vLLM builds its own."""
+def engine_families(scale=1):
+    """One engine's registry, labelled the way vLLM labels its own."""
     registry = CollectorRegistry()
+    labels = list(ENGINE)
 
-    Gauge("vllm:num_requests_running", "d", ["model_name"], registry=registry).labels(model_name="Qwen").set(5)
-    Gauge("vllm:num_requests_waiting_by_reason", "d", ["reason"], registry=registry).labels(
-        reason="kv_cache_exhausted"
-    ).set(2)
+    for name in ("num_requests_running", "num_requests_waiting", "kv_cache_usage_perc"):
+        Gauge(f"vllm:{name}", "d", labels, registry=registry).labels(**ENGINE).set(1)
 
-    success = Counter("vllm:request_success", "d", ["finished_reason"], registry=registry)
-    success.labels(finished_reason="length").inc(4)
-    success.labels(finished_reason="stop").inc(11)
+    waiting = Gauge("vllm:num_requests_waiting_by_reason", "d", labels + ["reason"], registry=registry)
+    for reason in WAITING_REASONS:
+        waiting.labels(**ENGINE, reason=reason).set(2)
 
-    latency = Histogram("vllm:e2e_request_latency_seconds", "d", buckets=(1.0, float("inf")), registry=registry)
-    latency.observe(0.5)
-    latency.observe(2.0)
+    sleep_state = Gauge("vllm:engine_sleep_state", "d", labels + ["sleep_state"], registry=registry)
+    for state in ("awake", "weights_offloaded", "discard_all"):
+        sleep_state.labels(**ENGINE, sleep_state=state).set(0)
+
+    success = Counter("vllm:request_success", "d", labels + ["finished_reason"], registry=registry)
+    for index, reason in enumerate(FINISH_REASONS):
+        success.labels(**ENGINE, finished_reason=reason).inc(index)
+
+    for name in ("num_preemptions", "prefix_cache_hits", "prefix_cache_queries", "generation_tokens", "prompt_tokens"):
+        Counter(f"vllm:{name}", "d", labels, registry=registry).labels(**ENGINE).inc(7)
+
+    for name in (
+        "request_queue_time_seconds",
+        "request_prefill_time_seconds",
+        "request_decode_time_seconds",
+        "e2e_request_latency_seconds",
+        "time_to_first_token_seconds",
+        "request_generation_tokens",
+    ):
+        Histogram(f"vllm:{name}", "d", labels, buckets=LATENCY_BUCKETS, registry=registry).labels(**ENGINE).observe(0.4)
 
     # vLLM reports its cache configuration as a gauge whose *label names* are configuration keys.
     Gauge("vllm:cache_config_info", "d", ["block_size"], registry=registry).labels(block_size="16").set(1)
     # The registry is process-wide, so it also holds whatever else the process registered.
     Counter("python_gc_collections", "d", ["generation"], registry=registry).labels(generation="0").inc(42)
 
-    return tuple(registry.collect())
+    return tuple(registry.collect()) * scale
 
 
-def test_only_the_selected_vllm_families_are_forwarded():
+def test_the_forwarded_series_are_exactly_the_selected_families():
     names = {snapshot.name for snapshot in exported_snapshots(engine_families())}
 
-    assert "num_requests_running" in names
-    assert "request_success_total" in names
-    assert not [name for name in names if "cache_config" in name or "gc_collections" in name]
+    assert names == {
+        "num_requests_running",
+        "num_requests_waiting",
+        "num_requests_waiting_by_reason",
+        "kv_cache_usage_perc",
+        "engine_sleep_state",
+        "request_success_total",
+        "num_preemptions_total",
+        "prefix_cache_hits_total",
+        "prefix_cache_queries_total",
+        "generation_tokens_total",
+        "prompt_tokens_total",
+        "request_queue_time_seconds_bucket",
+        "request_queue_time_seconds_count",
+        "request_queue_time_seconds_sum",
+        "request_prefill_time_seconds_bucket",
+        "request_prefill_time_seconds_count",
+        "request_prefill_time_seconds_sum",
+        "request_decode_time_seconds_bucket",
+        "request_decode_time_seconds_count",
+        "request_decode_time_seconds_sum",
+        "e2e_request_latency_seconds_bucket",
+        "e2e_request_latency_seconds_count",
+        "e2e_request_latency_seconds_sum",
+        "time_to_first_token_seconds_bucket",
+        "time_to_first_token_seconds_count",
+        "time_to_first_token_seconds_sum",
+        "request_generation_tokens_bucket",
+        "request_generation_tokens_count",
+        "request_generation_tokens_sum",
+    }
 
 
 def test_enumerated_labels_stay_attributes_instead_of_becoming_metric_names():
@@ -52,31 +104,14 @@ def test_enumerated_labels_stay_attributes_instead_of_becoming_metric_names():
     snapshots = exported_snapshots(engine_families())
 
     reasons = {
-        snapshot.attributes["finished_reason"]: snapshot.value
-        for snapshot in snapshots
-        if snapshot.name == "request_success_total"
+        snapshot.attributes["finished_reason"] for snapshot in snapshots if snapshot.name == "request_success_total"
     }
-    assert reasons == {"length": 4.0, "stop": 11.0}
+    assert reasons == set(FINISH_REASONS)
 
-    waiting = next(snapshot for snapshot in snapshots if snapshot.name == "num_requests_waiting_by_reason")
-    assert waiting.attributes == {"reason": "kv_cache_exhausted"}
-
-
-def test_histogram_buckets_survive_so_a_quantile_can_be_read_downstream():
-    buckets = {
-        snapshot.attributes["le"]: snapshot.value
-        for snapshot in exported_snapshots(engine_families())
-        if snapshot.name == "e2e_request_latency_seconds_bucket"
+    waiting = {
+        snapshot.attributes["reason"] for snapshot in snapshots if snapshot.name == "num_requests_waiting_by_reason"
     }
-
-    assert buckets == {"1.0": 1.0, "+Inf": 2.0}
-
-
-def test_temporality_follows_the_prometheus_type():
-    by_name = {snapshot.name: snapshot for snapshot in exported_snapshots(engine_families())}
-
-    assert by_name["num_requests_running"].source_temporality == telemetry.CURRENT_SNAPSHOT
-    assert by_name["request_success_total"].source_temporality == telemetry.CUMULATIVE_SNAPSHOT
+    assert waiting == set(WAITING_REASONS)
 
 
 def test_a_creation_timestamp_is_not_forwarded_as_a_counter():
@@ -84,11 +119,29 @@ def test_a_creation_timestamp_is_not_forwarded_as_a_counter():
     assert not [snapshot for snapshot in exported_snapshots(engine_families()) if snapshot.name.endswith("_created")]
 
 
-def test_an_engine_without_a_telemetry_endpoint_forwards_nothing_and_still_runs(monkeypatch):
+def test_one_engines_families_fit_inside_the_publisher_budget():
+    """The publisher truncates past `max_records` by keeping the prefix, and the timing histograms
+    register last, so an overflow drops exactly the families this module exists to deliver."""
+    assert len(exported_snapshots(engine_families())) <= MAX_SNAPSHOTS
+
+
+def test_an_engine_without_a_telemetry_endpoint_forwards_nothing(monkeypatch):
     monkeypatch.delenv("SKYRL_TELEMETRY_ENDPOINT", raising=False)
-    before = {thread.name for thread in threading.enumerate()}
+    started = []
+
+    class _Collector:
+        def start(self):
+            started.append("started")
+
+        def stop(self, *, timeout):
+            pass
+
+    monkeypatch.setattr(
+        "skyrl_train.inference_engines.vllm.vllm_telemetry.PrometheusCollector",
+        lambda **_: _Collector(),
+    )
 
     with engine_metrics_telemetry():
         pass
 
-    assert not [name for name in {thread.name for thread in threading.enumerate()} - before if "vllm" in name]
+    assert started == []

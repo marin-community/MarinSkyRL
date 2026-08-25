@@ -1,9 +1,11 @@
 """Forward the engine's own vLLM metrics to Finelog, from inside the engine process.
 
-vLLM registers its full metric set in each engine's ``prometheus_client`` registry whether or not
-``enable_ray_prometheus_stats`` is set: it appends its own ``PrometheusStatLogger`` unless it is
-handed a ``PrometheusStatLogger`` *subclass*, and this repo hands it a closure. Measured on a live
-engine at the pinned fork: 66 ``vllm:*`` families after engine construction, 0 before.
+vLLM appends its own ``PrometheusStatLogger`` unless it is handed a ``PrometheusStatLogger``
+*subclass*. At the default this repo hands it a closure, so the stock logger is added and every
+family lands in this process's registry. ⚠️ ``enable_ray_prometheus_stats: true`` hands it
+``RayPrometheusStatLogger``, which *is* that subclass, so vLLM skips the stock logger and this
+forwarder sees nothing; the engine warns when the two are combined. Measured on a live engine at the
+pinned fork with the flag off: 66 ``vllm:*`` families after engine construction, 0 before.
 
 marin forwards the same metrics for its serving path, but by scraping ``/metrics`` over HTTP. That
 does not port: SkyRL runs no HTTP surface on the engine (``enable_http_endpoint`` is false by
@@ -24,11 +26,13 @@ from skyrl_train.telemetry import INFERENCE_ROLE, process_telemetry
 METRIC_SOURCE = "vllm"
 METRIC_PREFIX = "vllm:"
 
-# Bounds one poll of this process's registry, and the publisher truncates past it silently. The set
-# below is ~152 series at a 32k context, and vLLM multiplies every series by the engine cores that
-# share a process, so raise this before adding families or widening data parallelism. 1024 matches
-# marin's reader for these metrics (`marin/inference/vllm_server.py`); the 512 elsewhere in this repo
-# sizes the Ray scraper, an unrelated and smaller set.
+# Bounds one poll of this process's registry. The set below is ~153 series, near enough context-
+# independent: only `request_generation_tokens` scales with `max_model_len`, and 4k to 1M moves the
+# total by 8. Adding families is what moves it. ⚠️ The publisher truncates past the cap by keeping
+# the *prefix*, and `REGISTRY.collect()` yields in registration order, which puts the timing
+# histograms last -- so an overflow drops the families this module exists to deliver, silently
+# except for `prometheus_dropped_samples`. A test asserts the set still fits. 1024 is marin's number
+# for the same metrics; the 512 elsewhere in this repo sizes the Ray scraper, a smaller unrelated set.
 MAX_SNAPSHOTS = 1024
 COLLECTOR_STOP_TIMEOUT = 0.5
 
@@ -55,11 +59,16 @@ EXPORTED_FAMILIES = frozenset(
         # Real throughput, as rates.
         "vllm:generation_tokens",
         "vllm:prompt_tokens",
-        # The levers: how loaded the engine is, and why requests wait.
+        # The levers: how loaded the engine is, and why requests wait. The by-reason breakdown sums
+        # to the aggregate, so both are kept only because the breakdown is newer than the pinned
+        # build and a filter cannot tell an absent family from an empty one.
         "vllm:num_requests_running",
         "vllm:num_requests_waiting",
         "vllm:num_requests_waiting_by_reason",
         "vllm:kv_cache_usage_perc",
+        # Separates an engine that failed to wake after a weight sync from one that is merely idle:
+        # both report zero running, zero waiting and low cache use. The trainer sleeps every step.
+        "vllm:engine_sleep_state",
     }
 )
 

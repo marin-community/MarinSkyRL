@@ -8,7 +8,7 @@ from http import HTTPStatus
 import ray
 import torch
 import asyncio
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
@@ -55,7 +55,22 @@ from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
 import warnings
-from skyrl_train.inference_engines.vllm.vllm_telemetry import engine_metrics_telemetry
+
+try:
+    from skyrl_train.inference_engines.vllm.vllm_telemetry import engine_metrics_telemetry
+except ImportError as error:
+    # `prometheus_client` and `rigging.telemetry` come from the optional telemetry extra, and this
+    # module is on the engine's import path. An installed rigging without the telemetry submodule
+    # raises ImportError rather than ModuleNotFoundError; the name check keeps other failures visible.
+    if error.name not in {"prometheus_client", "rigging", "skyrl_train"}:
+        raise
+    _ENGINE_TELEMETRY_UNAVAILABLE_REASON = str(error)
+
+    def engine_metrics_telemetry():
+        logger.info(f"vLLM metric forwarding is unavailable: {_ENGINE_TELEMETRY_UNAVAILABLE_REASON}")
+        return nullcontext()
+
+
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -1528,6 +1543,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         if enable_ray_prometheus_stats:
             ray_loggers = self._create_ray_prometheus_stat_loggers()
             if ray_loggers:
+                # RayPrometheusStatLogger is a PrometheusStatLogger subclass, so vLLM treats it as a
+                # replacement and never registers into prometheus_client. vllm_telemetry then reads
+                # an empty registry.
+                logger.warning(
+                    "enable_ray_prometheus_stats replaces vLLM's Prometheus registration, so engine "
+                    "metric forwarding to Finelog will see nothing from this engine."
+                )
                 stat_loggers.extend(ray_loggers)
 
         # Stagger engine startup to avoid TOCTOU port collisions (EADDRINUSE).
@@ -1958,8 +1980,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await engine.collective_rpc("skyrl_finish_weight_reload")
 
     async def teardown(self):
-        await self._destroy_weights_update_group()
-        self._telemetry.close()
+        try:
+            await self._destroy_weights_update_group()
+        finally:
+            self._telemetry.close()
 
     async def reset_prefix_cache(self):
         engine = self._get_engine()
