@@ -624,7 +624,7 @@ class VLLMStatsCallback(TrainerCallback):
         return control
 
     def _log_stats(self, stats: Dict[str, Any], global_step: int) -> None:
-        """Summarize stats on the console, export them, and log them to wandb."""
+        """Log stats to console and wandb."""
         num_engines = stats.get("num_engines", 0)
         if num_engines == 0:
             return

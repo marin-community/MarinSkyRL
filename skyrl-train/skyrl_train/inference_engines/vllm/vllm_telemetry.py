@@ -24,10 +24,11 @@ from skyrl_train.telemetry import INFERENCE_ROLE, process_telemetry
 METRIC_SOURCE = "vllm"
 METRIC_PREFIX = "vllm:"
 
-# marin's own vLLM reader uses 1024 for the same family set (`marin/inference/vllm_server.py`).
-# MarinSkyRL's 512 sizes the Ray-metrics scraper, a smaller and unrelated set, and would truncate
-# here. The set below measures 166 series lines per engine, so four engines fit with headroom;
-# `MetricSnapshotPublisher` truncates silently, so raise this before adding families.
+# Bounds one poll of this process's registry, and the publisher truncates past it silently. The set
+# below is ~152 series at a 32k context, and vLLM multiplies every series by the engine cores that
+# share a process, so raise this before adding families or widening data parallelism. 1024 matches
+# marin's reader for these metrics (`marin/inference/vllm_server.py`); the 512 elsewhere in this repo
+# sizes the Ray scraper, an unrelated and smaller set.
 MAX_SNAPSHOTS = 1024
 COLLECTOR_STOP_TIMEOUT = 0.5
 
@@ -70,9 +71,13 @@ class _RegistryScraper:
         return tuple(REGISTRY.collect())
 
 
-def _exported_snapshots(families):
+def exported_snapshots(families):
     selected = tuple(family for family in families if family.name in EXPORTED_FAMILIES)
-    return prefixed_metric_snapshots(selected, metric_prefix=METRIC_PREFIX)
+    snapshots = prefixed_metric_snapshots(selected, metric_prefix=METRIC_PREFIX)
+    # `prometheus_client` emits a `_created` series beside every counter and histogram whose value
+    # is a unix timestamp, and `prefixed_metric_snapshots` types it as the cumulative counter it
+    # is labelled as. Forwarded, it reads as a counter parked at 1.7e9.
+    return tuple(snapshot for snapshot in snapshots if not snapshot.name.endswith("_created"))
 
 
 @contextlib.contextmanager
@@ -83,7 +88,7 @@ def engine_metrics_telemetry() -> Iterator[None]:
             PrometheusCollector(
                 metric_source=METRIC_SOURCE,
                 scraper=_RegistryScraper(),
-                processor=_exported_snapshots,
+                processor=exported_snapshots,
                 publisher=MetricSnapshotPublisher(
                     max_records=MAX_SNAPSHOTS,
                     attributes={"metric_source": METRIC_SOURCE},

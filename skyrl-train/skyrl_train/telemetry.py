@@ -26,7 +26,6 @@ CONTROLLER_ROLE = "controller"
 INFERENCE_ROLE = "inference"
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
-# median.
 
 work_completed = telemetry.counter("work_completed", unit="{item}")
 phase_duration = telemetry.histogram("phase_duration_seconds", unit="s")
