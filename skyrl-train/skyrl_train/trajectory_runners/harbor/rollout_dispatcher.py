@@ -65,8 +65,7 @@ from skyrl_train.worker_setup import configure_worker_process
 
 # The name stamped on every retained trajectory. A literal rather than
 # `HarborTrajectoryRunner.__name__`: the harbor package does not import off Linux, and this runs in
-# the driver, which may be a launcher-only CPU environment. `test_dispatcher_trajectory_sink`
-# guards it against a rename.
+# the driver, which may be a launcher-only CPU environment.
 RETAINED_RUNNER_NAME = "HarborTrajectoryRunner"
 
 
@@ -353,8 +352,8 @@ class RolloutDispatcher:
         # Trainer sets this; default returns None until then.
         self.global_step_fn = None
 
-        # Set by set_trajectory_sink. The coordinators' runners never receive it: the sink is
-        # trainer-owned and lives in this process, and run() gets the finished batch back here.
+        # The coordinators' runners never receive it: the sink is trainer-owned, lives in this
+        # process, and run() gets the finished batch back here.
         self._trajectory_sink: Optional[TrajectorySink] = None
 
         self._actors: List = []
@@ -453,8 +452,8 @@ class RolloutDispatcher:
         """Route one group to one coordinator, await its TrajectoryBatch, and retain it.
 
         Training: round-robin across all coordinators. Eval: pinned to shard 0
-        (the only coordinator with an active eval orchestrator). When a sink is attached, the
-        returned batch is retained here and gains the sink's metrics in ``rollout_metrics``.
+        (the only coordinator with an active eval orchestrator). When a sink is attached, the returned batch
+        is retained here.
         """
         del disable_tqdm
         if self._eval_session_active:

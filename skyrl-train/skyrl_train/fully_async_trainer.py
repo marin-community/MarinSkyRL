@@ -530,11 +530,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         self.global_step = 0
 
-        # Swap the single-process runner for a K-actor rollout dispatcher. `rollout.fanout.enabled`
-        # defaults to TRUE, so the flag is not what gates this -- reaching this trainer is. That
-        # needs `entrypoint: terminal_bench` and `colocate_all: false`, which the production configs
-        # set and the base config does not. Absent `terminal_bench_config` it raises rather than
-        # falling back to the single-process runner.
+        # `rollout.fanout.enabled` defaults to TRUE, so the flag does not gate this -- reaching this
+        # trainer does, via `entrypoint: fully_async`, or `terminal_bench` with `colocate_all: false`.
+        # Absent `terminal_bench_config` it raises rather than falling back.
         self._maybe_enable_rollout_fanout()
 
         await self._startup_trajectory_runner()

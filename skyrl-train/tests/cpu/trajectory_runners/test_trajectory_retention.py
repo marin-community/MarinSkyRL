@@ -17,8 +17,11 @@ from skyrl_train.trajectory_runners.base import (
 )
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import RolloutDispatcher
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import (
+    RETENTION_METRIC_PREFIX,
     TrajectorySink,
+    retain_trajectories,
     TrajectoryRetentionPublicationError,
     TrajectoryRetentionPublicationTimeout,
     build_trajectory_records,
@@ -646,15 +649,51 @@ def test_retention_takes_the_run_id_the_initiator_set(monkeypatch):
     marin exports ``SKYRL_RUN_ID`` when it launches; a run started straight from MarinSkyRL has no
     such variable and falls back to the run name set there.
     """
-    import importlib
-
     from skyrl_train.config import utils
 
     monkeypatch.setenv("SKYRL_RUN_ID", "marin-run-42")
-    importlib.reload(utils)
     assert utils.get_default_config().generator.trajectory_retention.run_id == "marin-run-42"
 
     monkeypatch.delenv("SKYRL_RUN_ID")
-    importlib.reload(utils)
     config = utils.get_default_config()
     assert config.generator.trajectory_retention.run_id == config.trainer.run_name
+
+
+@pytest.mark.asyncio
+async def test_best_effort_retention_does_not_end_the_run(tmp_path):
+    """Retention runs inside the rollout worker, whose handler exits the process on an exception."""
+    sink = TrajectorySink(_config(tmp_path, required=False), _Tokenizer())
+    sink.bind_runner("SkyRLGymTrajectoryRunner")
+    sink.retain = _raises
+
+    output = _output()
+    await retain_trajectories(sink, _input(), output)
+
+    assert output["rollout_metrics"]["generate/trajectory_retention/write_errors"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_required_retention_still_raises(tmp_path):
+    sink = TrajectorySink(_config(tmp_path, required=True), _Tokenizer())
+    sink.bind_runner("SkyRLGymTrajectoryRunner")
+    sink.retain = _raises
+
+    with pytest.raises(RuntimeError):
+        await retain_trajectories(sink, _input(), _output())
+
+
+def _raises(*_args, **_kwargs):
+    raise RuntimeError("serialization blew up")
+
+
+def test_retention_counters_survive_group_concatenation():
+    """The async trainer concatenates per-group batches, and that rebuilds rollout_metrics."""
+    groups = []
+    for written in (2.0, 3.0):
+        output = _output()
+        output["rollout_metrics"] = {f"{RETENTION_METRIC_PREFIX}/written": written}
+        groups.append(output)
+
+    combined = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=1.0)
+
+    assert combined["rollout_metrics"][f"{RETENTION_METRIC_PREFIX}/written"] == 5.0

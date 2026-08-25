@@ -1059,11 +1059,20 @@ async def retain_trajectories(
     output: TrajectoryBatch,
 ) -> None:
     """Persist normalized trajectories without blocking the trainer event loop."""
-    metrics = await asyncio.to_thread(
-        sink.retain,
-        input_batch,
-        output,
-    )
+    try:
+        metrics = await asyncio.to_thread(
+            sink.retain,
+            input_batch,
+            output,
+        )
+    except Exception:
+        # `required: false` promises best effort, and the sink already honours that for publication
+        # failures. Retention runs inside the rollout worker, whose own handler exits the process, so
+        # without this a serialization or schema bug in retention ends the training run.
+        if sink.config.required:
+            raise
+        logger.exception("Trajectory retention failed; continuing without it")
+        metrics = {f"{RETENTION_METRIC_PREFIX}/write_errors": 1.0}
     if not metrics:
         return
     rollout_metrics = output.get("rollout_metrics") or {}
