@@ -353,7 +353,7 @@ generator:
   trajectory_retention:
     enabled: true
     output_path: ${trainer.export_path}/training_trajectories
-    run_id: ${trainer.run_name}
+    run_id: ${oc.env:SKYRL_RUN_ID,${trainer.run_name}}
     phases: [train]
     sample_count_per_step: 1
     sample_fraction: 0.0
