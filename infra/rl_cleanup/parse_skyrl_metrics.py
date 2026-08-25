@@ -71,10 +71,14 @@ TIMING_PARENTS: dict[str, str | None] = {
     "policy_train": "train_critic_and_policy",
     "policy_critic_overlap_train": "train_critic_and_policy",
     "sync_weights": "step",
+    "offload_policy_model_to_cpu": "step",
+    "dump_data_batch": "step",
     "init_weight_sync_state": None,
     "save_checkpoints": None,
     "cleanup_old_checkpoints": "save_checkpoints",
     "save_hf_model": None,
+    # Runs in-step and again at teardown, like save_checkpoints, so it is a root rather than a child.
+    "queue_hf_export": None,
     "eval": None,
     "update_ref_with_policy": None,
 }

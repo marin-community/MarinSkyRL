@@ -192,14 +192,19 @@ def record_policy_step(step: int) -> None:
     _process_state.policy_step = step
     _process_state.last_progress_timestamp = progress_time
     attributes = {"work_kind": "policy_step", "role": TRAINER_ROLE}
-    work_completed.add(1, attributes=attributes)
+    work_completed.add(1, attributes={**attributes, "step": str(step)})
     progress_timestamp.set(progress_time, attributes=attributes)
     policy_step.set(step, attributes={"role": TRAINER_ROLE})
 
 
 def record_generated_work(
-    response_ids: Sequence[Sequence[int]], is_last_step: Sequence[bool] | None, step: int
+    response_ids: Sequence[Sequence[int]], is_last_step: Sequence[bool] | None, weights_step: int
 ) -> None:
+    """Count generated work against the policy version that produced it.
+
+    Under fully-async generation that is up to `max_staleness_steps` behind the step being trained,
+    so this carries `weights_step` where every other record here carries `step`.
+    """
     sample_count = len(response_ids)
     rollout_count = sample_count if is_last_step is None else sum(is_last_step)
     generated_token_count = sum(len(response) for response in response_ids)
@@ -212,18 +217,21 @@ def record_generated_work(
         ("generated_token", generated_token_count),
     ):
         if count:
-            work_completed.add(count, attributes={"work_kind": work_kind, "role": TRAINER_ROLE, "step": str(step)})
+            work_completed.add(
+                count,
+                attributes={"work_kind": work_kind, "role": TRAINER_ROLE, "weights_step": str(weights_step)},
+            )
     if rollout_count:
         progress_timestamp.set(
             progress_time,
-            attributes={"work_kind": "rollout", "role": TRAINER_ROLE, "step": str(step)},
+            attributes={"work_kind": "rollout", "role": TRAINER_ROLE},
         )
 
 
-def record_rollout_buffer(depth: int, queue_capacity: int, step: int) -> None:
+def record_rollout_buffer(depth: int, queue_capacity: int) -> None:
     _process_state.queue_depth = depth
     _process_state.queue_capacity = queue_capacity
-    attributes = {"queue": "rollout_buffer", "role": TRAINER_ROLE, "step": str(step)}
+    attributes = {"queue": "rollout_buffer", "role": TRAINER_ROLE}
     rollout_queue_depth.set(depth, attributes=attributes)
     rollout_capacity.set(queue_capacity, attributes=attributes)
 

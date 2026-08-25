@@ -145,8 +145,6 @@ class RayPPOTrainer:
 
         self.all_metrics = {}
         self.all_timings = {}
-        # `all_timings` is cleared after every step, so a span that runs once before the step loop
-        # would be reported as part of step 1.
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
         self.global_step = 0
@@ -2201,7 +2199,6 @@ class RayPPOTrainer:
         logger.info(f"Queued out-of-band HF export for global_step_{self.global_step}: {request_path}")
 
     def _log_startup_timings(self) -> None:
-        """Publish the spans that ran once before the step loop."""
         # The startup weight sync records into all_timings, and Timer accumulates into whichever
         # dict it is given. all_timings is not cleared until the first step ends, so those durations
         # would be summed into step 1's timing/sync_weights.
@@ -2211,9 +2208,7 @@ class RayPPOTrainer:
             return
         payload = {f"startup/{name}": duration for name, duration in self.all_startup_timings.items()}
         self._log_metrics_stdout(payload, step=self.global_step, kind="startup")
-        # commit=False: the next tracker.log at this step (pre-train eval, or step 1) flushes it.
-        # Committing here would be a second commit at a step wandb has already been given.
-        self.tracker.log(payload, step=self.global_step)
+        self.tracker.log(payload, step=self.global_step, commit=False)
 
     def _log_metrics_stdout(self, payload: Dict[str, Any], step: int, kind: str = "train") -> None:
         """Mirror the wandb/tracker payload to stdout so metrics are recoverable without wandb access."""

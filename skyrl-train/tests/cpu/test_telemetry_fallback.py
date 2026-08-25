@@ -37,7 +37,7 @@ def test_rigging_without_telemetry_submodule_falls_back_to_inert(tmp_path: Path)
 
 
 def test_records_carry_the_step_they_describe(monkeypatch):
-    """`step` is what makes a run's producers groupable; without it each series stands alone."""
+    """Generated work names the policy version that produced it; the rest name the step they ran in."""
     import skyrl_train.telemetry as trainer_telemetry
 
     recorded: list[dict] = []
@@ -52,13 +52,25 @@ def test_records_carry_the_step_they_describe(monkeypatch):
         def record(self, _value, attributes):
             recorded.append(attributes)
 
-    for name in ("work_completed", "progress_timestamp", "rollout_queue_depth", "rollout_capacity", "phase_duration"):
+    for name in (
+        "work_completed",
+        "progress_timestamp",
+        "rollout_queue_depth",
+        "rollout_capacity",
+        "phase_duration",
+        "policy_step",
+    ):
         monkeypatch.setattr(trainer_telemetry, name, _Recorder())
 
-    trainer_telemetry.record_generated_work([[1, 2], [3]], [True, True], 41)
-    trainer_telemetry.record_rollout_buffer(3, 8, 41)
+    trainer_telemetry.record_generated_work([[1, 2], [3]], [True, True], 39)
+    trainer_telemetry.record_policy_step(41)
+    trainer_telemetry.record_rollout_buffer(3, 8)
     with trainer_telemetry.critical_phase("train_step", 41):
         pass
 
     assert recorded, "no telemetry records were emitted"
-    assert {attributes.get("step") for attributes in recorded} == {"41"}
+    stamped = [attributes for attributes in recorded if "step" in attributes or "weights_step" in attributes]
+    assert {attributes.get("step") for attributes in stamped} == {"41", None}
+    assert {attributes.get("weights_step") for attributes in stamped} == {"39", None}
+    # A record carries one of the two names, never both, so neither join double-counts.
+    assert not [a for a in stamped if "step" in a and "weights_step" in a]

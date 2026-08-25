@@ -20,6 +20,7 @@ import pytest
 from loguru import logger
 
 from ci.marin_nightly.gate import StepMetrics, parse_metrics
+from infra.rl_cleanup.parse_skyrl_metrics import TIMING_PARENTS
 from skyrl_train.trainer import RayPPOTrainer
 
 TRAINER_SOURCES = ("trainer.py", "fully_async_trainer.py")
@@ -40,7 +41,7 @@ def _timer_calls(source: Path):
     """Every ``Timer(...)`` call in one module, excluding ``threading.Timer``."""
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not node.args:
+        if not isinstance(node, ast.Call):
             continue
         func = node.func
         if isinstance(func, ast.Attribute):  # threading.Timer and friends
@@ -59,10 +60,13 @@ def _named_spans(source: Path) -> list[_Span]:
     """Every literally-named ``Timer`` span in one module."""
     spans = []
     for call in _timer_calls(source):
-        if not isinstance(call.args[0], ast.Constant):
+        arguments = dict(zip(("message", "update_dict"), call.args))
+        arguments.update({kw.arg: kw.value for kw in call.keywords if kw.arg})
+        name = arguments.get("message")
+        if not isinstance(name, ast.Constant):
             continue
-        destination = ast.unparse(call.args[1]) if len(call.args) > 1 else None
-        spans.append(_Span(call.args[0].value, destination, call.lineno))
+        destination = arguments.get("update_dict")
+        spans.append(_Span(name.value, ast.unparse(destination) if destination else None, call.lineno))
     return spans
 
 
@@ -89,6 +93,23 @@ def test_every_startup_span_name_is_still_used():
     assert not unused, f"startup span names no longer matching any span: {sorted(unused)}"
 
 
+def test_every_step_span_is_declared_to_the_step_time_analyzer():
+    """An undeclared span is reported with no parent and counted on top of the step total.
+
+    ``summarize_timing_spans`` subtracts only declared children from the step remainder, so a span
+    that records into ``all_timings`` without an entry here makes the rows sum past 100%.
+    """
+    recorded = {
+        s.name
+        for filename in TRAINER_SOURCES
+        for s in _named_spans(_SKYRL_TRAIN / filename)
+        if s.destination == "self.all_timings"
+    }
+    assert not recorded - set(TIMING_PARENTS), (
+        f"step spans missing from TIMING_PARENTS: {sorted(recorded - set(TIMING_PARENTS))}"
+    )
+
+
 @pytest.fixture
 def mirror_lines():
     """Loguru writes to its own sinks, so pytest's caplog does not see the mirror line."""
@@ -106,7 +127,7 @@ class _RecordingTracker:
     def __init__(self):
         self.calls = []
 
-    def log(self, data, step, commit=False):
+    def log(self, data, step, commit):
         self.calls.append((data, step, commit))
 
 
