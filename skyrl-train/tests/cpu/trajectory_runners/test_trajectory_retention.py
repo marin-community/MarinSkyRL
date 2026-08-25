@@ -638,3 +638,23 @@ async def test_enabling_fanout_keeps_the_already_attached_sink_working(tmp_path)
 
     assert output["rollout_metrics"]["generate/trajectory_retention/written"] == 3.0
     assert len(_records(tmp_path)) == 3
+
+
+def test_retention_takes_the_run_id_the_initiator_set(monkeypatch):
+    """Retained trajectories must carry the same run id as telemetry, or they cannot be joined.
+
+    marin exports ``SKYRL_RUN_ID`` when it launches; a run started straight from MarinSkyRL has no
+    such variable and falls back to the run name set there.
+    """
+    import importlib
+
+    from skyrl_train.config import utils
+
+    monkeypatch.setenv("SKYRL_RUN_ID", "marin-run-42")
+    importlib.reload(utils)
+    assert utils.get_default_config().generator.trajectory_retention.run_id == "marin-run-42"
+
+    monkeypatch.delenv("SKYRL_RUN_ID")
+    importlib.reload(utils)
+    config = utils.get_default_config()
+    assert config.generator.trajectory_retention.run_id == config.trainer.run_name
