@@ -40,17 +40,17 @@ def test_records_carry_the_step_they_describe(monkeypatch):
     """Generated work names the policy version that produced it; the rest name the step they ran in."""
     import skyrl_train.telemetry as trainer_telemetry
 
-    recorded: list[dict] = []
+    recorded: list[tuple[str, dict]] = []
 
     class _Recorder:
+        def __init__(self, name):
+            self.name = name
+
         def add(self, _value, attributes):
-            recorded.append(attributes)
+            recorded.append((self.name, attributes))
 
-        def set(self, _value, attributes):
-            recorded.append(attributes)
-
-        def record(self, _value, attributes):
-            recorded.append(attributes)
+        set = add
+        record = add
 
     for name in (
         "work_completed",
@@ -60,7 +60,7 @@ def test_records_carry_the_step_they_describe(monkeypatch):
         "phase_duration",
         "policy_step",
     ):
-        monkeypatch.setattr(trainer_telemetry, name, _Recorder())
+        monkeypatch.setattr(trainer_telemetry, name, _Recorder(name))
 
     trainer_telemetry.record_generated_work([[1, 2], [3]], [True, True], 39)
     trainer_telemetry.record_policy_step(41)
@@ -68,9 +68,25 @@ def test_records_carry_the_step_they_describe(monkeypatch):
     with trainer_telemetry.critical_phase("train_step", 41):
         pass
 
-    assert recorded, "no telemetry records were emitted"
-    stamped = [attributes for attributes in recorded if "step" in attributes or "weights_step" in attributes]
-    assert {attributes.get("step") for attributes in stamped} == {"41", None}
-    assert {attributes.get("weights_step") for attributes in stamped} == {"39", None}
-    # A record carries one of the two names, never both, so neither join double-counts.
-    assert not [a for a in stamped if "step" in a and "weights_step" in a]
+    stamps = {
+        (name, attributes.get("work_kind") or attributes.get("queue") or attributes.get("phase")): (
+            attributes.get("step"),
+            attributes.get("weights_step"),
+        )
+        for name, attributes in recorded
+    }
+    assert stamps == {
+        ("work_completed", "rollout"): (None, "39"),
+        ("work_completed", "sample"): (None, "39"),
+        ("work_completed", "generated_token"): (None, "39"),
+        ("work_completed", "policy_step"): ("41", None),
+        ("phase_duration", "train_step"): ("41", None),
+        # A live queue reading and a run constant; neither is about a step.
+        ("rollout_queue_depth", "rollout_buffer"): (None, None),
+        ("rollout_capacity", "rollout_buffer"): (None, None),
+        # Liveness, read as a max over a window, and one name inside TRAINING_STATUS_NAMES.
+        ("progress_timestamp", "rollout"): (None, None),
+        ("progress_timestamp", "policy_step"): (None, None),
+        # The gauge's value is the step.
+        ("policy_step", None): (None, None),
+    }
