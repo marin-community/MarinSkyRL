@@ -8,6 +8,7 @@ from http import HTTPStatus
 import ray
 import torch
 import asyncio
+from contextlib import ExitStack
 import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
@@ -54,6 +55,7 @@ from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
 import warnings
+from skyrl_train.inference_engines.vllm.vllm_telemetry import engine_metrics_telemetry
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -1470,6 +1472,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         self._stats_engine_id = id(self)
         super().__init__(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
+        # vLLM registers its metrics into this process's registry during engine construction, so
+        # the forwarder starts after super().__init__ and reads them here rather than over HTTP.
+        self._telemetry = ExitStack()
+        self._telemetry.enter_context(engine_metrics_telemetry())
 
     def _create_stat_logger_factory(self):
         """Create a factory that produces stat loggers with the engine ID set."""
@@ -1953,6 +1959,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def teardown(self):
         await self._destroy_weights_update_group()
+        self._telemetry.close()
 
     async def reset_prefix_cache(self):
         engine = self._get_engine()

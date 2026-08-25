@@ -31,7 +31,6 @@ from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_exp
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, GenerationQueuesProvider
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.json_serialization import to_jsonable
-from skyrl_train.telemetry import record_engine_stats
 from skyrl_train.utils.data_tracker import DataConsumptionState, DataConsumptionTracker
 from skyrl_train.utils.io import io
 
@@ -685,8 +684,6 @@ class VLLMStatsCallback(TrainerCallback):
                 logger.debug(msg)
             else:
                 logger.info(msg)
-
-        record_engine_stats(stats)
 
         # Log to wandb
         if self.log_to_wandb:
