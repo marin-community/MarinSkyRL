@@ -551,88 +551,41 @@ class PreflightGateCallback(TrainerCallback):
         return []
 
 
-def engine_metrics(stats: Dict[str, Any]) -> Dict[str, Any]:
+def _engine_metrics(stats: Dict[str, Any]) -> Dict[str, Any]:
     """Flatten one ``get_stats()`` payload into the ``vllm/*`` keys logged for a step.
 
     Peak and median values are accumulated by each engine over the step; the latency figures are
-    per-request seconds. Per-engine keys are emitted only when there is more than one engine,
-    because with a single engine they duplicate the aggregate.
+    per-request seconds.
     """
-    metrics: Dict[str, Any] = {
+    return {
         "vllm/num_engines": stats["num_engines"],
-        "vllm/peak_running_reqs": stats.get("total_peak_running_reqs", stats.get("total_running_reqs", 0)),
-        "vllm/peak_waiting_reqs": stats.get("total_peak_waiting_reqs", stats.get("total_waiting_reqs", 0)),
-        "vllm/peak_prompt_throughput": stats.get("avg_peak_prompt_throughput", stats.get("avg_prompt_throughput", 0.0)),
-        "vllm/peak_generation_throughput": stats.get(
-            "avg_peak_generation_throughput", stats.get("avg_generation_throughput", 0.0)
-        ),
-        "vllm/peak_gpu_cache_usage_perc": stats.get(
-            "avg_peak_gpu_cache_usage_perc", stats.get("avg_gpu_cache_usage_perc", 0.0)
-        ),
-        "vllm/peak_prefix_cache_hit_rate": stats.get(
-            "avg_peak_prefix_cache_hit_rate", stats.get("avg_prefix_cache_hit_rate", 0.0)
-        ),
-        "vllm/median_running_reqs": stats.get("avg_median_running_reqs", 0.0),
-        "vllm/median_waiting_reqs": stats.get("avg_median_waiting_reqs", 0.0),
-        "vllm/median_prompt_throughput": stats.get("avg_median_prompt_throughput", 0.0),
-        "vllm/median_generation_throughput": stats.get("avg_median_generation_throughput", 0.0),
-        "vllm/median_gpu_cache_usage_perc": stats.get("avg_median_gpu_cache_usage_perc", 0.0),
-        "vllm/median_prefix_cache_hit_rate": stats.get("avg_median_prefix_cache_hit_rate", 0.0),
-        # Per-request latency (seconds)
-        "vllm/latency_prefill_mean": stats.get("avg_latency_prefill_mean", 0.0),
-        "vllm/latency_prefill_p90": stats.get("max_latency_prefill_p90", 0.0),
-        "vllm/latency_decode_mean": stats.get("avg_latency_decode_mean", 0.0),
-        "vllm/latency_decode_p90": stats.get("max_latency_decode_p90", 0.0),
-        "vllm/latency_e2e_mean": stats.get("avg_latency_e2e_mean", 0.0),
-        "vllm/latency_e2e_p90": stats.get("max_latency_e2e_p90", 0.0),
-        "vllm/latency_queued_mean": stats.get("avg_latency_queued_mean", 0.0),
-        "vllm/latency_queued_p90": stats.get("max_latency_queued_p90", 0.0),
-        "vllm/latency_ttft_mean": stats.get("avg_latency_ttft_mean", 0.0),
-        "vllm/latency_ttft_p90": stats.get("max_latency_ttft_p90", 0.0),
-        "vllm/total_finished_requests": stats.get("total_finished_requests", 0),
-        "vllm/total_preempted_reqs": stats.get("total_preempted_reqs", 0),
-        "vllm/total_samples": stats.get("total_samples", 0),
-        "vllm/total_active_samples": stats.get("total_active_samples", 0),
+        "vllm/peak_running_reqs": stats["total_peak_running_reqs"],
+        "vllm/peak_waiting_reqs": stats["total_peak_waiting_reqs"],
+        "vllm/peak_prompt_throughput": stats["avg_peak_prompt_throughput"],
+        "vllm/peak_generation_throughput": stats["avg_peak_generation_throughput"],
+        "vllm/peak_gpu_cache_usage_perc": stats["avg_peak_gpu_cache_usage_perc"],
+        "vllm/peak_prefix_cache_hit_rate": stats["avg_peak_prefix_cache_hit_rate"],
+        "vllm/median_running_reqs": stats["avg_median_running_reqs"],
+        "vllm/median_waiting_reqs": stats["avg_median_waiting_reqs"],
+        "vllm/median_prompt_throughput": stats["avg_median_prompt_throughput"],
+        "vllm/median_generation_throughput": stats["avg_median_generation_throughput"],
+        "vllm/median_gpu_cache_usage_perc": stats["avg_median_gpu_cache_usage_perc"],
+        "vllm/median_prefix_cache_hit_rate": stats["avg_median_prefix_cache_hit_rate"],
+        "vllm/latency_prefill_mean": stats["avg_latency_prefill_mean"],
+        "vllm/latency_prefill_p90": stats["max_latency_prefill_p90"],
+        "vllm/latency_decode_mean": stats["avg_latency_decode_mean"],
+        "vllm/latency_decode_p90": stats["max_latency_decode_p90"],
+        "vllm/latency_e2e_mean": stats["avg_latency_e2e_mean"],
+        "vllm/latency_e2e_p90": stats["max_latency_e2e_p90"],
+        "vllm/latency_queued_mean": stats["avg_latency_queued_mean"],
+        "vllm/latency_queued_p90": stats["max_latency_queued_p90"],
+        "vllm/latency_ttft_mean": stats["avg_latency_ttft_mean"],
+        "vllm/latency_ttft_p90": stats["max_latency_ttft_p90"],
+        "vllm/total_finished_requests": stats["total_finished_requests"],
+        "vllm/total_preempted_reqs": stats["total_preempted_reqs"],
+        "vllm/total_samples": stats["total_samples"],
+        "vllm/total_active_samples": stats["total_active_samples"],
     }
-
-    if stats["num_engines"] <= 1:
-        return metrics
-
-    for i, engine in enumerate(stats.get("engines", [])):
-        metrics.update(
-            {
-                f"vllm/engine_{i}/peak_prompt_throughput": engine.get(
-                    "peak_prompt_throughput", engine.get("avg_prompt_throughput", 0.0)
-                ),
-                f"vllm/engine_{i}/peak_generation_throughput": engine.get(
-                    "peak_generation_throughput", engine.get("avg_generation_throughput", 0.0)
-                ),
-                f"vllm/engine_{i}/peak_running_reqs": engine.get(
-                    "peak_running_reqs", engine.get("num_running_reqs", 0)
-                ),
-                f"vllm/engine_{i}/peak_waiting_reqs": engine.get(
-                    "peak_waiting_reqs", engine.get("num_waiting_reqs", 0)
-                ),
-                f"vllm/engine_{i}/peak_gpu_cache_usage": engine.get(
-                    "peak_gpu_cache_usage_perc", engine.get("gpu_cache_usage_perc", 0.0)
-                ),
-                f"vllm/engine_{i}/median_prompt_throughput": engine.get("median_prompt_throughput", 0.0),
-                f"vllm/engine_{i}/median_generation_throughput": engine.get("median_generation_throughput", 0.0),
-                f"vllm/engine_{i}/median_running_reqs": engine.get("median_running_reqs", 0.0),
-                f"vllm/engine_{i}/median_waiting_reqs": engine.get("median_waiting_reqs", 0.0),
-                f"vllm/engine_{i}/latency_prefill_mean": engine.get("latency_prefill_mean", 0.0),
-                f"vllm/engine_{i}/latency_prefill_p90": engine.get("latency_prefill_p90", 0.0),
-                f"vllm/engine_{i}/latency_decode_mean": engine.get("latency_decode_mean", 0.0),
-                f"vllm/engine_{i}/latency_decode_p90": engine.get("latency_decode_p90", 0.0),
-                f"vllm/engine_{i}/latency_e2e_mean": engine.get("latency_e2e_mean", 0.0),
-                f"vllm/engine_{i}/latency_e2e_p90": engine.get("latency_e2e_p90", 0.0),
-                f"vllm/engine_{i}/latency_queued_mean": engine.get("latency_queued_mean", 0.0),
-                f"vllm/engine_{i}/latency_ttft_mean": engine.get("latency_ttft_mean", 0.0),
-                f"vllm/engine_{i}/finished_requests": engine.get("latency_num_finished_requests", 0),
-                f"vllm/engine_{i}/preempted_reqs": engine.get("total_preempted_reqs", 0),
-            }
-        )
-    return metrics
 
 
 @register_callback("vllm_stats")
@@ -699,21 +652,26 @@ class VLLMStatsCallback(TrainerCallback):
         if self._inference_engine_client is None:
             return control
 
+        trainer = kwargs.get("trainer")
+        if trainer is None:
+            logger.warning("VLLMStatsCallback: no trainer to publish engine stats through")
+            return control
+
         try:
             stats = await self._inference_engine_client.get_stats()
-            self._log_stats(stats, state.global_step, kwargs.get("trainer"))
         except Exception as e:
             logger.warning(f"VLLMStatsCallback: Failed to collect stats: {e}")
+            return control
 
+        self._log_stats(stats, state.global_step, trainer)
         return control
 
-    def _log_stats(self, stats: Dict[str, Any], global_step: int, trainer) -> None:
-        """Summarize stats on the console and add them to the trainer's per-step metrics."""
+    def _log_stats(self, stats: Dict[str, Any], global_step: int, trainer: Any) -> None:
         num_engines = stats.get("num_engines", 0)
         if num_engines == 0:
             return
 
-        metrics = engine_metrics(stats)
+        metrics = _engine_metrics(stats)
         total_samples = metrics["vllm/total_samples"]
         total_active = metrics["vllm/total_active_samples"]
         peak_running = metrics["vllm/peak_running_reqs"]
@@ -757,7 +715,6 @@ class VLLMStatsCallback(TrainerCallback):
         if total_samples > 0:
             msg += f", samples={total_active}/{total_samples}"
 
-        # Log to console
         if self.log_to_console:
             if self.console_log_level == "debug":
                 logger.debug(msg)
