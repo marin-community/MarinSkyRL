@@ -93,6 +93,7 @@ async def test_fully_async_step_finishes_policy_drain_before_forward():
                 }
             )
             self.all_timings = {}
+            self.global_step = 7
 
         async def _drain_policy_event_loops(self):
             events.append("drain-start")
