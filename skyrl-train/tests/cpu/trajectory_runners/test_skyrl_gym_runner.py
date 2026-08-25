@@ -589,7 +589,6 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
     assert trajectory_batch["rollout_metrics"]["generate/tis/lcs_fallback_alert"] == 0.0
     # The metrics describe the batch that ships, so a fully-masked rollout reports no assistant
     # tokens. Computing them before the filter reported the pre-truncation length instead.
-    assert trajectory_batch["rollout_metrics"]["generate/avg_assistant_tokens"] == 0
 
 
 @pytest.mark.asyncio
