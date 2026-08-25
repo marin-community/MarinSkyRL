@@ -1,13 +1,7 @@
-"""Run identity on the resource every MarinSkyRL telemetry row carries.
-
-Finelog promotes a resource attribute to the ``telemetry_v1`` column of the same name, so the
-key has to be ``run_id``; ``root_run_uid`` has no column.
-"""
-
 from skyrl_train.telemetry import TRAINER_ROLE, TelemetryConfig, _resources
 
 
-def test_the_resource_carries_the_run_id_finelog_promotes() -> None:
+def test_telemetry_resources_use_run_id() -> None:
     config = TelemetryConfig(
         endpoint="http://finelog:8080/v1/telemetry",
         run_id="/atqamar/iceball-micro-0",
@@ -20,22 +14,22 @@ def test_the_resource_carries_the_run_id_finelog_promotes() -> None:
     assert "root_run_uid" not in resources
 
 
-def test_each_process_derives_its_own_task_attempt(monkeypatch) -> None:
-    monkeypatch.setenv("IRIS_TASK_ID", "/atqamar/iceball-micro-0/1:2")
+def test_telemetry_config_without_override_uses_iris_attempt_uid(monkeypatch) -> None:
+    monkeypatch.setenv("IRIS_ATTEMPT_UID", "01JABCDEF0123456789")
     monkeypatch.delenv("SKYRL_EXECUTION_UID", raising=False)
 
-    assert TelemetryConfig.from_environment().execution_uid == "iris:/atqamar/iceball-micro-0/1:attempt:2"
+    assert TelemetryConfig.from_environment().execution_uid == "iris:01JABCDEF0123456789"
 
 
-def test_an_explicit_execution_uid_wins(monkeypatch) -> None:
-    monkeypatch.setenv("IRIS_TASK_ID", "/atqamar/iceball-micro-0/1:2")
+def test_telemetry_config_execution_uid_override_takes_precedence(monkeypatch) -> None:
+    monkeypatch.setenv("IRIS_ATTEMPT_UID", "01JABCDEF0123456789")
     monkeypatch.setenv("SKYRL_EXECUTION_UID", "iris:/other/task/0:attempt:0")
 
     assert TelemetryConfig.from_environment().execution_uid == "iris:/other/task/0:attempt:0"
 
 
-def test_no_iris_task_leaves_the_execution_uid_unset(monkeypatch) -> None:
-    monkeypatch.delenv("IRIS_TASK_ID", raising=False)
+def test_telemetry_config_without_attempt_uid_leaves_execution_uid_unset(monkeypatch) -> None:
+    monkeypatch.delenv("IRIS_ATTEMPT_UID", raising=False)
     monkeypatch.delenv("SKYRL_EXECUTION_UID", raising=False)
 
     assert TelemetryConfig.from_environment().execution_uid is None

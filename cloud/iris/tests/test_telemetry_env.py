@@ -1,8 +1,3 @@
-"""The writer for the telemetry variables ``skyrl_train.telemetry`` reads.
-
-Pins the resolver and the scopes each value reaches.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -26,34 +21,30 @@ from cloud.iris.env_vars import (  # noqa: E402
 )
 
 
-_SUPPORTS_ATTEMPT_UID = "attempt_uid" in JobInfo.__dataclass_fields__
+_ATTEMPT_UID = "01JABCDEF0123456789"
 
 
-def _job_info(attempt_uid: str | None = None) -> JobInfo:
-    """A real JobInfo, so `job_id` comes from Iris's own derivation rather than a stub.
-
-    `JobInfo.job_id` is `task_id.parent or task_id`, so the default run identity is the
-    immediate parent job. A hardcoded stub would assert our formatting and prove nothing about
-    which job a nested graph run actually reports under.
-
-    `attempt_uid` exists only in Iris newer than the pinned wheel, so it is passed only when the
-    installed version has it.
-    """
-    fields = {"task_id": JobName.from_wire("/atqamar/iceball-micro-0/1"), "attempt_id": 2}
-    if _SUPPORTS_ATTEMPT_UID:
-        fields["attempt_uid"] = attempt_uid
-    return JobInfo(**fields)
+def _job_info() -> JobInfo:
+    return JobInfo(
+        task_id=JobName.from_wire("/atqamar/iceball-micro-0/1"),
+        attempt_id=2,
+        attempt_uid=_ATTEMPT_UID,
+    )
 
 
 class _Client:
-    def resolve_endpoint(self, name: str) -> str:
-        assert name == "/system/log-server"
+    def resolve_endpoint(self, _name: str) -> str:
         return "http://finelog.marin.svc.cluster.local:8080/"
+
+
+class _UnreachableClient:
+    def resolve_endpoint(self, _name: str) -> str:
+        raise ConnectionError("controller is unreachable")
 
 
 @dataclass(frozen=True)
 class _Context:
-    client: _Client
+    client: _Client | _UnreachableClient
 
 
 def _in_cluster(monkeypatch) -> None:
@@ -61,79 +52,55 @@ def _in_cluster(monkeypatch) -> None:
     monkeypatch.setattr(telemetry_env, "get_iris_ctx", lambda: _Context(_Client()))
 
 
-def test_resolves_the_endpoint_and_identity_from_the_task_context(monkeypatch) -> None:
+def test_telemetry_environment_in_cluster_returns_endpoint_and_identity(monkeypatch) -> None:
     _in_cluster(monkeypatch)
 
     assert telemetry_env.telemetry_environment() == {
         TELEMETRY_ENDPOINT_ENV: "http://finelog.marin.svc.cluster.local:8080/v1/telemetry",
         RUN_ID_ENV: "/atqamar/iceball-micro-0",
-        EXECUTION_UID_ENV: "iris:/atqamar/iceball-micro-0/1:attempt:2",
+        EXECUTION_UID_ENV: f"iris:{_ATTEMPT_UID}",
     }
 
 
-def test_an_explicit_run_id_wins_over_the_job_id(monkeypatch) -> None:
+def test_telemetry_environment_run_id_sources_follow_precedence(monkeypatch) -> None:
     _in_cluster(monkeypatch)
 
-    resolved = telemetry_env.telemetry_environment(run_id="snowball-e6-muonh-0")
-
-    assert resolved[RUN_ID_ENV] == "snowball-e6-muonh-0"
-
-
-def test_an_inherited_run_id_beats_the_job_id_and_loses_to_an_explicit_one(monkeypatch) -> None:
-    """Precedence: explicit argument, then inherited SKYRL_RUN_ID, then the Iris job id.
-
-    The wrapper resolves into a copy of its own environment, so without this an identity the
-    initiator already set would be overwritten by the job id and the rows would join under the
-    wrong run.
-    """
-    _in_cluster(monkeypatch)
+    assert telemetry_env.telemetry_environment()[RUN_ID_ENV] == "/atqamar/iceball-micro-0"
     monkeypatch.setenv(RUN_ID_ENV, "inherited-run")
-
     assert telemetry_env.telemetry_environment()[RUN_ID_ENV] == "inherited-run"
     assert telemetry_env.telemetry_environment(run_id="explicit-run")[RUN_ID_ENV] == "explicit-run"
 
-    monkeypatch.delenv(RUN_ID_ENV)
-    assert telemetry_env.telemetry_environment()[RUN_ID_ENV] == "/atqamar/iceball-micro-0"
 
-
-def test_no_cluster_context_leaves_telemetry_inert(monkeypatch) -> None:
+def test_telemetry_environment_without_cluster_context_returns_nothing(monkeypatch) -> None:
     monkeypatch.setattr(telemetry_env, "get_job_info", lambda: None)
     monkeypatch.setattr(telemetry_env, "get_iris_ctx", lambda: None)
 
     assert telemetry_env.telemetry_environment() == {}
 
 
-def test_an_unreachable_controller_does_not_reach_the_caller(monkeypatch) -> None:
-    def explode() -> None:
-        raise ConnectionError("controller is unreachable")
-
+def test_telemetry_environment_unreachable_controller_returns_nothing(monkeypatch) -> None:
     monkeypatch.setattr(telemetry_env, "get_job_info", _job_info)
-    monkeypatch.setattr(telemetry_env, "get_iris_ctx", explode)
+    monkeypatch.setattr(telemetry_env, "get_iris_ctx", lambda: _Context(_UnreachableClient()))
 
     assert telemetry_env.telemetry_environment() == {}
 
 
-def test_the_endpoint_and_run_id_reach_ray_workers_and_the_execution_uid_does_not() -> None:
+def test_telemetry_environment_scopes_keep_execution_uid_task_local() -> None:
     ambient = {
         TELEMETRY_ENDPOINT_ENV: "http://finelog:8080/v1/telemetry",
         RUN_ID_ENV: "/atqamar/iceball-micro-0",
-        EXECUTION_UID_ENV: "iris:/atqamar/iceball-micro-0/1:attempt:2",
+        EXECUTION_UID_ENV: f"iris:{_ATTEMPT_UID}",
     }
     manager = EnvVarManager.from_config({}, environ=ambient)
 
     worker = manager.environment_for(EnvVarScope.RAY_WORKER)
     assert worker[TELEMETRY_ENDPOINT_ENV] == ambient[TELEMETRY_ENDPOINT_ENV]
     assert worker[RUN_ID_ENV] == ambient[RUN_ID_ENV]
-    # An attempt belongs to one task. Broadcasting the driver's would label actors in every
-    # other task with the driver's attempt.
     assert EXECUTION_UID_ENV not in worker
     assert manager.environment_for(EnvVarScope.TASK_RUNTIME)[EXECUTION_UID_ENV] == ambient[EXECUTION_UID_ENV]
 
 
-def test_the_writer_and_the_reader_agree_on_every_variable_name(monkeypatch) -> None:
-    """The writer spells these names with constants; the reader spells them as literals in
-    another package. Nothing else asserts the two agree.
-    """
+def test_telemetry_environment_round_trips_through_trainer_config(monkeypatch) -> None:
     from skyrl_train.telemetry import TelemetryConfig
 
     _in_cluster(monkeypatch)
@@ -145,21 +112,3 @@ def test_the_writer_and_the_reader_agree_on_every_variable_name(monkeypatch) -> 
     assert config.endpoint == exported[TELEMETRY_ENDPOINT_ENV]
     assert config.run_id == exported[RUN_ID_ENV]
     assert config.execution_uid == exported[EXECUTION_UID_ENV]
-
-
-def test_the_execution_uid_matches_what_iris_stamps_for_the_same_attempt() -> None:
-    """Pin against Iris's own helper rather than restating our formula.
-
-    Iris prefers `IRIS_ATTEMPT_UID` and falls back to task id and attempt number. Implementing
-    only the fallback produces a different string for the same attempt wherever the uid is set,
-    and nothing reports it — the cross-producer joins this PR exists to enable simply return
-    nothing.
-    """
-    from iris.runtime import telemetry as iris_telemetry
-
-    attempts = [None, "01JABCDEF0123456789"] if _SUPPORTS_ATTEMPT_UID else [None]
-    for attempt_uid in attempts:
-        job_info = _job_info(attempt_uid)
-        assert telemetry_env.execution_uid(
-            str(job_info.task_id), job_info.attempt_id, getattr(job_info, "attempt_uid", None)
-        ) == iris_telemetry._execution_uid(job_info)

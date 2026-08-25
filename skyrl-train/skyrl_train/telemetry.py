@@ -95,27 +95,15 @@ class TelemetryConfig:
         return cls(
             endpoint=text("SKYRL_TELEMETRY_ENDPOINT"),
             run_id=text("SKYRL_RUN_ID"),
-            execution_uid=text("SKYRL_EXECUTION_UID") or _task_attempt_uid(),
+            execution_uid=text("SKYRL_EXECUTION_UID") or _iris_execution_uid(),
             serving_job_id=text("SKYRL_SERVING_JOB_ID"),
         )
 
 
-def _task_attempt_uid() -> str | None:
-    """Identify this task attempt from its own Iris task id.
-
-    A resubmit can reuse the same task id and attempt number, so the derived form is not unique
-    across physical executions; IRIS_ATTEMPT_UID is the controller's own collision-free value.
-    Iris builds older than that variable leave the derived form as the only option.
-    """
+def _iris_execution_uid() -> str | None:
     if attempt_uid := os.environ.get("IRIS_ATTEMPT_UID"):
         return f"iris:{attempt_uid}"
-    task_with_attempt = os.environ.get("IRIS_TASK_ID")
-    if not task_with_attempt:
-        return None
-    task_id, separator, attempt = task_with_attempt.rpartition(":")
-    if not separator or "/" in attempt:
-        task_id, attempt = task_with_attempt, "0"
-    return f"iris:{task_id}:attempt:{attempt or '0'}"
+    return None
 
 
 def _iris_resources() -> dict[str, str]:

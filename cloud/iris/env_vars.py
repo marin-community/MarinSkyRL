@@ -161,11 +161,7 @@ ENV_VAR_SPECS = (
         EnvVarSource.CONFIG,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
     ),
-    # The endpoint and the run identity are properties of the whole run, so every
-    # process that emits has to agree on them. The execution uid identifies one task
-    # attempt: it is resolved per task and must not be broadcast from the driver's
-    # node to actors on other nodes, so it stops at the driver. A process that reaches
-    # a Ray worker without it derives its own from IRIS_TASK_ID.
+    # The execution uid is task-local; Ray actors derive it from the node's Iris attempt uid.
     EnvVarSpec(
         TELEMETRY_ENDPOINT_ENV,
         "runtime.telemetry",

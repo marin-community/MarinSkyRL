@@ -76,7 +76,7 @@ except ImportError as error:
     CONTROLLER_ROLE = "controller"
     WORKER_ROLE = "worker"
 
-    def ray_metrics_telemetry(node_ip: str, metrics_port: int, role: str = "controller"):
+    def ray_metrics_telemetry(_node_ip: str, _metrics_port: int, _role: str):
         _log(f"Ray metric forwarding is unavailable: {_RAY_METRICS_UNAVAILABLE_REASON}")
         return contextlib.nullcontext()
 
@@ -647,7 +647,7 @@ def pin_socket_ifname() -> str | None:
 
 
 def export_telemetry_environment(run_id: str | None) -> dict[str, str]:
-    """Publish this task's telemetry endpoint and run identity into the process env."""
+    """Export this task's resolved telemetry settings."""
     resolved = telemetry_environment(run_id=run_id)
     if not resolved:
         _log("[telemetry] no in-cluster Iris context; MarinSkyRL telemetry stays inert")
@@ -2050,9 +2050,7 @@ def main() -> None:
     # name is node-local; training_driver_env keeps it out of the driver, which
     # would otherwise broadcast the head's name to every node.
     derived_gloo_ifname = pin_socket_ifname()
-    # Resolve from THIS task's Iris context before `ray start`, so the raylet and every
-    # actor it spawns inherit them. Nothing else writes them, and skyrl_train.telemetry
-    # exports nothing when they are unset.
+    # Resolve before Ray starts so its actors inherit this task's telemetry settings.
     export_telemetry_environment(args.run_id)
     # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
     # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
