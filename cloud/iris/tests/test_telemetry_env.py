@@ -19,6 +19,7 @@ from cloud.iris.env_vars import (  # noqa: E402
     EnvVarManager,
     EnvVarScope,
 )
+from skyrl_train.telemetry import TelemetryConfig  # noqa: E402
 
 
 _ATTEMPT_UID = "01JABCDEF0123456789"
@@ -101,8 +102,6 @@ def test_telemetry_environment_scopes_keep_execution_uid_task_local() -> None:
 
 
 def test_telemetry_environment_round_trips_through_trainer_config(monkeypatch) -> None:
-    from skyrl_train.telemetry import TelemetryConfig
-
     _in_cluster(monkeypatch)
     exported = telemetry_env.telemetry_environment()
     for name, value in exported.items():

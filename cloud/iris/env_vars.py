@@ -366,13 +366,16 @@ class EnvVarManager:
     def from_config(cls, config: Any, *, environ: Mapping[str, str] | None = None) -> "EnvVarManager":
         ambient = os.environ if environ is None else environ
         values = {}
-        if library_path := ambient.get(LD_LIBRARY_PATH_ENV):
-            values[LD_LIBRARY_PATH_ENV] = library_path
-        if nvrtc_home := ambient.get(NVRTC_HOME_ENV):
-            values[NVRTC_HOME_ENV] = nvrtc_home
-        for telemetry_name in (TELEMETRY_ENDPOINT_ENV, RUN_ID_ENV, EXECUTION_UID_ENV):
-            if telemetry_value := ambient.get(telemetry_name):
-                values[telemetry_name] = telemetry_value
+        passthrough_names = (
+            LD_LIBRARY_PATH_ENV,
+            NVRTC_HOME_ENV,
+            TELEMETRY_ENDPOINT_ENV,
+            RUN_ID_ENV,
+            EXECUTION_UID_ENV,
+        )
+        for name in passthrough_names:
+            if value := ambient.get(name):
+                values[name] = value
         if _config_value(config, "trainer.algorithm.batch_invariant", False):
             values[VLLM_BATCH_INVARIANT_ENV] = "1"
         if _config_value(config, "generator.fuse_weights", False):

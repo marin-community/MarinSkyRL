@@ -7,9 +7,9 @@ wait and train-step durations, and fully async rollout-buffer occupancy through
 allowlist of its local Ray scheduler, logical CPU/GPU, placement-group and object
 store snapshots. A rollout is one completed trajectory; a sample is one generated
 response segment, so step-wise training counts only terminal segments as
-rollouts. Export is inert unless `SKYRL_TELEMETRY_ENDPOINT` and `SKYRL_RUN_ID`
-are set. `cloud/iris/telemetry_env.py` resolves them inside the Iris task, and the
-task runtime exports them before Ray starts so its actors inherit them.
+rollouts. Export is inert without a telemetry endpoint, run id, and execution uid.
+`cloud/iris/telemetry_env.py` resolves them inside the Iris task, and the task
+runtime exports them before Ray starts so its actors inherit them.
 `SKYRL_EXECUTION_UID` can override the execution identity; otherwise each process
 uses its node-local `IRIS_ATTEMPT_UID`. The service is fixed to `marinskyrl`;
 `SKYRL_SERVING_JOB_ID` optionally joins a centralized serving job.
