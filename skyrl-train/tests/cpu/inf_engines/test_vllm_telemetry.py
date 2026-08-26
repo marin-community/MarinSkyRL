@@ -125,6 +125,31 @@ def test_one_engines_families_fit_inside_the_publisher_budget():
     assert len(exported_snapshots(engine_families())) <= MAX_SNAPSHOTS
 
 
+def test_the_engines_rows_are_published_under_vllms_own_service(monkeypatch):
+    """These are vLLM's metrics under vLLM's names; marin's serving path publishes them the same way,
+    and every reader of them selects on the service."""
+    import skyrl_train.telemetry as trainer_telemetry
+
+    monkeypatch.setenv("SKYRL_TELEMETRY_ENDPOINT", "http://finelog.invalid")
+    monkeypatch.setenv("SKYRL_ROOT_RUN_UID", "run-1")
+    monkeypatch.setenv("SKYRL_EXECUTION_UID", "exec-1")
+    configured = {}
+
+    class _Telemetry:
+        def configure(self, *, endpoint, service, attributes):
+            configured.update(service=service, role=attributes["role"])
+
+        def runtime_status(self):
+            return type("S", (), {"configured": False, "queued_records": 0, "lost_records": 0})()
+
+    monkeypatch.setattr(trainer_telemetry, "telemetry", _Telemetry())
+
+    with engine_metrics_telemetry():
+        pass
+
+    assert configured == {"service": "vllm", "role": "inference"}
+
+
 def test_an_engine_without_a_telemetry_endpoint_forwards_nothing(monkeypatch):
     monkeypatch.delenv("SKYRL_TELEMETRY_ENDPOINT", raising=False)
     started = []

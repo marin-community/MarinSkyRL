@@ -23,7 +23,11 @@ from rigging.telemetry.prometheus import PrometheusCollector, prefixed_metric_sn
 
 from skyrl_train.telemetry import INFERENCE_ROLE, process_telemetry
 
-METRIC_SOURCE = "vllm"
+# The engine actor exists to run vLLM, and what it forwards is vLLM's own metrics under vLLM's own
+# names, so both `service` and `metric_source` name vLLM rather than the process hosting it. marin's
+# serving path publishes the same metrics under the same name, so one reader finds both.
+SERVICE = "vllm"
+METRIC_SOURCE = SERVICE
 METRIC_PREFIX = "vllm:"
 
 # Bounds one poll of this process's registry. The set below is ~153 series, near enough context-
@@ -92,7 +96,7 @@ def exported_snapshots(families):
 @contextlib.contextmanager
 def engine_metrics_telemetry() -> Iterator[None]:
     """Own this engine process's telemetry and forward its vLLM metrics for the block's duration."""
-    with process_telemetry(INFERENCE_ROLE) as owner:
+    with process_telemetry(INFERENCE_ROLE, service=SERVICE) as owner:
         collector = owner.collector_or_inert(
             PrometheusCollector(
                 metric_source=METRIC_SOURCE,

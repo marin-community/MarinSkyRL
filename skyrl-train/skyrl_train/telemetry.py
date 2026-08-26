@@ -19,6 +19,9 @@ except ImportError as error:
     from skyrl_train import inert_telemetry as telemetry
 
 
+# `service` names the system whose metrics these are, not the process that carries them. A process
+# that forwards a foreign system's metrics under that system's own names publishes them under its
+# name; everything MarinSkyRL measures about itself uses this one.
 SERVICE = "marinskyrl"
 DRIVER_ROLE = "driver"
 TRAINER_ROLE = "trainer"
@@ -227,9 +230,10 @@ def record_rollout_buffer(depth: int, queue_capacity: int) -> None:
 
 
 class ProcessTelemetry:
-    def __init__(self, config: TelemetryConfig, role: str) -> None:
+    def __init__(self, config: TelemetryConfig, role: str, service: str) -> None:
         self._config = config
         self._role = role
+        self._service = service
         self._configured = False
 
     def __enter__(self) -> "ProcessTelemetry":
@@ -243,7 +247,7 @@ class ProcessTelemetry:
             return self
         telemetry.configure(
             endpoint=self._config.endpoint,
-            service=SERVICE,
+            service=self._service,
             attributes=_resources(self._config, self._role),
         )
         self._configured = telemetry.runtime_status().configured
@@ -278,5 +282,5 @@ class ProcessTelemetry:
         return False
 
 
-def process_telemetry(role: str) -> ProcessTelemetry:
-    return ProcessTelemetry(TelemetryConfig.from_environment(), role)
+def process_telemetry(role: str, service: str = SERVICE) -> ProcessTelemetry:
+    return ProcessTelemetry(TelemetryConfig.from_environment(), role, service)
