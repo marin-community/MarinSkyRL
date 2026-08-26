@@ -71,9 +71,10 @@ TIMING_PARENTS: dict[str, str | None] = {
     "policy_train": "train_critic_and_policy",
     "policy_critic_overlap_train": "train_critic_and_policy",
     "sync_weights": "step",
-    # One Timer key, two call contexts: in-step, and again on the checkpoint path outside `step`.
-    # A root reports it without subtracting checkpoint-path time from the step remainder.
-    "offload_policy_model_to_cpu": None,
+    # Recorded by the same method as sync_weights above, at the same two call contexts -- in-step,
+    # and again on the checkpoint path outside `step`. One Timer key sums both, so on a save step
+    # some checkpoint time is charged here. Shared with sync_weights; splitting the key is the fix.
+    "offload_policy_model_to_cpu": "step",
     # Inside `run_training` in the async trainer; the sync trainer has no `run_training`, and
     # resolve_timing_parent walks up to `step` there.
     "dump_data_batch": "run_training",

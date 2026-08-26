@@ -1278,12 +1278,7 @@ class RayPPOTrainer:
 
         if not self.cfg.trainer.step_wise_training:
             validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
-        record_generated_work(
-            trajectory_batch["response_ids"],
-            trajectory_batch.get("is_last_step"),
-            self.global_step,
-            self.global_step,
-        )
+        record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"), self.global_step)
 
         return trajectory_batch
 

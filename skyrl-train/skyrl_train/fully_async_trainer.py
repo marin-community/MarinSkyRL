@@ -35,7 +35,13 @@ from typing import List, Tuple, TypeVar
 from enum import Enum, auto
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
-from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_rollout_buffer
+from skyrl_train.telemetry import (
+    critical_phase,
+    record_generated_work,
+    record_policy_step,
+    record_rollout_buffer,
+    record_rollout_staleness,
+)
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
@@ -980,7 +986,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 record_generated_work(
                     cur_trajectory_batch["response_ids"],
                     cur_trajectory_batch.get("is_last_step"),
-                    self.global_step,
                     staleness_step,
                 )
                 completed_group = GeneratedOutputGroup(
@@ -1377,6 +1382,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             trajectory_batches.append(cur_generated_output_group.trajectory_batch)
             group_size = len(cur_generated_output_group.trajectory_batch["response_ids"])
             uids.extend([cur_generated_output_group.uid] * group_size)
+
+        record_rollout_staleness(stalenesses, self.global_step)
 
         assert max(stalenesses) <= self.max_staleness_steps, (
             f"Fresh batch assembly returned staleness {max(stalenesses)} above max {self.max_staleness_steps}"
