@@ -71,8 +71,12 @@ TIMING_PARENTS: dict[str, str | None] = {
     "policy_train": "train_critic_and_policy",
     "policy_critic_overlap_train": "train_critic_and_policy",
     "sync_weights": "step",
-    "offload_policy_model_to_cpu": "step",
-    "dump_data_batch": "step",
+    # One Timer key, two call contexts: in-step, and again on the checkpoint path outside `step`.
+    # A root reports it without subtracting checkpoint-path time from the step remainder.
+    "offload_policy_model_to_cpu": None,
+    # Inside `run_training` in the async trainer; the sync trainer has no `run_training`, and
+    # resolve_timing_parent walks up to `step` there.
+    "dump_data_batch": "run_training",
     "init_weight_sync_state": None,
     "save_checkpoints": None,
     "cleanup_old_checkpoints": "save_checkpoints",
