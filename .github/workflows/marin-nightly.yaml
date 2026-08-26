@@ -103,9 +103,9 @@ jobs:
             "${TASK_ENV[@]}" \
             -- bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
 
-      - name: Stop any Iris job the run left behind
+      - name: Cancel any Iris job the run left behind
         if: always()
-        run: iris --cluster marin job stop "/runner/$JOB_NAME" || true
+        run: iris --cluster marin job cancel "/runner/$JOB_NAME" || true
 
       - uses: actions/upload-artifact@v7
         if: always()
