@@ -652,18 +652,15 @@ class VLLMStatsCallback(TrainerCallback):
         if self._inference_engine_client is None:
             return control
 
-        trainer = kwargs.get("trainer")
-        if trainer is None:
-            logger.warning("VLLMStatsCallback: no trainer to publish engine stats through")
-            return control
-
         try:
             stats = await self._inference_engine_client.get_stats()
         except Exception as e:
             logger.warning(f"VLLMStatsCallback: Failed to collect stats: {e}")
             return control
 
-        self._log_stats(stats, state.global_step, trainer)
+        # Outside the try: a failure here is a publishing failure, and the handler names the
+        # callback. Inside, it would be reported as a failure to reach the engines.
+        self._log_stats(stats, state.global_step, kwargs["trainer"])
         return control
 
     def _log_stats(self, stats: Dict[str, Any], global_step: int, trainer: Any) -> None:

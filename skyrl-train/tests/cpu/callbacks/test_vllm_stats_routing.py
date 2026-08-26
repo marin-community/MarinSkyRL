@@ -5,15 +5,11 @@ metrics, which is what carries them to every configured tracker backend and to t
 stdout line the offline parsers and the nightly gate read.
 """
 
-import ast
 import asyncio
-import re
-from pathlib import Path
 
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
-from skyrl_train.callbacks.builtin import VLLMStatsCallback
-
-_SKYRL_TRAIN = Path(__file__).resolve().parents[3] / "skyrl_train"
+from skyrl_train.callbacks.builtin import VLLMStatsCallback, _engine_metrics
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
 # The keys logged for a step. Pinned by name: a rename here is a break in every existing panel.
 EXPECTED_KEYS = {
@@ -111,32 +107,48 @@ def test_engine_stats_land_in_the_trainers_step_metrics():
     assert trainer.all_metrics["vllm/total_finished_requests"] == 64
 
 
-def test_every_key_read_from_a_payload_is_one_get_stats_produces():
-    """The reads are unguarded, so a producer-side rename is a crash rather than a silent zero."""
-    read = set(re.findall(r'stats\["([^"]+)"\]', (_SKYRL_TRAIN / "callbacks" / "builtin.py").read_text()))
-    client = ast.parse((_SKYRL_TRAIN / "inference_engines" / "inference_engine_client.py").read_text())
-    get_stats = next(
-        node for node in ast.walk(client) if isinstance(node, ast.AsyncFunctionDef) and node.name == "get_stats"
-    )
-    # The latency keys arrive through `**latency_agg`, built from this list one line above the loop.
-    latency_keys = {
-        f"{prefix}_latency_{name.value}_{suffix}"
-        for node in ast.walk(get_stats)
-        if isinstance(node, ast.Assign)
-        and isinstance(node.value, ast.List)
-        and any(isinstance(target, ast.Name) and target.id == "latency_keys" for target in node.targets)
-        for name in node.value.elts
-        if isinstance(name, ast.Constant)
-        for prefix, suffix in (("avg", "mean"), ("max", "p90"))
+def test_the_payload_get_stats_really_produces_carries_every_key_the_callback_reads():
+    """The reads are unguarded, so a producer-side rename is a KeyError rather than a silent zero.
+
+    This drives the real aggregation rather than a fixture, so a key renamed on either side fails
+    here instead of at the first step of a run.
+    """
+    engine = {
+        "peak_running_reqs": 5,
+        "peak_waiting_reqs": 1,
+        "peak_prompt_throughput": 900.0,
+        "peak_generation_throughput": 1450.5,
+        "peak_gpu_cache_usage_perc": 62.5,
+        "peak_prefix_cache_hit_rate": 41.0,
+        "median_running_reqs": 4.0,
+        "median_waiting_reqs": 0.0,
+        "median_prompt_throughput": 850.0,
+        "median_generation_throughput": 1310.0,
+        "median_gpu_cache_usage_perc": 58.0,
+        "median_prefix_cache_hit_rate": 38.0,
+        "latency_prefill_mean": 0.12,
+        "latency_prefill_p90": 0.30,
+        "latency_decode_mean": 3.9,
+        "latency_decode_p90": 8.0,
+        "latency_e2e_mean": 4.25,
+        "latency_e2e_p90": 9.5,
+        "latency_queued_mean": 0.05,
+        "latency_queued_p90": 0.20,
+        "latency_ttft_mean": 0.18,
+        "latency_ttft_p90": 0.44,
+        "latency_num_finished_requests": 32,
+        "total_preempted_reqs": 3,
+        "num_samples": 64,
+        "num_active_samples": 20,
     }
-    produced = latency_keys | {
-        key.value
-        for node in ast.walk(get_stats)
-        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)
-        for key in node.value.keys
-        if isinstance(key, ast.Constant)
-    }
-    assert not read - produced, f"read from get_stats but never produced: {sorted(read - produced)}"
+
+    class _Client:
+        async def _run_on_all_engines(self, _method):
+            return [engine, dict(engine)]
+
+    produced = asyncio.run(InferenceEngineClient.get_stats(_Client()))
+
+    assert set(_engine_metrics(produced)) == EXPECTED_KEYS
 
 
 def test_stats_are_collected_on_the_configured_interval_only():
