@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 import asyncio
+import concurrent.futures
 from dataclasses import dataclass, replace
 import gzip
 import hashlib
@@ -1053,6 +1054,14 @@ class TrajectorySink:
         )
 
 
+# `asyncio.to_thread` uses the loop's default executor, which on the driver is the stock
+# `min(32, cpu + 4)` threads shared with `train_critic_and_policy` and the checkpoint writes. Those
+# queue FIFO, so a burst of finished rollout groups delays the training step by however many
+# retentions were submitted first. `TrajectorySink.retain` also serialises on one lock, so extra
+# threads only wait: one writer is the throughput either way, and one keeps it off the shared pool.
+_RETENTION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="retention")
+
+
 async def retain_trajectories(
     sink: TrajectorySink,
     input_batch: TrajectoryRequestBatch,
@@ -1060,7 +1069,8 @@ async def retain_trajectories(
 ) -> None:
     """Persist normalized trajectories without blocking the trainer event loop."""
     try:
-        metrics = await asyncio.to_thread(
+        metrics = await asyncio.get_running_loop().run_in_executor(
+            _RETENTION_EXECUTOR,
             sink.retain,
             input_batch,
             output,
