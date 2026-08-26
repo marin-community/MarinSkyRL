@@ -267,8 +267,8 @@ class RolloutCoordinator:
         return await self._runner.run(sub_batch)
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
-    async def start_eval_session(self, run_name: str, eval_step: int, val_set_name=None) -> None:
-        await self._runner.start_eval_session(run_name, eval_step, val_set_name)
+    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
+        await self._runner.start_eval_session(run_name=run_name, eval_step=eval_step, val_set_name=val_set_name)
 
     async def stop_eval_session(self) -> None:
         await self._runner.stop_eval_session()
@@ -503,9 +503,11 @@ class RolloutDispatcher:
     # (eval_interval is effectively infinite), so this path is rarely exercised
     # under fan-out; routing to one coordinator avoids fanning eval-session
     # state across K orchestrators.
-    async def start_eval_session(self, run_name: str, eval_step: int, val_set_name=None) -> None:
+    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
         if self._actors:
-            await self._actors[0].start_eval_session.remote(run_name, eval_step, val_set_name)
+            await self._actors[0].start_eval_session.remote(
+                run_name=run_name, eval_step=eval_step, val_set_name=val_set_name
+            )
             self._eval_session_active = True
 
     async def stop_eval_session(self) -> None:
