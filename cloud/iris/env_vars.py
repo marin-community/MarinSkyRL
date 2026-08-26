@@ -161,7 +161,6 @@ ENV_VAR_SPECS = (
         EnvVarSource.CONFIG,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
     ),
-    # The execution uid is task-local; Ray actors derive it from the node's Iris attempt uid.
     EnvVarSpec(
         TELEMETRY_ENDPOINT_ENV,
         "runtime.telemetry",
@@ -174,6 +173,7 @@ ENV_VAR_SPECS = (
         EnvVarSource.EXTERNAL,
         ALL_RUNTIME_SCOPES,
     ),
+    # Task-local: each node stamps its own attempt uid.
     EnvVarSpec(
         EXECUTION_UID_ENV,
         "runtime.telemetry",

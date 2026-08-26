@@ -646,15 +646,13 @@ def pin_socket_ifname() -> str | None:
     return iface
 
 
-def export_telemetry_environment(run_id: str | None) -> dict[str, str]:
-    """Export this task's resolved telemetry settings."""
+def export_telemetry_environment(run_id: str | None) -> None:
     resolved = telemetry_environment(run_id=run_id)
     if not resolved:
-        _log("[telemetry] no in-cluster Iris context; MarinSkyRL telemetry stays inert")
-        return {}
+        _log("[telemetry] no telemetry environment resolved; MarinSkyRL telemetry stays inert")
+        return
     os.environ.update(resolved)
     _log(f"[telemetry] {resolved[TELEMETRY_ENDPOINT_ENV]} run_id={resolved[RUN_ID_ENV]}")
-    return resolved
 
 
 def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:

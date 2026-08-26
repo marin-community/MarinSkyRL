@@ -2169,8 +2169,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--train-data", args.train_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
-    # Experiment identity for telemetry. The job name is derived from it and sanitized,
-    # so it cannot be recovered in the pod; forward the value the caller actually holds.
+    # The job name is sanitized, so the pod cannot recover the run id.
     if args.run_id:
         controller_cmd.extend(["--run-id", args.run_id])
     controller_cmd.extend(_model_bootstrap_args(args))

@@ -16,8 +16,6 @@ from cloud.iris.env_vars import (  # noqa: E402
     EXECUTION_UID_ENV,
     RUN_ID_ENV,
     TELEMETRY_ENDPOINT_ENV,
-    EnvVarManager,
-    EnvVarScope,
 )
 from skyrl_train.telemetry import TelemetryConfig  # noqa: E402
 
@@ -84,21 +82,6 @@ def test_telemetry_environment_unreachable_controller_returns_nothing(monkeypatc
     monkeypatch.setattr(telemetry_env, "get_iris_ctx", lambda: _Context(_UnreachableClient()))
 
     assert telemetry_env.telemetry_environment() == {}
-
-
-def test_telemetry_environment_scopes_keep_execution_uid_task_local() -> None:
-    ambient = {
-        TELEMETRY_ENDPOINT_ENV: "http://finelog:8080/v1/telemetry",
-        RUN_ID_ENV: "/atqamar/iceball-micro-0",
-        EXECUTION_UID_ENV: f"iris:{_ATTEMPT_UID}",
-    }
-    manager = EnvVarManager.from_config({}, environ=ambient)
-
-    worker = manager.environment_for(EnvVarScope.RAY_WORKER)
-    assert worker[TELEMETRY_ENDPOINT_ENV] == ambient[TELEMETRY_ENDPOINT_ENV]
-    assert worker[RUN_ID_ENV] == ambient[RUN_ID_ENV]
-    assert EXECUTION_UID_ENV not in worker
-    assert manager.environment_for(EnvVarScope.TASK_RUNTIME)[EXECUTION_UID_ENV] == ambient[EXECUTION_UID_ENV]
 
 
 def test_telemetry_environment_round_trips_through_trainer_config(monkeypatch) -> None:

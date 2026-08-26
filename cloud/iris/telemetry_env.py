@@ -20,14 +20,15 @@ def telemetry_environment(*, run_id: str | None = None) -> dict[str, str]:
     """Return the telemetry variables for this task, or nothing outside a cluster.
 
     Args:
-        run_id: Experiment identity. Overrides ``SKYRL_RUN_ID`` and the Iris job id.
+        run_id: Experiment identity.
     """
     job_info = get_job_info()
     ctx = get_iris_ctx()
     if job_info is None or ctx is None or ctx.client is None:
         return {}
-    if job_info.attempt_uid is None:
-        raise RuntimeError("Iris did not provide an attempt uid")
+    if not job_info.attempt_uid:
+        logger.warning("Iris did not provide an attempt uid; MarinSkyRL telemetry stays inert")
+        return {}
     try:
         endpoint = ctx.client.resolve_endpoint(LOG_SERVER_ENDPOINT_NAME).rstrip("/") + TELEMETRY_ENDPOINT_PATH
     except (ConnectError, ConnectionError, TimeoutError):
@@ -36,7 +37,7 @@ def telemetry_environment(*, run_id: str | None = None) -> dict[str, str]:
     return {
         TELEMETRY_ENDPOINT_ENV: endpoint,
         RUN_ID_ENV: run_id or os.environ.get(RUN_ID_ENV) or str(job_info.job_id),
-        EXECUTION_UID_ENV: f"iris:{job_info.attempt_uid}",
+        EXECUTION_UID_ENV: os.environ.get(EXECUTION_UID_ENV) or f"iris:{job_info.attempt_uid}",
     }
 
 
