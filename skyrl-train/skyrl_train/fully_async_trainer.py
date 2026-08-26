@@ -978,6 +978,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 record_generated_work(
                     cur_trajectory_batch["response_ids"],
                     cur_trajectory_batch.get("is_last_step"),
+                    self.global_step,
                     staleness_step,
                 )
                 completed_group = GeneratedOutputGroup(

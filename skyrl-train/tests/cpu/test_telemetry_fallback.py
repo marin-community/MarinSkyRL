@@ -62,7 +62,7 @@ def test_records_carry_the_step_they_describe(monkeypatch):
     ):
         monkeypatch.setattr(trainer_telemetry, name, _Recorder(name))
 
-    trainer_telemetry.record_generated_work([[1, 2], [3]], [True, True], 39)
+    trainer_telemetry.record_generated_work([[1, 2], [3]], [True, True], 41, 39)
     trainer_telemetry.record_policy_step(41)
     trainer_telemetry.record_rollout_buffer(3, 8)
     with trainer_telemetry.critical_phase("train_step", 41):
@@ -76,9 +76,10 @@ def test_records_carry_the_step_they_describe(monkeypatch):
         for name, attributes in recorded
     }
     assert stamps == {
-        ("work_completed", "rollout"): (None, "39"),
-        ("work_completed", "sample"): (None, "39"),
-        ("work_completed", "generated_token"): (None, "39"),
+        # Both, so `step - weights_step` is the staleness with no time join.
+        ("work_completed", "rollout"): ("41", "39"),
+        ("work_completed", "sample"): ("41", "39"),
+        ("work_completed", "generated_token"): ("41", "39"),
         ("work_completed", "policy_step"): ("41", None),
         ("phase_duration", "train_step"): ("41", None),
         # A live queue reading and a run constant; neither is about a step.

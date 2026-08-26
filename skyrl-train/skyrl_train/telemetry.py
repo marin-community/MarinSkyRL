@@ -198,12 +198,15 @@ def record_policy_step(step: int) -> None:
 
 
 def record_generated_work(
-    response_ids: Sequence[Sequence[int]], is_last_step: Sequence[bool] | None, weights_step: int
+    response_ids: Sequence[Sequence[int]], is_last_step: Sequence[bool] | None, step: int, weights_step: int
 ) -> None:
-    """Count generated work against the policy version that produced it.
+    """Count generated work against both the step that recorded it and the policy that produced it.
 
-    Under fully-async generation that is up to `max_staleness_steps` behind the step being trained,
-    so this carries `weights_step` where every other record here carries `step`.
+    `step - weights_step` is the staleness: under fully-async generation the producer runs
+    concurrently, so tokens can be generated under policy N and consumed several steps later. Both
+    are carried because neither alone answers a question we need. `weights_step` groups a reward by
+    the policy that earned it; the difference is the staleness distribution. They are equal in the
+    synchronous trainer, where generation and training share a step.
     """
     sample_count = len(response_ids)
     rollout_count = sample_count if is_last_step is None else sum(is_last_step)
@@ -219,7 +222,12 @@ def record_generated_work(
         if count:
             work_completed.add(
                 count,
-                attributes={"work_kind": work_kind, "role": TRAINER_ROLE, "weights_step": str(weights_step)},
+                attributes={
+                    "work_kind": work_kind,
+                    "role": TRAINER_ROLE,
+                    "step": str(step),
+                    "weights_step": str(weights_step),
+                },
             )
     if rollout_count:
         progress_timestamp.set(
