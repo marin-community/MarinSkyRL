@@ -171,6 +171,11 @@ sbatch --export=ALL,CHECKOUT="$CHECKOUT",ARTIFACT_ROOT="$ARTIFACT_ROOT" \
   tests/gpu/fault_injection/run_moe_dispatch_jupiter.sbatch
 ```
 
+`codex/` is disposable staging scratch, not a durable artifact: it has been removed wholesale during scratch inode
+reclamation, and nothing recreates it. Before requesting the allocation, add a fresh clean worktree of this
+repository there from the login host (`git worktree add "$CHECKOUT" <ref>`); compute nodes have no internet, so the
+checkout must exist before launch.
+
 The test owns and reaps its Slurm step under separate setup and execution deadlines. Run it only in an otherwise
 idle allocation containing exactly four four-GPU nodes.
 
