@@ -669,7 +669,13 @@ async def test_best_effort_retention_does_not_end_the_run(tmp_path):
     output = _output()
     await retain_trajectories(sink, _input(), output)
 
-    assert output["rollout_metrics"]["generate/trajectory_retention/write_errors"] == 1.0
+    metrics = output["rollout_metrics"]
+    # Records, not batches, matching every other producer of this key.
+    assert metrics["generate/trajectory_retention/write_errors"] == 3.0
+    # The whole keyset survives a total failure: an absent `written` reads as no data, not as none
+    # written, and a threshold on it would never fire.
+    assert metrics["generate/trajectory_retention/written"] == 0.0
+    assert metrics["generate/trajectory_retention/candidates"] == 0.0
 
 
 @pytest.mark.asyncio

@@ -1082,7 +1082,11 @@ async def retain_trajectories(
         if sink.config.required:
             raise
         logger.exception("Trajectory retention failed; continuing without it")
-        metrics = {f"{RETENTION_METRIC_PREFIX}/write_errors": 1.0}
+        # Seeded from the zero-filled keyset: reporting write_errors alone would leave `written`
+        # absent on a step where every write failed, which reads as no data rather than as none
+        # written. The count is records, matching every other producer of this key.
+        metrics = _empty_metrics()
+        metrics[f"{RETENTION_METRIC_PREFIX}/write_errors"] = float(len(output.get("response_ids") or ()))
     if not metrics:
         return
     rollout_metrics = output.get("rollout_metrics") or {}
