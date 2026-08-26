@@ -9,6 +9,7 @@ pytest.importorskip("rigging.telemetry")
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 from skyrl_train.inference_engines.vllm.vllm_telemetry import (
+    COLLECTOR_STOP_TIMEOUT,
     MAX_SNAPSHOTS,
     engine_metrics_telemetry,
     exported_snapshots,
@@ -22,7 +23,7 @@ FINISH_REASONS = ("stop", "length", "abort", "error", "repetition")
 WAITING_REASONS = ("capacity", "deferred")
 
 
-def engine_families(scale=1):
+def engine_families():
     """One engine's registry, labelled the way vLLM labels its own."""
     registry = CollectorRegistry()
     labels = list(ENGINE)
@@ -33,10 +34,6 @@ def engine_families(scale=1):
     waiting = Gauge("vllm:num_requests_waiting_by_reason", "d", labels + ["reason"], registry=registry)
     for reason in WAITING_REASONS:
         waiting.labels(**ENGINE, reason=reason).set(2)
-
-    sleep_state = Gauge("vllm:engine_sleep_state", "d", labels + ["sleep_state"], registry=registry)
-    for state in ("awake", "weights_offloaded", "discard_all"):
-        sleep_state.labels(**ENGINE, sleep_state=state).set(0)
 
     success = Counter("vllm:request_success", "d", labels + ["finished_reason"], registry=registry)
     for index, reason in enumerate(FINISH_REASONS):
@@ -60,7 +57,7 @@ def engine_families(scale=1):
     # The registry is process-wide, so it also holds whatever else the process registered.
     Counter("python_gc_collections", "d", ["generation"], registry=registry).labels(generation="0").inc(42)
 
-    return tuple(registry.collect()) * scale
+    return tuple(registry.collect())
 
 
 def test_the_forwarded_series_are_exactly_the_selected_families():
@@ -71,7 +68,6 @@ def test_the_forwarded_series_are_exactly_the_selected_families():
         "num_requests_waiting",
         "num_requests_waiting_by_reason",
         "kv_cache_usage_perc",
-        "engine_sleep_state",
         "request_success_total",
         "num_preemptions_total",
         "prefix_cache_hits_total",
@@ -148,6 +144,46 @@ def test_the_engines_rows_are_published_under_vllms_own_service(monkeypatch):
         pass
 
     assert configured == {"service": "vllm", "role": "inference"}
+
+
+def test_a_configured_engine_starts_and_stops_the_forwarder(monkeypatch):
+    """The rest of the suite proves forwarding stays off when it should; this is the other half."""
+    import skyrl_train.telemetry as trainer_telemetry
+
+    monkeypatch.setenv("SKYRL_TELEMETRY_ENDPOINT", "http://finelog.invalid")
+    monkeypatch.setenv("SKYRL_ROOT_RUN_UID", "run-1")
+    monkeypatch.setenv("SKYRL_EXECUTION_UID", "exec-1")
+    calls = []
+
+    class _Telemetry:
+        def configure(self, **_):
+            pass
+
+        def runtime_status(self):
+            return type("S", (), {"configured": True, "queued_records": 0, "lost_records": 0})()
+
+        def event(self, *_args, **_kwargs):
+            pass
+
+        def shutdown(self, _timeout):
+            pass
+
+    class _Collector:
+        def start(self):
+            calls.append("start")
+
+        def stop(self, *, timeout):
+            calls.append(("stop", timeout))
+
+    monkeypatch.setattr(trainer_telemetry, "telemetry", _Telemetry())
+    monkeypatch.setattr(
+        "skyrl_train.inference_engines.vllm.vllm_telemetry.PrometheusCollector", lambda **_: _Collector()
+    )
+
+    with engine_metrics_telemetry():
+        assert calls == ["start"]
+
+    assert calls == ["start", ("stop", COLLECTOR_STOP_TIMEOUT)]
 
 
 def test_an_engine_without_a_telemetry_endpoint_forwards_nothing(monkeypatch):

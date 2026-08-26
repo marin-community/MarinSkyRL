@@ -5,7 +5,9 @@ vLLM appends its own ``PrometheusStatLogger`` unless it is handed a ``Prometheus
 family lands in this process's registry. ⚠️ ``enable_ray_prometheus_stats: true`` hands it
 ``RayPrometheusStatLogger``, which *is* that subclass, so vLLM skips the stock logger and this
 forwarder sees nothing; the engine warns when the two are combined. Measured on a live engine at the
-pinned fork with the flag off: 66 ``vllm:*`` families after engine construction, 0 before.
+pinned fork with the flag off, ``REGISTRY.collect()`` yields 36 ``vllm:*`` families after engine
+construction and 0 before. (A text scrape of the same registry reports 66, because it splits each
+``_created`` series into its own family -- the higher number describes the HTTP path, not this one.)
 
 marin forwards the same metrics for its serving path, but by scraping ``/metrics`` over HTTP. That
 does not port: SkyRL runs no HTTP surface on the engine (``enable_http_endpoint`` is false by
@@ -40,9 +42,11 @@ METRIC_PREFIX = "vllm:"
 MAX_SNAPSHOTS = 1024
 COLLECTOR_STOP_TIMEOUT = 0.5
 
-# vLLM registers 66 families. These answer where rollout time goes, how the engine is loaded, and
-# why a request ended; the rest are duplicates of these, configuration echoed back, or structurally
-# zero. `cache_config_info` is excluded deliberately: it uses configuration keys as label *names*.
+# Of the 36 families a default engine registers, these answer where rollout time goes, how the
+# engine is loaded, and why a request ended; the rest duplicate these, echo configuration back, or
+# are structurally zero. `cache_config_info` is excluded deliberately: its label *names* are
+# configuration keys. Listing a family the pinned build lacks costs nothing, since the filter matches
+# on name.
 EXPORTED_FAMILIES = frozenset(
     {
         # Where a request's time goes. Histograms, so any quantile survives the read.
@@ -63,16 +67,13 @@ EXPORTED_FAMILIES = frozenset(
         # Real throughput, as rates.
         "vllm:generation_tokens",
         "vllm:prompt_tokens",
-        # The levers: how loaded the engine is, and why requests wait. The by-reason breakdown sums
-        # to the aggregate, so both are kept only because the breakdown is newer than the pinned
-        # build and a filter cannot tell an absent family from an empty one.
+        # The levers: how loaded the engine is, and why requests wait. vLLM sets the aggregate to
+        # the sum of the two reasons in the same call, so the breakdown costs one series and saves
+        # the reader a decomposition.
         "vllm:num_requests_running",
         "vllm:num_requests_waiting",
         "vllm:num_requests_waiting_by_reason",
         "vllm:kv_cache_usage_perc",
-        # Separates an engine that failed to wake after a weight sync from one that is merely idle:
-        # both report zero running, zero waiting and low cache use. The trainer sleeps every step.
-        "vllm:engine_sleep_state",
     }
 )
 

@@ -60,9 +60,10 @@ try:
     from skyrl_train.inference_engines.vllm.vllm_telemetry import engine_metrics_telemetry
 except ImportError as error:
     # `prometheus_client` and `rigging.telemetry` come from the optional telemetry extra, and this
-    # module is on the engine's import path. An installed rigging without the telemetry submodule
-    # raises ImportError rather than ModuleNotFoundError; the name check keeps other failures visible.
-    if error.name not in {"prometheus_client", "rigging", "skyrl_train"}:
+    # module is on the engine's import path, so a missing extra must not stop an engine from starting.
+    # Match on the top-level package: `from rigging.telemetry.metrics import ...` reports
+    # `rigging.telemetry`, so comparing the whole name would re-raise the very case this guards.
+    if error.name.partition(".")[0] not in {"prometheus_client", "rigging"}:
         raise
     _ENGINE_TELEMETRY_UNAVAILABLE_REASON = str(error)
 
