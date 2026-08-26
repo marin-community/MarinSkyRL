@@ -600,6 +600,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # correctly treats "resumed exactly at max_steps" as done. A mid-training resume
             # (global_step < total_training_steps) falls through and continues normally.
             if self.global_step >= self.total_training_steps:
+                # The load is the whole cost of this run, so publish before the exit.
+                self._log_startup_timings()
                 await self._handle_resume_at_max_steps()
                 return
 
