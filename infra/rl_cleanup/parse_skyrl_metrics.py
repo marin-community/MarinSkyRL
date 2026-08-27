@@ -43,41 +43,10 @@ import pandas as pd
 from infra.harbor_results import parse_harbor_result
 from infra.rl_metrics import parse_training_metrics_result, strip_ansi, training_metrics_parse_error
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
+from skyrl_train.telemetry import TIMING_PARENTS, nearest_recorded_parent
 
 # Harbor writes one TimingInfo block per phase on every trial result, in execution order.
 TRIAL_PHASES = ("environment_setup", "agent_setup", "agent_execution", "verifier")
-
-# Which trainer span contains which, as `span: containing span`. `None` marks a span that no
-# other span contains, which covers both `step` and the checkpoint, export, evaluation and
-# reference-update work that callbacks run between steps. The four trainers under `skyrl-train/`
-# that emit `timing/step` do not share one tree, so this declares the deepest of them: a span
-# whose container a run did not record resolves to the nearest container it did. That resolution
-# only walks up, so a trainer that nests a span declared here as a root goes uncorrected.
-#
-# Containment is nesting, not a promise about wall clock. A child that runs alongside its parent
-# makes the children sum past it, and the summary carries the excess as its own row.
-TIMING_PARENTS: dict[str, str | None] = {
-    "step": None,
-    "generate": "step",
-    "wait_for_generation_buffer": "step",
-    "postprocess_trajectory_batch": "step",
-    "convert_to_training_input": "step",
-    "run_training": "step",
-    "fwd_logprobs_values_reward": "run_training",
-    "apply_reward_kl_penalty": "run_training",
-    "compute_advantages_and_returns": "run_training",
-    "train_critic_and_policy": "run_training",
-    "critic_train": "train_critic_and_policy",
-    "policy_train": "train_critic_and_policy",
-    "policy_critic_overlap_train": "train_critic_and_policy",
-    "sync_weights": "step",
-    "init_weight_sync_state": None,
-    "save_checkpoints": None,
-    "cleanup_old_checkpoints": "save_checkpoints",
-    "save_hf_model": None,
-    "eval": None,
-    "update_ref_with_policy": None,
-}
 
 UNATTRIBUTED_ROW = "unattributed"
 OVERLAP_ROW = "overlap"
@@ -878,14 +847,6 @@ def create_summary_statistics(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return summaries
 
 
-def resolve_timing_parent(name: str, recorded: set[str]) -> str | None:
-    """Return the nearest container of `name` that this run recorded, or None when it has none."""
-    parent = TIMING_PARENTS[name]
-    while parent is not None and parent not in recorded:
-        parent = TIMING_PARENTS[parent]
-    return parent
-
-
 def summarize_timing_spans(df: pd.DataFrame) -> list[TimingSpan]:
     """Summarize recorded timing spans using the declared containment tree.
 
@@ -915,7 +876,7 @@ def summarize_timing_spans(df: pd.DataFrame) -> list[TimingSpan]:
     children: dict[str | None, list[str]] = defaultdict(list)
     for name in recorded & set(TIMING_PARENTS):
         if name != STEP_SPAN:
-            children[resolve_timing_parent(name, recorded)].append(name)
+            children[nearest_recorded_parent(name, recorded)].append(name)
     for siblings in children.values():
         siblings.sort(key=lambda name: (-mean_seconds(name), name))
 

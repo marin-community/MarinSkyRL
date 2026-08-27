@@ -41,10 +41,10 @@ group-sized ``run()`` call to ONE coordinator (a group is the atomic
 reward-shaping unit, so it is never split across actors) and ``ray.get``s the
 compact ``TrajectoryBatch`` back.
 
-Default OFF: when ``rollout.fanout.enabled`` is false, the trainer never
-constructs any of this and the code path is byte-for-byte the current
-behavior. ``enabled: true, num_coordinators: 1`` is behavior-identical modulo
-one RPC hop (the K=1 parity check).
+``rollout.fanout.enabled`` defaults to TRUE in ``ppo_base_config.yaml``, so a default async
+config takes this path. Setting it false makes the trainer skip all of this and leaves the
+code path byte-for-byte the single-process behavior. ``enabled: true, num_coordinators: 1``
+is behavior-identical modulo one RPC hop (the K=1 parity check).
 """
 
 from __future__ import annotations
@@ -58,9 +58,14 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
+from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.utils.fd_monitor import start_fd_monitor
 from skyrl_train.worker_setup import configure_worker_process
+
+# A literal because the harbor package does not import off Linux and this runs in the driver.
+# Nothing catches a rename of the class: fan-out would fail at startup on `bind_runner`.
+RETAINED_RUNNER_NAME = "HarborTrajectoryRunner"
 
 
 class RolloutCoordinatorRPCTimeoutError(TimeoutError):
@@ -261,8 +266,8 @@ class RolloutCoordinator:
         return await self._runner.run(sub_batch)
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
-    async def start_eval_session(self, run_name: str, eval_step: int, val_set_name=None) -> None:
-        await self._runner.start_eval_session(run_name, eval_step, val_set_name)
+    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
+        await self._runner.start_eval_session(run_name=run_name, eval_step=eval_step, val_set_name=val_set_name)
 
     async def stop_eval_session(self) -> None:
         await self._runner.stop_eval_session()
@@ -346,6 +351,10 @@ class RolloutDispatcher:
         # Trainer sets this; default returns None until then.
         self.global_step_fn = None
 
+        # The coordinators' runners never receive it: the sink is trainer-owned, lives in this
+        # process, and run() gets the finished batch back here.
+        self._trajectory_sink: Optional[TrajectorySink] = None
+
         self._actors: List = []
         self._rr = itertools.cycle(range(num_coordinators))
         self._pg = None
@@ -428,11 +437,22 @@ class RolloutDispatcher:
 
         _log().info(f"[RolloutDispatcher] {self._num_coordinators} coordinators started")
 
+    def set_trajectory_sink(self, sink: TrajectorySink) -> None:
+        """Attach the trainer-owned sink used to retain each returned batch.
+
+        Binds it to the harbor runner rather than to this proxy: ``runner_name`` is recorded on every
+        retained trajectory, so the dispatcher's name would change the retained data whenever fan-out
+        is on.
+        """
+        sink.bind_runner(RETAINED_RUNNER_NAME)
+        self._trajectory_sink = sink
+
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
-        """Route one group to one coordinator and await its TrajectoryBatch.
+        """Route one group to one coordinator, await its TrajectoryBatch, and retain it.
 
         Training: round-robin across all coordinators. Eval: pinned to shard 0
-        (the only coordinator with an active eval orchestrator).
+        (the only coordinator with an active eval orchestrator). When a sink is attached, the returned batch
+        is retained here.
         """
         del disable_tqdm
         if self._eval_session_active:
@@ -446,7 +466,7 @@ class RolloutDispatcher:
         rpc_deadline = asyncio.timeout(self._coordinator_rpc_timeout)
         try:
             async with rpc_deadline:
-                return await asyncio.shield(rpc)
+                output = await asyncio.shield(rpc)
         except TimeoutError as error:
             if not rpc_deadline.expired():
                 raise
@@ -454,6 +474,11 @@ class RolloutDispatcher:
                 f"Rollout coordinator {coordinator_index} RPC did not return within "
                 f"{self._coordinator_rpc_timeout:g} seconds"
             ) from error
+
+        # Outside the deadline: a slow sink write is not an unresponsive coordinator.
+        if self._trajectory_sink is not None:
+            await retain_trajectories(self._trajectory_sink, input_batch, output)
+        return output
 
     async def shutdown(self) -> None:
         if self._actors:
@@ -477,9 +502,11 @@ class RolloutDispatcher:
     # (eval_interval is effectively infinite), so this path is rarely exercised
     # under fan-out; routing to one coordinator avoids fanning eval-session
     # state across K orchestrators.
-    async def start_eval_session(self, run_name: str, eval_step: int, val_set_name=None) -> None:
+    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
         if self._actors:
-            await self._actors[0].start_eval_session.remote(run_name, eval_step, val_set_name)
+            await self._actors[0].start_eval_session.remote(
+                run_name=run_name, eval_step=eval_step, val_set_name=val_set_name
+            )
             self._eval_session_active = True
 
     async def stop_eval_session(self) -> None:

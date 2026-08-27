@@ -742,6 +742,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
 
     async def start_eval_session(
         self,
+        *,
         run_name: str,
         eval_step: int,
         val_set_name: Optional[str] = None,

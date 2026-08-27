@@ -551,6 +551,43 @@ class PreflightGateCallback(TrainerCallback):
         return []
 
 
+def _engine_metrics(stats: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten one ``get_stats()`` payload into the ``vllm/*`` keys logged for a step.
+
+    Peak and median values are accumulated by each engine over the step; the latency figures are
+    per-request seconds.
+    """
+    return {
+        "vllm/num_engines": stats["num_engines"],
+        "vllm/peak_running_reqs": stats["total_peak_running_reqs"],
+        "vllm/peak_waiting_reqs": stats["total_peak_waiting_reqs"],
+        "vllm/peak_prompt_throughput": stats["avg_peak_prompt_throughput"],
+        "vllm/peak_generation_throughput": stats["avg_peak_generation_throughput"],
+        "vllm/peak_gpu_cache_usage_perc": stats["avg_peak_gpu_cache_usage_perc"],
+        "vllm/peak_prefix_cache_hit_rate": stats["avg_peak_prefix_cache_hit_rate"],
+        "vllm/median_running_reqs": stats["avg_median_running_reqs"],
+        "vllm/median_waiting_reqs": stats["avg_median_waiting_reqs"],
+        "vllm/median_prompt_throughput": stats["avg_median_prompt_throughput"],
+        "vllm/median_generation_throughput": stats["avg_median_generation_throughput"],
+        "vllm/median_gpu_cache_usage_perc": stats["avg_median_gpu_cache_usage_perc"],
+        "vllm/median_prefix_cache_hit_rate": stats["avg_median_prefix_cache_hit_rate"],
+        "vllm/latency_prefill_mean": stats["avg_latency_prefill_mean"],
+        "vllm/latency_prefill_p90": stats["max_latency_prefill_p90"],
+        "vllm/latency_decode_mean": stats["avg_latency_decode_mean"],
+        "vllm/latency_decode_p90": stats["max_latency_decode_p90"],
+        "vllm/latency_e2e_mean": stats["avg_latency_e2e_mean"],
+        "vllm/latency_e2e_p90": stats["max_latency_e2e_p90"],
+        "vllm/latency_queued_mean": stats["avg_latency_queued_mean"],
+        "vllm/latency_queued_p90": stats["max_latency_queued_p90"],
+        "vllm/latency_ttft_mean": stats["avg_latency_ttft_mean"],
+        "vllm/latency_ttft_p90": stats["max_latency_ttft_p90"],
+        "vllm/total_finished_requests": stats["total_finished_requests"],
+        "vllm/total_preempted_reqs": stats["total_preempted_reqs"],
+        "vllm/total_samples": stats["total_samples"],
+        "vllm/total_active_samples": stats["total_active_samples"],
+    }
+
+
 @register_callback("vllm_stats")
 class VLLMStatsCallback(TrainerCallback):
     """
@@ -560,12 +597,13 @@ class VLLMStatsCallback(TrainerCallback):
     throughput, KV cache usage, request counts) bypassing Ray's log-to-driver
     functionality which can be unreliable.
 
-    Stats are logged to both console (loguru) and wandb (if available).
+    Stats go into the trainer's per-step metrics, which the trainer logs and mirrors with the
+    rest of the step. They are also summarized on one console line.
 
     Args:
         log_every_steps: Log stats every N steps. Default 1 (every step).
-        log_to_console: Whether to log stats to console via loguru. Default True.
-        log_to_wandb: Whether to log stats to wandb. Default True.
+        log_to_console: Whether to summarize stats on the console via loguru. Default True.
+        log_to_tracker: Whether to add stats to the trainer's per-step metrics. Default True.
         console_log_level: Log level for console output ("info", "debug"). Default "info".
     """
 
@@ -573,14 +611,13 @@ class VLLMStatsCallback(TrainerCallback):
         self,
         log_every_steps: int = 1,
         log_to_console: bool = True,
-        log_to_wandb: bool = True,
+        log_to_tracker: bool = True,
         console_log_level: str = "info",
     ):
         self.log_every_steps = log_every_steps
         self.log_to_console = log_to_console
-        self.log_to_wandb = log_to_wandb
+        self.log_to_tracker = log_to_tracker
         self.console_log_level = console_log_level.lower()
-        self._wandb_available: Optional[bool] = None
         self._inference_engine_client = None
 
     def on_train_begin(
@@ -617,46 +654,43 @@ class VLLMStatsCallback(TrainerCallback):
 
         try:
             stats = await self._inference_engine_client.get_stats()
-            self._log_stats(stats, state.global_step)
         except Exception as e:
             logger.warning(f"VLLMStatsCallback: Failed to collect stats: {e}")
+            return control
 
+        # Outside the try: a failure here is a publishing failure, and the handler names the
+        # callback. Inside, it would be reported as a failure to reach the engines.
+        self._log_stats(stats, state.global_step, kwargs["trainer"])
         return control
 
-    def _log_stats(self, stats: Dict[str, Any], global_step: int) -> None:
-        """Log stats to console and wandb."""
+    def _log_stats(self, stats: Dict[str, Any], global_step: int, trainer: Any) -> None:
         num_engines = stats.get("num_engines", 0)
         if num_engines == 0:
             return
 
-        # Build log message with both peak and median stats
-        total_samples = stats.get("total_samples", 0)
-        total_active = stats.get("total_active_samples", 0)
-
-        # Use new field names if available, fall back to legacy
-        peak_running = stats.get("total_peak_running_reqs", stats.get("total_running_reqs", 0))
-        peak_waiting = stats.get("total_peak_waiting_reqs", stats.get("total_waiting_reqs", 0))
-        peak_prompt_tp = stats.get("avg_peak_prompt_throughput", stats.get("avg_prompt_throughput", 0.0))
-        peak_gen_tp = stats.get("avg_peak_generation_throughput", stats.get("avg_generation_throughput", 0.0))
-        peak_kv_cache = stats.get("avg_peak_gpu_cache_usage_perc", stats.get("avg_gpu_cache_usage_perc", 0.0))
-
-        median_running = stats.get("avg_median_running_reqs", 0.0)
-        median_waiting = stats.get("avg_median_waiting_reqs", 0.0)
-        median_prompt_tp = stats.get("avg_median_prompt_throughput", 0.0)
-        median_gen_tp = stats.get("avg_median_generation_throughput", 0.0)
-        median_kv_cache = stats.get("avg_median_gpu_cache_usage_perc", 0.0)
-
-        # Latency stats
-        prefill_mean = stats.get("avg_latency_prefill_mean", 0.0)
-        prefill_p90 = stats.get("max_latency_prefill_p90", 0.0)
-        decode_mean = stats.get("avg_latency_decode_mean", 0.0)
-        decode_p90 = stats.get("max_latency_decode_p90", 0.0)
-        e2e_mean = stats.get("avg_latency_e2e_mean", 0.0)
-        e2e_p90 = stats.get("max_latency_e2e_p90", 0.0)
-        queued_mean = stats.get("avg_latency_queued_mean", 0.0)
-        ttft_mean = stats.get("avg_latency_ttft_mean", 0.0)
-        total_finished = stats.get("total_finished_requests", 0)
-        total_preempted = stats.get("total_preempted_reqs", 0)
+        metrics = _engine_metrics(stats)
+        total_samples = metrics["vllm/total_samples"]
+        total_active = metrics["vllm/total_active_samples"]
+        peak_running = metrics["vllm/peak_running_reqs"]
+        peak_waiting = metrics["vllm/peak_waiting_reqs"]
+        peak_prompt_tp = metrics["vllm/peak_prompt_throughput"]
+        peak_gen_tp = metrics["vllm/peak_generation_throughput"]
+        peak_kv_cache = metrics["vllm/peak_gpu_cache_usage_perc"]
+        median_running = metrics["vllm/median_running_reqs"]
+        median_waiting = metrics["vllm/median_waiting_reqs"]
+        median_prompt_tp = metrics["vllm/median_prompt_throughput"]
+        median_gen_tp = metrics["vllm/median_generation_throughput"]
+        median_kv_cache = metrics["vllm/median_gpu_cache_usage_perc"]
+        prefill_mean = metrics["vllm/latency_prefill_mean"]
+        prefill_p90 = metrics["vllm/latency_prefill_p90"]
+        decode_mean = metrics["vllm/latency_decode_mean"]
+        decode_p90 = metrics["vllm/latency_decode_p90"]
+        e2e_mean = metrics["vllm/latency_e2e_mean"]
+        e2e_p90 = metrics["vllm/latency_e2e_p90"]
+        queued_mean = metrics["vllm/latency_queued_mean"]
+        ttft_mean = metrics["vllm/latency_ttft_mean"]
+        total_finished = metrics["vllm/total_finished_requests"]
+        total_preempted = metrics["vllm/total_preempted_reqs"]
 
         msg = (
             f"vLLM Stats (step {global_step}): "
@@ -678,126 +712,14 @@ class VLLMStatsCallback(TrainerCallback):
         if total_samples > 0:
             msg += f", samples={total_active}/{total_samples}"
 
-        # Log to console
         if self.log_to_console:
             if self.console_log_level == "debug":
                 logger.debug(msg)
             else:
                 logger.info(msg)
 
-        # Log to wandb
-        if self.log_to_wandb:
-            self._log_to_wandb(stats, global_step)
-
-    def _log_to_wandb(self, stats: Dict[str, Any], global_step: int) -> None:
-        """Log stats to wandb if available."""
-        # Lazy check for wandb availability
-        if self._wandb_available is None:
-            try:
-                import wandb
-
-                self._wandb_available = wandb.run is not None
-            except ImportError:
-                self._wandb_available = False
-
-        if not self._wandb_available:
-            return
-
-        try:
-            import wandb
-
-            # Log aggregated metrics (peak and median values accumulated throughout the step)
-            wandb.log(
-                {
-                    "vllm/num_engines": stats["num_engines"],
-                    # Peak metrics
-                    "vllm/peak_running_reqs": stats.get("total_peak_running_reqs", stats.get("total_running_reqs", 0)),
-                    "vllm/peak_waiting_reqs": stats.get("total_peak_waiting_reqs", stats.get("total_waiting_reqs", 0)),
-                    "vllm/peak_prompt_throughput": stats.get(
-                        "avg_peak_prompt_throughput", stats.get("avg_prompt_throughput", 0.0)
-                    ),
-                    "vllm/peak_generation_throughput": stats.get(
-                        "avg_peak_generation_throughput", stats.get("avg_generation_throughput", 0.0)
-                    ),
-                    "vllm/peak_gpu_cache_usage_perc": stats.get(
-                        "avg_peak_gpu_cache_usage_perc", stats.get("avg_gpu_cache_usage_perc", 0.0)
-                    ),
-                    "vllm/peak_prefix_cache_hit_rate": stats.get(
-                        "avg_peak_prefix_cache_hit_rate", stats.get("avg_prefix_cache_hit_rate", 0.0)
-                    ),
-                    # Median metrics
-                    "vllm/median_running_reqs": stats.get("avg_median_running_reqs", 0.0),
-                    "vllm/median_waiting_reqs": stats.get("avg_median_waiting_reqs", 0.0),
-                    "vllm/median_prompt_throughput": stats.get("avg_median_prompt_throughput", 0.0),
-                    "vllm/median_generation_throughput": stats.get("avg_median_generation_throughput", 0.0),
-                    "vllm/median_gpu_cache_usage_perc": stats.get("avg_median_gpu_cache_usage_perc", 0.0),
-                    "vllm/median_prefix_cache_hit_rate": stats.get("avg_median_prefix_cache_hit_rate", 0.0),
-                    # Per-request latency (seconds)
-                    "vllm/latency_prefill_mean": stats.get("avg_latency_prefill_mean", 0.0),
-                    "vllm/latency_prefill_p90": stats.get("max_latency_prefill_p90", 0.0),
-                    "vllm/latency_decode_mean": stats.get("avg_latency_decode_mean", 0.0),
-                    "vllm/latency_decode_p90": stats.get("max_latency_decode_p90", 0.0),
-                    "vllm/latency_e2e_mean": stats.get("avg_latency_e2e_mean", 0.0),
-                    "vllm/latency_e2e_p90": stats.get("max_latency_e2e_p90", 0.0),
-                    "vllm/latency_queued_mean": stats.get("avg_latency_queued_mean", 0.0),
-                    "vllm/latency_queued_p90": stats.get("max_latency_queued_p90", 0.0),
-                    "vllm/latency_ttft_mean": stats.get("avg_latency_ttft_mean", 0.0),
-                    "vllm/latency_ttft_p90": stats.get("max_latency_ttft_p90", 0.0),
-                    "vllm/total_finished_requests": stats.get("total_finished_requests", 0),
-                    "vllm/total_preempted_reqs": stats.get("total_preempted_reqs", 0),
-                    # Metadata
-                    "vllm/total_samples": stats.get("total_samples", 0),
-                    "vllm/total_active_samples": stats.get("total_active_samples", 0),
-                },
-                step=global_step,
-            )
-
-            # Also log per-engine metrics if there are multiple engines
-            if stats["num_engines"] > 1:
-                for i, engine_stats in enumerate(stats.get("engines", [])):
-                    wandb.log(
-                        {
-                            # Peak metrics per engine
-                            f"vllm/engine_{i}/peak_prompt_throughput": engine_stats.get(
-                                "peak_prompt_throughput", engine_stats.get("avg_prompt_throughput", 0.0)
-                            ),
-                            f"vllm/engine_{i}/peak_generation_throughput": engine_stats.get(
-                                "peak_generation_throughput", engine_stats.get("avg_generation_throughput", 0.0)
-                            ),
-                            f"vllm/engine_{i}/peak_running_reqs": engine_stats.get(
-                                "peak_running_reqs", engine_stats.get("num_running_reqs", 0)
-                            ),
-                            f"vllm/engine_{i}/peak_waiting_reqs": engine_stats.get(
-                                "peak_waiting_reqs", engine_stats.get("num_waiting_reqs", 0)
-                            ),
-                            f"vllm/engine_{i}/peak_gpu_cache_usage": engine_stats.get(
-                                "peak_gpu_cache_usage_perc", engine_stats.get("gpu_cache_usage_perc", 0.0)
-                            ),
-                            # Median metrics per engine
-                            f"vllm/engine_{i}/median_prompt_throughput": engine_stats.get(
-                                "median_prompt_throughput", 0.0
-                            ),
-                            f"vllm/engine_{i}/median_generation_throughput": engine_stats.get(
-                                "median_generation_throughput", 0.0
-                            ),
-                            f"vllm/engine_{i}/median_running_reqs": engine_stats.get("median_running_reqs", 0.0),
-                            f"vllm/engine_{i}/median_waiting_reqs": engine_stats.get("median_waiting_reqs", 0.0),
-                            # Per-engine latency stats
-                            f"vllm/engine_{i}/latency_prefill_mean": engine_stats.get("latency_prefill_mean", 0.0),
-                            f"vllm/engine_{i}/latency_prefill_p90": engine_stats.get("latency_prefill_p90", 0.0),
-                            f"vllm/engine_{i}/latency_decode_mean": engine_stats.get("latency_decode_mean", 0.0),
-                            f"vllm/engine_{i}/latency_decode_p90": engine_stats.get("latency_decode_p90", 0.0),
-                            f"vllm/engine_{i}/latency_e2e_mean": engine_stats.get("latency_e2e_mean", 0.0),
-                            f"vllm/engine_{i}/latency_e2e_p90": engine_stats.get("latency_e2e_p90", 0.0),
-                            f"vllm/engine_{i}/latency_queued_mean": engine_stats.get("latency_queued_mean", 0.0),
-                            f"vllm/engine_{i}/latency_ttft_mean": engine_stats.get("latency_ttft_mean", 0.0),
-                            f"vllm/engine_{i}/finished_requests": engine_stats.get("latency_num_finished_requests", 0),
-                            f"vllm/engine_{i}/preempted_reqs": engine_stats.get("total_preempted_reqs", 0),
-                        },
-                        step=global_step,
-                    )
-        except Exception as e:
-            logger.warning(f"VLLMStatsCallback: Failed to log to wandb: {e}")
+        if self.log_to_tracker:
+            trainer.all_metrics.update(metrics)
 
 
 def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
@@ -906,7 +828,7 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
             VLLMStatsCallback(
                 log_every_steps=vllm_stats_interval,
                 log_to_console=True,
-                log_to_wandb=True,
+                log_to_tracker=True,
             )
         )
 

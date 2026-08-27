@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 import asyncio
+import concurrent.futures
 from dataclasses import dataclass, replace
 import gzip
 import hashlib
@@ -1053,17 +1054,34 @@ class TrajectorySink:
         )
 
 
+# Its own thread: the sink serialises on one lock anyway, and the default executor is shared with
+# the training step, which a burst of finished rollout groups would queue in front of.
+_RETENTION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="retention")
+
+
 async def retain_trajectories(
     sink: TrajectorySink,
     input_batch: TrajectoryRequestBatch,
     output: TrajectoryBatch,
 ) -> None:
     """Persist normalized trajectories without blocking the trainer event loop."""
-    metrics = await asyncio.to_thread(
-        sink.retain,
-        input_batch,
-        output,
-    )
+    try:
+        metrics = await asyncio.get_running_loop().run_in_executor(
+            _RETENTION_EXECUTOR,
+            sink.retain,
+            input_batch,
+            output,
+        )
+    except Exception:
+        # `required: false` promises best effort, and the sink already honours that for publication
+        # failures. Retention runs inside the rollout worker, whose own handler exits the process, so
+        # without this a serialization or schema bug in retention ends the training run.
+        if sink.config.required:
+            raise
+        logger.exception("Trajectory retention failed; continuing without it")
+        # Seeded from the zero-filled keyset: an absent `written` reads as no data, not as none written.
+        metrics = _empty_metrics()
+        metrics[f"{RETENTION_METRIC_PREFIX}/write_errors"] = float(len(output.get("response_ids") or ()))
     if not metrics:
         return
     rollout_metrics = output.get("rollout_metrics") or {}
