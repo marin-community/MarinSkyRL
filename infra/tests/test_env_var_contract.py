@@ -7,6 +7,7 @@ import yaml
 import infra.check_env_var_contract as env_contract
 from cloud.iris.env_vars import (
     ENV_VAR_SPECS,
+    EXECUTION_UID_ENV,
     EnvVarScope,
     EnvVarSource,
     EnvVarSpec,
@@ -116,6 +117,14 @@ def test_typed_process_boundary_settings_project_only_to_workers():
         "SKYRL_ENABLE_NUMA_AFFINITY": "1",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
     }
+
+
+def test_the_execution_uid_does_not_project_to_ray_workers():
+    # The head's attempt uid would override each node's own once it reaches a worker's runtime_env.
+    manager = EnvVarManager.from_config({}, environ={EXECUTION_UID_ENV: "iris:01JABCDEF0123456789"})
+
+    assert EXECUTION_UID_ENV not in manager.environment_for(EnvVarScope.RAY_WORKER)
+    assert manager.environment_for(EnvVarScope.TASK_RUNTIME)[EXECUTION_UID_ENV] == "iris:01JABCDEF0123456789"
 
 
 def test_non_debug_worker_projection_does_not_require_an_artifact_directory():

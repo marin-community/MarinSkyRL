@@ -305,6 +305,8 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         json.dumps([_resolved_data_path(locator) for locator in request.validation_data]),
         "--data-sources-json",
         json.dumps(data_sources, sort_keys=True),
+        "--run-id",
+        request.run_id,
         "--num-nodes",
         str(request.topology.num_nodes),
         "--gpus-per-node",
@@ -1353,6 +1355,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--train-data", dest="train_data", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Experiment identity telemetry rows join on. Defaults to the Iris job id in the pod.",
+    )
+    parser.add_argument(
         "--data-sources-json",
         default=None,
         help="JSON locators materialized onto every node before Ray starts.",
@@ -2162,6 +2169,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--train-data", args.train_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
+    # The job name is sanitized, so the pod cannot recover the run id.
+    if args.run_id:
+        controller_cmd.extend(["--run-id", args.run_id])
     controller_cmd.extend(_model_bootstrap_args(args))
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)

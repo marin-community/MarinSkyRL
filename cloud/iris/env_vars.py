@@ -77,6 +77,9 @@ LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
 RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
 NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
+TELEMETRY_ENDPOINT_ENV = "SKYRL_TELEMETRY_ENDPOINT"
+RUN_ID_ENV = "SKYRL_RUN_ID"
+EXECUTION_UID_ENV = "SKYRL_EXECUTION_UID"
 DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
@@ -157,6 +160,25 @@ ENV_VAR_SPECS = (
         "trainer.placement.enable_numa_affinity",
         EnvVarSource.CONFIG,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
+    ),
+    EnvVarSpec(
+        TELEMETRY_ENDPOINT_ENV,
+        "runtime.telemetry",
+        EnvVarSource.EXTERNAL,
+        ALL_RUNTIME_SCOPES,
+    ),
+    EnvVarSpec(
+        RUN_ID_ENV,
+        "runtime.telemetry",
+        EnvVarSource.EXTERNAL,
+        ALL_RUNTIME_SCOPES,
+    ),
+    # Task-local: each node stamps its own attempt uid.
+    EnvVarSpec(
+        EXECUTION_UID_ENV,
+        "runtime.telemetry",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.TASK_RUNTIME, EnvVarScope.DRIVER}),
     ),
 )
 
@@ -344,10 +366,16 @@ class EnvVarManager:
     def from_config(cls, config: Any, *, environ: Mapping[str, str] | None = None) -> "EnvVarManager":
         ambient = os.environ if environ is None else environ
         values = {}
-        if library_path := ambient.get(LD_LIBRARY_PATH_ENV):
-            values[LD_LIBRARY_PATH_ENV] = library_path
-        if nvrtc_home := ambient.get(NVRTC_HOME_ENV):
-            values[NVRTC_HOME_ENV] = nvrtc_home
+        passthrough_names = (
+            LD_LIBRARY_PATH_ENV,
+            NVRTC_HOME_ENV,
+            TELEMETRY_ENDPOINT_ENV,
+            RUN_ID_ENV,
+            EXECUTION_UID_ENV,
+        )
+        for name in passthrough_names:
+            if value := ambient.get(name):
+                values[name] = value
         if _config_value(config, "trainer.algorithm.batch_invariant", False):
             values[VLLM_BATCH_INVARIANT_ENV] = "1"
         if _config_value(config, "generator.fuse_weights", False):

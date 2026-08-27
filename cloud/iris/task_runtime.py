@@ -46,10 +46,13 @@ from cloud.iris.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
     FR_DUMP_TEMP_FILE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
+    RUN_ID_ENV,
+    TELEMETRY_ENDPOINT_ENV,
     ensure_debug_artifact_directories,
     ray_cluster_owner_environment,
 )
 from cloud.iris.model_paths import unsupported_model_path_message
+from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
@@ -63,14 +66,17 @@ from cloud.iris.runtime_bundle import validate_bundled_runtime
 
 try:
     from skyrl_train.ray_metrics import ray_metrics_telemetry
+    from skyrl_train.telemetry import CONTROLLER_ROLE, WORKER_ROLE
 except ImportError as error:
     # An installed rigging without the telemetry submodule raises ImportError, not
     # ModuleNotFoundError; the name check still keeps a failure inside these packages visible.
     if error.name not in {"prometheus_client", "rigging", "skyrl_train"}:
         raise
     _RAY_METRICS_UNAVAILABLE_REASON = str(error)
+    CONTROLLER_ROLE = "controller"
+    WORKER_ROLE = "worker"
 
-    def ray_metrics_telemetry(node_ip: str, metrics_port: int):
+    def ray_metrics_telemetry(_node_ip: str, _metrics_port: int, _role: str):
         _log(f"Ray metric forwarding is unavailable: {_RAY_METRICS_UNAVAILABLE_REASON}")
         return contextlib.nullcontext()
 
@@ -638,6 +644,15 @@ def pin_socket_ifname() -> str | None:
     os.environ["GLOO_SOCKET_IFNAME"] = iface
     _log(f"[fabric] GLOO_SOCKET_IFNAME={iface} (derived from {ip})")
     return iface
+
+
+def export_telemetry_environment(run_id: str | None) -> None:
+    resolved = telemetry_environment(run_id=run_id)
+    if not resolved:
+        _log("[telemetry] no telemetry environment resolved; MarinSkyRL telemetry stays inert")
+        return
+    os.environ.update(resolved)
+    _log(f"[telemetry] {resolved[TELEMETRY_ENDPOINT_ENV]} run_id={resolved[RUN_ID_ENV]}")
 
 
 def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
@@ -1750,7 +1765,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     else:
         _log("Single-node slice: skipping rendezvous and multi-node wait.")
 
-    with ray_metrics_telemetry(head_ip, RAY_METRICS_EXPORT_PORT):
+    with ray_metrics_telemetry(head_ip, RAY_METRICS_EXPORT_PORT, CONTROLLER_ROLE):
         env = training_driver_env(derived_gloo_ifname)
         env["RAY_ADDRESS"] = ray_address  # skyrl-train's bare ray.init() attaches here
         env["PYTHONUNBUFFERED"] = "1"
@@ -1864,7 +1879,7 @@ def run_worker(args: argparse.Namespace) -> int:
     # Block until the head publishes the done marker (training finished) or we
     # are signalled. The training driver on rank 0 schedules actors onto this
     # node's GPUs; this process just keeps the Ray node alive.
-    with ray_metrics_telemetry(node_ip, RAY_METRICS_EXPORT_PORT):
+    with ray_metrics_telemetry(node_ip, RAY_METRICS_EXPORT_PORT, WORKER_ROLE):
         while not stop.is_set():
             if _marker_exists(args.rendezvous_dir, DONE_FILENAME, min_written_at=worker_start):
                 _log(f"Worker rank {rank} saw head done-marker; shutting down.")
@@ -1944,6 +1959,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "--data-sources-json",
         default="",
         help="Immutable object-store data locators to materialize before Ray starts.",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Experiment identity telemetry rows join on. Defaults to the Iris job id.",
     )
     parser.add_argument(
         "--prestage-model",
@@ -2028,6 +2048,8 @@ def main() -> None:
     # name is node-local; training_driver_env keeps it out of the driver, which
     # would otherwise broadcast the head's name to every node.
     derived_gloo_ifname = pin_socket_ifname()
+    # Resolve before Ray starts so its actors inherit this task's telemetry settings.
+    export_telemetry_environment(args.run_id)
     # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
     # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
     ensure_fr_dump_dir()
