@@ -27,7 +27,7 @@ from skyrl_train.distributed_debug import apply_distributed_debug_mode
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
-from skyrl_train.env_vars import EnvVarManager, EnvVarScope, write_process_manifest
+from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, EnvVarManager, EnvVarScope, write_process_manifest
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.runtime_options import GDNBackend, R3Transport
@@ -1466,7 +1466,7 @@ def initialize_ray(cfg: DictConfig):
         cfg: Training config
     """
     debug_environment = apply_distributed_debug_mode(cfg)
-    if debug_environment:
+    if debug_environment.get(DEBUG_ARTIFACT_DIR_ENV):
         manifest = write_process_manifest("driver", environment=debug_environment)
         logger.info(f"Distributed debug mode active; driver manifest: {manifest}")
 

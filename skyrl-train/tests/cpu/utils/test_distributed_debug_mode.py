@@ -28,7 +28,11 @@ def test_normal_mode_does_not_enable_expensive_diagnostics(monkeypatch):
     monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
     cfg = example_dummy_config()
 
-    assert distributed_debug_environment(cfg) == {}
+    environment = distributed_debug_environment(cfg)
+
+    assert DEBUG_MODE_ENV not in environment
+    assert DEBUG_ARTIFACT_DIR_ENV not in environment
+    assert "NCCL_DEBUG" not in environment
 
 
 def test_distributed_mode_expands_complete_worker_contract(monkeypatch):
