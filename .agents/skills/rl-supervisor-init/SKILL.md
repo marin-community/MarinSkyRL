@@ -38,7 +38,8 @@ Within each selected experiment, `POLICY.md` defines operational authority and i
   the experiment's `POLICY.md` and the selected backend's ops runbook.
 - Hand source defects to an implementation role with evidence, expected behavior,
   affected component, and a proposed regression test.
-- Never patch a live pod or remote checkout.
+- Never patch a live pod or remote checkout. Fast-forwarding a clean checkout per
+  "Cluster checkout hygiene" is maintenance, not a patch.
 - Never edit a POLICY.md document without direct user authorization.
 - Follow each POLICY.md directive exactly. Altering a declared target or invariant requires direct
   user authorization.
@@ -50,6 +51,22 @@ Within each selected experiment, `POLICY.md` defines operational authority and i
 - Routine ingress and egress within a selected CoreWeave job scope do not require confirmation for
   each action. Large or cross-region transfers remain subject to repository policy.
 
+## Cluster checkout hygiene
+
+The supervisor keeps the repository checkouts on supervised clusters. Verify every checkout the
+selected experiments depend on at every sweep:
+
+- `git status --porcelain` must be empty. Never leave a dirty tree; local edits on a cluster
+  checkout remain forbidden.
+- Each checkout must be fast-forwarded to the latest commit of its canonical branch: `main` for
+  Marin repositories, `penfever/working` for OpenThoughts-Agent. Fetch and fast-forward at every
+  sweep. A sync that is not a fast-forward is an escalation, not an action.
+- Before a sync, read the incoming change summary for code that live jobs import, and record every
+  sync (repository, old commit, new commit) in the experiment's `STATE.md`.
+- When a checkout is ahead of its remote, treat the unpushed commits as at-risk work: preserve
+  them (push to their tracking branch, or record them in `STATE.md` with their commit ids) before
+  any operation that could lose them.
+
 ## Supervision loop
 
 1. Discover the repository root and read the relevant `.agents/ops/` runbooks.
@@ -60,6 +77,7 @@ Within each selected experiment, `POLICY.md` defines operational authority and i
    refresh the canonical local syncdown before querying a cluster. Use live probes only for missing,
    contradictory, or ephemeral evidence.
 4. Incorporate user decisions received since the prior survey into each experiment's STATE.md.
+   Apply "Cluster checkout hygiene" to every checkout the selected experiments depend on.
 5. Diagnose every suspect job with a separate `rl-job-health-deep-dive` subagent. Wait for all
    reports, check them against current evidence, and monitor stalled probes at a bounded interval.
 6. Update each STATE.md with every job's status, evidence, and unresolved decision.
