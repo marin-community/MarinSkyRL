@@ -1617,3 +1617,15 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     assert out.reward.token_rewards[4] == 2.0
     assert out.reward.optimization_reward == 2.0
     assert (out.evidence.stop_reason or "unknown") == "stop"
+
+
+def test_rollout_metrics_skip_unstepped_episode_metrics():
+    """Episodes skipped before env.step report empty metrics and must not reach aggregators."""
+    metrics = get_rollout_metrics(
+        responses=[[1, 2], [3, 4, 5]],
+        rewards=[1.0, 0.0],
+        env_classes=["aime", "aime"],
+        env_metrics=[{"acc": True, "over_evaluation_budget": False, "answered_within_evaluation_budget": True}, {}],
+    )
+
+    assert metrics["environment/acc"] == 1.0
