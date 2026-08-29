@@ -36,10 +36,10 @@ class _StubCurriculumDataset:
         return batch
 
 
-def _sampler(bins, kind, seed=0, **overrides):
+def _sampler(bins, kind, seed=0, batch_size=2, **overrides):
     dataset = _StubCurriculumDataset(bins)
     config = CurriculumConfig(kind=SamplingKind(kind), **overrides)
-    return CurriculumSampler(dataset, config, seed)
+    return CurriculumSampler(dataset, config, seed, batch_size=batch_size)
 
 
 TWO_BINS = {"g0-easy": (0, 1), "g1-hard": (1, 1)}
@@ -221,8 +221,10 @@ def test_build_dataloader_grade_uniform_draw_frequencies(tmp_path):
                 easy_draws += int(item["uid"]) < 2
                 total_draws += 1
     # grade-uniform puts half the mass on the 2-row g0 bin vs its 10% row share.
+    # Batch-unique draws cap g0 at 2 of every 5-row batch, so the observed
+    # fraction lands between the 10% row share and the 40% per-batch ceiling.
     assert total_draws == 30 * 20
-    assert 0.4 < easy_draws / total_draws < 0.6
+    assert 0.25 < easy_draws / total_draws <= 0.4
 
 
 def test_build_dataloader_eval_loader_ignores_curriculum(tmp_path):
@@ -256,3 +258,13 @@ def test_stateful_dataloader_checkpoint_resumes_draws(tmp_path):
     resumed.load_state_dict(snapshot)
     assert list(iter(resumed)) == remaining
     np.testing.assert_allclose(resumed.sampler.total, dataloader.sampler.total)
+
+
+def test_draws_are_unique_within_each_batch():
+    bins = {"g0-easy": (0, 8), "g1-hard": (1, 8)}
+    sampler = _sampler(bins, "thompson", batch_size=4)
+    indices = list(iter(sampler))
+    assert len(indices) == 16
+    for start in range(0, 16, 4):
+        batch = indices[start : start + 4]
+        assert len(set(batch)) == len(batch)

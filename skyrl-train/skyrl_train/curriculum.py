@@ -115,6 +115,7 @@ class _CurriculumSamplerIterator(Iterator[int]):
     def __init__(self, sampler: "CurriculumSampler"):
         self.sampler = sampler
         self.yielded = 0
+        self._batch_rows: set[int] = set()
 
     def __iter__(self) -> "_CurriculumSamplerIterator":
         return self
@@ -122,14 +123,19 @@ class _CurriculumSamplerIterator(Iterator[int]):
     def __next__(self) -> int:
         if self.yielded >= len(self.sampler):
             raise StopIteration
+        if self.yielded % self.sampler.batch_size == 0:
+            self._batch_rows.clear()
         self.yielded += 1
-        return self.sampler._draw()
+        row = self.sampler._draw(exclude=self._batch_rows)
+        self._batch_rows.add(row)
+        return row
 
     def state_dict(self) -> Dict[str, Any]:
-        return {"yielded": self.yielded}
+        return {"yielded": self.yielded, "batch_rows": sorted(self._batch_rows)}
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         self.yielded = state_dict["yielded"]
+        self._batch_rows = set(state_dict["batch_rows"])
 
 
 class CurriculumSampler(Sampler[int]):
@@ -142,10 +148,13 @@ class CurriculumSampler(Sampler[int]):
     the decayed per-bin sufficient statistics.
     """
 
-    def __init__(self, dataset: PromptDataset, config: CurriculumConfig, seed: int):
+    def __init__(self, dataset: PromptDataset, config: CurriculumConfig, seed: int, batch_size: int):
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
         self.config = config
         self.bins = dataset_bins(dataset)
         self.num_rows = len(dataset)
+        self.batch_size = batch_size
         self.grade_values = np.unique(self.bins.grades)  # sorted ascending
         self.rng = np.random.default_rng(seed)
 
@@ -164,11 +173,21 @@ class CurriculumSampler(Sampler[int]):
     def __iter__(self) -> _CurriculumSamplerIterator:
         return _CurriculumSamplerIterator(self)
 
-    def _draw(self) -> int:
-        bin_idx = int(self.rng.choice(len(self.weights), p=self.weights))
-        rows = self.bins.bin_rows[bin_idx]
+    def _draw(self, exclude: set[int] = frozenset()) -> int:
+        """Draw one dataset row, rejecting rows already used in the current batch.
+
+        Duplicate rows within one train batch would merge into a single uid group and
+        violate the trainer's exact physical-group-size invariant. Rejection is cheap:
+        every bin is far larger than a train batch.
+        """
         self.draw_count += 1
-        return int(rows[self.rng.integers(len(rows))])
+        for _ in range(1000):
+            bin_idx = int(self.rng.choice(len(self.weights), p=self.weights))
+            rows = self.bins.bin_rows[bin_idx]
+            row = int(rows[self.rng.integers(len(rows))])
+            if row not in exclude:
+                return row
+        raise RuntimeError(f"Could not draw a batch-unique row after 1000 attempts (batch_size={self.batch_size})")
 
     def update(self, uids: List[str], rewards: List[float], n_samples_per_prompt: int) -> None:
         """Fold one training step's per-sample rewards into the bin statistics.
