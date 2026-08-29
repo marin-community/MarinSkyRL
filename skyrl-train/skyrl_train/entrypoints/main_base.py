@@ -22,13 +22,6 @@ from loguru import logger
 import asyncio
 import multiprocessing as mp
 
-from skyrl_train.utils.logging_utils import (
-    ServiceName,
-    ServiceReadyEvent,
-    ServiceStartingEvent,
-    log_progress,
-)
-
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
     from skyrl_train.trajectory_runners.base import TrajectoryRunner
@@ -210,6 +203,12 @@ class BasePPOExp:
     def create_inference_engine_client(self) -> InferenceEngineClient:
         """Create the configured local or remote inference-engine client."""
         from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: PLC0415
+        from skyrl_train.utils.logging_utils import (  # noqa: PLC0415 - keep launcher imports Torch-free
+            ServiceName,
+            ServiceReadyEvent,
+            ServiceStartingEvent,
+            log_progress,
+        )
 
         engine_mode = "local" if self.cfg.generator.run_engines_locally else "remote"
         log_progress(ServiceStartingEvent(service=ServiceName.INFERENCE_ENGINES, mode=engine_mode))
@@ -453,6 +452,13 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
+        from skyrl_train.utils.logging_utils import (  # noqa: PLC0415 - keep launcher imports Torch-free
+            ServiceName,
+            ServiceReadyEvent,
+            ServiceStartingEvent,
+            log_progress,
+        )
+
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
