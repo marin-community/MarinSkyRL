@@ -596,6 +596,8 @@ class RayPPOTrainer:
                         # this is because in step-wise training, len(uids) != len(trajectory_batch["response_ids"])
                         uids = [trajectory_id.instance_id for trajectory_id in trajectory_batch["trajectory_ids"]]
 
+                    self._update_curriculum_sampler(trajectory_batch, uids)
+
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
                         dynamic_sampling = self.handle_dynamic_sampling(trajectory_batch, uids)
@@ -613,7 +615,6 @@ class RayPPOTrainer:
                     # 1.2 postprocess rewards
                     with Timer("postprocess_trajectory_batch", self.all_timings):
                         trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
-                    self._update_curriculum_sampler(trajectory_batch, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
@@ -1418,9 +1419,12 @@ class RayPPOTrainer:
     def _update_curriculum_sampler(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> None:
         """Feed this step's per-sample rewards to the curriculum sampler, if one is active.
 
-        Runs after reward postprocessing, where rewards are per-token lists; each sample's
-        scalar reward is their sum. The sampler only compares rewards within one prompt's
-        group, so any monotonic scalarization works.
+        Runs on the raw generated batch, before dynamic sampling filters uninformative
+        groups: the sampler must observe every group's outcome (including all-pass and
+        all-fail groups) or its statistics would be biased toward 100% informative. At
+        this point rewards are response-level floats; per-token reward lists are also
+        accepted, with each sample's scalar reward taken as their sum. The sampler only
+        compares rewards within one prompt's group, so any monotonic scalarization works.
         """
         sampler = self.train_dataloader.sampler if self.train_dataloader is not None else None
         if not isinstance(sampler, CurriculumSampler):
