@@ -22,7 +22,7 @@ from skyrl_train.distributed.bf16_adamw import BFloat16UpdateMode, build_adamw, 
 from skyrl_train.distributed.optimizer_learning_rates import validate_optimizer_learning_rates
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 from skyrl_train.utils.constants import validate_worker_collective_timeout_seconds
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,

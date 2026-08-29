@@ -39,7 +39,7 @@ from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
 from skyrl_train.utils import trainer_utils
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
 from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
@@ -60,11 +60,11 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import GroupAdvantageInvariant, assert_training_groups_eligible
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
+from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
     run_on_each_node,
     get_node_ids,
-    extract_step_from_path,
     validate_consistency_for_latest_checkpoint,
     ResumeMode,
     DynamicSamplingState,

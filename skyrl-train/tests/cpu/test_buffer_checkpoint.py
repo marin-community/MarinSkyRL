@@ -13,7 +13,7 @@ from skyrl_train.callbacks.builtin import BufferCheckpointCallback
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
 from skyrl_train.fully_async_trainer import _GenerationQueues
 from skyrl_train.trajectory_runners.base import TrajectoryID
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 
 
 # ---------------------------------------------------------------------------

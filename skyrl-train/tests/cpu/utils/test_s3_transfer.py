@@ -4,7 +4,7 @@ from botocore.exceptions import ClientError, ReadTimeoutError
 from fsspec.exceptions import FSTimeoutError
 import pytest
 
-from skyrl_train.utils.io import io, s3fs
+from skyrl_train.io import io, s3fs
 
 
 def test_s3_client_has_explicit_transfer_timeouts_and_retries(monkeypatch):
