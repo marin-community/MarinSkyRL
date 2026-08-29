@@ -1,6 +1,7 @@
 """Behavior tests for runtime source selection inside an Iris GPU task."""
 
 import contextlib
+import io
 import signal
 import sys
 import threading
@@ -40,6 +41,35 @@ def test_training_driver_starts_from_the_immutable_runtime_checkout(monkeypatch)
 def test_training_driver_requires_the_runtime_checkout() -> None:
     with pytest.raises(RuntimeError, match="SKYRL_HOME"):
         task_runtime.launch_training_driver(["python"], {})
+
+
+def test_ray_stop_collapses_cli_process_spam(monkeypatch) -> None:
+    noisy_output = "VINFO scripts.py -- Killed `ray::IDLE`\n" * 200
+    observed = {}
+
+    def fake_run(_command, **kwargs):
+        observed.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout=noisy_output)
+
+    real_subprocess = task_runtime.subprocess
+    monkeypatch.setattr(
+        task_runtime,
+        "subprocess",
+        SimpleNamespace(
+            PIPE=real_subprocess.PIPE,
+            STDOUT=real_subprocess.STDOUT,
+            TimeoutExpired=real_subprocess.TimeoutExpired,
+            run=fake_run,
+        ),
+    )
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        task_runtime.ray_stop()
+
+    assert output.getvalue() == "[task-runtime] Ray stop completed (exit 0)\n"
+    assert observed["stdout"] == real_subprocess.PIPE
+    assert observed["stderr"] == real_subprocess.STDOUT
 
 
 def test_head_returns_driver_abort_when_failure_artifact_upload_blocks(tmp_path, monkeypatch) -> None:

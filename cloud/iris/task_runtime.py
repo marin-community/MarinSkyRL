@@ -1119,9 +1119,24 @@ def ray_start_worker(
 
 def ray_stop() -> None:
     try:
-        subprocess.run([_ray_bin(), "stop", "--force"], check=False, timeout=60)
+        completed = subprocess.run(
+            [_ray_bin(), "stop", "--force"],
+            check=False,
+            timeout=60,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
     except subprocess.TimeoutExpired:
         _log("Warning: 'ray stop' timed out")
+        return
+
+    if completed.returncode != 0:
+        detail = next((line.strip() for line in reversed(completed.stdout.splitlines()) if line.strip()), "")
+        suffix = f": {detail[:500]}" if detail else ""
+        _log(f"Warning: 'ray stop' exited {completed.returncode}{suffix}")
+        return
+    _log(f"Ray stop completed (exit {completed.returncode})")
 
 
 def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_cb=None) -> None:

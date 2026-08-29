@@ -1360,7 +1360,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Exporting RAY_ADDRESS to ray runtime env")
         env_vars["RAY_ADDRESS"] = os.environ["RAY_ADDRESS"]
 
-    # NCCL / Gloo network-fabric selection and debug knobs.
+    # NCCL network-fabric selection.
     # Ray actors start with a clean environment and only see env vars that we
     # explicitly forward here. On clusters where NCCL's interface auto-detection
     # picks the wrong NIC (e.g. a down `eno*`/loopback instead of the routable
@@ -1386,32 +1386,15 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         "NCCL_IB_DISABLE",
         "NCCL_NET",
         "NCCL_SOCKET_FAMILY",
-        "NCCL_DEBUG",
-        "NCCL_DEBUG_SUBSYS",
     ):
         if os.environ.get(_net_env):
             logger.info(f"Exporting `{_net_env}` to ray runtime env: {os.environ[_net_env]}")
             env_vars[_net_env] = os.environ[_net_env]
 
-    # NCCL verbosity: default to WARN for EVERY Ray worker in this job. This
-    # env_vars dict is the ray.init() job-level runtime_env (see initialize_ray),
-    # which is the ONLY env the vLLM inference-engine actors -- and the
-    # EngineCore/TP-worker subprocesses they spawn -- inherit. Those TP workers run
-    # the per-collective rollout weight-broadcast / AllGather / AllReduce NCCL ops,
-    # so if this is INFO the rank-0 log is drowned in `(AsyncVLLMInferenceEngine
-    # ...) NCCL INFO` chatter. The passthrough loop above already copied NCCL_DEBUG
-    # from the launcher/config env (the iris configs set `NCCL_DEBUG: WARN` in
-    # extra_env) into env_vars; here we only FILL IN WARN when nothing set it, so an
-    # explicit launcher/config value still wins (precedence: extra_env > this
-    # default). WARN keeps the NCCL flight recorder (TORCH_NCCL_DUMP_ON_TIMEOUT +
-    # TORCH_FR_BUFFER_SIZE, set above) fully armed -- a genuine hang still dumps the
-    # stuck-collective trace.
-    #
-    # (Historic: commit 5220e112 FORCED NCCL_DEBUG=INFO / NCCL_DEBUG_SUBSYS here to
-    # localize a one-off 80B EP all-to-all backward deadlock (job 673119). That
-    # per-collective INFO flood is exactly the spam we now suppress. To re-enable
-    # the trace for a diagnostic run, set NCCL_DEBUG=INFO (+ NCCL_DEBUG_SUBSYS) in
-    # the config's extra_env -- the passthrough loop above forwards both.)
+    # EnvVarManager owns NCCL verbosity through trainer.debug_mode. Do not copy
+    # ambient NCCL_DEBUG values into Ray workers: stale launcher extra_env once
+    # turned an ordinary checkpoint export into a per-collective INFO trace.
+    # WARN still leaves the bounded flight recorder armed for timeout dumps.
     env_vars.setdefault("NCCL_DEBUG", "WARN")
 
     return env_vars

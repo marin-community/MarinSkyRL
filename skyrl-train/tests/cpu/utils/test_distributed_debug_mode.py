@@ -35,6 +35,17 @@ def test_normal_mode_does_not_enable_expensive_diagnostics(monkeypatch):
     assert "NCCL_DEBUG" not in environment
 
 
+def test_normal_mode_ignores_ambient_nccl_debug_overrides(monkeypatch):
+    monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: False)
+    monkeypatch.setenv("NCCL_DEBUG", "INFO")
+    monkeypatch.setenv("NCCL_DEBUG_SUBSYS", "COLL,INIT")
+
+    environment = prepare_runtime_environment(example_dummy_config())
+
+    assert environment["NCCL_DEBUG"] == "WARN"
+    assert "NCCL_DEBUG_SUBSYS" not in environment
+
+
 def test_distributed_mode_expands_complete_worker_contract(monkeypatch):
     monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
     monkeypatch.delenv(DEBUG_ARTIFACT_DIR_ENV, raising=False)
