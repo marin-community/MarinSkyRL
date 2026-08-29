@@ -124,6 +124,8 @@ def submit_terminal_policy_export(spec: TerminalPolicyExport) -> None:
             ]
         )
         command.extend(model_source_cli_args(spec.model_source_uri, spec.model_source_identity))
-    exit_code = subprocess.call(command, cwd=str(PROJECT_ROOT))
+    # The launcher's stdout carries only the terminal JSON response; the export
+    # subprocess inherits raw fd 1, so route its console output to stderr.
+    exit_code = subprocess.call(command, cwd=str(PROJECT_ROOT), stdout=sys.stderr)
     if exit_code != 0:
         raise subprocess.CalledProcessError(exit_code, command)
