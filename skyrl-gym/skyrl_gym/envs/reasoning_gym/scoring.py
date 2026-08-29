@@ -8,6 +8,8 @@ from typing import Any
 
 import reasoning_gym
 
+ANSWER_MARKER = "Answer:"
+
 
 def normalize_ground_truth(ground_truth: Any) -> str:
     """Validate and serialize a task name with its complete generated entry."""
@@ -30,8 +32,18 @@ def normalize_ground_truth(ground_truth: Any) -> str:
     return json.dumps({"entry": dict(entry), "task": task}, sort_keys=True)
 
 
+def extract_answer(response: str) -> str:
+    """Return the text after the last ``Answer:`` marker, or the whole response if absent.
+
+    Reasoning Gym verifiers expect the bare answer: scoring a full chain-of-thought
+    response yields only length-ratio fuzz credit even when the final answer is correct.
+    """
+    _, marker, answer = response.rpartition(ANSWER_MARKER)
+    return answer.strip() if marker else response.strip()
+
+
 def score_response(response: str, ground_truth: str) -> float:
-    """Score a response with the generated task's package verifier."""
+    """Score a response's extracted final answer with the generated task's package verifier."""
     spec = json.loads(normalize_ground_truth(ground_truth))
-    score = reasoning_gym.get_score_answer_fn(spec["task"])(response, spec["entry"])
+    score = reasoning_gym.get_score_answer_fn(spec["task"])(extract_answer(response), spec["entry"])
     return float(score)
