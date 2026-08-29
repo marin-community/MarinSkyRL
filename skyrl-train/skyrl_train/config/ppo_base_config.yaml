@@ -9,6 +9,18 @@ defaults:
 data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
+  sampling:
+    kind: null # null = stock shuffle; naive|thompson|grade-uniform|grade-adaptive|grade-prior
+    decay: 0.95 # per-step multiplicative decay of bin sufficient stats
+    epsilon: 0.05 # per-bin probability floor (thompson/grade-prior)
+    prior_alpha: 1.0
+    prior_beta: 1.0
+    grade_prior_strength: 8.0 # pseudo-count mass seeded from grades (grade-prior)
+    grade_prior_temperature: 1.0
+    adaptive_exploration: 0.2 # grade-adaptive: probability mass spread off the current level
+    adaptive_window: 10 # steps without informative signal before advancing the level
+    adaptive_min_informative: 0.1 # informative-group fraction below which the level is exhausted
+    seed: null # falls back to trainer.seed
 
 checkpoint_export:
   step: null

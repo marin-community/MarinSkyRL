@@ -19,6 +19,7 @@ from transformers import AutoTokenizer
 from collections import defaultdict
 
 import numpy as np
+from skyrl_train.curriculum import CurriculumSampler
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
@@ -612,6 +613,7 @@ class RayPPOTrainer:
                     # 1.2 postprocess rewards
                     with Timer("postprocess_trajectory_batch", self.all_timings):
                         trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
+                    self._update_curriculum_sampler(uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
@@ -1412,6 +1414,20 @@ class RayPPOTrainer:
         # re-assign reward but now it's per token rewards
         trajectory_batch["rewards"] = per_token_rewards
         return trajectory_batch
+
+    def _update_curriculum_sampler(self, uids: List[str]) -> None:
+        """Feed this step's per-sample scalar rewards to the curriculum sampler, if one is active."""
+        sampler = self.train_dataloader.sampler if self.train_dataloader is not None else None
+        if not isinstance(sampler, CurriculumSampler):
+            return
+        rewards = self._current_step_rewards
+        if len(rewards) != len(uids):
+            raise ValueError(
+                f"Curriculum sampling needs one scalar reward per sample: got {len(rewards)} rewards "
+                f"for {len(uids)} uids. Token-level rewards are not supported."
+            )
+        sampler.update(uids, rewards, self.cfg.generator.n_samples_per_prompt)
+        self.all_metrics.update(sampler.metrics())
 
     @torch.no_grad()
     def compute_advantages_and_returns(self, data: TrainingInputBatch) -> TrainingInputBatch:

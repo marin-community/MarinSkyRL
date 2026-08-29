@@ -30,6 +30,7 @@ from transformers import AutoTokenizer
 from pathlib import Path
 from skyrl_train.utils.io import io
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
+from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler
 from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -634,13 +635,25 @@ def build_dataloader(
     seeded_generator = torch.Generator()
     seeded_generator.manual_seed(cfg.trainer.seed)
 
+    sampler = None
+    if is_train and cfg.data.sampling.kind is not None:
+        if is_fully_async:
+            raise ValueError("data.sampling.kind is not supported with fully async training")
+        if cfg.trainer.step_wise_training:
+            raise ValueError("data.sampling.kind requires per-prompt uids; step_wise_training is not supported")
+        sampling_seed = cfg.data.sampling.seed if cfg.data.sampling.seed is not None else cfg.trainer.seed
+        sampler = CurriculumSampler(dataset, CurriculumConfig.from_dict_config(cfg.data.sampling), sampling_seed)
+
     dataloader = StatefulDataLoader(
         dataset,
         batch_size=batch_size if not is_fully_async else 1,
-        shuffle=True if is_train else False,
+        shuffle=is_train and sampler is None,
+        sampler=sampler,
         collate_fn=dataset.collate_fn,
+        # Curriculum sampling stays single-process: worker prefetch would draw several
+        # batches of indices ahead of the per-step weight updates.
         # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if cfg.generator.enable_http_endpoint else 8,
+        num_workers=0 if (sampler is not None or cfg.generator.enable_http_endpoint) else 8,
         drop_last=True if is_train else False,
         generator=seeded_generator,
     )
