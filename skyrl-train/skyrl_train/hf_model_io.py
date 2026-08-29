@@ -10,7 +10,7 @@ from pathlib import Path
 from loguru import logger
 from marinskyrl.resource_locator import join_resource_path
 
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 
 HF_WEIGHT_FILENAME = "model.safetensors"
 HF_WEIGHT_INDEX_FILENAME = "model.safetensors.index.json"

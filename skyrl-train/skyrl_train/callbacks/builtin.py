@@ -32,7 +32,7 @@ from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBuff
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.utils.data_tracker import DataConsumptionState, DataConsumptionTracker
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from .types import (

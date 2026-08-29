@@ -10,7 +10,7 @@ from huggingface_hub import HfApi
 
 from skyrl_train.env_vars import HF_HUB_OFFLINE_ENV, EnvVarScope, temporarily_unset_managed_environment
 from skyrl_train.hf_export_schema import DEFAULT_HF_HUB_REVISION, DEFAULT_HF_UPLOAD_MODE, HFUploadMode
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 
 
 @contextlib.contextmanager
