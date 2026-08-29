@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -71,6 +72,13 @@ def policy_export_geometry(
     )
 
 
+def _resolved_config_path(config_path: str) -> str:
+    """Absolutize a caller-relative config path; the export subprocess runs from PROJECT_ROOT."""
+    if os.path.isabs(config_path) or not os.path.exists(config_path):
+        return config_path
+    return os.path.abspath(config_path)
+
+
 def submit_terminal_policy_export(spec: TerminalPolicyExport) -> None:
     """Submit and verify conversion of the latest committed checkpoint."""
     global_step = terminal_checkpoint_step(spec.checkpoint_root)
@@ -89,11 +97,11 @@ def submit_terminal_policy_export(spec: TerminalPolicyExport) -> None:
         f"{spec.job_name}-export-{global_step}",
     ]
     if spec.cluster_config:
-        command.extend(["--cluster-config", spec.cluster_config])
+        command.extend(["--cluster-config", _resolved_config_path(spec.cluster_config)])
     if spec.target_cluster:
         command.extend(["--target-cluster", spec.target_cluster])
     if spec.parent_cluster_config:
-        command.extend(["--parent-cluster-config", spec.parent_cluster_config])
+        command.extend(["--parent-cluster-config", _resolved_config_path(spec.parent_cluster_config)])
     if spec.cpu is not None:
         command.extend(["--cpu", str(spec.cpu)])
     if spec.memory:
