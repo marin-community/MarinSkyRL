@@ -5,6 +5,7 @@ Covers:
 - ``ensure_token_ids_in_sse_chunk`` (pure function, no vllm dependency)
 - HTTP endpoint streaming path via a mock ``CompletionBackend``
 - Regression: non-streaming path still returns ``JSONResponse``
+- HTTP disconnect cancellation for non-streaming requests
 
 Run with:
   uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_streaming.py

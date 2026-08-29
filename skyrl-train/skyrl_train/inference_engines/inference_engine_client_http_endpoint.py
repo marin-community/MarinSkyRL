@@ -228,7 +228,7 @@ async def handle_openai_request(raw_request: Request, endpoint: str):
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
-        # ── Non-streaming branch (unchanged) ──────────────────────────────
+        # Non-streaming requests stay attached to the client until completion.
         if endpoint == "/chat/completions":
             backend_request = _global_inference_engine_client.chat_completion(payload)
         else:
