@@ -18,7 +18,7 @@ import requests
 import traceback
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Optional, Protocol, Dict, Any
+from typing import Any, Coroutine, Dict, Optional, Protocol, TypeVar
 
 import fastapi
 import uvicorn
@@ -29,6 +29,8 @@ from pydantic import BaseModel
 
 
 logger = logging.getLogger(__name__)
+
+_ResponseT = TypeVar("_ResponseT")
 
 
 class CompletionBackend(Protocol):
@@ -170,6 +172,32 @@ async def _safe_sse_stream(generator):
         yield "data: [DONE]\n\n"
 
 
+async def _wait_for_disconnect(raw_request: Request) -> None:
+    """Wait for the ASGI server to report that the HTTP client disconnected."""
+    while True:
+        message = await raw_request.receive()
+        if message["type"] == "http.disconnect":
+            return
+
+
+async def _await_with_disconnect(raw_request: Request, backend_request: Coroutine[Any, Any, _ResponseT]) -> _ResponseT:
+    """Cancel backend work when its HTTP client abandons the request."""
+    backend_task = asyncio.create_task(backend_request)
+    disconnect_task = asyncio.create_task(_wait_for_disconnect(raw_request))
+    try:
+        done, _ = await asyncio.wait(
+            {backend_task, disconnect_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if backend_task in done:
+            return await backend_task
+        raise asyncio.CancelledError
+    finally:
+        backend_task.cancel()
+        disconnect_task.cancel()
+        await asyncio.gather(backend_task, disconnect_task, return_exceptions=True)
+
+
 async def handle_openai_request(raw_request: Request, endpoint: str):
     """Handle /completions or /chat/completions request.
 
@@ -202,9 +230,10 @@ async def handle_openai_request(raw_request: Request, endpoint: str):
 
         # ── Non-streaming branch (unchanged) ──────────────────────────────
         if endpoint == "/chat/completions":
-            response = await _global_inference_engine_client.chat_completion(payload)
+            backend_request = _global_inference_engine_client.chat_completion(payload)
         else:
-            response = await _global_inference_engine_client.completion(payload)
+            backend_request = _global_inference_engine_client.completion(payload)
+        response = await _await_with_disconnect(raw_request, backend_request)
 
         if "error" in response or response.get("object", "") == "error":
             # former is vllm format, latter is sglang format
