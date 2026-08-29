@@ -90,6 +90,15 @@ def test_head_result_only_completes_its_gang_epoch(tmp_path):
     assert not head_succeeded(str(tmp_path), "prior-epoch")
 
 
+def test_unknown_head_result_outcome_fails_instead_of_parking_worker(tmp_path):
+    (tmp_path / DONE_FILENAME).write_text(
+        json.dumps({"gang_epoch": "gang-epoch", "outcome": "failed", "written_at": 1.0})
+    )
+
+    with pytest.raises(RuntimeError):
+        head_succeeded(str(tmp_path), "gang-epoch")
+
+
 class _FakeRayLogSyncSession:
     def __init__(self, *_args):
         pass

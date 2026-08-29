@@ -1993,7 +1993,7 @@ def _build_task_shell(
     # The controller is run as a BACKGROUND child + `wait` (not `exec`) so we can
     # (a) run --up at exit via the bash EXIT trap and (b) FORWARD SIGTERM/SIGINT to
     # the controller — preserving the old `exec` graceful-shutdown path (rank-0's Ray
-    # teardown + done-marker on preemption) that a plain child would lose. `wait` is
+    # teardown + nonzero exit on preemption) that a plain child would lose. `wait` is
     # interrupted by the trapped signal (rc>128); we re-`wait` to reap the child's
     # real exit code after its forwarded-TERM shutdown.
     flashqla_enabled = _effective_gdn_backend(args) == GDNBackend.FLASHQLA

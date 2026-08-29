@@ -85,16 +85,13 @@ except ImportError as error:
 
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
-
-
-class HeadOutcome(StrEnum):
-    SUCCEEDED = "succeeded"
+HEAD_RESULT_SUCCEEDED = "succeeded"
 
 
 @dataclass(frozen=True)
 class HeadResult:
     gang_epoch: str
-    outcome: HeadOutcome
+    outcome: str
     written_at: float
 
     @classmethod
@@ -102,11 +99,14 @@ class HeadResult:
         if not isinstance(value, dict):
             raise RuntimeError("Ray head result must be a JSON object")
         try:
-            return cls(
+            result = cls(
                 gang_epoch=str(value["gang_epoch"]),
-                outcome=HeadOutcome(value["outcome"]),
+                outcome=str(value["outcome"]),
                 written_at=float(value["written_at"]),
             )
+            if result.outcome != HEAD_RESULT_SUCCEEDED:
+                raise ValueError(f"unknown outcome {result.outcome!r}")
+            return result
         except (KeyError, TypeError, ValueError) as error:
             raise RuntimeError("Ray head result contains invalid field values") from error
 
@@ -954,7 +954,7 @@ def write_head_result(rendezvous_dir: str, gang_epoch: str) -> None:
     """Publish successful completion for exactly one Ray gang attempt."""
     uri = _done_uri(rendezvous_dir)
     fs, path = fs_and_path(uri)
-    result = HeadResult(gang_epoch=gang_epoch, outcome=HeadOutcome.SUCCEEDED, written_at=time.time())
+    result = HeadResult(gang_epoch=gang_epoch, outcome=HEAD_RESULT_SUCCEEDED, written_at=time.time())
     with fs.open(path, "w") as destination:
         json.dump(asdict(result), destination)
     _log(f"Published successful head result for gang epoch {gang_epoch}: {uri}")
@@ -963,15 +963,12 @@ def write_head_result(rendezvous_dir: str, gang_epoch: str) -> None:
 def head_succeeded(rendezvous_dir: str, gang_epoch: str) -> bool:
     """Whether the head published success for ``gang_epoch``."""
     uri = _done_uri(rendezvous_dir)
-    try:
-        fs, path = fs_and_path(uri)
-        if not fs.exists(path):
-            return False
-        with fs.open(path, "r") as source:
-            result = HeadResult.from_dict(json.load(source))
-        return result.gang_epoch == gang_epoch and result.outcome is HeadOutcome.SUCCEEDED
-    except Exception:
+    fs, path = fs_and_path(uri)
+    if not fs.exists(path):
         return False
+    with fs.open(path, "r") as source:
+        result = HeadResult.from_dict(json.load(source))
+    return result.gang_epoch == gang_epoch
 
 
 def clear_rendezvous(rendezvous_dir: str) -> None:
