@@ -19,7 +19,7 @@ itself reports resource or fork errors; retry another login host.
 ## Source revision
 
 Jupiter OpenThoughts-Agent launches use the latest fetched `origin/main` revision. Fetch and fast-forward
-`main` before launch. Do not use the historical `penfever/working` branch.
+`main` before launch.
 
 ## Secrets
 
