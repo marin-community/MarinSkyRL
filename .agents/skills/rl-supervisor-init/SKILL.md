@@ -58,9 +58,10 @@ selected experiments depend on at every sweep:
 
 - `git status --porcelain` must be empty. Never leave a dirty tree; local edits on a cluster
   checkout remain forbidden.
-- Each checkout must be fast-forwarded to the latest commit of its canonical branch: `main` for
-  Marin repositories, `penfever/working` for OpenThoughts-Agent. Fetch and fast-forward at every
-  sweep. A sync that is not a fast-forward is an escalation, not an action.
+- Each checkout must be fast-forwarded to the latest commit of its canonical branch. Resolve that
+  branch from the current repository configuration and the selected backend's ops runbook at
+  execution time. For OpenThoughts-Agent on Jupiter, follow `.agents/ops/jupiter/README.md`. Fetch
+  and fast-forward at every sweep. A sync that is not a fast-forward is an escalation, not an action.
 - Before a sync, read the incoming change summary for code that live jobs import, and record every
   sync (repository, old commit, new commit) in the experiment's `STATE.md`.
 - When a checkout is ahead of its remote, treat the unpushed commits as at-risk work: preserve
