@@ -613,7 +613,7 @@ class RayPPOTrainer:
                     # 1.2 postprocess rewards
                     with Timer("postprocess_trajectory_batch", self.all_timings):
                         trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
-                    self._update_curriculum_sampler(uids)
+                    self._update_curriculum_sampler(trajectory_batch, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
@@ -1415,16 +1415,23 @@ class RayPPOTrainer:
         trajectory_batch["rewards"] = per_token_rewards
         return trajectory_batch
 
-    def _update_curriculum_sampler(self, uids: List[str]) -> None:
-        """Feed this step's per-sample scalar rewards to the curriculum sampler, if one is active."""
+    def _update_curriculum_sampler(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> None:
+        """Feed this step's per-sample rewards to the curriculum sampler, if one is active.
+
+        Runs after reward postprocessing, where rewards are per-token lists; each sample's
+        scalar reward is their sum. The sampler only compares rewards within one prompt's
+        group, so any monotonic scalarization works.
+        """
         sampler = self.train_dataloader.sampler if self.train_dataloader is not None else None
         if not isinstance(sampler, CurriculumSampler):
             return
-        rewards = self._current_step_rewards
+        rewards = [
+            float(np.sum(reward)) if isinstance(reward, list) else float(reward)
+            for reward in trajectory_batch["rewards"]
+        ]
         if len(rewards) != len(uids):
             raise ValueError(
-                f"Curriculum sampling needs one scalar reward per sample: got {len(rewards)} rewards "
-                f"for {len(uids)} uids. Token-level rewards are not supported."
+                f"Curriculum sampling needs one reward per sample: got {len(rewards)} rewards for {len(uids)} uids"
             )
         sampler.update(uids, rewards, self.cfg.generator.n_samples_per_prompt)
         self.all_metrics.update(sampler.metrics())
