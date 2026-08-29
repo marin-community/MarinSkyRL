@@ -74,6 +74,7 @@ terminal_bench:
     cleanup: true
 
 trainer:
+  debug_mode: distributed
   strategy: megatron
   attn_backend: sdpa
   flash_attn: false
@@ -251,15 +252,7 @@ rollout:
 
 extra_env:
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-  NCCL_DEBUG: INFO
-  NCCL_DEBUG_SUBSYS: INIT,NET,ENV
   VLLM_ALLOW_ROUTED_EXPERTS_DCP: "1"
   VLLM_MQ_MAX_CHUNK_BYTES_MB: "160"
   VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS: "1200"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "900"
-  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"
-  TORCH_NCCL_ENABLE_MONITORING: "1"
-  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
-  TORCH_FR_BUFFER_SIZE: "2000"
-  TORCH_NCCL_TRACE_CPP_STACK: "1"
-  TORCH_NCCL_DEBUG_INFO_TEMP_FILE: /tmp/nccl_fr_rank

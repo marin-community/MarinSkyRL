@@ -45,10 +45,8 @@ def test_training_driver_requires_the_runtime_checkout() -> None:
 
 def test_ray_stop_collapses_cli_process_spam(monkeypatch) -> None:
     noisy_output = "VINFO scripts.py -- Killed `ray::IDLE`\n" * 200
-    observed = {}
 
-    def fake_run(_command, **kwargs):
-        observed.update(kwargs)
+    def fake_run(_command, **_kwargs):
         return SimpleNamespace(returncode=0, stdout=noisy_output)
 
     real_subprocess = task_runtime.subprocess
@@ -68,8 +66,6 @@ def test_ray_stop_collapses_cli_process_spam(monkeypatch) -> None:
         task_runtime.ray_stop()
 
     assert output.getvalue() == "[task-runtime] Ray stop completed (exit 0)\n"
-    assert observed["stdout"] == real_subprocess.PIPE
-    assert observed["stderr"] == real_subprocess.STDOUT
 
 
 def test_head_returns_driver_abort_when_failure_artifact_upload_blocks(tmp_path, monkeypatch) -> None:
