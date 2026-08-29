@@ -79,6 +79,8 @@ def test_state_dict_roundtrip_resumes_identical_draws():
     assert [next(restored_it) for _ in range(10)] == expected
     np.testing.assert_allclose(restored.informative, sampler.informative)
     np.testing.assert_allclose(restored.total, sampler.total)
+    np.testing.assert_allclose(restored.solved, sampler.solved)
+    np.testing.assert_allclose(restored.samples, sampler.samples)
 
 
 def test_update_informative_accounting_with_decay():
@@ -122,6 +124,25 @@ def test_thompson_concentrates_on_informative_bins():
     assert sampler.weights[1] >= 0.05 / 2  # epsilon floor
 
 
+def test_learnability_concentrates_on_mid_pass_rate_bin():
+    bins = {"g0-easy": (0, 1), "g1-mid": (1, 1), "g2-hard": (2, 1)}
+    sampler = _sampler(bins, "learnability", seed=0)
+    for _ in range(30):
+        # Bin 0 (row 0) all-pass, bin 1 (row 1) 50% pass, bin 2 (row 2) all-fail.
+        sampler.update(["0", "0", "1", "1", "2", "2"], [1.0, 1.0, 0.0, 1.0, 0.0, 0.0], 2)
+    assert sampler.weights[1] > 0.5
+    assert sampler.weights[1] > sampler.weights[0]
+    assert sampler.weights[1] > sampler.weights[2]
+
+
+def test_pass_rate_metric_tracks_solved_samples():
+    sampler = _sampler(TWO_BINS, "naive")
+    sampler.update(["0", "0", "0", "0"], [1.0, 0.0, 0.0, 0.0], 2)
+    metrics = sampler.metrics()
+    assert metrics["curriculum/g0-easy/pass_rate"] == pytest.approx(0.25)
+    assert metrics["curriculum/g1-hard/pass_rate"] == 0.0  # no samples yet
+
+
 def test_grade_prior_prefers_easy_then_follows_evidence():
     bins = {"g0-easy": (0, 1), "g2-hard": (2, 1)}
     sampler = _sampler(bins, "grade-prior", seed=1)
@@ -129,10 +150,13 @@ def test_grade_prior_prefers_easy_then_follows_evidence():
     for _ in range(300):
         sampler.update([], [], 1)  # no evidence; redraws weights from the grade-seeded prior
         weight_sum += sampler.weights
+    # Prior mean pass rate 0.85 at the low grade vs 0.05 at the high grade: the easy
+    # bin's p*(1-p) learnability is larger in expectation until evidence says otherwise.
     assert weight_sum[0] > weight_sum[1]
 
     for _ in range(30):
-        # Evidence flips: the hard bin (row 1) is informative, the easy bin saturated.
+        # Evidence flips: the easy bin (row 0) saturates at 100% pass, the hard bin
+        # (row 1) sits at the 50% learnability peak.
         sampler.update(["0", "0", "1", "1"], [1.0, 1.0, 0.0, 1.0], 2)
     assert sampler.weights[1] > sampler.weights[0]
 
@@ -194,9 +218,7 @@ def _parquet_prompt_dataset(tmp_path):
     }
     parquet_path = str(tmp_path / "train.parquet")
     Dataset.from_dict(data).to_parquet(parquet_path)
-    return PromptDataset(
-        datasets=[parquet_path], tokenizer=_StubTokenizer(), max_prompt_length=100, num_workers=1
-    )
+    return PromptDataset(datasets=[parquet_path], tokenizer=_StubTokenizer(), max_prompt_length=100, num_workers=1)
 
 
 def _curriculum_config(kind):

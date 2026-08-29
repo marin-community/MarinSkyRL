@@ -4,7 +4,11 @@ Training rows carry a bin assignment in their ``extra_info`` column: ``data_sour
 bin (e.g. ``"g0-gsm8k"``) and ``grade`` orders bins by difficulty (0 easiest). CurriculumSampler
 draws dataset rows with replacement according to per-bin weights, updated each training step from
 per-sample rollout rewards. A prompt group (one uid's rollouts) is "informative" when its rewards
-are not all equal — an all-pass or all-fail group contributes no GRPO gradient signal.
+are not all equal — an all-pass or all-fail group contributes no GRPO gradient signal. Alongside
+the group-level informative counts, the sampler tracks sample-level solved counts (reward > 0),
+whose decayed pass rate drives the directional kinds: ``learnability`` and ``grade-prior`` weight
+bins by a Thompson draw on p·(1−p), which peaks at a 50% pass rate and so distinguishes bins that
+are too easy from bins that are too hard.
 """
 
 from collections import defaultdict
@@ -26,6 +30,7 @@ GRADE_KEY = "grade"
 class SamplingKind(StrEnum):
     NAIVE = "naive"
     THOMPSON = "thompson"
+    LEARNABILITY = "learnability"
     GRADE_UNIFORM = "grade-uniform"
     GRADE_ADAPTIVE = "grade-adaptive"
     GRADE_PRIOR = "grade-prior"
@@ -41,7 +46,8 @@ class CurriculumConfig:
     prior_alpha: float = 1.0
     prior_beta: float = 1.0
     grade_prior_strength: float = 8.0
-    grade_prior_temperature: float = 1.0
+    grade_prior_high: float = 0.85
+    grade_prior_low: float = 0.05
     adaptive_exploration: float = 0.2
     adaptive_window: int = 10
     adaptive_min_informative: float = 0.1
@@ -55,7 +61,8 @@ class CurriculumConfig:
             prior_alpha=cfg.prior_alpha,
             prior_beta=cfg.prior_beta,
             grade_prior_strength=cfg.grade_prior_strength,
-            grade_prior_temperature=cfg.grade_prior_temperature,
+            grade_prior_high=cfg.grade_prior_high,
+            grade_prior_low=cfg.grade_prior_low,
             adaptive_exploration=cfg.adaptive_exploration,
             adaptive_window=cfg.adaptive_window,
             adaptive_min_informative=cfg.adaptive_min_informative,
@@ -161,6 +168,8 @@ class CurriculumSampler(Sampler[int]):
         num_bins = len(self.bins.names)
         self.informative = np.zeros(num_bins)
         self.total = np.zeros(num_bins)
+        self.solved = np.zeros(num_bins)
+        self.samples = np.zeros(num_bins)
         self.step_groups = np.zeros(num_bins)
         self.level_pos = 0  # index into grade_values; grade-adaptive only
         self.low_signal_steps = 0
@@ -205,6 +214,8 @@ class CurriculumSampler(Sampler[int]):
         num_bins = len(self.bins.names)
         step_informative = np.zeros(num_bins)
         step_total = np.zeros(num_bins)
+        step_solved = np.zeros(num_bins)
+        step_samples = np.zeros(num_bins)
         for uid, group_rewards in groups.items():
             if len(group_rewards) % n_samples_per_prompt != 0:
                 raise ValueError(
@@ -215,9 +226,13 @@ class CurriculumSampler(Sampler[int]):
             step_total[bin_idx] += 1
             if any(reward != group_rewards[0] for reward in group_rewards):
                 step_informative[bin_idx] += 1
+            step_samples[bin_idx] += len(group_rewards)
+            step_solved[bin_idx] += sum(reward > 0 for reward in group_rewards)
 
         self.informative = self.config.decay * self.informative + step_informative
         self.total = self.config.decay * self.total + step_total
+        self.solved = self.config.decay * self.solved + step_solved
+        self.samples = self.config.decay * self.samples + step_samples
         self.step_groups = step_total
         if self.config.kind == SamplingKind.GRADE_ADAPTIVE:
             self._maybe_advance_level()
@@ -255,12 +270,21 @@ class CurriculumSampler(Sampler[int]):
             return self._thompson_weights(
                 np.full(num_bins, self.config.prior_alpha), np.full(num_bins, self.config.prior_beta)
             )
+        elif kind == SamplingKind.LEARNABILITY:
+            return self._learnability_weights(
+                np.full(num_bins, self.config.prior_alpha), np.full(num_bins, self.config.prior_beta)
+            )
         elif kind == SamplingKind.GRADE_PRIOR:
-            # Optimism seeded from grades: the easiest bin gets the largest prior pseudo-count.
-            logits = -self.bins.grades / self.config.grade_prior_temperature
-            optimism = np.exp(logits - logits.max())
-            optimism /= optimism.sum()
-            return self._thompson_weights(1.0 + self.config.grade_prior_strength * optimism, np.ones(num_bins))
+            # Learnability with a grade-seeded prior: the expected pass rate falls linearly
+            # from grade_prior_high at the lowest grade to grade_prior_low at the highest.
+            grades = self.bins.grades.astype(np.float64)
+            grade_span = grades.max() - grades.min()
+            fraction = (grades - grades.min()) / grade_span if grade_span > 0 else np.zeros(num_bins)
+            mean = self.config.grade_prior_high + fraction * (
+                self.config.grade_prior_low - self.config.grade_prior_high
+            )
+            strength = self.config.grade_prior_strength
+            return self._learnability_weights(1.0 + strength * mean, 1.0 + strength * (1.0 - mean))
         elif kind == SamplingKind.GRADE_ADAPTIVE:
             level_mask = self.bins.grades == self.grade_values[self.level_pos]
             if level_mask.all():
@@ -278,7 +302,15 @@ class CurriculumSampler(Sampler[int]):
 
     def _thompson_weights(self, prior_alpha: np.ndarray, prior_beta: np.ndarray) -> np.ndarray:
         samples = self.rng.beta(prior_alpha + self.informative, prior_beta + (self.total - self.informative))
-        weights = samples / samples.sum()
+        return self._floor_and_normalize(samples)
+
+    def _learnability_weights(self, prior_alpha: np.ndarray, prior_beta: np.ndarray) -> np.ndarray:
+        """Thompson draw on the pass rate, weighted by p·(1−p) so mid-difficulty bins dominate."""
+        pass_rate = self.rng.beta(prior_alpha + self.solved, prior_beta + (self.samples - self.solved))
+        return self._floor_and_normalize(pass_rate * (1.0 - pass_rate))
+
+    def _floor_and_normalize(self, weights: np.ndarray) -> np.ndarray:
+        weights = weights / weights.sum()
         weights = np.maximum(weights, self.config.epsilon / len(weights))
         return weights / weights.sum()
 
@@ -289,6 +321,8 @@ class CurriculumSampler(Sampler[int]):
             total = self.total[bin_idx]
             out[f"curriculum/{name}/weight"] = float(self.weights[bin_idx])
             out[f"curriculum/{name}/informative_frac"] = float(self.informative[bin_idx] / total) if total > 0 else 0.0
+            samples = self.samples[bin_idx]
+            out[f"curriculum/{name}/pass_rate"] = float(self.solved[bin_idx] / samples) if samples > 0 else 0.0
             out[f"curriculum/{name}/groups"] = float(self.step_groups[bin_idx])
         if self.config.kind == SamplingKind.GRADE_ADAPTIVE:
             out["curriculum/level"] = float(self.grade_values[self.level_pos])
@@ -298,6 +332,8 @@ class CurriculumSampler(Sampler[int]):
         return {
             "informative": self.informative.copy(),
             "total": self.total.copy(),
+            "solved": self.solved.copy(),
+            "samples": self.samples.copy(),
             "step_groups": self.step_groups.copy(),
             "weights": self.weights.copy(),
             "level_pos": self.level_pos,
@@ -309,6 +345,8 @@ class CurriculumSampler(Sampler[int]):
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         self.informative = state_dict["informative"].copy()
         self.total = state_dict["total"].copy()
+        self.solved = state_dict["solved"].copy()
+        self.samples = state_dict["samples"].copy()
         self.step_groups = state_dict["step_groups"].copy()
         self.weights = state_dict["weights"].copy()
         self.level_pos = state_dict["level_pos"]
