@@ -52,7 +52,7 @@ def patch_function_past_key_values(
                     error = str(e)
                     continue
     if not success:
-        print(f" Failed to patch {target_obj.__name__}.{attr_name}: {error}")
+        logger.warning(f"Failed to patch {target_obj.__name__}.{attr_name}: {error}")
     return success
 
 

@@ -1,4 +1,7 @@
+import json
 import traceback
+from dataclasses import asdict, dataclass, field
+from enum import StrEnum
 from typing import Any, Dict, List, Optional, Union
 
 from loguru import logger
@@ -6,6 +9,122 @@ from loguru import logger
 POSITIVE_RESPONSE_COLOR = "green"
 NEGATIVE_RESPONSE_COLOR = "yellow"
 BASE_PROMPT_COLOR = "cyan"
+PROGRESS_LOG_PREFIX = "SKYRL_PROGRESS "
+
+
+class ProgressEventName(StrEnum):
+    SERVICE_STARTING = "service_starting"
+    SERVICE_READY = "service_ready"
+    ROLLOUT_BATCH_STARTED = "rollout_batch_started"
+    ROLLOUT_BATCH_COMPLETED = "rollout_batch_completed"
+    OPTIMIZER_STEP_COMPLETED = "optimizer_step_completed"
+    WEIGHT_UPDATE_COMPLETED = "weight_update_completed"
+    TRAINING_STEP_COMPLETED = "training_step_completed"
+
+
+class ServiceName(StrEnum):
+    INFERENCE_ENGINES = "inference_engines"
+    POLICY_WORKERS = "policy_workers"
+    TRAJECTORY_RUNNER = "trajectory_runner"
+    WEIGHT_SYNC = "weight_sync"
+
+
+class WeightUpdateReason(StrEnum):
+    INITIAL = "initial"
+    TRAINING_STEP = "training_step"
+    CHECKPOINT_RESTORE = "checkpoint_restore"
+
+
+@dataclass(frozen=True)
+class ServiceStartingEvent:
+    service: ServiceName
+    implementation: str | None = None
+    mode: str | None = None
+    strategy: str | None = None
+    event: ProgressEventName = field(default=ProgressEventName.SERVICE_STARTING, init=False)
+
+
+@dataclass(frozen=True)
+class ServiceReadyEvent:
+    service: ServiceName
+    implementation: str | None = None
+    mode: str | None = None
+    strategy: str | None = None
+    count: int | None = None
+    policy_workers: int | None = None
+    inference_engines: int | None = None
+    event: ProgressEventName = field(default=ProgressEventName.SERVICE_READY, init=False)
+
+
+@dataclass(frozen=True)
+class RolloutBatchStartedEvent:
+    step: int
+    mode: str
+    prompts: int | None = None
+    required_groups: int | None = None
+    event: ProgressEventName = field(default=ProgressEventName.ROLLOUT_BATCH_STARTED, init=False)
+
+
+@dataclass(frozen=True)
+class RolloutBatchCompletedEvent:
+    step: int
+    mode: str
+    duration_seconds: float
+    trajectories: int
+    response_tokens: int
+    prompts: int | None = None
+    groups: int | None = None
+    staleness_mean: float | None = None
+    staleness_max: int | None = None
+    event: ProgressEventName = field(default=ProgressEventName.ROLLOUT_BATCH_COMPLETED, init=False)
+
+
+@dataclass(frozen=True)
+class OptimizerStepCompletedEvent:
+    step: int
+    epoch: int
+    sequences: int
+    duration_seconds: float
+    event: ProgressEventName = field(default=ProgressEventName.OPTIMIZER_STEP_COMPLETED, init=False)
+
+
+@dataclass(frozen=True)
+class WeightUpdateCompletedEvent:
+    step: int | None
+    reason: WeightUpdateReason
+    duration_seconds: float
+    event: ProgressEventName = field(default=ProgressEventName.WEIGHT_UPDATE_COMPLETED, init=False)
+
+
+@dataclass(frozen=True)
+class TrainingStepCompletedEvent:
+    step: int
+    epoch: int
+    total_steps: int
+    duration_seconds: float
+    event: ProgressEventName = field(default=ProgressEventName.TRAINING_STEP_COMPLETED, init=False)
+
+
+ProgressEvent = (
+    ServiceStartingEvent
+    | ServiceReadyEvent
+    | RolloutBatchStartedEvent
+    | RolloutBatchCompletedEvent
+    | OptimizerStepCompletedEvent
+    | WeightUpdateCompletedEvent
+    | TrainingStepCompletedEvent
+)
+
+
+def format_progress_event(progress: ProgressEvent) -> str:
+    """Format one machine-readable application progress event for text log capture."""
+    payload = {key: value for key, value in asdict(progress).items() if value is not None}
+    return PROGRESS_LOG_PREFIX + json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def log_progress(progress: ProgressEvent) -> None:
+    """Log a machine-readable application progress event at INFO level."""
+    logger.opt(depth=1).info(format_progress_event(progress))
 
 
 def format_exception_text(error: BaseException) -> str:
@@ -93,5 +212,10 @@ def log_example(
         # Let Loguru parse tags in log_format and then substitute arguments.
         logger.opt(colors=True).info(log_format, **format_kwargs)
     except Exception as e:
-        print(f"Error pretty printing example, debug printing instead: {e}")
-        print(f"Example:\n  Input: {prompt}\n  Output (Total Reward: {reward_str}):\n{response}")
+        logger.warning("Error pretty printing example; logging plain text instead: {}", e)
+        logger.info(
+            "Example:\n  Input: {}\n  Output (Total Reward: {}):\n{}",
+            prompt,
+            reward_str,
+            response,
+        )

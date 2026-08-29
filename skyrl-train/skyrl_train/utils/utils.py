@@ -257,20 +257,31 @@ def use_per_engine_strict_pack_pg(
 
 
 class Timer:
-    def __init__(self, message, update_dict=None):
+    def __init__(self, message, update_dict=None, *, log_events: bool = True):
         self.message = message
         self.update_dict = update_dict
+        self.log_events = log_events
+        self._duration: float | None = None
+
+    @property
+    def duration(self) -> float:
+        if self._duration is None:
+            raise RuntimeError("Timer duration is only available after its context exits")
+        return self._duration
 
     def __enter__(self):
         self.start_time = time.monotonic()
-        logger.opt(depth=1).info(f"Started: '{self.message}'")
+        if self.log_events:
+            logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     def _finish(self, exc_type) -> None:
         duration = time.monotonic() - self.start_time
-        log = logger.opt(depth=2).info if exc_type is None else logger.opt(depth=2).error
-        outcome = "Finished" if exc_type is None else "Failed"
-        log(f"{outcome}: '{self.message}', time cost: {duration:.2f}s")
+        self._duration = duration
+        if self.log_events:
+            log = logger.opt(depth=2).info if exc_type is None else logger.opt(depth=2).error
+            outcome = "Finished" if exc_type is None else "Failed"
+            log(f"{outcome}: '{self.message}', time cost: {duration:.2f}s")
         if self.update_dict is not None:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + duration
 
@@ -279,7 +290,8 @@ class Timer:
 
     async def __aenter__(self):
         self.start_time = time.monotonic()
-        logger.opt(depth=1).info(f"Started: '{self.message}'")
+        if self.log_events:
+            logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):

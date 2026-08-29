@@ -64,10 +64,10 @@ class DistributedStrategy(ABC):
         """Save model in HuggingFace safetensors format"""
         pass
 
-    def print(self, *msg):
-        """Print only on rank 0"""
+    def log(self, *msg: object) -> None:
+        """Log a message only on rank 0."""
         if self.is_rank_0():
-            print(*msg)
+            logger.opt(depth=1).info(" ".join(str(part) for part in msg))
 
     def is_rank_0(self) -> bool:
         """Check if current process is rank 0"""

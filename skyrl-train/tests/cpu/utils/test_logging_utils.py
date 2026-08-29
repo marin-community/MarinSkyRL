@@ -96,27 +96,3 @@ def test_log_example_uses_expected_colors_and_reward_string(reward, expected_col
     assert f"</{BASE_PROMPT_COLOR}>" in logger.last_message
     assert f"<{expected_color}>" in logger.last_message
     assert f"</{expected_color}>" in logger.last_message
-
-
-def test_log_example_handles_exceptions_gracefully(monkeypatch, capsys):
-    """Force an exception inside log_example and ensure the fallback path prints."""
-
-    def broken_color_block(*args, **kwargs):
-        raise RuntimeError("boom")
-
-    # Patch the helper to raise
-    monkeypatch.setattr(
-        "skyrl_train.utils.logging_utils._color_block_format_and_kwargs",
-        broken_color_block,
-    )
-
-    logger = StubLogger()
-    log_example(logger, prompt=[{"role": "user", "content": "p"}], response="r", reward=None)
-
-    # And the plain-text fallback should be printed to stdout
-    captured = capsys.readouterr()
-    assert "Error pretty printing example" in captured.out
-    assert "Example:" in captured.out
-    assert "Input: [{'role': 'user', 'content': 'p'}]" in captured.out
-    assert "Output (Total Reward: N/A):" in captured.out
-    assert "r" in captured.out

@@ -276,7 +276,7 @@ class DeepspeedStrategy(DistributedStrategy):
         if load_training_state and "rng" in states:
             self.load_rng_state(states["rng"])
             if self.is_rank_0():
-                self.print(f"[rank-{self.get_rank()}]: Loaded RNG state from checkpoint")
+                self.log(f"[rank-{self.get_rank()}]: Loaded RNG state from checkpoint")
 
         return load_path, states
 

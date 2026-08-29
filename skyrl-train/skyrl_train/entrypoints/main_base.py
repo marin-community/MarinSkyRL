@@ -22,6 +22,13 @@ from loguru import logger
 import asyncio
 import multiprocessing as mp
 
+from skyrl_train.utils.logging_utils import (
+    ServiceName,
+    ServiceReadyEvent,
+    ServiceStartingEvent,
+    log_progress,
+)
+
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
     from skyrl_train.trajectory_runners.base import TrajectoryRunner
@@ -204,15 +211,21 @@ class BasePPOExp:
         """Create the configured local or remote inference-engine client."""
         from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: PLC0415
 
+        engine_mode = "local" if self.cfg.generator.run_engines_locally else "remote"
+        log_progress(ServiceStartingEvent(service=ServiceName.INFERENCE_ENGINES, mode=engine_mode))
         if self.cfg.generator.run_engines_locally:
-            logger.info("Creating local inference engines")
             inference_engines = create_ray_wrapped_inference_engines_from_config(
                 self.cfg, self.colocate_pg, self.tokenizer
             )
         else:
-            logger.info("Connecting to remote inference engines")
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
-        logger.info("Inference engines ready")
+        log_progress(
+            ServiceReadyEvent(
+                service=ServiceName.INFERENCE_ENGINES,
+                mode=engine_mode,
+                count=len(inference_engines),
+            )
+        )
         return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
 
     def _configure_log_level(self):
@@ -480,9 +493,20 @@ class BasePPOExp:
         # Build the models. Pass the pre-reserved dedicated policy placement
         # group (None unless `policy_strict_spread_pg` is enabled for an
         # eligible disaggregated no-ref run).
-        logger.info("Creating policy workers")
+        log_progress(
+            ServiceStartingEvent(
+                service=ServiceName.POLICY_WORKERS,
+                strategy=self.cfg.trainer.strategy,
+            )
+        )
         trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
-        logger.info("Policy workers ready")
+        log_progress(
+            ServiceReadyEvent(
+                service=ServiceName.POLICY_WORKERS,
+                strategy=self.cfg.trainer.strategy,
+                count=len(trainer.policy_model.actor_infos),
+            )
+        )
         return trainer
 
     def run(self):

@@ -21,7 +21,13 @@ from skyrl_train.utils import Timer, get_system_memory_metrics
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
-from skyrl_train.utils.logging_utils import log_exception_as_text
+from skyrl_train.utils.logging_utils import (
+    RolloutBatchCompletedEvent,
+    RolloutBatchStartedEvent,
+    WeightUpdateReason,
+    log_exception_as_text,
+    log_progress,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import (
     prepare_trajectory_request,
     concatenate_trajectory_batches,
@@ -79,6 +85,27 @@ class _GenerationQueues:
         for prompts in retries:
             self.retries.put_nowait(prompts)
         return GenerationBufferState(completed_groups=completed, retry_prompts=retries)
+
+
+def _completed_rollout_event(
+    groups: list[GeneratedOutputGroup],
+    *,
+    step: int,
+    duration_seconds: float,
+    staleness_mean: float,
+    staleness_max: int,
+) -> RolloutBatchCompletedEvent:
+    response_ids = [response_ids for group in groups for response_ids in group.trajectory_batch["response_ids"]]
+    return RolloutBatchCompletedEvent(
+        step=step,
+        mode="fully_async",
+        groups=len(groups),
+        trajectories=len(response_ids),
+        response_tokens=sum(len(response) for response in response_ids),
+        staleness_mean=round(staleness_mean, 3),
+        staleness_max=staleness_max,
+        duration_seconds=round(duration_seconds, 3),
+    )
 
 
 @dataclass
@@ -608,12 +635,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.init_weight_sync_state()
 
         # sync weights to inference engines
-        with Timer("sync_weights_to_inference_engines"):
+        with Timer("sync_weights_to_inference_engines") as weight_update_timer:
             await self.async_sync_policy_weights_to_inference_engines()
             # Drain the policy workers' event loops to a hard sync point so every FSDP
             # shard rank is free before the step-1 forward is dispatched (the MoE-RL
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             await self._drain_policy_event_loops()
+        self._log_weight_update_completed(
+            reason=WeightUpdateReason.INITIAL,
+            duration_seconds=weight_update_timer.duration,
+        )
 
         # Create initial trainer state for on_train_begin callback
         start_epoch = self.global_step // self.num_steps_per_epoch
@@ -674,10 +705,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             trajectory_tasks = self._active_trajectory_tasks
 
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
-                with Timer("step", self.all_timings):
+                with Timer("step", self.all_timings) as step_timer:
                     # 1. Discard every completed stale attempt and wait for a full fresh batch.
+                    log_progress(
+                        RolloutBatchStartedEvent(
+                            step=self.global_step,
+                            mode="fully_async",
+                            required_groups=self.mini_batch_size,
+                        )
+                    )
                     with (
-                        Timer("wait_for_generation_buffer", self.all_timings),
+                        Timer("wait_for_generation_buffer", self.all_timings) as rollout_wait_timer,
                         critical_phase("rollout_or_inference_wait"),
                     ):
                         cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
@@ -690,6 +728,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             self.convert_generation_group_mini_batch_to_training_input,
                             cur_generation_group_mini_batch,
                         )
+                    log_progress(
+                        _completed_rollout_event(
+                            cur_generation_group_mini_batch,
+                            step=self.global_step,
+                            duration_seconds=rollout_wait_timer.duration,
+                            staleness_mean=self.all_metrics["async/staleness_mean"],
+                            staleness_max=self.all_metrics["async/staleness_max"],
+                        )
+                    )
 
                     # TIS graceful-degrade observability (Fix A): record whether THIS
                     # training batch was missing all rollout logprobs (-> TIS skipped,
@@ -712,7 +759,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # 3. Run training and record consumed UIDs in the tracker.
                     with Timer("run_training", self.all_timings):
                         status = await self._run_training(training_input)
-                        await self.data_tracker.mark_consumed([g.uid for g in cur_generation_group_mini_batch])
+                    train_duration = self.all_timings["train_critic_and_policy"]
+                    self._log_optimizer_step_completed(
+                        epoch=epoch,
+                        training_input=training_input,
+                        duration_seconds=train_duration,
+                    )
+                    await self.data_tracker.mark_consumed([g.uid for g in cur_generation_group_mini_batch])
 
                     # 4. After training: sync weights to the inference engines.
                     #    The inference engines are a SHARED HTTP backend that every
@@ -729,7 +782,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     #    max_staleness_steps accounting — exactly like stock
                     #    fully_async, which never drains trial orchestration. This
                     #    block is now byte-identical for fan-out ON and OFF.
-                    with Timer("sync_weights", self.all_timings):
+                    with Timer("sync_weights", self.all_timings) as weight_update_timer:
                         await self.inference_engine_client.pause_generation()
                         await self.async_sync_policy_weights_to_inference_engines()
                         # Drain the policy workers' event loops to a hard sync point so
@@ -738,6 +791,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         # _drain_policy_event_loops.
                         await self._drain_policy_event_loops()
                         await self.inference_engine_client.resume_generation()
+                    self._log_weight_update_completed(
+                        reason=WeightUpdateReason.TRAINING_STEP,
+                        duration_seconds=weight_update_timer.duration,
+                    )
 
                 # 5. Log status and update metrics
                 logger.info(status)
@@ -798,6 +855,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     await self.callback_handler.call_event_async(
                         "on_log", step_state, self._control, logs=log_payload, trainer=self
                     )
+
+                self._log_training_step_completed(
+                    epoch=epoch,
+                    duration_seconds=step_timer.duration,
+                )
 
                 self.all_metrics = {}
                 step_duration = self.all_timings.get("step")

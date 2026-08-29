@@ -237,7 +237,7 @@ class MegatronStrategy(DistributedStrategy):
         dist.barrier()
         ckpt_base.async_calls.close()
         ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
-        self.print(f"Checkpoint successfully saved to {ckpt_dir}")
+        self.log(f"Checkpoint successfully saved to {ckpt_dir}")
 
     def load_checkpoint(
         self,
@@ -284,21 +284,21 @@ class MegatronStrategy(DistributedStrategy):
             f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
         )
         model[0].load_state_dict(state_dict["model"], strict=load_module_strict)
-        self.print("Loaded model state dict.")
+        self.log("Loaded model state dict.")
 
         if optimizer and load_training_state:
             assert "optimizer" in state_dict, (
                 f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             )
             optimizer.load_state_dict(state_dict["optimizer"])
-            self.print("Loaded optimizer state dict.")
+            self.log("Loaded optimizer state dict.")
 
         if scheduler and load_training_state:
             assert "lr_scheduler" in state_dict, (
                 f"LR scheduler state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             )
             scheduler.load_state_dict(state_dict["lr_scheduler"])
-            self.print("Loaded LR scheduler state dict.")
+            self.log("Loaded LR scheduler state dict.")
 
         # Load RNG state, if present.
         if load_training_state and "rng" in state_dict:
@@ -312,7 +312,7 @@ class MegatronStrategy(DistributedStrategy):
             with io.open_file(extra_state_path, "rb") as f:
                 extra_state = torch.load(f, weights_only=False)
             states = extra_state.get("client_state", {}) or {}
-            self.print("Loaded client state (ZClip / StaleClip) from checkpoint.")
+            self.log("Loaded client state (ZClip / StaleClip) from checkpoint.")
 
         return ckpt_dir, states
 
@@ -327,11 +327,11 @@ class MegatronStrategy(DistributedStrategy):
         model_dir = hf_model_io.local_hf_model_dir(output_dir) if rank_writes_output else tempfile.TemporaryDirectory()
         with model_dir as work_dir:
             bridge.save_hf_weights(model.actor_module, work_dir)
-            self.print(f"Successfully saved HF safetensors model to {output_dir}")
+            self.log(f"Successfully saved HF safetensors model to {output_dir}")
 
             # Only rank 0 saves the Huggingface config and tokenizer.
             if self.is_rank_0():
                 self.save_hf_configs(self.hf_config, work_dir, tokenizer)
-                self.print(f"Successfully saved HF config and tokenizer to {output_dir}")
+                self.log(f"Successfully saved HF config and tokenizer to {output_dir}")
 
         # The Ray caller waits for every rank result; no collective needs to span artifact publication.
