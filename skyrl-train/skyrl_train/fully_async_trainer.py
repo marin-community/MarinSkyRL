@@ -21,13 +21,7 @@ from skyrl_train.utils import Timer, get_system_memory_metrics
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
-from skyrl_train.utils.logging_utils import (
-    RolloutBatchCompletedEvent,
-    RolloutBatchStartedEvent,
-    WeightUpdateReason,
-    log_exception_as_text,
-    log_progress,
-)
+from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.trajectory_runners.trajectory_processing import (
     prepare_trajectory_request,
     concatenate_trajectory_batches,
@@ -85,27 +79,6 @@ class _GenerationQueues:
         for prompts in retries:
             self.retries.put_nowait(prompts)
         return GenerationBufferState(completed_groups=completed, retry_prompts=retries)
-
-
-def _completed_rollout_event(
-    groups: list[GeneratedOutputGroup],
-    *,
-    step: int,
-    duration_seconds: float,
-    staleness_mean: float,
-    staleness_max: int,
-) -> RolloutBatchCompletedEvent:
-    response_ids = [response_ids for group in groups for response_ids in group.trajectory_batch["response_ids"]]
-    return RolloutBatchCompletedEvent(
-        step=step,
-        mode="fully_async",
-        groups=len(groups),
-        trajectories=len(response_ids),
-        response_tokens=sum(len(response) for response in response_ids),
-        staleness_mean=round(staleness_mean, 3),
-        staleness_max=staleness_max,
-        duration_seconds=round(duration_seconds, 3),
-    )
 
 
 @dataclass
@@ -642,7 +615,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             await self._drain_policy_event_loops()
         self._log_weight_update_completed(
-            reason=WeightUpdateReason.INITIAL,
+            reason="initial",
             duration_seconds=weight_update_timer.duration,
         )
 
@@ -707,12 +680,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
                 with Timer("step", self.all_timings) as step_timer:
                     # 1. Discard every completed stale attempt and wait for a full fresh batch.
-                    log_progress(
-                        RolloutBatchStartedEvent(
-                            step=self.global_step,
-                            mode="fully_async",
-                            required_groups=self.mini_batch_size,
-                        )
+                    logger.info(
+                        "Rollout batch started: step={} mode=fully_async required_groups={}",
+                        self.global_step,
+                        self.mini_batch_size,
                     )
                     with (
                         Timer("wait_for_generation_buffer", self.all_timings) as rollout_wait_timer,
@@ -728,14 +699,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             self.convert_generation_group_mini_batch_to_training_input,
                             cur_generation_group_mini_batch,
                         )
-                    log_progress(
-                        _completed_rollout_event(
-                            cur_generation_group_mini_batch,
-                            step=self.global_step,
-                            duration_seconds=rollout_wait_timer.duration,
-                            staleness_mean=self.all_metrics["async/staleness_mean"],
-                            staleness_max=self.all_metrics["async/staleness_max"],
-                        )
+                    response_ids = [
+                        response_ids
+                        for group in cur_generation_group_mini_batch
+                        for response_ids in group.trajectory_batch["response_ids"]
+                    ]
+                    logger.info(
+                        "Rollout batch completed: step={} mode=fully_async groups={} trajectories={} "
+                        "response_tokens={} staleness_mean={:.3f} staleness_max={} duration_seconds={:.3f}",
+                        self.global_step,
+                        len(cur_generation_group_mini_batch),
+                        len(response_ids),
+                        sum(len(response) for response in response_ids),
+                        self.all_metrics["async/staleness_mean"],
+                        self.all_metrics["async/staleness_max"],
+                        rollout_wait_timer.duration,
                     )
 
                     # TIS graceful-degrade observability (Fix A): record whether THIS
@@ -792,7 +770,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         await self._drain_policy_event_loops()
                         await self.inference_engine_client.resume_generation()
                     self._log_weight_update_completed(
-                        reason=WeightUpdateReason.TRAINING_STEP,
+                        reason="training_step",
                         duration_seconds=weight_update_timer.duration,
                     )
 

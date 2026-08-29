@@ -203,28 +203,16 @@ class BasePPOExp:
     def create_inference_engine_client(self) -> InferenceEngineClient:
         """Create the configured local or remote inference-engine client."""
         from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: PLC0415
-        from skyrl_train.utils.logging_utils import (  # noqa: PLC0415 - keep launcher imports Torch-free
-            ServiceName,
-            ServiceReadyEvent,
-            ServiceStartingEvent,
-            log_progress,
-        )
 
         engine_mode = "local" if self.cfg.generator.run_engines_locally else "remote"
-        log_progress(ServiceStartingEvent(service=ServiceName.INFERENCE_ENGINES, mode=engine_mode))
+        logger.info("Starting inference engines: mode={}", engine_mode)
         if self.cfg.generator.run_engines_locally:
             inference_engines = create_ray_wrapped_inference_engines_from_config(
                 self.cfg, self.colocate_pg, self.tokenizer
             )
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
-        log_progress(
-            ServiceReadyEvent(
-                service=ServiceName.INFERENCE_ENGINES,
-                mode=engine_mode,
-                count=len(inference_engines),
-            )
-        )
+        logger.info("Inference engines ready: mode={} count={}", engine_mode, len(inference_engines))
         return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
 
     def _configure_log_level(self):
@@ -452,13 +440,6 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
-        from skyrl_train.utils.logging_utils import (  # noqa: PLC0415 - keep launcher imports Torch-free
-            ServiceName,
-            ServiceReadyEvent,
-            ServiceStartingEvent,
-            log_progress,
-        )
-
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
@@ -499,19 +480,12 @@ class BasePPOExp:
         # Build the models. Pass the pre-reserved dedicated policy placement
         # group (None unless `policy_strict_spread_pg` is enabled for an
         # eligible disaggregated no-ref run).
-        log_progress(
-            ServiceStartingEvent(
-                service=ServiceName.POLICY_WORKERS,
-                strategy=self.cfg.trainer.strategy,
-            )
-        )
+        logger.info("Starting policy workers: strategy={}", self.cfg.trainer.strategy)
         trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
-        log_progress(
-            ServiceReadyEvent(
-                service=ServiceName.POLICY_WORKERS,
-                strategy=self.cfg.trainer.strategy,
-                count=len(trainer.policy_model.actor_infos),
-            )
+        logger.info(
+            "Policy workers ready: strategy={} count={}",
+            self.cfg.trainer.strategy,
+            len(trainer.policy_model.actor_infos),
         )
         return trainer
 

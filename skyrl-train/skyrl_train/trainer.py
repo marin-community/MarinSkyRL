@@ -78,19 +78,7 @@ from skyrl_train.utils.utils import (
 )
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
-from skyrl_train.utils.logging_utils import (
-    OptimizerStepCompletedEvent,
-    RolloutBatchCompletedEvent,
-    RolloutBatchStartedEvent,
-    ServiceName,
-    ServiceReadyEvent,
-    ServiceStartingEvent,
-    TrainingStepCompletedEvent,
-    WeightUpdateCompletedEvent,
-    WeightUpdateReason,
-    log_example,
-    log_progress,
-)
+from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks import (
     TrainerCallback,
     TrainerState,
@@ -385,20 +373,11 @@ class RayPPOTrainer:
 
     async def _startup_trajectory_runner(self) -> None:
         """Initialize trajectory-runner resources before any rollout can begin."""
-        log_progress(
-            ServiceStartingEvent(
-                service=ServiceName.TRAJECTORY_RUNNER,
-                implementation=type(self.trajectory_runner).__name__,
-            )
-        )
+        implementation = type(self.trajectory_runner).__name__
+        logger.info("Starting trajectory runner: implementation={}", implementation)
         try:
             await self.trajectory_runner.startup()
-            log_progress(
-                ServiceReadyEvent(
-                    service=ServiceName.TRAJECTORY_RUNNER,
-                    implementation=type(self.trajectory_runner).__name__,
-                )
-            )
+            logger.info("Trajectory runner ready: implementation={}", implementation)
         except Exception as e:
             logger.opt(depth=0).error("Trajectory runner startup failed: " + str(e))
             raise
@@ -452,7 +431,7 @@ class RayPPOTrainer:
             self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
             await asyncio.to_thread(self.save_checkpoints)
         finally:
-            await self._sync_policy_for_rollouts(reason=WeightUpdateReason.CHECKPOINT_RESTORE)
+            await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
     def _record_checkpoint_save_failure(self, state: TrainerState) -> None:
         self._checkpoint_save_failures += 1.0
@@ -485,7 +464,7 @@ class RayPPOTrainer:
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
         await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
-    async def _sync_policy_for_rollouts(self, *, reason: WeightUpdateReason) -> None:
+    async def _sync_policy_for_rollouts(self, *, reason: str) -> None:
         with Timer("publish_policy_weights", log_events=False) as update_timer:
             if self.colocate_all:
                 try:
@@ -497,13 +476,12 @@ class RayPPOTrainer:
                     ray.get(self.sync_policy_weights_to_inference_engines())
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
 
-    def _log_weight_update_completed(self, *, reason: WeightUpdateReason, duration_seconds: float) -> None:
-        log_progress(
-            WeightUpdateCompletedEvent(
-                step=getattr(self, "global_step", None),
-                reason=reason,
-                duration_seconds=round(duration_seconds, 3),
-            )
+    def _log_weight_update_completed(self, *, reason: str, duration_seconds: float) -> None:
+        logger.info(
+            "Policy weights updated: step={} reason={} duration_seconds={:.3f}",
+            getattr(self, "global_step", None),
+            reason,
+            duration_seconds,
         )
 
     def _log_optimizer_step_completed(
@@ -513,23 +491,21 @@ class RayPPOTrainer:
         training_input: TrainingInputBatch,
         duration_seconds: float,
     ) -> None:
-        log_progress(
-            OptimizerStepCompletedEvent(
-                step=self.global_step,
-                epoch=epoch,
-                sequences=len(training_input["sequences"]),
-                duration_seconds=round(duration_seconds, 3),
-            )
+        logger.info(
+            "Optimizer step completed: step={} epoch={} sequences={} duration_seconds={:.3f}",
+            self.global_step,
+            epoch,
+            len(training_input["sequences"]),
+            duration_seconds,
         )
 
     def _log_training_step_completed(self, *, epoch: int, duration_seconds: float) -> None:
-        log_progress(
-            TrainingStepCompletedEvent(
-                step=self.global_step,
-                epoch=epoch,
-                total_steps=self.total_training_steps,
-                duration_seconds=round(duration_seconds, 3),
-            )
+        logger.info(
+            "Training step completed: step={} total_steps={} epoch={} duration_seconds={:.3f}",
+            self.global_step,
+            self.total_training_steps,
+            epoch,
+            duration_seconds,
         )
 
     async def _train_loop(self):
@@ -565,7 +541,7 @@ class RayPPOTrainer:
                 await self._handle_resume_at_max_steps()
                 return
 
-        await self._sync_policy_for_rollouts(reason=WeightUpdateReason.INITIAL)
+        await self._sync_policy_for_rollouts(reason="initial")
 
         # initialize kl controller
         if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -694,7 +670,7 @@ class RayPPOTrainer:
                     )
 
                     # 5. sync weights to inference engines (must happen before callbacks)
-                    await self._sync_policy_for_rollouts(reason=WeightUpdateReason.TRAINING_STEP)
+                    await self._sync_policy_for_rollouts(reason="training_step")
 
                 # 6. Log status and update metrics
                 logger.info(status)
@@ -1112,12 +1088,10 @@ class RayPPOTrainer:
             )
         except ray.exceptions.RayError as e:
             raise RuntimeError(f"init_weight_sync_state failed at Ray boundary: {e!r}") from None
-        log_progress(
-            ServiceReadyEvent(
-                service=ServiceName.WEIGHT_SYNC,
-                policy_workers=len(self.policy_model.actor_infos),
-                inference_engines=len(self.inference_engine_client.engines),
-            )
+        logger.info(
+            "Weight sync ready: policy_workers={} inference_engines={}",
+            len(self.policy_model.actor_infos),
+            len(self.inference_engine_client.engines),
         )
 
     def _resolve_num_experts(self) -> Optional[int]:
@@ -1338,12 +1312,10 @@ class RayPPOTrainer:
         """
         # Runners preserve the input sample order.
         started_at = time.monotonic()
-        log_progress(
-            RolloutBatchStartedEvent(
-                step=self.global_step,
-                mode="synchronous",
-                prompts=len(input_batch["prompts"]),
-            )
+        logger.info(
+            "Rollout batch started: step={} mode=synchronous prompts={}",
+            self.global_step,
+            len(input_batch["prompts"]),
         )
         trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
         # add rollout metrics to self.all_metrics
@@ -1353,15 +1325,15 @@ class RayPPOTrainer:
         if not self.cfg.trainer.step_wise_training:
             validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
         record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"))
-        log_progress(
-            RolloutBatchCompletedEvent(
-                step=self.global_step,
-                mode="synchronous",
-                prompts=len(input_batch["prompts"]),
-                trajectories=len(trajectory_batch["response_ids"]),
-                response_tokens=sum(len(response_ids) for response_ids in trajectory_batch["response_ids"]),
-                duration_seconds=round(time.monotonic() - started_at, 3),
-            )
+        response_tokens = sum(len(response_ids) for response_ids in trajectory_batch["response_ids"])
+        logger.info(
+            "Rollout batch completed: step={} mode=synchronous prompts={} trajectories={} "
+            "response_tokens={} duration_seconds={:.3f}",
+            self.global_step,
+            len(input_batch["prompts"]),
+            len(trajectory_batch["response_ids"]),
+            response_tokens,
+            time.monotonic() - started_at,
         )
 
         return trajectory_batch
