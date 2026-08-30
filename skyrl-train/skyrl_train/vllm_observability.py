@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import math
-import os
 from collections.abc import Mapping
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-from skyrl_train.inference_engines.vllm.stats import VLLMStatsSnapshot
+from loguru import logger
+
+from skyrl_train.inference_engines.vllm.stats import VLLMHistogramSnapshot, VLLMStatsSnapshot
+from skyrl_train.telemetry import TelemetryConfig
+
+if TYPE_CHECKING:
+    from rigging.telemetry.metrics import MetricSnapshot
 
 
 class VLLMMetricsSink(Protocol):
@@ -17,12 +22,15 @@ class VLLMMetricsSink(Protocol):
 
 
 def configured_vllm_sinks() -> tuple[VLLMMetricsSink, ...]:
-    """Construct optional publishers without exposing their dependencies to the callback."""
-    if not os.environ.get("SKYRL_TELEMETRY_ENDPOINT"):
+    """Return the Finelog sink when telemetry is configured and Rigging is installed."""
+    if not TelemetryConfig.from_environment().endpoint:
         return ()
     try:
         return (FinelogVLLMMetricsSink(),)
-    except ImportError:
+    except ImportError as error:
+        if error.name != "rigging":
+            raise
+        logger.info("Rigging is unavailable; vLLM Finelog metrics are disabled")
         return ()
 
 
@@ -92,13 +100,13 @@ class FinelogVLLMMetricsSink:
     """Convert the neutral snapshot to Rigging records at the publishing edge."""
 
     def __init__(self) -> None:
-        from rigging.telemetry.metrics import MetricSnapshotPublisher
+        from rigging.telemetry.metrics import MetricSnapshotPublisher  # noqa: PLC0415
 
         self._publisher = MetricSnapshotPublisher(max_records=512, attributes={"metric_source": "vllm"})
 
     def publish(self, snapshot: VLLMStatsSnapshot, step: int) -> None:
-        from rigging import telemetry
-        from rigging.telemetry.metrics import MetricSnapshot
+        from rigging import telemetry  # noqa: PLC0415
+        from rigging.telemetry.metrics import MetricSnapshot  # noqa: PLC0415
 
         for engine in snapshot.engines:
             records = []
@@ -165,7 +173,12 @@ class FinelogVLLMMetricsSink:
                 self._publisher.publish(records)
 
 
-def _histogram_records(histogram, base, metric_snapshot_type, cumulative):
+def _histogram_records(
+    histogram: VLLMHistogramSnapshot,
+    base: Mapping[str, str],
+    metric_snapshot_type: type[MetricSnapshot],
+    cumulative: str,
+) -> list[MetricSnapshot]:
     attributes = {**base, **histogram.attributes}
     records = [
         metric_snapshot_type(

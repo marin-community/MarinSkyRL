@@ -36,13 +36,17 @@ def test_native_accumulator_preserves_current_cumulative_labels_and_histograms()
     )
 
     accumulator.observe(scheduler, iteration)
-    current, cumulative, histograms = accumulator.snapshot()
+    native = accumulator.snapshot()
 
-    assert (current.running_requests, current.waiting_capacity, current.waiting_deferred) == (2, 3, 1)
-    assert cumulative.prompt_tokens == 20
-    assert cumulative.generation_tokens == 12
-    assert cumulative.finished_by_reason == {"length": 1}
-    assert {histogram.name for histogram in histograms} == {
+    assert (native.current.running_requests, native.current.waiting_capacity, native.current.waiting_deferred) == (
+        2,
+        3,
+        1,
+    )
+    assert native.cumulative.prompt_tokens == 20
+    assert native.cumulative.generation_tokens == 12
+    assert native.cumulative.finished_by_reason == {"length": 1}
+    assert {histogram.name for histogram in native.histograms} == {
         "request_queue_time_seconds",
         "request_prefill_time_seconds",
         "request_decode_time_seconds",
@@ -50,8 +54,8 @@ def test_native_accumulator_preserves_current_cumulative_labels_and_histograms()
         "time_to_first_token_seconds",
         "request_generation_tokens",
     }
-    assert all(histogram.attributes == {"model_name": "m", "engine": "0"} for histogram in histograms)
-    assert next(item for item in histograms if item.name == "request_generation_tokens").total == 12
+    assert all(histogram.attributes == {"model_name": "m", "engine": "0"} for histogram in native.histograms)
+    assert next(item for item in native.histograms if item.name == "request_generation_tokens").total == 12
 
 
 def test_native_accumulator_is_cumulative_across_reads():
@@ -69,8 +73,8 @@ def test_native_accumulator_is_cumulative_across_reads():
     accumulator.observe(None, iteration)
     second = accumulator.snapshot()
 
-    assert first[1].prompt_tokens == 2
-    assert second[1].prompt_tokens == 4
+    assert first.cumulative.prompt_tokens == 2
+    assert second.cumulative.prompt_tokens == 4
 
 
 def test_finelog_adapter_projects_every_typed_native_measurement():
@@ -82,17 +86,17 @@ def test_finelog_adapter_projects_every_typed_native_measurement():
     accumulator.prefix_cache_queries = 8
     accumulator.preemptions = 1
     accumulator.finished_by_reason = {"length": 2}
-    current, cumulative, histograms = accumulator.snapshot()
+    native = accumulator.snapshot()
     snapshot = VLLMStatsSnapshot(
         (
             VLLMEngineStatsSnapshot(
                 "engine-a",
                 1.0,
-                current,
-                cumulative,
+                native.current,
+                native.cumulative,
                 VLLMIntervalStats(),
                 attributes={"model_name": "m"},
-                histograms=histograms,
+                histograms=native.histograms,
             ),
         )
     )

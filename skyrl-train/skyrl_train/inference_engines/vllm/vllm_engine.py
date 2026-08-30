@@ -1373,18 +1373,8 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
         return sorted_samples[mid]
 
     @classmethod
-    def get_stats_by_engine_id(cls, engine_id: int, reset: bool = True) -> Optional[Dict[str, Any]]:
-        """Get the accumulated stats for a given engine ID.
-
-        Args:
-            engine_id: The engine ID to get stats for.
-            reset: If True, reset the accumulated stats after reading (default True).
-                   This ensures each training step gets fresh stats.
-
-        Returns:
-            Dict with accumulated stats, or None if no stats recorded yet.
-            Includes peak values, median values, and computed averages.
-        """
+    def get_stats_by_engine_id(cls, engine_id: int, reset: bool = True) -> Optional[VLLMEngineStatsSnapshot]:
+        """Return the engine's typed metric snapshot, optionally resetting interval fields."""
         with cls._registry_lock:
             stats = cls._stats_registry.get(engine_id)
             if stats is None:
@@ -1424,59 +1414,50 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                 idx = int(len(sorted_s) * 0.9)
                 return sorted_s[min(idx, len(sorted_s) - 1)]
 
-            current, cumulative, native_histograms = stats["_native"].snapshot()
-            result = {
-                # Peak values
-                "peak_prompt_throughput": stats["_peak_prompt_tp"],
-                "peak_generation_throughput": stats["_peak_gen_tp"],
-                "peak_running_reqs": stats["_peak_running"],
-                "peak_waiting_reqs": stats["_peak_waiting"],
-                "peak_gpu_cache_usage_perc": stats["_peak_cache"],
-                "peak_prefix_cache_hit_rate": stats["_prefix_hit"].peak,
-                # Median values
-                "median_prompt_throughput": median_prompt_tp,
-                "median_generation_throughput": median_gen_tp,
-                "median_running_reqs": median_running,
-                "median_waiting_reqs": median_waiting,
-                "median_gpu_cache_usage_perc": median_cache,
-                "median_prefix_cache_hit_rate": median_prefix_hit,
-                # Mean values
-                "mean_prompt_throughput": mean_prompt_tp,
-                "mean_generation_throughput": mean_gen_tp,
-                # Per-request latency stats (seconds)
-                "latency_prefill_mean": _mean(prefill_samples),
-                "latency_prefill_median": cls._compute_median(prefill_samples),
-                "latency_prefill_p90": _p90(prefill_samples),
-                "latency_decode_mean": _mean(decode_samples),
-                "latency_decode_median": cls._compute_median(decode_samples),
-                "latency_decode_p90": _p90(decode_samples),
-                "latency_e2e_mean": _mean(e2e_samples),
-                "latency_e2e_median": cls._compute_median(e2e_samples),
-                "latency_e2e_p90": _p90(e2e_samples),
-                "latency_queued_mean": _mean(queued_samples),
-                "latency_queued_median": cls._compute_median(queued_samples),
-                "latency_queued_p90": _p90(queued_samples),
-                "latency_ttft_mean": _mean(ttft_samples),
-                "latency_ttft_median": cls._compute_median(ttft_samples),
-                "latency_ttft_p90": _p90(ttft_samples),
-                "latency_num_finished_requests": len(e2e_samples),
-                "total_preempted_reqs": stats["_total_preempted"],
-                # Legacy field names for backwards compatibility (use peak values)
-                "avg_prompt_throughput": stats["_peak_prompt_tp"],
-                "avg_generation_throughput": stats["_peak_gen_tp"],
-                "num_running_reqs": stats["_peak_running"],
-                "num_waiting_reqs": stats["_peak_waiting"],
-                "gpu_cache_usage_perc": stats["_peak_cache"],
-                "prefix_cache_hit_rate": stats["_prefix_hit"].peak,
-                # Metadata
-                "timestamp": stats["timestamp"],
-                "num_samples": stats["_num_samples"],
-                "num_active_samples": stats["_num_active_samples"],
-                "_native_current": current,
-                "_native_cumulative": cumulative,
-                "_native_histograms": native_histograms,
-                "_native_attributes": stats["_native"].attributes,
-            }
+            native = stats["_native"].snapshot()
+            result = VLLMEngineStatsSnapshot(
+                engine_id=str(engine_id),
+                timestamp=float(stats["timestamp"]),
+                current=native.current,
+                cumulative=native.cumulative,
+                interval=VLLMIntervalStats(
+                    peak_prompt_throughput=stats["_peak_prompt_tp"],
+                    peak_generation_throughput=stats["_peak_gen_tp"],
+                    peak_running_reqs=stats["_peak_running"],
+                    peak_waiting_reqs=stats["_peak_waiting"],
+                    peak_gpu_cache_usage_perc=stats["_peak_cache"],
+                    peak_prefix_cache_hit_rate=stats["_prefix_hit"].peak,
+                    median_prompt_throughput=median_prompt_tp,
+                    median_generation_throughput=median_gen_tp,
+                    median_running_reqs=median_running,
+                    median_waiting_reqs=median_waiting,
+                    median_gpu_cache_usage_perc=median_cache,
+                    median_prefix_cache_hit_rate=median_prefix_hit,
+                    mean_prompt_throughput=mean_prompt_tp,
+                    mean_generation_throughput=mean_gen_tp,
+                    latency_prefill_mean=_mean(prefill_samples),
+                    latency_prefill_median=cls._compute_median(prefill_samples),
+                    latency_prefill_p90=_p90(prefill_samples),
+                    latency_decode_mean=_mean(decode_samples),
+                    latency_decode_median=cls._compute_median(decode_samples),
+                    latency_decode_p90=_p90(decode_samples),
+                    latency_e2e_mean=_mean(e2e_samples),
+                    latency_e2e_median=cls._compute_median(e2e_samples),
+                    latency_e2e_p90=_p90(e2e_samples),
+                    latency_queued_mean=_mean(queued_samples),
+                    latency_queued_median=cls._compute_median(queued_samples),
+                    latency_queued_p90=_p90(queued_samples),
+                    latency_ttft_mean=_mean(ttft_samples),
+                    latency_ttft_median=cls._compute_median(ttft_samples),
+                    latency_ttft_p90=_p90(ttft_samples),
+                    finished_requests=len(e2e_samples),
+                    preempted_reqs=stats["_total_preempted"],
+                    samples=stats["_num_samples"],
+                    active_samples=stats["_num_active_samples"],
+                ),
+                attributes=stats["_native"].attributes,
+                histograms=native.histograms,
+            )
 
             if reset:
                 for key in (
@@ -2131,18 +2112,18 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET) -> VLLMEngineStatsSnapshot:
         """Return the engine's complete typed snapshot without publishing it."""
-        values = V1LoggingStatLoggerFixed.get_stats_by_engine_id(
+        snapshot = V1LoggingStatLoggerFixed.get_stats_by_engine_id(
             self._stats_engine_id,
             reset=read_mode is IntervalReadMode.RESET,
         )
+        if snapshot is not None:
+            return snapshot
         return VLLMEngineStatsSnapshot(
             engine_id=str(self._stats_engine_id),
-            timestamp=float(values.get("timestamp", time.time())) if values else time.time(),
-            current=values.get("_native_current", VLLMCurrentStats()) if values else VLLMCurrentStats(),
-            cumulative=(values.get("_native_cumulative", VLLMCumulativeStats()) if values else VLLMCumulativeStats()),
-            interval=VLLMIntervalStats.from_mapping(values or {}),
-            attributes=values.get("_native_attributes", {}) if values else {},
-            histograms=values.get("_native_histograms", ()) if values else (),
+            timestamp=time.time(),
+            current=VLLMCurrentStats(),
+            cumulative=VLLMCumulativeStats(),
+            interval=VLLMIntervalStats(),
         )
 
     async def pause_generation(self) -> None:

@@ -622,7 +622,7 @@ async def test_fanout_retains_its_coordinators_batch_under_the_harbor_runner(tmp
 
 @pytest.mark.asyncio
 async def test_enabling_fanout_keeps_the_already_attached_sink_working(tmp_path):
-    """The swap in _maybe_enable_rollout_fanout replaces the runner holding the sink; #445."""
+    """Replacing the trajectory runner reattaches its retention sink."""
     trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
     trainer.cfg = OmegaConf.create(
         {

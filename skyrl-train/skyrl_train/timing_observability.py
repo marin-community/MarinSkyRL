@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Protocol
+
+from skyrl_train.telemetry import TRAINER_ROLE, phase_duration
 
 
 TIMING_PARENTS: dict[str, str | None] = {
@@ -46,6 +48,10 @@ class TimingSink(Protocol):
     def publish(self, observations: Sequence[PhaseTiming], step: int) -> None: ...
 
 
+class Tracker(Protocol):
+    def log(self, metrics: Mapping[str, float], *, step: int, commit: bool) -> None: ...
+
+
 def nearest_recorded_parent(name: str, recorded: Mapping[str, object]) -> str | None:
     parent = TIMING_PARENTS.get(name)
     while parent is not None and parent not in recorded:
@@ -71,8 +77,6 @@ def phase_timing_observations(timings: Mapping[str, float]) -> tuple[PhaseTiming
 
 class FinelogTimingSink:
     def publish(self, observations: Sequence[PhaseTiming], step: int) -> None:
-        from skyrl_train.telemetry import TRAINER_ROLE, phase_duration
-
         for observation in observations:
             phase_duration.record(
                 observation.duration_seconds,
@@ -98,10 +102,10 @@ def publish_startup_timings(
     step_timings: MutableMapping[str, float],
     *,
     step: int,
-    tracker: Any,
+    tracker: Tracker,
     console: Callable[..., None],
 ) -> None:
-    """Route startup observations through the same tracker and console abstractions as steps."""
+    """Move step timings into startup timings, clear them, then publish them."""
     startup_timings.update(step_timings)
     step_timings.clear()
     if not startup_timings:

@@ -233,11 +233,7 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return await self.inference_engine_actor.resume_generation.remote()
 
     async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET):
-        """Get vLLM engine statistics from the remote actor.
-
-        Returns statistics about the inference engine including throughput,
-        KV cache usage, and request counts. Used by VLLMStatsCallback.
-        """
+        """Return throughput, latency, cache, token, and request statistics."""
         return await self.inference_engine_actor.get_stats.remote(read_mode=read_mode)
 
 

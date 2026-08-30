@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Protocol
 
 
 class IntervalReadMode(StrEnum):
@@ -77,47 +78,6 @@ class VLLMIntervalStats:
     samples: int = 0
     active_samples: int = 0
 
-    @classmethod
-    def from_mapping(cls, values: Mapping[str, object]) -> VLLMIntervalStats:
-        return cls(**{target: values.get(source, default) for target, source, default in _INTERVAL_FIELDS})
-
-
-_INTERVAL_FIELDS: tuple[tuple[str, str, float | int], ...] = (
-    ("peak_prompt_throughput", "peak_prompt_throughput", 0.0),
-    ("peak_generation_throughput", "peak_generation_throughput", 0.0),
-    ("peak_running_reqs", "peak_running_reqs", 0),
-    ("peak_waiting_reqs", "peak_waiting_reqs", 0),
-    ("peak_gpu_cache_usage_perc", "peak_gpu_cache_usage_perc", 0.0),
-    ("peak_prefix_cache_hit_rate", "peak_prefix_cache_hit_rate", 0.0),
-    ("median_prompt_throughput", "median_prompt_throughput", 0.0),
-    ("median_generation_throughput", "median_generation_throughput", 0.0),
-    ("median_running_reqs", "median_running_reqs", 0.0),
-    ("median_waiting_reqs", "median_waiting_reqs", 0.0),
-    ("median_gpu_cache_usage_perc", "median_gpu_cache_usage_perc", 0.0),
-    ("median_prefix_cache_hit_rate", "median_prefix_cache_hit_rate", 0.0),
-    ("mean_prompt_throughput", "mean_prompt_throughput", 0.0),
-    ("mean_generation_throughput", "mean_generation_throughput", 0.0),
-    ("latency_prefill_mean", "latency_prefill_mean", 0.0),
-    ("latency_prefill_median", "latency_prefill_median", 0.0),
-    ("latency_prefill_p90", "latency_prefill_p90", 0.0),
-    ("latency_decode_mean", "latency_decode_mean", 0.0),
-    ("latency_decode_median", "latency_decode_median", 0.0),
-    ("latency_decode_p90", "latency_decode_p90", 0.0),
-    ("latency_e2e_mean", "latency_e2e_mean", 0.0),
-    ("latency_e2e_median", "latency_e2e_median", 0.0),
-    ("latency_e2e_p90", "latency_e2e_p90", 0.0),
-    ("latency_queued_mean", "latency_queued_mean", 0.0),
-    ("latency_queued_median", "latency_queued_median", 0.0),
-    ("latency_queued_p90", "latency_queued_p90", 0.0),
-    ("latency_ttft_mean", "latency_ttft_mean", 0.0),
-    ("latency_ttft_median", "latency_ttft_median", 0.0),
-    ("latency_ttft_p90", "latency_ttft_p90", 0.0),
-    ("finished_requests", "latency_num_finished_requests", 0),
-    ("preempted_reqs", "total_preempted_reqs", 0),
-    ("samples", "num_samples", 0),
-    ("active_samples", "num_active_samples", 0),
-)
-
 
 @dataclass(frozen=True)
 class VLLMEngineStatsSnapshot:
@@ -133,6 +93,43 @@ class VLLMEngineStatsSnapshot:
 @dataclass(frozen=True)
 class VLLMStatsSnapshot:
     engines: tuple[VLLMEngineStatsSnapshot, ...]
+
+
+@dataclass(frozen=True)
+class VLLMNativeStatsSnapshot:
+    current: VLLMCurrentStats
+    cumulative: VLLMCumulativeStats
+    histograms: tuple[VLLMHistogramSnapshot, ...]
+
+
+class PrefixCacheStatsLike(Protocol):
+    hits: int
+    queries: int
+
+
+class SchedulerStatsLike(Protocol):
+    num_running_reqs: int
+    num_waiting_reqs: int
+    num_skipped_waiting_reqs: int
+    kv_cache_usage: float
+    prefix_cache_stats: PrefixCacheStatsLike
+
+
+class FinishedRequestStatsLike(Protocol):
+    finish_reason: str
+    queued_time: float
+    prefill_time: float
+    decode_time: float
+    e2e_latency: float
+    num_generation_tokens: int
+
+
+class IterationStatsLike(Protocol):
+    num_prompt_tokens: int
+    num_generation_tokens: int
+    num_preempted_reqs: int
+    time_to_first_tokens_iter: Sequence[float]
+    finished_requests: Sequence[FinishedRequestStatsLike]
 
 
 @dataclass
@@ -238,7 +235,7 @@ class VLLMNativeStatsAccumulator:
             "request_generation_tokens": HistogramAccumulator(self.token_bounds),
         }
 
-    def observe(self, scheduler_stats: object | None, iteration_stats: object | None) -> None:
+    def observe(self, scheduler_stats: SchedulerStatsLike | None, iteration_stats: IterationStatsLike | None) -> None:
         if scheduler_stats is not None:
             self.current = VLLMCurrentStats(
                 running_requests=int(scheduler_stats.num_running_reqs),
@@ -268,7 +265,7 @@ class VLLMNativeStatsAccumulator:
             ):
                 self.histograms[name].observe(float(value))
 
-    def snapshot(self) -> tuple[VLLMCurrentStats, VLLMCumulativeStats, tuple[VLLMHistogramSnapshot, ...]]:
+    def snapshot(self) -> VLLMNativeStatsSnapshot:
         cumulative = VLLMCumulativeStats(
             prompt_tokens=self.prompt_tokens,
             generation_tokens=self.generation_tokens,
@@ -281,7 +278,7 @@ class VLLMNativeStatsAccumulator:
             accumulator.snapshot(name, "{token}" if name == "request_generation_tokens" else "s", self.attributes)
             for name, accumulator in self.histograms.items()
         )
-        return self.current, cumulative, histograms
+        return VLLMNativeStatsSnapshot(self.current, cumulative, histograms)
 
 
 def build_1_2_5_buckets(max_value: int) -> tuple[int, ...]:

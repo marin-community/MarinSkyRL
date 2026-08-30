@@ -614,9 +614,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         self.global_step = 0
 
-        # `rollout.fanout.enabled` defaults to TRUE, so the flag does not gate this -- reaching this
-        # trainer does, via `entrypoint: fully_async`, or `terminal_bench` with `colocate_all: false`.
-        # Absent `terminal_bench_config` it raises rather than falling back.
+        # Fan-out is opt-in. When enabled, a missing terminal_bench_config raises instead of falling back.
         self._maybe_enable_rollout_fanout()
 
         try:
