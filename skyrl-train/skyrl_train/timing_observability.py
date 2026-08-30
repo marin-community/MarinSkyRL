@@ -87,9 +87,7 @@ class FinelogTimingSink:
             )
 
 
-def publish_step_timings(
-    timings: Mapping[str, float], step: int, sinks: Sequence[TimingSink] | None = None
-) -> None:
+def publish_step_timings(timings: Mapping[str, float], step: int, sinks: Sequence[TimingSink] | None = None) -> None:
     observations = phase_timing_observations(timings)
     for sink in (FinelogTimingSink(),) if sinks is None else sinks:
         sink.publish(observations, step)

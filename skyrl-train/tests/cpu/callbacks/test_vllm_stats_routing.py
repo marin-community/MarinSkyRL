@@ -5,6 +5,8 @@ from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.callbacks.builtin import VLLMStatsCallback
 from skyrl_train.inference_engines.vllm.stats import (
     IntervalReadMode,
+    VLLMCumulativeStats,
+    VLLMCurrentStats,
     VLLMEngineStatsSnapshot,
     VLLMIntervalStats,
     VLLMStatsSnapshot,
@@ -46,7 +48,17 @@ EXPECTED_KEYS = {
 def _snapshot():
     values = {field.name: index + 1 for index, field in enumerate(fields(VLLMIntervalStats))}
     interval = VLLMIntervalStats(**values)
-    return VLLMStatsSnapshot((VLLMEngineStatsSnapshot("engine-0", 1.0, interval),))
+    return VLLMStatsSnapshot(
+        (
+            VLLMEngineStatsSnapshot(
+                "engine-0",
+                1.0,
+                current=VLLMCurrentStats(),
+                cumulative=VLLMCumulativeStats(),
+                interval=interval,
+            ),
+        )
+    )
 
 
 class _Sink:

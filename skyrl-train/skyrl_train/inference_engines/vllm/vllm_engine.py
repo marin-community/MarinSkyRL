@@ -9,7 +9,6 @@ import ray
 import torch
 import asyncio
 import vllm
-from prometheus_client import REGISTRY
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
@@ -72,9 +71,12 @@ from skyrl_train.inference_engines.vllm.utils import (
 )
 from skyrl_train.inference_engines.vllm.stats import (
     IntervalReadMode,
+    VLLMCumulativeStats,
+    VLLMCurrentStats,
     VLLMEngineStatsSnapshot,
     VLLMIntervalStats,
-    collect_native_metrics,
+    VLLMNativeStatsAccumulator,
+    build_1_2_5_buckets,
 )
 from skyrl_train.utils import get_tcp_url, str_to_torch_dtype, torch_dtype_to_str
 import time
@@ -1203,6 +1205,13 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
         super().__init__(*args, **kwargs)
         self.log_interval = 5
         self._engine_id: Optional[int] = None
+        config = args[0] if args else kwargs["vllm_config"]
+        engine_index = args[1] if len(args) > 1 else kwargs.get("engine_index", 0)
+        self._native_attributes = {
+            "model_name": str(config.model_config.served_model_name),
+            "engine": str(engine_index),
+        }
+        self._token_histogram_bounds = build_1_2_5_buckets(config.model_config.max_model_len)
 
     def set_engine_id(self, engine_id: int) -> None:
         """Set the engine ID for this stat logger instance."""
@@ -1230,7 +1239,9 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
 
             if scheduler_stats is not None:
                 current_running = getattr(scheduler_stats, "num_running_reqs", 0)
-                current_waiting = getattr(scheduler_stats, "num_waiting_reqs", 0)
+                current_waiting = getattr(scheduler_stats, "num_waiting_reqs", 0) + getattr(
+                    scheduler_stats, "num_skipped_waiting_reqs", 0
+                )
                 current_cache_usage = getattr(scheduler_stats, "kv_cache_usage", 0.0) * 100.0  # Convert to percentage
                 prefix_cache_stats = scheduler_stats.prefix_cache_stats
 
@@ -1297,6 +1308,10 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                         "_samples_queued_time": list(finished_queued_times),
                         "_samples_ttft": list(finished_ttfts),
                         "_total_preempted": finished_num_preempted,
+                        "_native": VLLMNativeStatsAccumulator(
+                            self._token_histogram_bounds,
+                            self._native_attributes,
+                        ),
                         # Peak values
                         "_peak_prompt_tp": current_prompt_tp,
                         "_peak_gen_tp": current_gen_tp,
@@ -1338,6 +1353,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                     existing["timestamp"] = time.time()
 
                 existing["_prefix_hit"].observe(prefix_cache_stats, is_active=is_active)
+                existing["_native"].observe(scheduler_stats, iteration_stats)
 
         now = time.monotonic()
         if now - self.last_log_time > self.log_interval:
@@ -1408,6 +1424,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                 idx = int(len(sorted_s) * 0.9)
                 return sorted_s[min(idx, len(sorted_s) - 1)]
 
+            current, cumulative, native_histograms = stats["_native"].snapshot()
             result = {
                 # Peak values
                 "peak_prompt_throughput": stats["_peak_prompt_tp"],
@@ -1455,11 +1472,32 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                 "timestamp": stats["timestamp"],
                 "num_samples": stats["_num_samples"],
                 "num_active_samples": stats["_num_active_samples"],
+                "_native_current": current,
+                "_native_cumulative": cumulative,
+                "_native_histograms": native_histograms,
+                "_native_attributes": stats["_native"].attributes,
             }
 
             if reset:
-                # Reset for next step
-                del cls._stats_registry[engine_id]
+                for key in (
+                    "_samples_prompt_tp",
+                    "_samples_gen_tp",
+                    "_samples_running",
+                    "_samples_waiting",
+                    "_samples_cache",
+                    "_samples_prefill_time",
+                    "_samples_decode_time",
+                    "_samples_e2e_latency",
+                    "_samples_queued_time",
+                    "_samples_ttft",
+                ):
+                    stats[key].clear()
+                stats["_prefix_hit"] = PrefixCacheHitRateAccumulator()
+                for key in ("_peak_prompt_tp", "_peak_gen_tp", "_peak_running", "_peak_waiting", "_peak_cache"):
+                    stats[key] = 0
+                stats["_total_preempted"] = 0
+                stats["_num_samples"] = 0
+                stats["_num_active_samples"] = 0
 
             return result
 
@@ -1511,6 +1549,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             _engine_arg_fields = {f.name for f in _dataclass_fields(vllm.AsyncEngineArgs)}
         except TypeError:
             _engine_arg_fields = set()
+        if "disable_log_stats" in _engine_arg_fields:
+            kwargs["disable_log_stats"] = True
         if "enable_log_requests" in _engine_arg_fields:
             engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
         elif "disable_log_requests" in _engine_arg_fields:
@@ -2095,13 +2135,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             self._stats_engine_id,
             reset=read_mode is IntervalReadMode.RESET,
         )
-        metrics, histograms = collect_native_metrics(REGISTRY.collect())
         return VLLMEngineStatsSnapshot(
             engine_id=str(self._stats_engine_id),
             timestamp=float(values.get("timestamp", time.time())) if values else time.time(),
+            current=values.get("_native_current", VLLMCurrentStats()) if values else VLLMCurrentStats(),
+            cumulative=(values.get("_native_cumulative", VLLMCumulativeStats()) if values else VLLMCumulativeStats()),
             interval=VLLMIntervalStats.from_mapping(values or {}),
-            metrics=metrics,
-            histograms=histograms,
+            attributes=values.get("_native_attributes", {}) if values else {},
+            histograms=values.get("_native_histograms", ()) if values else (),
         )
 
     async def pause_generation(self) -> None:

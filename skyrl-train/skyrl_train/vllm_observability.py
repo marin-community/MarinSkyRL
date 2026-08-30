@@ -7,10 +7,7 @@ import os
 from collections.abc import Mapping
 from typing import Protocol
 
-from skyrl_train.inference_engines.vllm.stats import (
-    MetricTemporality,
-    VLLMStatsSnapshot,
-)
+from skyrl_train.inference_engines.vllm.stats import VLLMStatsSnapshot
 
 
 class VLLMMetricsSink(Protocol):
@@ -105,20 +102,61 @@ class FinelogVLLMMetricsSink:
 
         for engine in snapshot.engines:
             records = []
-            base = {"engine": engine.engine_id, "step": str(step)}
-            for metric in engine.metrics:
+            base = {**engine.attributes, "engine": engine.engine_id, "step": str(step)}
+            current = engine.current
+            for name, value, unit, attributes in (
+                ("num_requests_running", current.running_requests, "{request}", {}),
+                (
+                    "num_requests_waiting",
+                    current.waiting_capacity + current.waiting_deferred,
+                    "{request}",
+                    {},
+                ),
+                (
+                    "num_requests_waiting_by_reason",
+                    current.waiting_capacity,
+                    "{request}",
+                    {"reason": "capacity"},
+                ),
+                (
+                    "num_requests_waiting_by_reason",
+                    current.waiting_deferred,
+                    "{request}",
+                    {"reason": "deferred"},
+                ),
+                ("kv_cache_usage_perc", current.kv_cache_usage, "1", {}),
+            ):
                 records.append(
                     MetricSnapshot(
-                        name=metric.name,
-                        value=metric.value,
-                        unit=metric.unit,
-                        attributes={**base, **metric.attributes},
-                        source_kind=metric.kind,
-                        source_temporality=(
-                            telemetry.CUMULATIVE_SNAPSHOT
-                            if metric.temporality is MetricTemporality.CUMULATIVE
-                            else telemetry.CURRENT_SNAPSHOT
-                        ),
+                        name=name,
+                        value=value,
+                        unit=unit,
+                        attributes={**base, **attributes},
+                        source_kind="gauge",
+                        source_temporality=telemetry.CURRENT_SNAPSHOT,
+                    )
+                )
+            cumulative = engine.cumulative
+            counters = (
+                ("num_preemptions_total", cumulative.preemptions, "{request}", {}),
+                ("prefix_cache_hits_total", cumulative.prefix_cache_hits, "{token}", {}),
+                ("prefix_cache_queries_total", cumulative.prefix_cache_queries, "{token}", {}),
+                ("generation_tokens_total", cumulative.generation_tokens, "{token}", {}),
+                ("prompt_tokens_total", cumulative.prompt_tokens, "{token}", {}),
+                *(
+                    ("request_success_total", value, "{request}", {"finished_reason": reason})
+                    for reason, value in cumulative.finished_by_reason.items()
+                ),
+            )
+            for name, value, unit, attributes in counters:
+                records.append(
+                    MetricSnapshot(
+                        name=name,
+                        value=value,
+                        unit=unit,
+                        attributes={**base, **attributes},
+                        source_kind="counter",
+                        source_temporality=telemetry.CUMULATIVE_SNAPSHOT,
                     )
                 )
             for histogram in engine.histograms:

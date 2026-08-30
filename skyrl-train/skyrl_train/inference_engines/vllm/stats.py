@@ -2,40 +2,19 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-from collections.abc import Iterable, Mapping
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 
 class IntervalReadMode(StrEnum):
-    """Whether an engine read preserves or advances its interval accumulator."""
-
     PEEK = "peek"
     RESET = "reset"
 
 
-class MetricTemporality(StrEnum):
-    CURRENT = "current"
-    CUMULATIVE = "cumulative"
-
-
-@dataclass(frozen=True)
-class VLLMMetricSample:
-    """One labelled scalar from vLLM's native metric surface."""
-
-    name: str
-    value: float
-    unit: str
-    kind: str
-    temporality: MetricTemporality
-    attributes: Mapping[str, str] = field(default_factory=dict)
-
-
 @dataclass(frozen=True)
 class VLLMHistogramSnapshot:
-    """One labelled cumulative histogram, including its bucket boundaries."""
-
     name: str
     buckets: tuple[tuple[float, float], ...]
     count: float
@@ -45,9 +24,25 @@ class VLLMHistogramSnapshot:
 
 
 @dataclass(frozen=True)
-class VLLMIntervalStats:
-    """Measurements accumulated by one engine since the last reset read."""
+class VLLMCurrentStats:
+    running_requests: int = 0
+    waiting_capacity: int = 0
+    waiting_deferred: int = 0
+    kv_cache_usage: float = 0.0
 
+
+@dataclass(frozen=True)
+class VLLMCumulativeStats:
+    prompt_tokens: int = 0
+    generation_tokens: int = 0
+    prefix_cache_hits: int = 0
+    prefix_cache_queries: int = 0
+    preemptions: int = 0
+    finished_by_reason: Mapping[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class VLLMIntervalStats:
     peak_prompt_throughput: float = 0.0
     peak_generation_throughput: float = 0.0
     peak_running_reqs: int = 0
@@ -84,12 +79,7 @@ class VLLMIntervalStats:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, object]) -> VLLMIntervalStats:
-        return cls(
-            **{
-                target: values.get(source, default)
-                for target, source, default in _INTERVAL_FIELDS
-            }
-        )
+        return cls(**{target: values.get(source, default) for target, source, default in _INTERVAL_FIELDS})
 
 
 _INTERVAL_FIELDS: tuple[tuple[str, str, float | int], ...] = (
@@ -131,88 +121,176 @@ _INTERVAL_FIELDS: tuple[tuple[str, str, float | int], ...] = (
 
 @dataclass(frozen=True)
 class VLLMEngineStatsSnapshot:
-    """Everything the trainer can observe from one vLLM engine in one read."""
-
     engine_id: str
     timestamp: float
+    current: VLLMCurrentStats
+    cumulative: VLLMCumulativeStats
     interval: VLLMIntervalStats
-    metrics: tuple[VLLMMetricSample, ...] = ()
+    attributes: Mapping[str, str] = field(default_factory=dict)
     histograms: tuple[VLLMHistogramSnapshot, ...] = ()
 
 
 @dataclass(frozen=True)
 class VLLMStatsSnapshot:
-    """An unaggregated, lossless read from all live inference engines."""
-
     engines: tuple[VLLMEngineStatsSnapshot, ...]
 
 
-_NATIVE_METRICS = {
-    "vllm:num_requests_running": ("{request}", MetricTemporality.CURRENT),
-    "vllm:num_requests_waiting": ("{request}", MetricTemporality.CURRENT),
-    "vllm:num_requests_waiting_by_reason": ("{request}", MetricTemporality.CURRENT),
-    "vllm:kv_cache_usage_perc": ("1", MetricTemporality.CURRENT),
-    "vllm:request_success": ("{request}", MetricTemporality.CUMULATIVE),
-    "vllm:num_preemptions": ("{request}", MetricTemporality.CUMULATIVE),
-    "vllm:prefix_cache_hits": ("{token}", MetricTemporality.CUMULATIVE),
-    "vllm:prefix_cache_queries": ("{token}", MetricTemporality.CUMULATIVE),
-    "vllm:generation_tokens": ("{token}", MetricTemporality.CUMULATIVE),
-    "vllm:prompt_tokens": ("{token}", MetricTemporality.CUMULATIVE),
-}
-_NATIVE_HISTOGRAMS = {
-    "vllm:request_queue_time_seconds": "s",
-    "vllm:request_prefill_time_seconds": "s",
-    "vllm:request_decode_time_seconds": "s",
-    "vllm:e2e_request_latency_seconds": "s",
-    "vllm:time_to_first_token_seconds": "s",
-    "vllm:request_generation_tokens": "{token}",
-}
+@dataclass
+class HistogramAccumulator:
+    """Process-local cumulative histogram owned by the canonical stat logger."""
+
+    bounds: tuple[float, ...]
+    count: int = 0
+    total: float = 0.0
+    bucket_counts: list[int] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.bucket_counts:
+            self.bucket_counts = [0] * (len(self.bounds) + 1)
+
+    def observe(self, value: float) -> None:
+        self.count += 1
+        self.total += value
+        for index, bound in enumerate((*self.bounds, math.inf)):
+            if value <= bound:
+                self.bucket_counts[index] += 1
+
+    def snapshot(self, name: str, unit: str, attributes: Mapping[str, str]) -> VLLMHistogramSnapshot:
+        return VLLMHistogramSnapshot(
+            name=name,
+            buckets=tuple(zip((*self.bounds, math.inf), self.bucket_counts, strict=True)),
+            count=self.count,
+            total=self.total,
+            unit=unit,
+            attributes=attributes,
+        )
 
 
-def collect_native_metrics(families: Iterable[object]) -> tuple[tuple[VLLMMetricSample, ...], tuple[VLLMHistogramSnapshot, ...]]:
-    """Normalize vLLM's registry into the sink-neutral snapshot contract."""
-    metrics: list[VLLMMetricSample] = []
-    histograms: list[VLLMHistogramSnapshot] = []
-    for family in families:
-        family_name = getattr(family, "name", "")
-        if family_name in _NATIVE_METRICS:
-            unit, temporality = _NATIVE_METRICS[family_name]
-            expected_name = family_name if temporality is MetricTemporality.CURRENT else f"{family_name}_total"
-            for sample in getattr(family, "samples", ()):
-                if sample.name != expected_name:
-                    continue
-                metrics.append(
-                    VLLMMetricSample(
-                        name=sample.name.removeprefix("vllm:"),
-                        value=float(sample.value),
-                        unit=unit,
-                        kind="gauge" if temporality is MetricTemporality.CURRENT else "counter",
-                        temporality=temporality,
-                        attributes=dict(sample.labels),
-                    )
-                )
-        elif family_name in _NATIVE_HISTOGRAMS:
-            grouped: defaultdict[tuple[tuple[str, str], ...], dict[str, object]] = defaultdict(
-                lambda: {"buckets": [], "count": 0.0, "total": 0.0}
+@dataclass
+class VLLMNativeStatsAccumulator:
+    """Consume vLLM scheduler events once and retain its cumulative typed view."""
+
+    token_bounds: tuple[int, ...]
+    attributes: Mapping[str, str]
+    current: VLLMCurrentStats = field(default_factory=VLLMCurrentStats)
+    prompt_tokens: int = 0
+    generation_tokens: int = 0
+    prefix_cache_hits: int = 0
+    prefix_cache_queries: int = 0
+    preemptions: int = 0
+    finished_by_reason: dict[str, int] = field(default_factory=dict)
+    histograms: dict[str, HistogramAccumulator] = field(init=False)
+
+    def __post_init__(self) -> None:
+        latency = (
+            0.3,
+            0.5,
+            0.8,
+            1.0,
+            1.5,
+            2.0,
+            2.5,
+            5.0,
+            10.0,
+            15.0,
+            20.0,
+            30.0,
+            40.0,
+            50.0,
+            60.0,
+            120.0,
+            240.0,
+            480.0,
+            960.0,
+            1920.0,
+            7680.0,
+        )
+        ttft = (
+            0.001,
+            0.005,
+            0.01,
+            0.02,
+            0.04,
+            0.06,
+            0.08,
+            0.1,
+            0.25,
+            0.5,
+            0.75,
+            1.0,
+            2.5,
+            5.0,
+            7.5,
+            10.0,
+            20.0,
+            40.0,
+            80.0,
+            160.0,
+            640.0,
+            2560.0,
+        )
+        self.histograms = {
+            "request_queue_time_seconds": HistogramAccumulator(latency),
+            "request_prefill_time_seconds": HistogramAccumulator(latency),
+            "request_decode_time_seconds": HistogramAccumulator(latency),
+            "e2e_request_latency_seconds": HistogramAccumulator(latency),
+            "time_to_first_token_seconds": HistogramAccumulator(ttft),
+            "request_generation_tokens": HistogramAccumulator(self.token_bounds),
+        }
+
+    def observe(self, scheduler_stats: object | None, iteration_stats: object | None) -> None:
+        if scheduler_stats is not None:
+            self.current = VLLMCurrentStats(
+                running_requests=int(scheduler_stats.num_running_reqs),
+                waiting_capacity=int(scheduler_stats.num_waiting_reqs),
+                waiting_deferred=int(getattr(scheduler_stats, "num_skipped_waiting_reqs", 0)),
+                kv_cache_usage=float(scheduler_stats.kv_cache_usage),
             )
-            for sample in getattr(family, "samples", ()):
-                attributes = tuple(sorted((key, value) for key, value in sample.labels.items() if key != "le"))
-                group = grouped[attributes]
-                if sample.name.endswith("_bucket"):
-                    group["buckets"].append((float(sample.labels["le"]), float(sample.value)))
-                elif sample.name.endswith("_count"):
-                    group["count"] = float(sample.value)
-                elif sample.name.endswith("_sum"):
-                    group["total"] = float(sample.value)
-            for attributes, values in grouped.items():
-                histograms.append(
-                    VLLMHistogramSnapshot(
-                        name=family_name.removeprefix("vllm:"),
-                        buckets=tuple(sorted(values["buckets"])),
-                        count=values["count"],
-                        total=values["total"],
-                        unit=_NATIVE_HISTOGRAMS[family_name],
-                        attributes=dict(attributes),
-                    )
-                )
-    return tuple(metrics), tuple(histograms)
+            prefix = scheduler_stats.prefix_cache_stats
+            self.prefix_cache_hits += int(prefix.hits)
+            self.prefix_cache_queries += int(prefix.queries)
+        if iteration_stats is None:
+            return
+        self.prompt_tokens += int(iteration_stats.num_prompt_tokens)
+        self.generation_tokens += int(iteration_stats.num_generation_tokens)
+        self.preemptions += int(iteration_stats.num_preempted_reqs)
+        for ttft in iteration_stats.time_to_first_tokens_iter:
+            self.histograms["time_to_first_token_seconds"].observe(float(ttft))
+        for request in iteration_stats.finished_requests:
+            reason = str(request.finish_reason)
+            self.finished_by_reason[reason] = self.finished_by_reason.get(reason, 0) + 1
+            for name, value in (
+                ("request_queue_time_seconds", request.queued_time),
+                ("request_prefill_time_seconds", request.prefill_time),
+                ("request_decode_time_seconds", request.decode_time),
+                ("e2e_request_latency_seconds", request.e2e_latency),
+                ("request_generation_tokens", request.num_generation_tokens),
+            ):
+                self.histograms[name].observe(float(value))
+
+    def snapshot(self) -> tuple[VLLMCurrentStats, VLLMCumulativeStats, tuple[VLLMHistogramSnapshot, ...]]:
+        cumulative = VLLMCumulativeStats(
+            prompt_tokens=self.prompt_tokens,
+            generation_tokens=self.generation_tokens,
+            prefix_cache_hits=self.prefix_cache_hits,
+            prefix_cache_queries=self.prefix_cache_queries,
+            preemptions=self.preemptions,
+            finished_by_reason=dict(self.finished_by_reason),
+        )
+        histograms = tuple(
+            accumulator.snapshot(name, "{token}" if name == "request_generation_tokens" else "s", self.attributes)
+            for name, accumulator in self.histograms.items()
+        )
+        return self.current, cumulative, histograms
+
+
+def build_1_2_5_buckets(max_value: int) -> tuple[int, ...]:
+    buckets = []
+    exponent = 0
+    while True:
+        for mantissa in (1, 2, 5):
+            value = mantissa * 10**exponent
+            if value > max_value:
+                return tuple(buckets)
+            buckets.append(value)
+        exponent += 1

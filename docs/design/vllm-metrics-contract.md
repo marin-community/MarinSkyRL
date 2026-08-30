@@ -76,8 +76,11 @@ The callback has two independent sinks:
    destinations.
 2. A callback-owned periodic task requests `PEEK` and aggregates no engine identities away. It converts the cumulative and
    current views to typed Rigging metric snapshots and sends them through a `VLLMMetricsSink` protocol.
-   The Finelog implementation preserves the existing `service="vllm"`, metric names, engine identity,
-   labels, source kind, and current-versus-cumulative temporality used by Marin's serving dashboards.
+   The Finelog implementation preserves metric names, engine identity, labels, source kind, and
+   current-versus-cumulative temporality. It publishes through the trainer's existing `service="marinskyrl"`
+   runtime with `metric_source="vllm"`: Rigging owns one runtime per process, so a callback cannot also
+   configure an independent `service="vllm"` runtime. Marin's serving dashboards must select either the
+   serving service or the trainer service plus metric source, as appropriate.
 
 Both sinks consume `VLLMEngineStatsSnapshot`; neither reads vLLM internals or a Prometheus registry. A
 failure in one sink does not suppress the other. Collection failures are reported by the callback and keep
@@ -123,7 +126,8 @@ Run the CPU contract tests and the ordinary MarinSkyRL PR suite. Then run one sh
 with telemetry enabled and verify that step payloads contain all 27 scalar metrics, Finelog receives one
 complete engine-labelled histogram set per callback polling interval, finish-reason and waiting-reason labels
 survive, and disabling W&B does not change Finelog output. Compare the resulting Finelog series with the
-queries introduced by [marin#7863](https://github.com/marin-community/marin/pull/7863) before merging #460.
+queries introduced by [marin#7863](https://github.com/marin-community/marin/pull/7863), including its service
+filter, before merging #460.
 
 The implementation can be reverted as one unit because it does not change training decisions. If the typed
 sink fails in production, flat step metrics remain available through the tracker and the callback records the
