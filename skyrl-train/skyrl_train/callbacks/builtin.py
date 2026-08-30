@@ -1159,10 +1159,10 @@ class DataTrackingCallback(TrainerCallback):
 
 
 class BufferCheckpointCallback(TrainerCallback):
-    """Persist async completed groups and retry prompts with each checkpoint.
+    """Persist async rollout work with each checkpoint and during shutdown.
 
-    Saves completed output groups and stale-group retry prompts so resume preserves
-    every dataset row still needed by the current epoch.
+    Saves completed and admitted output groups plus stale-group retry prompts so
+    resume preserves every dataset row still needed by the current epoch.
     """
 
     ARTIFACT_NAME = "generation_buffer_state.pt"
@@ -1179,11 +1179,11 @@ class BufferCheckpointCallback(TrainerCallback):
         """Return whether the current epoch has exposed its generation queues."""
         return self._queues is not None
 
-    def has_pending_state(self, *, include_consumed_admitted: bool) -> bool:
-        """Return whether the bound queues contain resumable work."""
+    def has_shutdown_state(self) -> bool:
+        """Return whether the bound queues contain work needed after shutdown."""
         if self._queues is None:
             return False
-        state = self._queues.snapshot(include_consumed_admitted=include_consumed_admitted)
+        state = self._queues.shutdown_snapshot()
         return bool(state.completed_groups or state.admitted_groups or state.retry_prompts)
 
     @staticmethod
@@ -1201,18 +1201,11 @@ class BufferCheckpointCallback(TrainerCallback):
     async def _save_bound_state(
         self,
         checkpoint_path: str,
-        *,
-        include_consumed_admitted: bool,
-        write_empty: bool,
+        buffer_state: GenerationBufferState,
     ) -> None:
-        if self._queues is None:
-            raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")
-        buffer_state = self._queues.snapshot(include_consumed_admitted=include_consumed_admitted)
         completed = self._serialize_groups(buffer_state.completed_groups)
         admitted = self._serialize_groups(buffer_state.admitted_groups)
         retry_prompts = buffer_state.retry_prompts
-        if not completed and not admitted and not retry_prompts and not write_empty:
-            return
 
         artifact_path = os.path.join(checkpoint_path, self.ARTIFACT_NAME)
 
@@ -1238,11 +1231,9 @@ class BufferCheckpointCallback(TrainerCallback):
 
     async def flush_to_checkpoint(self, checkpoint_path: str) -> None:
         """Persist all resumable work, including a trained but uncheckpointed batch."""
-        await self._save_bound_state(
-            checkpoint_path,
-            include_consumed_admitted=True,
-            write_empty=True,
-        )
+        if self._queues is None:
+            raise RuntimeError("BufferCheckpointCallback queues were not bound before shutdown flush")
+        await self._save_bound_state(checkpoint_path, self._queues.shutdown_snapshot())
 
     async def on_save_async(
         self,
@@ -1253,22 +1244,24 @@ class BufferCheckpointCallback(TrainerCallback):
         trainer = kwargs.get("trainer")
         if trainer is None:
             raise RuntimeError("BufferCheckpointCallback requires trainer context during checkpoint save")
+        if self._queues is None:
+            raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")
+
+        buffer_state = self._queues.snapshot()
+        if not (buffer_state.completed_groups or buffer_state.admitted_groups or buffer_state.retry_prompts):
+            return control
 
         ckpt_path = os.path.join(
             trainer.cfg.trainer.ckpt_path,
             f"global_step_{state.global_step}",
         )
-        await self._save_bound_state(
-            ckpt_path,
-            include_consumed_admitted=False,
-            write_empty=False,
-        )
+        await self._save_bound_state(ckpt_path, buffer_state)
 
         return control
 
     @staticmethod
     def load_buffer_state(ckpt_path: str) -> GenerationBufferState:
-        """Load completed output groups and retry prompts from a checkpoint."""
+        """Load completed, admitted, and retryable rollout work from a checkpoint."""
 
         artifact_path = os.path.join(ckpt_path, BufferCheckpointCallback.ARTIFACT_NAME)
         if not io.exists(artifact_path):

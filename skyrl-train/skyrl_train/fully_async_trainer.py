@@ -15,6 +15,7 @@ import asyncio
 import collections
 import os
 import sys
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
@@ -91,21 +92,26 @@ class _GenerationQueues:
         self.admitted_groups.clear()
         self.admitted_groups_consumed = False
 
-    def snapshot(self, *, include_consumed_admitted: bool = False) -> GenerationBufferState:
+    def snapshot(self) -> GenerationBufferState:
         """Copy queued and admitted work without yielding to another event-loop task."""
+        admitted = [] if self.admitted_groups_consumed else list(self.admitted_groups)
+        return self._snapshot(admitted)
+
+    def shutdown_snapshot(self) -> GenerationBufferState:
+        """Copy all work needed to recover from shutdown before the next checkpoint."""
+        return self._snapshot(list(self.admitted_groups))
+
+    def _snapshot(self, admitted_groups: List[GeneratedOutputGroup]) -> GenerationBufferState:
         completed = _drain_queue(self.completed)
         retries = _drain_queue(self.retries)
         for group in completed:
             self.completed.put_nowait(group)
         for prompts in retries:
             self.retries.put_nowait(prompts)
-        admitted = []
-        if include_consumed_admitted or not self.admitted_groups_consumed:
-            admitted = list(self.admitted_groups)
         return GenerationBufferState(
             completed_groups=completed,
             retry_prompts=retries,
-            admitted_groups=admitted,
+            admitted_groups=admitted_groups,
         )
 
 
@@ -495,7 +501,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._active_trajectory_tasks = []
 
     def _restore_buffer_from_checkpoint(self, queues: _GenerationQueues, checkpoint_path: str) -> None:
-        """Restore completed outputs and pending retries from a checkpoint."""
+        """Restore completed, admitted, and retryable rollout work from a checkpoint."""
         buffer_state = BufferCheckpointCallback.load_buffer_state(checkpoint_path)
         if len(buffer_state.completed_groups) > queues.completed.maxsize:
             raise ValueError(
@@ -524,7 +530,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
     def _latest_checkpoint_step(self) -> int | None:
-        marker = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
+        marker = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
         if not io.exists(marker):
             return None
         with io.open_file(marker, "r") as f:
@@ -538,7 +544,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         target_step = self.global_step - 1
         latest_step = await asyncio.to_thread(self._latest_checkpoint_step)
         if latest_step != target_step:
-            if callback.has_pending_state(include_consumed_admitted=True):
+            if callback.has_shutdown_state():
                 logger.warning(
                     "Skipping final generation-buffer flush: latest checkpoint step {} is not the immediately "
                     "preceding step {}",
@@ -546,7 +552,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     target_step,
                 )
             return
-        checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{target_step}")
+        checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{target_step}")
         await callback.flush_to_checkpoint(checkpoint_path)
 
     async def shutdown(self) -> None:
@@ -555,9 +561,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             return
         try:
             await self._flush_generation_buffer_on_shutdown()
-        except Exception as e:
-            logger.warning("Final generation-buffer flush failed: {}", e)
-        await super().shutdown()
+        finally:
+            await super().shutdown()
 
     def _maybe_enable_rollout_fanout(self) -> None:
         """Enable configured multi-actor rollout collection without distributing staleness state."""

@@ -18,7 +18,7 @@ class GeneratedOutputGroup:
 
 @dataclass
 class GenerationBufferState:
-    """Completed rollout groups and pending source-prompt retries in a checkpoint."""
+    """Completed, admitted, and retryable rollout work stored with a checkpoint."""
 
     completed_groups: List[GeneratedOutputGroup]
     retry_prompts: List[List[dict]]
@@ -47,4 +47,6 @@ class GenerationBufferState:
 class GenerationQueuesProvider(Protocol):
     """Live generation queues that can provide checkpoint state."""
 
-    def snapshot(self, *, include_consumed_admitted: bool = False) -> GenerationBufferState: ...
+    def snapshot(self) -> GenerationBufferState: ...
+
+    def shutdown_snapshot(self) -> GenerationBufferState: ...

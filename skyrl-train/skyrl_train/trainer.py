@@ -59,7 +59,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import GroupAdvantageInvariant, assert_training_groups_eligible
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
@@ -2055,7 +2055,7 @@ class RayPPOTrainer:
         logger.info(f"Saved trainer state to {trainer_state_path}")
 
         # Atomic tracking - write this last after all saves succeed
-        latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
+        latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
         with io.open_file(latest_checkpoint_file, "w") as f:
             f.write(str(self.global_step))
 
@@ -2116,7 +2116,7 @@ class RayPPOTrainer:
             return 0, None
         # first, let's get resume_path
         elif self.resume_mode == ResumeMode.LATEST:
-            latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
+            latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
             if not io.exists(latest_checkpoint_file):
                 logger.warning(
                     f"resume_mode=latest found no checkpoint marker at {latest_checkpoint_file}; "

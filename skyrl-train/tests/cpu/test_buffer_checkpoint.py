@@ -67,6 +67,30 @@ class _FakeControl:
     pass
 
 
+def _make_shutdown_trainer(tmp_path, *, global_step: int, uid: str, consumed: bool):
+    queues = _GenerationQueues(
+        completed=asyncio.Queue(maxsize=1),
+        retries=asyncio.Queue(),
+        condition=asyncio.Condition(),
+    )
+    queues.record_admitted([_make_item(uid, step=global_step)])
+    if consumed:
+        queues.mark_admitted_consumed()
+    callback = BufferCheckpointCallback()
+    callback.bind_queues(queues)
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = _FakeTrainer(str(tmp_path), asyncio.Queue()).cfg
+    trainer.global_step = global_step
+    trainer._buffer_checkpoint_callback = callback
+    trainer._shutdown_complete = False
+
+    async def teardown():
+        pass
+
+    trainer._teardown = teardown
+    return trainer
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -152,7 +176,7 @@ def test_consumed_admitted_groups_are_only_included_by_final_flush_snapshot():
     queues.mark_admitted_consumed()
 
     assert queues.snapshot().admitted_groups == []
-    assert [group.uid for group in queues.snapshot(include_consumed_admitted=True).admitted_groups] == ["trained"]
+    assert [group.uid for group in queues.shutdown_snapshot().admitted_groups] == ["trained"]
 
 
 @pytest.mark.asyncio
@@ -160,25 +184,7 @@ async def test_shutdown_flush_banks_consumed_batch_in_immediately_preceding_chec
     step_dir = tmp_path / "global_step_5"
     step_dir.mkdir()
     (tmp_path / "latest_ckpt_global_step.txt").write_text("5")
-    queues = _GenerationQueues(
-        completed=asyncio.Queue(maxsize=1),
-        retries=asyncio.Queue(),
-        condition=asyncio.Condition(),
-    )
-    queues.record_admitted([_make_item("trained", step=6)])
-    queues.mark_admitted_consumed()
-    callback = BufferCheckpointCallback()
-    callback.bind_queues(queues)
-    trainer = object.__new__(FullyAsyncRayPPOTrainer)
-    trainer.cfg = _FakeTrainer(str(tmp_path), asyncio.Queue()).cfg
-    trainer.global_step = 6
-    trainer._buffer_checkpoint_callback = callback
-    trainer._shutdown_complete = False
-
-    async def teardown():
-        pass
-
-    trainer._teardown = teardown
+    trainer = _make_shutdown_trainer(tmp_path, global_step=6, uid="trained", consumed=True)
 
     await trainer.shutdown()
 
@@ -190,24 +196,7 @@ async def test_shutdown_flush_banks_consumed_batch_in_immediately_preceding_chec
 async def test_shutdown_flush_does_not_attach_buffer_to_older_model_checkpoint(tmp_path):
     (tmp_path / "global_step_4").mkdir()
     (tmp_path / "latest_ckpt_global_step.txt").write_text("4")
-    queues = _GenerationQueues(
-        completed=asyncio.Queue(maxsize=1),
-        retries=asyncio.Queue(),
-        condition=asyncio.Condition(),
-    )
-    queues.record_admitted([_make_item("too-new", step=6)])
-    callback = BufferCheckpointCallback()
-    callback.bind_queues(queues)
-    trainer = object.__new__(FullyAsyncRayPPOTrainer)
-    trainer.cfg = _FakeTrainer(str(tmp_path), asyncio.Queue()).cfg
-    trainer.global_step = 6
-    trainer._buffer_checkpoint_callback = callback
-    trainer._shutdown_complete = False
-
-    async def teardown():
-        pass
-
-    trainer._teardown = teardown
+    trainer = _make_shutdown_trainer(tmp_path, global_step=6, uid="too-new", consumed=False)
 
     await trainer.shutdown()
 
