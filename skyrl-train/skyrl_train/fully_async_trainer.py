@@ -531,9 +531,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # dispatcher (gated; default OFF => no-op, self.trajectory_runner unchanged).
         self._maybe_enable_rollout_fanout()
 
-        await self._startup_trajectory_runner()
-
         try:
+            await self._startup_trajectory_runner()
             await self._train_loop()
         except Exception as e:
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", e)
@@ -543,7 +542,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # (the per-epoch epilogue only runs on normal loop completion).
             self._cancel_trajectory_tasks()
 
-            await self._teardown()
+            await self.shutdown()
 
     async def _train_loop(self):
         """

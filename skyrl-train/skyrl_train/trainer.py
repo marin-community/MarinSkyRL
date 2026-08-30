@@ -146,6 +146,7 @@ class RayPPOTrainer:
         self.all_metrics = {}
         self.all_timings = {}
         self._checkpoint_save_failures = 0.0
+        self._shutdown_complete = False
         self.global_step = 0
 
         # initialized in `build_models`
@@ -348,6 +349,13 @@ class RayPPOTrainer:
         # ensures the process eventually terminates.
         self._start_exit_watchdog(timeout=120)
 
+    async def shutdown(self) -> None:
+        """Run trainer teardown once, including after partial startup."""
+        if getattr(self, "_shutdown_complete", False):
+            return
+        await self._teardown()
+        self._shutdown_complete = True
+
     @staticmethod
     def _start_exit_watchdog(timeout: int = 120) -> None:
         """Start a daemon thread that force-exits the process after *timeout* seconds."""
@@ -364,12 +372,11 @@ class RayPPOTrainer:
         """
         Main training loop for PPO
         """
-        await self._startup_trajectory_runner()
-
         try:
+            await self._startup_trajectory_runner()
             await self._train_loop()
         finally:
-            await self._teardown()
+            await self.shutdown()
 
     async def _startup_trajectory_runner(self) -> None:
         """Initialize trajectory-runner resources before any rollout can begin."""

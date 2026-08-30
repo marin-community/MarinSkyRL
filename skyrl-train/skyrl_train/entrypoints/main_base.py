@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ray.util.placement_group import placement_group, PlacementGroup
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from ray.remote_function import RemoteFunction
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -16,7 +17,7 @@ import ray
 
 import os
 import signal
-import sys
+import time
 import hydra
 from loguru import logger
 import asyncio
@@ -34,6 +35,67 @@ mp.set_start_method("spawn", force=True)
 
 config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
+
+
+def resolve_entrypoint_node_id(node_ip: str) -> str:
+    """Return the live Ray node ID for an explicitly selected node address."""
+    matching_node_ids = [
+        node["NodeID"] for node in ray.nodes() if node.get("Alive") and node.get("NodeManagerAddress") == node_ip
+    ]
+    if len(matching_node_ids) != 1:
+        raise ValueError(
+            f"Expected exactly one live Ray node with address {node_ip!r}, found {len(matching_node_ids)}. "
+            "Set trainer.entrypoint_node_ip to a NodeManagerAddress reported by ray.nodes()."
+        )
+    return matching_node_ids[0]
+
+
+class EntrypointSupervisor:
+    """Wait for an entrypoint task and cooperatively cancel it on termination."""
+
+    def __init__(self, *, shutdown_timeout_seconds: float) -> None:
+        if shutdown_timeout_seconds <= 0:
+            raise ValueError("shutdown_timeout_seconds must be positive")
+        self._shutdown_timeout_seconds = shutdown_timeout_seconds
+        self._termination_signal: int | None = None
+
+    def request_termination(self, signum: int, _frame=None) -> None:
+        """Record the first termination signal without calling Ray from a signal handler."""
+        if self._termination_signal is None:
+            self._termination_signal = signum
+
+    def wait(self, entrypoint_ref: ray.ObjectRef) -> int | None:
+        """Return a process exit code after the task finishes or is terminated."""
+        while self._termination_signal is None:
+            ready, _ = ray.wait([entrypoint_ref], timeout=1)
+            if ready:
+                ray.get(entrypoint_ref)
+                return None
+
+        signum = self._termination_signal
+        logger.warning(
+            "Received {}, asking the training entrypoint to shut down within {}s",
+            signal.Signals(signum).name,
+            self._shutdown_timeout_seconds,
+        )
+        ray.cancel(entrypoint_ref, force=False, recursive=False)
+        deadline = time.monotonic() + self._shutdown_timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.error("Training entrypoint did not stop before its shutdown deadline; forcing cancellation")
+                ray.cancel(entrypoint_ref, force=True, recursive=False)
+                break
+            ready, _ = ray.wait([entrypoint_ref], timeout=min(1, remaining))
+            if ready:
+                try:
+                    ray.get(entrypoint_ref)
+                except Exception:
+                    # Cooperative task cancellation is reported as a Ray task
+                    # error after the entrypoint's Python finally blocks finish.
+                    pass
+                break
+        return 128 + signum
 
 
 def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
@@ -537,15 +599,11 @@ class BasePPOExp:
             # those resources are released before the process exits.
             if trainer is not None:
                 try:
-                    # TrajectoryRunner.shutdown() is async; run it in a fresh event loop.
-                    # since asyncio.run() above may have already closed the loop.
-                    asyncio.run(trainer.trajectory_runner.shutdown())
+                    # train() owns normal teardown. This idempotent fallback covers
+                    # failures around the event-loop boundary.
+                    asyncio.run(trainer.shutdown())
                 except Exception as e:
-                    logger.warning(f"Error shutting down trajectory runner: {e}")
-                try:
-                    trainer.cleanup_ray_actors()
-                except Exception as e:
-                    logger.warning(f"Error cleaning up Ray actors: {e}")
+                    logger.warning(f"Error shutting down trainer: {e}")
 
 
 @ray.remote(num_cpus=1, max_retries=0)
@@ -574,23 +632,32 @@ def run_ray_driver(cfg: DictConfig, entrypoint: RemoteFunction, *, failure_messa
     initialize_ray(cfg)
 
     with process_telemetry(DRIVER_ROLE):
-        # Register SIGTERM handler so that cluster preemption / job scheduler
-        # timeouts trigger a clean Ray shutdown instead of leaving orphaned actors.
-        def _sigterm_handler(signum, frame):
-            logger.warning("Received SIGTERM on head node, shutting down Ray...")
-            shutdown_ray()
-            sys.exit(1)
+        supervisor = EntrypointSupervisor(
+            shutdown_timeout_seconds=float(cfg.trainer.get("entrypoint_shutdown_timeout_seconds", 120))
+        )
+        signal.signal(signal.SIGTERM, supervisor.request_termination)
 
-        signal.signal(signal.SIGTERM, _sigterm_handler)
+        entrypoint_node_ip = cfg.trainer.get("entrypoint_node_ip")
+        if entrypoint_node_ip:
+            node_id = resolve_entrypoint_node_id(str(entrypoint_node_ip))
+            logger.info("Pinning training entrypoint to Ray node {} ({})", node_id, entrypoint_node_ip)
+            entrypoint = entrypoint.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False)
+            )
 
+        exit_code = None
         try:
-            ray.get(entrypoint.remote(cfg))
+            exit_code = supervisor.wait(entrypoint.remote(cfg))
         except Exception as e:
             log_exception_as_text(failure_message, e)
             raise
         finally:
             logger.info("Shutting down Ray on head node...")
             shutdown_ray()
+
+        if exit_code is not None:
+            exit_without_ray_destructors(exit_code)
+            raise SystemExit(exit_code)
 
     exit_without_ray_destructors()
 
