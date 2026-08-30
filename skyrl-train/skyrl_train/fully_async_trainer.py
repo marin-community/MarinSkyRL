@@ -597,6 +597,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             cpus_per_coordinator=cpus_per_coordinator,
             coordinator_rpc_timeout=coordinator_rpc_timeout,
         )
+        # The sink was attached in __init__, to the runner just replaced. Re-attach it here rather
+        # than at the call site: the swap is what detaches it.
+        self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
 
     async def train(self):
         """
@@ -604,8 +607,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         self.global_step = 0
 
-        # Optionally swap the single-process runner for a K-actor rollout
-        # dispatcher (gated; default OFF => no-op, self.trajectory_runner unchanged).
+        # `rollout.fanout.enabled` defaults to TRUE, so the flag does not gate this -- reaching this
+        # trainer does, via `entrypoint: fully_async`, or `terminal_bench` with `colocate_all: false`.
+        # Absent `terminal_bench_config` it raises rather than falling back.
         self._maybe_enable_rollout_fanout()
 
         try:

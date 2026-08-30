@@ -10,6 +10,7 @@ from skyrl_train.trajectory_runners.base import (
     BatchMetadata,
     TrainingPhase,
 )
+from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
 from skyrl_train.metric_names import (
     TIS_ALIGNED_TOKENS_METRIC,
     TIS_METRIC_PREFIX,
@@ -694,6 +695,13 @@ def concatenate_trajectory_batches(
         rollout_metrics[TIS_LCS_FALLBACK_ALERT_METRIC] = 1.0 if (sum_lcs / denom) > tis_lcs_alert_threshold else 0.0
 
     rollout_metrics.update(_merge_batch_failure_metrics(trajectory_batches))
+
+    # Retention counts per group, and this rebuilds rollout_metrics from responses and rewards, so
+    # the per-group counters have to be carried across or the archives are written unobserved.
+    for output in trajectory_batches:
+        for name, value in (output.get("rollout_metrics") or {}).items():
+            if name.startswith(RETENTION_METRIC_PREFIX):
+                rollout_metrics[name] = rollout_metrics.get(name, 0.0) + value
 
     result["rollout_metrics"] = rollout_metrics
     refresh_trajectory_reward_shaping_metrics(result)

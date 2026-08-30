@@ -402,7 +402,9 @@ generator:
   trajectory_retention:
     enabled: true
     output_path: ${trainer.export_path}/training_trajectories
-    run_id: ${trainer.run_name}
+    # The initiator names the run: marin exports SKYRL_RUN_ID, and a launch straight from
+    # MarinSkyRL falls back to its own run name. Retained trajectories and telemetry then agree.
+    run_id: "${oc.env:SKYRL_RUN_ID,${trainer.run_name}}"
     phases: [train]
     sample_count_per_step: 1
     sample_fraction: 0.0
