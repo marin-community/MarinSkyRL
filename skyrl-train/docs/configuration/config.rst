@@ -251,6 +251,9 @@ This section configures the policy model used for training, including optimizer,
 .. code-block:: yaml
 
    policy:
+     grug_query_bias_update_mode: "frozen"
+     grug_query_bias_interpolation_weight: null
+     grug_query_bias_update_rate: null
      model:
        path: "Qwen/Qwen2.5-1.5B-Instruct"  # Hugging Face model path for the policy model
        lora:
@@ -281,6 +284,9 @@ This section configures the policy model used for training, including optimizer,
      record_memory: false  # Dump memory snapshot for debugging
 
 - ``policy.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
+- ``policy.grug_query_bias_update_mode``: Grug's external router-bias update. ``frozen`` preserves the checkpoint bias, ``replace`` and ``interpolate`` apply Quantile Balancing, and ``loss_free`` applies the signed load-error update from `Loss-Free Balancing <https://arxiv.org/abs/2408.15664>`_. This option applies only to Grug under FSDP2.
+- ``policy.grug_query_bias_interpolation_weight``: Fraction of the Quantile Balancing target applied after each successful optimizer step. Required only for ``interpolate``.
+- ``policy.grug_query_bias_update_rate``: Positive bias step size used by ``loss_free``. Required only for that mode; the reference implementation uses ``0.001``.
 - ``policy.optimizer_config``: Optimizer configuration for the policy model
 - ``policy.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
 - ``policy.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_
@@ -446,7 +452,7 @@ Algorithm Configuration
 
   - ``regular``: Vanilla PPO loss with token-level importance sampling
   - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
-  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements the "GSPO-token" variant from the paper.
+  - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements the "GSPO-token" variant from the paper and requires ``algorithm.loss_reduction=sequence_mean``.
   - ``clip_cov``: Clip-Cov combines standard PPO clipping with covariance-based correction masking for improved stability. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``kl_cov``: KL-Cov applies KL regularization to tokens selected based on covariance values. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``cispo``: Clipped Importance Sampling Weight Policy Optimization (CISPO) proposed in `MiniMax-M1 <https://arxiv.org/abs/2506.13585>`_.
@@ -467,8 +473,8 @@ Algorithm Configuration
 - ``algorithm.clip_ratio_c``: Clip ratio for dual clip PPO loss.
 - ``algorithm.value_clip``: Clip value for value loss.
 - ``algorithm.dynamic_sampling``: Dynamic sampling configuration.
-  - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. Currently, we support ``filter`` (`DAPO <https://dapo-sia.github.io/>`_), ``replace`` (`POLARIS <https://hkunlp.github.io/blog/2025/Polaris/>`_ / `WebSailor <https://arxiv.org/abs/2507.02592>`_), or ``null`` for no dynamic sampling.
-  - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
+  - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. We support ``filter`` (`DAPO <https://dapo-sia.github.io/>`_), ``replace`` (`POLARIS <https://hkunlp.github.io/blog/2025/Polaris/>`_ / `WebSailor <https://arxiv.org/abs/2507.02592>`_), or ``null`` for no dynamic sampling. Fully asynchronous training supports ``filter`` and ``null``; ``replace`` is synchronous only. The filter uses unshaped verifier outcomes and draws a fresh prompt for every uniform-outcome group.
+  - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever. Fully asynchronous training converts this to a per-step candidate-group limit of ``max_sample_batches * train_batch_size`` and never shortens the training batch.
   - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
 - ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. 
 - ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS.
@@ -605,6 +611,9 @@ Generator Configuration
       non_termination:
         penalty: 0.0
         accepted_stop_reasons: [stop, complete, eos, end_turn]
+      overlong:
+        l_max: ${generator.sampling_params.max_generate_length}
+        l_cache: 0
       successful_length:
         free_tokens: 0
         penalty_per_token: 0.0
@@ -703,7 +712,7 @@ Generation Parameters
 Misc Configuration
 ~~~~~~~~~~~~~~~~~~
 
-- ``generator.trajectory_reward_shaping``: Generator-independent optimization shaping applied after trajectory normalization. ``non_termination`` penalizes stop reasons outside its accepted set, and ``successful_length`` penalizes trainable response tokens beyond ``free_tokens`` only when the raw task outcome is positive. ``loop`` searches the final trainable segment's tail for the smallest repeating period, then emits capped negative per-token advantage credit for the excess repetitions. This loop credit is applied after advantage normalization and never enters the outcome reward or its group statistics. The raw outcome remains in ``unshaped_rewards`` for pass-rate and verifier-accuracy metrics. ``schema_version`` is stored with the run configuration and emitted on each shaped trajectory.
+- ``generator.trajectory_reward_shaping``: Generator-independent optimization shaping applied after trajectory normalization. ``non_termination`` penalizes stop reasons outside its accepted set. ``overlong`` applies DAPO's outcome-independent linear penalty to the full trajectory between ``l_max - l_cache`` and ``l_max``; the penalty is stored on the final row, and ``l_cache=0`` disables it. The default ``l_max`` follows the generation limit, so multi-turn runners should set it to their intended full-trajectory token budget. ``successful_length`` penalizes trainable response tokens beyond ``free_tokens`` only when the raw task outcome is positive. ``loop`` searches the final trainable segment's tail for the smallest repeating period, then emits capped negative per-token advantage credit for the excess repetitions. This loop credit is applied after advantage normalization and never enters the outcome reward or its group statistics. The raw outcome remains in ``unshaped_rewards`` for pass-rate and verifier-accuracy metrics. ``schema_version`` is stored with the run configuration and emitted on each shaped trajectory.
 - ``generator.trajectory_retention``: Generator-independent bounded capture of normalized training trajectories. It samples deterministically per step, always retains configured anomalies, and writes content-addressed compressed records plus a resume-safe ledger. ``required=false`` reports storage failures without stopping training; ``required=true`` fails the run.
 - ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.
 - ``trainer.step_wise_training``: Whether to use step-wise training. If ``true``, then the generator will return multi-turn generations with each turn being a separate trajectory. Advantages are computed based on the last step of each trajectory and propagated to the previous steps.

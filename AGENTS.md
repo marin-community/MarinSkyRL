@@ -37,7 +37,7 @@ profile only when resolving a training environment.
 
 ```bash
 # Root launcher + skyrl-train CPU tests (what PR CI runs)
-uv sync --frozen --group dev --extra cpu --extra telemetry
+uv sync --frozen --group dev --group harbor-test --extra cpu --extra telemetry
 uv run --frozen pytest cloud/iris/tests/ skyrl-train/tests/cpu/
 
 # FSDP2/vLLM runtime closure (GPU tests need an 8-GPU node; not run in PR CI)

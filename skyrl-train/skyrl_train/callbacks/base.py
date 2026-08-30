@@ -155,13 +155,15 @@ class TrainerCallback(ABC):
 
     Example:
         ```python
+        from loguru import logger
+
         class MyCallback(TrainerCallback):
             def __init__(self, log_every: int = 10):
                 self.log_every = log_every
 
             def on_step_end(self, state: TrainerState, control: TrainerControl, **kwargs):
                 if state.global_step % self.log_every == 0:
-                    print(f"Step {state.global_step}: {state.metrics}")
+                    logger.info(f"Step {state.global_step}: {state.metrics}")
         ```
     """
 

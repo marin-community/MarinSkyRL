@@ -34,9 +34,12 @@ from skyrl_train.trajectory_runners.trajectory_retention_publisher import (
     PublicationResult,
     TrajectoryPublisher,
 )
-from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward
+from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
+    NormalizedReward,
+    aggregate_reward_shaping_components,
+)
 from skyrl_train.json_serialization import canonical_json_bytes, to_jsonable
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
@@ -47,8 +50,6 @@ _SELECTION_FRACTION = "fraction"
 _SELECTION_MANDATORY = "mandatory"
 _ARCHIVE_DIRECTORY = "archives"
 _ARCHIVE_MANIFEST = "manifest.json"
-_ARCHIVE_BASE_OVERHEAD_BYTES = 2048
-_ARCHIVE_RECORD_OVERHEAD_BYTES = 512
 
 
 @dataclass(frozen=True)
@@ -393,6 +394,9 @@ def build_trajectory_records(
         normalized_reward = NormalizedReward.from_output(output["rewards"][final_index])
         shaped_reward = normalized_reward.total
         outcome = float(unshaped[final_index]) if unshaped is not None else normalized_reward.outcome
+        trajectory_components = None
+        if components is not None:
+            trajectory_components = aggregate_reward_shaping_components(components, row_indices)
         response_text = _decode(tokenizer, response_ids)
         record = TrajectoryRecord(
             schema_version=RETENTION_SCHEMA_VERSION,
@@ -427,7 +431,7 @@ def build_trajectory_records(
             reward=_RewardTrace(
                 outcome=outcome,
                 shaped=shaped_reward,
-                components=None if components is None else components[final_index],
+                components=trajectory_components,
             ),
             metrics=to_jsonable(output.get("rollout_metrics") or {}),
             provenance=_ProvenanceTrace(
@@ -859,49 +863,49 @@ class TrajectorySink:
         ledger: _RetentionLedger,
         metrics: dict[str, float],
     ) -> _SelectedArchive | None:
-        """Build the bounded archive and next ledger, or return none when no record qualifies."""
-        next_ledger = _copy_ledger(ledger)
+        """Return a payload-bounded priority prefix, or none when no record qualifies or fits."""
+        selection_ledger = _copy_ledger(ledger)
         selected = []
-        reserved_bytes = _ARCHIVE_BASE_OVERHEAD_BYTES
         for record in sorted(records, key=self._sample_score):
-            if record.record_id in next_ledger.records:
+            if record.record_id in selection_ledger.records:
                 metrics[f"{RETENTION_METRIC_PREFIX}/duplicates"] += 1.0
                 continue
-            selection = self._selection(record, next_ledger)
+            selection = self._selection(record, selection_ledger)
             if selection is None:
                 continue
             metrics[f"{RETENTION_METRIC_PREFIX}/selected"] += 1.0
             payload = self._encode_record(record)
-            estimated_bytes = len(payload) + _ARCHIVE_RECORD_OVERHEAD_BYTES
-            step_key = self._step_key(record)
-            if (
-                next_ledger.step_bytes.get(step_key, 0) + reserved_bytes + estimated_bytes
-                > self.config.max_bytes_per_step
-                or next_ledger.total_bytes + reserved_bytes + estimated_bytes > self.config.max_bytes_per_run
-            ):
-                metrics[f"{RETENTION_METRIC_PREFIX}/dropped_by_bounds"] += 1.0
-                continue
-            if selection.displaced_id is not None:
-                self._remove_count_reason(next_ledger, selection.displaced_id)
-            next_ledger.records[record.record_id] = _LedgerEntry(
-                path="",
-                bytes=len(payload),
-                step=step_key,
-                reasons=selection.reasons,
-                sample_score=self._sample_score(record),
-            )
-            selected.append(_SelectedRecord(record=record, payload=payload, selection=selection))
-            reserved_bytes += estimated_bytes
+            selected_record = _SelectedRecord(record=record, payload=payload, selection=selection)
+            self._add_selected_record(selection_ledger, selected_record)
+            selected.append(selected_record)
 
         if not selected:
             return None
-        archive_payload = _archive_payload(selected)
-        if len(archive_payload) > reserved_bytes:
-            raise ValueError("trajectory retention archive overhead exceeded its reserved bound")
+
         first = selected[0].record
-        archive_path = self._archive_path(first, archive_payload)
-        record_ids = tuple(item.record.record_id for item in selected)
         step_key = self._step_key(first)
+        max_payload_bytes = min(
+            self.config.max_bytes_per_step - ledger.step_bytes.get(step_key, 0),
+            self.config.max_bytes_per_run - ledger.total_bytes,
+        )
+        retained = []
+        retained_payload_bytes = 0
+        for selected_record in selected:
+            candidate_bytes = retained_payload_bytes + len(selected_record.payload)
+            if candidate_bytes > max_payload_bytes:
+                break
+            retained.append(selected_record)
+            retained_payload_bytes = candidate_bytes
+        metrics[f"{RETENTION_METRIC_PREFIX}/dropped_by_bounds"] += float(len(selected) - len(retained))
+        if not retained:
+            return None
+
+        next_ledger = _copy_ledger(ledger)
+        for selected_record in retained:
+            self._add_selected_record(next_ledger, selected_record)
+        archive_payload = _archive_payload(retained)
+        archive_path = self._archive_path(first, archive_payload)
+        record_ids = tuple(item.record.record_id for item in retained)
         for record_id in record_ids:
             next_ledger.records[record_id] = replace(next_ledger.records[record_id], path=archive_path)
         next_ledger.archives[archive_path] = _ArchiveEntry(
@@ -915,7 +919,19 @@ class TrajectorySink:
             path=archive_path,
             payload=archive_payload,
             ledger=next_ledger,
-            record_count=len(selected),
+            record_count=len(retained),
+        )
+
+    def _add_selected_record(self, ledger: _RetentionLedger, selected: _SelectedRecord) -> None:
+        record = selected.record
+        if selected.selection.displaced_id is not None:
+            self._remove_count_reason(ledger, selected.selection.displaced_id)
+        ledger.records[record.record_id] = _LedgerEntry(
+            path="",
+            bytes=len(selected.payload),
+            step=self._step_key(record),
+            reasons=selected.selection.reasons,
+            sample_score=self._sample_score(record),
         )
 
     def _encode_record(self, record: TrajectoryRecord) -> bytes:

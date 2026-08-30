@@ -177,7 +177,7 @@ def _dump_eval_results(
     if not cfg.trainer.dump_eval_results:
         return
     with Timer("dump_eval_results"):
-        # TODO(Ben): route eval dumps through skyrl_train.utils.io when evaluation exports support cloud paths.
+        # TODO(Ben): route eval dumps through skyrl_train.io when evaluation exports support cloud paths.
         data_save_dir = (
             Path(cfg.trainer.export_path)
             / "dumped_evals"

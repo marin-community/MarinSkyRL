@@ -12,6 +12,11 @@ import json
 import torch
 import numpy as np
 from collections import defaultdict
+from skyrl_train.dynamic_sampling import (
+    DynamicSamplingCriteria,
+    DynamicSamplingType,
+    group_is_informative_for_dynamic_sampling,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
     concatenate_trajectory_batches,
@@ -23,7 +28,8 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 )
 from transformers import AutoTokenizer
 from pathlib import Path
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
+from skyrl_train.checkpoint_listing import extract_step_from_path, list_checkpoint_dirs
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
 from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -90,43 +96,6 @@ def run_on_each_node(node_ids: List[str], fn: Callable, *args, **kwargs):
         refs.append(node_task.remote(*args, **kwargs))
 
     return ray.get(refs)
-
-
-def extract_step_from_path(path: str) -> int:
-    basename = os.path.basename(path)
-    if basename.startswith(GLOBAL_STEP_PREFIX):
-        return int(basename.split(GLOBAL_STEP_PREFIX)[1])
-    return -1
-
-
-def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
-    """
-    List all checkpoint directories in the base path.
-
-    Args:
-        checkpoint_base_path: Base path where checkpoints are stored
-
-    Returns:
-        list[str]: List of checkpoint directory names
-    """
-    if not io.exists(checkpoint_base_path):
-        return []
-
-    try:
-        all_items = io.list_dir(checkpoint_base_path)
-
-        # Filter for directories that match the global_step_* pattern
-        checkpoint_dirs = []
-        for item in all_items:
-            # Get just the basename for pattern matching
-            basename = os.path.basename(item)
-            if basename.startswith("global_step_") and io.isdir(os.path.join(checkpoint_base_path, basename)):
-                checkpoint_dirs.append(basename)
-
-        return sorted(checkpoint_dirs)
-    except Exception as e:
-        logger.warning(f"Failed to list checkpoint directories from {checkpoint_base_path}: {e}")
-        return []
 
 
 def cleanup_old_checkpoints(
@@ -339,17 +308,21 @@ def handle_dynamic_sampling(
     Returns:
         The processed batch, UIDs, continuation decision, and updated state.
     """
-    sampling_type = sampling_config.get("type", None)
+    sampling_type_value = sampling_config.get("type", None)
 
-    if sampling_type is None:
+    if sampling_type_value is None:
         return DynamicSamplingResult(trajectory_batch, uids, False, None)
 
-    if sampling_type == "replace":
+    try:
+        sampling_type = DynamicSamplingType(sampling_type_value)
+    except ValueError:
+        raise ValueError(f"Invalid dynamic sampling type: {sampling_type_value}") from None
+
+    if sampling_type is DynamicSamplingType.REPLACE:
         return handle_replace_sampling(trajectory_batch, uids, sampling_config)
-    elif sampling_type == "filter":
+    if sampling_type is DynamicSamplingType.FILTER:
         return handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state)
-    else:
-        raise ValueError(f"Invalid dynamic sampling type: {sampling_type}")
+    raise AssertionError(f"unhandled dynamic sampling type: {sampling_type}")
 
 
 def handle_replace_sampling(
@@ -452,6 +425,21 @@ def handle_replace_sampling(
         return DynamicSamplingResult(trajectory_batch, uids, True, None)
 
 
+def _rekey_collected_uid_collisions(uids: List[str], collected_uids: List[str], sample_batch_count: int) -> List[str]:
+    """Keep later draws of a dataset row distinct from groups collected in earlier sampling rounds."""
+    occupied_uids = set(collected_uids)
+    remapped_uids: dict[str, str] = {}
+    for uid in dict.fromkeys(uids):
+        candidate = uid
+        collision_index = 0
+        while candidate in occupied_uids:
+            collision_index += 1
+            candidate = f"{uid}:sample_batch_{sample_batch_count}:{collision_index}"
+        remapped_uids[uid] = candidate
+        occupied_uids.add(candidate)
+    return [remapped_uids[uid] for uid in uids]
+
+
 def handle_filter_sampling(
     trajectory_batch: TrajectoryBatch,
     uids: List[str],
@@ -471,27 +459,22 @@ def handle_filter_sampling(
         The processed batch, UIDs, continuation decision, and updated state.
     """
     target_batch_size = sampling_config["train_batch_size"]
-    n_samples_per_prompt = sampling_config["n_samples_per_prompt"]
 
-    # Extract rewards from collected output
-    rewards_list = trajectory_batch["rewards"]
-    if rewards_list and isinstance(rewards_list[0], list):
-        # Token-level rewards: sum to get sequence rewards
-        rewards = np.array([sum(r) for r in rewards_list])
-    else:
-        rewards = np.array(rewards_list)
-
-    # Group by UID and calculate standard deviation
-    uid2metric_vals = defaultdict(list)
-    for uid, reward in zip(uids, rewards):
-        uid2metric_vals[uid].append(reward)
-
-    uid2metric_std = {}
-    for uid, metric_vals in uid2metric_vals.items():
-        uid2metric_std[uid] = np.std(metric_vals)
-
-    # Filter out groups with std == 0 and group size > 1
-    kept_uids = [uid for uid, std in uid2metric_std.items() if std > 0 or n_samples_per_prompt == 1]
+    uid2indices = defaultdict(list)
+    for row_index, uid in enumerate(uids):
+        uid2indices[uid].append(row_index)
+    criteria = sampling_config["criteria"]
+    if not isinstance(criteria, DynamicSamplingCriteria):
+        raise ValueError("dynamic sampling filter requires resolved DynamicSamplingCriteria")
+    kept_uids = [
+        uid
+        for uid, row_indices in uid2indices.items()
+        if group_is_informative_for_dynamic_sampling(
+            trajectory_batch,
+            row_indices,
+            criteria=criteria,
+        )
+    ]
     kept_uids_set = set(kept_uids)
 
     # Filter trajectories based on kept UIDs
@@ -502,6 +485,13 @@ def handle_filter_sampling(
 
     filtered_output = filter_trajectory_batch(trajectory_batch, kept_traj_idxs)
     filtered_uids = [uids[idx] for idx in kept_traj_idxs]
+
+    # Dataset UIDs repeat across epochs. Re-key only later draws that would merge with a collected training group.
+    collected_uids = collected_state.get("collected_uids")
+    if collected_uids is not None:
+        filtered_uids = _rekey_collected_uid_collisions(
+            filtered_uids, collected_uids, collected_state["sample_batch_count"]
+        )
 
     if "collected_trajectory_batch" not in collected_state:
         collected_state.update(

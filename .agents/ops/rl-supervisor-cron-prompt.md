@@ -23,7 +23,7 @@ Copy the text inside this block verbatim. Do not prepend, append, paraphrase, or
 Run one RL supervision sweep for every experiment directory passed to the rl-supervisor-init skill. Do not add, remove, or infer experiments.
 
 For each experiment:
-1. Reread POLICY.md and STATE.md. Read TRACKER.md when present. Inventory artifacts/ when present, but do not edit scripts or configuration there.
+1. Reread POLICY.md and STATE.md. Read TRACKER.md when present. Inventory artifacts/ when present; you may edit its contents, including scripts and configuration, but never repository source, configuration, or skills.
 2. Compute the SHA-256 digest of POLICY.md and compare it with the `Policy SHA-256: <digest>` entry in STATE.md. If no digest is recorded, record the current digest as the baseline without claiming that policy changed. If it changed, apply the current policy and record the new digest and operational consequences in STATE.md. Never edit POLICY.md.
 3. Follow .agents/ops/watch-coreweave-rl.md. Inspect and refresh the canonical local syncdown first, then reconcile every tracked job against the authoritative controller on the cluster where it runs. Use live log or process probes only for missing, contradictory, or ephemeral evidence.
 4. Update STATE.md with current observations, actions, decisions, evidence locations, and unresolved questions. Update TRACKER.md when present so its job order, eligibility, outcomes, and next executable work agree with POLICY.md, STATE.md, and cluster state. Remove or correct stale claims instead of appending contradictions.

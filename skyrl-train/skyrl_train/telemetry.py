@@ -23,6 +23,7 @@ SERVICE = "marinskyrl"
 DRIVER_ROLE = "driver"
 TRAINER_ROLE = "trainer"
 CONTROLLER_ROLE = "controller"
+WORKER_ROLE = "worker"
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
 
@@ -81,7 +82,7 @@ _process_state = _ProcessState()
 @dataclass(frozen=True)
 class TelemetryConfig:
     endpoint: str | None = None
-    root_run_uid: str | None = None
+    run_id: str | None = None
     execution_uid: str | None = None
     serving_job_id: str | None = None
 
@@ -93,10 +94,16 @@ class TelemetryConfig:
 
         return cls(
             endpoint=text("SKYRL_TELEMETRY_ENDPOINT"),
-            root_run_uid=text("SKYRL_ROOT_RUN_UID"),
-            execution_uid=text("SKYRL_EXECUTION_UID"),
+            run_id=text("SKYRL_RUN_ID"),
+            execution_uid=text("SKYRL_EXECUTION_UID") or _iris_execution_uid(),
             serving_job_id=text("SKYRL_SERVING_JOB_ID"),
         )
+
+
+def _iris_execution_uid() -> str | None:
+    if attempt_uid := os.environ.get("IRIS_ATTEMPT_UID"):
+        return f"iris:{attempt_uid}"
+    return None
 
 
 def _iris_resources() -> dict[str, str]:
@@ -156,7 +163,7 @@ def _resources(config: TelemetryConfig, role: str) -> dict[str, str]:
         **_iris_resources(),
         **_ray_resources(),
         "host": socket.gethostname(),
-        "root_run_uid": config.root_run_uid or "",
+        "run_id": config.run_id or "",
         "execution_uid": config.execution_uid or "",
         "role": role,
     }
@@ -237,8 +244,8 @@ class ProcessTelemetry:
             return self
         if self._config.endpoint is None:
             return self
-        if self._config.root_run_uid is None or self._config.execution_uid is None:
-            logger.warning("Telemetry requires root_run_uid and execution_uid; export remains inert")
+        if self._config.run_id is None or self._config.execution_uid is None:
+            logger.warning("Telemetry requires run_id and execution_uid; export remains inert")
             return self
         telemetry.configure(
             endpoint=self._config.endpoint,

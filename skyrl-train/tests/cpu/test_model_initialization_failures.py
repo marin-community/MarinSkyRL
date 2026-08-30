@@ -42,6 +42,45 @@ def test_model_initialization_timeout_logs_and_kills_actors(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_startup_failure_still_runs_trainer_shutdown():
+    events = []
+    trainer = object.__new__(RayPPOTrainer)
+    trainer._shutdown_complete = False
+
+    async def fail_startup():
+        events.append("startup")
+        raise RuntimeError("runner failed to start")
+
+    async def teardown():
+        events.append("teardown")
+
+    trainer._startup_trajectory_runner = fail_startup
+    trainer._teardown = teardown
+
+    with pytest.raises(RuntimeError, match="runner failed to start"):
+        await trainer.train()
+
+    assert events == ["startup", "teardown"]
+
+
+@pytest.mark.asyncio
+async def test_trainer_shutdown_is_idempotent():
+    events = []
+    trainer = object.__new__(RayPPOTrainer)
+    trainer._shutdown_complete = False
+
+    async def teardown():
+        events.append("teardown")
+
+    trainer._teardown = teardown
+
+    await trainer.shutdown()
+    await trainer.shutdown()
+
+    assert events == ["teardown"]
+
+
+@pytest.mark.asyncio
 async def test_training_failure_log_record_does_not_contain_exception_object():
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.global_step = 12

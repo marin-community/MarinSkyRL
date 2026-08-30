@@ -12,11 +12,14 @@ Regression guard for the r5 engine-starvation investigation
 import pytest
 from omegaconf import OmegaConf
 
-# The builder pulls in the harbor/terminal_bench agentic-RL stack, which the CPU
-# dev extra deliberately does not install. Skip the module where it is absent
-# (it still runs in the agentic RL env where harbor is present).
+# The trainer CPU gate installs Harbor through the dedicated harbor-test group.
+# Keep the import guard for minimal launcher environments that collect this file.
 try:
-    from skyrl_train.trajectory_runners.harbor.configuration import AGENT_SCHEMA, HarborConfigBuilder
+    from skyrl_train.trajectory_runners.harbor.configuration import (
+        AGENT_SCHEMA,
+        HarborConfigBuilder,
+        get_exposed_harbor_fields,
+    )
 except ImportError:
     pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
 
@@ -79,3 +82,24 @@ def test_passthrough_exceptions_are_never_retried():
 )
 def test_agent_timeout_resolution_supports_nested_and_legacy_layouts(cfg):
     assert HarborConfigBuilder(OmegaConf.create(cfg)).get_agent_timeout_seconds() == 123
+
+
+def _trial_config(harbor_cfg: dict):
+    return HarborConfigBuilder(OmegaConf.create({"harbor": harbor_cfg})).build_trial_config(
+        task_path="/tmp/task",
+        trials_dir="/tmp/trials",
+        model_name="hosted_vllm/model",
+        api_base="http://localhost:8000/v1",
+        session_id="session",
+    )
+
+
+def test_trial_attempt_timeout_reaches_harbor_trial_config():
+    trial_config = _trial_config({"trial_attempt_timeout_sec": 1900})
+
+    assert trial_config.trial_attempt_timeout_sec == 1900
+    assert "trial_attempt_timeout_sec" in get_exposed_harbor_fields()["trial"]
+
+
+def test_trial_attempt_timeout_remains_unset_when_omitted():
+    assert _trial_config({}).trial_attempt_timeout_sec is None

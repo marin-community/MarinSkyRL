@@ -28,3 +28,25 @@ print(json.dumps(sorted(name for name in blocked if name in sys.modules)))
     )
 
     assert json.loads(result.stdout) == []
+
+
+def test_importing_hf_export_does_not_import_training_stacks() -> None:
+    """The launcher's export step imports skyrl_train.hf_export in a torch-free environment."""
+    program = """
+import json
+import sys
+
+import skyrl_train.hf_export
+
+blocked = ("flash_attn", "ray", "torch", "vllm")
+print(json.dumps(sorted(name for name in blocked if name in sys.modules)))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == []

@@ -77,6 +77,7 @@ from iris.cluster.constraints import (
 )
 from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_level
 from iris.cluster.types import CoschedulingConfig, ResourceSpec, gpu_device
+from iris.resources.state import JobState
 from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
@@ -304,6 +305,8 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         json.dumps([_resolved_data_path(locator) for locator in request.validation_data]),
         "--data-sources-json",
         json.dumps(data_sources, sort_keys=True),
+        "--run-id",
+        request.run_id,
         "--num-nodes",
         str(request.topology.num_nodes),
         "--gpus-per-node",
@@ -401,11 +404,6 @@ class IrisBackend:
                 storage_user=storage_user_from_resource_path(request.output.checkpoint_root),
             )
         )
-
-
-def iris_job_state_name(state: int) -> str:
-    """Return the protocol spelling for an Iris job state enum."""
-    return job_pb2.JobState.Name(state).removeprefix("JOB_STATE_").lower()
 
 
 def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:
@@ -1357,6 +1355,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--train-data", dest="train_data", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Experiment identity telemetry rows join on. Defaults to the Iris job id in the pod.",
+    )
+    parser.add_argument(
         "--data-sources-json",
         default=None,
         help="JSON locators materialized onto every node before Ray starts.",
@@ -1514,6 +1517,13 @@ def create_parser() -> argparse.ArgumentParser:
         "pre-stage/snapshot_download can legitimately take >30 min, so a SLOW-but-not-hung "
         "head prestage completes inside the window instead of the workers timing out and "
         "killing the gang (the 80B rank-spread bring-up flake, 2026-07-11).",
+    )
+    parser.add_argument(
+        "--driver-liveness-timeout",
+        type=int,
+        default=None,
+        help="Maximum silence from the training driver's stdout/stderr before task_runtime "
+        "captures diagnostics, kills the driver, and exits nonzero. Unset uses the controller default; zero disables.",
     )
     parser.add_argument(
         "--trials-dir",
@@ -1944,6 +1954,8 @@ def normalize(args: argparse.Namespace) -> None:
         raise SystemExit("--num-nodes must be >= 1.")
     if args.gpus_per_node < 1:
         raise SystemExit("--gpus-per-node must be >= 1.")
+    if args.driver_liveness_timeout is not None and args.driver_liveness_timeout < 0:
+        raise SystemExit("--driver-liveness-timeout must be >= 0.")
 
 
 def _build_task_shell(
@@ -1981,7 +1993,7 @@ def _build_task_shell(
     # The controller is run as a BACKGROUND child + `wait` (not `exec`) so we can
     # (a) run --up at exit via the bash EXIT trap and (b) FORWARD SIGTERM/SIGINT to
     # the controller — preserving the old `exec` graceful-shutdown path (rank-0's Ray
-    # teardown + done-marker on preemption) that a plain child would lose. `wait` is
+    # teardown + nonzero exit on preemption) that a plain child would lose. `wait` is
     # interrupted by the trapped signal (rc>128); we re-`wait` to reap the child's
     # real exit code after its forwarded-TERM shutdown.
     flashqla_enabled = _effective_gdn_backend(args) == GDNBackend.FLASHQLA
@@ -2142,6 +2154,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # slow-but-not-hung head prestage completes before the workers give up + kill the gang.
     if args.rendezvous_timeout is not None:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
+    if args.driver_liveness_timeout is not None:
+        controller_cmd.extend(["--driver-liveness-timeout", str(args.driver_liveness_timeout)])
     # Per-NODE task-dataset staging. training_driver.py's resolve_rl_train_data() extracts the
     # HF task dataset to node-local task storage,
     # but it runs ONLY on rank 0 (the head), so the Ray-scheduled rollout workers on
@@ -2155,6 +2169,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--train-data", args.train_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
+    # The job name is sanitized, so the pod cannot recover the run id.
+    if args.run_id:
+        controller_cmd.extend(["--run-id", args.run_id])
     controller_cmd.extend(_model_bootstrap_args(args))
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
@@ -2578,8 +2595,8 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
         )
         try:
             status = job.wait(stream_logs=True, timeout=float("inf"), raise_on_failure=False)
-            exit_code = 0 if status.state == job_pb2.JOB_STATE_SUCCEEDED else 1
-            job_state = iris_job_state_name(status.state)
+            exit_code = 0 if status.state is JobState.SUCCEEDED else 1
+            job_state = status.state.value
         except KeyboardInterrupt:
             print(f"[rl-iris] Terminating job {full_job_id}...", file=sys.stderr, flush=True)
             job.terminate()

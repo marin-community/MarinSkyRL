@@ -12,7 +12,7 @@ def test_cloud_checkpoint_load_stages_only_its_rank_shards(monkeypatch, tmp_path
     strategy.world_size = 8
     strategy.fsdp_strategy = "fsdp"
     monkeypatch.setattr(strategy, "get_rank", lambda: 3)
-    monkeypatch.setattr(strategy, "print", lambda *args: None)
+    monkeypatch.setattr(strategy, "log", lambda *args: None)
 
     staged_paths = []
 
@@ -58,7 +58,7 @@ def test_export_checkpoint_load_does_not_require_training_state(monkeypatch, tmp
     strategy.world_size = 8
     strategy.fsdp_strategy = "fsdp"
     monkeypatch.setattr(strategy, "get_rank", lambda: 3)
-    monkeypatch.setattr(strategy, "print", lambda *args: None)
+    monkeypatch.setattr(strategy, "log", lambda *args: None)
     staged_paths = []
 
     @contextmanager
@@ -98,7 +98,7 @@ def test_hf_export_serialization_has_no_trailing_barrier(monkeypatch, tmp_path):
     strategy = object.__new__(FSDPStrategy)
     monkeypatch.setattr(strategy, "is_rank_0", lambda: True)
     monkeypatch.setattr(strategy, "get_rank", lambda: 0)
-    monkeypatch.setattr(strategy, "print", lambda *args: None)
+    monkeypatch.setattr(strategy, "log", lambda *args: None)
     monkeypatch.setattr(strategy, "_unwrap_model", lambda model: model)
     monkeypatch.setattr(strategy, "_fix_fsdp_config", lambda config: config)
     monkeypatch.setattr(fsdp_module, "fsdp_version", lambda model: 2)

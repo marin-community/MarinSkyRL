@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any, Union, TypeVar
 import torch.optim as optim
 from jaxtyping import Float
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedTokenizer
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 
 
 DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])
@@ -64,10 +64,10 @@ class DistributedStrategy(ABC):
         """Save model in HuggingFace safetensors format"""
         pass
 
-    def print(self, *msg):
-        """Print only on rank 0"""
+    def log(self, *msg: object) -> None:
+        """Log a message only on rank 0."""
         if self.is_rank_0():
-            print(*msg)
+            logger.opt(depth=1).info(" ".join(str(part) for part in msg))
 
     def is_rank_0(self) -> bool:
         """Check if current process is rank 0"""

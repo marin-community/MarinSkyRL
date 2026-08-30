@@ -281,7 +281,7 @@ def test_resolve_launch_defaults_uses_cluster_storage_and_harness(tmp_path):
     )
     assert args.storage_paths.export_root == "s3://example-bucket/marin/users/alice/skyrl/storage-policy/exports"
     assert args.storage_paths.ray_log_root == (
-        "s3://example-bucket/marin/users/alice/skyrl/storage-policy/ray_session_logs"
+        "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/ray_session_logs"
     )
     assert args.storage_paths.resume_checkpoint_count == 2
     assert args.resolved_config_uri == (
@@ -367,6 +367,23 @@ def test_resolve_launch_defaults_rejects_non_path_trace_configuration(tmp_path):
         resolve_launch_defaults(args)
 
 
+def test_task_command_forwards_driver_liveness_timeout(tmp_path):
+    args = _args(tmp_path, "opencode", ["--driver-liveness-timeout", "600"])
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert options["--driver-liveness-timeout"] == ["600"]
+
+
+def test_normalize_rejects_negative_driver_liveness_timeout(tmp_path):
+    args = _args(tmp_path, "opencode", ["--driver-liveness-timeout", "-1"])
+
+    with pytest.raises(SystemExit, match="driver-liveness-timeout must be >= 0"):
+        normalize(args)
+
+
 def test_task_command_applies_bounded_storage_policy(tmp_path, parse_hydra_overrides):
     args = _args(tmp_path, "opencode", ["--job-name", "storage-policy", "--storage-user", "alice"])
     normalize(args)
@@ -377,7 +394,7 @@ def test_task_command_applies_bounded_storage_policy(tmp_path, parse_hydra_overr
     overrides = parse_hydra_overrides(encoded)
 
     assert set(options["--ray-log-dir"]) == {
-        "s3://example-bucket/marin/users/alice/skyrl/storage-policy/ray_session_logs"
+        "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/ray_session_logs"
     }
     assert overrides == {
         "generator.trajectory_retention.output_path": (

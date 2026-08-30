@@ -109,6 +109,13 @@ For fully async specifically, the following are the main knobs to tune:
   each worker works on a group of trajectories. It should be ``>= trainer.policy_mini_batch_size`` to avoid wasted throughput, 
   and ``<= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)`` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
+- ``trainer.fully_async.admission_stall_timeout``: The maximum number of seconds to assemble one admitted training mini-batch.
+  The default is six hours so long agent episodes and dynamic-sampling rejection do not terminate a healthy run. This deadline is
+  independent of episode, collective, and recent training-step durations. Increase it when a valid batch can take longer than six
+  hours; decrease it only when false-positive termination is preferable to a long rejected-only wait.
+- ``rollout.fanout.coordinator_rpc_timeout``: The maximum time to wait for a Harbor rollout coordinator RPC. The default is six
+  hours. Expiry fails the generation worker without cancelling the coordinator request or converting its trials to agent timeouts.
+  Harbor owns trial deadlines and retries; this watchdog only detects a coordinator that does not return.
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.
 
@@ -289,8 +296,12 @@ Checkpointing semantics
 
 Checkpoint artifacts record consumed dataset state, every completed group in the generation buffer, and every source
 row waiting for stale-group regeneration. Resume restores completed groups and pending retries before generation
-workers start. Partially generated groups are not checkpointed and are scheduled again through the restored dataset
-state. Buffer persistence fails the checkpoint operation if it cannot save a complete artifact.
+workers start. The restored groups and retries reserve their dataset UIDs, so restarting dataset iteration cannot
+generate a second copy of pending work. Partially generated groups are not checkpointed or reserved and are scheduled
+again through the restored dataset state. Buffer persistence fails the checkpoint operation if it cannot save a
+complete artifact. See the `fully asynchronous resume UID ownership design
+<https://github.com/marin-community/MarinSkyRL/blob/main/docs/design/fully-async-resume-uid-ownership.md>`_ for the UID
+ownership contract.
 
 .. note::
 

@@ -12,9 +12,10 @@ runs the driver on rank 0:
   ``RAY_ADDRESS`` pointing at the head so skyrl-train's bare ``ray.init()``
   attaches to the existing cluster.
 - **ranks 1..N-1 (workers):** read the head IP from the rendezvous, run
-  ``ray start --address=<head_ip>:<port>``, then BLOCK until the head's
-  ``done`` marker or SIGTERM. They contribute their 8 H100s to the Ray
-  cluster; they do NOT run the training driver.
+  ``ray start --address=<head_ip>:<port>``, then BLOCK until the current head
+  attempt publishes success or the task is terminated. Only the success result
+  exits 0. They contribute their 8 H100s to the Ray cluster; they do NOT run the
+  training driver.
 
 Head-IP discovery: rank 0 uses iris's ``IRIS_ADVERTISE_HOST`` (routable IP
 under ``host_network: true``) and publishes it to a rendezvous file on a shared
@@ -39,6 +40,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from typing import Protocol
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
 from marinskyrl.hf_model import validate_portable_hf_model_files
@@ -46,10 +48,13 @@ from cloud.iris.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
     FR_DUMP_TEMP_FILE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
+    RUN_ID_ENV,
+    TELEMETRY_ENDPOINT_ENV,
     ensure_debug_artifact_directories,
     ray_cluster_owner_environment,
 )
 from cloud.iris.model_paths import unsupported_model_path_message
+from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
@@ -63,24 +68,52 @@ from cloud.iris.runtime_bundle import validate_bundled_runtime
 
 try:
     from skyrl_train.ray_metrics import ray_metrics_telemetry
+    from skyrl_train.telemetry import CONTROLLER_ROLE, WORKER_ROLE
 except ImportError as error:
     # An installed rigging without the telemetry submodule raises ImportError, not
     # ModuleNotFoundError; the name check still keeps a failure inside these packages visible.
     if error.name not in {"prometheus_client", "rigging", "skyrl_train"}:
         raise
     _RAY_METRICS_UNAVAILABLE_REASON = str(error)
+    CONTROLLER_ROLE = "controller"
+    WORKER_ROLE = "worker"
 
-    def ray_metrics_telemetry(node_ip: str, metrics_port: int):
+    def ray_metrics_telemetry(_node_ip: str, _metrics_port: int, _role: str):
         _log(f"Ray metric forwarding is unavailable: {_RAY_METRICS_UNAVAILABLE_REASON}")
         return contextlib.nullcontext()
 
 
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
+HEAD_RESULT_SUCCEEDED = "succeeded"
+
+
+@dataclass(frozen=True)
+class HeadResult:
+    gang_epoch: str
+    outcome: str
+    written_at: float
+
+    @classmethod
+    def from_dict(cls, value: object) -> "HeadResult":
+        if not isinstance(value, dict):
+            raise RuntimeError("Ray head result must be a JSON object")
+        try:
+            result = cls(
+                gang_epoch=str(value["gang_epoch"]),
+                outcome=str(value["outcome"]),
+                written_at=float(value["written_at"]),
+            )
+            if result.outcome != HEAD_RESULT_SUCCEEDED:
+                raise ValueError(f"unknown outcome {result.outcome!r}")
+            return result
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("Ray head result contains invalid field values") from error
 
 
 @dataclass(frozen=True)
 class RendezvousPayload:
+    gang_epoch: str
     head_ip: str
     head_node: str
     port: int
@@ -99,6 +132,7 @@ class RendezvousPayload:
             raise RuntimeError(f"Ray head rendezvous is missing fields: {', '.join(missing_fields)}")
         try:
             return cls(
+                gang_epoch=str(value["gang_epoch"]),
                 head_ip=str(value["head_ip"]),
                 head_node=str(value["head_node"]),
                 port=int(value["port"]),
@@ -138,6 +172,14 @@ RENDEZVOUS_WRITE_ATTEMPTS = 5
 RENDEZVOUS_WRITE_TIMEOUT = 30  # seconds per attempt
 # Bound `ray start --head` so a hung Ray CLI fails loud (TimeoutExpired).
 RAY_START_HEAD_TIMEOUT = 300  # seconds
+# Failure reporting must never keep an Iris task alive after its driver exits.
+FAILURE_ARTIFACT_TIMEOUT = 30
+# Allow healthy policy phases longer than one hour while bounding a live but silent driver.
+DEFAULT_DRIVER_LIVENESS_TIMEOUT = 9000
+DRIVER_WATCHDOG_POLL_INTERVAL = 1.0
+DRIVER_KILL_TIMEOUT = 30
+DRIVER_STALLED_EXIT_CODE = 124
+IGNORED_DRIVER_OUTPUT_MARKERS = (b"[fd-monitor]",)
 
 
 def _log(msg: str) -> None:
@@ -632,6 +674,15 @@ def pin_socket_ifname() -> str | None:
     return iface
 
 
+def export_telemetry_environment(run_id: str | None) -> None:
+    resolved = telemetry_environment(run_id=run_id)
+    if not resolved:
+        _log("[telemetry] no telemetry environment resolved; MarinSkyRL telemetry stays inert")
+        return
+    os.environ.update(resolved)
+    _log(f"[telemetry] {resolved[TELEMETRY_ENDPOINT_ENV]} run_id={resolved[RUN_ID_ENV]}")
+
+
 def training_driver_env(derived_gloo_ifname: str | None) -> dict[str, str]:
     """Environment for the rank-0 training driver subprocess.
 
@@ -785,10 +836,11 @@ def _write_rendezvous_once(fs, path: str, payload: dict[str, object]) -> None:
         json.dump(payload, f)
 
 
-def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
+def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int, gang_epoch: str) -> None:
     uri = _rendezvous_uri(rendezvous_dir)
     python_version, ray_version = _runtime_versions()
     payload = RendezvousPayload(
+        gang_epoch=gang_epoch,
         head_ip=head_ip,
         head_node=socket.gethostname(),
         port=ray_port,
@@ -898,33 +950,29 @@ def poll_rendezvous(
     )
 
 
-def _set_marker(rendezvous_dir: str, name: str) -> None:
-    uri = f"{rendezvous_dir.rstrip('/')}/{name}"
-    try:
-        fs, path = fs_and_path(uri)
-        with fs.open(path, "w") as f:
-            f.write(str(time.time()))
-    except Exception as exc:
-        _log(f"Warning: could not write marker {uri}: {exc}")
+def write_head_result(rendezvous_dir: str, gang_epoch: str) -> None:
+    """Publish successful completion for exactly one Ray gang attempt."""
+    uri = _done_uri(rendezvous_dir)
+    fs, path = fs_and_path(uri)
+    result = HeadResult(gang_epoch=gang_epoch, outcome=HEAD_RESULT_SUCCEEDED, written_at=time.time())
+    with fs.open(path, "w") as destination:
+        json.dump(asdict(result), destination)
+    _log(f"Published successful head result for gang epoch {gang_epoch}: {uri}")
 
 
-def _marker_exists(rendezvous_dir: str, name: str, min_written_at: float | None = None) -> bool:
-    uri = f"{rendezvous_dir.rstrip('/')}/{name}"
-    try:
-        fs, path = fs_and_path(uri)
-        if not fs.exists(path):
-            return False
-        if min_written_at is None:
-            return True
-        with fs.open(path, "r") as f:
-            written_at = float(f.read().strip() or 0)
-        return written_at >= (min_written_at - RENDEZVOUS_FRESHNESS_SLACK)
-    except Exception:
+def head_succeeded(rendezvous_dir: str, gang_epoch: str) -> bool:
+    """Whether the head published success for ``gang_epoch``."""
+    uri = _done_uri(rendezvous_dir)
+    fs, path = fs_and_path(uri)
+    if not fs.exists(path):
         return False
+    with fs.open(path, "r") as source:
+        result = HeadResult.from_dict(json.load(source))
+    return result.gang_epoch == gang_epoch
 
 
 def clear_rendezvous(rendezvous_dir: str) -> None:
-    """Best-effort delete of the rendezvous + done markers (rank 0, on entry/exit)."""
+    """Best-effort delete of rendezvous state before a new head attempt starts."""
     for name in (RENDEZVOUS_FILENAME, DONE_FILENAME):
         uri = f"{rendezvous_dir.rstrip('/')}/{name}"
         try:
@@ -1096,9 +1144,24 @@ def ray_start_worker(
 
 def ray_stop() -> None:
     try:
-        subprocess.run([_ray_bin(), "stop", "--force"], check=False, timeout=60)
+        completed = subprocess.run(
+            [_ray_bin(), "stop", "--force"],
+            check=False,
+            timeout=60,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
     except subprocess.TimeoutExpired:
         _log("Warning: 'ray stop' timed out")
+        return
+
+    if completed.returncode != 0:
+        detail = next((line.strip() for line in reversed(completed.stdout.splitlines()) if line.strip()), "")
+        suffix = f": {detail[:500]}" if detail else ""
+        _log(f"Warning: 'ray stop' exited {completed.returncode}{suffix}")
+        return
+    _log(f"Ray stop completed (exit {completed.returncode})")
 
 
 def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_cb=None) -> None:
@@ -1549,16 +1612,117 @@ class RayLogSyncSession:
         return stop
 
 
+@dataclass
+class DriverOutputActivity:
+    """Track child output that provides evidence of training progress."""
+
+    last_progress_at: float = field(default_factory=time.monotonic)
+    condition: threading.Condition = field(default_factory=threading.Condition)
+
+    def record(self, line: bytes) -> None:
+        if not line.strip() or any(marker in line for marker in IGNORED_DRIVER_OUTPUT_MARKERS):
+            return
+        with self.condition:
+            self.last_progress_at = time.monotonic()
+            self.condition.notify_all()
+
+    def stream_closed(self) -> None:
+        with self.condition:
+            self.condition.notify_all()
+
+
+@dataclass(frozen=True)
+class DriverExited:
+    exit_code: int
+
+
+@dataclass(frozen=True)
+class DriverStalled:
+    silence: float
+
+
 def launch_training_driver(train_argv: list[str], env: dict[str, str]) -> subprocess.Popen:
     """Start the driver from the immutable runtime checkout, not the bootstrap bundle."""
     runtime_checkout = env.get("SKYRL_HOME")
     if not runtime_checkout:
         raise RuntimeError("SKYRL_HOME must identify the immutable MarinSkyRL runtime checkout")
-    return subprocess.Popen(train_argv, env=env, cwd=runtime_checkout, start_new_session=True)
+    return subprocess.Popen(
+        train_argv,
+        env=env,
+        cwd=runtime_checkout,
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def start_driver_output_tee(
+    process: subprocess.Popen,
+    activity: DriverOutputActivity,
+) -> threading.Thread:
+    """Forward child output to the task log and update its liveness signal."""
+    if process.stdout is None:
+        raise RuntimeError("Training driver stdout must be piped for liveness supervision")
+
+    def forward_output() -> None:
+        try:
+            for line in iter(process.stdout.readline, b""):
+                sys.stdout.write(line.decode(errors="replace"))
+                sys.stdout.flush()
+                activity.record(line)
+        finally:
+            activity.stream_closed()
+
+    output_thread = threading.Thread(target=forward_output, daemon=True, name="driver-output-tee")
+    output_thread.start()
+    return output_thread
+
+
+def wait_for_driver(
+    process: subprocess.Popen,
+    activity: DriverOutputActivity,
+    timeout: float,
+) -> DriverExited | DriverStalled:
+    """Return the named child exit or output-stall outcome."""
+    if timeout <= 0:
+        return DriverExited(process.wait())
+
+    while True:
+        exit_code = process.poll()
+        if exit_code is not None:
+            return DriverExited(exit_code)
+        with activity.condition:
+            silence = time.monotonic() - activity.last_progress_at
+            if silence >= timeout:
+                return DriverStalled(silence)
+            activity.condition.wait(timeout=min(timeout - silence, DRIVER_WATCHDOG_POLL_INTERVAL))
+
+
+def kill_driver_process_group(process: subprocess.Popen) -> None:
+    """Kill a stalled driver and its descendants before the Iris task exits."""
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        process.poll()
+        return
+    try:
+        process.wait(timeout=DRIVER_KILL_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _log(f"Training driver did not become waitable within {DRIVER_KILL_TIMEOUT}s after SIGKILL")
+
+
+def _persist_failure_artifacts_bounded(action, timeout: float) -> None:
+    """Give failure evidence a bounded upload window without delaying task failure indefinitely."""
+    artifact_thread = threading.Thread(target=action, daemon=True, name="failure-artifact-sync")
+    artifact_thread.start()
+    artifact_thread.join(timeout)
+    if artifact_thread.is_alive():
+        _log(f"Failure artifact upload exceeded {timeout}s; continuing task teardown")
 
 
 def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifname: str | None = None) -> int:
     num_tasks = _num_tasks()
+    gang_epoch = uuid.uuid4().hex
     head_ip = _own_ip()
     ray_port = args.ray_port
     ray_address = f"{head_ip}:{ray_port}"
@@ -1566,6 +1730,12 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     _log(f"ROLE=head rank=0/{num_tasks} head_ip={head_ip} ray_port={ray_port}")
     ray_log_sync_stop: threading.Event | None = None
     ray_log_sync = RayLogSyncSession(args.ray_log_dir, node_id)
+
+    def persist_runtime_artifacts(reason: str) -> None:
+        if ray_log_sync_stop is not None:
+            ray_log_sync_stop.set()
+        ray_log_sync.sync_bounded(reason)
+        sync_debug_artifacts(args.rendezvous_dir, node_id, reason)
 
     # Install the SIGTERM/SIGINT handler + termination-artifact capture at the TOP of
     # bring-up (BEFORE clear_rendezvous / ray_start_head / rendezvous write), so a reap
@@ -1592,10 +1762,8 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-        if args.rendezvous_dir and num_tasks > 1:
-            _set_marker(args.rendezvous_dir, DONE_FILENAME)
         ray_stop()
-        sys.exit(0)
+        sys.exit(128 + signum)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
@@ -1624,19 +1792,19 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         _log(
             f"[task-runtime] Ray head subprocess returned; writing rendezvous -> {_rendezvous_uri(args.rendezvous_dir)}"
         )
-        write_rendezvous(args.rendezvous_dir, head_ip, ray_port)
+        write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch)
         # Re-publish the rendezvous each poll so a late cold-node worker never sees it
         # as "stale" (see wait_for_nodes docstring — prevents the freshness deadlock).
         wait_for_nodes(
             ray_address,
             num_tasks,
             args.cluster_join_timeout,
-            rewrite_cb=lambda: write_rendezvous(args.rendezvous_dir, head_ip, ray_port),
+            rewrite_cb=lambda: write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch),
         )
     else:
         _log("Single-node slice: skipping rendezvous and multi-node wait.")
 
-    with ray_metrics_telemetry(head_ip, RAY_METRICS_EXPORT_PORT):
+    with ray_metrics_telemetry(head_ip, RAY_METRICS_EXPORT_PORT, CONTROLLER_ROLE):
         env = training_driver_env(derived_gloo_ifname)
         env["RAY_ADDRESS"] = ray_address  # skyrl-train's bare ray.init() attaches here
         env["PYTHONUNBUFFERED"] = "1"
@@ -1649,21 +1817,45 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
         # `process` here arms its driver-teardown path (the closure reads this value).
         process = launch_training_driver(train_argv, env)
+        driver_activity = DriverOutputActivity()
+        output_thread = start_driver_output_tee(process, driver_activity)
+        if args.driver_liveness_timeout > 0:
+            _log(f"Driver liveness watchdog armed: {args.driver_liveness_timeout:g}s maximum stdout/stderr silence")
+        wait_result = wait_for_driver(process, driver_activity, args.driver_liveness_timeout)
+        if isinstance(wait_result, DriverStalled):
+            reason = f"driver stalled after {wait_result.silence:.0f}s without stdout/stderr progress (head rank 0)"
+            _log(reason)
 
-        exit_code = process.wait()
+            def persist_stall_artifacts() -> None:
+                capture_termination_artifacts(args.rendezvous_dir, reason)
+                persist_runtime_artifacts(reason)
+
+            _persist_failure_artifacts_bounded(persist_stall_artifacts, timeout=FAILURE_ARTIFACT_TIMEOUT)
+            kill_driver_process_group(process)
+            output_thread.join(timeout=DRIVER_KILL_TIMEOUT)
+            ray_stop()
+            return DRIVER_STALLED_EXIT_CODE
+        output_thread.join(timeout=DRIVER_KILL_TIMEOUT)
+        exit_code = wait_result.exit_code
         if exit_code != 0:
-            capture_termination_artifacts(args.rendezvous_dir, f"driver exit_code={exit_code} (head rank 0)")
+
+            def persist_failure_artifacts() -> None:
+                reason = f"driver exit_code={exit_code} (head rank 0)"
+                capture_termination_artifacts(args.rendezvous_dir, reason)
+                persist_runtime_artifacts(reason)
+
+            _persist_failure_artifacts_bounded(
+                persist_failure_artifacts,
+                timeout=FAILURE_ARTIFACT_TIMEOUT,
+            )
+            ray_stop()
+            return exit_code
         # Final flush of this node's Ray session logs before teardown reaps them.
-        if ray_log_sync_stop is not None:
-            ray_log_sync_stop.set()
-        ray_log_sync.sync_bounded(f"driver exit_code={exit_code} (head)")
-        sync_debug_artifacts(args.rendezvous_dir, node_id, f"driver exit_code={exit_code} (head)")
+        persist_runtime_artifacts(f"driver exit_code={exit_code} (head)")
     # Signal workers to unpark, then tear down.
     if args.rendezvous_dir and num_tasks > 1:
-        _set_marker(args.rendezvous_dir, DONE_FILENAME)
+        write_head_result(args.rendezvous_dir, gang_epoch)
     ray_stop()
-    if args.rendezvous_dir and num_tasks > 1:
-        clear_rendezvous(args.rendezvous_dir)
     return exit_code
 
 
@@ -1707,8 +1899,11 @@ def run_worker(args: argparse.Namespace) -> int:
     ray_log_sync_stop = ray_log_sync.start_periodic(args.rendezvous_dir)
 
     stop = threading.Event()
+    termination_signal: int | None = None
 
     def _shutdown(signum, _frame) -> None:
+        nonlocal termination_signal
+        termination_signal = termination_signal or signum
         _log(f"Worker rank {rank} received signal {signum}; stopping Ray.")
         # A SIGTERM on a worker node is often a k8s eviction/OOM of that node (it
         # hosts the training actors' GPUs); capture its disk/GPU state before reap.
@@ -1721,13 +1916,17 @@ def run_worker(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Block until the head publishes the done marker (training finished) or we
-    # are signalled. The training driver on rank 0 schedules actors onto this
-    # node's GPUs; this process just keeps the Ray node alive.
-    with ray_metrics_telemetry(node_ip, RAY_METRICS_EXPORT_PORT):
-        while not stop.is_set():
-            if _marker_exists(args.rendezvous_dir, DONE_FILENAME, min_written_at=worker_start):
-                _log(f"Worker rank {rank} saw head done-marker; shutting down.")
+    # Exit successfully only after the current head attempt publishes success.
+    # A signal without that result tears down Ray but remains a non-successful
+    # task outcome so Iris cannot mistake a bounced gang peer for completed work.
+    head_completed = False
+    with ray_metrics_telemetry(node_ip, RAY_METRICS_EXPORT_PORT, WORKER_ROLE):
+        while True:
+            if head_succeeded(args.rendezvous_dir, payload.gang_epoch):
+                head_completed = True
+                _log(f"Worker rank {rank} saw successful head result; shutting down.")
+                break
+            if stop.is_set():
                 break
             time.sleep(POLL_INTERVAL)
         # Final flush of this worker node's Ray session logs before Ray teardown.
@@ -1735,7 +1934,10 @@ def run_worker(args: argparse.Namespace) -> int:
         ray_log_sync.sync_bounded(f"worker rank {rank} teardown")
         sync_debug_artifacts(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
     ray_stop()
-    return 0
+    if head_completed:
+        return 0
+    assert termination_signal is not None
+    return 128 + termination_signal
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
@@ -1787,6 +1989,13 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help=f"Seconds to wait for all nodes to join the Ray cluster (default {DEFAULT_CLUSTER_JOIN_TIMEOUT}).",
     )
     parser.add_argument(
+        "--driver-liveness-timeout",
+        type=int,
+        default=DEFAULT_DRIVER_LIVENESS_TIMEOUT,
+        help="Maximum driver stdout/stderr silence before the controller records diagnostics, "
+        f"kills the driver, and exits nonzero (default {DEFAULT_DRIVER_LIVENESS_TIMEOUT}; zero disables).",
+    )
+    parser.add_argument(
         "--train-data",
         default=os.environ.get("OT_AGENT_IRIS_TRAIN_DATA", ""),
         help="JSON list of train_data HF dataset(s) to stage (extract to the node-local "
@@ -1797,6 +2006,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "--data-sources-json",
         default="",
         help="Immutable object-store data locators to materialize before Ray starts.",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Experiment identity telemetry rows join on. Defaults to the Iris job id.",
     )
     parser.add_argument(
         "--prestage-model",
@@ -1881,6 +2095,8 @@ def main() -> None:
     # name is node-local; training_driver_env keeps it out of the driver, which
     # would otherwise broadcast the head's name to every node.
     derived_gloo_ifname = pin_socket_ifname()
+    # Resolve before Ray starts so its actors inherit this task's telemetry settings.
+    export_telemetry_environment(args.run_id)
     # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
     # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
     ensure_fr_dump_dir()

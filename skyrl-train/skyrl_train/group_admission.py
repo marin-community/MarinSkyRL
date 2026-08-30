@@ -68,13 +68,14 @@ class GroupAdvantageInvariant:
 
 
 class AdmissionRejection(StrEnum):
-    """Retryable reasons that prevent a completed group from entering training."""
+    """Reasons that prevent a completed group from entering training."""
 
     STALE = "stale"
     FULLY_MASKED = "fully_masked"
     PHYSICAL_GROUP_SIZE = "physical_group_size"
     BELOW_MINIMUM_GROUP_SIZE = "below_minimum_group_size"
     MISSING_ROLLOUT_LOGPROBS = "missing_rollout_logprobs"
+    DUPLICATE_UID = "duplicate_uid"
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,31 @@ class AdmissionDecision:
     @property
     def primary_rejection(self) -> AdmissionRejection | None:
         return self.rejections[0] if self.rejections else None
+
+
+class TrainingGroupInvariantError(ValueError):
+    """A concatenated training group violates its resolved run contract."""
+
+    def __init__(
+        self,
+        *,
+        uid: str,
+        decision: AdmissionDecision,
+        physical_count: int,
+        expected_physical_count: int,
+        row_indices: Sequence[int],
+    ) -> None:
+        self.uid = uid
+        self.rejections = decision.rejections
+        self.physical_count = physical_count
+        self.expected_physical_count = expected_physical_count
+        self.row_indices = tuple(row_indices)
+        reasons = ", ".join(rejection.value for rejection in decision.rejections)
+        super().__init__(
+            f"training group {uid!r} violates the resolved group invariant: {reasons} "
+            f"(physical_count={physical_count}, expected={expected_physical_count}, "
+            f"row_count={len(row_indices)}, row_indices={list(row_indices)})"
+        )
 
 
 class GeneratedGroup(Protocol):
@@ -271,7 +297,14 @@ def assert_training_groups_eligible(
             value = _aligned_sequence(trajectory_batch, key, len(response_ids))
             if value is not None:
                 group_batch[key] = [value[index] for index in indices]
-        decision = policy.evaluate(_BatchGroup(group_batch), global_step=0)
+        batch_group = _BatchGroup(group_batch)
+        facts = _inspect_group(batch_group)
+        decision = policy.evaluate(batch_group, global_step=0)
         if not decision.accepted:
-            reasons = ", ".join(rejection.value for rejection in decision.rejections)
-            raise ValueError(f"training group {uid!r} violates the resolved group invariant: {reasons}")
+            raise TrainingGroupInvariantError(
+                uid=uid,
+                decision=decision,
+                physical_count=facts.physical_count,
+                expected_physical_count=invariant.physical_group_size,
+                row_indices=indices,
+            )

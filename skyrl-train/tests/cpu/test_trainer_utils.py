@@ -2,6 +2,8 @@
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer_utils.py
 """
 
+from skyrl_train.group_admission import GroupAdvantageInvariant, assert_training_groups_eligible
+from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from skyrl_train.utils.trainer_utils import (
     run_on_each_node,
     cleanup_old_checkpoints,
@@ -504,7 +506,9 @@ def test_handle_filter_sampling_sufficient_prompts():
     trajectory_batch = {
         "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
         "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
-        "rewards": [1.0, 2.0, 3.0, 3.0],  # uid1: [1.0, 2.0] (good), uid2: [3.0, 3.0] (bad)
+        # Shaping varies for uid1, but only uid2 has varying verifier outcomes.
+        "rewards": [1.0, 2.0, 3.0, 3.0],
+        "unshaped_rewards": [0.0, 0.0, 0.0, 1.0],
         "loss_masks": [[1, 1]] * 4,
         "stop_reasons": ["stop"] * 4,
         "rollout_metrics": None,
@@ -515,6 +519,7 @@ def test_handle_filter_sampling_sufficient_prompts():
         "train_batch_size": 1,  # Only need 1 prompt
         "n_samples_per_prompt": 2,
         "max_sample_batches": 20,
+        "criteria": resolve_dynamic_sampling_criteria("unshaped"),
     }
 
     result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1})
@@ -527,10 +532,68 @@ def test_handle_filter_sampling_sufficient_prompts():
     assert keep_sampling is False
     assert state is None
 
-    # Should only keep the good uid1 samples
+    # Should only keep uid2, whose unshaped outcomes vary.
     assert len(result_output["prompt_token_ids"]) == 2
     assert len(result_uids) == 2
-    assert all(uid == "uid1" for uid in result_uids)
+    assert all(uid == "uid2" for uid in result_uids)
+
+
+@pytest.mark.parametrize(
+    ("informative_on", "expected_uid"),
+    [("shaped", "shaped"), ("unshaped", "unshaped")],
+)
+def test_handle_filter_sampling_selects_configured_reward_source(informative_on, expected_uid):
+    trajectory_batch = {
+        "prompt_token_ids": [[1], [1], [2], [2]],
+        "response_ids": [[3], [4], [5], [6]],
+        "rewards": [0.0, 0.25, 0.0, 0.0],
+        "unshaped_rewards": [0.0, 0.0, 0.0, 1.0],
+        "loss_masks": [[1]] * 4,
+        "stop_reasons": ["stop"] * 4,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    sampling_config = {
+        "train_batch_size": 1,
+        "n_samples_per_prompt": 2,
+        "criteria": resolve_dynamic_sampling_criteria(informative_on),
+    }
+
+    result = handle_filter_sampling(
+        trajectory_batch,
+        ["shaped", "shaped", "unshaped", "unshaped"],
+        sampling_config,
+        collected_state={"sample_batch_count": 1},
+    )
+
+    assert result.uids == [expected_uid, expected_uid]
+
+
+@pytest.mark.parametrize("min_reward_std", [0.0, 0.1])
+def test_handle_filter_sampling_applies_minimum_reward_std(min_reward_std):
+    trajectory_batch = {
+        "prompt_token_ids": [[1]] * 4,
+        "response_ids": [[2]] * 4,
+        "rewards": [0.05, 0.05, 0.10, 0.05],
+        "loss_masks": [[1]] * 4,
+        "stop_reasons": ["stop"] * 4,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    sampling_config = {
+        "train_batch_size": 1,
+        "n_samples_per_prompt": 4,
+        "criteria": resolve_dynamic_sampling_criteria("shaped", min_reward_std),
+    }
+
+    result = handle_filter_sampling(
+        trajectory_batch,
+        ["uid"] * 4,
+        sampling_config,
+        collected_state={"sample_batch_count": 1},
+    )
+
+    assert result.keep_sampling is (min_reward_std > 0)
 
 
 def test_handle_filter_sampling_insufficient_prompts_continue():
@@ -539,6 +602,7 @@ def test_handle_filter_sampling_insufficient_prompts_continue():
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8]],
         "rewards": [1.0, 2.0],  # Only 1 good prompt
+        "unshaped_rewards": [1.0, 2.0],
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,
@@ -550,6 +614,7 @@ def test_handle_filter_sampling_insufficient_prompts_continue():
         "n_samples_per_prompt": 2,
         "max_sample_batches": 20,
         "tis_lcs_alert_threshold": 0.005,
+        "criteria": resolve_dynamic_sampling_criteria(),
     }
 
     collected_state = {"sample_batch_count": 1}
@@ -576,6 +641,7 @@ def test_handle_filter_sampling_accumulation():
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8]],
         "rewards": [1.0, 2.0],  # Good prompt
+        "unshaped_rewards": [1.0, 2.0],
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,
@@ -588,6 +654,7 @@ def test_handle_filter_sampling_accumulation():
         "prompt_token_ids": [[9, 10], [11, 12]],
         "response_ids": [[13, 14], [15, 16]],
         "rewards": [3.0, 4.0],  # Another good prompt
+        "unshaped_rewards": [3.0, 4.0],
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,
@@ -600,6 +667,7 @@ def test_handle_filter_sampling_accumulation():
         "n_samples_per_prompt": 2,
         "max_sample_batches": 20,
         "tis_lcs_alert_threshold": 0.005,
+        "criteria": resolve_dynamic_sampling_criteria(),
     }
 
     collected_state = {"sample_batch_count": 1}
@@ -625,12 +693,57 @@ def test_handle_filter_sampling_accumulation():
     assert len(result2_uids) == 4
 
 
+def test_handle_filter_sampling_keeps_repeated_dataset_row_as_distinct_groups():
+    trajectory_batch = {
+        "prompt_token_ids": [[1, 2], [1, 2]],
+        "response_ids": [[3, 4], [5, 6]],
+        "rewards": [0.0, 1.0],
+        "unshaped_rewards": [0.0, 1.0],
+        "loss_masks": [[1, 1], [1, 1]],
+        "stop_reasons": ["stop", "stop"],
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
+    }
+    sampling_config = {
+        "train_batch_size": 2,
+        "n_samples_per_prompt": 2,
+        "max_sample_batches": 20,
+        "tis_lcs_alert_threshold": 0.005,
+        "criteria": resolve_dynamic_sampling_criteria(),
+    }
+
+    first_round = handle_filter_sampling(
+        trajectory_batch,
+        ["2069", "2069"],
+        sampling_config,
+        collected_state={"sample_batch_count": 1},
+    )
+    assert first_round.keep_sampling
+    assert first_round.state is not None
+
+    first_round.state["sample_batch_count"] = 2
+    second_round = handle_filter_sampling(
+        trajectory_batch,
+        ["2069", "2069"],
+        sampling_config,
+        collected_state=first_round.state,
+    )
+
+    assert len(set(second_round.uids)) == 2
+    assert_training_groups_eligible(
+        second_round.trajectory_batch,
+        second_round.uids,
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+    )
+
+
 def test_handle_filter_sampling_single_sample_per_prompt():
     """Test filter sampling with single sample per prompt."""
     trajectory_batch = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8]],
         "rewards": [1.0, 1.0],  # Same rewards but single sample per prompt
+        "unshaped_rewards": [1.0, 1.0],
         "loss_masks": [[1, 1]] * 2,
         "stop_reasons": ["stop"] * 2,
         "rollout_metrics": None,
@@ -641,6 +754,7 @@ def test_handle_filter_sampling_single_sample_per_prompt():
         "train_batch_size": 2,
         "n_samples_per_prompt": 1,
         "max_sample_batches": 20,
+        "criteria": resolve_dynamic_sampling_criteria(),
     }
 
     result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1})
@@ -668,9 +782,9 @@ def test_filter_trajectory_batch():
         "rollout_metrics": {"metric": "value"},
         "rollout_logprobs": [[0.16, 0.4], [0.1, 0.2], [0.3, 0.4]],
         "reward_shaping_components": [
-            {"non_termination": 0.0, "successful_length": 0.0},
-            {"non_termination": 0.0, "successful_length": 0.0},
-            {"non_termination": 0.0, "successful_length": 0.0},
+            {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
+            {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
+            {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
         ],
         "reward_shaping_loop_spans": [[{"start": 0, "end": 2}], [], [{"start": 1, "end": 2}]],
         "loop_advantages": [[-0.05, -0.05], [0.0, 0.0], [0.0, -0.2]],
@@ -690,8 +804,8 @@ def test_filter_trajectory_batch():
     assert filtered["rollout_metrics"]["generate/reward_shaping/loop_advantage_mean"] == pytest.approx(-0.15)
     assert filtered["rollout_logprobs"] == [[0.16, 0.4], [0.3, 0.4]]
     assert filtered["reward_shaping_components"] == [
-        {"non_termination": 0.0, "successful_length": 0.0},
-        {"non_termination": 0.0, "successful_length": 0.0},
+        {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
+        {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
     ]
     assert filtered["loop_advantages"] == [[-0.05, -0.05], [0.0, -0.2]]
     assert filtered["reward_shaping_loop_spans"] == [
@@ -877,41 +991,17 @@ def test_build_dataloader_seeding(dummy_config):
     """Test that build_dataloader correctly seeds the dataloader for reproducible shuffling."""
     dataset = MultiItemDataset(size=20)
 
-    # Test 1: Same seed should produce same shuffling
-    config1 = dummy_config.copy()
-    config1.trainer.seed = 42
-    config1.trainer.train_batch_size = 5
+    def first_batch(seed):
+        config = dummy_config.copy()
+        config.trainer.seed = seed
+        config.trainer.train_batch_size = 5
+        # This test covers generator seeding, not multiprocessing. Use the existing
+        # single-process loader mode so a small CI host is not asked for eight workers.
+        config.generator.enable_http_endpoint = True
+        return next(iter(build_dataloader(config, dataset, is_train=True)))
 
-    config2 = dummy_config.copy()
-    config2.trainer.seed = 42  # Same seed
-    config2.trainer.train_batch_size = 5
-
-    # Build dataloaders
-    dataloader1 = build_dataloader(config1, dataset, is_train=True)
-    dataloader2 = build_dataloader(config2, dataset, is_train=True)
-
-    # Get first batch from each dataloader
-    first_batch1 = next(iter(dataloader1))
-    first_batch2 = next(iter(dataloader2))
-
-    # With same seed, first batches should be identical
-    assert first_batch1 == first_batch2, (
-        f"Same seed should produce same first batch, got {first_batch1} vs {first_batch2}"
-    )
-
-    # Test 2: Different seeds should produce different shuffling
-    config3 = dummy_config.copy()
-    config3.trainer.seed = 123  # Different seed
-    config3.trainer.train_batch_size = 5
-
-    dataloader3 = build_dataloader(config3, dataset, is_train=True)
-    first_batch3 = next(iter(dataloader3))
-
-    # With different seed, first batch should be different
-    # Note: There's a tiny chance they could be the same by random chance, but very unlikely with 20 items
-    assert first_batch1 != first_batch3, (
-        f"Different seeds should produce different first batches, but both gave {first_batch1}"
-    )
+    assert first_batch(42) == first_batch(42)
+    assert first_batch(42) != first_batch(123)
 
 
 def test_validate_trajectory_batch_invalid_rewards():

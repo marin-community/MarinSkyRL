@@ -1,10 +1,17 @@
 import pytest
 
 from skyrl_train.fully_async_trainer import GeneratedOutputGroup
+from skyrl_train.dynamic_sampling import (
+    GroupSelectionPolicy,
+    GroupSelectionResult,
+    resolve_dynamic_sampling_criteria,
+)
 from skyrl_train.group_admission import (
     AdmissionRejection,
     GroupAdmissionPolicy,
     GroupAdvantageInvariant,
+    TrainingGroupInvariantError,
+    assert_training_groups_eligible,
     resolve_group_advantage_invariant,
 )
 
@@ -154,6 +161,23 @@ def test_malformed_group_fails_instead_of_being_retried():
         policy.evaluate(group, global_step=10)
 
 
+def test_training_group_error_reports_observed_and_expected_physical_counts():
+    group = _group(loss_masks=[[1], [1], [1], [1]])
+
+    with pytest.raises(TrainingGroupInvariantError) as exc_info:
+        assert_training_groups_eligible(
+            group.trajectory_batch,
+            ["duplicate"] * 4,
+            GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        )
+
+    assert exc_info.value.uid == "duplicate"
+    assert exc_info.value.rejections == (AdmissionRejection.PHYSICAL_GROUP_SIZE,)
+    assert exc_info.value.physical_count == 4
+    assert exc_info.value.expected_physical_count == 2
+    assert exc_info.value.row_indices == (0, 1, 2, 3)
+
+
 def test_stepwise_group_counts_final_trials_but_checks_all_transitions_for_training():
     policy = GroupAdmissionPolicy(
         GroupAdvantageInvariant.exact_physical(physical_group_size=2),
@@ -185,3 +209,60 @@ def test_grpo_rejects_unused_group_floor():
             physical_group_size=4,
             minimum_group_size=2,
         )
+
+
+def test_dynamic_filter_uses_final_unshaped_outcomes():
+    policy = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("unshaped"))
+    group = _group(loss_masks=[[1], [1], [1], [1]])
+    group.trajectory_batch.update(
+        {
+            "rewards": [0.0, 0.0, 0.0, -0.1],
+            "unshaped_rewards": [0.0, 1.0, 0.0, 1.0],
+            "is_last_step": [False, True, False, True],
+        }
+    )
+
+    decision = policy.evaluate(group)
+
+    assert decision is GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD
+
+
+def test_dynamic_filter_requires_unshaped_outcomes():
+    policy = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("unshaped"))
+
+    with pytest.raises(ValueError, match="requires unshaped_rewards"):
+        policy.evaluate(_group(loss_masks=[[1], [1]]))
+
+
+def test_dynamic_filter_can_admit_shaped_reward_variance():
+    group = _group(loss_masks=[[1], [1], [1], [1]])
+    group.trajectory_batch.update(
+        {
+            "rewards": [0.0, 0.25, 0.5, 0.0],
+            "unshaped_rewards": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+
+    shaped = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("shaped"))
+    unshaped = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("unshaped"))
+
+    assert shaped.evaluate(group) is GroupSelectionResult.KEEP
+    assert unshaped.evaluate(group) is GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD
+
+
+def test_dynamic_filter_applies_minimum_reward_std():
+    group = _group(loss_masks=[[1], [1], [1], [1]])
+    group.trajectory_batch["rewards"] = [0.05, 0.05, 0.10, 0.05]
+
+    default_floor = GroupSelectionPolicy.for_fully_async("filter")
+    high_floor = GroupSelectionPolicy.for_fully_async(
+        "filter", criteria=resolve_dynamic_sampling_criteria("shaped", 0.1)
+    )
+
+    assert default_floor.evaluate(group) is GroupSelectionResult.KEEP
+    assert high_floor.evaluate(group) is GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD
+
+
+def test_fully_async_selection_rejects_replace_sampling():
+    with pytest.raises(ValueError, match="supports dynamic_sampling.type=filter or null"):
+        GroupSelectionPolicy.for_fully_async("replace")

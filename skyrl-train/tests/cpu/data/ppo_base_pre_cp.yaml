@@ -228,6 +228,7 @@ trainer:
   fully_async:
     max_staleness_steps: 4
     num_parallel_generation_workers: 768
+    admission_stall_timeout: 21600
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   seed: 42
@@ -342,6 +343,9 @@ generator:
     non_termination:
       penalty: 0.0
       accepted_stop_reasons: [stop, complete, eos, end_turn]
+    overlong:
+      l_max: ${generator.sampling_params.max_generate_length}
+      l_cache: 0
     successful_length:
       free_tokens: 0
       penalty_per_token: 0.0
@@ -408,7 +412,7 @@ rollout:
     enabled: true
     num_coordinators: 4
     cpus_per_coordinator: 8
-    shard_timeout_seconds: null
+    coordinator_rpc_timeout: 21600
 deepspeed_config:
   train:
     zero_optimization:

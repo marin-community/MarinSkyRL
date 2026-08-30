@@ -18,7 +18,7 @@ from ray.util.placement_group import (
 )
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
-from skyrl_train.config.query_bias import resolve_grug_query_bias_update_mode
+from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
@@ -27,14 +27,15 @@ from skyrl_train.distributed_debug import apply_distributed_debug_mode
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
-from skyrl_train.env_vars import EnvVarManager, EnvVarScope, write_process_manifest
+from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, EnvVarManager, EnvVarScope, write_process_manifest
 from skyrl_train.group_admission import resolve_group_advantage_invariant
+from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
-from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, sync_registries
+from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, sync_registries
 from .logging_utils import format_exception_text
-from .loss_reduction import SUPPORTED_LOSS_REDUCTIONS
+from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTIONS
 from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
@@ -256,20 +257,31 @@ def use_per_engine_strict_pack_pg(
 
 
 class Timer:
-    def __init__(self, message, update_dict=None):
+    def __init__(self, message, update_dict=None, *, log_events: bool = True):
         self.message = message
         self.update_dict = update_dict
+        self.log_events = log_events
+        self._duration: float | None = None
+
+    @property
+    def duration(self) -> float:
+        if self._duration is None:
+            raise RuntimeError("Timer duration is only available after its context exits")
+        return self._duration
 
     def __enter__(self):
         self.start_time = time.monotonic()
-        logger.opt(depth=1).info(f"Started: '{self.message}'")
+        if self.log_events:
+            logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     def _finish(self, exc_type) -> None:
         duration = time.monotonic() - self.start_time
-        log = logger.opt(depth=2).info if exc_type is None else logger.opt(depth=2).error
-        outcome = "Finished" if exc_type is None else "Failed"
-        log(f"{outcome}: '{self.message}', time cost: {duration:.2f}s")
+        self._duration = duration
+        if self.log_events:
+            log = logger.opt(depth=2).info if exc_type is None else logger.opt(depth=2).error
+            outcome = "Finished" if exc_type is None else "Failed"
+            log(f"{outcome}: '{self.message}', time cost: {duration:.2f}s")
         if self.update_dict is not None:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + duration
 
@@ -278,7 +290,8 @@ class Timer:
 
     async def __aenter__(self):
         self.start_time = time.monotonic()
-        logger.opt(depth=1).info(f"Started: '{self.message}'")
+        if self.log_events:
+            logger.opt(depth=1).info(f"Started: '{self.message}'")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -556,6 +569,17 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    resolve_dynamic_sampling_criteria(
+        cfg.trainer.algorithm.dynamic_sampling.informative_on,
+        float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
+    )
+    if (
+        cfg.trainer.algorithm.policy_loss_type == PolicyLossType.GSPO
+        and cfg.trainer.algorithm.loss_reduction != SEQUENCE_MEAN_LOSS_REDUCTION
+    ):
+        raise ValueError(
+            f"GSPO requires trainer.algorithm.loss_reduction=sequence_mean; got {cfg.trainer.algorithm.loss_reduction}"
+        )
     runtime_values = {
         "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
         "trainer.distributed.worker_collective_timeout_seconds": cfg.trainer.distributed.worker_collective_timeout_seconds,
@@ -601,7 +625,7 @@ def validate_cfg(cfg: DictConfig):
     )
 
     try:
-        resolve_grug_query_bias_update_mode(cfg.trainer.policy)
+        resolve_grug_query_bias_update(cfg.trainer.policy)
     except ValueError as error:
         raise AssertionError(str(error)) from error
 
@@ -1348,7 +1372,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Exporting RAY_ADDRESS to ray runtime env")
         env_vars["RAY_ADDRESS"] = os.environ["RAY_ADDRESS"]
 
-    # NCCL / Gloo network-fabric selection and debug knobs.
+    # NCCL network-fabric selection.
     # Ray actors start with a clean environment and only see env vars that we
     # explicitly forward here. On clusters where NCCL's interface auto-detection
     # picks the wrong NIC (e.g. a down `eno*`/loopback instead of the routable
@@ -1374,32 +1398,15 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         "NCCL_IB_DISABLE",
         "NCCL_NET",
         "NCCL_SOCKET_FAMILY",
-        "NCCL_DEBUG",
-        "NCCL_DEBUG_SUBSYS",
     ):
         if os.environ.get(_net_env):
             logger.info(f"Exporting `{_net_env}` to ray runtime env: {os.environ[_net_env]}")
             env_vars[_net_env] = os.environ[_net_env]
 
-    # NCCL verbosity: default to WARN for EVERY Ray worker in this job. This
-    # env_vars dict is the ray.init() job-level runtime_env (see initialize_ray),
-    # which is the ONLY env the vLLM inference-engine actors -- and the
-    # EngineCore/TP-worker subprocesses they spawn -- inherit. Those TP workers run
-    # the per-collective rollout weight-broadcast / AllGather / AllReduce NCCL ops,
-    # so if this is INFO the rank-0 log is drowned in `(AsyncVLLMInferenceEngine
-    # ...) NCCL INFO` chatter. The passthrough loop above already copied NCCL_DEBUG
-    # from the launcher/config env (the iris configs set `NCCL_DEBUG: WARN` in
-    # extra_env) into env_vars; here we only FILL IN WARN when nothing set it, so an
-    # explicit launcher/config value still wins (precedence: extra_env > this
-    # default). WARN keeps the NCCL flight recorder (TORCH_NCCL_DUMP_ON_TIMEOUT +
-    # TORCH_FR_BUFFER_SIZE, set above) fully armed -- a genuine hang still dumps the
-    # stuck-collective trace.
-    #
-    # (Historic: commit 5220e112 FORCED NCCL_DEBUG=INFO / NCCL_DEBUG_SUBSYS here to
-    # localize a one-off 80B EP all-to-all backward deadlock (job 673119). That
-    # per-collective INFO flood is exactly the spam we now suppress. To re-enable
-    # the trace for a diagnostic run, set NCCL_DEBUG=INFO (+ NCCL_DEBUG_SUBSYS) in
-    # the config's extra_env -- the passthrough loop above forwards both.)
+    # EnvVarManager owns NCCL verbosity through trainer.debug_mode. Do not copy
+    # ambient NCCL_DEBUG values into Ray workers: stale launcher extra_env once
+    # turned an ordinary checkpoint export into a per-collective INFO trace.
+    # WARN still leaves the bounded flight recorder armed for timeout dumps.
     env_vars.setdefault("NCCL_DEBUG", "WARN")
 
     return env_vars
@@ -1454,7 +1461,7 @@ def initialize_ray(cfg: DictConfig):
         cfg: Training config
     """
     debug_environment = apply_distributed_debug_mode(cfg)
-    if debug_environment:
+    if debug_environment.get(DEBUG_ARTIFACT_DIR_ENV):
         manifest = write_process_manifest("driver", environment=debug_environment)
         logger.info(f"Distributed debug mode active; driver manifest: {manifest}")
 
