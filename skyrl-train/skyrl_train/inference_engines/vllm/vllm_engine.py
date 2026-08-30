@@ -8,8 +8,8 @@ from http import HTTPStatus
 import ray
 import torch
 import asyncio
-from contextlib import ExitStack, nullcontext
 import vllm
+from prometheus_client import REGISTRY
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
@@ -56,21 +56,6 @@ from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
 import warnings
 
-try:
-    from skyrl_train.inference_engines.vllm.vllm_telemetry import engine_metrics_telemetry
-except ImportError as error:
-    # `prometheus_client` and `rigging.telemetry` come from the optional telemetry extra, and this
-    # module is on the engine's import path, so a missing extra must not stop an engine from starting.
-    # Match on the top-level package: `from rigging.telemetry.metrics import ...` reports
-    # `rigging.telemetry`, so comparing the whole name would re-raise the very case this guards.
-    if error.name.partition(".")[0] not in {"prometheus_client", "rigging"}:
-        raise
-    _ENGINE_TELEMETRY_UNAVAILABLE_REASON = str(error)
-
-    def engine_metrics_telemetry():
-        logger.info(f"vLLM metric forwarding is unavailable: {_ENGINE_TELEMETRY_UNAVAILABLE_REASON}")
-        return nullcontext()
-
 
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
@@ -84,6 +69,12 @@ from skyrl_train.inference_engines.vllm.utils import (
     pop_openai_kwargs,
     ensure_token_ids_in_sse_chunk,
     PrefixCacheHitRateAccumulator,
+)
+from skyrl_train.inference_engines.vllm.stats import (
+    IntervalReadMode,
+    VLLMEngineStatsSnapshot,
+    VLLMIntervalStats,
+    collect_native_metrics,
 )
 from skyrl_train.utils import get_tcp_url, str_to_torch_dtype, torch_dtype_to_str
 import time
@@ -1095,13 +1086,6 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         # not pass them through to EngineArgs and raise TypeError.
         openai_kwargs = pop_openai_kwargs(kwargs)
         self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
-        # Pop enable_ray_prometheus_stats - only supported for async engine
-        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
-        if enable_ray_prometheus_stats:
-            logger.warning(
-                "enable_ray_prometheus_stats is only supported with AsyncVLLMInferenceEngine. "
-                "Set `generator.async_engine=true` to enable Ray Prometheus stats logging."
-            )
         return vllm.LLM(*args, **kwargs)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -1488,10 +1472,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         self._stats_engine_id = id(self)
         super().__init__(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
-        # vLLM registers its metrics into this process's registry during engine construction, so
-        # the forwarder starts after super().__init__ and reads them here rather than over HTTP.
-        self._telemetry = ExitStack()
-        self._telemetry.enter_context(engine_metrics_telemetry())
 
     def _create_stat_logger_factory(self):
         """Create a factory that produces stat loggers with the engine ID set."""
@@ -1515,8 +1495,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 f"top_p={self._openai_sampling_params.get('top_p', 1.0)}, "
                 f"top_k={self._openai_sampling_params.get('top_k', -1)}"
             )
-        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
-
         # TODO (erictang000): potentially enable log requests for a debugging mode
         custom_chat_template_path = kwargs.pop("custom_chat_template_chat_completion_path", None)
         # Use factory to inject engine ID into stat logger
@@ -1539,19 +1517,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
         else:
             engine_args = vllm.AsyncEngineArgs(**kwargs)
-
-        # Add Ray Prometheus stat loggers if enabled
-        if enable_ray_prometheus_stats:
-            ray_loggers = self._create_ray_prometheus_stat_loggers()
-            if ray_loggers:
-                # RayPrometheusStatLogger is a PrometheusStatLogger subclass, so vLLM treats it as a
-                # replacement and never registers into prometheus_client. vllm_telemetry then reads
-                # an empty registry.
-                logger.warning(
-                    "enable_ray_prometheus_stats replaces vLLM's Prometheus registration, so engine "
-                    "metric forwarding to Finelog will see nothing from this engine."
-                )
-                stat_loggers.extend(ray_loggers)
 
         # Stagger engine startup to avoid TOCTOU port collisions (EADDRINUSE).
         # vLLM's get_open_port() queries a free port then releases the socket;
@@ -1777,30 +1742,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
         return engine
 
-    def _create_ray_prometheus_stat_loggers(self):
-        """Create Ray Prometheus stat loggers for vLLM metrics.
-
-        Returns stat_loggers in the format expected by vLLM's from_engine_args().
-        For vLLM v1 (0.9.0+), this returns a list of StatLoggerFactory callables.
-        For older versions where the v1 API is not available, this returns `None`.
-
-        See: https://docs.vllm.ai/en/latest/api/vllm/v1/metrics/ray_wrappers/
-        """
-        try:
-            # Try vLLM v1 API first (0.9.0+)
-            from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
-
-            logger.info("Enabling RayPrometheusStatLogger for vLLM inference engine metrics")
-            # For v1, stat_loggers is a list of factory callables
-            return [RayPrometheusStatLogger]
-        except ImportError:
-            logger.warning(
-                "RayPrometheusStatLogger not available in this vLLM version. "
-                "For Ray-integrated metrics, upgrade to vLLM >= 0.9.0. "
-                "Stat logging will be disabled."
-            )
-            return None
-
     async def _load_lora_from_disk(self, lora_path: str):
         """Load LoRA adapters from disk using vLLM's native add_lora method."""
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
@@ -1981,10 +1922,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await engine.collective_rpc("skyrl_finish_weight_reload")
 
     async def teardown(self):
-        try:
-            await self._destroy_weights_update_group()
-        finally:
-            self._telemetry.close()
+        await self._destroy_weights_update_group()
 
     async def reset_prefix_cache(self):
         engine = self._get_engine()
@@ -2151,76 +2089,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             yield f"data: {json.dumps(err)}\n\n"
             yield "data: [DONE]\n\n"
 
-    async def get_stats(self) -> Dict[str, Any]:
-        """Get accumulated vLLM engine statistics for the current step.
-
-        Returns a dict with the following keys:
-        - peak_*: Peak values observed during the step
-        - median_*: Median values across active samples
-        - mean_*: Mean values across active samples
-        - num_samples: Total number of stat samples collected
-        - num_active_samples: Number of samples with active requests
-        - timestamp: Unix timestamp of last sample
-        - engine_id: Unique identifier for this engine instance
-
-        Note: Stats are reset after reading to provide fresh stats per training step.
-
-        Used by VLLMStatsCallback to collect and aggregate stats across engines.
-        """
-        # Reset=True ensures each training step gets fresh stats
-        stats = V1LoggingStatLoggerFixed.get_stats_by_engine_id(self._stats_engine_id, reset=True)
-        if stats is None:
-            # Return empty stats if no data recorded yet
-            stats = {
-                # Peak values
-                "peak_prompt_throughput": 0.0,
-                "peak_generation_throughput": 0.0,
-                "peak_running_reqs": 0,
-                "peak_waiting_reqs": 0,
-                "peak_gpu_cache_usage_perc": 0.0,
-                "peak_prefix_cache_hit_rate": 0.0,
-                # Median values
-                "median_prompt_throughput": 0.0,
-                "median_generation_throughput": 0.0,
-                "median_running_reqs": 0.0,
-                "median_waiting_reqs": 0.0,
-                "median_gpu_cache_usage_perc": 0.0,
-                "median_prefix_cache_hit_rate": 0.0,
-                # Mean values
-                "mean_prompt_throughput": 0.0,
-                "mean_generation_throughput": 0.0,
-                # Per-request latency stats
-                "latency_prefill_mean": 0.0,
-                "latency_prefill_median": 0.0,
-                "latency_prefill_p90": 0.0,
-                "latency_decode_mean": 0.0,
-                "latency_decode_median": 0.0,
-                "latency_decode_p90": 0.0,
-                "latency_e2e_mean": 0.0,
-                "latency_e2e_median": 0.0,
-                "latency_e2e_p90": 0.0,
-                "latency_queued_mean": 0.0,
-                "latency_queued_median": 0.0,
-                "latency_queued_p90": 0.0,
-                "latency_ttft_mean": 0.0,
-                "latency_ttft_median": 0.0,
-                "latency_ttft_p90": 0.0,
-                "latency_num_finished_requests": 0,
-                "total_preempted_reqs": 0,
-                # Legacy field names
-                "avg_prompt_throughput": 0.0,
-                "avg_generation_throughput": 0.0,
-                "num_running_reqs": 0,
-                "num_waiting_reqs": 0,
-                "gpu_cache_usage_perc": 0.0,
-                "prefix_cache_hit_rate": 0.0,
-                # Metadata
-                "num_samples": 0,
-                "num_active_samples": 0,
-                "timestamp": time.time(),
-            }
-        stats["engine_id"] = self._stats_engine_id
-        return stats
+    async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET) -> VLLMEngineStatsSnapshot:
+        """Return the engine's complete typed snapshot without publishing it."""
+        values = V1LoggingStatLoggerFixed.get_stats_by_engine_id(
+            self._stats_engine_id,
+            reset=read_mode is IntervalReadMode.RESET,
+        )
+        metrics, histograms = collect_native_metrics(REGISTRY.collect())
+        return VLLMEngineStatsSnapshot(
+            engine_id=str(self._stats_engine_id),
+            timestamp=float(values.get("timestamp", time.time())) if values else time.time(),
+            interval=VLLMIntervalStats.from_mapping(values or {}),
+            metrics=metrics,
+            histograms=histograms,
+        )
 
     async def pause_generation(self) -> None:
         """Abort outstanding requests and hold the EngineCore scheduler idle for weight reload."""

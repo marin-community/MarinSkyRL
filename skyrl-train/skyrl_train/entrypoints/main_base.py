@@ -134,7 +134,6 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
             **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
             "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
         },
-        "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
         # Opt-in mp executor backend (Qwen3-Next R3 capture hang workaround; default off).
         "mp_backend": cfg.generator.get("inference_engine_mp_backend", False),
         "placement_group_timeout_seconds": int(cfg.trainer.distributed.placement_group_timeout_seconds),
@@ -213,7 +212,6 @@ def create_teacher_inference_engines_from_config(cfg: DictConfig, tokenizer: Pre
         "engine_init_kwargs": {
             **OmegaConf.to_container(teacher_cfg.engine_init_kwargs, resolve=True),
         },
-        "enable_ray_prometheus_stats": False,
         "max_logprobs": teacher_cfg.top_k_logprobs,
     }
 

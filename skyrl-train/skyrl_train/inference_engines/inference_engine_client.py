@@ -4,6 +4,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.inference_engines.vllm.stats import IntervalReadMode, VLLMStatsSnapshot
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
 from transformers import PreTrainedTokenizerBase
 import asyncio
@@ -816,172 +817,10 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def teardown(self):
         return await self._run_on_all_engines("teardown")
 
-    async def get_stats(self) -> Dict[str, Any]:
-        """Get aggregated statistics from all vLLM inference engines.
-
-        Queries each engine for its accumulated stats (peak and median values since last read)
-        and returns aggregated metrics. Stats are reset on each engine after reading,
-        so each training step gets fresh stats.
-
-        Returns:
-            Dict with keys:
-            - engines: List of per-engine stats dicts
-            - num_engines: Total number of engines
-            - Peak metrics (sum/avg across engines):
-              - total_peak_running_reqs, total_peak_waiting_reqs
-              - avg_peak_prompt_throughput, avg_peak_generation_throughput
-              - avg_peak_gpu_cache_usage_perc, avg_peak_prefix_cache_hit_rate
-            - Median metrics (avg across engines):
-              - avg_median_prompt_throughput, avg_median_generation_throughput
-              - avg_median_running_reqs, avg_median_waiting_reqs
-            - total_samples, total_active_samples
-
-        Used by VLLMStatsCallback to log engine stats without relying on
-        Ray's log-to-driver functionality.
-        """
-        engine_stats_list = await self._run_on_all_engines("get_stats")
-        num_engines = len(engine_stats_list)
-
-        if num_engines == 0:
-            return {
-                "engines": [],
-                "num_engines": 0,
-                # Peak metrics
-                "total_peak_running_reqs": 0,
-                "total_peak_waiting_reqs": 0,
-                "avg_peak_prompt_throughput": 0.0,
-                "avg_peak_generation_throughput": 0.0,
-                "avg_peak_gpu_cache_usage_perc": 0.0,
-                "avg_peak_prefix_cache_hit_rate": 0.0,
-                # Median metrics
-                "avg_median_prompt_throughput": 0.0,
-                "avg_median_generation_throughput": 0.0,
-                "avg_median_running_reqs": 0.0,
-                "avg_median_waiting_reqs": 0.0,
-                "avg_median_gpu_cache_usage_perc": 0.0,
-                "avg_median_prefix_cache_hit_rate": 0.0,
-                # Per-request latency stats
-                "avg_latency_prefill_mean": 0.0,
-                "max_latency_prefill_p90": 0.0,
-                "avg_latency_prefill_median": 0.0,
-                "avg_latency_decode_mean": 0.0,
-                "max_latency_decode_p90": 0.0,
-                "avg_latency_decode_median": 0.0,
-                "avg_latency_e2e_mean": 0.0,
-                "max_latency_e2e_p90": 0.0,
-                "avg_latency_e2e_median": 0.0,
-                "avg_latency_queued_mean": 0.0,
-                "max_latency_queued_p90": 0.0,
-                "avg_latency_queued_median": 0.0,
-                "avg_latency_ttft_mean": 0.0,
-                "max_latency_ttft_p90": 0.0,
-                "avg_latency_ttft_median": 0.0,
-                "total_finished_requests": 0,
-                "total_preempted_reqs": 0,
-                # Legacy field names for backwards compatibility
-                "total_running_reqs": 0,
-                "total_waiting_reqs": 0,
-                "avg_prompt_throughput": 0.0,
-                "avg_generation_throughput": 0.0,
-                "avg_gpu_cache_usage_perc": 0.0,
-                "avg_prefix_cache_hit_rate": 0.0,
-                # Metadata
-                "total_samples": 0,
-                "total_active_samples": 0,
-            }
-
-        # Aggregate PEAK stats
-        total_peak_running = sum(s.get("peak_running_reqs", s.get("num_running_reqs", 0)) for s in engine_stats_list)
-        total_peak_waiting = sum(s.get("peak_waiting_reqs", s.get("num_waiting_reqs", 0)) for s in engine_stats_list)
-        avg_peak_prompt_tp = (
-            sum(s.get("peak_prompt_throughput", s.get("avg_prompt_throughput", 0.0)) for s in engine_stats_list)
-            / num_engines
-        )
-        avg_peak_gen_tp = (
-            sum(s.get("peak_generation_throughput", s.get("avg_generation_throughput", 0.0)) for s in engine_stats_list)
-            / num_engines
-        )
-        avg_peak_gpu_cache = (
-            sum(s.get("peak_gpu_cache_usage_perc", s.get("gpu_cache_usage_perc", 0.0)) for s in engine_stats_list)
-            / num_engines
-        )
-        avg_peak_prefix_hit = (
-            sum(s.get("peak_prefix_cache_hit_rate", s.get("prefix_cache_hit_rate", 0.0)) for s in engine_stats_list)
-            / num_engines
-        )
-
-        # Aggregate MEDIAN stats (average of medians across engines)
-        avg_median_prompt_tp = sum(s.get("median_prompt_throughput", 0.0) for s in engine_stats_list) / num_engines
-        avg_median_gen_tp = sum(s.get("median_generation_throughput", 0.0) for s in engine_stats_list) / num_engines
-        avg_median_running = sum(s.get("median_running_reqs", 0.0) for s in engine_stats_list) / num_engines
-        avg_median_waiting = sum(s.get("median_waiting_reqs", 0.0) for s in engine_stats_list) / num_engines
-        avg_median_gpu_cache = sum(s.get("median_gpu_cache_usage_perc", 0.0) for s in engine_stats_list) / num_engines
-        avg_median_prefix_hit = sum(s.get("median_prefix_cache_hit_rate", 0.0) for s in engine_stats_list) / num_engines
-
-        # Total samples collected (useful for debugging stats collection)
-        total_samples = sum(s.get("num_samples", 0) for s in engine_stats_list)
-        total_active_samples = sum(s.get("num_active_samples", 0) for s in engine_stats_list)
-
-        # Aggregate per-request latency stats (weighted average across engines by finished request count)
-        latency_keys = ["prefill", "decode", "e2e", "queued", "ttft"]
-        latency_agg = {}
-        total_finished = sum(s.get("latency_num_finished_requests", 0) for s in engine_stats_list)
-        total_preempted = sum(s.get("total_preempted_reqs", 0) for s in engine_stats_list)
-        for key in latency_keys:
-            if total_finished > 0:
-                # Weighted mean across engines
-                latency_agg[f"avg_latency_{key}_mean"] = (
-                    sum(
-                        s.get(f"latency_{key}_mean", 0.0) * s.get("latency_num_finished_requests", 0)
-                        for s in engine_stats_list
-                    )
-                    / total_finished
-                )
-                # Max of p90s across engines (worst-case engine)
-                latency_agg[f"max_latency_{key}_p90"] = max(
-                    (s.get(f"latency_{key}_p90", 0.0) for s in engine_stats_list), default=0.0
-                )
-                # Avg of medians across engines
-                latency_agg[f"avg_latency_{key}_median"] = (
-                    sum(s.get(f"latency_{key}_median", 0.0) for s in engine_stats_list) / num_engines
-                )
-            else:
-                latency_agg[f"avg_latency_{key}_mean"] = 0.0
-                latency_agg[f"max_latency_{key}_p90"] = 0.0
-                latency_agg[f"avg_latency_{key}_median"] = 0.0
-
-        return {
-            "engines": engine_stats_list,
-            "num_engines": num_engines,
-            # Peak metrics
-            "total_peak_running_reqs": total_peak_running,
-            "total_peak_waiting_reqs": total_peak_waiting,
-            "avg_peak_prompt_throughput": avg_peak_prompt_tp,
-            "avg_peak_generation_throughput": avg_peak_gen_tp,
-            "avg_peak_gpu_cache_usage_perc": avg_peak_gpu_cache,
-            "avg_peak_prefix_cache_hit_rate": avg_peak_prefix_hit,
-            # Median metrics
-            "avg_median_prompt_throughput": avg_median_prompt_tp,
-            "avg_median_generation_throughput": avg_median_gen_tp,
-            "avg_median_running_reqs": avg_median_running,
-            "avg_median_waiting_reqs": avg_median_waiting,
-            "avg_median_gpu_cache_usage_perc": avg_median_gpu_cache,
-            "avg_median_prefix_cache_hit_rate": avg_median_prefix_hit,
-            # Aggregated per-request latency stats (seconds)
-            **latency_agg,
-            "total_finished_requests": total_finished,
-            "total_preempted_reqs": total_preempted,
-            # Legacy field names for backwards compatibility (use peak values)
-            "total_running_reqs": total_peak_running,
-            "total_waiting_reqs": total_peak_waiting,
-            "avg_prompt_throughput": avg_peak_prompt_tp,
-            "avg_generation_throughput": avg_peak_gen_tp,
-            "avg_gpu_cache_usage_perc": avg_peak_gpu_cache,
-            "avg_prefix_cache_hit_rate": avg_peak_prefix_hit,
-            # Metadata
-            "total_samples": total_samples,
-            "total_active_samples": total_active_samples,
-        }
+    async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET) -> VLLMStatsSnapshot:
+        """Read every live engine without aggregating away labels or histogram buckets."""
+        engine_snapshots = await self._run_on_all_engines("get_stats", read_mode=read_mode)
+        return VLLMStatsSnapshot(engines=tuple(engine_snapshots))
 
     def tp_size(self) -> int:
         raise NotImplementedError("InferenceEngineClient does not implement tp_size()")

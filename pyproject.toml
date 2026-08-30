@@ -266,7 +266,6 @@ ignore = [
 "skyrl-train/tests/cpu/models/test_moe_weight_remap.py" = ["E402"]
 "skyrl-train/tests/cpu/models/test_models.py" = ["E402"]
 "skyrl-train/tests/cpu/test_ray_metrics.py" = ["E402"]
-"skyrl-train/tests/cpu/inf_engines/test_vllm_telemetry.py" = ["E402"]
 "skyrl-train/skyrl_train/trajectory_runners/harbor/_harbor_compat.py" = ["F401"]
 
 [tool.pytest.ini_options]

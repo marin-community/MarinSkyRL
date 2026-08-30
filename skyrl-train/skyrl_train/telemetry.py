@@ -2,7 +2,7 @@ import contextlib
 import os
 import socket
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -25,7 +25,6 @@ SERVICE = "marinskyrl"
 DRIVER_ROLE = "driver"
 TRAINER_ROLE = "trainer"
 CONTROLLER_ROLE = "controller"
-INFERENCE_ROLE = "inference"
 WORKER_ROLE = "worker"
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
@@ -181,98 +180,6 @@ def _resources(config: TelemetryConfig, role: str) -> dict[str, str]:
     return resources
 
 
-# Which trainer span contains which, as `span: containing span`. `None` marks a span nothing
-# contains. The trainers do not share one tree, so this declares the deepest: a span whose
-# container a run did not record resolves to the nearest one it did, walking up only.
-# Containment is nesting, not wall clock -- a child running alongside its parent makes the
-# children sum past it. Whoever hands a `Timer` a dict adds it here in the same change.
-TIMING_PARENTS: dict[str, str | None] = {
-    "step": None,
-    "generate": "step",
-    "wait_for_generation_buffer": "step",
-    "postprocess_trajectory_batch": "step",
-    "convert_to_training_input": "step",
-    "run_training": "step",
-    "fwd_logprobs_values_reward": "run_training",
-    "apply_reward_kl_penalty": "run_training",
-    "compute_advantages_and_returns": "run_training",
-    "train_critic_and_policy": "run_training",
-    "critic_train": "train_critic_and_policy",
-    "policy_train": "train_critic_and_policy",
-    "policy_critic_overlap_train": "train_critic_and_policy",
-    "sync_weights": "step",
-    # Same method as sync_weights, recorded in-step and again on the checkpoint path; one Timer key
-    # sums both, so a save step charges some checkpoint time here.
-    "offload_policy_model_to_cpu": "step",
-    # Nested inside run_training in the async trainer. Declared under `step` it is subtracted twice.
-    "dump_data_batch": "run_training",
-    "init_weight_sync_state": None,
-    "save_checkpoints": None,
-    "cleanup_old_checkpoints": "save_checkpoints",
-    "save_hf_model": None,
-    # Runs in-step and again at teardown, like save_checkpoints, so it is a root rather than a child.
-    "queue_hf_export": None,
-    "eval": None,
-    "update_ref_with_policy": None,
-}
-
-
-def nearest_recorded_parent(name: str, recorded: Mapping[str, float]) -> str | None:
-    """The nearest container of `name` this run actually recorded, skipping spans it did not."""
-    parent = TIMING_PARENTS.get(name)
-    while parent is not None and parent not in recorded:
-        parent = TIMING_PARENTS.get(parent)
-    return parent
-
-
-def declared_root(name: str) -> str:
-    """The top of `name`'s containment chain, so one subtree can be stacked without the others.
-
-    Declared rather than recorded: a span's root must not change because a sibling happened to be
-    absent this step.
-    """
-    root = name
-    while TIMING_PARENTS.get(root) is not None:
-        root = TIMING_PARENTS[root]
-    return root
-
-
-def exclusive_durations(timings: Mapping[str, float]) -> dict[str, float]:
-    """Self time per span: its duration minus the recorded spans it contains.
-
-    One root's spans sum to that root, which is what a stacked chart requires. Under the async
-    trainer siblings genuinely overlap and children can exceed their parent, so self time floors at
-    zero rather than going negative.
-    """
-    contained: dict[str, float] = {name: 0.0 for name in timings}
-    for name, duration in timings.items():
-        parent = nearest_recorded_parent(name, timings)
-        if parent is not None:
-            contained[parent] += duration
-    return {name: max(0.0, duration - contained[name]) for name, duration in timings.items()}
-
-
-def record_step_timings(timings: Mapping[str, float], step: int) -> None:
-    """Publish every recorded span as exclusive time, so a step can be decomposed.
-
-    `root` names which subtree each span belongs to. Checkpointing, eval and export are recorded
-    alongside a step but contained by none, so stacking every span together reports a step as the
-    sum of itself and the work beside it: filter to one root to stack.
-    """
-    known = {name: float(duration) for name, duration in timings.items() if name in TIMING_PARENTS}
-    for name, duration in exclusive_durations(known).items():
-        phase_duration.record(
-            duration,
-            attributes={
-                "phase": name,
-                "root": declared_root(name),
-                "clock_domain": "exclusive",
-                "role": TRAINER_ROLE,
-                "step": str(step),
-            },
-        )
-
-
 @contextlib.contextmanager
 def critical_phase(phase: Literal["rollout_or_inference_wait", "train_step"], step: int) -> Iterator[None]:
     started = time.perf_counter()
@@ -356,10 +263,9 @@ def record_rollout_buffer(depth: int, queue_capacity: int) -> None:
 
 
 class ProcessTelemetry:
-    def __init__(self, config: TelemetryConfig, role: str, service: str) -> None:
+    def __init__(self, config: TelemetryConfig, role: str) -> None:
         self._config = config
         self._role = role
-        self._service = service
         self._configured = False
 
     def __enter__(self) -> "ProcessTelemetry":
@@ -373,7 +279,7 @@ class ProcessTelemetry:
             return self
         telemetry.configure(
             endpoint=self._config.endpoint,
-            service=self._service,
+            service=SERVICE,
             attributes=_resources(self._config, self._role),
         )
         self._configured = telemetry.runtime_status().configured
@@ -408,5 +314,5 @@ class ProcessTelemetry:
         return False
 
 
-def process_telemetry(role: str, service: str = SERVICE) -> ProcessTelemetry:
-    return ProcessTelemetry(TelemetryConfig.from_environment(), role, service)
+def process_telemetry(role: str) -> ProcessTelemetry:
+    return ProcessTelemetry(TelemetryConfig.from_environment(), role)

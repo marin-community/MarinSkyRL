@@ -294,7 +294,6 @@ generator:
   max_num_batched_tokens: 8192
   enforce_eager: true
   fully_sharded_loras: false
-  enable_ray_prometheus_stats: false
   vllm_stats_interval: 1
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
@@ -353,7 +352,7 @@ generator:
   trajectory_retention:
     enabled: true
     output_path: ${trainer.export_path}/training_trajectories
-    run_id: ${oc.env:SKYRL_RUN_ID,${trainer.run_name}}
+    run_id: ${trainer.run_name}
     phases: [train]
     sample_count_per_step: 1
     sample_fraction: 0.0

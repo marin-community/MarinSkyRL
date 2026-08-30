@@ -87,7 +87,8 @@ from skyrl_train.callbacks import (
     DefaultCallbackHandler,
     RefModelUpdateCallback,
 )
-from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step, record_step_timings
+from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
+from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
@@ -773,7 +774,7 @@ class RayPPOTrainer:
                 )
 
                 self.all_metrics = {}
-                record_step_timings(self.all_timings, self.global_step)
+                publish_step_timings(self.all_timings, self.global_step)
                 self.all_timings = {}
 
                 # 10. Update progress bar and global step
@@ -2277,16 +2278,13 @@ class RayPPOTrainer:
         logger.info(f"Queued out-of-band HF export for global_step_{self.global_step}: {request_path}")
 
     def _log_startup_timings(self) -> None:
-        # The startup weight sync records into all_timings, and Timer accumulates into whichever
-        # dict it is given. all_timings is not cleared until the first step ends, so those durations
-        # would be summed into step 1's timing/sync_weights.
-        self.all_startup_timings.update(self.all_timings)
-        self.all_timings.clear()
-        if not self.all_startup_timings:
-            return
-        payload = {f"startup/{name}": duration for name, duration in self.all_startup_timings.items()}
-        self._log_metrics_stdout(payload, step=self.global_step, kind="startup")
-        self.tracker.log(payload, step=self.global_step, commit=False)
+        publish_startup_timings(
+            self.all_startup_timings,
+            self.all_timings,
+            step=self.global_step,
+            tracker=self.tracker,
+            console=self._log_metrics_stdout,
+        )
 
     def _log_metrics_stdout(self, payload: Dict[str, Any], step: int, kind: str = "train") -> None:
         """Mirror the wandb/tracker payload to stdout so metrics are recoverable without wandb access."""

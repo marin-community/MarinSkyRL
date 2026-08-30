@@ -230,7 +230,6 @@ generator:
   async_engine: true
   batched: false
   enable_http_endpoint: true
-  enable_ray_prometheus_stats: false
   vllm_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true
 

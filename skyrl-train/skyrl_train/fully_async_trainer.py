@@ -43,8 +43,8 @@ from skyrl_train.telemetry import (
     record_policy_step,
     record_rollout_buffer,
     record_rollout_staleness,
-    record_step_timings,
 )
+from skyrl_train.timing_observability import publish_step_timings
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
 from skyrl_train.io import io
 from skyrl_train.dynamic_sampling import (
@@ -924,7 +924,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 step_duration = self.all_timings.get("step")
                 if step_duration is not None:
                     self._step_time_history.append(step_duration)
-                record_step_timings(self.all_timings, self.global_step)
+                publish_step_timings(self.all_timings, self.global_step)
                 self.all_timings = {}
                 pbar.update(1)
 

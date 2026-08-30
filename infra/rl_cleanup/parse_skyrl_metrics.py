@@ -43,7 +43,7 @@ import pandas as pd
 from infra.harbor_results import parse_harbor_result
 from infra.rl_metrics import parse_training_metrics_result, strip_ansi, training_metrics_parse_error
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
-from skyrl_train.telemetry import TIMING_PARENTS, nearest_recorded_parent
+from skyrl_train.timing_observability import TIMING_PARENTS, nearest_recorded_parent
 
 # Harbor writes one TimingInfo block per phase on every trial result, in execution order.
 TRIAL_PHASES = ("environment_setup", "agent_setup", "agent_execution", "verifier")
