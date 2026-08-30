@@ -1175,6 +1175,75 @@ class BufferCheckpointCallback(TrainerCallback):
         """Select the current epoch's queues for checkpoint persistence."""
         self._queues = queues
 
+    def has_bound_queues(self) -> bool:
+        """Return whether the current epoch has exposed its generation queues."""
+        return self._queues is not None
+
+    def has_pending_state(self, *, include_consumed_admitted: bool) -> bool:
+        """Return whether the bound queues contain resumable work."""
+        if self._queues is None:
+            return False
+        state = self._queues.snapshot(include_consumed_admitted=include_consumed_admitted)
+        return bool(state.completed_groups or state.admitted_groups or state.retry_prompts)
+
+    @staticmethod
+    def _serialize_groups(groups: List[GeneratedOutputGroup]) -> List[dict]:
+        return [
+            {
+                "trajectory_batch": dict(item.trajectory_batch),
+                "uid": item.uid,
+                "earliest_model_step": item.earliest_model_step,
+                "source_prompts": item.source_prompts,
+            }
+            for item in groups
+        ]
+
+    async def _save_bound_state(
+        self,
+        checkpoint_path: str,
+        *,
+        include_consumed_admitted: bool,
+        write_empty: bool,
+    ) -> None:
+        if self._queues is None:
+            raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")
+        buffer_state = self._queues.snapshot(include_consumed_admitted=include_consumed_admitted)
+        completed = self._serialize_groups(buffer_state.completed_groups)
+        admitted = self._serialize_groups(buffer_state.admitted_groups)
+        retry_prompts = buffer_state.retry_prompts
+        if not completed and not admitted and not retry_prompts and not write_empty:
+            return
+
+        artifact_path = os.path.join(checkpoint_path, self.ARTIFACT_NAME)
+
+        def save_state() -> None:
+            with io.open_file(artifact_path, "wb") as f:
+                torch.save(
+                    {
+                        "completed_groups": completed,
+                        "admitted_groups": admitted,
+                        "retry_prompts": retry_prompts,
+                    },
+                    f,
+                )
+
+        await asyncio.to_thread(save_state)
+        logger.info(
+            "Saved {} completed, {} admitted generation groups, and {} pending retries to {}",
+            len(completed),
+            len(admitted),
+            len(retry_prompts),
+            artifact_path,
+        )
+
+    async def flush_to_checkpoint(self, checkpoint_path: str) -> None:
+        """Persist all resumable work, including a trained but uncheckpointed batch."""
+        await self._save_bound_state(
+            checkpoint_path,
+            include_consumed_admitted=True,
+            write_empty=True,
+        )
+
     async def on_save_async(
         self,
         state: TrainerState,
@@ -1185,39 +1254,14 @@ class BufferCheckpointCallback(TrainerCallback):
         if trainer is None:
             raise RuntimeError("BufferCheckpointCallback requires trainer context during checkpoint save")
 
-        if self._queues is None:
-            raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")
-        # This method does not yield before snapshotting, so generation tasks cannot
-        # interleave with the drain-and-restore operation.
-        buffer_state = self._queues.snapshot()
-        items = buffer_state.completed_groups
-        retry_prompts = buffer_state.retry_prompts
-        if not items and not retry_prompts:
-            return control
-
-        serialized = [
-            {
-                "trajectory_batch": dict(item.trajectory_batch),
-                "uid": item.uid,
-                "earliest_model_step": item.earliest_model_step,
-                "source_prompts": item.source_prompts,
-            }
-            for item in items
-        ]
         ckpt_path = os.path.join(
             trainer.cfg.trainer.ckpt_path,
             f"global_step_{state.global_step}",
         )
-        artifact_path = os.path.join(ckpt_path, self.ARTIFACT_NAME)
-
-        def save_state() -> None:
-            with io.open_file(artifact_path, "wb") as f:
-                torch.save({"completed_groups": serialized, "retry_prompts": retry_prompts}, f)
-
-        await asyncio.to_thread(save_state)
-        logger.info(
-            f"Saved {len(serialized)} completed generation groups and {len(retry_prompts)} pending retries "
-            f"to {artifact_path}"
+        await self._save_bound_state(
+            ckpt_path,
+            include_consumed_admitted=False,
+            write_empty=False,
         )
 
         return control
@@ -1233,15 +1277,24 @@ class BufferCheckpointCallback(TrainerCallback):
         with io.open_file(artifact_path, "rb") as f:
             state = torch.load(f, map_location="cpu", weights_only=False)
 
-        items = []
-        for entry in state["completed_groups"]:
-            trajectory_batch: TrajectoryBatch = entry["trajectory_batch"]
-            items.append(
-                GeneratedOutputGroup(
-                    trajectory_batch=trajectory_batch,
-                    uid=entry["uid"],
-                    earliest_model_step=entry["earliest_model_step"],
-                    source_prompts=entry["source_prompts"],
+        def deserialize_groups(entries: List[dict]) -> List[GeneratedOutputGroup]:
+            groups = []
+            for entry in entries:
+                trajectory_batch: TrajectoryBatch = entry["trajectory_batch"]
+                groups.append(
+                    GeneratedOutputGroup(
+                        trajectory_batch=trajectory_batch,
+                        uid=entry["uid"],
+                        earliest_model_step=entry["earliest_model_step"],
+                        source_prompts=entry["source_prompts"],
+                    )
                 )
-            )
-        return GenerationBufferState(completed_groups=items, retry_prompts=state["retry_prompts"])
+            return groups
+
+        items = deserialize_groups(state["completed_groups"])
+        admitted = deserialize_groups(state.get("admitted_groups", []))
+        return GenerationBufferState(
+            completed_groups=items,
+            retry_prompts=state["retry_prompts"],
+            admitted_groups=admitted,
+        )

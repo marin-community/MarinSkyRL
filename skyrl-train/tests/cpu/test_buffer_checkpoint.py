@@ -11,7 +11,7 @@ import torch
 
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
-from skyrl_train.fully_async_trainer import _GenerationQueues
+from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer, _GenerationQueues
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.io import io
 
@@ -124,6 +124,97 @@ async def test_roundtrip_with_items():
 
 
 @pytest.mark.asyncio
+async def test_roundtrip_preserves_admitted_groups_outside_completed_queue():
+    buf = asyncio.Queue(maxsize=1)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        step_dir = os.path.join(tmpdir, "global_step_5")
+        os.makedirs(step_dir)
+        trainer = _FakeTrainer(tmpdir, buf)
+        admitted = _make_item("admitted", step=5)
+        trainer._generation_queues.record_admitted([admitted])
+        callback = BufferCheckpointCallback()
+        callback.bind_queues(trainer._generation_queues)
+
+        await callback.on_save_async(_FakeState(5), _FakeControl(), trainer=trainer)
+
+        buffer_state = BufferCheckpointCallback.load_buffer_state(step_dir)
+        assert [group.uid for group in buffer_state.admitted_groups] == ["admitted"]
+        assert buffer_state.completed_groups == []
+
+
+def test_consumed_admitted_groups_are_only_included_by_final_flush_snapshot():
+    queues = _GenerationQueues(
+        completed=asyncio.Queue(maxsize=1),
+        retries=asyncio.Queue(),
+        condition=asyncio.Condition(),
+    )
+    queues.record_admitted([_make_item("trained", step=5)])
+    queues.mark_admitted_consumed()
+
+    assert queues.snapshot().admitted_groups == []
+    assert [group.uid for group in queues.snapshot(include_consumed_admitted=True).admitted_groups] == ["trained"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_flush_banks_consumed_batch_in_immediately_preceding_checkpoint(tmp_path):
+    step_dir = tmp_path / "global_step_5"
+    step_dir.mkdir()
+    (tmp_path / "latest_ckpt_global_step.txt").write_text("5")
+    queues = _GenerationQueues(
+        completed=asyncio.Queue(maxsize=1),
+        retries=asyncio.Queue(),
+        condition=asyncio.Condition(),
+    )
+    queues.record_admitted([_make_item("trained", step=6)])
+    queues.mark_admitted_consumed()
+    callback = BufferCheckpointCallback()
+    callback.bind_queues(queues)
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = _FakeTrainer(str(tmp_path), asyncio.Queue()).cfg
+    trainer.global_step = 6
+    trainer._buffer_checkpoint_callback = callback
+    trainer._shutdown_complete = False
+
+    async def teardown():
+        pass
+
+    trainer._teardown = teardown
+
+    await trainer.shutdown()
+
+    restored = BufferCheckpointCallback.load_buffer_state(str(step_dir))
+    assert [group.uid for group in restored.admitted_groups] == ["trained"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_flush_does_not_attach_buffer_to_older_model_checkpoint(tmp_path):
+    (tmp_path / "global_step_4").mkdir()
+    (tmp_path / "latest_ckpt_global_step.txt").write_text("4")
+    queues = _GenerationQueues(
+        completed=asyncio.Queue(maxsize=1),
+        retries=asyncio.Queue(),
+        condition=asyncio.Condition(),
+    )
+    queues.record_admitted([_make_item("too-new", step=6)])
+    callback = BufferCheckpointCallback()
+    callback.bind_queues(queues)
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = _FakeTrainer(str(tmp_path), asyncio.Queue()).cfg
+    trainer.global_step = 6
+    trainer._buffer_checkpoint_callback = callback
+    trainer._shutdown_complete = False
+
+    async def teardown():
+        pass
+
+    trainer._teardown = teardown
+
+    await trainer.shutdown()
+
+    assert not (tmp_path / "global_step_4" / BufferCheckpointCallback.ARTIFACT_NAME).exists()
+
+
+@pytest.mark.asyncio
 async def test_roundtrip_with_pending_retry():
     buf = asyncio.Queue(maxsize=1)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -164,6 +255,7 @@ def test_load_missing_file():
     with tempfile.TemporaryDirectory() as tmpdir:
         buffer_state = BufferCheckpointCallback.load_buffer_state(tmpdir)
         assert buffer_state.completed_groups == []
+        assert buffer_state.admitted_groups == []
         assert buffer_state.retry_prompts == []
 
 
