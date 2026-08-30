@@ -21,6 +21,7 @@ data:
     adaptive_exploration: 0.2 # grade-adaptive: probability mass spread off the current level
     adaptive_window: 10 # steps without informative signal before advancing the level
     adaptive_min_informative: 0.1 # informative-group fraction below which the level is exhausted
+    weighting: pass-variance # learnability/grade-prior weight curve: pass-variance|group-informative
     seed: null # falls back to trainer.seed
 
 checkpoint_export:

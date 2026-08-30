@@ -643,7 +643,10 @@ def build_dataloader(
             raise ValueError("data.sampling.kind requires per-prompt uids; step_wise_training is not supported")
         sampling_seed = cfg.data.sampling.seed if cfg.data.sampling.seed is not None else cfg.trainer.seed
         sampler = CurriculumSampler(
-            dataset, CurriculumConfig.from_dict_config(cfg.data.sampling), sampling_seed, batch_size=batch_size
+            dataset,
+            CurriculumConfig.from_dict_config(cfg.data.sampling, group_size=cfg.generator.n_samples_per_prompt),
+            sampling_seed,
+            batch_size=batch_size,
         )
 
     dataloader = StatefulDataLoader(

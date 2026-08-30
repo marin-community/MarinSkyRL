@@ -5,7 +5,7 @@ import pytest
 from datasets import Dataset
 from torch.utils.data import SequentialSampler
 
-from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler, SamplingKind, dataset_bins
+from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler, SamplingKind, WeightingKind, dataset_bins
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.trainer_utils import build_dataloader
 from tests.cpu.util import example_dummy_config
@@ -290,3 +290,29 @@ def test_draws_are_unique_within_each_batch():
     for start in range(0, 16, 4):
         batch = indices[start : start + 4]
         assert len(set(batch)) == len(batch)
+
+
+def test_group_informative_weights_low_pass_bin_near_mid_bin():
+    """At n=16, a 1-in-16 bin is nearly as informative as a 50% bin; both dwarf the extremes.
+
+    pass-variance would give the low bin ~23% of the mid bin's weight; the
+    group-informative curve keeps it above 60%.
+    """
+    bins = {"g0-easy": (0, 1), "g1-low": (1, 1), "g2-mid": (2, 1), "g3-dead": (3, 1)}
+    sampler = _sampler(bins, "learnability", seed=0, weighting=WeightingKind.GROUP_INFORMATIVE, group_size=16)
+    low = [1.0] + [0.0] * 15
+    mid = [1.0] * 8 + [0.0] * 8
+    for _ in range(60):
+        sampler.update(
+            ["0"] * 16 + ["1"] * 16 + ["2"] * 16 + ["3"] * 16,
+            [1.0] * 16 + low + mid + [0.0] * 16,
+            16,
+        )
+    assert sampler.weights[1] > 0.6 * sampler.weights[2]
+    assert sampler.weights[1] > 3 * sampler.weights[0]
+    assert sampler.weights[1] > 3 * sampler.weights[3]
+
+
+def test_group_informative_requires_group_size():
+    with pytest.raises(ValueError, match="group_size"):
+        CurriculumConfig(kind=SamplingKind.LEARNABILITY, weighting=WeightingKind.GROUP_INFORMATIVE)

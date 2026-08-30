@@ -36,6 +36,21 @@ class SamplingKind(StrEnum):
     GRADE_PRIOR = "grade-prior"
 
 
+class WeightingKind(StrEnum):
+    """Weight curve applied to the Thompson-drawn pass rate p of each bin.
+
+    ``pass-variance`` is p·(1−p): per-sample reward variance, peaked at p=0.5.
+    ``group-informative`` is 1 − p^n − (1−p)^n with n samples per prompt: the
+    probability a GRPO group has nonzero advantage variance, i.e. survives
+    dynamic-sampling filtering. It is near-flat across mid difficulties and
+    collapses only within ~1/n of the extremes, matching the filter's actual
+    rollout-cost model.
+    """
+
+    PASS_VARIANCE = "pass-variance"
+    GROUP_INFORMATIVE = "group-informative"
+
+
 @dataclass(frozen=True)
 class CurriculumConfig:
     """Weight-policy parameters, mirroring the ``data.sampling`` config subtree."""
@@ -51,9 +66,17 @@ class CurriculumConfig:
     adaptive_exploration: float = 0.2
     adaptive_window: int = 10
     adaptive_min_informative: float = 0.1
+    weighting: WeightingKind = WeightingKind.PASS_VARIANCE
+    # GRPO group size (generator.n_samples_per_prompt), the n in the
+    # group-informative curve. Supplied by the caller, not the config subtree.
+    group_size: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.weighting is WeightingKind.GROUP_INFORMATIVE and (self.group_size is None or self.group_size < 2):
+            raise ValueError("group-informative weighting requires group_size >= 2")
 
     @classmethod
-    def from_dict_config(cls, cfg: DictConfig) -> "CurriculumConfig":
+    def from_dict_config(cls, cfg: DictConfig, *, group_size: int) -> "CurriculumConfig":
         return cls(
             kind=SamplingKind(cfg.kind),
             decay=cfg.decay,
@@ -66,6 +89,8 @@ class CurriculumConfig:
             adaptive_exploration=cfg.adaptive_exploration,
             adaptive_window=cfg.adaptive_window,
             adaptive_min_informative=cfg.adaptive_min_informative,
+            weighting=WeightingKind(cfg.weighting),
+            group_size=group_size,
         )
 
 
@@ -305,9 +330,14 @@ class CurriculumSampler(Sampler[int]):
         return self._floor_and_normalize(samples)
 
     def _learnability_weights(self, prior_alpha: np.ndarray, prior_beta: np.ndarray) -> np.ndarray:
-        """Thompson draw on the pass rate, weighted by p·(1−p) so mid-difficulty bins dominate."""
+        """Thompson draw on the pass rate, pushed through the configured weight curve."""
         pass_rate = self.rng.beta(prior_alpha + self.solved, prior_beta + (self.samples - self.solved))
-        return self._floor_and_normalize(pass_rate * (1.0 - pass_rate))
+        if self.config.weighting is WeightingKind.GROUP_INFORMATIVE:
+            n = self.config.group_size
+            weights = 1.0 - pass_rate**n - (1.0 - pass_rate) ** n
+        else:
+            weights = pass_rate * (1.0 - pass_rate)
+        return self._floor_and_normalize(weights)
 
     def _floor_and_normalize(self, weights: np.ndarray) -> np.ndarray:
         weights = weights / weights.sum()
