@@ -65,7 +65,7 @@ class EntrypointSupervisor:
             self._termination_signal = signum
 
     def wait(self, entrypoint_ref: ray.ObjectRef) -> int | None:
-        """Return a process exit code after the task finishes or is terminated."""
+        """Wait for the task, returning ``None`` normally or ``128 + signal`` after termination."""
         while self._termination_signal is None:
             ready, _ = ray.wait([entrypoint_ref], timeout=1)
             if ready:
@@ -90,10 +90,10 @@ class EntrypointSupervisor:
             if ready:
                 try:
                     ray.get(entrypoint_ref)
-                except Exception:
+                except Exception as e:
                     # Cooperative task cancellation is reported as a Ray task
                     # error after the entrypoint's Python finally blocks finish.
-                    pass
+                    logger.info("Training entrypoint stopped after the termination request: {}", e)
                 break
         return 128 + signum
 

@@ -81,8 +81,7 @@ def test_entrypoint_node_resolution_selects_live_matching_node():
 
     node_id = resolve_entrypoint_node_id(node_ip)
 
-    matching_nodes = {node["NodeID"] for node in ray.nodes() if node["Alive"] and node["NodeManagerAddress"] == node_ip}
-    assert node_id in matching_nodes
+    assert node_id == ray.get_runtime_context().get_node_id()
 
 
 @pytest.mark.usefixtures("ray_init")
