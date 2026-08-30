@@ -10,7 +10,10 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import huggingface_hub
 from huggingface_hub import snapshot_download
+
+from marinskyrl.resource_locator import HFDatasetSelector, parse_hf_dataset_selector
 
 
 def is_raw_tasks_directory(snapshot_dir) -> bool:
@@ -41,14 +44,31 @@ def is_raw_tasks_directory(snapshot_dir) -> bool:
     return False
 
 
-def download_hf_dataset(repo_id: str, revision: Optional[str] = None) -> str:
-    """Download a HuggingFace dataset repo snapshot and return its local path."""
-    if not repo_id or not isinstance(repo_id, str):
-        raise ValueError("repo_id must be a non-empty string")
+def resolve_hf_dataset_selector(value: str) -> HFDatasetSelector:
+    """Resolve a dataset selector's revision to an immutable Hub commit."""
+    selector = parse_hf_dataset_selector(value)
+    if selector is None:
+        raise ValueError(f"Invalid Hugging Face dataset selector: {value!r}")
+    info = huggingface_hub.HfApi().dataset_info(selector.repo_id, revision=selector.revision)
+    return HFDatasetSelector(selector.repo_id, info.sha, selector.subdir)
+
+
+def download_hf_dataset(selector_value: str, revision: Optional[str] = None) -> str:
+    """Download a dataset selector and return its selected local directory."""
+    selector = parse_hf_dataset_selector(selector_value)
+    if selector is None:
+        raise ValueError(f"Invalid Hugging Face dataset selector: {selector_value!r}")
+    if revision is not None and selector.revision is not None and revision != selector.revision:
+        raise ValueError("revision conflicts with the revision embedded in the dataset selector")
     cache_path = os.environ.get("HF_CACHE_DIR", os.path.expanduser("~/.cache/huggingface/hub"))
-    return snapshot_download(
-        repo_id=repo_id,
+    snapshot = snapshot_download(
+        repo_id=selector.repo_id,
         cache_dir=str(cache_path),
-        revision=revision,
+        revision=revision or selector.revision,
         repo_type="dataset",
+        allow_patterns=[f"{selector.subdir}/**"] if selector.subdir else None,
     )
+    selected = Path(snapshot) / selector.subdir if selector.subdir else Path(snapshot)
+    if not selected.is_dir():
+        raise FileNotFoundError(f"Dataset selector {selector_value!r} did not resolve a subdirectory")
+    return str(selected)

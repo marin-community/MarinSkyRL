@@ -3,10 +3,12 @@
 from dataclasses import dataclass
 import os
 import posixpath
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 CLOUD_URI_SCHEMES = frozenset({"s3", "gs", "gcs"})
 CLOUD_URI_PREFIXES = tuple(f"{scheme}://" for scheme in sorted(CLOUD_URI_SCHEMES))
+HF_SELECTOR_REVISION_SEPARATOR = "@"
+HF_SELECTOR_SUBDIR_SEPARATOR = "::"
 
 
 class ModelLocatorError(ValueError):
@@ -29,11 +31,50 @@ def join_resource_path(root: str, *parts: str) -> str:
 
 def is_hugging_face_repo_id(repo_id: str) -> bool:
     """Return whether a value has Hugging Face's ``namespace/repository`` form."""
-    if not repo_id or repo_id.count("/") != 1:
+    if not repo_id or repo_id.count("/") != 1 or HF_SELECTOR_SUBDIR_SEPARATOR in repo_id:
         return False
     if repo_id.startswith(("./", "../", "/", "~")) or "\\" in repo_id:
         return False
     return all(part.strip() not in ("", ".", "..") for part in repo_id.split("/"))
+
+
+@dataclass(frozen=True)
+class HFDatasetSelector:
+    """A Hugging Face dataset repository with an optional revision and subdirectory."""
+
+    repo_id: str
+    revision: str | None = None
+    subdir: str | None = None
+
+    def canonical(self) -> str:
+        revision = f"{HF_SELECTOR_REVISION_SEPARATOR}{self.revision}" if self.revision else ""
+        subdir = f"{HF_SELECTOR_SUBDIR_SEPARATOR}{self.subdir}" if self.subdir else ""
+        return f"{self.repo_id}{revision}{subdir}"
+
+    def cache_name(self) -> str:
+        """Return a reversible cache key that includes every selector component."""
+        components = (("repo", self.repo_id), ("subdir", self.subdir), ("revision", self.revision))
+        encoded = ((name, quote(value, safe="-._")) for name, value in components if value is not None)
+        return "__".join(f"{name}-{len(value)}-{value}" for name, value in encoded)
+
+
+def parse_hf_dataset_selector(value: str) -> HFDatasetSelector | None:
+    """Parse ``org/repo[@revision][::subdir]`` without accepting local paths."""
+    if not value or value.startswith(("./", "../", "/", "~")) or "\\" in value:
+        return None
+    repo_revision, subdir_separator, subdir = value.partition(HF_SELECTOR_SUBDIR_SEPARATOR)
+    repo_id, revision_separator, revision = repo_revision.partition(HF_SELECTOR_REVISION_SEPARATOR)
+    if not is_hugging_face_repo_id(repo_id):
+        return None
+    if revision_separator and not revision:
+        return None
+    if subdir_separator and (not subdir or subdir.startswith("/") or ".." in subdir.split("/")):
+        return None
+    return HFDatasetSelector(
+        repo_id=repo_id,
+        revision=revision if revision_separator else None,
+        subdir=subdir if subdir_separator else None,
+    )
 
 
 @dataclass(frozen=True)

@@ -13,10 +13,20 @@ import stat
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from marinskyrl.resource_locator import is_hugging_face_repo_id
+from cloud.iris.hf_datasets import resolve_hf_dataset_selector
+from marinskyrl.resource_locator import parse_hf_dataset_selector
+
+
+@dataclass(frozen=True)
+class ResolvedRLData:
+    """Local data paths paired with their immutable or local source references."""
+
+    paths: tuple[str, ...]
+    sources: tuple[str, ...]
 
 
 def resolve_rl_train_data(
@@ -26,7 +36,29 @@ def resolve_rl_train_data(
     verbose: bool = True,
     kind: str = "tasks",
 ) -> List[str]:
+    """Resolve data to paths while preserving the historical list-only API."""
+    return list(
+        resolve_rl_train_data_with_sources(
+            train_data,
+            scratch_dir=scratch_dir,
+            on_exist=on_exist,
+            verbose=verbose,
+            kind=kind,
+        ).paths
+    )
+
+
+def resolve_rl_train_data_with_sources(
+    train_data: List[str],
+    scratch_dir: Optional[str] = None,
+    on_exist: str = "skip",
+    verbose: bool = True,
+    kind: str = "tasks",
+) -> ResolvedRLData:
     """Resolve train_data paths for the configured data kind.
+
+    ``sources`` preserves local inputs and replaces Hub inputs with canonical
+    selectors pinned to their resolved commit.
 
     ``kind="tasks"`` (default, terminal_bench agentic RL): SkyRL's
     TerminalBenchTaskDataset expects local directory paths where each subdirectory is a
@@ -44,7 +76,7 @@ def resolve_rl_train_data(
     creds + endpoint) so the offline flag only gates weights, not the dataset read.
     """
     if not train_data:
-        return []
+        return ResolvedRLData((), ())
 
     if kind == "parquet":
         resolved: List[str] = []
@@ -65,7 +97,7 @@ def resolve_rl_train_data(
             if verbose:
                 print(f"[rl_data] data.kind=parquet: staged {entry} -> {local}")
             resolved.append(str(local))
-        return resolved
+        return ResolvedRLData(tuple(resolved), tuple(train_data))
 
     # Determine the scratch directory for extracted tasks. It MUST be a shared
     # filesystem visible to all compute nodes; /tmp is node-local (last resort).
@@ -84,20 +116,23 @@ def resolve_rl_train_data(
     tasks_base = Path(scratch_dir) / "tasks"
 
     resolved_paths = []
+    sources = []
 
     for data_path in train_data:
-        if is_hugging_face_repo_id(data_path):
-            repo_name = data_path.split("/")[-1]
-            output_dir = tasks_base / repo_name
+        if parse_hf_dataset_selector(data_path) is not None:
+            selector = resolve_hf_dataset_selector(data_path)
+            canonical_source = selector.canonical()
+            output_dir = tasks_base / selector.cache_name()
 
             if verbose:
-                print(f"[rl_data] Extracting HF dataset: {data_path}")
+                print(f"[rl_data] Extracting HF dataset: {canonical_source}")
                 print(f"[rl_data] Output directory: {output_dir}")
 
             if on_exist == "skip" and output_dir.exists() and any(output_dir.iterdir()):
                 if verbose:
                     print(f"[rl_data] Tasks already extracted, skipping: {output_dir}")
                 resolved_paths.append(str(output_dir))
+                sources.append(canonical_source)
                 continue
 
             cmd = [
@@ -105,7 +140,7 @@ def resolve_rl_train_data(
                 "-m",
                 "cloud.iris.extract_tasks_from_parquet",
                 "--parquet",
-                data_path,
+                canonical_source,
                 "--output_dir",
                 str(output_dir),
                 "--on_exist",
@@ -151,13 +186,15 @@ def resolve_rl_train_data(
 
             _fix_task_permissions(output_dir, verbose=verbose)
             resolved_paths.append(str(output_dir))
+            sources.append(canonical_source)
         else:
             local_path = Path(data_path)
             if local_path.exists():
                 _fix_task_permissions(local_path, verbose=verbose)
             resolved_paths.append(data_path)
+            sources.append(data_path)
 
-    return resolved_paths
+    return ResolvedRLData(tuple(resolved_paths), tuple(sources))
 
 
 def _fix_task_permissions(task_dir: Path, verbose: bool = True) -> None:

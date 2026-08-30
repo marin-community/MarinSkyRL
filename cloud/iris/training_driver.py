@@ -46,7 +46,7 @@ from cloud.iris.rl_config_translation import (
 from cloud.iris.rl_data import (
     check_rl_environment,
     compute_num_inference_engines,
-    resolve_rl_train_data,
+    resolve_rl_train_data_with_sources,
 )
 from cloud.iris.storage_policy import hydra_override_value
 from marinskyrl.resource_locator import model_source_for_path
@@ -98,6 +98,7 @@ class LocalRLRunner:
 
     def __init__(self, config: LocalRLConfig):
         self.config = config
+        self._train_data_sources = list(config.train_data)
         self._processes: List[subprocess.Popen] = []
         self.rl_env_path: Path | None = None
         # Set by _ingress_context when ingress_mode=controller mints a capability
@@ -207,6 +208,7 @@ class LocalRLRunner:
                     "entrypoint": entrypoint,
                     "hydra_args": hydra_args,
                     "source_config": str(source_config),
+                    "train_data_sources": self._train_data_sources,
                 },
                 destination,
                 sort_keys=True,
@@ -247,10 +249,11 @@ class LocalRLRunner:
         self.config.tensor_parallel_size = parsed.tensor_parallel_size
         if self.config.train_data:
             print(f"\nResolving train_data (kind={parsed.data_kind}): {self.config.train_data}")
-            resolved_train = resolve_rl_train_data(self.config.train_data, kind=parsed.data_kind)
-            self.config.train_data = resolved_train
-            exp_args["train_data"] = resolved_train
-            print(f"Resolved train_data: {resolved_train}")
+            resolved_train = resolve_rl_train_data_with_sources(self.config.train_data, kind=parsed.data_kind)
+            self.config.train_data = list(resolved_train.paths)
+            self._train_data_sources = list(resolved_train.sources)
+            exp_args["train_data"] = self.config.train_data
+            print(f"Resolved train_data: {self.config.train_data}")
         hydra_args = build_skyrl_hydra_args(parsed, exp_args, hpc_stub)
         self._record_context_budget(parsed, skyrl_overrides)
 
