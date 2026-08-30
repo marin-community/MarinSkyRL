@@ -375,6 +375,46 @@ async def test_resume_skips_uids_owned_by_restored_completed_groups_and_retries(
 
 
 @pytest.mark.asyncio
+async def test_restore_continues_a_partially_admitted_batch(tmp_path):
+    trainer, _ = _batch_assembly_state(mini_batch_size=2, accepted=0)
+
+    class _PendingUIDs:
+        def __init__(self):
+            self.reserved = set()
+
+        def reserve_pending_uids(self, _uids):
+            self.reserved.update(_uids)
+
+    pending_uids = _PendingUIDs()
+    trainer.async_train_dataloader = pending_uids
+    queues = _GenerationQueues(
+        completed=asyncio.Queue(maxsize=2), retries=asyncio.Queue(), condition=asyncio.Condition()
+    )
+    torch.save(
+        {
+            "completed_groups": [],
+            "admitted_groups": [
+                {
+                    "trajectory_batch": dict(_generated_group("banked", 10).trajectory_batch),
+                    "uid": "banked",
+                    "earliest_model_step": 10,
+                    "source_prompts": [{"uid": "banked"}],
+                }
+            ],
+            "retry_prompts": [],
+        },
+        tmp_path / "generation_buffer_state.pt",
+    )
+
+    trainer._restore_buffer_from_checkpoint(queues, str(tmp_path))
+    assert pending_uids.reserved == {"banked"}
+    queues.completed.put_nowait(_generated_group("replacement", earliest_model_step=10))
+
+    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    assert [group.uid for group in batch] == ["banked", "replacement"]
+
+
+@pytest.mark.asyncio
 async def test_batch_assembly_rejected_only_progress_terminates_instead_of_livelocking():
     trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
     trainer.admission_stall_timeout = 0.0

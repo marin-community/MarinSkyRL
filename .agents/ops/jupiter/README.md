@@ -16,6 +16,11 @@ Use `squeue -u "$USER"` for live state, `sacct -j <job-id>` for terminal state, 
 when cancellation is authorized. Do not treat an empty result from one login host as authoritative when SSH
 itself reports resource or fork errors; retry another login host.
 
+## Source revision
+
+Jupiter OpenThoughts-Agent launches use the latest fetched `origin/main` revision. Fetch and fast-forward
+`main` before launch.
+
 ## Secrets
 
 The private Jupiter secrets file is `$HOME/secrets.env` on the login host. The corresponding operator-side

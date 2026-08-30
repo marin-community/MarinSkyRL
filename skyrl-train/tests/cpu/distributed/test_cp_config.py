@@ -71,7 +71,7 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
     "progress": {
         "mode": "auto",
         "min_interval_seconds": 0.5,
-        "heartbeat_seconds": 15.0,
+        "heartbeat_seconds": 60.0,
         "percent_step": 5.0,
         "count_step": 1000,
     },

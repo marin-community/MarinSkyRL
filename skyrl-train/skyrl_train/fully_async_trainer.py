@@ -13,7 +13,9 @@ High-level notes:
 
 import asyncio
 import collections
+import os
 import sys
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
@@ -27,7 +29,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
 )
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -44,6 +46,7 @@ from skyrl_train.telemetry import (
     record_step_timings,
 )
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
+from skyrl_train.io import io
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
     GroupSelectionPolicy,
@@ -76,16 +79,47 @@ class _GenerationQueues:
     completed: asyncio.Queue[GeneratedOutputGroup]
     retries: asyncio.Queue[List[dict]]
     condition: asyncio.Condition
+    admitted_groups: List[GeneratedOutputGroup] = field(default_factory=list)
+    admitted_groups_consumed: bool = False
+
+    def record_admitted(self, groups: List[GeneratedOutputGroup]) -> None:
+        """Retain newly admitted groups until the step crosses its checkpoint boundary."""
+        if self.admitted_groups_consumed:
+            raise RuntimeError("cannot admit another group before clearing the consumed batch")
+        self.admitted_groups.extend(groups)
+
+    def mark_admitted_consumed(self) -> None:
+        """Keep the trained batch available only to a final previous-checkpoint flush."""
+        if not self.admitted_groups:
+            raise RuntimeError("cannot consume an empty admitted batch")
+        self.admitted_groups_consumed = True
+
+    def clear_admitted(self) -> None:
+        """Release the prior step's admitted groups before assembling the next step."""
+        self.admitted_groups.clear()
+        self.admitted_groups_consumed = False
 
     def snapshot(self) -> GenerationBufferState:
-        """Copy both queues without yielding to another event-loop task."""
+        """Copy queued and admitted work without yielding to another event-loop task."""
+        admitted = [] if self.admitted_groups_consumed else list(self.admitted_groups)
+        return self._snapshot(admitted)
+
+    def shutdown_snapshot(self) -> GenerationBufferState:
+        """Copy all work needed to recover from shutdown before the next checkpoint."""
+        return self._snapshot(list(self.admitted_groups))
+
+    def _snapshot(self, admitted_groups: List[GeneratedOutputGroup]) -> GenerationBufferState:
         completed = _drain_queue(self.completed)
         retries = _drain_queue(self.retries)
         for group in completed:
             self.completed.put_nowait(group)
         for prompts in retries:
             self.retries.put_nowait(prompts)
-        return GenerationBufferState(completed_groups=completed, retry_prompts=retries)
+        return GenerationBufferState(
+            completed_groups=completed,
+            retry_prompts=retries,
+            admitted_groups=admitted_groups,
+        )
 
 
 @dataclass
@@ -474,25 +508,68 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._active_trajectory_tasks = []
 
     def _restore_buffer_from_checkpoint(self, queues: _GenerationQueues, checkpoint_path: str) -> None:
-        """Restore completed outputs and pending retries from a checkpoint."""
+        """Restore completed, admitted, and retryable rollout work from a checkpoint."""
         buffer_state = BufferCheckpointCallback.load_buffer_state(checkpoint_path)
         if len(buffer_state.completed_groups) > queues.completed.maxsize:
             raise ValueError(
                 f"Checkpoint contains {len(buffer_state.completed_groups)} completed groups, exceeding buffer capacity "
                 f"{queues.completed.maxsize}"
             )
+        if len(buffer_state.admitted_groups) > self.mini_batch_size:
+            raise ValueError(
+                f"Checkpoint contains {len(buffer_state.admitted_groups)} admitted groups, exceeding mini-batch size "
+                f"{self.mini_batch_size}"
+            )
         self.async_train_dataloader.reserve_pending_uids(buffer_state.pending_uids())
         for item in buffer_state.completed_groups:
             queues.completed.put_nowait(item)
         for prompts in buffer_state.retry_prompts:
             queues.retries.put_nowait(prompts)
-        self._staleness_manager._stat.accepted += len(buffer_state.completed_groups)
-        self._staleness_manager._stat.submitted += len(buffer_state.completed_groups)
+        queues.record_admitted(buffer_state.admitted_groups)
+        restored_group_count = len(buffer_state.completed_groups) + len(buffer_state.admitted_groups)
+        self._staleness_manager._stat.accepted += restored_group_count
+        self._staleness_manager._stat.submitted += restored_group_count
         logger.info(
-            f"Restored {len(buffer_state.completed_groups)} completed generation groups and "
+            f"Restored {len(buffer_state.completed_groups)} completed, "
+            f"{len(buffer_state.admitted_groups)} admitted generation groups, and "
             f"{len(buffer_state.retry_prompts)} pending retries "
             "from checkpoint"
         )
+
+    def _latest_checkpoint_step(self) -> int | None:
+        marker = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
+        if not io.exists(marker):
+            return None
+        with io.open_file(marker, "r") as f:
+            return int(f.read().strip())
+
+    async def _flush_generation_buffer_on_shutdown(self) -> None:
+        """Attach volatile buffer state to the immediately preceding model checkpoint."""
+        callback = getattr(self, "_buffer_checkpoint_callback", None)
+        if callback is None or not callback.has_bound_queues():
+            return
+        target_step = self.global_step - 1
+        latest_step = await asyncio.to_thread(self._latest_checkpoint_step)
+        if latest_step != target_step:
+            if callback.has_shutdown_state():
+                logger.warning(
+                    "Skipping final generation-buffer flush: latest checkpoint step {} is not the immediately "
+                    "preceding step {}",
+                    latest_step,
+                    target_step,
+                )
+            return
+        checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{target_step}")
+        await callback.flush_to_checkpoint(checkpoint_path)
+
+    async def shutdown(self) -> None:
+        """Bank the compatible async buffer before releasing trainer resources."""
+        if getattr(self, "_shutdown_complete", False):
+            return
+        try:
+            await self._flush_generation_buffer_on_shutdown()
+        finally:
+            await super().shutdown()
 
     def _maybe_enable_rollout_fanout(self) -> None:
         """Enable configured multi-actor rollout collection without distributing staleness state."""
@@ -542,9 +619,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Absent `terminal_bench_config` it raises rather than falling back.
         self._maybe_enable_rollout_fanout()
 
-        await self._startup_trajectory_runner()
-
         try:
+            await self._startup_trajectory_runner()
             await self._train_loop()
         except Exception as e:
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", e)
@@ -554,7 +630,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # (the per-epoch epilogue only runs on normal loop completion).
             self._cancel_trajectory_tasks()
 
-            await self._teardown()
+            await self.shutdown()
 
     async def _train_loop(self):
         """
@@ -598,34 +674,28 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 f"This can happen after epoch boundary transitions or error recovery."
                             )
 
-            # Resume-overshoot guard: if we resumed AT or PAST max_steps, the run is
-            # already complete. Without this guard, the unconditional `self.global_step += 1`
-            # below (followed by the inner `for _ in range(self.global_step, ...)` loop) would
-            # execute a spurious step gs N+1 ("overshoot") before the post-increment max_steps
-            # check at the bottom of the loop ever fires — wasting a node slot and typically
-            # ending FAILED, which (because it is a *failure*) keeps the afternotok restart
-            # chain alive and spawns yet more overshoot links. Recognize completion here and
-            # exit 0 cleanly so the chain terminates and the final export/upload runs.
-            # NOTE: `self.global_step` here is the *completed* step count loaded from the
-            # checkpoint (save_checkpoints writes it after a step finishes), so `>=` (not `>`)
-            # correctly treats "resumed exactly at max_steps" as done. A mid-training resume
-            # (global_step < total_training_steps) falls through and continues normally.
-            if self.global_step >= self.total_training_steps:
-                self._log_startup_timings()
-                await self._handle_resume_at_max_steps()
-                return
-
         # Initialize weight sync state
         with Timer("init_weight_sync_state", self.all_startup_timings):
             self.init_weight_sync_state()
 
         # sync weights to inference engines
-        with Timer("sync_weights_to_inference_engines", self.all_startup_timings):
+        with Timer("sync_weights_to_inference_engines", self.all_startup_timings) as weight_update_timer:
             await self.async_sync_policy_weights_to_inference_engines()
             # Drain the policy workers' event loops to a hard sync point so every FSDP
             # shard rank is free before the step-1 forward is dispatched (the MoE-RL
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             await self._drain_policy_event_loops()
+        self._log_weight_update_completed(
+            reason="initial",
+            duration_seconds=weight_update_timer.duration,
+        )
+
+        # Synchronize before checking completion so a requested final evaluation uses
+        # the checkpoint weights. The loaded global_step is the completed step count;
+        # >= treats a resume exactly at max_steps as complete without running gs N+1.
+        if self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
+            await self._handle_resume_at_max_steps()
+            return
 
         self._log_startup_timings()
 
@@ -688,10 +758,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             trajectory_tasks = self._active_trajectory_tasks
 
             for _ in range(self.global_step, (1 + epoch) * self.num_steps_per_epoch + 1):
-                with Timer("step", self.all_timings):
+                with Timer("step", self.all_timings) as step_timer:
                     # 1. Discard every completed stale attempt and wait for a full fresh batch.
+                    logger.info(
+                        "Rollout batch started: step={} mode=fully_async required_groups={}",
+                        self.global_step,
+                        self.mini_batch_size,
+                    )
                     with (
-                        Timer("wait_for_generation_buffer", self.all_timings),
+                        Timer("wait_for_generation_buffer", self.all_timings) as rollout_wait_timer,
                         critical_phase("rollout_or_inference_wait", self.global_step),
                     ):
                         cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
@@ -704,6 +779,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             self.convert_generation_group_mini_batch_to_training_input,
                             cur_generation_group_mini_batch,
                         )
+                    response_ids = [
+                        response_ids
+                        for group in cur_generation_group_mini_batch
+                        for response_ids in group.trajectory_batch["response_ids"]
+                    ]
+                    logger.info(
+                        "Rollout batch completed: step={} mode=fully_async groups={} trajectories={} "
+                        "response_tokens={} staleness_mean={:.3f} staleness_max={} duration_seconds={:.3f}",
+                        self.global_step,
+                        len(cur_generation_group_mini_batch),
+                        len(response_ids),
+                        sum(len(response) for response in response_ids),
+                        self.all_metrics["async/staleness_mean"],
+                        self.all_metrics["async/staleness_max"],
+                        rollout_wait_timer.duration,
+                    )
 
                     # TIS graceful-degrade observability (Fix A): record whether THIS
                     # training batch was missing all rollout logprobs (-> TIS skipped,
@@ -726,7 +817,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # 3. Run training and record consumed UIDs in the tracker.
                     with Timer("run_training", self.all_timings):
                         status = await self._run_training(training_input)
-                        await self.data_tracker.mark_consumed([g.uid for g in cur_generation_group_mini_batch])
+                    train_duration = self.all_timings["train_critic_and_policy"]
+                    self._log_optimizer_step_completed(
+                        epoch=epoch,
+                        training_input=training_input,
+                        duration_seconds=train_duration,
+                    )
+                    await self.data_tracker.mark_consumed([g.uid for g in cur_generation_group_mini_batch])
+                    generation_queues.mark_admitted_consumed()
 
                     # 4. After training: sync weights to the inference engines.
                     #    The inference engines are a SHARED HTTP backend that every
@@ -743,7 +841,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     #    max_staleness_steps accounting — exactly like stock
                     #    fully_async, which never drains trial orchestration. This
                     #    block is now byte-identical for fan-out ON and OFF.
-                    with Timer("sync_weights", self.all_timings):
+                    with Timer("sync_weights", self.all_timings) as weight_update_timer:
                         await self.inference_engine_client.pause_generation()
                         await self.async_sync_policy_weights_to_inference_engines()
                         # Drain the policy workers' event loops to a hard sync point so
@@ -752,6 +850,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         # _drain_policy_event_loops.
                         await self._drain_policy_event_loops()
                         await self.inference_engine_client.resume_generation()
+                    self._log_weight_update_completed(
+                        reason="training_step",
+                        duration_seconds=weight_update_timer.duration,
+                    )
 
                 # 5. Log status and update metrics
                 logger.info(status)
@@ -813,6 +915,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         "on_log", step_state, self._control, logs=log_payload, trainer=self
                     )
 
+                self._log_training_step_completed(
+                    epoch=epoch,
+                    duration_seconds=step_timer.duration,
+                )
+
                 self.all_metrics = {}
                 step_duration = self.all_timings.get("step")
                 if step_duration is not None:
@@ -824,6 +931,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 last_completed_step = self.global_step
                 record_policy_step(self.global_step)
                 self.global_step += 1
+                generation_queues.clear_admitted()
 
                 # 9. Notify generation workers that the capacity has increased, unblocking them.
                 await self._staleness_manager.notify_capacity_change(self.global_step)
@@ -1282,7 +1390,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             GenerationStalledError: No producer can make admission progress.
             RuntimeError: Dynamic sampling exhausts its per-step candidate budget.
         """
-        accepted_groups = []
+        if queues.admitted_groups_consumed:
+            raise RuntimeError("cannot assemble a new batch before clearing the previously consumed batch")
+        accepted_groups = queues.admitted_groups
         loop = asyncio.get_event_loop()
         last_admitted_progress = loop.time()
         stall_timeout = float(self.admission_stall_timeout)
@@ -1321,7 +1431,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     partition.accepted_groups,
                     available_slots=self.mini_batch_size - len(accepted_groups),
                 )
-                accepted_groups.extend(selection.admitted_groups)
+                queues.record_admitted(selection.admitted_groups)
                 dynamic_candidate_count += selection.candidate_count
                 dynamic_discarded_this_scan = sum(selection.discarded_reasons.values())
                 dynamic_discarded_count += dynamic_discarded_this_scan

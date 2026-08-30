@@ -839,7 +839,10 @@ def get_rollout_metrics(
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)
         for i, metrics in enumerate(env_metrics):
-            env_to_metrics[env_classes[i]].append(metrics)
+            # Skipped episodes (e.g. over-length prompts) never step the environment and
+            # report an empty dict; per-environment aggregators only see stepped episodes.
+            if metrics:
+                env_to_metrics[env_classes[i]].append(metrics)
         for env_name, metrics in env_to_metrics.items():
             # Aggregate metrics across all trajectories for the same environment
             agg = aggregate_for_environment(env_name, metrics)

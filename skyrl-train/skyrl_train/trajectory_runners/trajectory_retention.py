@@ -40,7 +40,7 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     aggregate_reward_shaping_components,
 )
 from skyrl_train.json_serialization import canonical_json_bytes, to_jsonable
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"

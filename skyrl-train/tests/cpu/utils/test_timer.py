@@ -46,10 +46,11 @@ def test_accumulated_duration_comes_from_a_single_clock_read(monkeypatch):
     monkeypatch.setattr(timer_module, "time", FakeClock(100.0, 101.0, 900.0))
 
     timings = {}
-    with Timer("generate", timings):
+    with Timer("generate", timings) as timer:
         pass
 
     assert timings["generate"] == 1.0
+    assert timer.duration == 1.0
 
 
 def test_repeated_blocks_accumulate_under_one_key(monkeypatch):

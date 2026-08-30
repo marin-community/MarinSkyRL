@@ -5,18 +5,24 @@ Covers:
 - ``ensure_token_ids_in_sse_chunk`` (pure function, no vllm dependency)
 - HTTP endpoint streaming path via a mock ``CompletionBackend``
 - Regression: non-streaming path still returns ``JSONResponse``
+- HTTP disconnect cancellation for non-streaming requests
 
 Run with:
   uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_streaming.py
 """
 
+import asyncio
 import json
-import pytest
+from contextlib import suppress
 from http import HTTPStatus
+
+import pytest
+from fastapi import Request
 
 from skyrl_train.inference_engines.vllm.utils import ensure_token_ids_in_sse_chunk
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     create_app,
+    handle_openai_request,
     set_global_state,
 )
 
@@ -135,6 +141,30 @@ class MockStreamingBackend:
 
     async def completion(self, request_payload):
         return self._non_stream_response
+
+
+class BlockingBackend:
+    """Backend that exposes whether an abandoned HTTP request cancelled its work."""
+
+    model_name = "test-model"
+
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def chat_completion(self, request_payload):
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+    async def chat_completion_stream(self, request_payload):
+        yield "data: [DONE]\n\n"
+
+    async def completion(self, request_payload):
+        return await self.chat_completion(request_payload)
 
 
 @pytest.fixture
@@ -257,6 +287,42 @@ class TestHTTPEndpointStreaming:
         )
         assert resp.status_code == HTTPStatus.BAD_REQUEST
         assert "Model name mismatch" in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_disconnect_cancels_backend_request():
+    backend = BlockingBackend()
+    set_global_state(backend, None)
+    receive_events = asyncio.Queue()
+    await receive_events.put(
+        {
+            "type": "http.request",
+            "body": json.dumps(
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                }
+            ).encode(),
+            "more_body": False,
+        }
+    )
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []},
+        receive=receive_events.get,
+    )
+
+    request_task = asyncio.create_task(handle_openai_request(request, endpoint="/chat/completions"))
+    await backend.started.wait()
+    await receive_events.put({"type": "http.disconnect"})
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(request_task, timeout=1)
+        assert backend.cancelled.is_set()
+    finally:
+        request_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await request_task
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
@@ -145,10 +146,24 @@ class _LoggingProgress:
         self._last_emit_n = -1
         self._last_bucket: Optional[int] = None
         self._closed = False
+        self._lock = threading.RLock()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
         assert _SETTINGS is not None, "configure_progress must run before logging progress is constructed"
         self._settings = _SETTINGS
         # Initial line so operators immediately see the bar exists (and its total).
         self._maybe_emit(force=True)
+        if not self.disable and self._settings.heartbeat_seconds > 0:
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name=f"skyrl-progress-{self.desc}",
+                daemon=True,
+            )
+            self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        while not self._heartbeat_stop.wait(self._settings.heartbeat_seconds):
+            self._maybe_emit()
 
     # --- bucketing ---------------------------------------------------------
     def _bucket(self) -> Optional[int]:
@@ -182,28 +197,30 @@ class _LoggingProgress:
         return False
 
     def _maybe_emit(self, force: bool = False) -> None:
-        if self.disable:
-            return
-        now = time.time()
-        if not self._should_emit(now, force):
-            return
-        elapsed = now - self._start
-        if self.total and self.total > 0:
-            pct = 100.0 * self.n / self.total
-            line = f"{self.desc}: {self.n}/{self.total} ({pct:.0f}%) [{elapsed:.0f}s]"
-        else:
-            line = f"{self.desc}: {self.n} [{elapsed:.0f}s]"
-        if self._postfix:
-            line = f"{line} | {self._postfix}"
-        _emit(line)
-        self._last_emit_t = now
-        self._last_emit_n = self.n
-        self._last_bucket = self._bucket()
+        with self._lock:
+            if self.disable:
+                return
+            now = time.time()
+            if not self._should_emit(now, force):
+                return
+            elapsed = now - self._start
+            if self.total and self.total > 0:
+                pct = 100.0 * self.n / self.total
+                line = f"{self.desc}: {self.n}/{self.total} ({pct:.0f}%) [{elapsed:.0f}s]"
+            else:
+                line = f"{self.desc}: {self.n} [{elapsed:.0f}s]"
+            if self._postfix:
+                line = f"{line} | {self._postfix}"
+            _emit(line)
+            self._last_emit_t = now
+            self._last_emit_n = self.n
+            self._last_bucket = self._bucket()
 
     # --- tqdm-compatible surface ------------------------------------------
     def update(self, n: int = 1) -> None:
-        self.n += n
-        self._maybe_emit()
+        with self._lock:
+            self.n += n
+            self._maybe_emit()
 
     def set_postfix(self, ordered_dict: Optional[dict] = None, refresh: bool = True, **kwargs: Any) -> None:
         merged = {}
@@ -211,21 +228,27 @@ class _LoggingProgress:
             merged.update(ordered_dict)
         if kwargs:
             merged.update(kwargs)
-        self._postfix = _fmt_postfix(merged)
+        with self._lock:
+            self._postfix = _fmt_postfix(merged)
 
     def set_description(self, desc: Optional[str] = None, refresh: bool = True) -> None:
         if desc is not None:
-            self.desc = desc
+            with self._lock:
+                self.desc = desc
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        # Guaranteed final line (100% when total is known).
-        self._maybe_emit(force=True)
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._heartbeat_stop.set()
+            # Guaranteed final line (100% when total is known).
+            self._maybe_emit(force=True)
+        if self._heartbeat_thread is not None and self._heartbeat_thread is not threading.current_thread():
+            self._heartbeat_thread.join()
 
-    def refresh(self) -> None:  # tqdm compat no-op
-        pass
+    def refresh(self) -> None:
+        self._maybe_emit()
 
     def __iter__(self):
         if self.iterable is None:

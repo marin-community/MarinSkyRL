@@ -41,6 +41,8 @@ train:
     revision: <dataset-commit>
     cap: 10000
 validation:
+  - source: aime24
+    revision: <dataset-commit>
   - source: math500
     revision: <dataset-commit>
     cap: 100

@@ -11,7 +11,7 @@ from unittest.mock import patch, Mock
 import torch
 
 from skyrl_train.hf_model_io import local_hf_model_dir
-from skyrl_train.utils.io.io import (
+from skyrl_train.io.io import (
     is_cloud_path,
     makedirs,
     exists,
@@ -22,10 +22,8 @@ from skyrl_train.utils.io.io import (
     local_read_dir,
     list_dir,
 )
-from skyrl_train.utils.trainer_utils import (
-    list_checkpoint_dirs,
-    cleanup_old_checkpoints,
-)
+from skyrl_train.checkpoint_listing import list_checkpoint_dirs
+from skyrl_train.utils.trainer_utils import cleanup_old_checkpoints
 
 
 class TestCloudPathDetection:
@@ -200,7 +198,7 @@ class TestCheckpointUtilities:
 class TestCloudFileOperationsMocked:
     """Test cloud file operations with mocked fsspec."""
 
-    @patch("skyrl_train.utils.io.io._get_filesystem")
+    @patch("skyrl_train.io.io._get_filesystem")
     def test_list_checkpoint_dirs_cloud(self, mock_get_filesystem):
         """Test list_checkpoint_dirs with cloud storage."""
         mock_fs = Mock()
@@ -221,7 +219,7 @@ class TestCloudFileOperationsMocked:
         expected = ["global_step_1000", "global_step_2000"]
         assert sorted(result) == sorted(expected)
 
-    @patch("skyrl_train.utils.io.io._get_filesystem")
+    @patch("skyrl_train.io.io._get_filesystem")
     def test_cleanup_old_checkpoints_cloud(self, mock_get_filesystem):
         """Test cleanup_old_checkpoints with cloud storage."""
         mock_fs = Mock()
@@ -312,8 +310,8 @@ class TestContextManagers:
             with open(test_file, "r") as f:
                 assert f.read() == "test content"
 
-    @patch("skyrl_train.utils.io.io.upload_directory")
-    @patch("skyrl_train.utils.io.io.is_cloud_path")
+    @patch("skyrl_train.io.io.upload_directory")
+    @patch("skyrl_train.io.io.is_cloud_path")
     def test_local_work_dir_cloud_path(self, mock_is_cloud_path, mock_upload_directory):
         """Test local_work_dir with a cloud path."""
         mock_is_cloud_path.return_value = True
@@ -358,8 +356,8 @@ class TestContextManagers:
                 with open(read_file, "r") as f:
                     assert f.read() == "test content"
 
-    @patch("skyrl_train.utils.io.io.download_directory")
-    @patch("skyrl_train.utils.io.io.is_cloud_path")
+    @patch("skyrl_train.io.io.download_directory")
+    @patch("skyrl_train.io.io.is_cloud_path")
     def test_local_read_dir_cloud_path(self, mock_is_cloud_path, mock_download_directory):
         """Test local_read_dir with a cloud path."""
         mock_is_cloud_path.return_value = True
@@ -384,7 +382,7 @@ class TestContextManagers:
             with local_read_dir(non_existent_path):
                 pass
 
-    @patch("skyrl_train.utils.io.io._get_filesystem")
+    @patch("skyrl_train.io.io._get_filesystem")
     def test_local_read_dir_cloud_directory_preserves_root_contents(self, mock_get_filesystem):
         """Cloud directory reads expose checkpoint metadata at the returned directory root."""
 
@@ -442,7 +440,7 @@ class FakeHFCloudFilesystem:
 
 def test_cloud_hf_model_publication_writes_index_after_weight_shards(monkeypatch):
     filesystem = FakeHFCloudFilesystem()
-    monkeypatch.setattr("skyrl_train.utils.io.io._get_filesystem", lambda path: filesystem)
+    monkeypatch.setattr("skyrl_train.io.io._get_filesystem", lambda path: filesystem)
 
     with local_hf_model_dir("s3://bucket/export/policy") as work_dir:
         Path(work_dir, "config.json").write_text("{}")
@@ -469,7 +467,7 @@ def test_cloud_hf_model_publication_writes_index_after_weight_shards(monkeypatch
 
 def test_non_s3_hf_model_publication_preserves_destination_scheme(monkeypatch):
     filesystem = FakeHFCloudFilesystem()
-    monkeypatch.setattr("skyrl_train.utils.io.io._get_filesystem", lambda path: filesystem)
+    monkeypatch.setattr("skyrl_train.io.io._get_filesystem", lambda path: filesystem)
 
     with local_hf_model_dir("gs://bucket/export/policy") as work_dir:
         Path(work_dir, "model.safetensors").write_bytes(b"weights")
@@ -483,7 +481,7 @@ def test_interrupted_cloud_hf_model_publication_removes_stale_index(monkeypatch)
         objects={index_key: b"stale index"},
         upload_error=OSError("interrupted upload"),
     )
-    monkeypatch.setattr("skyrl_train.utils.io.io._get_filesystem", lambda path: filesystem)
+    monkeypatch.setattr("skyrl_train.io.io._get_filesystem", lambda path: filesystem)
 
     with pytest.raises(OSError, match="interrupted upload"):
         with local_hf_model_dir("s3://bucket/export/policy") as work_dir:
@@ -501,7 +499,7 @@ class TestUploadDownload:
         with pytest.raises(ValueError, match="Destination must be a cloud path"):
             upload_directory("/local/src", "/local/dst")
 
-    @patch("skyrl_train.utils.io.io._get_filesystem")
+    @patch("skyrl_train.io.io._get_filesystem")
     def test_upload_directory_preserves_destination_contents(self, mock_get_filesystem):
         """Cloud directory uploads land at the destination root even when the prefix already exists."""
 

@@ -281,7 +281,7 @@ def test_resolve_launch_defaults_uses_cluster_storage_and_harness(tmp_path):
     )
     assert args.storage_paths.export_root == "s3://example-bucket/marin/users/alice/skyrl/storage-policy/exports"
     assert args.storage_paths.ray_log_root == (
-        "s3://example-bucket/marin/users/alice/skyrl/storage-policy/ray_session_logs"
+        "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/ray_session_logs"
     )
     assert args.storage_paths.resume_checkpoint_count == 2
     assert args.resolved_config_uri == (
@@ -394,7 +394,7 @@ def test_task_command_applies_bounded_storage_policy(tmp_path, parse_hydra_overr
     overrides = parse_hydra_overrides(encoded)
 
     assert set(options["--ray-log-dir"]) == {
-        "s3://example-bucket/marin/users/alice/skyrl/storage-policy/ray_session_logs"
+        "s3://example-bucket/tmp/ttl=14d/skyrl/users/alice/storage-policy/ray_session_logs"
     }
     assert overrides == {
         "generator.trajectory_retention.output_path": (

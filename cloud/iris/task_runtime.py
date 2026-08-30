@@ -12,9 +12,10 @@ runs the driver on rank 0:
   ``RAY_ADDRESS`` pointing at the head so skyrl-train's bare ``ray.init()``
   attaches to the existing cluster.
 - **ranks 1..N-1 (workers):** read the head IP from the rendezvous, run
-  ``ray start --address=<head_ip>:<port>``, then BLOCK until the head's
-  ``done`` marker or SIGTERM. They contribute their 8 H100s to the Ray
-  cluster; they do NOT run the training driver.
+  ``ray start --address=<head_ip>:<port>``, then BLOCK until the current head
+  attempt publishes success or the task is terminated. Only the success result
+  exits 0. They contribute their 8 H100s to the Ray cluster; they do NOT run the
+  training driver.
 
 Head-IP discovery: rank 0 uses iris's ``IRIS_ADVERTISE_HOST`` (routable IP
 under ``host_network: true``) and publishes it to a rendezvous file on a shared
@@ -39,6 +40,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from typing import Protocol
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
 from marinskyrl.hf_model import validate_portable_hf_model_files
@@ -83,10 +85,35 @@ except ImportError as error:
 
 RENDEZVOUS_FILENAME = "ray_head.json"
 DONE_FILENAME = "ray_head.done"
+HEAD_RESULT_SUCCEEDED = "succeeded"
+
+
+@dataclass(frozen=True)
+class HeadResult:
+    gang_epoch: str
+    outcome: str
+    written_at: float
+
+    @classmethod
+    def from_dict(cls, value: object) -> "HeadResult":
+        if not isinstance(value, dict):
+            raise RuntimeError("Ray head result must be a JSON object")
+        try:
+            result = cls(
+                gang_epoch=str(value["gang_epoch"]),
+                outcome=str(value["outcome"]),
+                written_at=float(value["written_at"]),
+            )
+            if result.outcome != HEAD_RESULT_SUCCEEDED:
+                raise ValueError(f"unknown outcome {result.outcome!r}")
+            return result
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("Ray head result contains invalid field values") from error
 
 
 @dataclass(frozen=True)
 class RendezvousPayload:
+    gang_epoch: str
     head_ip: str
     head_node: str
     port: int
@@ -105,6 +132,7 @@ class RendezvousPayload:
             raise RuntimeError(f"Ray head rendezvous is missing fields: {', '.join(missing_fields)}")
         try:
             return cls(
+                gang_epoch=str(value["gang_epoch"]),
                 head_ip=str(value["head_ip"]),
                 head_node=str(value["head_node"]),
                 port=int(value["port"]),
@@ -808,10 +836,11 @@ def _write_rendezvous_once(fs, path: str, payload: dict[str, object]) -> None:
         json.dump(payload, f)
 
 
-def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int) -> None:
+def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int, gang_epoch: str) -> None:
     uri = _rendezvous_uri(rendezvous_dir)
     python_version, ray_version = _runtime_versions()
     payload = RendezvousPayload(
+        gang_epoch=gang_epoch,
         head_ip=head_ip,
         head_node=socket.gethostname(),
         port=ray_port,
@@ -921,33 +950,29 @@ def poll_rendezvous(
     )
 
 
-def _set_marker(rendezvous_dir: str, name: str) -> None:
-    uri = f"{rendezvous_dir.rstrip('/')}/{name}"
-    try:
-        fs, path = fs_and_path(uri)
-        with fs.open(path, "w") as f:
-            f.write(str(time.time()))
-    except Exception as exc:
-        _log(f"Warning: could not write marker {uri}: {exc}")
+def write_head_result(rendezvous_dir: str, gang_epoch: str) -> None:
+    """Publish successful completion for exactly one Ray gang attempt."""
+    uri = _done_uri(rendezvous_dir)
+    fs, path = fs_and_path(uri)
+    result = HeadResult(gang_epoch=gang_epoch, outcome=HEAD_RESULT_SUCCEEDED, written_at=time.time())
+    with fs.open(path, "w") as destination:
+        json.dump(asdict(result), destination)
+    _log(f"Published successful head result for gang epoch {gang_epoch}: {uri}")
 
 
-def _marker_exists(rendezvous_dir: str, name: str, min_written_at: float | None = None) -> bool:
-    uri = f"{rendezvous_dir.rstrip('/')}/{name}"
-    try:
-        fs, path = fs_and_path(uri)
-        if not fs.exists(path):
-            return False
-        if min_written_at is None:
-            return True
-        with fs.open(path, "r") as f:
-            written_at = float(f.read().strip() or 0)
-        return written_at >= (min_written_at - RENDEZVOUS_FRESHNESS_SLACK)
-    except Exception:
+def head_succeeded(rendezvous_dir: str, gang_epoch: str) -> bool:
+    """Whether the head published success for ``gang_epoch``."""
+    uri = _done_uri(rendezvous_dir)
+    fs, path = fs_and_path(uri)
+    if not fs.exists(path):
         return False
+    with fs.open(path, "r") as source:
+        result = HeadResult.from_dict(json.load(source))
+    return result.gang_epoch == gang_epoch
 
 
 def clear_rendezvous(rendezvous_dir: str) -> None:
-    """Best-effort delete of the rendezvous + done markers (rank 0, on entry/exit)."""
+    """Best-effort delete of rendezvous state before a new head attempt starts."""
     for name in (RENDEZVOUS_FILENAME, DONE_FILENAME):
         uri = f"{rendezvous_dir.rstrip('/')}/{name}"
         try:
@@ -1119,9 +1144,24 @@ def ray_start_worker(
 
 def ray_stop() -> None:
     try:
-        subprocess.run([_ray_bin(), "stop", "--force"], check=False, timeout=60)
+        completed = subprocess.run(
+            [_ray_bin(), "stop", "--force"],
+            check=False,
+            timeout=60,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
     except subprocess.TimeoutExpired:
         _log("Warning: 'ray stop' timed out")
+        return
+
+    if completed.returncode != 0:
+        detail = next((line.strip() for line in reversed(completed.stdout.splitlines()) if line.strip()), "")
+        suffix = f": {detail[:500]}" if detail else ""
+        _log(f"Warning: 'ray stop' exited {completed.returncode}{suffix}")
+        return
+    _log(f"Ray stop completed (exit {completed.returncode})")
 
 
 def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_cb=None) -> None:
@@ -1682,6 +1722,7 @@ def _persist_failure_artifacts_bounded(action, timeout: float) -> None:
 
 def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifname: str | None = None) -> int:
     num_tasks = _num_tasks()
+    gang_epoch = uuid.uuid4().hex
     head_ip = _own_ip()
     ray_port = args.ray_port
     ray_address = f"{head_ip}:{ray_port}"
@@ -1721,10 +1762,8 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-        if args.rendezvous_dir and num_tasks > 1:
-            _set_marker(args.rendezvous_dir, DONE_FILENAME)
         ray_stop()
-        sys.exit(0)
+        sys.exit(128 + signum)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
@@ -1753,14 +1792,14 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         _log(
             f"[task-runtime] Ray head subprocess returned; writing rendezvous -> {_rendezvous_uri(args.rendezvous_dir)}"
         )
-        write_rendezvous(args.rendezvous_dir, head_ip, ray_port)
+        write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch)
         # Re-publish the rendezvous each poll so a late cold-node worker never sees it
         # as "stale" (see wait_for_nodes docstring — prevents the freshness deadlock).
         wait_for_nodes(
             ray_address,
             num_tasks,
             args.cluster_join_timeout,
-            rewrite_cb=lambda: write_rendezvous(args.rendezvous_dir, head_ip, ray_port),
+            rewrite_cb=lambda: write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch),
         )
     else:
         _log("Single-node slice: skipping rendezvous and multi-node wait.")
@@ -1815,10 +1854,8 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         persist_runtime_artifacts(f"driver exit_code={exit_code} (head)")
     # Signal workers to unpark, then tear down.
     if args.rendezvous_dir and num_tasks > 1:
-        _set_marker(args.rendezvous_dir, DONE_FILENAME)
+        write_head_result(args.rendezvous_dir, gang_epoch)
     ray_stop()
-    if args.rendezvous_dir and num_tasks > 1:
-        clear_rendezvous(args.rendezvous_dir)
     return exit_code
 
 
@@ -1862,8 +1899,11 @@ def run_worker(args: argparse.Namespace) -> int:
     ray_log_sync_stop = ray_log_sync.start_periodic(args.rendezvous_dir)
 
     stop = threading.Event()
+    termination_signal: int | None = None
 
     def _shutdown(signum, _frame) -> None:
+        nonlocal termination_signal
+        termination_signal = termination_signal or signum
         _log(f"Worker rank {rank} received signal {signum}; stopping Ray.")
         # A SIGTERM on a worker node is often a k8s eviction/OOM of that node (it
         # hosts the training actors' GPUs); capture its disk/GPU state before reap.
@@ -1876,13 +1916,17 @@ def run_worker(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Block until the head publishes the done marker (training finished) or we
-    # are signalled. The training driver on rank 0 schedules actors onto this
-    # node's GPUs; this process just keeps the Ray node alive.
+    # Exit successfully only after the current head attempt publishes success.
+    # A signal without that result tears down Ray but remains a non-successful
+    # task outcome so Iris cannot mistake a bounced gang peer for completed work.
+    head_completed = False
     with ray_metrics_telemetry(node_ip, RAY_METRICS_EXPORT_PORT, WORKER_ROLE):
-        while not stop.is_set():
-            if _marker_exists(args.rendezvous_dir, DONE_FILENAME, min_written_at=worker_start):
-                _log(f"Worker rank {rank} saw head done-marker; shutting down.")
+        while True:
+            if head_succeeded(args.rendezvous_dir, payload.gang_epoch):
+                head_completed = True
+                _log(f"Worker rank {rank} saw successful head result; shutting down.")
+                break
+            if stop.is_set():
                 break
             time.sleep(POLL_INTERVAL)
         # Final flush of this worker node's Ray session logs before Ray teardown.
@@ -1890,7 +1934,10 @@ def run_worker(args: argparse.Namespace) -> int:
         ray_log_sync.sync_bounded(f"worker rank {rank} teardown")
         sync_debug_artifacts(args.rendezvous_dir, node_id, f"worker rank {rank} teardown")
     ray_stop()
-    return 0
+    if head_completed:
+        return 0
+    assert termination_signal is not None
+    return 128 + termination_signal
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:

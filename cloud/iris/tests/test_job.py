@@ -699,6 +699,7 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
     assert _git_commit(checkout) == commit
     expected_uv_args = [
         "sync",
+        "--quiet",
         "--project",
         str(checkout),
         "--python",

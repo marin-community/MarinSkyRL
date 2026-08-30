@@ -23,7 +23,7 @@ from skyrl_train.hf_export_schema import (
 from skyrl_train.hf_publisher import HuggingFacePublisher
 from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
     policy_per_gpu_bundles_enabled,

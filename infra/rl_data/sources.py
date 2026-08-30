@@ -19,6 +19,7 @@ from infra.rl_data.contracts import VerifierDataContract
 RLVR_MATH_DATASET = "allenai/RLVR-MATH"
 RLVR_IFEVAL_DATASET = "allenai/RLVR-IFeval"
 DAPO_MATH_DATASET = "BytedTsinghua-SIA/DAPO-Math-17k"
+AIME24_DATASET = "HuggingFaceH4/aime_2024"
 MATH500_DATASET = "HuggingFaceH4/MATH-500"
 DEEPSCALER_DATASET = "agentica-org/DeepScaleR-Preview-Dataset"
 GSM8K_DATASET = "openai/gsm8k"
@@ -31,7 +32,7 @@ HH_RLHF_DATASET = "Anthropic/hh-rlhf"
 EURUS2_DATASET = "PRIME-RL/Eurus-2-RL-Data"
 NEMOTRON_DATASET = "nvidia/Llama-Nemotron-Post-Training-Dataset"
 REASONING_GYM_DATASET = "open-thought/reasoning-gym"
-TEST_ONLY_SOURCE_LABELS = {"math500": "MATH-500"}
+TEST_ONLY_SOURCE_LABELS = {"aime24": "AIME24", "math500": "MATH-500"}
 TEST_ONLY_SOURCE_NAMES = frozenset(TEST_ONLY_SOURCE_LABELS)
 
 _DAPO_LEADING_MARKERS = ("The last line of your response", "Solve the following math problem")
@@ -142,11 +143,25 @@ def _prepare_dapo_math(example: Mapping[str, Any], index: int, contract: Verifie
     )
 
 
-def _prepare_math500(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+def _prepare_problem_answer_math(
+    example: Mapping[str, Any],
+    index: int,
+    contract: VerifierDataContract,
+    source: Source,
+    label: str,
+) -> PreparedRow:
     problem = example.get("problem")
     if not isinstance(problem, str):
-        raise TypeError("MATH-500 row problem must be a string.")
-    return _math_row(problem, example.get("answer"), math500_source(), index, contract)
+        raise TypeError(f"{label} row problem must be a string.")
+    return _math_row(problem, example.get("answer"), source, index, contract)
+
+
+def _prepare_math500(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    return _prepare_problem_answer_math(example, index, contract, math500_source(), "MATH-500")
+
+
+def _prepare_aime24(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    return _prepare_problem_answer_math(example, index, contract, aime24_source(), "AIME24")
 
 
 def _prepare_rlvr_ifeval(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
@@ -175,6 +190,10 @@ def math500_source() -> Source:
     return Source("math500", MATH500_DATASET, "aime", "test", False, "two_sided", _prepare_math500)
 
 
+def aime24_source() -> Source:
+    return Source("aime24", AIME24_DATASET, "aime", "train", False, "two_sided", _prepare_aime24)
+
+
 def rlvr_ifeval_source() -> Source:
     return Source("rlvr_ifeval", RLVR_IFEVAL_DATASET, "ifeval", "train", False, "schema_only", _prepare_rlvr_ifeval)
 
@@ -185,11 +204,7 @@ def rlvr_ifeval_source() -> Source:
 
 
 def _prepare_deepscaler(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
-    source = deepscaler_source()
-    problem = example.get("problem")
-    if not isinstance(problem, str):
-        raise TypeError("DeepScaleR row problem must be a string.")
-    return _math_row(problem, example.get("answer"), source, index, contract)
+    return _prepare_problem_answer_math(example, index, contract, deepscaler_source(), "DeepScaleR")
 
 
 def _gsm8k_extract_answer(answer_text: str) -> str:
@@ -686,6 +701,7 @@ SOURCES = {
     for source in (
         rlvr_math_source(),
         dapo_math_source(),
+        aime24_source(),
         math500_source(),
         rlvr_ifeval_source(),
         deepscaler_source(),

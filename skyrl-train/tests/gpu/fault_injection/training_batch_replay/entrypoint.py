@@ -13,7 +13,8 @@ from omegaconf import DictConfig, OmegaConf
 import ray
 
 from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
-from skyrl_train.utils.trainer_utils import extract_step_from_path, ResumeMode
+from skyrl_train.checkpoint_listing import extract_step_from_path
+from skyrl_train.utils.trainer_utils import ResumeMode
 from tests.training_batch_replay import (
     BatchReplayProvenance,
     CapturingFullyAsyncRayPPOTrainer,

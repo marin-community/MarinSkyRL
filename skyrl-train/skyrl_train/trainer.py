@@ -39,7 +39,7 @@ from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
 from skyrl_train.utils import trainer_utils
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
 from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
@@ -59,12 +59,12 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import GroupAdvantageInvariant, assert_training_groups_eligible
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
+from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
     run_on_each_node,
     get_node_ids,
-    extract_step_from_path,
     validate_consistency_for_latest_checkpoint,
     ResumeMode,
     DynamicSamplingState,
@@ -147,6 +147,7 @@ class RayPPOTrainer:
         self.all_timings = {}
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
+        self._shutdown_complete = False
         self.global_step = 0
 
         # initialized in `build_models`
@@ -349,6 +350,13 @@ class RayPPOTrainer:
         # ensures the process eventually terminates.
         self._start_exit_watchdog(timeout=120)
 
+    async def shutdown(self) -> None:
+        """Run trainer teardown once, including after partial startup."""
+        if getattr(self, "_shutdown_complete", False):
+            return
+        await self._teardown()
+        self._shutdown_complete = True
+
     @staticmethod
     def _start_exit_watchdog(timeout: int = 120) -> None:
         """Start a daemon thread that force-exits the process after *timeout* seconds."""
@@ -365,18 +373,19 @@ class RayPPOTrainer:
         """
         Main training loop for PPO
         """
-        await self._startup_trajectory_runner()
-
         try:
+            await self._startup_trajectory_runner()
             await self._train_loop()
         finally:
-            await self._teardown()
+            await self.shutdown()
 
     async def _startup_trajectory_runner(self) -> None:
         """Initialize trajectory-runner resources before any rollout can begin."""
+        implementation = type(self.trajectory_runner).__name__
+        logger.info("Starting trajectory runner: implementation={}", implementation)
         try:
             await self.trajectory_runner.startup()
-            logger.info("Trajectory runner startup complete")
+            logger.info("Trajectory runner ready: implementation={}", implementation)
         except Exception as e:
             logger.opt(depth=0).error("Trajectory runner startup failed: " + str(e))
             raise
@@ -393,9 +402,6 @@ class RayPPOTrainer:
             f"({self.total_training_steps}); run is already COMPLETE. Skipping further "
             f"training and finalizing (export/upload if missing)."
         )
-        if self.colocate_all:
-            self.policy_model.backload_to_gpu()
-
         await self._finalize_training(
             completed_step=self.global_step,
             epoch=max(self.cfg.trainer.epochs - 1, 0),
@@ -403,7 +409,7 @@ class RayPPOTrainer:
         logger.info("Training already complete on resume — exiting cleanly.")
 
     async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
-        """Run train-end callbacks and saves at the last completed optimizer step."""
+        """Run train-end callbacks, evaluation, and saves at the last completed optimizer step."""
         self.global_step = completed_step
         final_state = self._create_trainer_state(epoch=epoch)
         self._control.reset()
@@ -411,13 +417,28 @@ class RayPPOTrainer:
             "on_train_end", final_state, self._control, trainer=self
         )
 
-        if self._control.should_save:
-            with Timer("save_checkpoints", self.all_timings):
-                await asyncio.to_thread(self.save_checkpoints)
-                logger.info("Saved final checkpoint.")
-            await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
-        if self._control.should_save_hf_model:
-            await asyncio.to_thread(self.handle_hf_export)
+        try:
+            if self._control.should_evaluate and self.eval_dataset is not None:
+                with Timer("eval", self.all_timings):
+                    eval_metrics = await self.eval()
+                    self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
+                    self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+                await self.callback_handler.call_event_async(
+                    "on_evaluate", final_state, self._control, metrics=eval_metrics, trainer=self
+                )
+                self._control.should_evaluate = False
+        finally:
+            if self.colocate_all:
+                await self.inference_engine_client.sleep()
+                self.policy_model.backload_to_gpu()
+
+            if self._control.should_save:
+                with Timer("save_checkpoints", self.all_timings):
+                    await asyncio.to_thread(self.save_checkpoints)
+                    logger.info("Saved final checkpoint.")
+                await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
+            if self._control.should_save_hf_model:
+                await asyncio.to_thread(self.handle_hf_export)
 
     async def _save_checkpoints_with_residency(self) -> None:
         """Save a checkpoint, swapping colocated training and inference residency when needed."""
@@ -430,7 +451,7 @@ class RayPPOTrainer:
             self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
             await asyncio.to_thread(self.save_checkpoints)
         finally:
-            await self._sync_policy_for_rollouts()
+            await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
     def _record_checkpoint_save_failure(self, state: TrainerState) -> None:
         self._checkpoint_save_failures += 1.0
@@ -463,15 +484,49 @@ class RayPPOTrainer:
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
         await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
-    async def _sync_policy_for_rollouts(self) -> None:
-        if self.colocate_all:
-            try:
-                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-            finally:
-                await self._sync_weights_and_restore_rollout_residency()
-        else:
-            with Timer("sync_weights", self.all_timings):
-                ray.get(self.sync_policy_weights_to_inference_engines())
+    async def _sync_policy_for_rollouts(self, *, reason: str) -> None:
+        with Timer("publish_policy_weights", log_events=False) as update_timer:
+            if self.colocate_all:
+                try:
+                    self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+                finally:
+                    await self._sync_weights_and_restore_rollout_residency()
+            else:
+                with Timer("sync_weights", self.all_timings):
+                    ray.get(self.sync_policy_weights_to_inference_engines())
+        self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
+
+    def _log_weight_update_completed(self, *, reason: str, duration_seconds: float) -> None:
+        logger.info(
+            "Policy weights updated: step={} reason={} duration_seconds={:.3f}",
+            getattr(self, "global_step", None),
+            reason,
+            duration_seconds,
+        )
+
+    def _log_optimizer_step_completed(
+        self,
+        *,
+        epoch: int,
+        training_input: TrainingInputBatch,
+        duration_seconds: float,
+    ) -> None:
+        logger.info(
+            "Optimizer step completed: step={} epoch={} sequences={} duration_seconds={:.3f}",
+            self.global_step,
+            epoch,
+            len(training_input["sequences"]),
+            duration_seconds,
+        )
+
+    def _log_training_step_completed(self, *, epoch: int, duration_seconds: float) -> None:
+        logger.info(
+            "Training step completed: step={} total_steps={} epoch={} duration_seconds={:.3f}",
+            self.global_step,
+            self.total_training_steps,
+            epoch,
+            duration_seconds,
+        )
 
     async def _train_loop(self):
         """
@@ -494,20 +549,14 @@ class RayPPOTrainer:
             with Timer("load_checkpoints", self.all_startup_timings):
                 self.global_step, _ = self.load_checkpoints()
 
-            # Resume-overshoot guard: if we resumed AT or PAST max_steps the run is
-            # already complete. The loaded `global_step` is the *completed* step count
-            # (save_checkpoints writes it after a step finishes), so the unconditional
-            # `self.global_step += 1` below would push us to gs N+1 and run one spurious
-            # ("overshoot") step before the post-increment max_steps check fires. Recognize
-            # completion here and exit 0 cleanly (firing on_train_end so a missing final
-            # export/upload still runs). `>=` treats "resumed exactly at max_steps" as done;
-            # a mid-training resume (global_step < total_training_steps) falls through.
-            if self.global_step >= self.total_training_steps:
-                self._log_startup_timings()
-                await self._handle_resume_at_max_steps()
-                return
+        await self._sync_policy_for_rollouts(reason="initial")
 
-        await self._sync_policy_for_rollouts()
+        # Synchronize before checking completion so a requested final evaluation uses
+        # the checkpoint weights. The loaded global_step is the completed step count;
+        # >= treats a resume exactly at max_steps as complete without running gs N+1.
+        if self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
+            await self._handle_resume_at_max_steps()
+            return
 
         self._log_startup_timings()
 
@@ -540,7 +589,7 @@ class RayPPOTrainer:
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
-                with Timer("step", self.all_timings):
+                with Timer("step", self.all_timings) as step_timer:
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
 
                     # 0. truncate data to have even shards
@@ -636,9 +685,15 @@ class RayPPOTrainer:
                         critical_phase("train_step", self.global_step),
                     ):
                         status = self.train_critic_and_policy(training_input)
+                    train_duration = self.all_timings["train_critic_and_policy"]
+                    self._log_optimizer_step_completed(
+                        epoch=epoch,
+                        training_input=training_input,
+                        duration_seconds=train_duration,
+                    )
 
                     # 5. sync weights to inference engines (must happen before callbacks)
-                    await self._sync_policy_for_rollouts()
+                    await self._sync_policy_for_rollouts(reason="training_step")
 
                 # 6. Log status and update metrics
                 logger.info(status)
@@ -712,6 +767,11 @@ class RayPPOTrainer:
                         "on_log", step_state, self._control, logs=log_payload, trainer=self
                     )
 
+                self._log_training_step_completed(
+                    epoch=epoch,
+                    duration_seconds=step_timer.duration,
+                )
+
                 self.all_metrics = {}
                 record_step_timings(self.all_timings, self.global_step)
                 self.all_timings = {}
@@ -750,10 +810,6 @@ class RayPPOTrainer:
 
         # End of training
         pbar.close()
-        if self.colocate_all:
-            await self.inference_engine_client.sleep()
-            self.policy_model.backload_to_gpu()
-
         await self._finalize_training(
             completed_step=last_completed_step,
             epoch=self.cfg.trainer.epochs - 1,
@@ -1052,7 +1108,11 @@ class RayPPOTrainer:
             )
         except ray.exceptions.RayError as e:
             raise RuntimeError(f"init_weight_sync_state failed at Ray boundary: {e!r}") from None
-        logger.info("Initialized weight sync state for policy model and inference engines.")
+        logger.info(
+            "Weight sync ready: policy_workers={} inference_engines={}",
+            len(self.policy_model.actor_infos),
+            len(self.inference_engine_client.engines),
+        )
 
     def _resolve_num_experts(self) -> Optional[int]:
         """Resolve the policy model's MoE expert count from its HF config, memoized.
@@ -1271,6 +1331,12 @@ class RayPPOTrainer:
         - after calling this method, the same model placement still holds.
         """
         # Runners preserve the input sample order.
+        started_at = time.monotonic()
+        logger.info(
+            "Rollout batch started: step={} mode=synchronous prompts={}",
+            self.global_step,
+            len(input_batch["prompts"]),
+        )
         trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
         # add rollout metrics to self.all_metrics
         if trajectory_batch["rollout_metrics"] is not None:
@@ -1279,6 +1345,16 @@ class RayPPOTrainer:
         if not self.cfg.trainer.step_wise_training:
             validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
         record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"), self.global_step)
+        response_tokens = sum(len(response_ids) for response_ids in trajectory_batch["response_ids"])
+        logger.info(
+            "Rollout batch completed: step={} mode=synchronous prompts={} trajectories={} "
+            "response_tokens={} duration_seconds={:.3f}",
+            self.global_step,
+            len(input_batch["prompts"]),
+            len(trajectory_batch["response_ids"]),
+            response_tokens,
+            time.monotonic() - started_at,
+        )
 
         return trajectory_batch
 
@@ -1992,7 +2068,7 @@ class RayPPOTrainer:
         logger.info(f"Saved trainer state to {trainer_state_path}")
 
         # Atomic tracking - write this last after all saves succeed
-        latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
+        latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
         with io.open_file(latest_checkpoint_file, "w") as f:
             f.write(str(self.global_step))
 
@@ -2053,7 +2129,7 @@ class RayPPOTrainer:
             return 0, None
         # first, let's get resume_path
         elif self.resume_mode == ResumeMode.LATEST:
-            latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
+            latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
             if not io.exists(latest_checkpoint_file):
                 logger.warning(
                     f"resume_mode=latest found no checkpoint marker at {latest_checkpoint_file}; "

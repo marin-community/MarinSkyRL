@@ -6,7 +6,7 @@ For a given job it syncs:
   (1) ray_session_logs  — the per-actor Ray logs (worker-*.out/.err, python-*, raylet, gcs) from the
       durable object store, reached via the LOTA endpoint cwobject.com + the in-cluster `iris-task-env`
       creds + virtual addressing. Three layouts are supported (see "Ray-log layouts" below):
-        - current:      `s3://<bucket>/marin/users/<user>/skyrl/<job>/ray_session_logs/`
+        - current:      `s3://<bucket>/tmp/ttl=<N>d/skyrl/users/<user>/<job>/ray_session_logs/`
         - agentic:     `s3://marin-us-east-02a/iris/<slug>/<run>/ray_session_logs/`
         - non-agentic: `s3://marin-us-east-02a/iris/<rendezvous>/ray_session_logs/` (e.g. `iris/rl-rdv/<job>/`)
   (2) finelog.log       — the aggregated controller/job finelog via `iris job logs --no-tail`.
@@ -16,7 +16,7 @@ For a given job it syncs:
       so we never materialize the tree on the (unified-memory) Mac: one archive, not millions of inodes.
 
 Ray-log layouts:
-  Current launches publish Ray logs to the durable user-owned path printed as `Ray logs: <uri>` in the launcher banner.
+  Current launches publish Ray logs to the lifecycle-managed tmp/ttl path printed as `Ray logs: <uri>` in the launcher banner.
   Pass that URI with `--ray-log-dir` or let the tool derive it from finelog. Historical agentic jobs use
   `iris/<slug>/run-<ts>/ray_session_logs/`, with the newest `run-*` auto-discovered. Historical non-agentic jobs place
   logs below their rendezvous URI; pass `--rendezvous-dir` or let the tool derive that URI from finelog.

@@ -175,7 +175,7 @@ def resolve_storage_paths(policy: RLStoragePolicy) -> RLStoragePaths:
         resume_checkpoint_count = _configured_checkpoint_count(policy)
 
     rendezvous_root = policy.rendezvous_dir or join_resource_path(temporary_root, "rendezvous")
-    ray_log_root = join_resource_path(durable_root, "ray_session_logs")
+    ray_log_root = join_resource_path(temporary_root, "ray_session_logs")
     resolved_config_uri = policy.resolved_config_uri
     if resolved_config_uri is None and not policy.checkpoint_export:
         resolved_config_uri = join_resource_path(durable_root, "resolved-skyrl.json")
@@ -189,7 +189,7 @@ def resolve_storage_paths(policy: RLStoragePolicy) -> RLStoragePaths:
     _validate_temporary_path("raw traces", trace_root)
     _validate_temporary_path("retained trajectories", trajectory_root)
     _validate_temporary_path("rendezvous data", rendezvous_root)
-    _validate_durable_path("Ray session logs", ray_log_root)
+    _validate_temporary_path("Ray session logs", ray_log_root)
     _validate_durable_path("canonical exports", export_root)
     if resolved_config_uri is not None:
         _validate_durable_path("resolved launch configuration", resolved_config_uri)

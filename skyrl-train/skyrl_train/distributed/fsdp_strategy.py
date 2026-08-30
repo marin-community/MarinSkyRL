@@ -22,7 +22,7 @@ from skyrl_train.distributed.bf16_adamw import BFloat16UpdateMode, build_adamw, 
 from skyrl_train.distributed.optimizer_learning_rates import validate_optimizer_learning_rates
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
-from skyrl_train.utils.io import io
+from skyrl_train.io import io
 from skyrl_train.utils.constants import validate_worker_collective_timeout_seconds
 from skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
@@ -669,7 +669,7 @@ class FSDPStrategy(DistributedStrategy):
                 if arch.startswith("FSDP"):
                     # Remove "FSDP" prefix (for fsdp2)
                     fixed_arch = arch[len("FSDP") :]
-                    self.print(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
+                    self.log(f"[rank-0]: Fixed architecture name: {arch} -> {fixed_arch}")
                 fixed_architectures.append(fixed_arch)
 
             config_to_save.architectures = fixed_architectures
@@ -700,7 +700,7 @@ class FSDPStrategy(DistributedStrategy):
             with io.open_file(os.path.join(lora_save_path, "adapter_config.json"), "w") as f:
                 json.dump(peft_config, f, ensure_ascii=False, indent=4)
 
-            self.print(f"[rank-0]: Saved LoRA adapter to: {lora_save_path}")
+            self.log(f"[rank-0]: Saved LoRA adapter to: {lora_save_path}")
 
         dist.barrier()
 
@@ -753,7 +753,7 @@ class FSDPStrategy(DistributedStrategy):
                 with get_fsdp_state_ctx(save_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
                     # Get and save model state dict
                     model_state_dict = save_model.state_dict()
-                    self.print(f"[rank-{rank}]: Saving model to {model_path}")
+                    self.log(f"[rank-{rank}]: Saving model to {model_path}")
                     with io.open_file(model_path, "wb") as f:
                         torch.save(model_state_dict, f)
 
@@ -761,7 +761,7 @@ class FSDPStrategy(DistributedStrategy):
                     optimizer_state_dict = {}
                     if optimizer is not None:
                         optimizer_state_dict = optimizer.state_dict()
-                    self.print(f"[rank-{rank}]: Saving optim to {optim_path}")
+                    self.log(f"[rank-{rank}]: Saving optim to {optim_path}")
                     with io.open_file(optim_path, "wb") as f:
                         torch.save(optimizer_state_dict, f)
 
@@ -782,7 +782,7 @@ class FSDPStrategy(DistributedStrategy):
                     }
 
                     # Save extra state
-                    self.print(f"[rank-{rank}]: Saving extra_state to {extra_path}")
+                    self.log(f"[rank-{rank}]: Saving extra_state to {extra_path}")
                     with io.open_file(extra_path, "wb") as f:
                         torch.save(extra_state_dict, f)
 
@@ -807,7 +807,7 @@ class FSDPStrategy(DistributedStrategy):
         dist.barrier()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-        self.print(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
+        self.log(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
 
     def load_checkpoint(
         self,
@@ -847,11 +847,11 @@ class FSDPStrategy(DistributedStrategy):
             raise FileNotFoundError(f"Extra state checkpoint not found: {extra_path}")
         optim_exists = load_training_state and io.exists(optim_path)
 
-        self.print(f"[rank-{rank}]: Loading model from {model_path}")
+        self.log(f"[rank-{rank}]: Loading model from {model_path}")
         if load_training_state:
-            self.print(f"[rank-{rank}]: Loading extra_state from {extra_path}")
+            self.log(f"[rank-{rank}]: Loading extra_state from {extra_path}")
         if optim_exists:
-            self.print(f"[rank-{rank}]: Loading optim from {optim_path}")
+            self.log(f"[rank-{rank}]: Loading optim from {optim_path}")
 
         checkpoint_paths = [model_path]
         if optim_exists:
@@ -885,17 +885,17 @@ class FSDPStrategy(DistributedStrategy):
             with get_fsdp_state_ctx(load_model, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
                 # Load model state dict
                 load_model.load_state_dict(model_state_dict, strict=load_module_strict)
-                self.print(f"[rank-{rank}]: Successfully loaded model state dict")
+                self.log(f"[rank-{rank}]: Successfully loaded model state dict")
 
                 # Load optimizer state dict if optimizer object is provided and loading is requested
                 if optimizer is not None and optimizer_state_dict:
                     optimizer.load_state_dict(optimizer_state_dict)
-                    self.print(f"[rank-{rank}]: Successfully loaded optimizer state")
+                    self.log(f"[rank-{rank}]: Successfully loaded optimizer state")
 
                 # Load scheduler state dict if scheduler object is provided and loading is requested
                 if scheduler is not None and load_training_state:
                     scheduler.load_state_dict(lr_scheduler_state_dict)
-                    self.print(f"[rank-{rank}]: Successfully loaded scheduler state")
+                    self.log(f"[rank-{rank}]: Successfully loaded scheduler state")
 
         # Load RNG state for reproducibility
         if load_training_state and "rng" in extra_state_dict:
@@ -914,7 +914,7 @@ class FSDPStrategy(DistributedStrategy):
             "rank": extra_state_dict.get("rank", rank),
         }
 
-        self.print(f"[rank-{rank}]: Checkpoint loaded successfully from {ckpt_dir}")
+        self.log(f"[rank-{rank}]: Checkpoint loaded successfully from {ckpt_dir}")
 
         return ckpt_dir, states
 
@@ -925,7 +925,7 @@ class FSDPStrategy(DistributedStrategy):
         # Step 1: Create output directory (rank 0 only)
         if self.is_rank_0():
             io.makedirs(output_dir, exist_ok=True)
-            self.print(f"[rank-0]: Created output directory: {output_dir}")
+            self.log(f"[rank-0]: Created output directory: {output_dir}")
 
         # Step 2: Extract models - get both the model for saving metadata and the FSDP model for state dict
         model_to_save = self._unwrap_model(model)  # For saving config/metadata
@@ -937,8 +937,8 @@ class FSDPStrategy(DistributedStrategy):
 
         # Step 3: Determine FSDP version and collect full state dict
         fsdp_ver = fsdp_version(fsdp_model)
-        self.print(f"[rank-{self.get_rank()}]: Detected FSDP version: {fsdp_ver}")
-        self.print(f"[rank-{self.get_rank()}]: Gathering full state dict for HF export")
+        self.log(f"[rank-{self.get_rank()}]: Detected FSDP version: {fsdp_ver}")
+        self.log(f"[rank-{self.get_rank()}]: Gathering full state dict for HF export")
 
         if fsdp_ver == 2:
             # Use FSDP2 API - collects on rank 0 only
@@ -954,7 +954,7 @@ class FSDPStrategy(DistributedStrategy):
             raise ValueError(f"Unsupported FSDP version: {fsdp_ver}")
 
         if self.is_rank_0():
-            self.print(f"Gathered {len(output_state_dict)} tensors for HF export")
+            self.log(f"Gathered {len(output_state_dict)} tensors for HF export")
 
         # Step 4: Save on rank 0 only
         if self.is_rank_0():
@@ -969,9 +969,9 @@ class FSDPStrategy(DistributedStrategy):
             output_state_dict = self._maybe_remap_grouped_moe_state_dict(output_state_dict)
 
             with hf_model_io.local_hf_model_dir(output_dir) as work_dir:
-                self.print(f"[rank-0]: Serializing {len(output_state_dict)} tensors to HF safetensors")
+                self.log(f"[rank-0]: Serializing {len(output_state_dict)} tensors to HF safetensors")
                 model_to_save.save_pretrained(work_dir, state_dict=output_state_dict, safe_serialization=True, **kwargs)
-                self.print("[rank-0]: Finished serializing HF safetensors")
+                self.log("[rank-0]: Finished serializing HF safetensors")
 
                 # Fix and save the config
                 config_to_save = self._fix_fsdp_config(model_to_save.config)
@@ -981,7 +981,7 @@ class FSDPStrategy(DistributedStrategy):
                 if tokenizer is not None:
                     tokenizer.save_pretrained(work_dir)
 
-            self.print(f"[rank-0]: Successfully saved model to {output_dir}")
+            self.log(f"[rank-0]: Successfully saved model to {output_dir}")
 
         # The Ray caller waits for every rank result. A trailing process-group
         # barrier would only make idle ranks inherit rank 0's serialization timeout.
