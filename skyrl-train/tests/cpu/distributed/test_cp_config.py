@@ -121,6 +121,12 @@ EXPERT_LOADER_FIELDS = {
 ADDITIVE_TRAINING_OPTIMIZER_FIELDS = {
     "fsdp_parameter_storage_dtype": None,
 }
+# Additive curriculum-sampling subtree under `data`. Default `kind: null` keeps
+# the stock shuffled sampler, so the tree is behavior-preserving and stripped
+# before the structural-identity comparison against the pre-CP golden.
+ADDITIVE_DATA_FIELDS = {
+    "sampling": None,
+}
 
 
 # ----------------------------------------------------------------------------- G0
@@ -174,6 +180,8 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         container["trainer"]["policy"].pop(k, None)
     for k in ADDITIVE_OVERLONG_FIELDS:
         container["generator"]["trajectory_reward_shaping"]["overlong"].pop(k, None)
+    for k in ADDITIVE_DATA_FIELDS:
+        container["data"].pop(k, None)
     container["trainer"]["placement"].pop("enable_numa_affinity", None)
     container["trainer"]["policy"].pop("host_memory_monitor", None)
     container["trainer"]["algorithm"].pop("tis_splice", None)
