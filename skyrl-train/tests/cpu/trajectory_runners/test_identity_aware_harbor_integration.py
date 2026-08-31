@@ -1,13 +1,14 @@
 from types import SimpleNamespace
 
 import pytest
-from skyrl_gym.verification import RewardResult, VerificationStatus
+from skyrl_gym.verification import RewardResult
 
 try:
     from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner
 except ImportError:
     pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
 
+from harbor.verifier.verifier import VerifierOutputParseError
 from skyrl_train.metric_names import IDENTITY_AWARE_REWARD_METRIC_PREFIX
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
@@ -106,7 +107,7 @@ def test_identity_aware_shaping_preserves_the_downstream_truncation_penalty(veri
     assert [output.reward_result.optimization_reward for output in outputs] == [0.75, 0.0]
 
 
-def test_unrecognized_verifier_output_is_reported_as_a_verifier_failure():
+def test_unrecognized_verifier_output_is_binned_as_a_verifier_failure():
     runner = object.__new__(HarborTrajectoryRunner)
     runner._error_handling_config = ErrorHandlingConfig(enable_error_classification=True)
     runner._reward_shaping_enabled = True
@@ -129,8 +130,9 @@ def test_unrecognized_verifier_output_is_reported_as_a_verifier_failure():
         ),
     )
 
-    output = runner._process_trial_result(result, TrajectoryID(instance_id="task", repetition_id=0))
+    with pytest.raises(VerifierOutputParseError):
+        runner._process_trial_result(result, TrajectoryID(instance_id="task", repetition_id=0))
 
-    assert output.verification.status is VerificationStatus.ERROR
-    assert output.disposition.exception_type == "VerifierOutputParseError"
-    assert output.disposition.baseline_eligible is False
+    treatment, exception_type = runner._classify_exception(VerifierOutputParseError("unrecognized output"))
+    assert treatment == "mask"
+    assert exception_type == "VerifierOutputParseError"

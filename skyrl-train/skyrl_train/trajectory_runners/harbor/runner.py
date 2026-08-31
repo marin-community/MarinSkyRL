@@ -2018,24 +2018,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 preserve_timeout=preserve_timeout,
                 parsed_tests=parsed_tests,
             )
-        except Exception as error:
-            verifier_error = VerifierOutputParseError("could not interpret verifier output for reward shaping")
-            treatment, exception_type = self._classify_exception(verifier_error)
-            exclude_from_baseline = treatment_excludes_from_baseline(treatment, verifier_available=False)
-            logger.warning(
-                f"Trajectory {trajectory_id} failed while interpreting verifier output: "
-                f"{type(error).__name__}: {error} "
-                f"(exception_type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
-            )
-            return _failed_agent_output(
-                trajectory_id=trajectory_id,
-                verification=VerificationResult.error(
-                    "could not interpret verifier output for reward shaping",
-                    diagnostics={"exception_type": exception_type, "cause": type(error).__name__},
-                ),
-                exception_type=exception_type,
-                exclude_from_baseline=exclude_from_baseline,
-            )
+        except ValueError as error:
+            raise VerifierOutputParseError("could not interpret verifier output for reward shaping") from error
         original_reward = reward_result.unshaped_reward or 0.0
         reward = reward_result.optimization_reward
 

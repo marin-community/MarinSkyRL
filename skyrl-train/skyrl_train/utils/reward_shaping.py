@@ -646,7 +646,7 @@ class GenericOutputParser(OutputParser):
 
 
 class PassRatioSummaryOutputParser(OutputParser):
-    """Parse verifier summaries such as ``Results: 13/20 passed (ratio=0.65)``."""
+    """Parse pass-ratio summaries and explicit no-solution failures."""
 
     SUMMARY_PATTERN = re.compile(
         r"^Results:\s*(\d+)\s*/\s*(\d+)\s+passed(?:\s*\(ratio\s*=\s*[\d.]+\))?\s*$",
