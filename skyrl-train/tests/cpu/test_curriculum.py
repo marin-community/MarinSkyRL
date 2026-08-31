@@ -135,6 +135,50 @@ def test_learnability_concentrates_on_mid_pass_rate_bin():
     assert sampler.weights[1] > sampler.weights[2]
 
 
+def _starved_bin_weights(reversion_mass):
+    """Drive bin 0 at a 50% pass rate and bin 1 with one all-fail group of 8 rollouts per
+    step — the epsilon-floor trickle of a starved bin. Returns per-bin weights averaged
+    over the last 10 of 20 steps."""
+    sampler = _sampler({"g0-mid": (0, 4), "g1-dead": (1, 4)}, "learnability", seed=2, reversion_mass=reversion_mass)
+    mid, dead = [1.0] * 4 + [0.0] * 4, [0.0] * 8
+    weight_sum = np.zeros(2)
+    for step in range(20):
+        sampler.update(["0"] * 8 + ["4"] * 8, mid + dead, 8)
+        if step >= 10:
+            weight_sum += sampler.weights
+    return weight_sum / 10
+
+
+def test_reversion_mass_recovers_starved_bin():
+    # Without reversion the floor trickle re-confirms pass 0 forever, so the bin stays
+    # pinned near the epsilon floor (0.05 / 2 per bin).
+    starved = _starved_bin_weights(reversion_mass=0.0)
+    assert starved[1] <= 2 * 0.05 / 2
+    # With reversion the bin's pass estimate settles near 2.0 * 0.5 / (8 + 2.0) = 0.1,
+    # lifting its weight back into re-probeable range.
+    recovered = _starved_bin_weights(reversion_mass=2.0)
+    assert recovered[1] >= 0.3 * recovered.max()
+
+
+def test_reversion_mass_barely_moves_actively_sampled_bin():
+    def run(reversion_mass):
+        sampler = _sampler({"g0-mid": (0, 5), "g1-low": (1, 5)}, "learnability", seed=0, reversion_mass=reversion_mass)
+        # 50 rollouts/step per bin: bin 0 (rows 0-4) at pass 0.5, bin 1 (rows 5-9) at 0.2.
+        uids = [str(row) for row in range(10) for _ in range(10)]
+        rewards = ([1.0] * 5 + [0.0] * 5) * 5 + ([1.0] * 2 + [0.0] * 8) * 5
+        weight_sum = np.zeros(2)
+        for step in range(30):
+            sampler.update(uids, rewards, 10)
+            if step >= 20:
+                weight_sum += sampler.weights
+        return weight_sum / 10
+
+    # Real counts dominate: 2.0 pseudo-rollouts against 50 real ones move the actively
+    # sampled bin's normalized weight by well under 5%.
+    without, with_reversion = run(0.0), run(2.0)
+    assert abs(with_reversion[0] - without[0]) / without[0] < 0.05
+
+
 def test_pass_rate_metric_tracks_solved_samples():
     sampler = _sampler(TWO_BINS, "naive")
     sampler.update(["0", "0", "0", "0"], [1.0, 0.0, 0.0, 0.0], 2)

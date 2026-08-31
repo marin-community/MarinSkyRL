@@ -13,6 +13,7 @@ data:
     kind: null # null = stock shuffle; naive|thompson|learnability|grade-uniform|grade-adaptive|grade-prior
     decay: 0.95 # per-step multiplicative decay of bin sufficient stats
     epsilon: 0.05 # per-bin probability floor (thompson/learnability/grade-prior)
+    reversion_mass: 0.0 # per-step pseudo-evidence pulling every bin's belief toward the weight-curve peak
     prior_alpha: 1.0 # Beta prior for thompson (informative rate) and learnability (pass rate)
     prior_beta: 1.0
     grade_prior_strength: 8.0 # total prior pseudo-count per bin (grade-prior)

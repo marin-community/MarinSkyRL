@@ -58,6 +58,7 @@ class CurriculumConfig:
     kind: SamplingKind
     decay: float = 0.95
     epsilon: float = 0.05
+    reversion_mass: float = 0.0
     prior_alpha: float = 1.0
     prior_beta: float = 1.0
     grade_prior_strength: float = 8.0
@@ -81,6 +82,7 @@ class CurriculumConfig:
             kind=SamplingKind(cfg.kind),
             decay=cfg.decay,
             epsilon=cfg.epsilon,
+            reversion_mass=cfg.reversion_mass,
             prior_alpha=cfg.prior_alpha,
             prior_beta=cfg.prior_beta,
             grade_prior_strength=cfg.grade_prior_strength,
@@ -258,6 +260,16 @@ class CurriculumSampler(Sampler[int]):
         self.total = self.config.decay * self.total + step_total
         self.solved = self.config.decay * self.solved + step_solved
         self.samples = self.config.decay * self.samples + step_samples
+        # Bounded belief reversion: every bin gains reversion_mass pseudo-evidence per step
+        # at the weight-curve peak (pass 0.5). A bin pinned at the epsilon floor (~8 real
+        # rollouts/step at pass 0) settles at a pass estimate of
+        # reversion_mass * 0.5 / (8 + reversion_mass), so its weight drifts back to a
+        # re-probeable level; a heavily sampled bin's estimate is dominated by real counts
+        # and barely moves.
+        self.informative += self.config.reversion_mass * 0.5
+        self.total += self.config.reversion_mass
+        self.solved += self.config.reversion_mass * 0.5
+        self.samples += self.config.reversion_mass
         self.step_groups = step_total
         if self.config.kind == SamplingKind.GRADE_ADAPTIVE:
             self._maybe_advance_level()
