@@ -11,6 +11,28 @@ os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 
 import ray  # noqa: E402
 import torch.distributed as dist  # noqa: E402
+from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestCollection  # noqa: E402
+
+
+@pytest.fixture
+def verifier_test_collection_factory():
+    def build(trial: int, outcomes: dict[str, str], *, complete: bool = True) -> VerifierTestCollection:
+        return {
+            "parser": "test",
+            "complete": complete,
+            "tests": [
+                {
+                    "record_id": f"trial-{trial}:{test_id}",
+                    "trial_id": TrajectoryID(instance_id="task", repetition_id=trial),
+                    "test_id": test_id,
+                    "outcome": outcome,
+                    "output": f"{test_id}: {outcome}",
+                }
+                for test_id, outcome in outcomes.items()
+            ],
+        }
+
+    return build
 
 
 def _kill_registry_actors() -> None:

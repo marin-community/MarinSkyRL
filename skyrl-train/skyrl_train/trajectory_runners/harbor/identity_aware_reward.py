@@ -5,11 +5,12 @@ import math
 from numbers import Real
 
 from skyrl_train.trajectory_runners.types import VerifierTestCollection, VerifierTestRecord
+from skyrl_train.utils.reward_shaping import VerifierTestOutcome
 
 
 IDENTITY_AWARE_SHAPER = "identity_aware_pass_ratio"
 
-TestWeightFilter = Callable[[VerifierTestRecord], float | bool | None]
+TestWeightFilter = Callable[[VerifierTestRecord], float]
 
 
 class IdentityAwareFallback(StrEnum):
@@ -39,12 +40,7 @@ def _record_weight(
     weight = _weight(exact_weights.get(record["record_id"], 1.0), source=f"weight for {record['record_id']}")
     if weight_filter is None:
         return weight
-    filtered = weight_filter(record)
-    if filtered is None or filtered is False:
-        return 0.0
-    if filtered is True:
-        return weight
-    return weight * _weight(filtered, source=f"filter weight for {record['record_id']}")
+    return weight * _weight(weight_filter(record), source=f"filter weight for {record['record_id']}")
 
 
 def identity_aware_pass_ratios(
@@ -59,7 +55,7 @@ def identity_aware_pass_ratios(
 
     Incomplete or mismatched test evidence returns the aggregate rewards unchanged.
     Exact weights use the deterministic test-and-trial ``record_id``. A post-hoc
-    filter may exclude a record with ``None``/``False`` or return a multiplier.
+    filter returns a multiplier; a zero multiplier excludes the record.
     """
     if not (len(collections) == len(aggregate_rewards) == len(baseline_eligible)):
         raise ValueError("collections, aggregate_rewards, and baseline_eligible must have equal length")
@@ -104,7 +100,7 @@ def identity_aware_pass_ratios(
         sorted(
             test_id
             for test_id in expected_ids
-            if len({records[test_id]["outcome"] == "passed" for records in records_by_id}) > 1
+            if len({records[test_id]["outcome"] == VerifierTestOutcome.PASSED.value for records in records_by_id}) > 1
         )
     )
     rewards = list(aggregate_rewards)
@@ -116,7 +112,7 @@ def identity_aware_pass_ratios(
             record = records[test_id]
             record_weight = _record_weight(record, weights, weight_filter)
             total_weight += record_weight
-            if record["outcome"] == "passed":
+            if record["outcome"] == VerifierTestOutcome.PASSED.value:
                 passed_weight += record_weight
         rewards[index] = passed_weight / total_weight if total_weight else 0.0
 

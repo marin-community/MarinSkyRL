@@ -17,9 +17,11 @@ from omegaconf import OmegaConf
 try:
     from skyrl_train.trajectory_runners.harbor.configuration import (
         AGENT_SCHEMA,
+        REWARD_SHAPING_SCHEMA,
         HarborConfigBuilder,
         get_exposed_harbor_fields,
     )
+    from skyrl_train.trajectory_runners.harbor.identity_aware_reward import IDENTITY_AWARE_SHAPER
 except ImportError:
     pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
 
@@ -33,6 +35,10 @@ def _agent_kwargs(harbor_cfg: dict) -> dict:
 def test_schema_defaults_are_hygienic():
     assert AGENT_SCHEMA.fields["record_terminal_session"].default is False
     assert AGENT_SCHEMA.fields["trajectory_config"].default == {"raw_content": True}
+
+
+def test_identity_aware_reward_shaping_is_the_default_strategy():
+    assert REWARD_SHAPING_SCHEMA.fields["reward_shaper"].default == IDENTITY_AWARE_SHAPER
 
 
 def test_omitted_keys_get_defaults():
