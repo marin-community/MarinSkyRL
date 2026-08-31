@@ -299,30 +299,17 @@ def _prepare_aime_1983_2024(
     return _math_row(question, str(answer).strip(), source, index, contract)
 
 
-def _prepare_asdiv(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
-    source = asdiv_source()
-    body = example.get("Body")
-    question = example.get("Question")
-    grade = example.get("Grade")
-    if not all(isinstance(value, str) and value for value in (body, question, grade)):
-        raise TypeError("ASDiv rows require Body, Question, and Grade strings.")
-    row = _math_row(
-        f"{body.strip()} {question.strip()}",
-        _plain_numeric_answer(example.get("Answer")),
-        source,
-        index,
-        contract,
-    )
-    row["extra_info"]["grade"] = grade
-    return row
-
-
-def _prepare_svamp(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
-    source = svamp_source()
+def _prepare_numeric_word_problem(
+    example: Mapping[str, Any],
+    index: int,
+    contract: VerifierDataContract,
+    source: Source,
+    label: str,
+) -> PreparedRow:
     body = example.get("Body")
     question = example.get("Question")
     if not all(isinstance(value, str) and value for value in (body, question)):
-        raise TypeError("SVAMP rows require Body and Question strings.")
+        raise TypeError(f"{label} rows require Body and Question strings.")
     return _math_row(
         f"{body.strip()} {question.strip()}",
         _plain_numeric_answer(example.get("Answer")),
@@ -330,6 +317,19 @@ def _prepare_svamp(example: Mapping[str, Any], index: int, contract: VerifierDat
         index,
         contract,
     )
+
+
+def _prepare_asdiv(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    grade = example.get("Grade")
+    if not isinstance(grade, str) or not grade:
+        raise TypeError("ASDiv rows require a Grade string.")
+    row = _prepare_numeric_word_problem(example, index, contract, asdiv_source(), "ASDiv")
+    row["extra_info"]["grade"] = grade
+    return row
+
+
+def _prepare_svamp(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    return _prepare_numeric_word_problem(example, index, contract, svamp_source(), "SVAMP")
 
 
 def _prepare_numina_math(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
