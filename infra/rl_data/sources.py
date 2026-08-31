@@ -6,6 +6,7 @@ import ast
 import itertools
 import json
 import re
+import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import version
@@ -13,6 +14,8 @@ from typing import Any
 
 import numpy as np
 import reasoning_gym
+import requests
+from skyrl_gym.envs.aime.utils import last_boxed_only_string, remove_boxed
 
 from infra.rl_data.contracts import VerifierDataContract
 
@@ -23,6 +26,12 @@ AIME24_DATASET = "HuggingFaceH4/aime_2024"
 MATH500_DATASET = "HuggingFaceH4/MATH-500"
 DEEPSCALER_DATASET = "agentica-org/DeepScaleR-Preview-Dataset"
 GSM8K_DATASET = "openai/gsm8k"
+HENDRYCKS_MATH_DATASET = "EleutherAI/hendrycks_math"
+AIME_1983_2024_DATASET = "di-zhang-fdu/AIME_1983_2024"
+ASDIV_DATASET = "chaochun/nlu-asdiv-dataset"
+SVAMP_DATASET = "ChilleD/SVAMP"
+NUMINA_MATH_DATASET = "AI-MO/NuminaMath-CoT"
+HARDMATH_DATASET = "pafitis/HARDMath_processed_training"
 VERIFIABLE_CODE_DATASET = "open-r1/verifiable-coding-problems-python"
 APPS_DATASET = "codeparrot/apps"
 GPQA_DATASET = "Idavidrein/gpqa"
@@ -38,6 +47,17 @@ TEST_ONLY_SOURCE_NAMES = frozenset(TEST_ONLY_SOURCE_LABELS)
 _DAPO_LEADING_MARKERS = ("The last line of your response", "Solve the following math problem")
 _DAPO_TRAILING_MARKERS = ("Remember to put your answer", "The last line of your response")
 _EURUS2_CODE_ABILITY = "code"
+_HENDRYCKS_MATH_SUBJECTS = (
+    "algebra",
+    "counting_and_probability",
+    "geometry",
+    "intermediate_algebra",
+    "number_theory",
+    "prealgebra",
+    "precalculus",
+)
+_ASDIV_XML_URL = "https://raw.githubusercontent.com/chaochun/nlu-asdiv-dataset/{revision}/dataset/ASDiv.xml"
+_PLAIN_NUMERIC_ANSWER = re.compile(r"^-?\d+(?:\.\d+)?(?:/\d+)?$")
 
 
 PreparedRow = dict[str, Any]
@@ -225,6 +245,123 @@ def _prepare_gsm8k(example: Mapping[str, Any], index: int, contract: VerifierDat
         raise TypeError("GSM8K row answer must be a string.")
     ground_truth = _gsm8k_extract_answer(answer_text)
     return _schema_row(question, ground_truth, source, index, contract)
+
+
+# ---------------------------------------------------------------------------
+# Math: curriculum-ladder sources
+# ---------------------------------------------------------------------------
+
+
+def _boxed_answer(solution: str) -> str:
+    boxed = last_boxed_only_string(solution)
+    if boxed is None:
+        raise ValueError("solution is missing a boxed answer.")
+    answer = remove_boxed(boxed).strip()
+    if not answer:
+        raise ValueError("solution has an empty boxed answer.")
+    return answer
+
+
+def _plain_numeric_answer(answer: Any) -> str:
+    normalized = str(answer).split("(", 1)[0].strip().replace(",", "")
+    if not _PLAIN_NUMERIC_ANSWER.fullmatch(normalized):
+        raise ValueError("answer is not a plain number or fraction.")
+    if normalized.endswith(".0"):
+        return normalized[: -len(".0")]
+    return normalized
+
+
+def _prepare_hendrycks_math(
+    example: Mapping[str, Any], index: int, contract: VerifierDataContract
+) -> PreparedRow:
+    source = hendrycks_math_source()
+    problem = example.get("problem")
+    solution = example.get("solution")
+    level = example.get("level")
+    subject = example.get("subject")
+    if not all(isinstance(value, str) and value for value in (problem, solution, level, subject)):
+        raise TypeError("Hendrycks MATH rows require problem, solution, level, and subject strings.")
+    row = _math_row(problem, _boxed_answer(solution), source, index, contract)
+    row["extra_info"].update({"level": level, "subject": subject})
+    return row
+
+
+def _prepare_aime_1983_2024(
+    example: Mapping[str, Any], index: int, contract: VerifierDataContract
+) -> PreparedRow:
+    source = aime_1983_2024_source()
+    question = example.get("Question")
+    answer = example.get("Answer")
+    if not isinstance(question, str) or not question:
+        raise TypeError("AIME 1983-2024 rows require a Question string.")
+    if answer is None or not str(answer).strip() or str(answer).strip().lower() == "none":
+        raise ValueError("AIME 1983-2024 rows require an answer.")
+    return _math_row(question, str(answer).strip(), source, index, contract)
+
+
+def _prepare_asdiv(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    source = asdiv_source()
+    body = example.get("Body")
+    question = example.get("Question")
+    grade = example.get("Grade")
+    if not all(isinstance(value, str) and value for value in (body, question, grade)):
+        raise TypeError("ASDiv rows require Body, Question, and Grade strings.")
+    row = _math_row(
+        f"{body.strip()} {question.strip()}",
+        _plain_numeric_answer(example.get("Answer")),
+        source,
+        index,
+        contract,
+    )
+    row["extra_info"]["grade"] = grade
+    return row
+
+
+def _prepare_svamp(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    source = svamp_source()
+    body = example.get("Body")
+    question = example.get("Question")
+    if not all(isinstance(value, str) and value for value in (body, question)):
+        raise TypeError("SVAMP rows require Body and Question strings.")
+    return _math_row(
+        f"{body.strip()} {question.strip()}",
+        _plain_numeric_answer(example.get("Answer")),
+        source,
+        index,
+        contract,
+    )
+
+
+def _prepare_numina_math(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    source = numina_math_source()
+    problem = example.get("problem")
+    solution = example.get("solution")
+    source_tag = example.get("source")
+    if not all(isinstance(value, str) and value for value in (problem, solution, source_tag)):
+        raise TypeError("NuminaMath rows require problem, solution, and source strings.")
+    row = _math_row(problem, _boxed_answer(solution), source, index, contract)
+    row["extra_info"]["source"] = source_tag
+    return row
+
+
+def _prepare_hardmath(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
+    source = hardmath_source()
+    question = example.get("question")
+    ground_truth = example.get("ground_truths")
+    if not isinstance(question, str) or not question:
+        raise TypeError("HARDMath rows require a question string.")
+    if not isinstance(ground_truth, str):
+        raise TypeError("HARDMath rows require a ground_truths string.")
+    answer = _boxed_answer(ground_truth)
+    if "[" in answer:
+        raise ValueError("HARDMath list-valued answers are not supported.")
+    if "\\approx" in answer:
+        answer = answer.rsplit("\\approx", 1)[1].strip()
+    elif "=" in answer:
+        answer = answer.rsplit("=", 1)[1].strip()
+    if not answer:
+        raise ValueError("HARDMath row has an empty answer.")
+    return _math_row(question, answer, source, index, contract)
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +677,49 @@ def gsm8k_source() -> Source:
     return Source("gsm8k", GSM8K_DATASET, "gsm8k", "train", False, "two_sided", _prepare_gsm8k)
 
 
+def hendrycks_math_source() -> Source:
+    return Source(
+        "hendrycks_math",
+        HENDRYCKS_MATH_DATASET,
+        "aime",
+        "train",
+        False,
+        "two_sided",
+        _prepare_hendrycks_math,
+        _load_hendrycks_math_rows,
+    )
+
+
+def aime_1983_2024_source() -> Source:
+    return Source(
+        "aime_1983_2024",
+        AIME_1983_2024_DATASET,
+        "aime",
+        "train",
+        False,
+        "two_sided",
+        _prepare_aime_1983_2024,
+    )
+
+
+def asdiv_source() -> Source:
+    return Source("asdiv", ASDIV_DATASET, "aime", "train", False, "two_sided", _prepare_asdiv, _load_asdiv_rows)
+
+
+def svamp_source() -> Source:
+    return Source("svamp", SVAMP_DATASET, "aime", "train", False, "two_sided", _prepare_svamp)
+
+
+def numina_math_source() -> Source:
+    return Source(
+        "numina_math", NUMINA_MATH_DATASET, "aime", "train", False, "two_sided", _prepare_numina_math
+    )
+
+
+def hardmath_source() -> Source:
+    return Source("hardmath", HARDMATH_DATASET, "aime", "train", False, "two_sided", _prepare_hardmath)
+
+
 def verifiable_code_source() -> Source:
     return Source(
         "verifiable_code", VERIFIABLE_CODE_DATASET, "lcb", "train", False, "schema_only", _prepare_verifiable_code
@@ -656,6 +836,39 @@ def _load_reasoning_gym_rows(source: Source, revision: str, parameters: Mapping[
     )
 
 
+def _load_hendrycks_math_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
+    _validate_source_parameters(source.name, parameters, {"subjects", "skip"})
+    subjects = parameters.get("subjects", list(_HENDRYCKS_MATH_SUBJECTS))
+    if not isinstance(subjects, list) or not subjects or not all(isinstance(subject, str) for subject in subjects):
+        raise TypeError("Hendrycks MATH parameters.subjects must be a non-empty list of strings.")
+    unknown = set(subjects) - set(_HENDRYCKS_MATH_SUBJECTS)
+    if unknown:
+        raise ValueError(f"Unknown Hendrycks MATH subjects: {sorted(unknown)}.")
+
+    def rows():
+        for subject in subjects:
+            for example in _load_hugging_face_dataset(source, revision, subject):
+                yield {**example, "subject": subject}
+
+    return _skip_source_rows(source, rows(), {"skip": parameters.get("skip", 0)})
+
+
+def _load_asdiv_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
+    response = requests.get(_ASDIV_XML_URL.format(revision=revision), timeout=60)
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+    rows = (
+        {
+            "Body": problem.findtext("Body", ""),
+            "Question": problem.findtext("Question", ""),
+            "Answer": problem.findtext("Answer", ""),
+            "Grade": problem.get("Grade", ""),
+        }
+        for problem in root.iter("Problem")
+    )
+    return _skip_source_rows(source, rows, parameters)
+
+
 def _load_hugging_face_dataset(source: Source, revision: str, config: str | None = None):
     import datasets
 
@@ -706,6 +919,12 @@ SOURCES = {
         rlvr_ifeval_source(),
         deepscaler_source(),
         gsm8k_source(),
+        hendrycks_math_source(),
+        aime_1983_2024_source(),
+        asdiv_source(),
+        svamp_source(),
+        numina_math_source(),
+        hardmath_source(),
         verifiable_code_source(),
         apps_source(),
         eurus2_code_source(),

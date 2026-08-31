@@ -72,6 +72,11 @@ remain separate in `provenance.json`. Reasoning Gym validation slices use `start
 deterministic holdout after the training slice. Its revision is the installed `reasoning-gym` package
 version rather than a Hugging Face commit.
 
+The math source registry also accepts `hendrycks_math`, `aime_1983_2024`, `asdiv`, `svamp`,
+`numina_math`, and `hardmath`. They use the two-sided `aime` verifier contract. Hendrycks MATH accepts
+an optional `parameters.subjects` list; source-native MATH levels, ASDiv grades, and NuminaMath source
+tags are retained in `extra_info` for downstream sampling.
+
 `provenance.json` records source revisions, source and verifier identifiers, prompt-token
 statistics, raw/unique/emitted counts, dedup and subsampling limits, and verifier-preflight
 coverage. AIME sources use two-sided verifier checks. IFEval validates the constraint schema;

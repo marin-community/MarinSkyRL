@@ -6,22 +6,29 @@ from infra.rl_data.preparation import PreparationOptions, prepare_artifact, writ
 from infra.rl_data.mixtures import MixtureSlice, MixtureSpec, load_mixture_spec, prepare_mixture
 from infra.rl_data.sources import (
     Source,
+    aime_1983_2024_source,
     aime24_source,
     apps_source,
+    asdiv_source,
     dapo_math_source,
     deepscaler_source,
     gpqa_source,
     gsm8k_source,
+    hardmath_source,
+    hendrycks_math_source,
     hh_rlhf_source,
     kto_mix_source,
     eurus2_code_source,
     generate_reasoning_gym_rows,
+    load_source_rows,
     math500_source,
     nemotron_if_source,
+    numina_math_source,
     openscience_source,
     rlvr_math_source,
     rlvr_ifeval_source,
     source_by_name,
+    svamp_source,
     verifiable_code_source,
 )
 from skyrl_gym import get_data_contract
@@ -386,6 +393,113 @@ def test_gsm8k_rejects_missing_delimiter():
             token_count=lambda text: len(text.split()),
             options=PreparationOptions(**_OPTS),
         )
+
+
+@pytest.mark.parametrize(
+    ("source", "example", "expected_answer", "expected_metadata"),
+    [
+        (
+            hendrycks_math_source(),
+            {"problem": "Compute 2 + 2.", "solution": "Therefore \\boxed{4}.", "level": "Level 1", "subject": "algebra"},
+            "4",
+            {"level": "Level 1", "subject": "algebra"},
+        ),
+        (
+            aime_1983_2024_source(),
+            {"Question": "Compute 100 + 24.", "Answer": 124},
+            "124",
+            {},
+        ),
+        (
+            asdiv_source(),
+            {"Body": "Sam has four apples.", "Question": "How many?", "Answer": "4 (apples)", "Grade": "2"},
+            "4",
+            {"grade": "2"},
+        ),
+        (
+            svamp_source(),
+            {"Body": "Sam has four apples.", "Question": "How many?", "Answer": 4.0},
+            "4",
+            {},
+        ),
+        (
+            numina_math_source(),
+            {"problem": "Compute one half.", "solution": "Therefore \\boxed{\\frac{1}{2}}.", "source": "cn_k12"},
+            "\\frac{1}{2}",
+            {"source": "cn_k12"},
+        ),
+        (
+            hardmath_source(),
+            {"question": "Approximate epsilon.", "ground_truths": "The result is \\boxed{\\epsilon \\approx 4.16}."},
+            "4.16",
+            {},
+        ),
+    ],
+)
+def test_curriculum_math_sources_emit_verifier_ready_rows(source, example, expected_answer, expected_metadata):
+    artifact = prepare_artifact(
+        source,
+        [example],
+        get_data_contract("aime"),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(**_OPTS),
+    )
+
+    row = artifact.rows[0]
+    assert row["data_source"] == source.dataset_id
+    assert row["env_class"] == "aime"
+    assert row["reward_model"]["ground_truth"] == expected_answer
+    assert {key: row["extra_info"][key] for key in expected_metadata} == expected_metadata
+    assert artifact.provenance["verification"] == "two_sided"
+
+
+def test_hendrycks_math_loader_combines_selected_subjects(monkeypatch):
+    def load_dataset(dataset_id, subject, *, split, revision, streaming):
+        return [{"problem": f"Problem from {subject}", "solution": "\\boxed{1}", "level": "Level 1"}]
+
+    monkeypatch.setattr("datasets.load_dataset", load_dataset)
+
+    rows = list(
+        load_source_rows(
+            hendrycks_math_source(),
+            "revision-1",
+            {"subjects": ["algebra", "geometry"], "skip": 1},
+        )
+    )
+
+    assert rows == [
+        {
+            "problem": "Problem from geometry",
+            "solution": "\\boxed{1}",
+            "level": "Level 1",
+            "subject": "geometry",
+        }
+    ]
+
+
+def test_asdiv_loader_reads_pinned_xml(monkeypatch):
+    class Response:
+        content = b"""<ASDiv><ProblemSet><Problem ID='1' Grade='3'><Body>Sam has four apples.</Body><Question>How many?</Question><Answer>4 (apples)</Answer></Problem></ProblemSet></ASDiv>"""
+
+        def raise_for_status(self):
+            return None
+
+    requested = []
+
+    def get(url, *, timeout):
+        requested.append((url, timeout))
+        return Response()
+
+    monkeypatch.setattr("infra.rl_data.sources.requests.get", get)
+
+    rows = list(load_source_rows(asdiv_source(), "commit-123", {}))
+
+    assert rows == [
+        {"Body": "Sam has four apples.", "Question": "How many?", "Answer": "4 (apples)", "Grade": "3"}
+    ]
+    assert requested == [
+        ("https://raw.githubusercontent.com/chaochun/nlu-asdiv-dataset/commit-123/dataset/ASDiv.xml", 60)
+    ]
 
 
 def test_verifiable_code_preparation():
