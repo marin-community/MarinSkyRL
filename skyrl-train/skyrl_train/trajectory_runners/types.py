@@ -66,14 +66,9 @@ class RewardShapingLoopSpan(TypedDict):
     end: int
 
 
-class VerifierTestTrialID(TypedDict):
-    instance_id: str
-    repetition_id: int
-
-
 class VerifierTestRecord(TypedDict):
     record_id: str
-    trial_id: VerifierTestTrialID
+    trial_id: TrajectoryID
     test_id: str
     outcome: str
     output: str

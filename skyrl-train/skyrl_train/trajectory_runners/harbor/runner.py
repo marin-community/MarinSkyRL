@@ -426,6 +426,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
 
         # Reward shaping config (parses test output for partial credit)
         self._reward_shaping_config = self._harbor_config_builder.get_reward_shaping_config()
+        self._reward_shaping_enabled = bool(self._reward_shaping_config.get("enable_reward_shaping", True))
 
         # Loop-behavior reward shaping (Stage B / F5 + F4): master gate for the
         # per-token shaping channel + span tagger. Default False -> the runner
@@ -479,7 +480,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             f"Retry config: max_retries={self._retry_config.max_retries}, "
             f"backoff={self._retry_config.min_wait_sec}-{self._retry_config.max_wait_sec}s. "
             f"Concurrent trials: {self._n_concurrent_trials}. "
-            f"Reward shaping: enabled={self._reward_shaping_config.get('enable_reward_shaping', True)}, "
+            f"Reward shaping: enabled={self._reward_shaping_enabled}, "
             f"shaper={self._reward_shaping_config.get('reward_shaper', 'pass_ratio')}. "
             f"Error classification: enabled={self._error_handling_config.enable_error_classification}"
         )
@@ -1413,7 +1414,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "exclude_from_baseline": [not output.disposition.baseline_eligible for output in all_outputs],
             "actual_global_step": actual_global_step,
         }
-        if self._reward_shaping_config.get("enable_reward_shaping", True):
+        if self._reward_shaping_enabled:
             trajectory_batch["verifier_tests"] = [output.verifier_tests for output in all_outputs]
 
         # Only attach routed_experts when router-replay is on, so the flag-off
@@ -1658,7 +1659,10 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         *,
         preserve_timeout: bool,
     ) -> tuple[RewardResult, Optional[VerifierTestCollection]]:
-        """Adapt a Harbor verdict and configured shaper to the shared reward contract."""
+        """Return the shaped reward and any identified verifier tests.
+
+        The test collection is absent when shaping is disabled or the trial timed out.
+        """
         if preserve_timeout:
             return RewardResult(unshaped_reward=None, optimization_reward=0.0), None
 
@@ -1668,7 +1672,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         reward = original_reward
         reward_components: Optional[Dict[str, float]] = None
         test_collection = None
-        if self._reward_shaping_config.get("enable_reward_shaping", True):
+        if self._reward_shaping_enabled:
             verifier_stdout = getattr(result.verifier_result, "stdout", None)
             parsed_tests, parser_name = parse_test_output_with_parser(
                 verifier_stdout or "",

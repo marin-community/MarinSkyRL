@@ -194,11 +194,6 @@ class _RewardTrace:
 
 
 @dataclass(frozen=True)
-class _VerifierTrace:
-    tests: VerifierTestCollection
-
-
-@dataclass(frozen=True)
 class _ProvenanceTrace:
     runner: str
     inference_backend: str | None
@@ -221,7 +216,7 @@ class TrajectoryRecord:
     prompt: _PromptTrace
     response: _ResponseTrace
     reward: _RewardTrace
-    verifier: _VerifierTrace | None
+    verifier: VerifierTestCollection | None
     metrics: dict[str, Any]
     provenance: _ProvenanceTrace
 
@@ -445,11 +440,7 @@ def build_trajectory_records(
                 shaped=shaped_reward,
                 components=trajectory_components,
             ),
-            verifier=(
-                None
-                if verifier_tests is None or verifier_tests[final_index] is None
-                else _VerifierTrace(tests=verifier_tests[final_index])
-            ),
+            verifier=None if verifier_tests is None else verifier_tests[final_index],
             metrics=to_jsonable(output.get("rollout_metrics") or {}),
             provenance=_ProvenanceTrace(
                 runner=runner_name,

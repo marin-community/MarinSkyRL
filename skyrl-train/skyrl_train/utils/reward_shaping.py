@@ -41,7 +41,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 from loguru import logger
-from skyrl_train.trajectory_runners.types import VerifierTestCollection, VerifierTestRecord
+from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestCollection, VerifierTestRecord
 
 
 # =============================================================================
@@ -164,10 +164,10 @@ _PREFIX_TEST_LINE = re.compile(
 )
 
 
-def _identified_tests(output: str, *, pytest_only: bool = False) -> tuple[ParsedVerifierTest, ...]:
+def _identified_tests(output: str, parser_name: str) -> tuple[ParsedVerifierTest, ...]:
     patterns = (
         (_PYTEST_TEST_LINE, _PYTEST_STANDARD_TEST_LINE)
-        if pytest_only
+        if parser_name == PytestOutputParser.name()
         else (_BRACKET_TEST_LINE, _SUFFIX_TEST_LINE, _PREFIX_TEST_LINE)
     )
     tests = []
@@ -225,7 +225,7 @@ def verifier_test_collection(
         records.append(
             {
                 "record_id": sha256(identity.encode()).hexdigest(),
-                "trial_id": {"instance_id": instance_id, "repetition_id": repetition_id},
+                "trial_id": TrajectoryID(instance_id=instance_id, repetition_id=repetition_id),
                 "test_id": test.test_id,
                 "outcome": test.outcome.value,
                 "output": test.output,
@@ -309,16 +309,6 @@ class PytestOutputParser(OutputParser):
     # Pattern to extract individual counts from summary
     COUNT_PATTERN = re.compile(r"(\d+)\s+(\w+)", re.IGNORECASE)
 
-    # Patterns for individual test result lines
-    RESULT_LINE_PATTERNS = {
-        "passed": re.compile(r"^PASSED\s+", re.MULTILINE),
-        "failed": re.compile(r"^FAILED\s+", re.MULTILINE),
-        "error": re.compile(r"^ERROR\s+", re.MULTILINE),
-        "xfail": re.compile(r"^XFAIL\s+", re.MULTILINE),
-        "xpass": re.compile(r"^XPASS\s+", re.MULTILINE),
-        "skipped": re.compile(r"^SKIPPED\s+", re.MULTILINE),
-    }
-
     # Patterns that indicate pytest couldn't collect/load tests
     # These are infrastructure failures, not agent failures
     COLLECTION_ERROR_PATTERNS = [
@@ -401,7 +391,7 @@ class PytestOutputParser(OutputParser):
         except (ValueError, TypeError):
             duration = None
 
-        parsed = ParsedTestResult(
+        return ParsedTestResult(
             passed=counts["passed"],
             failed=counts["failed"],
             errors=errors,
@@ -413,33 +403,23 @@ class PytestOutputParser(OutputParser):
             raw_output=output,
             metadata={"parse_method": "summary", "deselected": counts["deselected"]},
         )
-        return _with_identified_tests(parsed, _identified_tests(output, pytest_only=True))
 
     def _parse_from_lines(self, output: str) -> Optional[ParsedTestResult]:
         """Parse by counting individual test result lines."""
-        counts = {}
-        found_any = False
-
-        for status, pattern in self.RESULT_LINE_PATTERNS.items():
-            matches = pattern.findall(output)
-            counts[status] = len(matches)
-            if counts[status] > 0:
-                found_any = True
-
-        if not found_any:
+        tests = _identified_tests(output, self.name())
+        if not tests:
             return None
 
-        parsed = ParsedTestResult(
-            passed=counts.get("passed", 0),
-            failed=counts.get("failed", 0),
-            errors=counts.get("error", 0),
-            xfailed=counts.get("xfail", 0),
-            xpassed=counts.get("xpass", 0),
-            skipped=counts.get("skipped", 0),
+        return ParsedTestResult(
+            passed=sum(test.outcome is VerifierTestOutcome.PASSED for test in tests),
+            failed=sum(test.outcome is VerifierTestOutcome.FAILED for test in tests),
+            errors=sum(test.outcome is VerifierTestOutcome.ERROR for test in tests),
+            xfailed=sum(test.outcome is VerifierTestOutcome.XFAILED for test in tests),
+            xpassed=sum(test.outcome is VerifierTestOutcome.XPASSED for test in tests),
+            skipped=sum(test.outcome is VerifierTestOutcome.SKIPPED for test in tests),
             raw_output=output,
             metadata={"parse_method": "line_count"},
         )
-        return _with_identified_tests(parsed, _identified_tests(output, pytest_only=True))
 
     def can_parse(self, output: str) -> bool:
         """Quick check for pytest indicators."""
@@ -535,7 +515,7 @@ class UnittestOutputParser(OutputParser):
         xpassed = counts["unexpected successes"]
         passed = total - failed - errors - skipped - xfailed - xpassed
 
-        parsed = ParsedTestResult(
+        return ParsedTestResult(
             passed=max(0, passed),
             failed=failed,
             errors=errors,
@@ -547,7 +527,6 @@ class UnittestOutputParser(OutputParser):
             raw_output=output,
             metadata={"parse_method": "unittest"},
         )
-        return _with_identified_tests(parsed, _identified_tests(output))
 
     def can_parse(self, output: str) -> bool:
         """Quick check for unittest indicators."""
@@ -598,7 +577,7 @@ class JestOutputParser(OutputParser):
         failed = counts["failed"]
         skipped = counts["skipped"] + counts["todo"]
         total = counts["total"] if counts["total"] else (passed + failed + skipped)
-        parsed = ParsedTestResult(
+        return ParsedTestResult(
             passed=passed,
             failed=failed,
             skipped=skipped,
@@ -606,7 +585,6 @@ class JestOutputParser(OutputParser):
             raw_output=output,
             metadata={"parse_method": "jest"},
         )
-        return _with_identified_tests(parsed, _identified_tests(output))
 
     def can_parse(self, output: str) -> bool:
         if not output:
@@ -658,14 +636,13 @@ class GenericOutputParser(OutputParser):
         if passed == 0 and failed == 0 and errors == 0:
             return None
 
-        parsed = ParsedTestResult(
+        return ParsedTestResult(
             passed=passed,
             failed=failed,
             errors=errors,
             raw_output=output,
             metadata={"parse_method": "generic_keywords"},
         )
-        return _with_identified_tests(parsed, _identified_tests(output))
 
 
 class PassRatioSummaryOutputParser(OutputParser):
@@ -688,13 +665,12 @@ class PassRatioSummaryOutputParser(OutputParser):
         total = int(match.group(2))
         if passed > total:
             return None
-        parsed = ParsedTestResult(
+        return ParsedTestResult(
             passed=passed,
             failed=total - passed,
             raw_output=output,
             metadata={"parse_method": "pass_ratio_summary"},
         )
-        return _with_identified_tests(parsed, _identified_tests(output))
 
 
 # =============================================================================
@@ -2110,7 +2086,10 @@ def parse_test_output_with_parser(
         parser = auto_detect_parser(output)
         if parser is None:
             return None, None
-    return parser.parse(output), parser.name()
+    parsed = parser.parse(output)
+    if parsed is not None:
+        parsed = _with_identified_tests(parsed, _identified_tests(output, parser.name()))
+    return parsed, parser.name()
 
 
 def shape_reward_from_output(

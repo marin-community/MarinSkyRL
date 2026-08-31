@@ -1,3 +1,4 @@
+from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.utils.reward_shaping import parse_test_output_with_parser, verifier_test_collection
 
 
@@ -22,9 +23,7 @@ Results: 1/2 passed
         ("test formatting", "passed", "test formatting: PASS: title is present"),
         ("test semantics", "failed", "test semantics: FAIL: expected 4, got 3"),
     ]
-    assert all(
-        test["trial_id"] == {"instance_id": "task-7", "repetition_id": 2} for test in collection["tests"]
-    )
+    assert all(test["trial_id"] == TrajectoryID(instance_id="task-7", repetition_id=2) for test in collection["tests"])
     assert len({test["record_id"] for test in collection["tests"]}) == 2
 
 

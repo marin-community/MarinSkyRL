@@ -263,7 +263,7 @@ def test_verifier_tests_are_persisted_with_the_retained_trace():
             "tests": [
                 {
                     "record_id": "test-record-a",
-                    "trial_id": {"instance_id": "a", "repetition_id": 0},
+                    "trial_id": TrajectoryID(instance_id="a", repetition_id=0),
                     "test_id": "test formatting",
                     "outcome": "failed",
                     "output": "test formatting: FAIL: expected title",
@@ -283,19 +283,17 @@ def test_verifier_tests_are_persisted_with_the_retained_trace():
     )
 
     assert records[0].to_json()["verifier"] == {
-        "tests": {
-            "parser": "pass_ratio_summary",
-            "complete": True,
-            "tests": [
-                {
-                    "record_id": "test-record-a",
-                    "trial_id": {"instance_id": "a", "repetition_id": 0},
-                    "test_id": "test formatting",
-                    "outcome": "failed",
-                    "output": "test formatting: FAIL: expected title",
-                }
-            ],
-        }
+        "parser": "pass_ratio_summary",
+        "complete": True,
+        "tests": [
+            {
+                "record_id": "test-record-a",
+                "trial_id": {"instance_id": "a", "repetition_id": 0},
+                "test_id": "test formatting",
+                "outcome": "failed",
+                "output": "test formatting: FAIL: expected title",
+            }
+        ],
     }
 
 
