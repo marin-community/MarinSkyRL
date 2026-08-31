@@ -934,6 +934,18 @@ def test_failure_metrics_survive_concatenation():
     assert merged["rollout_metrics"]["generate/errors/ContextLengthExceededError"] == 1
 
 
+def test_identity_aware_reward_metrics_survive_concatenation():
+    groups = [_generated_group(2, 0), _generated_group(2, 0)]
+    groups[0]["rollout_metrics"]["generate/reward_shaping/identity_aware/groups"] = 1
+    groups[1]["rollout_metrics"]["generate/reward_shaping/identity_aware/groups"] = 1
+    groups[1]["rollout_metrics"]["generate/reward_shaping/identity_aware/fallback_groups"] = 1
+
+    merged = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=0.005)
+
+    assert merged["rollout_metrics"]["generate/reward_shaping/identity_aware/groups"] == 2
+    assert merged["rollout_metrics"]["generate/reward_shaping/identity_aware/fallback_groups"] == 1
+
+
 def test_generators_that_report_no_trials_get_no_failure_series():
     # Only the agentic generator counts trials, and a fabricated zero series for
     # every other generator would read as a measured "nothing failed".

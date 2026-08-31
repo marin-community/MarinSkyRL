@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional, Set
 
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from skyrl_train.trajectory_runners.harbor.identity_aware_reward import IDENTITY_AWARE_SHAPER
 from skyrl_train.utils.harbor_errors import (
     DEFAULT_ERROR_HANDLING_CONFIG,
     ErrorHandlingConfig,
@@ -255,10 +256,13 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
         # Parser for test output (pytest, unittest, generic, or None for auto-detect)
         "reward_parser": FieldMapping("reward_parser", default=None),
         # Shaper strategy:
+        #   Group-based: identity_aware_pass_ratio (default)
         #   Verifier-based: pass_ratio, effective_pass_ratio, weighted, threshold, binary_partial, original
         #   Trajectory-based: thinking_length, format_quality
         #   Composite: composite (weighted combination of verifier + trajectory shapers)
-        "reward_shaper": FieldMapping("reward_shaper", default="pass_ratio"),
+        "reward_shaper": FieldMapping("reward_shaper", default=IDENTITY_AWARE_SHAPER),
+        # Optional weights keyed by the deterministic test-and-trial record ID.
+        "identity_aware_test_weights": FieldMapping("identity_aware_test_weights", default=None),
         # Whether to enable reward shaping (if False, uses original binary reward)
         "enable_reward_shaping": FieldMapping("enable_reward_shaping", default=False),
         # Fallback to original reward if parsing fails
@@ -688,7 +692,7 @@ class HarborConfigBuilder:
             Dict with keys:
                 - enable_reward_shaping: bool
                 - reward_parser: str | None (pytest, unittest, generic, or None for auto)
-                - reward_shaper: str (pass_ratio, effective_pass_ratio, weighted, etc.)
+                - reward_shaper: str (identity_aware_pass_ratio, pass_ratio, weighted, etc.)
                 - reward_shaping_fallback: bool
                 - shaper_kwargs: dict with shaper-specific params
         """
@@ -701,6 +705,12 @@ class HarborConfigBuilder:
 
         # Build shaper kwargs from shaper-specific params
         shaper_kwargs = {}
+
+        if "identity_aware_test_weights" in config:
+            val = config.pop("identity_aware_test_weights")
+            if OmegaConf.is_config(val):
+                val = OmegaConf.to_container(val, resolve=True)
+            shaper_kwargs["test_weights"] = val
 
         # Threshold shaper params
         if "reward_threshold" in config:

@@ -20,7 +20,11 @@ from uuid import uuid4
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.types import VerifierTestCollection
 from skyrl_train.trajectory_runners.projections import project_loss_mask
-from skyrl_train.metric_names import TIS_LCS_FALLBACK_ALERT_METRIC, TIS_METRIC_PREFIX
+from skyrl_train.metric_names import (
+    IDENTITY_AWARE_REWARD_METRIC_PREFIX,
+    TIS_LCS_FALLBACK_ALERT_METRIC,
+    TIS_METRIC_PREFIX,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import (
     BATCH_ERROR_METRIC_PREFIX,
     get_batch_failure_metrics,
@@ -71,6 +75,11 @@ from harbor.utils.traces_utils import normalize_message
 # Schema-driven Harbor config mapping
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
 from skyrl_train.trajectory_runners.harbor.contracts import verification_from_harbor_result
+from skyrl_train.trajectory_runners.harbor.identity_aware_reward import (
+    IDENTITY_AWARE_SHAPER,
+    TestWeightFilter,
+    identity_aware_pass_ratios,
+)
 from skyrl_train.trajectory_runners.harbor.truncation_penalty import apply_truncation_penalty, detect_turn_truncation
 
 # Incremental, trial-indexed reader for the shared opencode literal log.
@@ -333,6 +342,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         rollout_logprobs_required: bool = False,
         tito_full: Optional[bool] = None,
         tis_splice: bool = True,
+        test_weight_filter: TestWeightFilter | None = None,
     ):
         """
         Args:
@@ -348,6 +358,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 behavior-policy logprobs. Full-TITO rollout assembly defaults to this.
             tito_full: ``trainer.algorithm.tito_full`` — explicit full-TITO override.
                 None = auto (default to ``rollout_logprobs_required``); True/False = force.
+            test_weight_filter: Optional post-hoc test filter or weight multiplier.
         """
         self.base_url = f"http://{trajectory_runner_cfg.http_endpoint_host}:{trajectory_runner_cfg.http_endpoint_port}"
         # Native controller-ingress (opencode-RL literal capture): when the runner stood up
@@ -403,6 +414,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         self._tito_full = tito_full
         self._tis_splice = tis_splice
         self._tis_lcs_alert_threshold = tis_lcs_alert_threshold
+        self._test_weight_filter = test_weight_filter
 
         # Core terminal bench config
         self.trials_dir = terminal_bench_cfg.trials_dir
@@ -481,7 +493,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             f"backoff={self._retry_config.min_wait_sec}-{self._retry_config.max_wait_sec}s. "
             f"Concurrent trials: {self._n_concurrent_trials}. "
             f"Reward shaping: enabled={self._reward_shaping_enabled}, "
-            f"shaper={self._reward_shaping_config.get('reward_shaper', 'pass_ratio')}. "
+            f"shaper={self._reward_shaping_config.get('reward_shaper', IDENTITY_AWARE_SHAPER)}. "
             f"Error classification: enabled={self._error_handling_config.enable_error_classification}"
         )
 
@@ -1149,6 +1161,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 else:
                     successful_outputs.append(output)
 
+        identity_aware_metrics = self._apply_identity_aware_reward_shaping(all_outputs)
+
         # Calculate rollout metrics for successful outputs
         if len(successful_outputs) > 0:
             rollout_metrics = get_rollout_metrics(
@@ -1191,6 +1205,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 num_masked_trajectories=num_masked_trajectories,
             )
         )
+        rollout_metrics.update(identity_aware_metrics)
 
         # TIS logprob-alignment metrics (aggregated across all trajectories with
         # logprobs). These make an LCS fallback or alignment failure ALWAYS visible
@@ -1684,9 +1699,18 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 instance_id=trajectory_id.instance_id,
                 repetition_id=trajectory_id.repetition_id,
             )
-            shaper_name = self._reward_shaping_config.get("reward_shaper", "pass_ratio")
+            shaper_name = self._reward_shaping_config.get("reward_shaper", IDENTITY_AWARE_SHAPER)
             shaper_kwargs = self._reward_shaping_config.get("shaper_kwargs", {})
-            if shaper_name in ("composite", "composite_loop"):
+            if shaper_name == IDENTITY_AWARE_SHAPER:
+                if parsed_tests is None:
+                    if not self._reward_shaping_config.get("reward_shaping_fallback", True):
+                        raise ValueError(
+                            f"could not parse verifier output with parser="
+                            f"{self._reward_shaping_config.get('reward_parser') or 'auto'}"
+                        )
+                else:
+                    reward = parsed_tests.pass_ratio
+            elif shaper_name in ("composite", "composite_loop"):
                 trajectory_context = (
                     detect_termination_signals(chat_history, original_reward)
                     if shaper_name == "composite_loop"
@@ -1724,6 +1748,54 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             ),
             test_collection,
         )
+
+    def _apply_identity_aware_reward_shaping(
+        self,
+        all_outputs: List[TerminalBenchAgentOutput],
+    ) -> Dict[str, float]:
+        if (
+            not self._reward_shaping_enabled
+            or self._reward_shaping_config.get("reward_shaper", IDENTITY_AWARE_SHAPER) != IDENTITY_AWARE_SHAPER
+        ):
+            return {}
+
+        groups: Dict[str, List[TerminalBenchAgentOutput]] = {}
+        for output in all_outputs:
+            groups.setdefault(output.trajectory_id.instance_id, []).append(output)
+
+        shaper_kwargs = self._reward_shaping_config.get("shaper_kwargs", {})
+        exact_weights = shaper_kwargs.get("test_weights") or {}
+        metrics = {
+            f"{IDENTITY_AWARE_REWARD_METRIC_PREFIX}/groups": float(len(groups)),
+            f"{IDENTITY_AWARE_REWARD_METRIC_PREFIX}/fallback_groups": 0.0,
+            f"{IDENTITY_AWARE_REWARD_METRIC_PREFIX}/zero_informative_groups": 0.0,
+            f"{IDENTITY_AWARE_REWARD_METRIC_PREFIX}/informative_tests": 0.0,
+        }
+        for outputs in groups.values():
+            aggregate_rewards = [
+                output.reward_result.optimization_reward
+                + (self._truncation_penalty if output.truncation_penalized else 0.0)
+                for output in outputs
+            ]
+            result = identity_aware_pass_ratios(
+                [output.verifier_tests for output in outputs],
+                aggregate_rewards,
+                [output.disposition.baseline_eligible for output in outputs],
+                exact_weights=exact_weights,
+                weight_filter=self._test_weight_filter,
+            )
+            for output, reward in zip(outputs, result.rewards, strict=True):
+                if output.truncation_penalized:
+                    reward -= self._truncation_penalty
+                output.reward_result = replace(output.reward_result, optimization_reward=reward)
+            metrics[f"{IDENTITY_AWARE_REWARD_METRIC_PREFIX}/informative_tests"] += result.informative_test_count
+            if result.fallback_reason is not None:
+                metrics[f"{IDENTITY_AWARE_REWARD_METRIC_PREFIX}/fallback_groups"] += 1
+                reason_metric = f"{IDENTITY_AWARE_REWARD_METRIC_PREFIX}/fallback/{result.fallback_reason.value}"
+                metrics[reason_metric] = metrics.get(reason_metric, 0.0) + 1
+            elif result.informative_test_count == 0:
+                metrics[f"{IDENTITY_AWARE_REWARD_METRIC_PREFIX}/zero_informative_groups"] += 1
+        return metrics
 
     def _process_trial_result(
         self,

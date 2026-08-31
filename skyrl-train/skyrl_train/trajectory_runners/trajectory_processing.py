@@ -12,6 +12,7 @@ from skyrl_train.trajectory_runners.base import (
 )
 from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
 from skyrl_train.metric_names import (
+    IDENTITY_AWARE_REWARD_METRIC_PREFIX,
     TIS_ALIGNED_TOKENS_METRIC,
     TIS_METRIC_PREFIX,
     TIS_EXACT_MATCH_FRACTION_METRIC,
@@ -700,7 +701,7 @@ def concatenate_trajectory_batches(
     # the per-group counters have to be carried across or the archives are written unobserved.
     for output in trajectory_batches:
         for name, value in (output.get("rollout_metrics") or {}).items():
-            if name.startswith(RETENTION_METRIC_PREFIX):
+            if name.startswith((RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX)):
                 rollout_metrics[name] = rollout_metrics.get(name, 0.0) + value
 
     result["rollout_metrics"] = rollout_metrics

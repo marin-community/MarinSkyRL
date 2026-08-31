@@ -42,7 +42,7 @@ terminal_bench:
     log_level: INFO
 
     enable_reward_shaping: true
-    reward_shaper: pass_ratio
+    reward_shaper: identity_aware_pass_ratio
     reward_parser: null
     reward_shaping_fallback: true
     truncation_penalty: 0.25
