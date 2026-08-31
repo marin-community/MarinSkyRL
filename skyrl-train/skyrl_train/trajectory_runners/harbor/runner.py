@@ -72,6 +72,7 @@ from skyrl_train.trajectory_runners.harbor._harbor_compat import (
 from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.result import TrialResult
 from harbor.utils.traces_utils import normalize_message
+from harbor.verifier.verifier import VerifierOutputParseError
 
 # Schema-driven Harbor config mapping
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
@@ -2003,19 +2004,38 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 exclude_from_baseline=exclude_from_baseline,
             )
 
-        parsed_tests, verifier_tests = self._collect_verifier_test_evidence(
-            result,
-            trajectory_id,
-            preserve_timeout=preserve_timeout,
-        )
-        reward_result = self._shape_harbor_reward(
-            result,
-            verification,
-            chat_history,
-            trajectory_id,
-            preserve_timeout=preserve_timeout,
-            parsed_tests=parsed_tests,
-        )
+        try:
+            parsed_tests, verifier_tests = self._collect_verifier_test_evidence(
+                result,
+                trajectory_id,
+                preserve_timeout=preserve_timeout,
+            )
+            reward_result = self._shape_harbor_reward(
+                result,
+                verification,
+                chat_history,
+                trajectory_id,
+                preserve_timeout=preserve_timeout,
+                parsed_tests=parsed_tests,
+            )
+        except Exception as error:
+            verifier_error = VerifierOutputParseError("could not interpret verifier output for reward shaping")
+            treatment, exception_type = self._classify_exception(verifier_error)
+            exclude_from_baseline = treatment_excludes_from_baseline(treatment, verifier_available=False)
+            logger.warning(
+                f"Trajectory {trajectory_id} failed while interpreting verifier output: "
+                f"{type(error).__name__}: {error} "
+                f"(exception_type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
+            )
+            return _failed_agent_output(
+                trajectory_id=trajectory_id,
+                verification=VerificationResult.error(
+                    "could not interpret verifier output for reward shaping",
+                    diagnostics={"exception_type": exception_type, "cause": type(error).__name__},
+                ),
+                exception_type=exception_type,
+                exclude_from_baseline=exclude_from_baseline,
+            )
         original_reward = reward_result.unshaped_reward or 0.0
         reward = reward_result.optimization_reward
 

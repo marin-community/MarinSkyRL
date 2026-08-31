@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
-from skyrl_gym.verification import RewardResult
+from skyrl_gym.verification import RewardResult, VerificationStatus
 
 try:
     from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner
@@ -10,6 +10,7 @@ except ImportError:
 
 from skyrl_train.metric_names import IDENTITY_AWARE_REWARD_METRIC_PREFIX
 from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
 
 
 def _runner_output(
@@ -103,3 +104,33 @@ def test_identity_aware_shaping_preserves_the_downstream_truncation_penalty(veri
     _runner()._apply_identity_aware_reward_shaping(outputs)
 
     assert [output.reward_result.optimization_reward for output in outputs] == [0.75, 0.0]
+
+
+def test_unrecognized_verifier_output_is_reported_as_a_verifier_failure():
+    runner = object.__new__(HarborTrajectoryRunner)
+    runner._error_handling_config = ErrorHandlingConfig(enable_error_classification=True)
+    runner._reward_shaping_enabled = True
+    runner._reward_shaping_config = {
+        "enable_reward_shaping": True,
+        "reward_shaper": "threshold",
+        "reward_shaping_fallback": False,
+    }
+    result = SimpleNamespace(
+        verifier_result=SimpleNamespace(rewards={"reward": 0.0}, stdout="unrecognized verifier output"),
+        exception_info=None,
+        agent_result=SimpleNamespace(
+            metadata={
+                "all_messages": [
+                    {"role": "user", "content": "solve it"},
+                    {"role": "assistant", "content": "done"},
+                ],
+                "summarization_count": 0,
+            }
+        ),
+    )
+
+    output = runner._process_trial_result(result, TrajectoryID(instance_id="task", repetition_id=0))
+
+    assert output.verification.status is VerificationStatus.ERROR
+    assert output.disposition.exception_type == "VerifierOutputParseError"
+    assert output.disposition.baseline_eligible is False
