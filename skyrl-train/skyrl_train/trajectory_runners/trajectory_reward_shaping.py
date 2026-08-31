@@ -21,6 +21,7 @@ REWARD_SHAPING_ROW_KEYS = (
     "reward_shaping_loop_spans",
     "loop_advantages",
     "reward_shaping_versions",
+    "verifier_tests",
 )
 DEFAULT_ACCEPTED_STOP_REASONS = ("complete", "end_turn", "eos", "stop")
 

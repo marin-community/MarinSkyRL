@@ -66,6 +66,25 @@ class RewardShapingLoopSpan(TypedDict):
     end: int
 
 
+class VerifierTestTrialID(TypedDict):
+    instance_id: str
+    repetition_id: int
+
+
+class VerifierTestRecord(TypedDict):
+    record_id: str
+    trial_id: VerifierTestTrialID
+    test_id: str
+    outcome: str
+    output: str
+
+
+class VerifierTestCollection(TypedDict):
+    parser: Optional[str]
+    complete: bool
+    tests: List[VerifierTestRecord]
+
+
 class TrajectoryBatch(TypedDict):
     """Normalized output shared by trajectory runners and trainer consumers.
 
@@ -81,6 +100,7 @@ class TrajectoryBatch(TypedDict):
     reward_shaping_loop_spans: Optional[List[List[RewardShapingLoopSpan]]]
     loop_advantages: Optional[List[List[float]]]
     reward_shaping_versions: Optional[List[int]]
+    verifier_tests: Optional[List[Optional[VerifierTestCollection]]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
     rollout_metrics: Optional[Dict[str, Any]]

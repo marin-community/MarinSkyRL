@@ -789,6 +789,11 @@ def test_filter_trajectory_batch():
         "reward_shaping_loop_spans": [[{"start": 0, "end": 2}], [], [{"start": 1, "end": 2}]],
         "loop_advantages": [[-0.05, -0.05], [0.0, 0.0], [0.0, -0.2]],
         "reward_shaping_versions": [2, 2, 2],
+        "verifier_tests": [
+            {"parser": "pytest", "complete": True, "tests": [{"record_id": "a"}]},
+            None,
+            {"parser": "pytest", "complete": True, "tests": [{"record_id": "c"}]},
+        ],
     }
     kept_indices = [0, 2]  # Keep first and third samples
 
@@ -813,6 +818,7 @@ def test_filter_trajectory_batch():
         [{"start": 1, "end": 2}],
     ]
     assert filtered["reward_shaping_versions"] == [2, 2]
+    assert [collection["tests"][0]["record_id"] for collection in filtered["verifier_tests"]] == ["a", "c"]
 
 
 def test_validate_trajectory_batch_valid_case():

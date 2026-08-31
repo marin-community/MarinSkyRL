@@ -23,6 +23,7 @@ from skyrl_train.trajectory_runners.types import (
     RewardShapingComponents,
     RewardShapingLoopSpan,
     TrajectoryID,
+    VerifierTestCollection,
 )
 from skyrl_train.trajectory_runners.trajectory_retention_config import (
     TrajectoryRetentionConfig,
@@ -45,6 +46,7 @@ from skyrl_train.io import io
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
 RETENTION_SCHEMA_VERSION = 1
+TRAJECTORY_RECORD_SCHEMA_VERSION = 2
 _LEDGER_NAME = "_retention_ledger.json"
 _SELECTION_COUNT = "count"
 _SELECTION_FRACTION = "fraction"
@@ -192,6 +194,11 @@ class _RewardTrace:
 
 
 @dataclass(frozen=True)
+class _VerifierTrace:
+    tests: VerifierTestCollection
+
+
+@dataclass(frozen=True)
 class _ProvenanceTrace:
     runner: str
     inference_backend: str | None
@@ -214,6 +221,7 @@ class TrajectoryRecord:
     prompt: _PromptTrace
     response: _ResponseTrace
     reward: _RewardTrace
+    verifier: _VerifierTrace | None
     metrics: dict[str, Any]
     provenance: _ProvenanceTrace
 
@@ -379,6 +387,9 @@ def build_trajectory_records(
     components = output.get("reward_shaping_components")
     loop_spans = output.get("reward_shaping_loop_spans")
     shaping_versions = output.get("reward_shaping_versions")
+    verifier_tests = output.get("verifier_tests")
+    if verifier_tests is not None and len(verifier_tests) != len(output["response_ids"]):
+        raise ValueError("verifier tests must have one entry per trajectory row")
     model_version_step = output.get("actual_global_step")
     if model_version_step is None:
         model_version_step = max(0, metadata.global_step - 1)
@@ -400,7 +411,7 @@ def build_trajectory_records(
             trajectory_components = aggregate_reward_shaping_components(components, row_indices)
         response_text = _decode(tokenizer, response_ids)
         record = TrajectoryRecord(
-            schema_version=RETENTION_SCHEMA_VERSION,
+            schema_version=TRAJECTORY_RECORD_SCHEMA_VERSION,
             record_id="",
             run_id=config.run_id,
             global_step=metadata.global_step,
@@ -433,6 +444,11 @@ def build_trajectory_records(
                 outcome=outcome,
                 shaped=shaped_reward,
                 components=trajectory_components,
+            ),
+            verifier=(
+                None
+                if verifier_tests is None or verifier_tests[final_index] is None
+                else _VerifierTrace(tests=verifier_tests[final_index])
             ),
             metrics=to_jsonable(output.get("rollout_metrics") or {}),
             provenance=_ProvenanceTrace(

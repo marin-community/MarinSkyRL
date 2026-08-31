@@ -724,7 +724,7 @@ def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatc
         f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
     )
 
-    for key in ("response_ids", "loss_masks", "rewards", "rollout_logprobs"):
+    for key in ("response_ids", "loss_masks", "rewards", "rollout_logprobs", "verifier_tests"):
         value = trajectory_batch.get(key)
         if isinstance(value, list):
             assert len(value) == num_responses, (

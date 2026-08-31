@@ -244,12 +244,59 @@ def test_normalized_output_produces_complete_core_trace_schema():
         "prompt",
         "response",
         "reward",
+        "verifier",
         "metrics",
         "provenance",
     }
     assert record["prompt"]["messages"] == [{"role": "user", "content": "first"}]
     assert record["response"]["text"] == "10 11"
+    assert record["verifier"] is None
     assert record["provenance"]["runner"] == "SkyRLGymTrajectoryRunner"
+
+
+def test_verifier_tests_are_persisted_with_the_retained_trace():
+    output = _output()
+    output["verifier_tests"] = [
+        {
+            "parser": "pass_ratio_summary",
+            "complete": True,
+            "tests": [
+                {
+                    "record_id": "test-record-a",
+                    "trial_id": {"instance_id": "a", "repetition_id": 0},
+                    "test_id": "test formatting",
+                    "outcome": "failed",
+                    "output": "test formatting: FAIL: expected title",
+                }
+            ],
+        },
+        None,
+        None,
+    ]
+
+    records = build_trajectory_records(
+        _input(),
+        output,
+        _config(Path("/unused")),
+        _Tokenizer(),
+        runner_name="HarborTrajectoryRunner",
+    )
+
+    assert records[0].to_json()["verifier"] == {
+        "tests": {
+            "parser": "pass_ratio_summary",
+            "complete": True,
+            "tests": [
+                {
+                    "record_id": "test-record-a",
+                    "trial_id": {"instance_id": "a", "repetition_id": 0},
+                    "test_id": "test formatting",
+                    "outcome": "failed",
+                    "output": "test formatting: FAIL: expected title",
+                }
+            ],
+        }
+    }
 
 
 @pytest.mark.asyncio

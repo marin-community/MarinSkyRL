@@ -18,6 +18,7 @@ from skyrl_gym.verification import (
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
+from skyrl_train.trajectory_runners.types import VerifierTestCollection
 from skyrl_train.trajectory_runners.projections import project_loss_mask
 from skyrl_train.metric_names import TIS_LCS_FALLBACK_ALERT_METRIC, TIS_METRIC_PREFIX
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -37,7 +38,12 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     SENTINEL_EXPERT_ID,
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.utils.reward_shaping import shape_reward_from_output, shape_reward_with_components
+from skyrl_train.utils.reward_shaping import (
+    parse_test_output_with_parser,
+    shape_reward_from_output,
+    shape_reward_with_components,
+    verifier_test_collection,
+)
 from skyrl_train.utils.harbor_errors import (
     ErrorTreatment,
     classify_exception_type,
@@ -207,6 +213,7 @@ class TerminalBenchAgentOutput:
     disposition: TrainingDisposition
     loss_mask: List[int]
     trajectory_id: TrajectoryID
+    verifier_tests: Optional[VerifierTestCollection] = None
     summarization_count: Optional[int] = None
     # TIS logprob-alignment bookkeeping (exact-vs-LCS-vs-failed token counts).
     # Aggregated into rollout_metrics as tis/* so an LCS fallback or alignment
@@ -1406,6 +1413,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "exclude_from_baseline": [not output.disposition.baseline_eligible for output in all_outputs],
             "actual_global_step": actual_global_step,
         }
+        if self._reward_shaping_config.get("enable_reward_shaping", True):
+            trajectory_batch["verifier_tests"] = [output.verifier_tests for output in all_outputs]
 
         # Only attach routed_experts when router-replay is on, so the flag-off
         # TrajectoryBatch dict is byte-identical to today (key absent, not None).
@@ -1648,18 +1657,29 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         trajectory_id: TrajectoryID,
         *,
         preserve_timeout: bool,
-    ) -> RewardResult:
+    ) -> tuple[RewardResult, Optional[VerifierTestCollection]]:
         """Adapt a Harbor verdict and configured shaper to the shared reward contract."""
         if preserve_timeout:
-            return RewardResult(unshaped_reward=None, optimization_reward=0.0)
+            return RewardResult(unshaped_reward=None, optimization_reward=0.0), None
 
         if verification.score is None:
             raise ValueError("verified Harbor results require a score")
         original_reward = verification.score
         reward = original_reward
         reward_components: Optional[Dict[str, float]] = None
+        test_collection = None
         if self._reward_shaping_config.get("enable_reward_shaping", True):
             verifier_stdout = getattr(result.verifier_result, "stdout", None)
+            parsed_tests, parser_name = parse_test_output_with_parser(
+                verifier_stdout or "",
+                self._reward_shaping_config.get("reward_parser"),
+            )
+            test_collection = verifier_test_collection(
+                parsed_tests,
+                parser_name=parser_name,
+                instance_id=trajectory_id.instance_id,
+                repetition_id=trajectory_id.repetition_id,
+            )
             shaper_name = self._reward_shaping_config.get("reward_shaper", "pass_ratio")
             shaper_kwargs = self._reward_shaping_config.get("shaper_kwargs", {})
             if shaper_name in ("composite", "composite_loop"):
@@ -1692,10 +1712,13 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 f"Trajectory {trajectory_id}: reward shaped {original_reward:.3f} -> {reward:.3f}"
                 + (f" (components={reward_components})" if reward_components else "")
             )
-        return RewardResult(
-            unshaped_reward=original_reward,
-            optimization_reward=reward,
-            components={} if reward_components is None else reward_components,
+        return (
+            RewardResult(
+                unshaped_reward=original_reward,
+                optimization_reward=reward,
+                components={} if reward_components is None else reward_components,
+            ),
+            test_collection,
         )
 
     def _process_trial_result(
@@ -1898,7 +1921,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 exclude_from_baseline=exclude_from_baseline,
             )
 
-        reward_result = self._shape_harbor_reward(
+        reward_result, verifier_tests = self._shape_harbor_reward(
             result,
             verification,
             chat_history,
@@ -2161,6 +2184,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             evidence=evidence,
             verification=verification,
             reward_result=reward_result,
+            verifier_tests=verifier_tests,
             disposition=disposition,
             loss_mask=loss_mask,
             trajectory_id=trajectory_id,
