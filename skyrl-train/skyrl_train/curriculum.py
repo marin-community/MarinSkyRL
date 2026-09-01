@@ -298,9 +298,7 @@ def flat_prior(num_bins: int, alpha: float, beta: float) -> tuple[np.ndarray, np
     return np.full(num_bins, alpha), np.full(num_bins, beta)
 
 
-def grade_linear_prior(
-    grades: np.ndarray, high: float, low: float, strength: float
-) -> tuple[np.ndarray, np.ndarray]:
+def grade_linear_prior(grades: np.ndarray, high: float, low: float, strength: float) -> tuple[np.ndarray, np.ndarray]:
     """Beta priors whose mean pass rate falls linearly from ``high`` at the lowest grade
     to ``low`` at the highest, with ``strength`` pseudo-counts per bin."""
     grades = grades.astype(np.float64)
@@ -363,9 +361,7 @@ class ThompsonInformative(WeightPolicy):
         self.epsilon = epsilon
 
     def weights(self, stats: BinStats, rng: np.random.Generator) -> np.ndarray:
-        draws = rng.beta(
-            self.prior_alpha + stats.informative, self.prior_beta + (stats.total - stats.informative)
-        )
+        draws = rng.beta(self.prior_alpha + stats.informative, self.prior_beta + (stats.total - stats.informative))
         return floored_normalized(draws, self.epsilon)
 
 
