@@ -3,7 +3,7 @@
 ## Context
 
 MarinSkyRL currently has three overlapping vLLM metric paths. `V1LoggingStatLoggerFixed` accumulates a
-step window for `VLLMStatsCallback`; vLLM's Prometheus logger accumulates native counters and histograms;
+step window for `InferenceStatsCallback`; vLLM's Prometheus logger accumulates native counters and histograms;
 and `enable_ray_prometheus_stats` can replace that logger with `RayPrometheusStatLogger`. The draft
 telemetry work in [#460](https://github.com/marin-community/MarinSkyRL/pull/460) routes the callback's
 scalar summaries through `trainer.all_metrics`, but separately reads the process-wide Prometheus registry
@@ -17,7 +17,7 @@ step trackers and typed telemetry.
 
 ## Decision
 
-`VLLMStatsCallback` owns vLLM metric collection and publication for a training run. No inference-engine
+`InferenceStatsCallback` owns inference metric collection and publication for a training run. No inference-engine
 class, stat logger, or background Prometheus collector publishes vLLM metrics directly.
 
 Each inference engine exposes one RPC that returns an immutable `VLLMEngineStatsSnapshot`. The engine's
@@ -102,7 +102,7 @@ CPU tests exercise the public producer-to-consumer path:
 
 - feed scheduler and finished-request observations to the real stat logger, read a snapshot, and verify
   current, cumulative, and interval semantics, including that periodic reads do not reset the interval;
-- pass snapshots from multiple fake engine RPCs through `VLLMStatsCallback` and verify the flat tracker
+- pass snapshots from multiple fake engine RPCs through `InferenceStatsCallback` and verify the flat tracker
   payload and typed recording sink from the same read;
 - require every snapshot field to have an explicit tracker, telemetry, or dual disposition and pin the
   externally consumed metric names and labels;

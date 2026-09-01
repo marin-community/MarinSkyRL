@@ -432,11 +432,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.cfg.trainer.algorithm.policy_loss_type
             ),
         )
-        # K-actor rollout fan-out gate. Resolved in _maybe_enable_rollout_fanout()
-        # at train() start; initialized False so the flag is always defined
-        # (e.g. if train() is never reached, the weight-sync block stays a no-op).
-        self._rollout_fanout_enabled = False
-
         # Some async-specific validations
         assert self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size, (
             "train_batch_size must equal policy_mini_batch_size for fully async training"
@@ -571,51 +566,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         finally:
             await super().shutdown()
 
-    def _maybe_enable_rollout_fanout(self) -> None:
-        """Enable configured multi-actor rollout collection without distributing staleness state."""
-        rollout_cfg = OmegaConf.select(self.cfg, "rollout.fanout")
-        self._rollout_fanout_enabled = bool(rollout_cfg is not None and getattr(rollout_cfg, "enabled", False))
-        if not self._rollout_fanout_enabled:
-            return
-
-        # Harbor is optional and absent from launcher-only CPU environments.
-        from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import RolloutDispatcher  # noqa: PLC0415
-
-        terminal_bench_cfg = OmegaConf.select(self.cfg, "terminal_bench_config")
-        if terminal_bench_cfg is None:
-            raise ValueError(
-                "rollout.fanout.enabled=true requires cfg.terminal_bench_config "
-                "(the terminal_bench RL path). Disable fan-out for other generators."
-            )
-
-        num_coordinators = int(getattr(rollout_cfg, "num_coordinators", 4))
-        cpus_per_coordinator = int(getattr(rollout_cfg, "cpus_per_coordinator", 8))
-        coordinator_rpc_timeout = float(rollout_cfg.coordinator_rpc_timeout)
-        logger.info(
-            f"Rollout fan-out ENABLED: replacing single-process runner with "
-            f"RolloutDispatcher (K={num_coordinators}, cpus_per_coordinator="
-            f"{cpus_per_coordinator}, coordinator_rpc_timeout={coordinator_rpc_timeout:g}s)."
-        )
-        self.trajectory_runner = RolloutDispatcher(
-            cfg=self.cfg,
-            trajectory_runner_cfg=self.cfg.generator,
-            terminal_bench_cfg=terminal_bench_cfg,
-            num_coordinators=num_coordinators,
-            cpus_per_coordinator=cpus_per_coordinator,
-            coordinator_rpc_timeout=coordinator_rpc_timeout,
-        )
-        # The sink was attached in __init__, to the runner just replaced. Re-attach it here rather
-        # than at the call site: the swap is what detaches it.
-        self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
-
     async def train(self):
         """
         Main fully async training loop for PPO
         """
         self.global_step = 0
-
-        # Fan-out is opt-in. When enabled, a missing terminal_bench_config raises instead of falling back.
-        self._maybe_enable_rollout_fanout()
 
         try:
             await self._startup_trajectory_runner()

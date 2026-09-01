@@ -19,6 +19,7 @@ from http import HTTPStatus
 import pytest
 from fastapi import Request
 
+from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator
 from skyrl_train.inference_engines.vllm.utils import ensure_token_ids_in_sse_chunk
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     create_app,
@@ -311,7 +312,13 @@ async def test_non_streaming_disconnect_cancels_backend_request():
         receive=receive_events.get,
     )
 
-    request_task = asyncio.create_task(handle_openai_request(request, endpoint="/chat/completions"))
+    request_task = asyncio.create_task(
+        handle_openai_request(
+            request,
+            endpoint="/chat/completions",
+            bridge_stats=HTTPBridgeStatsAccumulator(),
+        )
+    )
     await backend.started.wait()
     await receive_events.put({"type": "http.disconnect"})
 

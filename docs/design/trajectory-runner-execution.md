@@ -101,7 +101,7 @@ The HTTP bridge extends the canonical snapshot-and-callback metrics contract int
 publish directly from the Uvicorn thread, or mutate trainer metrics from that thread.
 
 A thread-safe accumulator in the bridge is the sole producer of `HTTPBridgeStatsSnapshot`. The snapshot carries
-cumulative histograms and an interval view with `PEEK` and `RESET` semantics matching `VLLMStatsSnapshot`:
+cumulative histograms and an interval view with `PEEK` and `RESET` semantics matching `InferenceStatsSnapshot`:
 
 - `event_loop_lag_seconds`, measured from scheduled versus actual wake time on the Uvicorn loop;
 - `response_bytes`, measured from the rendered non-streaming body and emitted streaming chunks; and

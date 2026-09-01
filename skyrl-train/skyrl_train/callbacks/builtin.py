@@ -35,9 +35,9 @@ from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.utils.data_tracker import DataConsumptionState, DataConsumptionTracker
 from skyrl_train.io import io
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
-from skyrl_train.vllm_observability import (
-    VLLMMetricsSink,
-    configured_vllm_sinks,
+from skyrl_train.inference_observability import (
+    InferenceMetricsSink,
+    configured_inference_sinks,
     format_console_summary,
     trainer_metrics,
 )
@@ -569,9 +569,9 @@ class PreflightGateCallback(TrainerCallback):
         return []
 
 
-@register_callback("vllm_stats")
-class VLLMStatsCallback(TrainerCallback):
-    """Collect one canonical vLLM snapshot and fan it out to independent sinks."""
+@register_callback("inference_stats")
+class InferenceStatsCallback(TrainerCallback):
+    """Collect one canonical inference snapshot and fan it out to independent sinks."""
 
     def __init__(
         self,
@@ -580,7 +580,7 @@ class VLLMStatsCallback(TrainerCallback):
         log_to_tracker: bool = True,
         console_log_level: str = "info",
         poll_interval_seconds: float = 5.0,
-        sinks: tuple[VLLMMetricsSink, ...] | None = None,
+        sinks: tuple[InferenceMetricsSink, ...] | None = None,
     ):
         self.log_every_steps = log_every_steps
         self.log_to_console = log_to_console
@@ -604,10 +604,10 @@ class VLLMStatsCallback(TrainerCallback):
             self._inference_engine_client = getattr(trainer, "inference_engine_client", None)
             if self._inference_engine_client is None:
                 logger.warning(
-                    "VLLMStatsCallback: No inference_engine_client found on trainer. Stats collection will be disabled."
+                    "InferenceStatsCallback: No inference_engine_client found on trainer. Stats collection will be disabled."
                 )
         if self._sinks is None:
-            self._sinks = configured_vllm_sinks()
+            self._sinks = configured_inference_sinks()
         return control
 
     async def on_train_begin_async(self, state: TrainerState, control: TrainerControl, **kwargs):
@@ -635,7 +635,7 @@ class VLLMStatsCallback(TrainerCallback):
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.warning("VLLMStatsCallback: periodic collection failed", exc_info=True)
+                logger.warning("InferenceStatsCallback: periodic collection failed", exc_info=True)
 
     async def on_step_end_async(
         self,
@@ -653,7 +653,7 @@ class VLLMStatsCallback(TrainerCallback):
             async with self._read_lock:
                 snapshot = await self._inference_engine_client.get_stats(read_mode=IntervalReadMode.RESET)
         except Exception:
-            logger.warning("VLLMStatsCallback: Failed to collect stats", exc_info=True)
+            logger.warning("InferenceStatsCallback: Failed to collect stats", exc_info=True)
             return control
 
         metrics = trainer_metrics(snapshot)
@@ -661,7 +661,7 @@ class VLLMStatsCallback(TrainerCallback):
             return control
         if self.log_to_tracker:
             kwargs["trainer"].all_metrics.update(metrics)
-        if self.log_to_console:
+        if self.log_to_console and "vllm/num_engines" in metrics:
             log = logger.debug if self.console_log_level == "debug" else logger.info
             log(format_console_summary(metrics, state.global_step))
         self._publish_sinks(snapshot, state.global_step)
@@ -672,7 +672,7 @@ class VLLMStatsCallback(TrainerCallback):
             try:
                 sink.publish(snapshot, step)
             except Exception:
-                logger.warning(f"VLLMStatsCallback: {type(sink).__name__} failed", exc_info=True)
+                logger.warning(f"InferenceStatsCallback: {type(sink).__name__} failed", exc_info=True)
 
 
 def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
@@ -772,14 +772,14 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
             )
         )
 
-    # vLLM stats callback (enabled when using vLLM backend)
-    # This collects engine stats directly, bypassing unreliable Ray log-to-driver
+    # Inference stats callback (enabled when using the vLLM backend). This combines
+    # engine and HTTP bridge stats without relying on Ray log-to-driver forwarding.
     generator_backend = getattr(cfg.generator, "backend", None)
-    vllm_stats_interval = getattr(cfg.generator, "vllm_stats_interval", 1)
-    if generator_backend == "vllm" and vllm_stats_interval > 0:
+    inference_stats_interval = getattr(cfg.generator, "inference_stats_interval", 1)
+    if generator_backend == "vllm" and inference_stats_interval > 0:
         callbacks.append(
-            VLLMStatsCallback(
-                log_every_steps=vllm_stats_interval,
+            InferenceStatsCallback(
+                log_every_steps=inference_stats_interval,
                 log_to_console=True,
                 log_to_tracker=True,
             )

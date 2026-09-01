@@ -1,8 +1,9 @@
-"""Typed boundary between vLLM metric producers and trainer observability sinks."""
+"""Typed boundary between inference metric producers and trainer observability sinks."""
 
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -91,8 +92,87 @@ class VLLMEngineStatsSnapshot:
 
 
 @dataclass(frozen=True)
-class VLLMStatsSnapshot:
+class InferenceStatsSnapshot:
     engines: tuple[VLLMEngineStatsSnapshot, ...]
+    http_bridge: HTTPBridgeStatsSnapshot | None = None
+
+
+@dataclass(frozen=True)
+class DistributionSummary:
+    count: int = 0
+    mean: float = 0.0
+    p95: float = 0.0
+    maximum: float = 0.0
+
+
+@dataclass(frozen=True)
+class HTTPBridgeStatsSnapshot:
+    event_loop_lag_seconds: DistributionSummary = field(default_factory=DistributionSummary)
+    response_bytes: DistributionSummary = field(default_factory=DistributionSummary)
+    json_serialization_seconds: DistributionSummary = field(default_factory=DistributionSummary)
+    histograms: tuple[VLLMHistogramSnapshot, ...] = ()
+
+
+@dataclass
+class _IntervalDistributionAccumulator:
+    """Exact count/mean/max with a bounded sample for interval p95."""
+
+    sample_limit: int = 4_096
+    count: int = 0
+    total: float = 0.0
+    maximum: float = 0.0
+    samples: list[float] = field(default_factory=list)
+
+    def observe(self, value: float) -> None:
+        self.count += 1
+        self.total += value
+        self.maximum = max(self.maximum, value)
+        if len(self.samples) < self.sample_limit:
+            self.samples.append(value)
+        else:
+            self.samples[(self.count - 1) % self.sample_limit] = value
+
+    def snapshot(self) -> DistributionSummary:
+        if not self.count:
+            return DistributionSummary()
+        ordered = sorted(self.samples)
+        p95_index = min(len(ordered) - 1, math.ceil(0.95 * len(ordered)) - 1)
+        return DistributionSummary(self.count, self.total / self.count, ordered[p95_index], self.maximum)
+
+
+class HTTPBridgeStatsAccumulator:
+    """Thread-safe bridge observations with PEEK and RESET interval reads."""
+
+    _BOUNDS = {
+        "event_loop_lag_seconds": (0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
+        "response_bytes": (1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576),
+        "json_serialization_seconds": (0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1),
+    }
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._interval = {name: _IntervalDistributionAccumulator() for name in self._BOUNDS}
+        self._histograms: dict[tuple[str, tuple[tuple[str, str], ...]], HistogramAccumulator] = {}
+
+    def observe(self, name: str, value: float, *, attributes: Mapping[str, str] | None = None) -> None:
+        if name not in self._BOUNDS:
+            raise ValueError(f"unknown HTTP bridge metric: {name}")
+        labels = tuple(sorted((attributes or {}).items()))
+        with self._lock:
+            self._interval[name].observe(value)
+            histogram = self._histograms.setdefault((name, labels), HistogramAccumulator(self._BOUNDS[name]))
+            histogram.observe(value)
+
+    def snapshot(self, read_mode: IntervalReadMode) -> HTTPBridgeStatsSnapshot:
+        with self._lock:
+            summaries = {name: accumulator.snapshot() for name, accumulator in self._interval.items()}
+            histograms = tuple(
+                histogram.snapshot(name, "By" if name == "response_bytes" else "s", dict(labels))
+                for (name, labels), histogram in self._histograms.items()
+            )
+            if read_mode is IntervalReadMode.RESET:
+                self._interval = {name: _IntervalDistributionAccumulator() for name in self._BOUNDS}
+        return HTTPBridgeStatsSnapshot(histograms=histograms, **summaries)
 
 
 @dataclass(frozen=True)

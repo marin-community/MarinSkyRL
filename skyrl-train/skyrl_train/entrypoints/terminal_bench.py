@@ -10,20 +10,21 @@ from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_dr
 
 class TerminalBenchExp(BasePPOExp):
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
+        del inference_engine_client
         # Harbor is an optional agent-harness dependency and is absent from the CPU launcher environment.
-        from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner  # noqa: PLC0415
-        from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
+        from skyrl_train.trajectory_runners.harbor.execution import (  # noqa: PLC0415
+            ExecutionEnvironment,
+            HarborRunnerSpec,
+            ProcessPoolResources,
+            TrajectoryWorkload,
+            build_harbor_trajectory_runner,
+        )
 
-        return HarborTrajectoryRunner(
-            trajectory_runner_cfg=cfg.generator,
-            terminal_bench_cfg=cfg.terminal_bench_config,
-            inference_engine_client=inference_engine_client,
+        return build_harbor_trajectory_runner(
+            spec=HarborRunnerSpec.from_config(cfg),
+            workload=TrajectoryWorkload(environment=ExecutionEnvironment.PRODUCTION),
             tokenizer=tokenizer,
-            moe_router_replay=bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
-            rollout_logprobs_required=rollout_logprobs_enabled(cfg.trainer.algorithm),
-            tito_full=cfg.trainer.algorithm.get("tito_full", None),
-            tis_splice=bool(cfg.trainer.algorithm.tis_splice),
-            tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
+            resources=ProcessPoolResources.from_config(cfg),
         )
 
     def get_train_dataset(self):

@@ -2,16 +2,18 @@ import asyncio
 from dataclasses import fields
 
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
-from skyrl_train.callbacks.builtin import VLLMStatsCallback
+from skyrl_train.callbacks.builtin import InferenceStatsCallback
 from skyrl_train.inference_engines.vllm.stats import (
+    DistributionSummary,
+    HTTPBridgeStatsSnapshot,
     IntervalReadMode,
     VLLMCumulativeStats,
     VLLMCurrentStats,
     VLLMEngineStatsSnapshot,
     VLLMIntervalStats,
-    VLLMStatsSnapshot,
+    InferenceStatsSnapshot,
 )
-from skyrl_train.vllm_observability import trainer_metrics
+from skyrl_train.inference_observability import trainer_metrics
 
 
 EXPECTED_KEYS = {
@@ -42,13 +44,22 @@ EXPECTED_KEYS = {
     "vllm/total_preempted_reqs",
     "vllm/total_samples",
     "vllm/total_active_samples",
+    *(
+        f"inference_bridge/{name}/{statistic}"
+        for name in (
+            "event_loop_lag_seconds",
+            "response_bytes",
+            "json_serialization_seconds",
+        )
+        for statistic in ("count", "mean", "p95", "maximum")
+    ),
 }
 
 
 def _snapshot():
     values = {field.name: index + 1 for index, field in enumerate(fields(VLLMIntervalStats))}
     interval = VLLMIntervalStats(**values)
-    return VLLMStatsSnapshot(
+    return InferenceStatsSnapshot(
         (
             VLLMEngineStatsSnapshot(
                 "engine-0",
@@ -57,7 +68,12 @@ def _snapshot():
                 cumulative=VLLMCumulativeStats(),
                 interval=interval,
             ),
-        )
+        ),
+        http_bridge=HTTPBridgeStatsSnapshot(
+            event_loop_lag_seconds=DistributionSummary(2, 0.01, 0.02, 0.02),
+            response_bytes=DistributionSummary(2, 100, 120, 120),
+            json_serialization_seconds=DistributionSummary(2, 0.001, 0.002, 0.002),
+        ),
     )
 
 
@@ -87,7 +103,7 @@ class _Trainer:
 
 def _run_step(snapshot, *, global_step=3, sinks=(), **callback_kwargs):
     trainer = _Trainer(snapshot)
-    callback = VLLMStatsCallback(sinks=sinks, **callback_kwargs)
+    callback = InferenceStatsCallback(sinks=sinks, **callback_kwargs)
     state = TrainerState(global_step=global_step, epoch=0, total_steps=10, num_steps_per_epoch=10)
     control = TrainerControl()
     callback.on_train_begin(state, control, trainer=trainer)

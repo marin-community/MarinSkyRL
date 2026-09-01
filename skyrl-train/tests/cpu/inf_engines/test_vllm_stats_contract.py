@@ -3,11 +3,29 @@ from types import SimpleNamespace
 
 from skyrl_train.inference_engines.vllm.stats import VLLMNativeStatsAccumulator, build_1_2_5_buckets
 from skyrl_train.inference_engines.vllm.stats import (
+    HTTPBridgeStatsAccumulator,
+    IntervalReadMode,
     VLLMEngineStatsSnapshot,
     VLLMIntervalStats,
-    VLLMStatsSnapshot,
+    InferenceStatsSnapshot,
 )
-from skyrl_train.vllm_observability import FinelogVLLMMetricsSink
+from skyrl_train.inference_observability import FinelogInferenceMetricsSink
+
+
+def test_http_bridge_accumulator_peek_and_reset_interval_without_resetting_histograms():
+    accumulator = HTTPBridgeStatsAccumulator()
+    labels = {"endpoint": "/chat/completions", "transport": "json", "status": "2xx"}
+    accumulator.observe("response_bytes", 100, attributes=labels)
+    accumulator.observe("response_bytes", 300, attributes=labels)
+
+    peek = accumulator.snapshot(IntervalReadMode.PEEK)
+    reset = accumulator.snapshot(IntervalReadMode.RESET)
+    empty_interval = accumulator.snapshot(IntervalReadMode.PEEK)
+
+    assert peek.response_bytes.count == reset.response_bytes.count == 2
+    assert peek.response_bytes.mean == 200
+    assert empty_interval.response_bytes.count == 0
+    assert empty_interval.histograms[0].count == 2
 
 
 def test_native_accumulator_preserves_current_cumulative_labels_and_histograms():
@@ -87,7 +105,7 @@ def test_finelog_adapter_projects_every_typed_native_measurement():
     accumulator.preemptions = 1
     accumulator.finished_by_reason = {"length": 2}
     native = accumulator.snapshot()
-    snapshot = VLLMStatsSnapshot(
+    snapshot = InferenceStatsSnapshot(
         (
             VLLMEngineStatsSnapshot(
                 "engine-a",
@@ -101,7 +119,7 @@ def test_finelog_adapter_projects_every_typed_native_measurement():
         )
     )
     published = []
-    sink = FinelogVLLMMetricsSink.__new__(FinelogVLLMMetricsSink)
+    sink = FinelogInferenceMetricsSink.__new__(FinelogInferenceMetricsSink)
     sink._publisher = SimpleNamespace(publish=lambda records: published.extend(records))
 
     sink.publish(snapshot, step=7)
@@ -146,3 +164,16 @@ def test_vllm_engine_package_has_no_direct_publisher_or_parallel_prometheus_path
         if token in path.read_text()
     }
     assert findings == set()
+
+
+def test_http_bridge_uses_the_callback_boundary_instead_of_publishing_directly():
+    endpoint = (
+        Path(__file__).parents[3] / "skyrl_train" / "inference_engines" / "inference_engine_client_http_endpoint.py"
+    )
+    source = endpoint.read_text()
+
+    assert not {
+        token
+        for token in ("MetricSnapshotPublisher", "rigging.telemetry", "wandb.log", "all_metrics")
+        if token in source
+    }

@@ -4,7 +4,11 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
-from skyrl_train.inference_engines.vllm.stats import IntervalReadMode, VLLMStatsSnapshot
+from skyrl_train.inference_engines.vllm.stats import (
+    HTTPBridgeStatsAccumulator,
+    IntervalReadMode,
+    InferenceStatsSnapshot,
+)
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
 from transformers import PreTrainedTokenizerBase
 import asyncio
@@ -68,7 +72,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # response for. Because this client is the SOLE router in front of the engines,
         # this outstanding count equals (running + waiting) as seen by each engine — a
         # real-time load signal with no reset-on-read side effect (unlike get_stats(),
-        # which resets each vLLM engine's per-step accumulators that VLLMStatsCallback
+        # which resets each vLLM engine's per-step accumulators that InferenceStatsCallback
         # depends on). Used for power-of-two-choices balancing of new sessions.
         self._engine_inflight: List[int] = [0] * len(engines)
         # session_id (str) -> engine_idx. Populated on a session's FIRST request (load
@@ -79,6 +83,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # no awaits, so this cheap lock keeps the two structures consistent even if the
         # HTTP endpoint thread and other callers ever touch them concurrently.
         self._routing_lock = threading.Lock()
+        self._http_bridge_stats = HTTPBridgeStatsAccumulator()
 
         if self.enable_http_endpoint:
             self._spin_up_http_endpoint()
@@ -817,10 +822,13 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def teardown(self):
         return await self._run_on_all_engines("teardown")
 
-    async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET) -> VLLMStatsSnapshot:
+    async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET) -> InferenceStatsSnapshot:
         """Read every live engine without aggregating away labels or histogram buckets."""
         engine_snapshots = await self._run_on_all_engines("get_stats", read_mode=read_mode)
-        return VLLMStatsSnapshot(engines=tuple(engine_snapshots))
+        return InferenceStatsSnapshot(
+            engines=tuple(engine_snapshots),
+            http_bridge=self._http_bridge_stats.snapshot(read_mode),
+        )
 
     def tp_size(self) -> int:
         raise NotImplementedError("InferenceEngineClient does not implement tp_size()")
@@ -917,6 +925,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # threading.Lock is not picklable; the pickled copy is only used for weight-sync
         # RPC args and never routes, so dropping the routing lock is safe.
         state["_routing_lock"] = None
+        state["_http_bridge_stats"] = None
         return state
 
     def _spin_up_http_endpoint(self):
@@ -941,6 +950,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 "host": "0.0.0.0",
                 "port": self.http_endpoint_port,
                 "log_level": "warning",
+                "bridge_stats": self._http_bridge_stats,
             },
             daemon=True,
         )

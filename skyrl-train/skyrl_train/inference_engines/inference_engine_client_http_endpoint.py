@@ -27,6 +27,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator
+
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +137,27 @@ def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Opt
     return None
 
 
-async def _safe_sse_stream(generator):
+def _status_class(status_code: int) -> str:
+    return f"{status_code // 100}xx"
+
+
+def _json_response(
+    content: Any,
+    *,
+    endpoint: str,
+    bridge_stats: HTTPBridgeStatsAccumulator,
+    status_code: int = HTTPStatus.OK.value,
+) -> JSONResponse:
+    started = time.perf_counter()
+    response = JSONResponse(content=content, status_code=status_code)
+    serialization_seconds = time.perf_counter() - started
+    attributes = {"endpoint": endpoint, "transport": "json", "status": _status_class(status_code)}
+    bridge_stats.observe("json_serialization_seconds", serialization_seconds, attributes=attributes)
+    bridge_stats.observe("response_bytes", float(len(response.body)), attributes=attributes)
+    return response
+
+
+async def _safe_sse_stream(generator, *, endpoint: str, bridge_stats: HTTPBridgeStatsAccumulator):
     """Wrap an async generator so the SSE body always completes.
 
     Guarantees ``data: [DONE]\\n\\n`` is the last chunk even when the
@@ -145,15 +167,19 @@ async def _safe_sse_stream(generator):
     ``RemoteProtocolError: incomplete chunked read`` on the client side.
     """
     done_sent = False
+    response_bytes = 0
+    status = HTTPStatus.OK.value
     try:
         async for chunk in generator:
             if isinstance(chunk, str) and "[DONE]" in chunk:
                 done_sent = True
+            response_bytes += len(chunk.encode()) if isinstance(chunk, str) else len(chunk)
             yield chunk
     except asyncio.CancelledError:
         # Client disconnected — re-raise so Starlette stops sending.
         raise
     except Exception as e:
+        status = HTTPStatus.INTERNAL_SERVER_ERROR.value
         tb = traceback.format_exc()
         logger.error(f"Mid-stream SSE error:\n{tb}")
         if not done_sent:
@@ -164,12 +190,24 @@ async def _safe_sse_stream(generator):
                     code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                 ),
             ).model_dump()
-            yield f"data: {json.dumps(err)}\n\n"
-            yield "data: [DONE]\n\n"
+            error_chunk = f"data: {json.dumps(err)}\n\n"
+            done_chunk = "data: [DONE]\n\n"
+            response_bytes += len(error_chunk.encode()) + len(done_chunk.encode())
+            yield error_chunk
+            yield done_chunk
         return
-    # Normal completion — ensure [DONE] if the generator didn't send it.
-    if not done_sent:
-        yield "data: [DONE]\n\n"
+    else:
+        # Normal completion — ensure [DONE] if the generator didn't send it.
+        if not done_sent:
+            done_chunk = "data: [DONE]\n\n"
+            response_bytes += len(done_chunk.encode())
+            yield done_chunk
+    finally:
+        bridge_stats.observe(
+            "response_bytes",
+            float(response_bytes),
+            attributes={"endpoint": endpoint, "transport": "sse", "status": _status_class(status)},
+        )
 
 
 async def _wait_for_disconnect(raw_request: Request) -> None:
@@ -198,7 +236,7 @@ async def _await_with_disconnect(raw_request: Request, backend_request: Coroutin
         await asyncio.gather(backend_task, disconnect_task, return_exceptions=True)
 
 
-async def handle_openai_request(raw_request: Request, endpoint: str):
+async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stats: HTTPBridgeStatsAccumulator):
     """Handle /completions or /chat/completions request.
 
     Returns ``StreamingResponse`` for ``stream:true`` chat-completions and
@@ -211,7 +249,12 @@ async def handle_openai_request(raw_request: Request, endpoint: str):
         # SkyRL-side validation
         error_response = _validate_openai_request(request_json, endpoint=endpoint)
         if error_response is not None:
-            return JSONResponse(content=error_response.model_dump(), status_code=error_response.error.code)
+            return _json_response(
+                error_response.model_dump(),
+                endpoint=endpoint,
+                bridge_stats=bridge_stats,
+                status_code=error_response.error.code,
+            )
 
         # Serialize fastapi.Request because it is not pickable, which causes ray methods to fail.
         payload = {
@@ -223,7 +266,7 @@ async def handle_openai_request(raw_request: Request, endpoint: str):
         if request_json.get("stream", False) and endpoint == "/chat/completions":
             raw_gen = _global_inference_engine_client.chat_completion_stream(payload)
             return StreamingResponse(
-                content=_safe_sse_stream(raw_gen),
+                content=_safe_sse_stream(raw_gen, endpoint=endpoint, bridge_stats=bridge_stats),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -238,9 +281,9 @@ async def handle_openai_request(raw_request: Request, endpoint: str):
         if "error" in response or response.get("object", "") == "error":
             # former is vllm format, latter is sglang format
             error_code = response["error"]["code"] if "error" in response else response["code"]
-            return JSONResponse(content=response, status_code=error_code)
+            return _json_response(response, endpoint=endpoint, bridge_stats=bridge_stats, status_code=error_code)
         else:
-            return JSONResponse(content=response)
+            return _json_response(response, endpoint=endpoint, bridge_stats=bridge_stats)
 
     except json.JSONDecodeError as e:
         # To catch possible raw_request.json() errors
@@ -251,7 +294,12 @@ async def handle_openai_request(raw_request: Request, endpoint: str):
                 code=HTTPStatus.BAD_REQUEST.value,
             ),
         )
-        return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.BAD_REQUEST.value)
+        return _json_response(
+            error_response.model_dump(),
+            endpoint=endpoint,
+            bridge_stats=bridge_stats,
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
     except Exception as e:
         # Include full traceback for debugging
         tb = traceback.format_exc()
@@ -263,7 +311,12 @@ async def handle_openai_request(raw_request: Request, endpoint: str):
                 code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             ),
         )
-        return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value)
+        return _json_response(
+            error_response.model_dump(),
+            endpoint=endpoint,
+            bridge_stats=bridge_stats,
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        )
 
 
 def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds: int = 30) -> None:
@@ -322,13 +375,49 @@ def wait_for_server_ready(host: str = "127.0.0.1", port: int = 8000, max_wait_se
             time.sleep(1)  # Wait 1 second between retries
 
 
-def create_app() -> fastapi.FastAPI:
+async def _monitor_event_loop_lag(
+    bridge_stats: HTTPBridgeStatsAccumulator,
+    interval_seconds: float,
+) -> None:
+    """Measure delay between a scheduled wake-up and the event loop running it."""
+    try:
+        loop = asyncio.get_running_loop()
+        expected = loop.time() + interval_seconds
+        while True:
+            await asyncio.sleep(interval_seconds)
+            now = loop.time()
+            bridge_stats.observe("event_loop_lag_seconds", max(0.0, now - expected))
+            expected = now + interval_seconds
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Inference HTTP event-loop lag monitor failed")
+        raise
+
+
+def create_app(
+    bridge_stats: HTTPBridgeStatsAccumulator | None = None,
+    *,
+    event_loop_lag_interval_seconds: float = 0.5,
+) -> fastapi.FastAPI:
     """Create the FastAPI application."""
+    bridge_stats = bridge_stats or HTTPBridgeStatsAccumulator()
 
     @asynccontextmanager
     async def lifespan(app: fastapi.FastAPI):
         logger.info("Starting inference HTTP endpoint...")
-        yield
+        monitor = asyncio.create_task(
+            _monitor_event_loop_lag(bridge_stats, event_loop_lag_interval_seconds),
+            name="inference-http-event-loop-lag",
+        )
+        try:
+            yield
+        finally:
+            monitor.cancel()
+            try:
+                await monitor
+            except asyncio.CancelledError:
+                pass
 
     app = fastapi.FastAPI(
         title="InferenceEngine OpenAI-Compatible API",
@@ -365,7 +454,7 @@ def create_app() -> fastapi.FastAPI:
         - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
         - https://docs.sglang.ai/basic_usage/openai_api_completions.html
         """
-        return await handle_openai_request(raw_request, endpoint="/chat/completions")
+        return await handle_openai_request(raw_request, endpoint="/chat/completions", bridge_stats=bridge_stats)
 
     @app.post("/v1/completions")
     async def completions(raw_request: Request):
@@ -389,7 +478,7 @@ def create_app() -> fastapi.FastAPI:
         - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
         - https://docs.sglang.ai/basic_usage/openai_api_completions.html
         """
-        return await handle_openai_request(raw_request, endpoint="/completions")
+        return await handle_openai_request(raw_request, endpoint="/completions", bridge_stats=bridge_stats)
 
     # Health check endpoint
     # All inference engine replicas are initialized before creating `InferenceEngineClient`, and thus
@@ -409,7 +498,12 @@ def create_app() -> fastapi.FastAPI:
                 code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             ),
         )
-        return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value)
+        return _json_response(
+            error_response.model_dump(),
+            endpoint=request.url.path,
+            bridge_stats=bridge_stats,
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        )
 
     return app
 
@@ -419,6 +513,7 @@ def serve(
     host: str = "0.0.0.0",
     port: int = 8000,
     log_level: str = "info",
+    bridge_stats: HTTPBridgeStatsAccumulator | None = None,
 ):
     """
     Start the HTTP endpoint.
@@ -428,9 +523,10 @@ def serve(
         host: Host to bind to (default: "0.0.0.0")
         port: Port to bind to (default: 8000)
         log_level: Logging level (default: "info")
+        bridge_stats: Shared accumulator for HTTP bridge metrics
     """
     # Create app
-    app = create_app()
+    app = create_app(bridge_stats)
 
     # Configure logging
     logging.basicConfig(level=getattr(logging, log_level.upper()))

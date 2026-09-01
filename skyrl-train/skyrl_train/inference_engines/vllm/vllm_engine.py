@@ -1189,7 +1189,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
     The log method is otherwise not called in the VLLM codebase.
 
     Also stores aggregated stats in a class-level registry for programmatic access
-    (used by VLLMStatsCallback to bypass Ray log-to-driver unreliability).
+    (used by InferenceStatsCallback to bypass Ray log-to-driver unreliability).
 
     Stats are accumulated throughout a step:
     - Request counts (running, waiting): track peak and median values

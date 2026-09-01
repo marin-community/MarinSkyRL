@@ -591,7 +591,9 @@ def validate_cfg(cfg: DictConfig):
         "trainer.progress.percent_step": cfg.trainer.progress.percent_step,
         "trainer.progress.count_step": cfg.trainer.progress.count_step,
         "generator.r3_dispatch_put_timeout_seconds": cfg.generator.r3_dispatch_put_timeout_seconds,
-        "generator.coordinator_executor_workers": cfg.generator.coordinator_executor_workers,
+        "trajectory_runner.process_pool.num_coordinators": cfg.trajectory_runner.process_pool.num_coordinators,
+        "trajectory_runner.process_pool.cpus_per_coordinator": cfg.trajectory_runner.process_pool.cpus_per_coordinator,
+        "trajectory_runner.process_pool.executor_workers": cfg.trajectory_runner.process_pool.executor_workers,
         "trainer.policy.fsdp_config.expert_loader_chunk_rows": cfg.trainer.policy.fsdp_config.expert_loader_chunk_rows,
     }
     for path, value in runtime_values.items():

@@ -314,7 +314,6 @@ generator:
   fuse_weights: false
   r3_transport: "decentral"
   r3_dispatch_put_timeout_seconds: 600
-  coordinator_executor_workers: 256
   gdn_backend: "torch"
   weight_transfer_threshold_cuda_ipc_GB: 1.0
   inference_engine_tensor_parallel_size: 4
@@ -333,7 +332,7 @@ generator:
   max_num_batched_tokens: 8192
   enforce_eager: true
   fully_sharded_loras: false
-  vllm_stats_interval: 1
+  inference_stats_interval: 1
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]
@@ -443,9 +442,9 @@ teacher:
 environment:
   env_class: "gsm8k"
 
-rollout:
-  fanout:
-    enabled: true
+trajectory_runner:
+  process_pool:
     num_coordinators: 4
     cpus_per_coordinator: 8
-    coordinator_rpc_timeout: 21600
+    executor_workers: 256
+    rpc_timeout_seconds: 21600

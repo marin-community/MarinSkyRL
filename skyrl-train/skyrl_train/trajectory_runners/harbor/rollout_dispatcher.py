@@ -1,50 +1,8 @@
-"""K-actor rollout fan-out for terminal-bench RL orchestration.
+"""Process-isolated Harbor trajectory execution.
 
-This module implements the gated, default-OFF rollout fan-out described in
-``notes/ot-agent/RL/architecture/skyrl_harbor_rollout_fanout_design.md``.
-
-Motivation (one constraint, not two bugs): the whole rollout-orchestration
-tier — the ``submit_batch`` create_task storm, the per-trial Harbor/Terminus2
-coroutine bodies, litellm, the ``asyncio.gather`` reconverge, AND the
-post-gather token/logprob/reward processing — runs on a SINGLE asyncio loop
-inside ONE ``ray::skyrl_entrypoint`` task process, pinning one CPU core while
-the rest sit idle. asyncio gives I/O concurrency but no parallelism for the
-per-task Python work, and the entrypoint is a ``@ray.remote`` *task* (no
-``max_concurrency`` knob).
-
-The fix is more *processes*. We insert a pool of K ``RolloutCoordinator`` Ray
-actors between the trainer and the trajectory runner:
-
-  * Each actor builds its OWN ``HarborTrajectoryRunner`` scoped to the process
-    with ``n_concurrent_trials // K`` and ``daytona connection_pool_maxsize // K``
-    so the per-process load (and the Daytona control-plane load) is divided,
-    not replicated.
-  * The clean seam is ``HarborTrajectoryRunner.run(TrajectoryRequestBatch)
-    -> TrajectoryBatch`` — already an awaited, serializable-in/serializable-out
-    boundary. Because ``run()`` itself runs ``submit_batch`` + ``gather``
-    + ALL post-gather token/logprob/reward shaping (see
-    ``harbor/runner.py`` ``_run()`` body), wrapping ``run()``
-    in ``run_shard`` moves *all* of that work off the dispatcher loop and into
-    the actor. (This is the CRITICAL move the design calls out — the
-    post-gather processing must not survive on the single dispatcher core.)
-  * Inference is already a shared HTTP service on its own thread; actors only
-    need the host:port string (carried in ``trajectory_runner_cfg.http_endpoint_*``),
-    so weights propagate "for free" via the existing broadcast — actors never
-    touch weights.
-
-The ``RolloutDispatcher`` is a thin, trajectory-runner-compatible object
-(NOT a Ray actor) that the trainer holds in place of ``self.trajectory_runner`` when
-fan-out is enabled. It owns NO staleness state (that stays single-loop in
-``FullyAsyncRayPPOTrainer`` — same code class that caused prior all_reduce
-key-mismatch NCCL deadlocks; must not be distributed). It round-robins each
-group-sized ``run()`` call to ONE coordinator (a group is the atomic
-reward-shaping unit, so it is never split across actors) and ``ray.get``s the
-compact ``TrajectoryBatch`` back.
-
-``rollout.fanout.enabled`` defaults to TRUE in ``ppo_base_config.yaml``, so a default async
-config takes this path. Setting it false makes the trainer skip all of this and leaves the
-code path byte-for-byte the single-process behavior. ``enabled: true, num_coordinators: 1``
-is behavior-identical modulo one RPC hop (the K=1 parity check).
+Production Harbor workloads use this runner regardless of trainer type. A request can
+contain arbitrary reward groups. The dispatcher keeps each group on one coordinator,
+runs groups concurrently, and restores the input row order before returning.
 """
 
 from __future__ import annotations
@@ -52,12 +10,15 @@ from __future__ import annotations
 import asyncio
 import itertools
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from collections import defaultdict
+from typing import Any, List, Optional
 
 import ray
 from omegaconf import DictConfig, OmegaConf
 
-from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
+from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch, TrajectoryBatch
+from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.utils.fd_monitor import start_fd_monitor
@@ -161,16 +122,12 @@ class RolloutCoordinator:
 
     def __init__(
         self,
-        cfg: DictConfig,
-        trajectory_runner_cfg: DictConfig,
-        terminal_bench_cfg: DictConfig,
+        spec: HarborRunnerSpec,
         shard_idx: int,
         num_coordinators: int,
+        executor_workers: int,
     ):
         configure_worker_process()
-        from skyrl_train.trajectory_runners.harbor.runner import (  # noqa: PLC0415
-            HarborTrajectoryRunner,
-        )
         from transformers import AutoTokenizer
 
         # Each actor process gets its own FD monitor (per-process daemon thread),
@@ -182,17 +139,18 @@ class RolloutCoordinator:
 
         self._shard_idx = shard_idx
         self._num_coordinators = num_coordinators
-        self._executor_workers = int(cfg.generator.coordinator_executor_workers)
+        self._executor_workers = executor_workers
 
-        scaled_tb_cfg = _scale_terminal_bench_cfg(terminal_bench_cfg, num_coordinators)
+        scaled_tb_cfg = _scale_terminal_bench_cfg(spec.terminal_bench_config, num_coordinators)
+        spec = spec.with_terminal_bench_config(scaled_tb_cfg)
 
         # Build the tokenizer in-process (same construction as
         # BasePPOExp.get_tokenizer) — the runner uses it during
         # post-gather token/logprob extraction (apply_chat_template).
         tokenizer = AutoTokenizer.from_pretrained(
-            cfg.trainer.policy.model.path,
+            spec.config.trainer.policy.model.path,
             trust_remote_code=True,
-            use_fast=not cfg.trainer.disable_fast_tokenizer,
+            use_fast=not spec.config.trainer.disable_fast_tokenizer,
         )
         tokenizer.padding_side = "left"
         if tokenizer.pad_token is None:
@@ -204,21 +162,11 @@ class RolloutCoordinator:
         # So None is safe and avoids shipping a Ray actor handle into the worker.
         # NOTE: this is verified against the current HarborTrajectoryRunner,
         # which only stores the handle and never calls it.
-        self._runner = HarborTrajectoryRunner(
-            trajectory_runner_cfg=trajectory_runner_cfg,
-            terminal_bench_cfg=scaled_tb_cfg,
-            inference_engine_client=None,
-            tokenizer=tokenizer,
-            moe_router_replay=bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False)),
-            rollout_logprobs_required=rollout_logprobs_enabled(cfg.trainer.algorithm),
-            tito_full=cfg.trainer.algorithm.get("tito_full", None),
-            tis_splice=bool(cfg.trainer.algorithm.tis_splice),
-            tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
-        )
+        self._runner = spec.build(tokenizer)
 
         _log().info(
             f"[RolloutCoordinator {shard_idx}/{num_coordinators}] constructed "
-            f"(http={trajectory_runner_cfg.http_endpoint_host}:{trajectory_runner_cfg.http_endpoint_port})"
+            f"(http={spec.runner_config.http_endpoint_host}:{spec.runner_config.http_endpoint_port})"
         )
 
     async def startup(self) -> None:
@@ -274,14 +222,11 @@ class RolloutCoordinator:
 
 
 class RolloutDispatcher:
-    """Trajectory-runner-compatible proxy that fans out across K coordinators.
+    """Trajectory-runner proxy that runs atomic reward groups across K coordinators.
 
-    Drop-in for ``self.trajectory_runner`` in the trainer when ``rollout.fanout.enabled``.
-    Owns NO staleness state. Each ``run()`` call (one group =
-    n_samples_per_prompt trajectories) is routed round-robin to ONE coordinator;
-    a group is never split (it is the atomic reward-shaping unit). With
-    ``num_parallel_generation_workers`` concurrent ``run()`` calls in flight,
-    the load spreads naturally across the K coordinators' event loops.
+    One call can contain any number of groups. The dispatcher partitions them by
+    instance identity, sends each complete group to one coordinator, and restores
+    the request order after concurrent execution. It owns no trainer staleness state.
 
     Lifecycle mirrors ``TrajectoryRunner``: ``startup`` / ``run`` /
     ``shutdown`` (+ optional eval-session passthrough). ``global_step_fn`` is set
@@ -291,27 +236,12 @@ class RolloutDispatcher:
 
     def __init__(
         self,
-        cfg: DictConfig,
-        trajectory_runner_cfg: DictConfig,
-        terminal_bench_cfg: DictConfig,
-        num_coordinators: int,
-        cpus_per_coordinator: int,
-        coordinator_rpc_timeout: float,
+        spec: HarborRunnerSpec,
+        resources: ProcessPoolResources,
     ):
-        # Detach each config to a parent-ref-free, object-free OmegaConf copy
-        # BEFORE it can cross a `.remote()` boundary. The live `cfg` tree (under
-        # the forced `spawn` start method) transitively reaches a wandb-class
-        # `multiprocessing.SimpleQueue`, which cannot be pickled into a Ray actor
-        # ("SimpleQueue objects should only be shared between processes through
-        # inheritance"). The `to_container(resolve=True)` round-trip severs
-        # OmegaConf parent back-references and drops any attached live object;
-        # it changes only HOW configs are shipped, not their values. Mirrors the
-        # pattern already used by `_scale_terminal_bench_cfg` in this file.
-        self.cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
-        self._trajectory_runner_cfg = OmegaConf.create(OmegaConf.to_container(trajectory_runner_cfg, resolve=True))
-        self._terminal_bench_cfg = OmegaConf.create(OmegaConf.to_container(terminal_bench_cfg, resolve=True))
+        self._spec = spec
 
-        # --- Fan-out connectivity fix (head-IP injection) ---
+        # The routable inference host is resolved at startup, when Ray is initialized.
         # The vLLM HTTP inference endpoint (InferenceEngineClient) is bound on the
         # HEAD node — the same process that constructs this dispatcher. Its
         # configured `http_endpoint_host` is 127.0.0.1, which only resolves to the
@@ -326,27 +256,10 @@ class RolloutDispatcher:
         # InferenceEngineClient._spin_up_http_endpoint), so this routable host is
         # reachable from every node.
         #
-        # GATING: this only happens on the fan-out path — the RolloutDispatcher is
-        # constructed ONLY when rollout.fanout.enabled (see
-        # fully_async_trainer._maybe_enable_rollout_fanout). When fan-out is OFF,
-        # the dispatcher never exists and the runner runs in-process on the head
-        # using the unchanged 127.0.0.1 host. We only override the loopback host so
-        # an explicitly-configured non-loopback host (e.g. a manual remote setup)
-        # is respected.
-        configured_host = self._trajectory_runner_cfg.get("http_endpoint_host", None)
-        if configured_host in ("127.0.0.1", "localhost", None):
-            head_ip = ray.util.get_node_ip_address()
-            self._trajectory_runner_cfg["http_endpoint_host"] = head_ip
-            _log().info(
-                f"[RolloutDispatcher] fan-out path: overriding inference host "
-                f"{configured_host} -> {head_ip} (routable head IP) for "
-                f"coordinator litellm base_url connectivity"
-            )
-        self._num_coordinators = num_coordinators
-        self._cpus_per_coordinator = cpus_per_coordinator
-        if coordinator_rpc_timeout <= 0:
-            raise ValueError("rollout.fanout.coordinator_rpc_timeout must be positive")
-        self._coordinator_rpc_timeout = coordinator_rpc_timeout
+        self._num_coordinators = resources.num_coordinators
+        self._cpus_per_coordinator = resources.cpus_per_coordinator
+        self._executor_workers = resources.executor_workers
+        self._coordinator_rpc_timeout = resources.rpc_timeout_seconds
 
         # Trainer sets this; default returns None until then.
         self.global_step_fn = None
@@ -356,15 +269,16 @@ class RolloutDispatcher:
         self._trajectory_sink: Optional[TrajectorySink] = None
 
         self._actors: List = []
-        self._rr = itertools.cycle(range(num_coordinators))
+        self._rr = itertools.cycle(range(self._num_coordinators))
         self._pg = None
         # When an eval session is active, run() is pinned to shard 0 (the
         # only coordinator with the eval orchestrator). See start_eval_session.
         self._eval_session_active = False
 
         _log().info(
-            f"[RolloutDispatcher] configured num_coordinators={num_coordinators}, "
-            f"cpus_per_coordinator={cpus_per_coordinator}, coordinator_rpc_timeout={coordinator_rpc_timeout:g}s"
+            f"[RolloutDispatcher] configured num_coordinators={self._num_coordinators}, "
+            f"cpus_per_coordinator={self._cpus_per_coordinator}, "
+            f"coordinator_rpc_timeout={self._coordinator_rpc_timeout:g}s"
         )
 
     def _current_global_step(self) -> Optional[int]:
@@ -385,6 +299,12 @@ class RolloutDispatcher:
         requests ``cpus_per_coordinator`` CPUs on the head node.
         """
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+        runner_config = OmegaConf.create(OmegaConf.to_container(self._spec.runner_config, resolve=True))
+        configured_host = runner_config.get("http_endpoint_host", None)
+        if configured_host in ("127.0.0.1", "localhost", None):
+            runner_config.http_endpoint_host = ray.util.get_node_ip_address()
+        actor_spec = self._spec.with_runner_config(runner_config)
 
         # The RecordProxy writes the opencode literal log to a NODE-LOCAL path on THIS
         # (rank-0/head) node, and LiteralLogStore reads it with a bare local open(). A
@@ -419,11 +339,10 @@ class RolloutDispatcher:
                 num_cpus=self._cpus_per_coordinator,
                 scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=self._proxy_node_id, soft=False),
             ).remote(
-                cfg=self.cfg,
-                trajectory_runner_cfg=self._trajectory_runner_cfg,
-                terminal_bench_cfg=self._terminal_bench_cfg,
+                spec=actor_spec,
                 shard_idx=shard_idx,
                 num_coordinators=self._num_coordinators,
+                executor_workers=self._executor_workers,
             )
             # Await THIS coordinator's startup/readiness to completion before
             # constructing the next one, so its heavy GPFS import + tokenizer
@@ -440,21 +359,51 @@ class RolloutDispatcher:
     def set_trajectory_sink(self, sink: TrajectorySink) -> None:
         """Attach the trainer-owned sink used to retain each returned batch.
 
-        Binds it to the harbor runner rather than to this proxy: ``runner_name`` is recorded on every
-        retained trajectory, so the dispatcher's name would change the retained data whenever fan-out
-        is on.
+        Binds it to the Harbor runner rather than to this proxy. ``runner_name`` is
+        recorded on each retained trajectory, so process placement must not change provenance.
         """
         sink.bind_runner(RETAINED_RUNNER_NAME)
         self._trajectory_sink = sink
 
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
-        """Route one group to one coordinator, await its TrajectoryBatch, and retain it.
-
-        Training: round-robin across all coordinators. Eval: pinned to shard 0
-        (the only coordinator with an active eval orchestrator). When a sink is attached, the returned batch
-        is retained here.
-        """
+        """Run complete reward groups concurrently and restore input row order."""
         del disable_tqdm
+        trajectory_ids = input_batch.get("trajectory_ids")
+        if not trajectory_ids or len(trajectory_ids) != len(input_batch["prompts"]):
+            raise ValueError("process-isolated trajectory execution requires one trajectory ID per request row")
+        request_keys = [trajectory_id.to_string() for trajectory_id in trajectory_ids]
+        if len(request_keys) != len(set(request_keys)):
+            raise ValueError("process-isolated trajectory execution requires unique trajectory IDs")
+
+        groups: dict[str, list[int]] = defaultdict(list)
+        for index, trajectory_id in enumerate(trajectory_ids):
+            groups[trajectory_id.instance_id].append(index)
+
+        sub_batches = [self._select_request_rows(input_batch, indices) for indices in groups.values()]
+        outputs = await asyncio.gather(*(self._run_group(sub_batch) for sub_batch in sub_batches))
+        for sub_batch, output in zip(sub_batches, outputs, strict=True):
+            self._validate_group_identity(sub_batch, output)
+
+        if len(outputs) == 1:
+            result = outputs[0]
+        else:
+            result = concatenate_trajectory_batches(
+                outputs,
+                require_rollout_logprobs=rollout_logprobs_enabled(self._spec.config.trainer.algorithm),
+                tis_lcs_alert_threshold=float(self._spec.config.trainer.algorithm.tis_lcs_alert_threshold),
+            )
+            actual_steps = [output.get("actual_global_step") for output in outputs]
+            observed_steps = [step for step in actual_steps if step is not None]
+            if observed_steps:
+                result["actual_global_step"] = min(observed_steps)
+            self._restore_request_order(result, trajectory_ids)
+
+        # Outside the deadline: a slow sink write is not an unresponsive coordinator.
+        if self._trajectory_sink is not None:
+            await retain_trajectories(self._trajectory_sink, input_batch, result)
+        return result
+
+    async def _run_group(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         if self._eval_session_active:
             coordinator_index = 0
             actor = self._actors[0]
@@ -474,11 +423,38 @@ class RolloutDispatcher:
                 f"Rollout coordinator {coordinator_index} RPC did not return within "
                 f"{self._coordinator_rpc_timeout:g} seconds"
             ) from error
-
-        # Outside the deadline: a slow sink write is not an unresponsive coordinator.
-        if self._trajectory_sink is not None:
-            await retain_trajectories(self._trajectory_sink, input_batch, output)
         return output
+
+    @staticmethod
+    def _select_request_rows(input_batch: TrajectoryRequestBatch, indices: list[int]) -> TrajectoryRequestBatch:
+        row_keys = ("prompts", "env_classes", "env_extras", "trajectory_ids")
+        selected: dict[str, Any] = dict(input_batch)
+        for key in row_keys:
+            values = input_batch.get(key)
+            if values is not None:
+                selected[key] = [values[index] for index in indices]
+        return selected  # type: ignore[return-value]
+
+    @staticmethod
+    def _validate_group_identity(input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> None:
+        expected = [trajectory_id.to_string() for trajectory_id in input_batch["trajectory_ids"] or []]
+        returned_ids = output.get("trajectory_ids")
+        if returned_ids is None:
+            raise ValueError("trajectory runner output omitted trajectory IDs")
+        returned = [trajectory_id.to_string() for trajectory_id in returned_ids]
+        if len(returned) != len(set(returned)) or set(returned) != set(expected):
+            raise ValueError(f"trajectory runner output identity mismatch: expected {expected}, got {returned}")
+
+    @staticmethod
+    def _restore_request_order(output: TrajectoryBatch, requested_ids: list[TrajectoryID]) -> None:
+        returned_ids = output.get("trajectory_ids")
+        assert returned_ids is not None
+        returned_positions = {trajectory_id.to_string(): index for index, trajectory_id in enumerate(returned_ids)}
+        order = [returned_positions[trajectory_id.to_string()] for trajectory_id in requested_ids]
+        row_count = len(returned_ids)
+        for key, values in list(output.items()):
+            if isinstance(values, list) and len(values) == row_count:
+                output[key] = [values[index] for index in order]  # type: ignore[literal-required]
 
     async def shutdown(self) -> None:
         if self._actors:

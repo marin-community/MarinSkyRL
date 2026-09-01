@@ -236,7 +236,7 @@ generator:
   async_engine: true
   batched: false
   enable_http_endpoint: true
-  vllm_stats_interval: 1
+  inference_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true
 
   sampling_params:
@@ -255,9 +255,8 @@ data:
   train_data: []
   val_data: []
 
-rollout:
-  fanout:
-    enabled: true
+trajectory_runner:
+  process_pool:
     num_coordinators: 4
     cpus_per_coordinator: 8
 

@@ -41,7 +41,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     _sentinel_routed_experts_row,
     SENTINEL_EXPERT_ID,
 )
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.utils.reward_shaping import (
     ParsedTestResult,
     parse_test_output_with_parser,
@@ -336,7 +335,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         self,
         trajectory_runner_cfg: DictConfig,
         terminal_bench_cfg: DictConfig,
-        inference_engine_client: InferenceEngineClient,
         tokenizer,
         tis_lcs_alert_threshold: float,
         moe_router_replay: bool = False,
@@ -348,7 +346,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         Args:
             trajectory_runner_cfg: trajectory-runner configuration
             terminal_bench_cfg: DictConfig object containing the terminal bench configuration
-            inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
             moe_router_replay: when True, capture per-token MoE routed_experts from
                 Harbor rollout_details and plumb them through to the training batch
