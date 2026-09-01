@@ -12,6 +12,8 @@ The module splits sampling mechanics from weighting policy:
   Stateful checkpointing) and folds each step's rewards into ``BinStats``.
 - ``BinStats`` holds the decayed per-bin sufficient statistics (informative/total group counts
   and solved/sample counts, whose ratio is a decayed pass-rate estimate).
+- ``RowStats`` records the same evidence per dataset row (visit counts, per-visit-decayed
+  pass evidence, recency), checkpointed but not yet consulted by any weight policy.
 - ``WeightPolicy`` subclasses turn those statistics into per-bin weights. ``build_policy``
   normalizes the ``data.sampling`` config subtree into a policy instance once, at construction.
 """
@@ -64,6 +66,7 @@ class CurriculumConfig:
     decay: float = 0.95
     epsilon: float = 0.05
     reversion_mass: float = 0.0
+    instance_decay: float = 0.7
     prior_alpha: float = 1.0
     prior_beta: float = 1.0
     grade_prior_strength: float = 8.0
@@ -84,6 +87,7 @@ class CurriculumConfig:
             decay=cfg.decay,
             epsilon=cfg.epsilon,
             reversion_mass=cfg.reversion_mass,
+            instance_decay=cfg.instance_decay,
             prior_alpha=cfg.prior_alpha,
             prior_beta=cfg.prior_beta,
             grade_prior_strength=cfg.grade_prior_strength,
@@ -206,6 +210,61 @@ class BinStats:
         self.solved = state_dict["solved"].copy()
         self.samples = state_dict["samples"].copy()
         self.step_groups = state_dict["step_groups"].copy()
+
+
+class RowStats:
+    """Per-row (example) rollout evidence, updated only when a row is drawn.
+
+    Bin statistics decay per training step, which suits bins that receive rollouts every
+    step; a single row is drawn orders of magnitude less often, so per-step decay would
+    erase its evidence between visits. Row counts instead decay per visit: when a row
+    receives a new group, its previous counts shrink by ``instance_decay`` before the
+    group's counts are added, making solved/samples an EWMA pass estimate over the row's
+    visit history under policy drift. ``visits`` and ``last_step`` are undecayed exposure
+    and recency records. No weight policy consults these yet; they are tracked and
+    checkpointed so instance-level weighting can build on recorded visit history.
+    """
+
+    def __init__(self, num_rows: int, instance_decay: float):
+        self.instance_decay = instance_decay
+        self.visits = np.zeros(num_rows, dtype=np.int64)
+        self.samples = np.zeros(num_rows)
+        self.solved = np.zeros(num_rows)
+        self.last_step = np.full(num_rows, -1, dtype=np.int64)
+
+    def observe_group(self, row: int, solved: int, size: int, step: int) -> None:
+        self.visits[row] += 1
+        self.samples[row] = self.instance_decay * self.samples[row] + size
+        self.solved[row] = self.instance_decay * self.solved[row] + solved
+        self.last_step[row] = step
+
+    def summary_metrics(self) -> Dict[str, float]:
+        """Aggregate instance-evidence health; per-row series would swamp the logger."""
+        visited = self.visits > 0
+        num_visited = int(visited.sum())
+        out = {"curriculum/instances/visited_frac": num_visited / len(self.visits)}
+        if num_visited == 0:
+            return out
+        pass_rate = self.solved[visited] / self.samples[visited]
+        revisited = self.visits[visited] >= 2
+        out["curriculum/instances/mean_pass"] = float(pass_rate.mean())
+        out["curriculum/instances/mastered_frac"] = float((revisited & (pass_rate >= 0.999)).mean())
+        out["curriculum/instances/dead_frac"] = float((revisited & (pass_rate <= 0.001)).mean())
+        return out
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            "visits": self.visits.copy(),
+            "samples": self.samples.copy(),
+            "solved": self.solved.copy(),
+            "last_step": self.last_step.copy(),
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        self.visits = state_dict["visits"].copy()
+        self.samples = state_dict["samples"].copy()
+        self.solved = state_dict["solved"].copy()
+        self.last_step = state_dict["last_step"].copy()
 
 
 def floored_normalized(weights: np.ndarray, epsilon: float) -> np.ndarray:
@@ -467,8 +526,10 @@ class CurriculumSampler(Sampler[int]):
         self.batch_size = batch_size
         self.rng = np.random.default_rng(seed)
         self.stats = BinStats(self.bins, decay=config.decay, reversion_mass=config.reversion_mass)
+        self.rows = RowStats(self.num_rows, instance_decay=config.instance_decay)
         self.policy = build_policy(config, self.bins)
         self.draw_count = 0
+        self.update_count = 0
         self.weights = self.policy.weights(self.stats, self.rng)
 
     def __len__(self) -> int:
@@ -526,7 +587,10 @@ class CurriculumSampler(Sampler[int]):
         if len(uids) != len(rewards):
             raise ValueError(f"Got {len(uids)} uids but {len(rewards)} rewards")
         outcomes = self._group_outcomes(uids, rewards, n_samples_per_prompt)
+        self.update_count += 1
         self.stats.apply_step(outcomes)
+        for outcome in outcomes:
+            self.rows.observe_group(outcome.row, outcome.solved, outcome.size, self.update_count)
         self.policy.observe_step(self.stats)
         self.weights = self.policy.weights(self.stats, self.rng)
 
@@ -541,21 +605,26 @@ class CurriculumSampler(Sampler[int]):
             samples = stats.samples[bin_idx]
             out[f"curriculum/{name}/pass_rate"] = float(stats.solved[bin_idx] / samples) if samples > 0 else 0.0
             out[f"curriculum/{name}/groups"] = float(stats.step_groups[bin_idx])
+        out.update(self.rows.summary_metrics())
         out.update(self.policy.metrics())
         return out
 
     def state_dict(self) -> Dict[str, Any]:
         return {
             "stats": self.stats.state_dict(),
+            "rows": self.rows.state_dict(),
             "policy": self.policy.state_dict(),
             "weights": self.weights.copy(),
             "draw_count": self.draw_count,
+            "update_count": self.update_count,
             "rng_state": self.rng.bit_generator.state,
         }
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         self.stats.load_state_dict(state_dict["stats"])
+        self.rows.load_state_dict(state_dict["rows"])
         self.policy.load_state_dict(state_dict["policy"])
         self.weights = state_dict["weights"].copy()
         self.draw_count = state_dict["draw_count"]
+        self.update_count = state_dict["update_count"]
         self.rng.bit_generator.state = state_dict["rng_state"]

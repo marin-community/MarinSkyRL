@@ -99,6 +99,44 @@ def test_update_informative_accounting_with_decay():
     assert metrics["curriculum/g1-hard/groups"] == 0.0
 
 
+def test_row_stats_track_per_visit_decay_and_recency():
+    sampler = _sampler(TWO_BINS, "naive", instance_decay=0.5)
+    sampler.update(["0", "0"], [1.0, 0.0], 2)
+    sampler.update(["1", "1"], [1.0, 1.0], 2)
+    # Row 0's second visit decays its earlier counts by 0.5 before adding the new group.
+    sampler.update(["0", "0"], [1.0, 1.0], 2)
+    rows = sampler.rows
+    np.testing.assert_array_equal(rows.visits, [2, 1])
+    np.testing.assert_array_equal(rows.last_step, [3, 2])
+    np.testing.assert_allclose(rows.samples, [0.5 * 2 + 2, 2.0])
+    np.testing.assert_allclose(rows.solved, [0.5 * 1 + 2, 2.0])
+
+
+def test_row_stats_summary_metrics():
+    sampler = _sampler({"g0-easy": (0, 4)}, "naive")
+    for _ in range(2):
+        # Row 0 always passes (mastered), row 1 always fails (dead).
+        sampler.update(["0", "0", "1", "1"], [1.0, 1.0, 0.0, 0.0], 2)
+    sampler.update(["2", "2"], [1.0, 0.0], 2)  # row 2: one mixed visit
+    metrics = sampler.metrics()
+    assert metrics["curriculum/instances/visited_frac"] == pytest.approx(3 / 4)
+    assert metrics["curriculum/instances/mean_pass"] == pytest.approx((1.0 + 0.0 + 0.5) / 3)
+    assert metrics["curriculum/instances/mastered_frac"] == pytest.approx(1 / 3)
+    assert metrics["curriculum/instances/dead_frac"] == pytest.approx(1 / 3)
+
+
+def test_row_stats_checkpoint_roundtrip():
+    sampler = _sampler(TWO_BINS, "naive")
+    sampler.update(["0", "0"], [1.0, 0.0], 2)
+    restored = _sampler(TWO_BINS, "naive")
+    restored.load_state_dict(sampler.state_dict())
+    assert restored.update_count == 1
+    np.testing.assert_array_equal(restored.rows.visits, sampler.rows.visits)
+    np.testing.assert_array_equal(restored.rows.last_step, sampler.rows.last_step)
+    np.testing.assert_allclose(restored.rows.samples, sampler.rows.samples)
+    np.testing.assert_allclose(restored.rows.solved, sampler.rows.solved)
+
+
 def test_update_rejects_partial_groups():
     sampler = _sampler(TWO_BINS, "naive")
     with pytest.raises(ValueError, match="not a multiple"):
