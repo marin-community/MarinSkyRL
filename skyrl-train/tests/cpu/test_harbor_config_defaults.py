@@ -76,7 +76,18 @@ def test_passthrough_exceptions_are_never_retried():
 
     retry_config = HarborConfigBuilder(cfg).build_retry_config()
 
-    assert retry_config.exclude_exceptions == {"AgentTimeoutError", "VerifierTimeoutError"}
+    assert {
+        "AgentTimeoutError",
+        "OutputLengthExceededError",
+        "TurnCapExhaustedError",
+        "VerifierTimeoutError",
+    } <= retry_config.exclude_exceptions
+
+
+def test_default_taxonomy_passthrough_exceptions_are_terminal_without_campaign_duplication():
+    retry_config = HarborConfigBuilder(OmegaConf.create({"harbor": {"max_retries": 3}})).build_retry_config()
+
+    assert {"OutputLengthExceededError", "TurnCapExhaustedError"} <= retry_config.exclude_exceptions
 
 
 @pytest.mark.parametrize(

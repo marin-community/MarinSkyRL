@@ -1,6 +1,7 @@
 from loguru import logger
 from omegaconf import OmegaConf
 import pytest
+from harbor_config.errors import ErrorCategory, errors_by_category, known_error_types
 
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.utils.harbor_errors import (
@@ -84,13 +85,60 @@ def test_passthrough_exceptions_are_added_to_retry_exclusions():
 
     excluded = retry_excluded_exception_types({"VerifierTimeoutError"}, error_handling)
 
-    assert excluded == frozenset(
-        {
-            "AgentTimeoutError",
-            "ContextLengthExceededError",
-            "VerifierTimeoutError",
-        }
-    )
+    assert {
+        "AgentTimeoutError",
+        "ContextLengthExceededError",
+        "OutputLengthExceededError",
+        "TurnCapExhaustedError",
+        "VerifierTimeoutError",
+    } <= excluded
+
+
+def test_every_known_passthrough_classification_is_excluded_from_retries():
+    config = ErrorHandlingConfig()
+
+    excluded = retry_excluded_exception_types(None, config)
+
+    classified_types = set(known_error_types()) - set(errors_by_category(ErrorCategory.UNKNOWN))
+    expected = {
+        error_type
+        for error_type in classified_types
+        if classify_exception_type(error_type, config) is ErrorTreatment.PASSTHROUGH
+    }
+    assert expected
+    assert excluded == frozenset(expected)
+
+
+@pytest.mark.parametrize("error_type", ["TurnCapExhaustedError", "OutputLengthExceededError"])
+def test_reported_taxonomy_passthrough_errors_are_terminal_without_campaign_overrides(error_type):
+    assert error_type in retry_excluded_exception_types(None, ErrorHandlingConfig())
+
+
+def test_retry_exclusion_follows_campaign_treatment_override():
+    config = ErrorHandlingConfig(zero_exceptions=frozenset({"TurnCapExhaustedError"}))
+
+    excluded = retry_excluded_exception_types(None, config)
+
+    assert classify_exception_type("TurnCapExhaustedError", config) is ErrorTreatment.ZERO
+    assert "TurnCapExhaustedError" not in excluded
+    assert "OutputLengthExceededError" in excluded
+
+
+def test_default_passthrough_treatment_makes_known_unknown_errors_terminal():
+    config = ErrorHandlingConfig(default_error_treatment=ErrorTreatment.PASSTHROUGH)
+
+    excluded = retry_excluded_exception_types(None, config)
+
+    assert set(errors_by_category(ErrorCategory.UNKNOWN)) <= excluded
+
+
+def test_retryable_infrastructure_classification_is_not_implicitly_excluded():
+    config = ErrorHandlingConfig()
+
+    excluded = retry_excluded_exception_types(None, config)
+
+    assert classify_exception_type("EnvironmentStartTimeoutError", config) is ErrorTreatment.MASK
+    assert "EnvironmentStartTimeoutError" not in excluded
 
 
 @pytest.mark.parametrize(

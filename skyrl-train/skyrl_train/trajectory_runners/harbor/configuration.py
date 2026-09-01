@@ -633,9 +633,10 @@ class HarborConfigBuilder:
     def build_retry_config(self) -> RetryConfig:
         """Build the QueueOrchestrator retry policy.
 
-        Explicit and Harbor-default exclusions are combined with SkyRL's
-        pass-through exception set. Pass-through failures are terminal results that
-        may retain verifier output; retrying would discard that result.
+        Explicit and Harbor-default exclusions are combined with every exception
+        type that the shared taxonomy and campaign overrides classify as pass-through.
+        Pass-through failures are terminal results that may retain verifier output;
+        retrying would discard that result.
 
         Returns:
             RetryConfig with exponential backoff and resolved terminal exceptions.
