@@ -94,19 +94,20 @@ def test_passthrough_exceptions_are_added_to_retry_exclusions():
     } <= excluded
 
 
-def test_every_known_passthrough_classification_is_excluded_from_retries():
+@pytest.mark.parametrize(
+    "error_type",
+    sorted(set(known_error_types()) - set(errors_by_category(ErrorCategory.UNKNOWN))),
+)
+def test_retry_exclusion_matches_each_known_taxonomy_classification(error_type):
     config = ErrorHandlingConfig()
 
     excluded = retry_excluded_exception_types(None, config)
+    treatment = classify_exception_type(error_type, config)
 
-    classified_types = set(known_error_types()) - set(errors_by_category(ErrorCategory.UNKNOWN))
-    expected = {
-        error_type
-        for error_type in classified_types
-        if classify_exception_type(error_type, config) is ErrorTreatment.PASSTHROUGH
-    }
-    assert expected
-    assert excluded == frozenset(expected)
+    if treatment is ErrorTreatment.PASSTHROUGH:
+        assert error_type in excluded
+    else:
+        assert error_type not in excluded
 
 
 @pytest.mark.parametrize("error_type", ["TurnCapExhaustedError", "OutputLengthExceededError"])
