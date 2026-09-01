@@ -77,22 +77,22 @@ def test_state_dict_roundtrip_resumes_identical_draws():
     restored.load_state_dict(snapshot)
     restored_it = iter(restored)
     assert [next(restored_it) for _ in range(10)] == expected
-    np.testing.assert_allclose(restored.informative, sampler.informative)
-    np.testing.assert_allclose(restored.total, sampler.total)
-    np.testing.assert_allclose(restored.solved, sampler.solved)
-    np.testing.assert_allclose(restored.samples, sampler.samples)
+    np.testing.assert_allclose(restored.stats.informative, sampler.stats.informative)
+    np.testing.assert_allclose(restored.stats.total, sampler.stats.total)
+    np.testing.assert_allclose(restored.stats.solved, sampler.stats.solved)
+    np.testing.assert_allclose(restored.stats.samples, sampler.stats.samples)
 
 
 def test_update_informative_accounting_with_decay():
     sampler = _sampler(TWO_BINS, "naive", decay=0.5)
     # Row 0 is the g0 bin, row 1 the g1 bin. One informative group each for bin 0, none for bin 1.
     sampler.update(["0", "0", "1", "1"], [0.0, 1.0, 1.0, 1.0], 2)
-    np.testing.assert_allclose(sampler.informative, [1.0, 0.0])
-    np.testing.assert_allclose(sampler.total, [1.0, 1.0])
+    np.testing.assert_allclose(sampler.stats.informative, [1.0, 0.0])
+    np.testing.assert_allclose(sampler.stats.total, [1.0, 1.0])
 
     sampler.update(["0", "0"], [1.0, 1.0], 2)
-    np.testing.assert_allclose(sampler.informative, [0.5, 0.0])
-    np.testing.assert_allclose(sampler.total, [1.5, 0.5])
+    np.testing.assert_allclose(sampler.stats.informative, [0.5, 0.0])
+    np.testing.assert_allclose(sampler.stats.total, [1.5, 0.5])
     metrics = sampler.metrics()
     assert metrics["curriculum/g0-easy/informative_frac"] == pytest.approx(0.5 / 1.5)
     assert metrics["curriculum/g0-easy/groups"] == 1.0
@@ -323,7 +323,7 @@ def test_stateful_dataloader_checkpoint_resumes_draws(tmp_path):
     resumed = build_dataloader(config, dataset, is_train=True)
     resumed.load_state_dict(snapshot)
     assert list(iter(resumed)) == remaining
-    np.testing.assert_allclose(resumed.sampler.total, dataloader.sampler.total)
+    np.testing.assert_allclose(resumed.sampler.stats.total, dataloader.sampler.stats.total)
 
 
 def test_draws_are_unique_within_each_batch():
@@ -358,5 +358,7 @@ def test_group_informative_weights_low_pass_bin_near_mid_bin():
 
 
 def test_group_informative_requires_group_size():
+    # The guard lives in the curve builder, so a sampler with group-informative
+    # weighting still fails fast at construction when group_size is missing.
     with pytest.raises(ValueError, match="group_size"):
-        CurriculumConfig(kind=SamplingKind.LEARNABILITY, weighting=WeightingKind.GROUP_INFORMATIVE)
+        _sampler(TWO_BINS, "learnability", weighting=WeightingKind.GROUP_INFORMATIVE)
