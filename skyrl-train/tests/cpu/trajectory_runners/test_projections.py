@@ -95,8 +95,9 @@ def test_projection_derives_mask_baseline_and_token_credit_from_contracts():
     step = replace(
         step,
         reward=RewardResult(unshaped_reward=None, optimization_reward=0.0, token_credit=(0.1, -0.1)),
-        disposition=TrainingDisposition.mask("verifier unavailable"),
+        disposition=TrainingDisposition.mask("verifier unavailable", exception_type="TurnCapExhaustedError"),
     )
+    step.error_treatment = "passthrough"
 
     output = projection.project(
         [step],
@@ -106,4 +107,6 @@ def test_projection_derives_mask_baseline_and_token_credit_from_contracts():
     assert output["loss_masks"] == [[0, 0]]
     assert output["exclude_from_baseline"] == [True]
     assert output["token_level_shaping"] == [[0.1, -0.1]]
+    assert output["exception_types"] == ["TurnCapExhaustedError"]
+    assert output["error_treatments"] == ["passthrough"]
     assert "unshaped_rewards" not in output

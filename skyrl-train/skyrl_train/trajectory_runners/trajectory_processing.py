@@ -662,6 +662,15 @@ def concatenate_trajectory_batches(
     if any(output.get("unshaped_rewards") is not None for output in trajectory_batches):
         unshaped_rewards_concat = [reward for output in trajectory_batches for reward in _outcome_rewards(output)]
 
+    disposition_channels: dict[str, list[str | None]] = {}
+    for key in ("exception_types", "error_treatments"):
+        if any(output.get(key) is not None for output in trajectory_batches):
+            disposition_channels[key] = [
+                value
+                for output in trajectory_batches
+                for value in (output.get(key) or [None] * len(output["response_ids"]))
+            ]
+
     # Handle mixed routed_experts (Stage 1 MoE router-replay capture rail) the same
     # way as rollout_logprobs: if any batch carries routed_experts but others don't,
     # sentinel-fill the missing batches with a per-token [1, 1] sentinel row so the
@@ -751,6 +760,8 @@ def concatenate_trajectory_batches(
         result["response_span_tags"] = response_span_tags_concat
     if unshaped_rewards_concat is not None:
         result["unshaped_rewards"] = unshaped_rewards_concat
+    for key, values in disposition_channels.items():
+        result[key] = values
 
     # propagate additional keys with list values as-is
     additional_keys = [

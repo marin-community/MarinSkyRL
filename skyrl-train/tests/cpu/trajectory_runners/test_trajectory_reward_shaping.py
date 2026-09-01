@@ -73,6 +73,30 @@ def test_tail_loop_detection_requires_minimum_occurrences():
     assert output["loop_advantages"] == [[0.0] * len(response)]
 
 
+def test_passthrough_penalty_preserves_verified_outcome_and_normal_completion():
+    output = _output(
+        responses=[[1, 2], [3, 4]],
+        rewards=[1.0, 1.0],
+        stop_reasons=["turn_cap_exhausted", "complete"],
+    )
+    output["unshaped_rewards"] = [1.0, 1.0]
+    output["error_treatments"] = ["passthrough", None]
+    output["exception_types"] = ["TurnCapExhaustedError", None]
+
+    shape_trajectory_rewards(
+        output,
+        {
+            "enabled": True,
+            "passthrough": {"penalty": 0.25},
+        },
+    )
+
+    assert output["unshaped_rewards"] == [1.0, 1.0]
+    assert output["rewards"] == pytest.approx([0.75, 1.0])
+    assert [component["passthrough"] for component in output["reward_shaping_components"]] == [-0.25, 0.0]
+    assert output["rollout_metrics"]["generate/reward_shaping/passthrough_incidence"] == 0.5
+
+
 def test_loop_advantage_cap_scales_the_charged_span_without_touching_outcome_reward():
     response = list(range(4)) * 8
     output = _output([response], [1.0], ["length"])
@@ -129,12 +153,14 @@ def test_successful_length_penalty_only_changes_positive_outcomes():
     assert output["unshaped_rewards"] == [1.0, 1.0, 0.0]
     assert output["rewards"] == pytest.approx([1.0, 0.7, 0.0])
     assert output["reward_shaping_components"][0] == {
+        "passthrough": 0.0,
         "non_termination": 0.0,
         "overlong": 0.0,
         "successful_length": 0.0,
     }
     assert output["reward_shaping_components"][1]["successful_length"] == pytest.approx(-0.3)
     assert output["reward_shaping_components"][2] == {
+        "passthrough": 0.0,
         "non_termination": 0.0,
         "overlong": 0.0,
         "successful_length": 0.0,
@@ -256,7 +282,7 @@ def test_loop_advantage_stays_separate_from_scalar_trajectory_penalties():
 
     assert output["rewards"] == pytest.approx([0.5])
     assert output["reward_shaping_components"] == [
-        {"non_termination": -0.3, "overlong": 0.0, "successful_length": -0.2}
+        {"passthrough": 0.0, "non_termination": -0.3, "overlong": 0.0, "successful_length": -0.2}
     ]
     assert output["reward_shaping_loop_spans"] == [[{"start": 6, "end": 10}]]
     assert output["loop_advantages"] == [pytest.approx([0.0] * 6 + [-0.05] * 4)]
@@ -340,6 +366,18 @@ def test_concatenation_recomputes_shaping_metrics_from_retained_components():
     )
 
 
+def test_concatenation_preserves_later_passthrough_disposition():
+    normal = _output([[1]], [1.0], ["complete"])
+    passthrough = _output([[2]], [1.0], ["turn_cap_exhausted"])
+    passthrough["exception_types"] = ["TurnCapExhaustedError"]
+    passthrough["error_treatments"] = ["passthrough"]
+
+    concatenated = concatenate_trajectory_batches([normal, passthrough], tis_lcs_alert_threshold=0.005)
+
+    assert concatenated["exception_types"] == [None, "TurnCapExhaustedError"]
+    assert concatenated["error_treatments"] == [None, "passthrough"]
+
+
 class _SharedShapingRunner(TrajectoryRunner):
     trajectory_runner_cfg = {
         "trajectory_reward_shaping": {
@@ -372,6 +410,7 @@ async def test_trajectory_runner_applies_shared_shaping_after_generation():
             {"loop": {"advantage_penalty_per_token": 0.1, "max_advantage_penalty": 0.0}},
             "loop.max_advantage_penalty must be positive",
         ),
+        ({"passthrough": {"penalty": -0.1}}, "passthrough.penalty"),
         ({"non_termination": {"penalty": -0.1}}, "non_termination.penalty"),
         ({"non_termination": {"accepted_stop_reasons": "stop"}}, "accepted_stop_reasons"),
         ({"successful_length": {"free_tokens": -1}}, "successful_length.free_tokens"),

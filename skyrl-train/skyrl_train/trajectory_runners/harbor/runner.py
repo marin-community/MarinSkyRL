@@ -19,7 +19,7 @@ from loguru import logger
 from uuid import uuid4
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.types import VerifierTestCollection
-from skyrl_train.trajectory_runners.projections import project_loss_mask
+from skyrl_train.trajectory_runners.projections import attach_training_dispositions, project_loss_mask
 from skyrl_train.metric_names import (
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
     TIS_ALIGNMENT_ALERT_METRIC,
@@ -233,6 +233,7 @@ class TerminalBenchAgentOutput:
     # True when the truncation penalty was applied (stop_reason=="length" +
     # original_reward==0 + truncation_penalty>0). Counted into rollout_metrics.
     truncation_penalized: bool = False
+    error_treatment: str | None = None
 
 
 def _failed_agent_output(
@@ -305,12 +306,13 @@ def _completed_disposition(
     preserve_timeout: bool,
     preserve_exclude_from_baseline: bool,
     preserve_exception_type: Optional[str],
+    terminal_exception_type: Optional[str],
 ) -> TrainingDisposition:
     return TrainingDisposition(
         loss_eligible=True,
         baseline_eligible=not preserve_exclude_from_baseline if preserve_timeout else True,
         reason=f"preserved {preserve_exception_type}" if preserve_timeout else "verified",
-        exception_type=preserve_exception_type if preserve_timeout else None,
+        exception_type=terminal_exception_type,
     )
 
 
@@ -1425,6 +1427,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "exclude_from_baseline": [not output.disposition.baseline_eligible for output in all_outputs],
             "actual_global_step": actual_global_step,
         }
+        attach_training_dispositions(trajectory_batch, all_outputs)
         if self._reward_shaping_enabled:
             trajectory_batch["verifier_tests"] = [output.verifier_tests for output in all_outputs]
 
@@ -1845,6 +1848,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         preserve_timeout = False
         preserve_exclude_from_baseline = False
         preserve_exception_type: Optional[str] = None
+        terminal_exception_type: Optional[str] = None
+        terminal_error_treatment: ErrorTreatment | None = None
 
         # Check for exception_info - Harbor may return both exception_info AND
         # verifier_result when a trial had an error (e.g., AgentTimeoutError,
@@ -1859,6 +1864,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 exception_type = type(exception_info).__name__
 
             treatment, _ = self._classify_exception_type(exception_type)
+            terminal_exception_type = exception_type
+            terminal_error_treatment = treatment
 
             # Passthrough: ignore the exception and fall through to normal
             # verifier processing. The agent hit a soft limit (timeout, context
@@ -2138,13 +2145,16 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 tis_splice=self._tis_splice,
             )
 
-        # Determine stop reason
+        # Prefer the agent's terminal reason when Harbor supplied one. The local
+        # response limit remains authoritative when the reconstructed response
+        # itself exceeds the configured budget.
         max_response_tokens = (
             self.trajectory_runner_cfg.sampling_params.max_generate_length
             + self.trajectory_runner_cfg.max_input_length
             - initial_prompt_length
         )
-        stop_reason = "complete"  # Default for trial completion
+        raw_agent_stop_reason = metadata.get("stop_reason") if isinstance(metadata, dict) else None
+        stop_reason = str(raw_agent_stop_reason).strip().lower() if raw_agent_stop_reason else "complete"
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
 
@@ -2269,6 +2279,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             preserve_timeout=preserve_timeout,
             preserve_exclude_from_baseline=preserve_exclude_from_baseline,
             preserve_exception_type=preserve_exception_type,
+            terminal_exception_type=terminal_exception_type,
         )
         return TerminalBenchAgentOutput(
             evidence=evidence,
@@ -2282,4 +2293,5 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             alignment_stats=alignment_stats,
             response_span_tags=response_span_tags,
             truncation_penalized=truncation_penalized,
+            error_treatment=None if terminal_error_treatment is None else terminal_error_treatment.value,
         )

@@ -22,6 +22,8 @@ REWARD_SHAPING_ROW_KEYS = (
     "loop_advantages",
     "reward_shaping_versions",
     "verifier_tests",
+    "exception_types",
+    "error_treatments",
 )
 DEFAULT_ACCEPTED_STOP_REASONS = ("complete", "end_turn", "eos", "stop")
 
@@ -39,6 +41,11 @@ class LoopCreditConfig:
 class NonTerminationPenaltyConfig:
     penalty: float = 0.0
     accepted_stop_reasons: tuple[str, ...] = DEFAULT_ACCEPTED_STOP_REASONS
+
+
+@dataclass(frozen=True)
+class PassthroughPenaltyConfig:
+    penalty: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,7 @@ class TrajectoryRewardShapingConfig:
     schema_version: int = SHAPING_SCHEMA_VERSION
     enabled: bool = False
     loop: LoopCreditConfig = LoopCreditConfig()
+    passthrough: PassthroughPenaltyConfig = PassthroughPenaltyConfig()
     non_termination: NonTerminationPenaltyConfig = NonTerminationPenaltyConfig()
     overlong: OverlongPenaltyConfig = OverlongPenaltyConfig()
     successful_length: SuccessfulLengthPenaltyConfig = SuccessfulLengthPenaltyConfig()
@@ -129,6 +137,7 @@ def parse_trajectory_reward_shaping_config(config: Mapping[str, Any] | None) -> 
     if unknown_loop_keys:
         raise ValueError(f"unknown loop settings: {', '.join(sorted(unknown_loop_keys))}")
     non_termination = _section(config, "non_termination")
+    passthrough = _section(config, "passthrough")
     overlong = _section(config, "overlong")
     successful_length = _section(config, "successful_length")
     defaults = TrajectoryRewardShapingConfig()
@@ -147,6 +156,9 @@ def parse_trajectory_reward_shaping_config(config: Mapping[str, Any] | None) -> 
                 loop.get("advantage_penalty_per_token", defaults.loop.advantage_penalty_per_token)
             ),
             max_advantage_penalty=float(loop.get("max_advantage_penalty", defaults.loop.max_advantage_penalty)),
+        ),
+        passthrough=PassthroughPenaltyConfig(
+            penalty=float(passthrough.get("penalty", defaults.passthrough.penalty)),
         ),
         non_termination=NonTerminationPenaltyConfig(
             penalty=float(non_termination.get("penalty", defaults.non_termination.penalty)),
@@ -194,6 +206,7 @@ def _validate_config(config: TrajectoryRewardShapingConfig) -> None:
     magnitudes = {
         "loop.advantage_penalty_per_token": config.loop.advantage_penalty_per_token,
         "loop.max_advantage_penalty": config.loop.max_advantage_penalty,
+        "passthrough.penalty": config.passthrough.penalty,
         "non_termination.penalty": config.non_termination.penalty,
         "successful_length.penalty_per_token": config.successful_length.penalty_per_token,
         "successful_length.max_penalty": config.successful_length.max_penalty,
@@ -300,13 +313,13 @@ def _metric_key(value: str | None) -> str:
 
 
 def _empty_components() -> RewardShapingComponents:
-    return {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0}
+    return {"passthrough": 0.0, "non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0}
 
 
 def aggregate_reward_shaping_components(
     components: Sequence[RewardShapingComponents], indices: Sequence[int]
 ) -> RewardShapingComponents:
-    return {name: sum(components[index][name] for index in indices) for name in REWARD_SHAPING_COMPONENT_NAMES}
+    return {name: sum(components[index].get(name, 0.0) for index in indices) for name in REWARD_SHAPING_COMPONENT_NAMES}
 
 
 def _soft_overlong_penalty(response_length: int, config: OverlongPenaltyConfig) -> float:
@@ -394,6 +407,9 @@ def refresh_trajectory_reward_shaping_metrics(output: TrajectoryBatch) -> None:
             ),
             f"{SHAPING_METRIC_PREFIX}/shaped_reward_mean": float(np.mean(shaped_totals)),
             f"{SHAPING_METRIC_PREFIX}/penalty_mean": float(np.mean(penalties)),
+            f"{SHAPING_METRIC_PREFIX}/passthrough_penalty_mean": float(
+                np.mean([values.get("passthrough", 0.0) for values in trajectory_components])
+            ),
             f"{SHAPING_METRIC_PREFIX}/non_termination_penalty_mean": float(
                 np.mean([values["non_termination"] for values in trajectory_components])
             ),
@@ -415,6 +431,9 @@ def refresh_trajectory_reward_shaping_metrics(output: TrajectoryBatch) -> None:
             f"{SHAPING_METRIC_PREFIX}/non_termination_incidence": float(
                 np.mean([values["non_termination"] < 0 for values in trajectory_components])
             ),
+            f"{SHAPING_METRIC_PREFIX}/passthrough_incidence": float(
+                np.mean([values.get("passthrough", 0.0) < 0 for values in trajectory_components])
+            ),
             f"{SHAPING_METRIC_PREFIX}/successful_length_incidence": float(
                 np.mean([values["successful_length"] < 0 for values in trajectory_components])
             ),
@@ -435,7 +454,7 @@ def shape_trajectory_rewards(output: TrajectoryBatch, raw_config: Mapping[str, A
     """Build runner-independent reward penalties and token-local loop credit.
 
     Raw task outcomes are copied to ``unshaped_rewards`` before any shared
-    shaping. Non-termination, DAPO soft-overlong, and successful-length
+    shaping. Pass-through, non-termination, DAPO soft-overlong, and successful-length
     penalties remain additive to the optimization reward. Loop detection
     instead emits ``loop_advantages``; the trainer adds that channel after
     advantage normalization. Neither path alters pass-rate or verifier-accuracy
@@ -457,6 +476,12 @@ def shape_trajectory_rewards(output: TrajectoryBatch, raw_config: Mapping[str, A
         stop_reasons = [None] * batch_size
     if len(stop_reasons) != batch_size:
         raise ValueError("stop reasons must have one entry per trajectory")
+
+    error_treatments = output.get("error_treatments")
+    if error_treatments is None:
+        error_treatments = [None] * batch_size
+    if len(error_treatments) != batch_size:
+        raise ValueError("error treatments must have one entry per trajectory")
 
     normalized_rewards = [NormalizedReward.from_output(reward) for reward in rewards]
     existing_outcomes = output.get("unshaped_rewards")
@@ -494,6 +519,11 @@ def shape_trajectory_rewards(output: TrajectoryBatch, raw_config: Mapping[str, A
         final_components = components[final_index]
 
         if not excluded[final_index]:
+            normalized_treatment = (
+                None if error_treatments[final_index] is None else str(error_treatments[final_index]).strip().lower()
+            )
+            if normalized_treatment == "passthrough":
+                final_components["passthrough"] = -config.passthrough.penalty
             final_components["overlong"] = _soft_overlong_penalty(trajectory_length, config.overlong)
             normalized_stop = (
                 None if stop_reasons[final_index] is None else str(stop_reasons[final_index]).strip().lower()

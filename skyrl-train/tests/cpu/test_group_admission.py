@@ -14,6 +14,7 @@ from skyrl_train.group_admission import (
     assert_training_groups_eligible,
     resolve_group_advantage_invariant,
 )
+from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_trajectory_rewards
 
 
 def _group(
@@ -246,6 +247,30 @@ def test_dynamic_filter_can_admit_shaped_reward_variance():
     shaped = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("shaped"))
     unshaped = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("unshaped"))
 
+    assert shaped.evaluate(group) is GroupSelectionResult.KEEP
+    assert unshaped.evaluate(group) is GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD
+
+
+def test_unshaped_dynamic_filter_ignores_passthrough_optimization_penalty():
+    group = _group(loss_masks=[[1], [1]])
+    group.trajectory_batch.update(
+        {
+            "rewards": [1.0, 1.0],
+            "unshaped_rewards": [1.0, 1.0],
+            "stop_reasons": ["turn_cap_exhausted", "complete"],
+            "exception_types": ["TurnCapExhaustedError", None],
+            "error_treatments": ["passthrough", None],
+        }
+    )
+    shape_trajectory_rewards(
+        group.trajectory_batch,
+        {"enabled": True, "passthrough": {"penalty": 0.25}},
+    )
+
+    shaped = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("shaped"))
+    unshaped = GroupSelectionPolicy.for_fully_async("filter", criteria=resolve_dynamic_sampling_criteria("unshaped"))
+
+    assert group.trajectory_batch["rewards"] == pytest.approx([0.75, 1.0])
     assert shaped.evaluate(group) is GroupSelectionResult.KEEP
     assert unshaped.evaluate(group) is GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD
 

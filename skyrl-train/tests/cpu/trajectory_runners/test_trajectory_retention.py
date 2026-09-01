@@ -130,15 +130,17 @@ def _output() -> TrajectoryBatch:
         "rewards": [1.0, -0.25, 0.0],
         "unshaped_rewards": [1.0, 0.0, 0.0],
         "reward_shaping_components": [
-            {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
-            {"non_termination": -0.25, "overlong": 0.0, "successful_length": 0.0},
-            {"non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
+            {"passthrough": 0.0, "non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
+            {"passthrough": -0.25, "non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
+            {"passthrough": 0.0, "non_termination": 0.0, "overlong": 0.0, "successful_length": 0.0},
         ],
         "reward_shaping_loop_spans": [[], [], [{"start": 0, "end": 2}]],
         "loop_advantages": [[0.0, 0.0], [0.0, 0.0, 0.0], [-0.1, -0.1]],
         "reward_shaping_versions": [2, 2, 2],
         "loss_masks": [[1, 1], [1, 1, 1], [1, 1]],
         "stop_reasons": ["stop", "length", "stop"],
+        "exception_types": [None, "TurnCapExhaustedError", None],
+        "error_treatments": [None, "passthrough", None],
         "rollout_metrics": {"environment/score": 1 / 3},
         "rollout_logprobs": None,
         "trajectory_ids": [
@@ -161,6 +163,8 @@ _OUTPUT_BATCH_SEQUENCE_KEYS = (
     "reward_shaping_versions",
     "loss_masks",
     "stop_reasons",
+    "exception_types",
+    "error_treatments",
     "trajectory_ids",
 )
 
@@ -243,6 +247,7 @@ def test_normalized_output_produces_complete_core_trace_schema():
         "prompt",
         "response",
         "reward",
+        "disposition",
         "verifier",
         "metrics",
         "provenance",
@@ -250,6 +255,8 @@ def test_normalized_output_produces_complete_core_trace_schema():
     assert record["prompt"]["messages"] == [{"role": "user", "content": "first"}]
     assert record["response"]["text"] == "10 11"
     assert record["verifier"] is None
+    assert record["schema_version"] == 3
+    assert record["disposition"] == {"exception_type": None, "error_treatment": None}
     assert record["provenance"]["runner"] == "SkyRLGymTrajectoryRunner"
 
 
@@ -341,6 +348,8 @@ def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries(
             "reward_shaping_versions": None,
             "loss_masks": [[1], [1, 1]],
             "stop_reasons": ["tool", "stop"],
+            "exception_types": [None, None],
+            "error_treatments": [None, None],
             "trajectory_ids": [trajectory_id, trajectory_id],
             "is_last_step": [False, True],
         }
@@ -382,6 +391,8 @@ def test_step_wise_retention_aggregates_final_row_overlong_penalty():
             "reward_shaping_versions": [2, 2],
             "loss_masks": [[1], [1, 1]],
             "stop_reasons": ["tool", "stop"],
+            "exception_types": [None, None],
+            "error_treatments": [None, None],
             "trajectory_ids": [trajectory_id, trajectory_id],
             "is_last_step": [False, True],
         }
@@ -398,7 +409,7 @@ def test_step_wise_retention_aggregates_final_row_overlong_penalty():
     assert record["reward"] == {
         "outcome": 1.0,
         "shaped": 0.5,
-        "components": {"non_termination": 0.0, "overlong": -0.5, "successful_length": 0.0},
+        "components": {"passthrough": 0.0, "non_termination": 0.0, "overlong": -0.5, "successful_length": 0.0},
     }
 
 
@@ -413,7 +424,11 @@ def test_train_phase_retains_sample_and_anomalies(tmp_path):
     failed = next(record for record in records if record["trajectory"]["instance_id"] == "b")
     assert failed["reward"]["outcome"] == 0.0
     assert failed["reward"]["shaped"] == -0.25
-    assert failed["reward"]["components"]["non_termination"] == -0.25
+    assert failed["reward"]["components"]["passthrough"] == -0.25
+    assert failed["disposition"] == {
+        "exception_type": "TurnCapExhaustedError",
+        "error_treatment": "passthrough",
+    }
 
 
 def test_resume_is_idempotent_and_new_content_appends(tmp_path):

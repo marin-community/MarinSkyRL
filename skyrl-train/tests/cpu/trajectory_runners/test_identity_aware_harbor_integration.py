@@ -2,8 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 from skyrl_gym.verification import RewardResult
+from omegaconf import OmegaConf
 
 try:
+    import skyrl_train.trajectory_runners.harbor.runner as harbor_runner_module
     from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner
 except ImportError:
     pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
@@ -39,6 +41,85 @@ def _runner(shaper: str | None = None):
         runner._reward_shaping_config["reward_shaper"] = shaper
     runner._truncation_penalty = 0.25
     return runner
+
+
+class _Tokenizer:
+    def apply_chat_template(self, *_args, **_kwargs):
+        return [1]
+
+
+def _trial_runner() -> HarborTrajectoryRunner:
+    runner = object.__new__(HarborTrajectoryRunner)
+    runner._error_handling_config = ErrorHandlingConfig(
+        enable_error_classification=True,
+        passthrough_exceptions=frozenset({"TurnCapExhaustedError"}),
+    )
+    runner._rollout_logprobs_required = False
+    runner._reward_shaping_enabled = False
+    runner._collect_rollout_details = False
+    runner._moe_router_replay = False
+    runner._tito_full = None
+    runner._tis_splice = True
+    runner._truncation_penalty = 0.0
+    runner._enable_token_reward_channel = False
+    runner._chat_template_kwargs = {}
+    runner.custom_chat_template_content = None
+    runner.tokenizer = _Tokenizer()
+    runner.trajectory_runner_cfg = OmegaConf.create(
+        {"sampling_params": {"max_generate_length": 16}, "max_input_length": 16}
+    )
+    return runner
+
+
+@pytest.mark.parametrize(
+    ("exception_info", "agent_stop_reason", "expected_exception", "expected_treatment"),
+    [
+        (
+            SimpleNamespace(exception_type="TurnCapExhaustedError"),
+            "turn_cap_exhausted",
+            "TurnCapExhaustedError",
+            "passthrough",
+        ),
+        (None, "complete", None, None),
+    ],
+)
+def test_verified_harbor_result_preserves_terminal_disposition(
+    monkeypatch, exception_info, agent_stop_reason, expected_exception, expected_treatment
+):
+    monkeypatch.setattr(
+        harbor_runner_module,
+        "get_response_ids_and_loss_mask_from_messages",
+        lambda *_args, **_kwargs: ([10, 11], [1, 1], None),
+    )
+    result = SimpleNamespace(
+        verifier_result=SimpleNamespace(rewards={"reward": 1.0}, stdout="passed"),
+        exception_info=exception_info,
+        agent_result=SimpleNamespace(
+            metadata={
+                "all_messages": [
+                    {"role": "user", "content": "solve it"},
+                    {"role": "assistant", "content": "done"},
+                ],
+                "summarization_count": 0,
+                "stop_reason": agent_stop_reason,
+            },
+            rollout_details=None,
+        ),
+    )
+
+    output = _trial_runner()._process_trial_result(
+        result,
+        TrajectoryID(instance_id="task", repetition_id=0),
+    )
+
+    assert output.verification.score == 1.0
+    assert output.reward_result.unshaped_reward == 1.0
+    assert output.reward_result.optimization_reward == 1.0
+    assert output.evidence.stop_reason == agent_stop_reason
+    assert output.disposition.loss_eligible
+    assert output.disposition.baseline_eligible
+    assert output.disposition.exception_type == expected_exception
+    assert output.error_treatment == expected_treatment
 
 
 def test_harbor_runner_applies_identity_aware_shaping_as_the_default(verifier_test_collection_factory):
