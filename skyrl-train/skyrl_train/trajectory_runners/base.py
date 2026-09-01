@@ -49,6 +49,11 @@ class TrajectoryRunner(ABC):
             TrajectoryBatch: Generated trajectories
         """
         output = await self._run(input_batch, disable_tqdm=disable_tqdm)
+        trajectory_ids = input_batch.get("trajectory_ids")
+        if trajectory_ids is not None and output.get("trajectory_ids") is None:
+            if len(trajectory_ids) != len(output["response_ids"]):
+                raise ValueError("trajectory runner output rows must align with request trajectory IDs")
+            output["trajectory_ids"] = list(trajectory_ids)
         return await self._finalize_output(input_batch, output)
 
     async def _finalize_output(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> TrajectoryBatch:
