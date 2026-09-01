@@ -10,10 +10,12 @@ Run:
 """
 
 import math
+from types import SimpleNamespace
 
 import pytest
 from transformers import AutoTokenizer
 
+from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.trajectory_runners.trajectory_processing import (
     AlignmentStats,
     align_logprobs_by_token_ids,
@@ -25,6 +27,18 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_response_ids_and_loss_mask_from_messages,
     _tito_full_enabled,
 )
+
+
+def _generated_ids(tokenizer, content):
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+    response_ids = get_response_ids_and_loss_mask_from_messages([{"role": "assistant", "content": content}], tokenizer)[
+        0
+    ]
+    generated_ids = response_ids[len(generation_prompt_ids) :]
+    if tokenizer.eos_token_id in generated_ids:
+        last_eos = len(generated_ids) - 1 - generated_ids[::-1].index(tokenizer.eos_token_id)
+        generated_ids = generated_ids[: last_eos + 1]
+    return generated_ids
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +126,13 @@ def test_lcs_fallback_alert_metric():
     assert bad.as_metrics(lcs_alert_threshold=0.005)["tis/lcs_fallback_alert"] == 1.0
     # Typed threshold raises the bar.
     assert bad.as_metrics(lcs_alert_threshold=0.2)["tis/lcs_fallback_alert"] == 0.0
+
+    # Unaligned tokens are unsafe at any fraction, even when LCS was not used.
+    unaligned = AlignmentStats()
+    unaligned.n_tokens = 1000
+    unaligned.n_exact = 999
+    unaligned.n_unaligned = 1
+    assert unaligned.as_metrics(lcs_alert_threshold=0.2)["tis/lcs_fallback_alert"] == 1.0
 
 
 def test_extract_float_format_no_longer_disables_tis():
@@ -273,6 +294,137 @@ def test_exact_alignment_end_to_end(model_name):
     # The masked (generated) positions carry the exact vLLM logprobs in order.
     masked_lps = [lp for lp, m in zip(rollout_logprobs, loss_mask) if m == 1]
     assert masked_lps == vllm_logprobs
+
+
+def test_valid_multi_turn_full_tito_preserves_all_training_logprobs():
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    messages = [
+        {"role": "assistant", "content": "First answer."},
+        {"role": "user", "content": "A tool returned more evidence."},
+        {"role": "assistant", "content": "Revised answer."},
+    ]
+    completions = [_generated_ids(tokenizer, "First answer."), _generated_ids(tokenizer, "Revised answer.")]
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+    first_prompt = [700, 701] + generation_prompt_ids
+    second_prompt = first_prompt + completions[0] + [800, 801] + generation_prompt_ids
+    behavior_logprobs = [[-0.1] * len(completions[0]), [-0.2] * len(completions[1])]
+    stats = AlignmentStats()
+
+    _, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+        messages,
+        tokenizer,
+        assistant_logprobs=behavior_logprobs,
+        assistant_token_ids=completions,
+        assistant_prompt_token_ids=[first_prompt, second_prompt],
+        rollout_logprobs_required=True,
+        alignment_stats=stats,
+    )
+
+    assert [logprob for logprob, mask in zip(rollout_logprobs, loss_mask, strict=True) if mask] == sum(
+        behavior_logprobs, []
+    )
+    assert stats.n_exact == sum(map(len, completions))
+    assert stats.n_unaligned == 0
+
+
+@pytest.mark.parametrize("truncate_logprobs", [False, True])
+def test_failed_multi_turn_full_tito_cannot_enter_required_logprob_training(truncate_logprobs):
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    messages = [
+        {"role": "assistant", "content": "First answer."},
+        {"role": "user", "content": "A tool returned more evidence."},
+        {"role": "assistant", "content": "Revised answer."},
+    ]
+    retokenized_completions = [
+        _generated_ids(tokenizer, "First answer."),
+        _generated_ids(tokenizer, "Revised answer."),
+    ]
+    divergent_completions = [[token_id + 1 for token_id in turn] for turn in retokenized_completions]
+    behavior_logprobs = [[-0.1] * (len(turn) - int(truncate_logprobs)) for turn in divergent_completions]
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+    stats = AlignmentStats()
+
+    response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+        messages,
+        tokenizer,
+        assistant_logprobs=behavior_logprobs,
+        assistant_token_ids=divergent_completions,
+        assistant_prompt_token_ids=[
+            [700, 701] + generation_prompt_ids,
+            [999] + generation_prompt_ids,
+        ],
+        rollout_logprobs_required=True,
+        alignment_stats=stats,
+        tis_splice=False,
+    )
+
+    assert not any(loss_mask)
+    assert stats.n_unaligned == sum(map(len, retokenized_completions))
+    assert all(logprob == 0.0 for logprob in rollout_logprobs)
+
+    group = SimpleNamespace(
+        trajectory_batch={
+            "response_ids": [response_ids],
+            "loss_masks": [loss_mask],
+            "rollout_logprobs": [rollout_logprobs],
+        },
+        earliest_model_step=0,
+    )
+    policy = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.no_group_advantage(physical_group_size=1),
+        max_staleness_steps=0,
+        rollout_logprobs_required=True,
+    )
+    decision = policy.evaluate(group, global_step=0)
+    assert decision.primary_rejection is AdmissionRejection.FULLY_MASKED
+
+
+def test_partial_lcs_alignment_masks_the_message_when_logprobs_are_required():
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    content = "A response with several tokens."
+    generated_ids = _generated_ids(tokenizer, content)
+    generated_tokens = tokenizer.convert_ids_to_tokens(generated_ids)
+    missing_index = len(generated_ids) // 2
+    partial_logprobs = [
+        {"token": token, "logprob": -0.1} for index, token in enumerate(generated_tokens) if index != missing_index
+    ]
+    stats = AlignmentStats()
+
+    _, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
+        [{"role": "assistant", "content": content}],
+        tokenizer,
+        assistant_logprobs=[partial_logprobs],
+        rollout_logprobs_required=True,
+        alignment_stats=stats,
+    )
+
+    assert not any(loss_mask)
+    assert stats.n_unaligned == 1
+
+
+def test_missing_turn_logprobs_mask_only_the_affected_message():
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    messages = [
+        {"role": "assistant", "content": "First answer."},
+        {"role": "user", "content": "A tool returned more evidence."},
+        {"role": "assistant", "content": "Revised answer."},
+    ]
+    completions = [_generated_ids(tokenizer, "First answer."), _generated_ids(tokenizer, "Revised answer.")]
+    first_logprobs = [-0.1] * len(completions[0])
+    stats = AlignmentStats()
+
+    _, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+        messages,
+        tokenizer,
+        assistant_logprobs=[first_logprobs],
+        assistant_token_ids=completions,
+        rollout_logprobs_required=True,
+        alignment_stats=stats,
+    )
+
+    assert [logprob for logprob, mask in zip(rollout_logprobs, loss_mask, strict=True) if mask] == first_logprobs
+    assert sum(loss_mask) == len(completions[0])
+    assert stats.n_unaligned == len(completions[1])
 
 
 def test_float_format_without_ids_uses_positional_exact():

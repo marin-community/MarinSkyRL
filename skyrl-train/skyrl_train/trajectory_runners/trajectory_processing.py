@@ -33,12 +33,6 @@ from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
 
 
-# Sentinel used to mark logprob positions that the alignment layer could NOT
-# recover (no vLLM logprob available for that training token). Distinct from a
-# legitimate 0.0 logprob so the metrics layer can count "holes" exactly. The
-# training tensor still consumes a float, so callers replace UNALIGNED_LOGPROB
-# with 0.0 right before emitting; the metrics are computed BEFORE that step.
-UNALIGNED_LOGPROB = float("nan")
 BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
 _NUM_TRIALS_METRIC = "generate/num_trials"
 _NUM_FAILED_INSTANCES_METRIC = "generate/num_failed_instances"
@@ -62,7 +56,7 @@ class AlignmentStats:
         n_messages:        assistant messages processed
         n_lcs_messages:    assistant messages that took the LCS fallback path
         n_failed_messages: assistant messages where alignment fully failed
-                           (entire message zeroed)
+                           (masked from behavior-referenced training)
     """
 
     __slots__ = (
@@ -114,11 +108,10 @@ class AlignmentStats:
             names["unaligned_fraction"]: self.n_unaligned / n,
             names["alignment_fail_count"]: float(self.n_failed_messages),
             names["lcs_fallback_messages"]: float(self.n_lcs_messages),
-            # Metered LCS guard: 1.0 when the LCS defensive fallback fired on more than
-            # the alert threshold of training tokens (a serving↔training tokenizer/
-            # template regression). ALWAYS emitted (keyset-stable across ranks — the
-            # NumelIn=1 all_reduce-deadlock trap). Under full TITO this should stay 0.
-            names["lcs_fallback_alert"]: 1.0 if lcs_frac > lcs_alert_threshold else 0.0,
+            # Any unaligned token makes behavior-referenced training unsafe. LCS use
+            # remains thresholded because a complete fallback still supplies a value
+            # for each token. Keep the existing metric name for dashboard continuity.
+            names["lcs_fallback_alert"]: 1.0 if self.n_unaligned > 0 or lcs_frac > lcs_alert_threshold else 0.0,
         }
 
 
@@ -183,7 +176,8 @@ def align_logprobs_with_lcs(
         stats: Optional AlignmentStats to record fallback counts into.
 
     Returns:
-        List of aligned logprobs, one per retokenized_id. Unmatched tokens get 0.0.
+        List of aligned logprobs, one per retokenized ID. Unmatched tokens get
+        0.0; behavior-referenced callers must mask them from the loss.
     """
     if stats is not None:
         stats.n_lcs_messages += 1
@@ -691,9 +685,11 @@ def concatenate_trajectory_batches(
         rollout_metrics[TIS_UNALIGNED_FRACTION_METRIC] = sum_unaligned / denom
         rollout_metrics[TIS_ALIGNMENT_FAIL_COUNT_METRIC] = sum_fail
         rollout_metrics[TIS_LCS_FALLBACK_MESSAGES_METRIC] = sum_lcs_msgs
-        # Recompute the metered LCS-guard alert from the recombined fraction so it
-        # stays keyset-stable and consistent with the per-trajectory emission.
-        rollout_metrics[TIS_LCS_FALLBACK_ALERT_METRIC] = 1.0 if (sum_lcs / denom) > tis_lcs_alert_threshold else 0.0
+        # Preserve the safety signal when any constituent batch had unaligned
+        # behavior logprobs; complete LCS fallbacks retain their threshold.
+        rollout_metrics[TIS_LCS_FALLBACK_ALERT_METRIC] = (
+            1.0 if sum_unaligned > 0 or (sum_lcs / denom) > tis_lcs_alert_threshold else 0.0
+        )
 
     rollout_metrics.update(_merge_batch_failure_metrics(trajectory_batches))
 
@@ -1668,6 +1664,10 @@ def get_response_ids_and_loss_mask_from_messages(
          fallback is RECORDED in ``alignment_stats`` (and logged at WARNING) so
          it surfaces as ``tis/lcs_fallback_fraction`` and never silently degrades.
 
+    When rollout logprobs are required, any assistant message with an unaligned
+    token is removed from the loss. Zero values remain only as shape-preserving
+    placeholders under disabled loss-mask positions.
+
     Args:
         messages: List of message dicts with 'role' and 'content' keys. Must contain at least
                  one message.
@@ -1719,6 +1719,7 @@ def get_response_ids_and_loss_mask_from_messages(
         and assistant_prompt_token_ids is not None
         and assistant_token_ids is not None
     ):
+        unaligned_before = alignment_stats.n_unaligned
         _tito = _assemble_response_ids_tito_full(
             messages,
             tokenizer,
@@ -1733,6 +1734,8 @@ def get_response_ids_and_loss_mask_from_messages(
         )
         if _tito is not None:
             _rids, _lmask, _rlp, _rre = _tito
+            if rollout_logprobs_required and alignment_stats.n_unaligned > unaligned_before:
+                _lmask = [0] * len(_lmask)
             if assistant_routed_experts is None:
                 return _rids, _lmask, _rlp
             return _rids, _lmask, _rlp, _rre
@@ -1930,17 +1933,24 @@ def get_response_ids_and_loss_mask_from_messages(
                 rollout_routed_experts.extend(_re_sentinel_rows(prefix_len, _re_sentinel_row))
 
             # 3.2.2. Add what the assistant actually generated
+            generated_mask_start = len(loss_mask)
             loss_mask.extend([1] * len(generated_token_ids))
             if assistant_logprobs:
+                unaligned_before = alignment_stats.n_unaligned
                 msg_logprobs = None
                 alignment_stats.n_messages += 1
                 alignment_stats.n_tokens += len(generated_token_ids)
                 if assistant_msg_idx >= len(assistant_logprobs):
+                    missing_logprobs_action = (
+                        "Masking this message from behavior-referenced training."
+                        if rollout_logprobs_required
+                        else "Proceeding with zeroed logprobs."
+                    )
                     logger.warning(
-                        "Missing logprobs for assistant message #{} (provided {} lists). "
-                        "Proceeding with zeroed logprobs.",
+                        "Missing logprobs for assistant message #{} (provided {} lists). {}",
                         assistant_msg_idx + 1,
                         len(assistant_logprobs),
+                        missing_logprobs_action,
                     )
                     alignment_stats.n_unaligned += len(generated_token_ids)
                     alignment_stats.n_failed_messages += 1
@@ -1985,7 +1995,7 @@ def get_response_ids_and_loss_mask_from_messages(
                                 tokenizer,
                                 stats=alignment_stats,
                             )
-                        elif len(candidate_float_logprobs) == len(generated_token_ids):
+                        elif candidate_ids is None and len(candidate_float_logprobs) == len(generated_token_ids):
                             # No token strings, but counts match exactly: positional
                             # 1:1 (treat as exact — this is the float+no-ids case).
                             msg_logprobs = candidate_float_logprobs
@@ -1993,18 +2003,31 @@ def get_response_ids_and_loss_mask_from_messages(
                         else:
                             # No token ids, no token strings, count mismatch: cannot
                             # align. Record the failure loudly instead of guessing.
+                            if candidate_ids is not None:
+                                failure_reason = "served token IDs diverge from the reconstructed training tokens"
+                            else:
+                                failure_reason = (
+                                    f"logprob count ({len(candidate_float_logprobs)}) does not match token count "
+                                    f"({len(generated_token_ids)}) and no token IDs or strings are available"
+                                )
+                            alignment_failure_action = (
+                                "Masking this message from behavior-referenced training."
+                                if rollout_logprobs_required
+                                else "Proceeding with zeroed logprobs."
+                            )
                             logger.warning(
-                                "TIS alignment FAILED for assistant message #{}: "
-                                "logprob count ({}) != token count ({}), and no token ids/strings "
-                                "available for fallback. Zeroing this message's logprobs.",
+                                "TIS alignment FAILED for assistant message #{}: {}. {}",
                                 assistant_msg_idx + 1,
-                                len(candidate_float_logprobs),
-                                len(generated_token_ids),
+                                failure_reason,
+                                alignment_failure_action,
                             )
                             alignment_stats.n_unaligned += len(generated_token_ids)
                             alignment_stats.n_failed_messages += 1
 
                 rollout_logprobs.extend(msg_logprobs if msg_logprobs is not None else [0.0] * len(generated_token_ids))
+                if rollout_logprobs_required and alignment_stats.n_unaligned > unaligned_before:
+                    generated_mask_end = generated_mask_start + len(generated_token_ids)
+                    loss_mask[generated_mask_start:generated_mask_end] = [0] * len(generated_token_ids)
 
             # 3.2.2b. Add the per-token routed_experts [L, K] rows for what the
             # assistant actually generated, aligned to the re-tokenized generated

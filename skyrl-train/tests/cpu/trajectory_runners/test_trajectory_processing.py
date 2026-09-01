@@ -6,6 +6,7 @@ import pytest
 from types import SimpleNamespace
 
 from skyrl_train.trajectory_runners.trajectory_processing import (
+    AlignmentStats,
     apply_overlong_filtering,
     concatenate_trajectory_batches,
     minimum_captured_global_step,
@@ -932,6 +933,25 @@ def test_failure_metrics_survive_concatenation():
     assert merged["rollout_metrics"]["generate/failed_trajectory_fraction"] == pytest.approx(4 / 6)
     assert merged["rollout_metrics"]["generate/errors/SandboxError"] == 3
     assert merged["rollout_metrics"]["generate/errors/ContextLengthExceededError"] == 1
+
+
+def test_unaligned_logprob_alert_survives_concatenation():
+    groups = [_generated_group(1, 0), _generated_group(1, 0)]
+    clean = AlignmentStats()
+    clean.n_tokens = 10
+    clean.n_exact = 10
+    unaligned = AlignmentStats()
+    unaligned.n_tokens = 10
+    unaligned.n_exact = 9
+    unaligned.n_unaligned = 1
+    unaligned.n_failed_messages = 1
+    groups[0]["rollout_metrics"].update(clean.as_metrics(prefix="generate/tis/", lcs_alert_threshold=0.005))
+    groups[1]["rollout_metrics"].update(unaligned.as_metrics(prefix="generate/tis/", lcs_alert_threshold=0.005))
+
+    merged = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=0.005)
+
+    assert merged["rollout_metrics"]["generate/tis/unaligned_fraction"] == pytest.approx(0.05)
+    assert merged["rollout_metrics"]["generate/tis/lcs_fallback_alert"] == 1.0
 
 
 def test_identity_aware_reward_metrics_survive_concatenation():
