@@ -26,6 +26,7 @@ InteractionT = TypeVar("InteractionT")
 class TrainableInteraction(Protocol):
     loss_mask: list[int]
     disposition: TrainingDisposition
+    error_treatment: str | None
 
 
 class RewardedInteraction(Protocol):
@@ -88,7 +89,7 @@ class WholeTrajectoryProjection:
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
             actual_global_step=minimum_captured_global_step(outputs),
         )
-        attach_training_dispositions(batch, outputs)
+        attach_terminal_classifications(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
         return batch
 
@@ -148,15 +149,15 @@ class StepWiseTrajectoryProjection:
             exclude_from_baseline=[not step.disposition.baseline_eligible for step in steps],
             actual_global_step=minimum_captured_global_step(steps),
         )
-        attach_training_dispositions(batch, steps)
+        attach_terminal_classifications(batch, steps)
         _attach_reward_channels(batch, steps, responses)
         return batch
 
 
-def attach_training_dispositions(batch: TrajectoryBatch, outputs: Sequence[TrainableInteraction]) -> None:
+def attach_terminal_classifications(batch: TrajectoryBatch, outputs: Sequence[TrainableInteraction]) -> None:
     """Project aligned terminal classifications when a runner supplied them."""
     exception_types = [output.disposition.exception_type for output in outputs]
-    error_treatments = [getattr(output, "error_treatment", None) for output in outputs]
+    error_treatments = [output.error_treatment for output in outputs]
     if any(exception_type is not None for exception_type in exception_types):
         batch["exception_types"] = exception_types
     if any(error_treatment is not None for error_treatment in error_treatments):

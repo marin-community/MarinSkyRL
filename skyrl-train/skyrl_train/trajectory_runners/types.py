@@ -29,6 +29,7 @@ class AgentLoopOutput:
     env_metrics: Dict[str, Any]
     captured_global_step: Optional[int] = None
     token_provenance: TokenProvenance = TokenProvenance.ENGINE
+    error_treatment: Optional[str] = None
 
 
 @dataclass

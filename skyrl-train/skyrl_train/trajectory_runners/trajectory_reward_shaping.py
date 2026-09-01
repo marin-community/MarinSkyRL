@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 
+from skyrl_train.error_treatment import ErrorTreatment
 from skyrl_train.trajectory_runners.types import (
     REWARD_SHAPING_COMPONENT_NAMES,
     TrajectoryBatch,
@@ -522,7 +523,7 @@ def shape_trajectory_rewards(output: TrajectoryBatch, raw_config: Mapping[str, A
             normalized_treatment = (
                 None if error_treatments[final_index] is None else str(error_treatments[final_index]).strip().lower()
             )
-            if normalized_treatment == "passthrough":
+            if normalized_treatment == ErrorTreatment.PASSTHROUGH.value:
                 final_components["passthrough"] = -config.passthrough.penalty
             final_components["overlong"] = _soft_overlong_penalty(trajectory_length, config.overlong)
             normalized_stop = (

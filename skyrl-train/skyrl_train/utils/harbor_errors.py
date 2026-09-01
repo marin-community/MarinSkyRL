@@ -1,22 +1,15 @@
 from dataclasses import dataclass, field
-from enum import StrEnum
 from collections.abc import Iterable
 from typing import Any, Mapping
 
 from harbor_config.errors import ErrorCategory, error_category, errors_by_category, known_error_types
 from loguru import logger
 
+from skyrl_train.error_treatment import ErrorTreatment
+
 
 AGENT_TIMEOUT_ERROR = "AgentTimeoutError"
 PASSTHROUGH_WITHOUT_LOGPROBS_ERROR = "PassthroughWithoutLogprobs"
-
-
-class ErrorTreatment(StrEnum):
-    """How a persisted Harbor trial failure contributes to RL training."""
-
-    MASK = "mask"
-    ZERO = "zero"
-    PASSTHROUGH = "passthrough"
 
 
 DEFAULT_ERROR_TREATMENT = ErrorTreatment.ZERO

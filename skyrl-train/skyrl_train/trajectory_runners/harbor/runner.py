@@ -19,7 +19,7 @@ from loguru import logger
 from uuid import uuid4
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.types import VerifierTestCollection
-from skyrl_train.trajectory_runners.projections import attach_training_dispositions, project_loss_mask
+from skyrl_train.trajectory_runners.projections import attach_terminal_classifications, project_loss_mask
 from skyrl_train.metric_names import (
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
     TIS_ALIGNMENT_ALERT_METRIC,
@@ -1427,7 +1427,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "exclude_from_baseline": [not output.disposition.baseline_eligible for output in all_outputs],
             "actual_global_step": actual_global_step,
         }
-        attach_training_dispositions(trajectory_batch, all_outputs)
+        attach_terminal_classifications(trajectory_batch, all_outputs)
         if self._reward_shaping_enabled:
             trajectory_batch["verifier_tests"] = [output.verifier_tests for output in all_outputs]
 
