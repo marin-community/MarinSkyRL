@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from types import MappingProxyType
 from skyrl_train.metric_names import (
     TIS_ALIGNED_TOKENS_METRIC,
+    TIS_ALIGNMENT_ALERT_METRIC,
     TIS_ALIGNMENT_FAIL_COUNT_METRIC,
     TIS_EXACT_MATCH_FRACTION_METRIC,
     TIS_LCS_FALLBACK_ALERT_METRIC,
@@ -111,6 +112,7 @@ class TrajectoryRunner(ABC):
                 TIS_ALIGNMENT_FAIL_COUNT_METRIC: 0.0,
                 TIS_LCS_FALLBACK_MESSAGES_METRIC: 0.0,
                 TIS_LCS_FALLBACK_ALERT_METRIC: 0.0,
+                TIS_ALIGNMENT_ALERT_METRIC: 0.0,
             }
         )
         output["rollout_metrics"] = rollout_metrics

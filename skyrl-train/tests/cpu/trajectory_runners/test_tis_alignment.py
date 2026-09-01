@@ -132,7 +132,9 @@ def test_lcs_fallback_alert_metric():
     unaligned.n_tokens = 1000
     unaligned.n_exact = 999
     unaligned.n_unaligned = 1
-    assert unaligned.as_metrics(lcs_alert_threshold=0.2)["tis/lcs_fallback_alert"] == 1.0
+    metrics = unaligned.as_metrics(lcs_alert_threshold=0.2)
+    assert metrics["tis/lcs_fallback_alert"] == 0.0
+    assert metrics["tis/alignment_alert"] == 1.0
 
 
 def test_extract_float_format_no_longer_disables_tis():

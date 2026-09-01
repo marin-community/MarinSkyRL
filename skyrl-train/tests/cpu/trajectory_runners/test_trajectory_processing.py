@@ -951,7 +951,8 @@ def test_unaligned_logprob_alert_survives_concatenation():
     merged = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=0.005)
 
     assert merged["rollout_metrics"]["generate/tis/unaligned_fraction"] == pytest.approx(0.05)
-    assert merged["rollout_metrics"]["generate/tis/lcs_fallback_alert"] == 1.0
+    assert merged["rollout_metrics"]["generate/tis/lcs_fallback_alert"] == 0.0
+    assert merged["rollout_metrics"]["generate/tis/alignment_alert"] == 1.0
 
 
 def test_identity_aware_reward_metrics_survive_concatenation():
