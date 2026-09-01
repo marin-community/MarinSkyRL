@@ -4,10 +4,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from typing import Protocol
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
+from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch
+from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink
+
+
+class HarborRunner(Protocol):
+    """Lifecycle surface shared by in-process and process-isolated Harbor runners."""
+
+    async def startup(self) -> None: ...
+
+    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
+
+    async def shutdown(self) -> None: ...
+
+    def set_trajectory_sink(self, sink: TrajectorySink) -> None: ...
+
+    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None: ...
+
+    async def stop_eval_session(self) -> None: ...
 
 
 def _detached(config: DictConfig) -> DictConfig:
@@ -77,7 +96,7 @@ class HarborRunnerSpec:
     def with_terminal_bench_config(self, terminal_bench_config: DictConfig) -> HarborRunnerSpec:
         return replace(self, terminal_bench_config=_detached(terminal_bench_config))
 
-    def build(self, tokenizer: PreTrainedTokenizerBase):
+    def build(self, tokenizer: PreTrainedTokenizerBase) -> HarborRunner:
         """Construct an in-process Harbor runner."""
         from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner  # noqa: PLC0415
 
@@ -100,7 +119,7 @@ def build_harbor_trajectory_runner(
     workload: TrajectoryWorkload,
     tokenizer: PreTrainedTokenizerBase,
     resources: ProcessPoolResources,
-):
+) -> HarborRunner:
     """Select execution placement from the runner workload, before trainer construction."""
     if workload.environment is ExecutionEnvironment.PRODUCTION:
         from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import RolloutDispatcher  # noqa: PLC0415

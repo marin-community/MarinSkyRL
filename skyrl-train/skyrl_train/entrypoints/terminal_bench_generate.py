@@ -17,13 +17,10 @@ from skyrl_train.trajectory_runners.trajectory_processing import prepare_traject
 
 
 class TerminalBenchGenerateExp(TerminalBenchExp):
-    def _setup_trajectory_runner(self):
+    async def _generate(self) -> None:
         inference_engine_client = self.create_inference_engine_client()
-        asyncio.run(inference_engine_client.wake_up())
-        return self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
-
-    def run(self):
-        trajectory_runner = self._setup_trajectory_runner()
+        await inference_engine_client.wake_up()
+        trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
 
         input_batch, _ = prepare_trajectory_request(
             list(self.train_dataset),
@@ -34,7 +31,14 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
             0,
         )
 
-        asyncio.run(trajectory_runner.run(input_batch))
+        await trajectory_runner.startup()
+        try:
+            await trajectory_runner.run(input_batch)
+        finally:
+            await trajectory_runner.shutdown()
+
+    def run(self):
+        asyncio.run(self._generate())
 
 
 @ray.remote(num_cpus=1, max_retries=0)

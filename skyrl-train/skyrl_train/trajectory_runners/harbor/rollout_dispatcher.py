@@ -157,11 +157,6 @@ class RolloutCoordinator:
             tokenizer.pad_token = tokenizer.eos_token
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
-        # The runner never actually dereferences inference_engine_client — it
-        # talks to vLLM over HTTP via trajectory_runner_cfg.http_endpoint_{host,port}.
-        # So None is safe and avoids shipping a Ray actor handle into the worker.
-        # NOTE: this is verified against the current HarborTrajectoryRunner,
-        # which only stores the handle and never calls it.
         self._runner = spec.build(tokenizer)
 
         _log().info(
@@ -241,21 +236,6 @@ class RolloutDispatcher:
     ):
         self._spec = spec
 
-        # The routable inference host is resolved at startup, when Ray is initialized.
-        # The vLLM HTTP inference endpoint (InferenceEngineClient) is bound on the
-        # HEAD node — the same process that constructs this dispatcher. Its
-        # configured `http_endpoint_host` is 127.0.0.1, which only resolves to the
-        # endpoint ON the head. The RolloutCoordinator actors below run on WORKER
-        # nodes (SPREAD PlacementGroup), where 127.0.0.1:8000 has nothing
-        # listening -> every litellm request fails "All connection attempts
-        # failed". This dispatcher runs on the head where the endpoint is bound, so
-        # `ray.util.get_node_ip_address()` here yields the head's ROUTABLE compute
-        # IP. We substitute it for the loopback host in the per-coordinator
-        # runner config so each coordinator builds its litellm base_url against
-        # a reachable address. The server is bound to 0.0.0.0 (see
-        # InferenceEngineClient._spin_up_http_endpoint), so this routable host is
-        # reachable from every node.
-        #
         self._num_coordinators = resources.num_coordinators
         self._cpus_per_coordinator = resources.cpus_per_coordinator
         self._executor_workers = resources.executor_workers
@@ -300,7 +280,7 @@ class RolloutDispatcher:
         """
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-        runner_config = OmegaConf.create(OmegaConf.to_container(self._spec.runner_config, resolve=True))
+        runner_config = self._spec.runner_config.copy()
         configured_host = runner_config.get("http_endpoint_host", None)
         if configured_host in ("127.0.0.1", "localhost", None):
             runner_config.http_endpoint_host = ray.util.get_node_ip_address()
@@ -331,8 +311,7 @@ class RolloutDispatcher:
         # tipped GPFS into a SIGBUS / errno=116 (ESTALE) mmap fault that killed
         # raylets and cascaded to ActorUnavailableError at weight-sync-state
         # init. Serializing construction+startup keeps only one coordinator
-        # paging the heavy stack in at a time. The SPREAD PlacementGroup is
-        # retained (it is not the cause).
+        # paging the heavy stack in at a time.
         self._actors = []
         for shard_idx in range(self._num_coordinators):
             actor = RolloutCoordinator.options(

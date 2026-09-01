@@ -6,7 +6,6 @@ import threading
 import zipfile
 
 import pytest
-from omegaconf import OmegaConf
 
 from skyrl_train.trajectory_runners.base import (
     BatchMetadata,
@@ -624,14 +623,14 @@ def test_initialization_reconciles_archive_written_before_ledger_commit(tmp_path
     assert len(list(tmp_path.rglob("*.zip"))) == 1
 
 
-class _FanoutCoordinator:
+class _ProcessCoordinator:
     """One coordinator actor that returns a finished batch, standing in for the Ray RPC."""
 
     def __init__(self):
-        self.run_shard = _FanoutRemote()
+        self.run_shard = _ProcessRemote()
 
 
-class _FanoutRemote:
+class _ProcessRemote:
     def remote(self, input_batch, *_args):
         positions = {trajectory_id.to_string(): index for index, trajectory_id in enumerate(_input()["trajectory_ids"])}
         indices = [positions[trajectory_id.to_string()] for trajectory_id in input_batch["trajectory_ids"]]
@@ -641,41 +640,26 @@ class _FanoutRemote:
         return future
 
 
-def _fanout_dispatcher() -> RolloutDispatcher:
+def _process_dispatcher(harbor_runner_spec: HarborRunnerSpec) -> RolloutDispatcher:
     dispatcher = RolloutDispatcher(
-        spec=HarborRunnerSpec(
-            OmegaConf.create(
-                {
-                    "trainer": {
-                        "algorithm": {
-                            "policy_loss_type": "regular",
-                            "use_tis": False,
-                            "behavior_clip": None,
-                            "tis_lcs_alert_threshold": 0.1,
-                        }
-                    }
-                }
-            ),
-            OmegaConf.create({}),
-            OmegaConf.create({}),
-        ),
+        spec=harbor_runner_spec,
         resources=ProcessPoolResources(1, 1, 1, 30),
     )
-    dispatcher._actors = [_FanoutCoordinator()]
+    dispatcher._actors = [_ProcessCoordinator()]
     return dispatcher
 
 
 @pytest.mark.asyncio
-async def test_fanout_retains_its_coordinators_batch_under_the_harbor_runner(tmp_path):
-    """Retention under fan-out, where the dispatcher replaced the runner the sink was attached to."""
-    dispatcher = _fanout_dispatcher()
+async def test_process_dispatcher_retains_its_coordinators_batch_under_the_harbor_runner(tmp_path, harbor_runner_spec):
+    """Retention when the process dispatcher replaces the runner the sink was attached to."""
+    dispatcher = _process_dispatcher(harbor_runner_spec)
     dispatcher.set_trajectory_sink(TrajectorySink(_config(tmp_path), _Tokenizer()))
 
     output = await dispatcher.run(_input())
 
     assert output["rollout_metrics"]["generate/trajectory_retention/written"] == 3.0
     assert {record["trajectory"]["instance_id"] for record in _records(tmp_path)} == {"a", "b", "c"}
-    # The proxy must not stamp its own name: retained provenance is identical with fan-out on or off.
+    # The proxy must not stamp its own name: retained provenance is independent of process placement.
     assert {record["provenance"]["runner"] for record in _records(tmp_path)} == {"HarborTrajectoryRunner"}
 
 

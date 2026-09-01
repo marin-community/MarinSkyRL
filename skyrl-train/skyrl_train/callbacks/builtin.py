@@ -34,7 +34,7 @@ from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.utils.data_tracker import DataConsumptionState, DataConsumptionTracker
 from skyrl_train.io import io
-from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
+from skyrl_train.inference_engines.vllm.stats import VLLM_NUM_ENGINES_METRIC, IntervalReadMode
 from skyrl_train.inference_observability import (
     InferenceMetricsSink,
     configured_inference_sinks,
@@ -661,7 +661,7 @@ class InferenceStatsCallback(TrainerCallback):
             return control
         if self.log_to_tracker:
             kwargs["trainer"].all_metrics.update(metrics)
-        if self.log_to_console and "vllm/num_engines" in metrics:
+        if self.log_to_console and VLLM_NUM_ENGINES_METRIC in metrics:
             log = logger.debug if self.console_log_level == "debug" else logger.info
             log(format_console_summary(metrics, state.global_step))
         self._publish_sinks(snapshot, state.global_step)

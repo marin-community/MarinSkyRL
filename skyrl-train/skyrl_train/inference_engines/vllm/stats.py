@@ -10,6 +10,15 @@ from enum import StrEnum
 from typing import Protocol
 
 
+HTTP_BRIDGE_HISTOGRAM_BOUNDS = {
+    "event_loop_lag_seconds": (0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
+    "response_bytes": (1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576),
+    "json_serialization_seconds": (0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1),
+}
+HTTP_BRIDGE_METRIC_NAMES = tuple(HTTP_BRIDGE_HISTOGRAM_BOUNDS)
+VLLM_NUM_ENGINES_METRIC = "vllm/num_engines"
+
+
 class IntervalReadMode(StrEnum):
     PEEK = "peek"
     RESET = "reset"
@@ -143,24 +152,20 @@ class _IntervalDistributionAccumulator:
 class HTTPBridgeStatsAccumulator:
     """Thread-safe bridge observations with PEEK and RESET interval reads."""
 
-    _BOUNDS = {
-        "event_loop_lag_seconds": (0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0),
-        "response_bytes": (1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576),
-        "json_serialization_seconds": (0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1),
-    }
-
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._interval = {name: _IntervalDistributionAccumulator() for name in self._BOUNDS}
+        self._interval = {name: _IntervalDistributionAccumulator() for name in HTTP_BRIDGE_METRIC_NAMES}
         self._histograms: dict[tuple[str, tuple[tuple[str, str], ...]], HistogramAccumulator] = {}
 
     def observe(self, name: str, value: float, *, attributes: Mapping[str, str] | None = None) -> None:
-        if name not in self._BOUNDS:
+        if name not in HTTP_BRIDGE_HISTOGRAM_BOUNDS:
             raise ValueError(f"unknown HTTP bridge metric: {name}")
         labels = tuple(sorted((attributes or {}).items()))
         with self._lock:
             self._interval[name].observe(value)
-            histogram = self._histograms.setdefault((name, labels), HistogramAccumulator(self._BOUNDS[name]))
+            histogram = self._histograms.setdefault(
+                (name, labels), HistogramAccumulator(HTTP_BRIDGE_HISTOGRAM_BOUNDS[name])
+            )
             histogram.observe(value)
 
     def snapshot(self, read_mode: IntervalReadMode) -> HTTPBridgeStatsSnapshot:
@@ -171,7 +176,7 @@ class HTTPBridgeStatsAccumulator:
                 for (name, labels), histogram in self._histograms.items()
             )
             if read_mode is IntervalReadMode.RESET:
-                self._interval = {name: _IntervalDistributionAccumulator() for name in self._BOUNDS}
+                self._interval = {name: _IntervalDistributionAccumulator() for name in HTTP_BRIDGE_METRIC_NAMES}
         return HTTPBridgeStatsSnapshot(histograms=histograms, **summaries)
 
 

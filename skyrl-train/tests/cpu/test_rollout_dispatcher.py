@@ -3,8 +3,6 @@ from collections.abc import Awaitable, Callable
 
 import pytest
 import ray
-from omegaconf import OmegaConf
-
 from skyrl_train.trajectory_runners.harbor.execution import (
     ExecutionEnvironment,
     HarborRunnerSpec,
@@ -67,22 +65,6 @@ class _BlockingCoordinator:
         return self._cancelled
 
 
-def _spec() -> HarborRunnerSpec:
-    config = OmegaConf.create(
-        {
-            "trainer": {
-                "algorithm": {
-                    "policy_loss_type": "regular",
-                    "use_tis": False,
-                    "behavior_clip": None,
-                    "tis_lcs_alert_threshold": 0.1,
-                }
-            }
-        }
-    )
-    return HarborRunnerSpec(config, OmegaConf.create({}), OmegaConf.create({}))
-
-
 def _request(ids: list[TrajectoryID]) -> dict:
     return {
         "prompts": [f"prompt-{trajectory_id.to_string()}" for trajectory_id in ids],
@@ -108,9 +90,9 @@ def _output(ids: list[TrajectoryID]) -> dict:
     }
 
 
-def _dispatcher(actors: list[object], *, timeout: float = 1) -> RolloutDispatcher:
+def _dispatcher(actors: list[object], harbor_runner_spec: HarborRunnerSpec, *, timeout: float = 1) -> RolloutDispatcher:
     dispatcher = RolloutDispatcher(
-        spec=_spec(),
+        spec=harbor_runner_spec,
         resources=ProcessPoolResources(
             num_coordinators=len(actors),
             cpus_per_coordinator=1,
@@ -122,11 +104,11 @@ def _dispatcher(actors: list[object], *, timeout: float = 1) -> RolloutDispatche
     return dispatcher
 
 
-def test_production_harbor_workload_selects_process_isolation_before_trainer_construction():
+def test_production_harbor_workload_selects_process_isolation_before_trainer_construction(harbor_runner_spec):
     resources = ProcessPoolResources(2, 1, 4, 30)
 
     runner = build_harbor_trajectory_runner(
-        spec=_spec(),
+        spec=harbor_runner_spec,
         workload=TrajectoryWorkload(ExecutionEnvironment.PRODUCTION),
         tokenizer=object(),
         resources=resources,
@@ -155,7 +137,7 @@ def test_development_harbor_workload_selects_in_process_execution():
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_partitions_complete_groups_and_restores_request_order():
+async def test_dispatcher_partitions_complete_groups_and_restores_request_order(harbor_runner_spec):
     calls: list[list[str]] = []
 
     async def run_group(input_batch, _global_step):
@@ -164,7 +146,7 @@ async def test_dispatcher_partitions_complete_groups_and_restores_request_order(
         return _output(list(reversed(ids)))
 
     ids = [TrajectoryID("a", 0), TrajectoryID("b", 0), TrajectoryID("a", 1), TrajectoryID("b", 1)]
-    dispatcher = _dispatcher([_Coordinator(run_group), _Coordinator(run_group)])
+    dispatcher = _dispatcher([_Coordinator(run_group), _Coordinator(run_group)], harbor_runner_spec)
 
     result = await dispatcher.run(_request(ids))
 
@@ -174,32 +156,32 @@ async def test_dispatcher_partitions_complete_groups_and_restores_request_order(
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_rejects_output_from_the_wrong_group():
+async def test_dispatcher_rejects_output_from_the_wrong_group(harbor_runner_spec):
     async def wrong_group(_input_batch, _global_step):
         return _output([TrajectoryID("other", 0)])
 
-    dispatcher = _dispatcher([_Coordinator(wrong_group)])
+    dispatcher = _dispatcher([_Coordinator(wrong_group)], harbor_runner_spec)
 
     with pytest.raises(ValueError, match="identity mismatch"):
         await dispatcher.run(_request([TrajectoryID("a", 0)]))
 
 
 @pytest.mark.asyncio
-async def test_coordinator_rpc_returns_one_group_unchanged():
+async def test_coordinator_rpc_returns_one_group_unchanged(harbor_runner_spec):
     expected = _output([TrajectoryID("a", 0)])
 
     async def completed_rpc(_input_batch, _global_step):
         return expected
 
-    dispatcher = _dispatcher([_Coordinator(completed_rpc)])
+    dispatcher = _dispatcher([_Coordinator(completed_rpc)], harbor_runner_spec)
 
     assert await dispatcher.run(_request([TrajectoryID("a", 0)])) is expected
 
 
 @pytest.mark.asyncio
-async def test_coordinator_rpc_timeout_does_not_cancel_remote_work(ray_init):
+async def test_coordinator_rpc_timeout_does_not_cancel_remote_work(ray_init, harbor_runner_spec):
     actor = _BlockingCoordinator.remote()
-    dispatcher = _dispatcher([actor], timeout=0.1)
+    dispatcher = _dispatcher([actor], harbor_runner_spec, timeout=0.1)
 
     with pytest.raises(RolloutCoordinatorRPCTimeoutError):
         await dispatcher.run(_request([TrajectoryID("a", 0)]))
@@ -209,13 +191,13 @@ async def test_coordinator_rpc_timeout_does_not_cancel_remote_work(ray_init):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_rpc_preserves_remote_timeout_error():
+async def test_coordinator_rpc_preserves_remote_timeout_error(harbor_runner_spec):
     remote_error = TimeoutError("remote post-processing timed out")
 
     async def failed_rpc(_input_batch, _global_step):
         raise remote_error
 
-    dispatcher = _dispatcher([_Coordinator(failed_rpc)])
+    dispatcher = _dispatcher([_Coordinator(failed_rpc)], harbor_runner_spec)
 
     with pytest.raises(TimeoutError) as raised:
         await dispatcher.run(_request([TrajectoryID("a", 0)]))

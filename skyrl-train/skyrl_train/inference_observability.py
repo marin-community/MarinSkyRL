@@ -8,7 +8,13 @@ from typing import Protocol
 
 from loguru import logger
 
-from skyrl_train.inference_engines.vllm.stats import VLLMHistogramSnapshot, InferenceStatsSnapshot
+from skyrl_train.inference_engines.vllm.stats import (
+    HTTP_BRIDGE_METRIC_NAMES,
+    VLLM_NUM_ENGINES_METRIC,
+    InferenceStatsSnapshot,
+    VLLMEngineStatsSnapshot,
+    VLLMHistogramSnapshot,
+)
 from skyrl_train.telemetry import TelemetryConfig
 
 
@@ -39,14 +45,14 @@ def trainer_metrics(snapshot: InferenceStatsSnapshot) -> dict[str, float]:
     else:
         metrics = _engine_trainer_metrics(engines)
     if snapshot.http_bridge is not None:
-        for name in ("event_loop_lag_seconds", "response_bytes", "json_serialization_seconds"):
+        for name in HTTP_BRIDGE_METRIC_NAMES:
             summary = getattr(snapshot.http_bridge, name)
             for statistic in ("count", "mean", "p95", "maximum"):
                 metrics[f"inference_bridge/{name}/{statistic}"] = float(getattr(summary, statistic))
     return metrics
 
 
-def _engine_trainer_metrics(engines) -> dict[str, float]:
+def _engine_trainer_metrics(engines: tuple[VLLMEngineStatsSnapshot, ...]) -> dict[str, float]:
     intervals = [engine.interval for engine in engines]
     count = len(intervals)
     finished = sum(item.finished_requests for item in intervals)
@@ -60,7 +66,7 @@ def _engine_trainer_metrics(engines) -> dict[str, float]:
         return sum(float(getattr(item, name)) * item.finished_requests for item in intervals) / finished
 
     return {
-        "vllm/num_engines": float(count),
+        VLLM_NUM_ENGINES_METRIC: float(count),
         "vllm/peak_running_reqs": float(sum(item.peak_running_reqs for item in intervals)),
         "vllm/peak_waiting_reqs": float(sum(item.peak_waiting_reqs for item in intervals)),
         "vllm/peak_prompt_throughput": average("peak_prompt_throughput"),
@@ -93,7 +99,7 @@ def _engine_trainer_metrics(engines) -> dict[str, float]:
 def format_console_summary(metrics: Mapping[str, float], step: int) -> str:
     """Format the compact console view without coupling collection to a logger."""
     return (
-        f"vLLM Stats (step {step}): engines={metrics['vllm/num_engines']:.0f}, "
+        f"vLLM Stats (step {step}): engines={metrics[VLLM_NUM_ENGINES_METRIC]:.0f}, "
         f"running={metrics['vllm/median_running_reqs']:.1f}/{metrics['vllm/peak_running_reqs']:.0f}, "
         f"waiting={metrics['vllm/median_waiting_reqs']:.1f}/{metrics['vllm/peak_waiting_reqs']:.0f}, "
         f"generation={metrics['vllm/median_generation_throughput']:.1f}/"
