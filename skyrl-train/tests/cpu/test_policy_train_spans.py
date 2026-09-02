@@ -383,6 +383,12 @@ def test_ppo_train_wires_the_span_layer():
     assert "counters=_counters if _policy_spans.enabled else None" in source
     assert "micro_step_count" in source
     assert "attention_work_ratio" in source
+    # H2's keystone. Three OOMs in this workstream asked for the eager attention score tensor and
+    # no memory series existed to see any of them coming.
+    assert "peak_allocated_bytes" in source
+    assert "alloc_retries" in source
+    # The peak must span the whole step: resetting here would hide the forward that sets it.
+    assert "reset_peak_memory_stats" not in source
 
 
 def test_counters_go_to_their_own_instrument_not_the_span_tree():
@@ -416,7 +422,16 @@ def test_counters_go_to_their_own_instrument_not_the_span_tree():
     assert by_name["tokens_real"][1]["step"] == "2"
     assert by_name["micro_step_count"][1]["role"] == "worker"
     # And they must not be registered as spans, or they would join the residual arithmetic.
-    for name in ("micro_step_count", "tokens_real", "tokens_padded", "attention_work_ratio"):
+    for name in (
+        "micro_step_count",
+        "tokens_real",
+        "tokens_padded",
+        "attention_work_ratio",
+        "peak_allocated_bytes",
+        "peak_reserved_bytes",
+        "alloc_retries",
+        "alloc_ooms",
+    ):
         assert name not in TIMING_PARENTS
         assert name not in POLICY_TRAIN_SPANS
 
