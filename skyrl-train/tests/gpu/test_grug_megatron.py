@@ -95,6 +95,9 @@ SNOWBALL_LIKE_SHAPE = dict(
     head_dim=128,
     sliding_window=2048,
 )
+# Snowball's width with few experts, so each expert sees as many tokens per micro-batch
+# as it does at full scale (about 700 for 2700-token rows across two EP ranks).
+SNOWBALL_LIKE_DENSE_EXPERTS_SHAPE = {**SNOWBALL_LIKE_SHAPE, "num_local_experts": 32}
 
 
 def _write_tiny_checkpoint(
@@ -292,8 +295,8 @@ def test_grug_megatron_forward_matches_hf(tmp_path, world_size: int, pp: int, ep
 
 @pytest.mark.parametrize(
     ("world_size", "pp", "ep"),
-    [(1, 1, 1), (2, 2, 1), (4, 2, 2)],
-    ids=["pp1", "pp2", "pp2_ep2"],
+    [(1, 1, 1), (2, 2, 1), (4, 2, 2), (4, 2, 1), (4, 1, 2)],
+    ids=["pp1", "pp2", "pp2_ep2", "pp2_dp2", "ep2_dp2"],
 )
 @pytest.mark.parametrize(
     ("shape", "num_experts_per_tok", "prompt_length", "response_length"),
@@ -301,8 +304,16 @@ def test_grug_megatron_forward_matches_hf(tmp_path, world_size: int, pp: int, ep
         (TOY_SHAPE, 2, 24, 16),
         (TOY_SHAPE, 4, 1000, 200),
         (SNOWBALL_LIKE_SHAPE, 4, 2400, 300),
+        (SNOWBALL_LIKE_SHAPE, 4, 1024, 8192),
+        (SNOWBALL_LIKE_DENSE_EXPERTS_SHAPE, 4, 2400, 300),
     ],
-    ids=["toy_top2_short", "toy_top4_long", "snowball_like_top4_long"],
+    ids=[
+        "toy_top2_short",
+        "toy_top4_long",
+        "snowball_like_top4_long",
+        "snowball_like_top4_full_length",
+        "snowball_like_dense_experts",
+    ],
 )
 def test_grug_megatron_train_forward_matches_eval_forward(
     tmp_path,
@@ -326,12 +337,16 @@ def test_grug_megatron_train_forward_matches_eval_forward(
     model_path = tmp_path / "model"
     model_path.mkdir()
     _write_tiny_checkpoint(
-        model_path, max_position_embeddings=4096, num_experts_per_tok=num_experts_per_tok, shape=shape
+        model_path, max_position_embeddings=16384, num_experts_per_tok=num_experts_per_tok, shape=shape
     )
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     # The forward and training passes must see the same micro-batch shapes; see the trainer docs.
     cfg.trainer.micro_forward_batch_size_per_gpu = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
+    # The production DDP settings from cloud/iris/configs/snowball_megatron_full.yaml.
+    cfg.trainer.policy.megatron_config.ddp_config.overlap_grad_reduce = True
+    cfg.trainer.policy.megatron_config.ddp_config.overlap_param_gather = True
+    cfg.trainer.policy.megatron_config.ddp_config.grad_reduce_in_fp32 = False
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
     batch = _padded_batch(
         pad_token_id, prompt_length=prompt_length, response_length=response_length, variable_lengths=True
@@ -339,8 +354,17 @@ def test_grug_megatron_train_forward_matches_eval_forward(
     initialize_ray(cfg)
     try:
         policy = _init_policy(cfg, world_size)
+        # The trainer offloads the optimizer for rollouts and reloads it before training.
+        ray.get(
+            policy.async_run_ray_method("pass_through", "offload_to_cpu", offload_optimizer=True, offload_model=False)
+        )
         eval_logprobs = _megatron_response_logprobs(policy, batch)
         batch["action_log_probs"] = (eval_logprobs * batch["response_mask"]).float()
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "backload_to_gpu", backload_optimizer=True, backload_model=False
+            )
+        )
         train_output = ray.get(policy.async_run_ray_method("mesh", "ppo_train", batch))[0]
         status = train_output.metadata["train_status"]
         print(

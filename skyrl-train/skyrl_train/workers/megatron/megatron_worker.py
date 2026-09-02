@@ -336,6 +336,44 @@ class MegatronWorker:
         output.metadata = data.metadata
         return output
 
+    def _log_train_eval_parity_probe(self, micro_buffer: List[MegatronPolicyMicroBatch]) -> None:
+        """Re-run forward-only passes on the training micro-batches and compare them with the old log-probs.
+
+        The eval-mode pass measures whether the log-prob forward is repeatable at all; the
+        train-mode pass isolates module train/eval behaviour from the backward pass. The
+        training metrics then report the remaining forward-backward drift.
+        """
+        micro_dicts = [
+            {
+                "sequences": micro.sequences,
+                "attention_mask": micro.attention_mask,
+                "position_ids": micro.position_ids,
+                "num_actions": micro.num_actions,
+            }
+            for micro in micro_buffer
+        ]
+        seq_len = micro_buffer[0].sequences.shape[1]
+        micro_bsz = micro_buffer[0].sequences.shape[0]
+        old = torch.cat([micro.old_action_log_probs for micro in micro_buffer]).float()
+        mask = torch.cat([micro.loss_mask for micro in micro_buffer]).bool()
+        for mode in ("eval", "train"):
+            self.model.eval() if mode == "eval" else self.model.train()
+            with torch.no_grad():
+                repeated = self.model.forward(
+                    micro_batches=micro_dicts,
+                    seq_len=seq_len,
+                    micro_batch_size=micro_bsz,
+                    temperature=self.cfg.generator.sampling_params.temperature,
+                )
+            if not mpu.is_pipeline_last_stage(ignore_virtual=True):
+                continue
+            diff = (repeated.float() - old.to(repeated.device)).abs()[mask.to(repeated.device)]
+            logger.info(
+                f"train/eval parity probe dp_rank={mpu.get_data_parallel_rank()} {mode}-mode forward vs old "
+                f"log-probs: mean abs {diff.mean().item():.6f}, max abs {diff.max().item():.6f}, "
+                f"exact fraction {(diff == 0).float().mean().item():.4f}"
+            )
+
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
         self.strategy.save_hf_model(
@@ -561,6 +599,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 )
 
                 if len(micro_buffer) == micro_batches_per_mini_batch:
+                    if self.cfg.trainer.policy.megatron_config.check_train_eval_parity:
+                        self._log_train_eval_parity_probe(micro_buffer)
                     # run mini-batch forward-backward and then one optimizer step
                     self.model.train()
                     for chunk in self.actor_module:
