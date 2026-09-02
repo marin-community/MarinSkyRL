@@ -16,7 +16,7 @@ cd "$REPOSITORY_ROOT"
 JUNIT_XML="$REPOSITORY_ROOT/grug-megatron-junit.xml"
 "$PYTHON" "$REPOSITORY_ROOT/cloud/iris/env_vars.py" \
   run-grug-gpu-gate "$REPOSITORY_ROOT" -- \
-  "$PYTHON" -m pytest -x -s \
+  "$PYTHON" -m pytest ${GRUG_MEGATRON_PYTEST_ARGS:--x} -s \
   --junitxml="$JUNIT_XML" \
   "${GRUG_MEGATRON_TESTS:-skyrl-train/tests/gpu/test_grug_megatron.py}"
 "$PYTHON" -c "import xml.etree.ElementTree as ET; cases = ET.parse('$JUNIT_XML').getroot().findall('.//testcase'); assert cases and all(case.find('skipped') is None for case in cases), 'a Grug Megatron gate did not execute'"

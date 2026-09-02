@@ -67,7 +67,7 @@ LOGPROB_MEAN_ABS_TOLERANCE = 3e-2
 TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE = 1e-3
 
 
-def _write_tiny_checkpoint(path: Path) -> None:
+def _write_tiny_checkpoint(path: Path, max_position_embeddings: int = 128) -> None:
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     config = GrugMoeConfig(
         vocab_size=len(tokenizer),
@@ -80,7 +80,7 @@ def _write_tiny_checkpoint(path: Path) -> None:
         num_attention_heads=2,
         num_key_value_heads=1,
         head_dim=64,
-        max_position_embeddings=128,
+        max_position_embeddings=max_position_embeddings,
         sliding_window=16,
         initializer_range=0.02,
         qk_mult=1.37,
@@ -144,10 +144,15 @@ def _config(model_path: str, *, world_size: int, pp: int, ep: int):
     return cfg
 
 
-def _padded_batch(pad_token_id: int, batch_size: int = 4) -> TrainingInputBatch:
+def _padded_batch(
+    pad_token_id: int,
+    batch_size: int = 4,
+    prompt_length: int = PROMPT_LENGTH,
+    response_length: int = RESPONSE_LENGTH,
+) -> TrainingInputBatch:
     """Return a bf16-friendly batch with left and right padding and fixed content."""
     generator = torch.Generator().manual_seed(5)
-    body_length = PROMPT_LENGTH + RESPONSE_LENGTH
+    body_length = prompt_length + response_length
     total_length = body_length + 6
     pad_before = [3, 0, 5, 1]
     sequences = []
@@ -160,9 +165,9 @@ def _padded_batch(pad_token_id: int, batch_size: int = 4) -> TrainingInputBatch:
         masks.append([0] * before + [1] * body_length + [0] * after)
     sequences = torch.tensor(sequences, dtype=torch.long)
     attention_mask = torch.tensor(masks, dtype=torch.long)
-    response_mask = attention_mask[:, -RESPONSE_LENGTH:]
-    zeros = torch.zeros(batch_size, RESPONSE_LENGTH, dtype=torch.float32)
-    advantages = torch.tensor([[-1.0, -0.25, 0.5, 1.0, 1.0, 0.5, -0.25, -1.0]]).repeat(batch_size, 1)
+    response_mask = attention_mask[:, -response_length:]
+    zeros = torch.zeros(batch_size, response_length, dtype=torch.float32)
+    advantages = torch.linspace(-1.0, 1.0, response_length).unsqueeze(0).repeat(batch_size, 1)
     batch = TrainingInputBatch(
         {
             "sequences": sequences,
@@ -177,7 +182,7 @@ def _padded_batch(pad_token_id: int, batch_size: int = 4) -> TrainingInputBatch:
             "response_mask": response_mask.clone(),
         }
     )
-    batch.metadata = {"response_length": RESPONSE_LENGTH, "global_step": 0}
+    batch.metadata = {"response_length": response_length, "global_step": 0}
     return batch
 
 
@@ -259,34 +264,81 @@ def test_grug_megatron_forward_matches_hf(tmp_path, world_size: int, pp: int, ep
 )
 @pytest.mark.parametrize("gradient_checkpointing", [True, False], ids=["recompute", "no_recompute"])
 @pytest.mark.parametrize("micro_train_batch_size", [2, 1], ids=["same_shapes", "narrower_train_micro"])
+@pytest.mark.parametrize(
+    ("prompt_length", "response_length"), [(PROMPT_LENGTH, RESPONSE_LENGTH), (1000, 200)], ids=["short", "long"]
+)
 def test_grug_megatron_train_forward_matches_eval_forward(
-    tmp_path, world_size: int, pp: int, ep: int, gradient_checkpointing: bool, micro_train_batch_size: int
+    tmp_path,
+    world_size: int,
+    pp: int,
+    ep: int,
+    gradient_checkpointing: bool,
+    micro_train_batch_size: int,
+    prompt_length: int,
+    response_length: int,
 ):
     """The training forward must reproduce the eval-mode log-probs it is scored against.
 
     With one update per batch the PPO ratio is exp(train_logprob - eval_logprob), so any
-    train/eval drift shows up as spurious clipping. FSDP2 reports exactly zero here.
+    train/eval drift shows up as spurious clipping. FSDP2 reports exactly zero here. The
+    long variant runs sequences well past the sliding window, where attention kernels
+    are selected differently from the toy lengths.
+    """
+    require_hoppers(world_size)
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    _write_tiny_checkpoint(model_path, max_position_embeddings=2048)
+    cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
+    cfg.trainer.gradient_checkpointing = gradient_checkpointing
+    cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size
+    pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
+    batch = _padded_batch(pad_token_id, prompt_length=prompt_length, response_length=response_length)
+    initialize_ray(cfg)
+    try:
+        policy = _init_policy(cfg, world_size)
+        eval_logprobs = _megatron_response_logprobs(policy, batch)
+        batch["action_log_probs"] = (eval_logprobs * batch["response_mask"]).float()
+        train_output = ray.get(policy.async_run_ray_method("mesh", "ppo_train", batch))[0]
+        status = train_output.metadata["train_status"]
+        print(
+            f"train/eval log-ratio: mean abs {status['log_ratio_abs_mean']:.6f}, max abs {status['log_ratio_abs_max']:.6f}, "
+            f"exact-unit fraction {status['ppo_ratio_exact_unit_fraction']:.4f}"
+        )
+        assert status["log_ratio_abs_max"] < TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE, status["log_ratio_abs_max"]
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.parametrize(("world_size", "pp", "ep"), [(2, 1, 2), (4, 2, 2)], ids=["pp1_ep2", "pp2_ep2"])
+def test_grug_megatron_eval_forward_is_independent_of_peer_rank_batch(tmp_path, world_size: int, pp: int, ep: int):
+    """A rank's log-probs must not change when only the peer expert-parallel rank's rows change.
+
+    Expert parallelism co-batches tokens from every rank in the expert group, so a
+    composition-dependent kernel would make old log-probs depend on which rows the
+    other ranks happened to hold.
     """
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
     _write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
-    cfg.trainer.gradient_checkpointing = gradient_checkpointing
-    cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
-    batch = _padded_batch(pad_token_id)
+    rows = _padded_batch(pad_token_id, batch_size=6)
+    first = rows.slice(0, 4)
+    peer_swapped = TrainingInputBatch({key: torch.cat([rows[key][0:2], rows[key][4:6]]) for key in rows.keys()})
+    peer_swapped.metadata = rows.metadata
     initialize_ray(cfg)
     try:
         policy = _init_policy(cfg, world_size)
-        eval_logprobs = _megatron_response_logprobs(policy, batch)
-        batch["action_log_probs"] = (eval_logprobs * batch["response_mask"]).float()
-        status = _train_step(policy, batch)
-        print(
-            f"train/eval log-ratio: mean abs {status['log_ratio_abs_mean']:.6f}, max abs {status['log_ratio_abs_max']:.6f}, "
-            f"exact-unit fraction {status['ppo_ratio_exact_unit_fraction']:.4f}"
-        )
-        assert status["log_ratio_abs_max"] < TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE, status["log_ratio_abs_max"]
+        baseline = _megatron_response_logprobs(policy, first)
+        repeated = _megatron_response_logprobs(policy, first)
+        swapped = _megatron_response_logprobs(policy, peer_swapped)
+        valid = first["response_mask"][:2].bool()
+        repeat_diff = (repeated[:2][valid] - baseline[:2][valid]).abs().max().item()
+        swap_diff = (swapped[:2][valid] - baseline[:2][valid]).abs().max().item()
+        print(f"rank-0 rows: repeat max abs {repeat_diff:.6f}, peer-swapped max abs {swap_diff:.6f}")
+        assert repeat_diff == 0.0, repeat_diff
+        assert swap_diff == 0.0, swap_diff
     finally:
         ray.shutdown()
 
