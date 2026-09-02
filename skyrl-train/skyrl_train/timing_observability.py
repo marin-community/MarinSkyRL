@@ -28,6 +28,7 @@ TIMING_PARENTS: dict[str, str | None] = {
     # only a Ray dispatch plus a wait for the slowest worker, so these are where its time actually
     # goes. Published with role=worker and clock_domain=exclusive_wall; see WorkerSpanAccumulator.
     "policy_ppo_train": "policy_train",
+    "policy_entry_barrier": "policy_ppo_train",
     "policy_training_step": "policy_ppo_train",
     "policy_metric_allreduce": "policy_ppo_train",
     "policy_final_barrier": "policy_ppo_train",
@@ -136,8 +137,19 @@ def publish_startup_timings(
 # rank anyway -- the driver waits for the slowest. Ray actors inherit the telemetry endpoint, run id
 # and execution uid from the task runtime, so each worker publishes its own rows directly and the
 # aggregation (max, p95) happens at query time over the rank attribute.
+#
+# These do NOT close against the driver's policy_train, and that gap is a measurement, not an
+# omission: policy_train also covers Ray dispatch and argument materialisation, which happen on the
+# driver and cannot be seen from here. Read
+#
+#     policy_train - max_over_ranks(policy_ppo_train)
+#
+# as the dispatch and transport overhead. policy_ppo_train starts at true function entry, before the
+# R3 co-arrival drain, so the arrival spread the driver is paying for lands in policy_entry_barrier
+# rather than vanishing.
 
 POLICY_TRAIN_SPANS = (
+    "policy_entry_barrier",
     "policy_training_step",
     "policy_metric_allreduce",
     "policy_final_barrier",
