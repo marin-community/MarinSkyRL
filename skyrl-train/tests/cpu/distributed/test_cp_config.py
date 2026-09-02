@@ -77,6 +77,12 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
         "count_step": 1000,
     },
 }
+POLICY_SPAN_TRAINER_FIELDS = {
+    # Worker-side decomposition of policy_train. Additive and default-off, so it must be declared
+    # here or the golden-diff guards below fail -- which is what they are for.
+    "policy_train_spans": False,
+    "policy_train_spans_synchronize": True,
+}
 ADDITIVE_ALGORITHM_FIELDS = {
     "batch_invariant": False,
 }
@@ -167,7 +173,12 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         optimizer = container["trainer"][role]["optimizer_config"]
         for k in ADDITIVE_TRAINING_OPTIMIZER_FIELDS:
             optimizer.pop(k, None)
-    for k in (*STAGE2_TRAINER_FIELDS, *DEBUG_MODE_TRAINER_FIELDS, *RUNTIME_CONFIG_TRAINER_FIELDS):
+    for k in (
+        *STAGE2_TRAINER_FIELDS,
+        *DEBUG_MODE_TRAINER_FIELDS,
+        *RUNTIME_CONFIG_TRAINER_FIELDS,
+        *POLICY_SPAN_TRAINER_FIELDS,
+    ):
         container["trainer"].pop(k, None)
     for k in ADDITIVE_ALGORITHM_FIELDS:
         container["trainer"]["algorithm"].pop(k, None)
@@ -216,7 +227,9 @@ def test_diff_is_exactly_the_additive_fsdp_keys_x_three_roles():
             assert cur_fsdp[k] == v
     # Only explicitly additive top-level trainer keys may differ from the golden.
     added_trainer = set(current["trainer"]) - set(golden["trainer"])
-    expected_trainer_fields = STAGE2_TRAINER_FIELDS | DEBUG_MODE_TRAINER_FIELDS | RUNTIME_CONFIG_TRAINER_FIELDS
+    expected_trainer_fields = (
+        STAGE2_TRAINER_FIELDS | DEBUG_MODE_TRAINER_FIELDS | RUNTIME_CONFIG_TRAINER_FIELDS | POLICY_SPAN_TRAINER_FIELDS
+    )
     assert added_trainer == set(expected_trainer_fields), (
         f"trainer added top-level keys {sorted(added_trainer)}, expected {sorted(expected_trainer_fields)}"
     )

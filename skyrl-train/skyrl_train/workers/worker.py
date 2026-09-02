@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import time
 import logging
 import os
 import socket
@@ -34,6 +35,7 @@ from skyrl_train.utils.numa import physical_gpu_id_for_worker, set_numa_affinity
 from skyrl_train.utils.policy_math import masked_mean
 from skyrl_train.distributed.dispatch import ActorInfo, Dispatch, DispatchRegistry, DispatchSettings, MeshRank
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
+from skyrl_train.timing_observability import WorkerSpanAccumulator, publish_worker_spans
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
@@ -1025,6 +1027,14 @@ class PolicyWorkerBase(Worker):
             torch.distributed.barrier()
 
         global_step = train_data.metadata["global_step"]
+        # Off unless trainer.policy_train_spans is set, so the overhead on/off pair is a config flip
+        # rather than two revisions. synchronize decides whether these measure kernel launch or
+        # kernel execution -- see WorkerSpanAccumulator.
+        _policy_spans = WorkerSpanAccumulator(
+            enabled=bool(self.cfg.trainer.get("policy_train_spans", False)),
+            synchronize=bool(self.cfg.trainer.get("policy_train_spans_synchronize", True)),
+        )
+        _policy_spans_started = time.perf_counter()
 
         # Per-batch stale_min for StaleClip (None for sync RL, populated for async).
         stale_min = train_data.metadata.get("stale_min")
@@ -1137,18 +1147,22 @@ class PolicyWorkerBase(Worker):
                         local_step=local_step,
                     ),
                 ):
-                    status = self.training_step(
-                        experience,
-                        global_step,
-                        local_step,
-                        accumulation_steps,
-                    )
+                    with _policy_spans.span("policy_training_step"):
+                        status = self.training_step(
+                            experience,
+                            global_step,
+                            local_step,
+                            accumulation_steps,
+                        )
                 policy_update_steps += 1
 
                 # for DP
                 # TODO (sumanthrh): this assumes all workers are data parallel.
                 # We assume that outputs are replicated within tp or sp group, otherwise this is not correct.
-                status = self.strategy.all_reduce(status)
+                # One collective per micro-step, and at micro_train_batch_size_per_gpu=1 that is 64
+                # of them per rank per step at E6's geometry. Timed because nobody has attributed it.
+                with _policy_spans.span("policy_metric_allreduce"):
+                    status = self.strategy.all_reduce(status)
 
                 # weighted mean for kl
                 # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
@@ -1162,8 +1176,18 @@ class PolicyWorkerBase(Worker):
                     all_metrics[k].append(v)
                 pbar.set_postfix(policy_progress_metrics(status))
 
-        torch.distributed.barrier()
+        with _policy_spans.span("policy_final_barrier"):
+            torch.distributed.barrier()
         status_mean = policy_training_metrics(all_metrics, policy_update_steps / accumulation_steps)
+
+        # Published from the worker, not returned: trainer.py keeps only policy_statuses[0]'s
+        # "train_status", so a sibling key here would be transported and then dropped -- and rank 0
+        # is the wrong rank, because the driver waits for the slowest.
+        publish_worker_spans(
+            _policy_spans.totals(total_seconds=time.perf_counter() - _policy_spans_started),
+            step=global_step,
+            rank=self._rank,
+        )
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
