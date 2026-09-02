@@ -605,6 +605,8 @@ class BasePPOExp:
                     asyncio.run(trainer.shutdown())
                 except Exception as e:
                     logger.warning(f"Error shutting down trainer: {e}")
+                finally:
+                    trainer.tracker.finish()
 
 
 @ray.remote(num_cpus=1, max_retries=0)

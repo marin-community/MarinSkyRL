@@ -90,6 +90,8 @@ class Tracking:
                     x_label=f"node-{current_node_ip}",
                 ),
             )
+            run.define_metric("trainer/global_step", hidden=True)
+            run.define_metric("*", step_metric="trainer/global_step")
             run_id = run.id
             self.logger["wandb"] = run
             self._prepare_worker_nodes_systems_logging_wandb(
@@ -180,11 +182,16 @@ class Tracking:
     def log(self, data, step, commit=False):
         for logger_name, logger_instance in self.logger.items():
             if logger_name == "wandb":
-                logger_instance.log(data=data, step=step, commit=commit)
+                logger_instance.log(data={**data, "trainer/global_step": step}, commit=commit)
             else:
                 logger_instance.log(data=data, step=step)
 
-    def __del__(self):
+    def finish(self):
+        """Flush tracking backends and mark the run complete."""
+        if getattr(self, "_finished", False):
+            return
+        self._finished = True
+
         # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
         # This is because wandb often errors out with a BrokenPipeError when closing.
         # https://github.com/wandb/wandb/issues/6449
@@ -200,6 +207,9 @@ class Tracking:
                 self.logger["mlflow"].finish()
         except Exception as e:
             logger.warning(f"Attempted to finish tracking but got error {e}")
+
+    def __del__(self):
+        self.finish()
 
 
 class ConsoleLogger:
