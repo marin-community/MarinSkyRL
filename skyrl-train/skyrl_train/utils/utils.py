@@ -779,11 +779,11 @@ def validate_cfg(cfg: DictConfig):
         cfg.trainer.strategy == "megatron"
         and cfg.trainer.micro_forward_batch_size_per_gpu != cfg.trainer.micro_train_batch_size_per_gpu
     ):
-        logger.warning(
+        raise ValueError(
             "Megatron recomputes old log-probs with micro_forward_batch_size_per_gpu="
             f"{cfg.trainer.micro_forward_batch_size_per_gpu} but trains with micro_train_batch_size_per_gpu="
             f"{cfg.trainer.micro_train_batch_size_per_gpu}; cuBLAS selects kernels per shape, so the two "
-            "passes will not agree and PPO clipping acts on kernel noise. Use equal sizes for exact on-policy ratios."
+            "passes disagree and PPO clipping acts on kernel noise. Use equal sizes."
         )
 
     if cfg.trainer.offload_optimizer_during_rollouts and cfg.trainer.placement.colocate_all:

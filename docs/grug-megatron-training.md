@@ -53,8 +53,8 @@ log-probabilities equal the training forward, which FSDP2 satisfies exactly:
 - cuBLAS selects kernels per GEMM shape, and at Grug's width the per-row rounding
   differs between kernels. The log-probability forward and the training forward
   must therefore use the same micro-batch size
-  (`micro_forward_batch_size_per_gpu == micro_train_batch_size_per_gpu`); the
-  trainer warns when they differ.
+  (`micro_forward_batch_size_per_gpu == micro_train_batch_size_per_gpu`);
+  `validate_cfg` rejects Megatron runs where they differ.
 
 `test_grug_megatron_train_forward_matches_eval_forward` guards both on a toy
 model and on a Snowball-shaped tiny model (256 experts, top-4, 20/5 heads,
