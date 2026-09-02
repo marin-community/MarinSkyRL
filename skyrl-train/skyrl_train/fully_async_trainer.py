@@ -83,7 +83,7 @@ class _GenerationQueues:
     admitted_groups: List[GeneratedOutputGroup] = field(default_factory=list)
     admitted_groups_consumed: bool = False
 
-    async def producer_finished(self) -> None:
+    async def mark_producer_finished(self) -> None:
         """Wake admission when a generation worker permanently exits."""
         async with self.condition:
             if self.active_producers <= 0:
@@ -1103,7 +1103,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._staleness_manager.cancel_submission_slot()
             sys.exit(1)
         finally:
-            await queues.producer_finished()
+            await queues.mark_producer_finished()
 
     async def _next_generation_prompts(
         self,
@@ -1289,31 +1289,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         median = sorted_times[len(sorted_times) // 2]
         return max(median * 5.0, 600.0)
 
-    def _any_trajectory_workers_alive(self) -> bool:
-        return any(not t.done() for t in self._active_trajectory_tasks)
-
-    def _check_generation_stall(self, elapsed: float) -> float:
-        """Raise ``GenerationStalledError`` if no producers remain, else extend the deadline.
-
-        Returns the new stall timeout for the next wait cycle.
-        """
-        if not self._any_trajectory_workers_alive():
-            raise GenerationStalledError(f"Generation stalled: waited {elapsed:.0f}s, no active generators")
-        logger.warning(
-            f"Generation stall watchdog: {elapsed:.0f}s since last progress, "
-            f"generators still alive — extending deadline"
+    def _raise_admission_stall(self, elapsed: float, rejection_counts: collections.Counter[str]) -> None:
+        """Bound a step that has admitted no new groups, even if producer tasks remain alive."""
+        raise GenerationStalledError(
+            f"Generation stalled: no groups admitted for {elapsed:.0f}s; "
+            f"active_producers={sum(not task.done() for task in self._active_trajectory_tasks)}, "
+            f"rejected_completions={dict(rejection_counts)}"
         )
-        return self._generation_stall_timeout()
-
-    def _check_admission_stall(self, elapsed: float, rejection_counts: collections.Counter[str]) -> float:
-        """Raise on rejected-only progress, or restart the admission deadline."""
-        if rejection_counts:
-            raise GenerationStalledError(
-                f"Generation stalled: no groups admitted for {elapsed:.0f}s; "
-                f"rejected completions={dict(rejection_counts)}"
-            )
-        self._check_generation_stall(elapsed)
-        return float(self.admission_stall_timeout)
 
     def _select_dynamic_sampling_candidates(
         self,
@@ -1379,16 +1361,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     elapsed = loop.time() - last_admitted_progress
                     remaining = stall_timeout - elapsed
                     if remaining <= 0:
-                        stall_timeout = self._check_admission_stall(elapsed, rejection_counts_since_admission)
-                        last_admitted_progress = loop.time()
-                        continue
+                        self._raise_admission_stall(elapsed, rejection_counts_since_admission)
                     try:
                         await asyncio.wait_for(queues.condition.wait(), timeout=remaining)
                     except asyncio.TimeoutError:
-                        stall_timeout = self._check_admission_stall(
+                        self._raise_admission_stall(
                             loop.time() - last_admitted_progress, rejection_counts_since_admission
                         )
-                        last_admitted_progress = loop.time()
 
                 completed_groups = _drain_queue(queues.completed)
                 partition = self._partition_completed_groups(

@@ -78,34 +78,12 @@ def test_generation_stall_timeout(history, expected):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("history", [[], [100.0, 200.0, 300.0], [10_000.0, 20_000.0, 30_000.0]])
-async def test_admission_stall_timeout_is_independent_of_step_duration(history):
+async def test_admission_stall_timeout_stops_live_but_unproductive_generators(history):
     alive_task = asyncio.create_task(asyncio.Event().wait())
     trainer = _bare_trainer(step_times=history, tasks=[alive_task], admission_stall_timeout=21_600)
     try:
-        assert trainer._check_admission_stall(elapsed=1800.0, rejection_counts=collections.Counter()) == 21_600
-    finally:
-        alive_task.cancel()
-
-
-# --------------------------------------------------------------------------- #
-# _any_generators_alive and _check_generation_stall                           #
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.asyncio
-async def test_check_stall_raises_when_no_generators():
-    trainer = _bare_trainer(tasks=[])
-    with pytest.raises(GenerationStalledError, match="no active generators"):
-        trainer._check_generation_stall(elapsed=600.0)
-
-
-@pytest.mark.asyncio
-async def test_check_stall_extends_when_generators_alive():
-    alive_task = asyncio.create_task(asyncio.Event().wait())
-    trainer = _bare_trainer(tasks=[alive_task])
-    try:
-        new_timeout = trainer._check_generation_stall(elapsed=600.0)
-        assert new_timeout == trainer._generation_stall_timeout()
+        with pytest.raises(GenerationStalledError, match="active_producers=1"):
+            trainer._raise_admission_stall(elapsed=21_600.0, rejection_counts=collections.Counter())
     finally:
         alive_task.cancel()
 
@@ -132,7 +110,7 @@ async def test_get_admitted_batch_stops_when_last_producer_exhausts_dataset():
     queues = _make_queues(active_producers=1)
 
     admission = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
-    await queues.producer_finished()
+    await queues.mark_producer_finished()
 
     with pytest.raises(GenerationStalledError, match="admitted=0/2"):
         await asyncio.wait_for(admission, timeout=1)
