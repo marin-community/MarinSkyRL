@@ -167,6 +167,32 @@ def test_publish_flushes_so_the_last_step_survives_ray_kill(monkeypatch):
     assert flushed == [], "nothing to publish means nothing to flush"
 
 
+def test_a_flush_that_does_not_settle_is_logged_not_swallowed(monkeypatch, caplog):
+    """flush() settles the queue; it does not guarantee delivery.
+
+    A silently short row set understates max and p95 in exactly the same direction as losing rows at
+    shutdown, so the False return has to be loud.
+    """
+    import logging
+
+    import skyrl_train.timing_observability as module
+
+    monkeypatch.setattr(module.telemetry, "flush", lambda timeout: False)
+    monkeypatch.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+
+    with caplog.at_level(logging.WARNING, logger=module.logger.name):
+        publish_worker_spans({"policy_ppo_train": 1.0}, step=9, rank=2)
+
+    assert any("did not settle" in record.message for record in caplog.records)
+
+
+def test_flush_timeout_stays_off_the_critical_path():
+    """It blocks the worker's return, so every second lands in driver policy_train unattributed."""
+    import skyrl_train.timing_observability as module
+
+    assert module.TELEMETRY_FLUSH_TIMEOUT_SECONDS <= 1.0
+
+
 def test_worker_init_configures_telemetry_for_the_worker_role():
     """The wiring that stops the spans publishing into nothing.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import time
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
@@ -140,19 +141,25 @@ def publish_startup_timings(
 # and execution uid from the task runtime, so each worker publishes its own rows directly and the
 # aggregation (max, p95) happens at query time over the rank attribute.
 #
-# These do NOT close against the driver's policy_train.
+# These do NOT close against the driver's policy_train, and the difference
 #
 #     policy_train - max_over_ranks(policy_ppo_train)
 #
-# is an UPPER BOUND on driver-side overhead, not an isolation of it. It also contains the skew
-# between ranks' start times -- the worker intervals are measured on different hosts against
-# unsynchronised clocks -- plus the worker epilogue after the span closes and the transport of the
-# result back. Quote it as a bound and never as "dispatch cost".
+# is a LOWER BOUND on driver-side overhead -- not an upper one, and not an isolation of it. The
+# driver waits for the LAST-RETURNING worker, which is not necessarily the LONGEST-RUNNING one: a
+# rank that starts late and runs briefly can return last. Subtracting the maximum duration therefore
+# understates the overhead whenever those differ, so a small value does NOT rule out large dispatch,
+# skew or transport cost. It also carries the worker epilogue after the span closes, the transport of
+# the result back, and the publish/flush below. Quote it as a floor, never as "dispatch cost".
 #
 # policy_ppo_train does start at true function entry, before the R3 co-arrival drain, so the arrival
 # spread the driver pays for lands in policy_entry_barrier rather than vanishing.
 
-TELEMETRY_FLUSH_TIMEOUT_SECONDS = 5.0
+# Deliberately well under Rigging's 5 s default: this blocks the worker's return to the driver, so
+# every second here lands in driver policy_train without appearing in any span.
+logger = logging.getLogger(__name__)
+
+TELEMETRY_FLUSH_TIMEOUT_SECONDS = 1.0
 
 POLICY_TRAIN_SPANS = (
     "policy_entry_barrier",
@@ -253,13 +260,30 @@ class WorkerTimingSink:
 def publish_worker_spans(timings: Mapping[str, float], *, step: int, rank: int) -> None:
     """Publish one worker's policy_train decomposition, then settle the queue.
 
-    The flush is the durability mechanism, and it has to be here rather than at shutdown: Ray tears
-    actors down with ``ray.kill``, which does not run ``atexit`` handlers, and even the graceful path
-    allows less than Rigging's request timeout. Relying on shutdown loses the last step's rows from
-    exactly the slowest ranks -- which would understate max and p95 and inflate the apparent driver
-    gap, i.e. bias every number in the direction that makes the instrumentation look successful.
+    The flush is the durability mechanism, and it belongs here rather than at shutdown: Ray tears
+    actors down with ``ray.kill``, which does not run ``atexit`` handlers. Relying on shutdown loses
+    the last step's rows from exactly the slowest ranks -- understating max and p95, i.e. biasing
+    every number in the direction that makes the instrumentation look successful.
+
+    Two properties of the flush that its callers have to know:
+
+    * It settles the queue; it does not guarantee delivery. Records can still be rejected or
+      dropped, and ``flush`` reports that by returning ``False``. **A false return is logged at
+      WARNING**, because a silently short row set understates max and p95 in exactly the same
+      direction as losing them at shutdown.
+    * It runs on the critical path, AFTER ``policy_ppo_train``'s window has closed. So it inflates
+      the driver's ``policy_train`` without appearing in any span -- bounded by the timeout below,
+      per step, per rank in parallel. Keep the timeout small, and subtract it before reading
+      anything into the driver gap above.
     """
     if not timings:
         return
     WorkerTimingSink(rank).publish(phase_timing_observations(timings), step)
-    telemetry.flush(TELEMETRY_FLUSH_TIMEOUT_SECONDS)
+    if not telemetry.flush(TELEMETRY_FLUSH_TIMEOUT_SECONDS):
+        logger.warning(
+            "policy_train span flush did not settle within %.1fs at step %d rank %d; "
+            "these rows may be missing, which understates max and p95",
+            TELEMETRY_FLUSH_TIMEOUT_SECONDS,
+            step,
+            rank,
+        )
