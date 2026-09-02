@@ -50,5 +50,10 @@ def runtime_status() -> _Status:
     return _status
 
 
+def flush(timeout: float = 5.0) -> bool:
+    """Nothing is queued, so the queue is trivially settled."""
+    return True
+
+
 def shutdown(timeout: float = 5.0) -> None:
     pass
