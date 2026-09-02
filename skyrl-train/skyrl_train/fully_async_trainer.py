@@ -79,8 +79,17 @@ class _GenerationQueues:
     completed: asyncio.Queue[GeneratedOutputGroup]
     retries: asyncio.Queue[List[dict]]
     condition: asyncio.Condition
+    active_producers: int = 0
     admitted_groups: List[GeneratedOutputGroup] = field(default_factory=list)
     admitted_groups_consumed: bool = False
+
+    async def producer_finished(self) -> None:
+        """Wake admission when a generation worker permanently exits."""
+        async with self.condition:
+            if self.active_producers <= 0:
+                raise RuntimeError("generation producer accounting underflow")
+            self.active_producers -= 1
+            self.condition.notify_all()
 
     def record_admitted(self, groups: List[GeneratedOutputGroup]) -> None:
         """Retain newly admitted groups until the step crosses its checkpoint boundary."""
@@ -686,6 +695,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 completed=asyncio.Queue(maxsize=self.max_buffered_groups),
                 retries=asyncio.Queue(),
                 condition=asyncio.Condition(),
+                active_producers=self.num_parallel_generation_workers,
             )
 
             self._buffer_checkpoint_callback.bind_queues(generation_queues)
@@ -1092,6 +1102,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             if slot_acquired:
                 await self._staleness_manager.cancel_submission_slot()
             sys.exit(1)
+        finally:
+            await queues.producer_finished()
 
     async def _next_generation_prompts(
         self,
@@ -1356,6 +1368,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         while True:
             async with queues.condition:
                 while len(accepted_groups) < self.mini_batch_size and queues.completed.empty():
+                    if queues.active_producers == 0:
+                        raise GenerationStalledError(
+                            "Generation exhausted its dataset before assembling a complete training batch: "
+                            f"admitted={len(accepted_groups)}/{self.mini_batch_size}, "
+                            f"dynamic_candidates={dynamic_candidate_count}, "
+                            f"dynamic_discarded={dynamic_discarded_count}, "
+                            f"rejections={dict(rejection_counts_since_admission)}"
+                        )
                     elapsed = loop.time() - last_admitted_progress
                     remaining = stall_timeout - elapsed
                     if remaining <= 0:
