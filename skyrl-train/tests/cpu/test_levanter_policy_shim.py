@@ -34,7 +34,7 @@ class _PolicyHandler(BaseHTTPRequestHandler):
         length = int(self.headers["content-length"])
         with np.load(io.BytesIO(self.rfile.read(length)), allow_pickle=False) as batch:
             action_count = int(batch["action_count"])
-            action_log_probs = -batch["sequences"][:, -action_count:].astype(np.float32)
+            action_log_probs = batch["attention_mask"][:, :action_count].astype(np.float32)
 
         output = io.BytesIO()
         if self.path == "/ppo_train":
@@ -88,7 +88,8 @@ def test_levanter_actor_group_preserves_skyrl_forward_train_and_publish_contract
         group = LevanterPolicyActorGroup(cfg)
         batch = TrainingInputBatch(
             {
-                "sequences": torch.tensor([[1, 2, 3, 4]], dtype=torch.int64),
+                "sequences": torch.tensor([[0, 0, 1, 2, 3, 4]], dtype=torch.int64),
+                "attention_mask": torch.tensor([[0, 0, 1, 1, 1, 1]], dtype=torch.int64),
                 "action_log_probs": torch.zeros((1, 2)),
                 "advantages": torch.ones((1, 2)),
                 "loss_mask": torch.ones((1, 2)),
@@ -103,7 +104,7 @@ def test_levanter_actor_group_preserves_skyrl_forward_train_and_publish_contract
         publish_refs = group.async_run_ray_method("pass_through", "broadcast_to_inference_engines", None)
         published_step = ray.get(publish_refs)[0]
 
-        np.testing.assert_array_equal(forward["output"].numpy(), [[-3.0, -4.0]])
+        np.testing.assert_array_equal(forward["output"].numpy(), [[0.0, 0.0]])
         assert trained.metadata["train_status"]["policy_loss"] == 0.25
         assert trained.metadata["train_status"]["levanter_step"] == 1.0
         assert published_step == 1

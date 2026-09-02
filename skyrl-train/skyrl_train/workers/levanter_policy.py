@@ -19,6 +19,7 @@ def _encode_batch(data: TrainingInputBatch, *, training: bool) -> bytes:
     action_count = int(data.metadata["response_length"])
     arrays: dict[str, np.ndarray] = {
         "sequences": data["sequences"].detach().cpu().numpy(),
+        "attention_mask": data["attention_mask"].detach().cpu().numpy(),
         "action_count": np.asarray(action_count, dtype=np.int32),
     }
     if training:
