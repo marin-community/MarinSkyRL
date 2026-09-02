@@ -320,12 +320,7 @@ class MegatronWorker:
                 }
             )
 
-        # Keep the modules in training mode: Transformer Engine picks attention kernels from
-        # the module's training flag, and the eval-mode kernels do not reproduce the training
-        # forward on Grug's GQA/sliding-window geometry. Dropout is zero and every
-        # training-only side effect (aux losses, expert-bias counts) is gated on grad mode,
-        # so a no_grad forward in training mode is a pure function of the weights.
-        self.model.train()
+        self.model.eval()
         seq_len = micro_dicts[0]["sequences"].shape[1]
         mbs = micro_dicts[0]["sequences"].shape[0]
         with torch.no_grad():
