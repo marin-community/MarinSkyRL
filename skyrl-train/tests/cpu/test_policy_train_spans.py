@@ -121,3 +121,37 @@ def test_published_rows_carry_worker_role_rank_and_an_exclusive_clock_domain():
 
 def test_publishing_an_empty_mapping_is_a_no_op():
     publish_worker_spans({}, step=1, rank=0)
+
+
+def test_every_child_of_policy_ppo_train_is_either_a_measured_span_or_the_residual():
+    """Guards the two halves against drift.
+
+    A name registered under policy_ppo_train but absent from POLICY_TRAIN_SPANS is excluded from the
+    residual arithmetic, so its time would be counted twice -- once in its own row and again inside
+    the residual.
+    """
+    children = {name for name, parent in TIMING_PARENTS.items() if parent == "policy_ppo_train"}
+    assert children == set(POLICY_TRAIN_SPANS) | {"policy_span_residual"}
+
+
+def test_worker_init_configures_telemetry_for_the_worker_role():
+    """The wiring that stops the spans publishing into nothing.
+
+    Rigging discards every record while unconfigured, and a Ray actor never enters
+    ``process_telemetry`` on its own -- ``main_base`` does it for the trainer and driver roles only.
+    Without this the spans emit silently into nothing, which is indistinguishable from a phase that
+    costs nothing.
+
+    Asserted on the source of ``Worker.__init__`` because the constructor cannot be exercised
+    off-actor: it needs a live torch.distributed rendezvous. A structural check is weak, but it does
+    catch the regression that matters -- someone deleting the wiring and leaving a green suite.
+    """
+    import inspect
+
+    from skyrl_train.workers.worker import Worker
+
+    source = inspect.getsource(Worker.__init__)
+    assert "process_telemetry(WORKER_ROLE)" in source
+    assert 'cfg.trainer.get("policy_train_spans", False)' in source
+    # Ray kills actors rather than unwinding them, so the drain must be registered, not relied upon.
+    assert "atexit.register" in source

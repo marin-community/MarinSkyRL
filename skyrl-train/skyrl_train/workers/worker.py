@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import contextlib
 import time
 import logging
@@ -35,6 +36,7 @@ from skyrl_train.utils.numa import physical_gpu_id_for_worker, set_numa_affinity
 from skyrl_train.utils.policy_math import masked_mean
 from skyrl_train.distributed.dispatch import ActorInfo, Dispatch, DispatchRegistry, DispatchSettings, MeshRank
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
+from skyrl_train.telemetry import WORKER_ROLE, process_telemetry
 from skyrl_train.timing_observability import WorkerSpanAccumulator, publish_worker_spans
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
@@ -356,6 +358,18 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         configure_progress(cfg.trainer.progress)
+        # Rigging discards every record while unconfigured, and a Ray actor never enters
+        # process_telemetry on its own -- main_base does it for the trainer and driver roles only.
+        # Without this the worker spans below publish silently into nothing, which reads exactly
+        # like a phase that costs nothing. Gated on the same flag so nothing changes for runs that
+        # do not ask for the spans.
+        self._policy_span_telemetry: contextlib.ExitStack | None = None
+        if cfg.trainer.get("policy_train_spans", False):
+            self._policy_span_telemetry = contextlib.ExitStack()
+            self._policy_span_telemetry.enter_context(process_telemetry(WORKER_ROLE))
+            # Ray kills actors rather than unwinding them, so the drain has to be registered here or
+            # the last step's rows are lost on shutdown.
+            atexit.register(self._policy_span_telemetry.close)
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
 
     def init_model(self, *args, **kwargs):
@@ -982,6 +996,16 @@ class PolicyWorkerBase(Worker):
         return causal_lm if isinstance(causal_lm, GrugMoeForCausalLM) else None
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
+        # Started here, at true function entry, NOT after the drain barrier below: the barrier can
+        # absorb a multi-minute arrival spread, and timing from after it would hide exactly the wait
+        # the driver is paying for. Off unless trainer.policy_train_spans is set, so the overhead
+        # on/off pair is a config flip rather than two revisions.
+        _policy_spans = WorkerSpanAccumulator(
+            enabled=bool(self.cfg.trainer.get("policy_train_spans", False)),
+            synchronize=bool(self.cfg.trainer.get("policy_train_spans_synchronize", True)),
+        )
+        _policy_spans_started = time.perf_counter()
+
         # ── Co-arrival drain before the first training FSDP unshard (80B gs1 SIGABRT #1-6) ──
         # Under fully_async + SKYRL_R3_DECENTRAL, `ppo_train` is dispatched STAGGERED
         # per-dp-group: MeshDispatch relocates each dp-group's multi-GB `rollout_routed_experts`
@@ -1023,18 +1047,11 @@ class PolicyWorkerBase(Worker):
             # (staggered entry), then RELEASE together — the timestamp CLUSTER at release proves
             # co-arrival; unshard #6936 must NOT time out afterward.
             logger.info(f"WORKER_PPO_TRAIN_DRAIN_BARRIER rank={self._rank}")
-            torch.cuda.synchronize()
-            torch.distributed.barrier()
+            with _policy_spans.span("policy_entry_barrier"):
+                torch.cuda.synchronize()
+                torch.distributed.barrier()
 
         global_step = train_data.metadata["global_step"]
-        # Off unless trainer.policy_train_spans is set, so the overhead on/off pair is a config flip
-        # rather than two revisions. synchronize decides whether these measure kernel launch or
-        # kernel execution -- see WorkerSpanAccumulator.
-        _policy_spans = WorkerSpanAccumulator(
-            enabled=bool(self.cfg.trainer.get("policy_train_spans", False)),
-            synchronize=bool(self.cfg.trainer.get("policy_train_spans_synchronize", True)),
-        )
-        _policy_spans_started = time.perf_counter()
 
         # Per-batch stale_min for StaleClip (None for sync RL, populated for async).
         stale_min = train_data.metadata.get("stale_min")
