@@ -1,0 +1,84 @@
+entrypoint: standard
+
+context_budget:
+  request_window_tokens: 1024
+  max_new_tokens_per_turn: 512
+  max_turns: 1
+
+environment:
+  env_class: gsm8k
+
+trainer:
+  strategy: levanter
+  algorithm:
+    advantage_estimator: grpo
+    use_kl_loss: false
+    use_kl_in_reward: false
+
+  epochs: 1
+  max_steps: 30
+  update_epochs_per_batch: 1
+  train_batch_size: 8
+  policy_mini_batch_size: 8
+  eval_batch_size: 8
+  micro_forward_batch_size_per_gpu: 8
+  micro_train_batch_size_per_gpu: 8
+  max_prompt_length: 512
+
+  eval_before_train: false
+  eval_interval: -1
+  ckpt_interval: -1
+  hf_save_interval: -1
+  resume_mode: null
+  dump_eval_results: false
+  logger: console
+  project_name: levanter-policy-smoke
+  run_name: qwen06-gsm8k
+
+  policy:
+    model:
+      path: Qwen/Qwen3-0.6B
+    levanter:
+      endpoint_urls: []
+      data_parallel_size: 1
+      request_timeout_seconds: 1800
+
+  placement:
+    colocate_all: true
+    policy_num_nodes: 1
+    policy_num_gpus_per_node: 1
+    critic_num_nodes: 1
+    critic_num_gpus_per_node: 1
+    ref_num_nodes: 1
+    ref_num_gpus_per_node: 1
+
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  num_inference_engines: 1
+  inference_engine_tensor_parallel_size: 1
+  n_samples_per_prompt: 4
+  eval_n_samples_per_prompt: 1
+  max_num_seqs: 64
+  max_num_batched_tokens: 8192
+  gpu_memory_utilization: 0.7
+  enforce_eager: true
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: true
+  enable_http_endpoint: true
+  http_endpoint_host: 127.0.0.1
+  http_endpoint_port: 8000
+  sampling_params:
+    max_generate_length: 512
+    temperature: 1.0
+    top_p: 1.0
+
+extra_env:
+  VLLM_USE_DEEP_GEMM: "0"
+
+data:
+  kind: parquet
+  train_data: []
+  val_data: []
