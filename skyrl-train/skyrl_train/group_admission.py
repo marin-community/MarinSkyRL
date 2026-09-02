@@ -93,6 +93,16 @@ class AdmissionDecision:
         return self.rejections[0] if self.rejections else None
 
 
+@dataclass(frozen=True)
+class BatchGroupAdmission:
+    """Admission result for one UID group in a concatenated batch."""
+
+    uid: str
+    row_indices: tuple[int, ...]
+    decision: AdmissionDecision
+    physical_count: int
+
+
 class TrainingGroupInvariantError(ValueError):
     """A concatenated training group violates its resolved run contract."""
 
@@ -202,6 +212,12 @@ def _inspect_group(group: GeneratedGroup) -> _GroupFacts:
     )
 
 
+def group_is_fully_excluded_from_training(trajectory_batch: Mapping[str, object]) -> bool:
+    """Return whether a group contributes neither loss tokens nor a group baseline."""
+    facts = _inspect_group(_BatchGroup(trajectory_batch))
+    return facts.trainable_count == 0 and facts.baseline_contributor_count == 0
+
+
 class GroupAdmissionPolicy:
     """Evaluate completed groups without mutating async lifecycle state."""
 
@@ -241,6 +257,44 @@ class GroupAdmissionPolicy:
             rejections.append(AdmissionRejection.MISSING_ROLLOUT_LOGPROBS)
         return AdmissionDecision(tuple(rejections))
 
+    def evaluate_batch(
+        self,
+        trajectory_batch: Mapping[str, object],
+        uids: Sequence[str],
+        *,
+        global_step: int,
+    ) -> tuple[BatchGroupAdmission, ...]:
+        """Evaluate each UID group in a concatenated trajectory batch."""
+        response_ids = trajectory_batch.get("response_ids")
+        if not isinstance(response_ids, Sequence) or isinstance(response_ids, (str, bytes)):
+            raise ValueError("response_ids must be a sequence")
+        if len(response_ids) != len(uids):
+            raise ValueError(f"uids must have one entry per response row, got {len(uids)} and {len(response_ids)}")
+
+        grouped_indices: dict[str, list[int]] = {}
+        for row_index, uid in enumerate(uids):
+            grouped_indices.setdefault(uid, []).append(row_index)
+
+        aligned_keys = ("response_ids", "loss_masks", "exclude_from_baseline", "rollout_logprobs", "is_last_step")
+        admissions = []
+        for uid, indices in grouped_indices.items():
+            group_batch = {}
+            for key in aligned_keys:
+                value = _aligned_sequence(trajectory_batch, key, len(response_ids))
+                if value is not None:
+                    group_batch[key] = [value[index] for index in indices]
+            batch_group = _BatchGroup(group_batch)
+            facts = _inspect_group(batch_group)
+            admissions.append(
+                BatchGroupAdmission(
+                    uid=uid,
+                    row_indices=tuple(indices),
+                    decision=self.evaluate(batch_group, global_step=global_step),
+                    physical_count=facts.physical_count,
+                )
+            )
+        return tuple(admissions)
+
 
 def resolve_group_advantage_invariant(
     *, advantage_estimator: str, physical_group_size: int, minimum_group_size: int | None
@@ -279,32 +333,13 @@ def assert_training_groups_eligible(
     invariant: GroupAdvantageInvariant,
 ) -> None:
     """Fail when a synchronous or async training batch violates its group contract."""
-    response_ids = trajectory_batch.get("response_ids")
-    if not isinstance(response_ids, Sequence) or isinstance(response_ids, (str, bytes)):
-        raise ValueError("response_ids must be a sequence")
-    if len(response_ids) != len(uids):
-        raise ValueError(f"uids must have one entry per response row, got {len(uids)} and {len(response_ids)}")
-
-    grouped_indices: dict[str, list[int]] = {}
-    for row_index, uid in enumerate(uids):
-        grouped_indices.setdefault(uid, []).append(row_index)
-
     policy = GroupAdmissionPolicy(invariant, max_staleness_steps=0, rollout_logprobs_required=False)
-    aligned_keys = ("response_ids", "loss_masks", "exclude_from_baseline", "rollout_logprobs", "is_last_step")
-    for uid, indices in grouped_indices.items():
-        group_batch = {}
-        for key in aligned_keys:
-            value = _aligned_sequence(trajectory_batch, key, len(response_ids))
-            if value is not None:
-                group_batch[key] = [value[index] for index in indices]
-        batch_group = _BatchGroup(group_batch)
-        facts = _inspect_group(batch_group)
-        decision = policy.evaluate(batch_group, global_step=0)
-        if not decision.accepted:
+    for admission in policy.evaluate_batch(trajectory_batch, uids, global_step=0):
+        if not admission.decision.accepted:
             raise TrainingGroupInvariantError(
-                uid=uid,
-                decision=decision,
-                physical_count=facts.physical_count,
+                uid=admission.uid,
+                decision=admission.decision,
+                physical_count=admission.physical_count,
                 expected_physical_count=invariant.physical_group_size,
-                row_indices=indices,
+                row_indices=admission.row_indices,
             )

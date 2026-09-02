@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdvantageInvariant
+from skyrl_train.sync_group_admission import InsufficientEligibleGroupsError
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import ResumeMode
@@ -41,6 +42,39 @@ from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
 from tests.grug_training_parity import ORACLE_FIXTURE_DIR
+
+
+def test_sync_group_admission_exhaustion_raises_typed_error():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=2)
+    trainer.group_admission_state = None
+    trainer.all_metrics = {}
+    trainer.global_step = 1
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "train_batch_size": 1,
+                "algorithm": {
+                    "policy_loss_type": "regular",
+                    "tis_lcs_alert_threshold": 0.005,
+                    "group_admission": {"max_sample_batches": 1},
+                },
+            }
+        }
+    )
+    fully_masked = {
+        "prompt_token_ids": [[1], [1]],
+        "response_ids": [[2], [2]],
+        "rewards": [0.0, 0.0],
+        "loss_masks": [[0], [0]],
+        "stop_reasons": ["error", "error"],
+        "rollout_metrics": {},
+        "rollout_logprobs": None,
+        "exclude_from_baseline": [True, True],
+    }
+
+    with pytest.raises(InsufficientEligibleGroupsError):
+        trainer.handle_group_admission(fully_masked, ["masked", "masked"])
 
 
 _TEST_PROGRESS_CONFIG = {

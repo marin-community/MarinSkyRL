@@ -3,6 +3,7 @@ from difflib import SequenceMatcher
 from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol
 from collections import defaultdict
 import numpy as np
+from skyrl_train.group_admission import group_is_fully_excluded_from_training
 from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
@@ -625,6 +626,17 @@ def _outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
     return [NormalizedReward.from_output(reward).outcome for reward in rewards]
 
 
+def _rollout_logprob_presence(trajectory_batches: List[TrajectoryBatch], *, required: bool) -> List[bool]:
+    """Validate missing logprobs and return their per-group presence mask."""
+    presence = [output.get("rollout_logprobs") is not None for output in trajectory_batches]
+    if not required:
+        return presence
+    for output, has_logprobs in zip(trajectory_batches, presence, strict=True):
+        if not has_logprobs and not group_is_fully_excluded_from_training(output):
+            raise ValueError("rollout_logprobs are required for every generated group")
+    return presence
+
+
 def concatenate_trajectory_batches(
     trajectory_batches: List[TrajectoryBatch],
     *,
@@ -638,10 +650,8 @@ def concatenate_trajectory_batches(
     those that use `env_metrics` or `env_classes`.
     """
     assert len(trajectory_batches) > 0
-    has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in trajectory_batches]
+    has_rollout_logprobs = _rollout_logprob_presence(trajectory_batches, required=require_rollout_logprobs)
     any_has_logprobs = any(has_rollout_logprobs)
-    if require_rollout_logprobs and not all(has_rollout_logprobs):
-        raise ValueError("rollout_logprobs are required for every generated group")
 
     # Handle mixed rollout_logprobs: if some batches have logprobs and others don't,
     # fill in placeholder [0.0] values for the batches that don't have them.
@@ -670,6 +680,14 @@ def concatenate_trajectory_batches(
                 for output in trajectory_batches
                 for value in (output.get(key) or [None] * len(output["response_ids"]))
             ]
+
+    baseline_exclusions_concat = None
+    if any(output.get("exclude_from_baseline") is not None for output in trajectory_batches):
+        baseline_exclusions_concat = [
+            excluded
+            for output in trajectory_batches
+            for excluded in (output.get("exclude_from_baseline") or [False] * len(output["response_ids"]))
+        ]
 
     # Handle mixed routed_experts (Stage 1 MoE router-replay capture rail) the same
     # way as rollout_logprobs: if any batch carries routed_experts but others don't,
@@ -762,6 +780,8 @@ def concatenate_trajectory_batches(
         result["unshaped_rewards"] = unshaped_rewards_concat
     for key, values in disposition_channels.items():
         result[key] = values
+    if baseline_exclusions_concat is not None:
+        result["exclude_from_baseline"] = baseline_exclusions_concat
 
     # propagate additional keys with list values as-is
     additional_keys = [

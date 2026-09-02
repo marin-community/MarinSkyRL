@@ -1006,3 +1006,36 @@ def test_required_rollout_logprobs_reject_partial_generation_batch():
             require_rollout_logprobs=True,
             tis_lcs_alert_threshold=0.005,
         )
+
+
+def test_required_rollout_logprobs_allow_fully_excluded_generation_batch():
+    trainable = {**_generated_group(2, 0), "rollout_logprobs": [[-0.1, -0.2], [-0.3, -0.4]]}
+    excluded = {
+        **_generated_group(2, 2),
+        "loss_masks": [[0, 0], [0, 0]],
+        "exclude_from_baseline": [True, True],
+    }
+
+    merged = concatenate_trajectory_batches(
+        [trainable, excluded],
+        require_rollout_logprobs=True,
+        tis_lcs_alert_threshold=0.005,
+    )
+
+    assert merged["loss_masks"] == [[1, 1], [1, 1], [0, 0], [0, 0]]
+    assert merged["exclude_from_baseline"] == [False, False, True, True]
+
+
+def test_required_rollout_logprobs_reject_fully_masked_baseline_contributor():
+    masked_baseline_contributor = {
+        **_generated_group(2, 0),
+        "loss_masks": [[0, 0], [0, 0]],
+        "exclude_from_baseline": [False, False],
+    }
+
+    with pytest.raises(ValueError, match="rollout_logprobs are required"):
+        concatenate_trajectory_batches(
+            [masked_baseline_contributor],
+            require_rollout_logprobs=True,
+            tis_lcs_alert_threshold=0.005,
+        )

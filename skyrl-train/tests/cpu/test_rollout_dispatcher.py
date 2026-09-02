@@ -156,6 +156,36 @@ async def test_dispatcher_partitions_complete_groups_and_restores_request_order(
 
 
 @pytest.mark.asyncio
+async def test_dispatcher_concatenates_fully_excluded_group_without_logprobs(harbor_runner_spec):
+    harbor_runner_spec.config.trainer.algorithm.use_tis = True
+
+    async def run_group(input_batch, _global_step):
+        ids = input_batch["trajectory_ids"]
+        output = _output(ids)
+        if ids[0].instance_id == "masked":
+            output["loss_masks"] = [[0] for _ in ids]
+            output["exclude_from_baseline"] = [True for _ in ids]
+            output["rollout_logprobs"] = None
+        else:
+            output["exclude_from_baseline"] = [False for _ in ids]
+            output["rollout_logprobs"] = [[-0.5] for _ in ids]
+        return output
+
+    ids = [
+        TrajectoryID("trainable", 0),
+        TrajectoryID("masked", 0),
+        TrajectoryID("trainable", 1),
+        TrajectoryID("masked", 1),
+    ]
+    dispatcher = _dispatcher([_Coordinator(run_group), _Coordinator(run_group)], harbor_runner_spec)
+
+    result = await dispatcher.run(_request(ids))
+
+    assert result["trajectory_ids"] == ids
+    assert result["loss_masks"] == [[1], [0], [1], [0]]
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_rejects_output_from_the_wrong_group(harbor_runner_spec):
     async def wrong_group(_input_batch, _global_step):
         return _output([TrajectoryID("other", 0)])
