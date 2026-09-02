@@ -14,6 +14,7 @@ trainer:
   strategy: megatron
   flash_attn: false
   use_sample_packing: false
+  offload_optimizer_for_weight_sync: true
   gradient_checkpointing: true
   algorithm:
     advantage_estimator: grpo

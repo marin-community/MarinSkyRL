@@ -493,6 +493,15 @@ class RayPPOTrainer:
                     self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
                 finally:
                     await self._sync_weights_and_restore_rollout_residency()
+            elif self.cfg.trainer.offload_optimizer_for_weight_sync:
+                with Timer("offload_policy_optimizer_to_cpu", self.all_timings):
+                    self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+                try:
+                    with Timer("sync_weights", self.all_timings):
+                        ray.get(self.sync_policy_weights_to_inference_engines())
+                finally:
+                    with Timer("backload_policy_optimizer_to_gpu", self.all_timings):
+                        self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=False)
             else:
                 with Timer("sync_weights", self.all_timings):
                     ray.get(self.sync_policy_weights_to_inference_engines())

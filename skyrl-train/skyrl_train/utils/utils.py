@@ -775,6 +775,12 @@ def validate_cfg(cfg: DictConfig):
                 "`trainer.exclude_modules` is deprecated, use `trainer.policy.model.lora.exclude_modules` or `trainer.critic.model.lora.exclude_modules` instead"
             )
 
+    if cfg.trainer.offload_optimizer_for_weight_sync and cfg.trainer.placement.colocate_all:
+        raise ValueError(
+            "trainer.offload_optimizer_for_weight_sync applies to disaggregated runs only; "
+            "colocated runs already offload the optimizer around weight sync"
+        )
+
     # Validate placement
     if cfg.trainer.placement.colocate_all:
         tp_pp_size = (

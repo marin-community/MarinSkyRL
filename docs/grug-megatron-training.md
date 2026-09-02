@@ -33,6 +33,13 @@ the same names as FSDP2 training and vLLM serving. The router bias becomes
 Megatron's persistent fp32 `expert_bias` buffer and is sent to vLLM in fp32 in
 its own weight-sync bucket; every other tensor is sent in the generator dtype.
 
+Re-stacking gathers every expert of a layer onto each rank before the tensor
+is sent, which needs a few GiB of headroom beyond the resident model, gradient
+buffers, and optimizer state. On the 67B-A2B snowball checkpoint at PP2 x EP8 x
+DP2 that headroom does not exist once the optimizer state is materialized, so
+disaggregated runs set `trainer.offload_optimizer_for_weight_sync=true` to move
+the optimizer state and gradient buffers to CPU for the duration of each sync.
+
 ## Query bias
 
 Only the frozen query-bias mode is supported on Megatron. The bias steers
