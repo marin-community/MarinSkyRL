@@ -81,11 +81,15 @@ against the FSDP2 trainer at the same geometry:
 
 | phase | Megatron | FSDP2 |
 | --- | --- | --- |
-| step | 189-194s | 634s |
+| step | 190-196s | 634s |
 | policy_train | 26-27s | 457s |
-| generate | 135-138s | 131s |
-| fwd_logprobs | 5.4s | 32s |
-| sync_weights | 15s | 11.3s |
+| generate | 134-139s | 131s |
+| fwd_logprobs | 6-7s | 32s |
+| sync_weights | 15-17s | 11.3s |
+
+With equal micro-batch sizes the recomputed old log-probs and the training
+forward agree exactly at this scale: `policy/log_ratio_abs_max` is 0 and
+`policy/ppo_ratio_exact_unit_fraction` is 1.0 on every step.
 
 The Megatron numbers use `cloud/iris/configs/snowball_megatron_full.yaml`,
 which overlaps gradient reduction and parameter gathering with compute and
