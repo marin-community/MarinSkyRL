@@ -134,6 +134,39 @@ def test_every_child_of_policy_ppo_train_is_either_a_measured_span_or_the_residu
     assert children == set(POLICY_TRAIN_SPANS) | {"policy_span_residual"}
 
 
+def test_presync_false_leaves_a_self_synchronising_region_measurable():
+    """A leading sync would drain the queue and leave the wrapped sync timing nothing."""
+    calls: list[str] = []
+
+    accumulator = WorkerSpanAccumulator(enabled=True, synchronize=True)
+    accumulator._sync = lambda: calls.append("sync")  # type: ignore[method-assign]
+
+    with accumulator.span("policy_training_step"):
+        pass
+    assert calls == ["sync", "sync"], "a normal span brackets itself with synchronises"
+
+    calls.clear()
+    with accumulator.span("policy_entry_barrier", presync=False):
+        pass
+    assert calls == ["sync"], "presync=False must not synchronise before the region starts"
+
+
+def test_publish_flushes_so_the_last_step_survives_ray_kill(monkeypatch):
+    """Ray does not run atexit handlers on ray.kill, so durability has to be at publish time."""
+    import skyrl_train.timing_observability as module
+
+    flushed: list[float] = []
+    monkeypatch.setattr(module.telemetry, "flush", lambda timeout: flushed.append(timeout) or True)
+    monkeypatch.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+
+    publish_worker_spans({"policy_ppo_train": 1.0}, step=3, rank=0)
+    assert flushed == [module.TELEMETRY_FLUSH_TIMEOUT_SECONDS]
+
+    flushed.clear()
+    publish_worker_spans({}, step=3, rank=0)
+    assert flushed == [], "nothing to publish means nothing to flush"
+
+
 def test_worker_init_configures_telemetry_for_the_worker_role():
     """The wiring that stops the spans publishing into nothing.
 
