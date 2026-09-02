@@ -39,6 +39,7 @@ from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagn
 from skyrl_train.telemetry import WORKER_ROLE, process_telemetry
 from skyrl_train.timing_observability import (
     WorkerSpanAccumulator,
+    publish_worker_counters,
     publish_worker_spans,
     unconfigured_telemetry_reason,
 )
@@ -368,7 +369,7 @@ class Worker(DistributedTorchRayActor):
         # like a phase that costs nothing. Gated on the same flag so nothing changes for runs that
         # do not ask for the spans.
         self._policy_span_telemetry: contextlib.ExitStack | None = None
-        if cfg.trainer.get("policy_train_spans", False):
+        if (cfg.get("trainer", {}) if hasattr(cfg, "get") else {}).get("policy_train_spans", False):
             self._policy_span_telemetry = contextlib.ExitStack()
             self._policy_span_telemetry.enter_context(process_telemetry(WORKER_ROLE))
             # Best effort only. Ray tears actors down with ray.kill, which does not run atexit
@@ -1008,10 +1009,12 @@ class PolicyWorkerBase(Worker):
         # absorb a multi-minute arrival spread, and timing from after it would hide exactly the wait
         # the driver is paying for. Off unless trainer.policy_train_spans is set, so the overhead
         # on/off pair is a config flip rather than two revisions.
+        _trainer_cfg = self.cfg.get("trainer", {}) if hasattr(self.cfg, "get") else {}
         _policy_spans = WorkerSpanAccumulator(
-            enabled=bool(self.cfg.trainer.get("policy_train_spans", False)),
-            synchronize=bool(self.cfg.trainer.get("policy_train_spans_synchronize", True)),
+            enabled=bool(_trainer_cfg.get("policy_train_spans", False)),
+            synchronize=bool(_trainer_cfg.get("policy_train_spans_synchronize", True)),
         )
+        self._policy_spans = _policy_spans
         _policy_spans_started = time.perf_counter()
 
         # ── Co-arrival drain before the first training FSDP unshard (80B gs1 SIGABRT #1-6) ──
@@ -1186,7 +1189,6 @@ class PolicyWorkerBase(Worker):
                             global_step,
                             local_step,
                             accumulation_steps,
-                            _spans=_policy_spans,
                         )
                 policy_update_steps += 1
 
@@ -1217,6 +1219,28 @@ class PolicyWorkerBase(Worker):
         # Published from the worker, not returned: trainer.py keeps only policy_statuses[0]'s
         # "train_status", so a sibling key here would be transported and then dropped -- and rank 0
         # is the wrong rank, because the driver waits for the slowest.
+        if _policy_spans.enabled:
+            # H3's multiplier and H7's padding keystone. Counted from the batch itself rather than
+            # derived from config, so a mismatch between the two is visible instead of assumed.
+            _attn = train_data["attention_mask"] if "attention_mask" in train_data.keys() else None
+            _counters: dict[str, float] = {"micro_step_count": float(policy_update_steps)}
+            if _attn is not None:
+                _real = float(_attn.sum().item())
+                _padded = float(_attn.numel())
+                _lengths = _attn.sum(dim=-1).to(torch.float64)
+                _counters.update(
+                    {
+                        "tokens_real": _real,
+                        "tokens_padded": _padded,
+                        # Eager attention is quadratic on the PADDED shape, so the linear padded
+                        # fraction understates its cost; this ratio is the attention-work proxy.
+                        "attention_work_ratio": float(
+                            (_attn.shape[0] * _attn.shape[-1] ** 2) / max(float((_lengths**2).sum().item()), 1.0)
+                        ),
+                    }
+                )
+            publish_worker_counters(_counters, step=global_step, rank=self._rank)
+
         _previous_publish = getattr(self, "_policy_span_publish", None)
         self._policy_span_publish = (
             global_step,
@@ -1239,14 +1263,14 @@ class PolicyWorkerBase(Worker):
         global_step: int,
         local_step: int,
         accumulation_steps: int,
-        _spans: WorkerSpanAccumulator | None = None,
     ) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
-        # Callers that do not pass an accumulator (the critic path) get an inert one, so the spans
-        # below are a no-op rather than a branch at every seam.
-        _spans = _spans if _spans is not None else WorkerSpanAccumulator(enabled=False)
+        # Read off self rather than taken as an argument: training_step is overridden by subclasses
+        # and stubbed by tests, so adding a parameter to its signature breaks callers that have every
+        # right not to know about spans. Absent, the spans are an inert no-op.
+        _spans = getattr(self, "_policy_spans", None) or WorkerSpanAccumulator(enabled=False)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_ENTER)
         self.model.train()
         experience.to_device(torch.cuda.current_device())
