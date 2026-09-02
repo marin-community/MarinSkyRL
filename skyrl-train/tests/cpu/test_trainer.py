@@ -200,7 +200,12 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
 def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypatch):
     trainer = object.__new__(RayPPOTrainer)
     trainer.cfg = OmegaConf.create(
-        {"trainer": {"algorithm": {"loss_reduction": "seq_mean_token_sum_norm_global", "max_seq_len": 8}}}
+        {
+            "trainer": {
+                "algorithm": {"loss_reduction": "seq_mean_token_sum_norm_global", "max_seq_len": 8},
+                "offload_optimizer_during_rollouts": False,
+            }
+        }
     )
     trainer.global_step = 3
     trainer.all_metrics = {}

@@ -151,6 +151,7 @@ class RayPPOTrainer:
         self._checkpoint_save_failures = 0.0
         self._shutdown_complete = False
         self.global_step = 0
+        self._last_saved_step: int | None = None
 
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
@@ -434,7 +435,8 @@ class RayPPOTrainer:
                 await self.inference_engine_client.sleep()
                 self.policy_model.backload_to_gpu()
 
-            if self._control.should_save:
+            # The interval save may have just written this same step; do not write it twice.
+            if self._control.should_save and self._last_saved_step != self.global_step:
                 with Timer("save_checkpoints", self.all_timings):
                     await asyncio.to_thread(self.save_checkpoints)
                     logger.info("Saved final checkpoint.")
@@ -2107,6 +2109,7 @@ class RayPPOTrainer:
             f.write(str(self.global_step))
 
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
+        self._last_saved_step = self.global_step
 
         # Clean up old checkpoints after successful save
         with Timer("cleanup_old_checkpoints", self.all_timings):
