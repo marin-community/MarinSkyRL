@@ -103,6 +103,9 @@ class IrisLaunchOptions:
     max_retries: int
     job_name: str
     wandb_entity: str | None
+    # Defaulted, and last, so an envelope from a Marin that predates this field still parses. The
+    # value mirrors iris's own client default rather than 0, so omitting it changes nothing.
+    max_retries_preemption: int = 1000
 
 
 @dataclass(frozen=True)
