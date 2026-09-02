@@ -1203,13 +1203,15 @@ class PolicyWorkerBase(Worker):
         # Published from the worker, not returned: trainer.py keeps only policy_statuses[0]'s
         # "train_status", so a sibling key here would be transported and then dropped -- and rank 0
         # is the wrong rank, because the driver waits for the slowest.
-        self._policy_span_publish_seconds = publish_worker_spans(
-            _policy_spans.totals(
-                total_seconds=time.perf_counter() - _policy_spans_started,
-                publish_seconds=getattr(self, "_policy_span_publish_seconds", 0.0),
+        _previous_publish = getattr(self, "_policy_span_publish", None)
+        self._policy_span_publish = (
+            global_step,
+            publish_worker_spans(
+                _policy_spans.totals(total_seconds=time.perf_counter() - _policy_spans_started),
+                step=global_step,
+                rank=self._rank,
+                previous_publish=_previous_publish,
             ),
-            step=global_step,
-            rank=self._rank,
         )
 
         # should return an `TrainingOutputBatch`
