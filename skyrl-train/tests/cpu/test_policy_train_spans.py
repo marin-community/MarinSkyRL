@@ -61,7 +61,7 @@ def test_every_span_is_registered_in_the_timing_tree():
 
 def test_disabled_accumulator_records_nothing_and_costs_nothing():
     accumulator = WorkerSpanAccumulator(enabled=False)
-    with accumulator.span("policy_training_step"):
+    with accumulator.span("policy_forward"):
         pass
     assert accumulator.totals(total_seconds=1.0) == {}
 
@@ -69,19 +69,19 @@ def test_disabled_accumulator_records_nothing_and_costs_nothing():
 def test_spans_accumulate_across_micro_steps():
     accumulator = _accumulator()
     for _ in range(3):
-        with accumulator.span("policy_training_step"):
+        with accumulator.span("policy_forward"):
             pass
         with accumulator.span("policy_metric_allreduce"):
             pass
     totals = accumulator.totals()
-    assert set(totals) == {"policy_training_step", "policy_metric_allreduce"}
+    assert set(totals) == {"policy_forward", "policy_metric_allreduce"}
     assert all(value >= 0.0 for value in totals.values())
 
 
 def test_residual_closes_the_decomposition():
     """The residual is what makes a wrong decomposition visible rather than plausible."""
     accumulator = _accumulator()
-    with accumulator.span("policy_training_step"):
+    with accumulator.span("policy_forward"):
         pass
     totals = accumulator.totals(total_seconds=10.0)
     assert totals["policy_ppo_train"] == 10.0
@@ -89,11 +89,34 @@ def test_residual_closes_the_decomposition():
     assert totals["policy_span_residual"] == pytest.approx(10.0 - covered)
 
 
-def test_residual_never_goes_negative():
+def test_residual_is_signed_so_over_coverage_is_visible():
+    """Clamping at zero would hide double-counting, which is what the residual exists to surface."""
     accumulator = _accumulator()
     with accumulator.span("policy_final_barrier"):
         pass
-    assert accumulator.totals(total_seconds=0.0)["policy_span_residual"] == 0.0
+    assert accumulator.totals(total_seconds=0.0)["policy_span_residual"] <= 0.0
+
+
+def test_record_zero_distinguishes_did_not_run_from_cost_nothing():
+    """A conditional region must say which; a missing row and a zero row are different claims."""
+    accumulator = _accumulator()
+    assert "policy_entry_barrier" not in accumulator.totals()
+    accumulator.record_zero("policy_entry_barrier")
+    assert accumulator.totals()["policy_entry_barrier"] == 0.0
+
+
+def test_disabled_accumulator_records_no_zeros_either():
+    accumulator = WorkerSpanAccumulator(enabled=False)
+    accumulator.record_zero("policy_entry_barrier")
+    assert accumulator.totals(total_seconds=1.0) == {}
+
+
+def test_training_step_is_split_not_one_coarse_span():
+    """A single policy_training_step span reports ~95% of the parent and answers nothing."""
+    for name in ("policy_forward", "policy_backward", "policy_optimizer_step", "policy_entropy_allreduce"):
+        assert TIMING_PARENTS[name] == "policy_ppo_train"
+        assert name in POLICY_TRAIN_SPANS
+    assert "policy_training_step" not in TIMING_PARENTS, "the coarse span must be gone, not merely joined"
 
 
 def test_published_rows_carry_worker_role_rank_and_an_exclusive_clock_domain():
@@ -105,7 +128,7 @@ def test_published_rows_carry_worker_role_rank_and_an_exclusive_clock_domain():
 
     sink = _Probe(rank=5)
     observations = phase_timing_observations(
-        {"policy_ppo_train": 9.0, "policy_training_step": 6.0, "policy_final_barrier": 1.0}
+        {"policy_ppo_train": 9.0, "policy_forward": 6.0, "policy_final_barrier": 1.0}
     )
     import skyrl_train.timing_observability as module
 
@@ -122,18 +145,18 @@ def test_published_rows_carry_worker_role_rank_and_an_exclusive_clock_domain():
         module.phase_duration = original
 
     by_phase = {attributes["phase"]: attributes for _, attributes in recorded}
-    assert set(by_phase) == {"policy_ppo_train", "policy_training_step", "policy_final_barrier"}
+    assert set(by_phase) == {"policy_ppo_train", "policy_forward", "policy_final_barrier"}
     for attributes in by_phase.values():
         assert attributes["role"] == "worker"
         assert attributes["rank"] == "5"
         assert attributes["step"] == "7"
     assert by_phase["policy_ppo_train"]["clock_domain"] == "inclusive_wall"
-    assert by_phase["policy_training_step"]["clock_domain"] == "exclusive_wall"
+    assert by_phase["policy_forward"]["clock_domain"] == "exclusive_wall"
     assert by_phase["policy_final_barrier"]["clock_domain"] == "exclusive_wall"
     # The parent is the declared one, not the nearest *recorded* one: policy_train is measured on the
     # driver and is never in this mapping, so nearest_recorded_parent would orphan every leaf.
     assert by_phase["policy_ppo_train"]["parent"] == "policy_train"
-    assert by_phase["policy_training_step"]["parent"] == "policy_ppo_train"
+    assert by_phase["policy_forward"]["parent"] == "policy_ppo_train"
 
 
 def test_publishing_an_empty_mapping_is_a_no_op():
@@ -158,7 +181,7 @@ def test_presync_false_leaves_a_self_synchronising_region_measurable():
     accumulator = WorkerSpanAccumulator(enabled=True, synchronize=True)
     accumulator._sync = lambda: calls.append("sync")  # type: ignore[method-assign]
 
-    with accumulator.span("policy_training_step"):
+    with accumulator.span("policy_forward"):
         pass
     assert calls == ["sync", "sync"], "a normal span brackets itself with synchronises"
 
@@ -259,7 +282,7 @@ def test_previous_publish_is_emitted_under_its_own_step_not_this_one():
 def test_totals_does_not_absorb_the_publish_cost():
     """It happens after the window closes, so it is not part of that interval's decomposition."""
     accumulator = _accumulator()
-    with accumulator.span("policy_training_step"):
+    with accumulator.span("policy_forward"):
         pass
     totals = accumulator.totals(total_seconds=10.0)
     assert "policy_span_publish" not in totals

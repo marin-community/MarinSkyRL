@@ -37,7 +37,11 @@ from skyrl_train.utils.policy_math import masked_mean
 from skyrl_train.distributed.dispatch import ActorInfo, Dispatch, DispatchRegistry, DispatchSettings, MeshRank
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.telemetry import WORKER_ROLE, process_telemetry
-from skyrl_train.timing_observability import WorkerSpanAccumulator, publish_worker_spans
+from skyrl_train.timing_observability import (
+    WorkerSpanAccumulator,
+    publish_worker_spans,
+    unconfigured_telemetry_reason,
+)
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
@@ -371,6 +375,9 @@ class Worker(DistributedTorchRayActor):
             # handlers, so durability comes from the flush after each step's publish -- see
             # publish_worker_spans -- and not from here.
             atexit.register(self._policy_span_telemetry.close)
+            reason = unconfigured_telemetry_reason()
+            if reason is not None:
+                raise RuntimeError(f"policy_train_spans is enabled but {reason}")
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
 
     def init_model(self, *args, **kwargs):
@@ -1053,6 +1060,12 @@ class PolicyWorkerBase(Worker):
             with _policy_spans.span("policy_entry_barrier", presync=False):
                 torch.cuda.synchronize()
                 torch.distributed.barrier()
+        else:
+            # Recorded as an explicit zero. Without this the span is simply absent when R3 is off,
+            # and a missing row is indistinguishable from a barrier that cost nothing -- while the
+            # arrival spread has not vanished, it has moved into the first micro-batch's unshard,
+            # inside the compute spans.
+            _policy_spans.record_zero("policy_entry_barrier")
 
         global_step = train_data.metadata["global_step"]
 
@@ -1167,12 +1180,13 @@ class PolicyWorkerBase(Worker):
                         local_step=local_step,
                     ),
                 ):
-                    with _policy_spans.span("policy_training_step"):
+                    with _policy_spans.span("policy_training_step_other"):
                         status = self.training_step(
                             experience,
                             global_step,
                             local_step,
                             accumulation_steps,
+                            _spans=_policy_spans,
                         )
                 policy_update_steps += 1
 
@@ -1225,10 +1239,14 @@ class PolicyWorkerBase(Worker):
         global_step: int,
         local_step: int,
         accumulation_steps: int,
+        _spans: WorkerSpanAccumulator | None = None,
     ) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
+        # Callers that do not pass an accumulator (the critic path) get an inert one, so the spans
+        # below are a no-op rather than a branch at every seam.
+        _spans = _spans if _spans is not None else WorkerSpanAccumulator(enabled=False)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_ENTER)
         self.model.train()
         experience.to_device(torch.cuda.current_device())
@@ -1258,6 +1276,8 @@ class PolicyWorkerBase(Worker):
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
+        _forward_span = _spans.span("policy_forward")
+        _forward_span.__enter__()
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
             action_log_probs, output = self.model(
@@ -1289,6 +1309,7 @@ class PolicyWorkerBase(Worker):
                 scaling=LossScaling.CALLER,
                 global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
             )
+        _forward_span.__exit__(None, None, None)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_EXIT)
         loss = objective.optimization_loss
         policy_loss = objective.policy_loss
@@ -1304,7 +1325,7 @@ class PolicyWorkerBase(Worker):
         _cp_backward_span = getattr(self.model, "cp_backward_dispatcher_span", None)
         _cp_span_cm = _cp_backward_span() if _cp_backward_span is not None else contextlib.nullcontext()
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.BACKWARD_ENTER)
-        with _cp_span_cm:
+        with _spans.span("policy_backward"), _cp_span_cm:
             self.strategy.backward(loss, self.model, self.optimizer)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.BACKWARD_EXIT)
 
@@ -1343,14 +1364,15 @@ class PolicyWorkerBase(Worker):
             stale_min = getattr(self, "_current_stale_min", None)
             lr_scale = stale_clip.compute_lr_scale(stale_min) if stale_clip is not None else 1.0
 
-            grad_norm = self.strategy.optimizer_step(
-                self.optimizer,
-                self.model,
-                self.scheduler,
-                name="actor",
-                z_clip=z_clip,
-                stale_clip_lr_scale=lr_scale,
-            )
+            with _spans.span("policy_optimizer_step"):
+                grad_norm = self.strategy.optimizer_step(
+                    self.optimizer,
+                    self.model,
+                    self.scheduler,
+                    name="actor",
+                    z_clip=z_clip,
+                    stale_clip_lr_scale=lr_scale,
+                )
             optimizer_step_succeeded = (
                 bool(self.strategy.last_optimizer_step_succeeded) if grug_causal_lm is not None else True
             )
@@ -1372,7 +1394,8 @@ class PolicyWorkerBase(Worker):
                 # Smoking gun (Perlmutter 52905223): metrics show
                 #   triggered=0.625 / scale=0.8125 at stale_min=1
                 # = 5/8 ranks applying scale=0.7 and 3/8 applying 1.0.
-                entropy_global = self.strategy.all_reduce(entropy.item(), op="mean")
+                with _spans.span("policy_entropy_allreduce"):
+                    entropy_global = self.strategy.all_reduce(entropy.item(), op="mean")
                 stale_clip.update_entropy(entropy_global)
 
             # Surface decisions for logging.

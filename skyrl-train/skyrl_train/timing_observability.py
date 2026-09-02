@@ -9,9 +9,11 @@ from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequenc
 from dataclasses import dataclass
 from typing import Protocol
 
-from rigging import telemetry
-
-from skyrl_train.telemetry import TRAINER_ROLE, WORKER_ROLE, phase_duration
+# Via skyrl_train.telemetry, NOT `from rigging import telemetry`: that module guards the import
+# and falls back to inert_telemetry, because an installed rigging without the telemetry
+# submodule raises ImportError. This module is imported at the top of trainer.py and worker.py,
+# so an unguarded import here would take the whole trainer down on that install shape.
+from skyrl_train.telemetry import TRAINER_ROLE, WORKER_ROLE, phase_duration, telemetry
 
 
 TIMING_PARENTS: dict[str, str | None] = {
@@ -33,7 +35,14 @@ TIMING_PARENTS: dict[str, str | None] = {
     "policy_ppo_train": "policy_train",
     "policy_entry_barrier": "policy_ppo_train",
     "policy_span_publish": "policy_ppo_train",
-    "policy_training_step": "policy_ppo_train",
+    # Split at the seams _phase_diagnostics already marks. A single policy_training_step span would
+    # report ~95% of policy_ppo_train and reproduce the same black box one level down, at the cost of
+    # a full step.
+    "policy_forward": "policy_ppo_train",
+    "policy_backward": "policy_ppo_train",
+    "policy_optimizer_step": "policy_ppo_train",
+    "policy_entropy_allreduce": "policy_ppo_train",
+    "policy_training_step_other": "policy_ppo_train",
     "policy_metric_allreduce": "policy_ppo_train",
     "policy_final_barrier": "policy_ppo_train",
     "policy_span_residual": "policy_ppo_train",
@@ -140,7 +149,17 @@ def publish_startup_timings(
 # "train_status", so a sibling key would be transported and then dropped, and rank 0 is the wrong
 # rank anyway -- the driver waits for the slowest. Ray actors inherit the telemetry endpoint, run id
 # and execution uid from the task runtime, so each worker publishes its own rows directly and the
-# aggregation (max, p95) happens at query time over the rank attribute.
+# aggregation happens at query time over the rank attribute.
+#
+# ⚠️ Aggregate by PICKING A RANK, not by taking a per-phase max. The entry barrier and the compute
+# are ANTI-CORRELATED across ranks -- the last rank to arrive waits ~0 in the barrier and then does
+# full compute, while early ranks do the reverse -- so max_r(barrier) + max_r(training_step) comes
+# from different ranks, can exceed max_r(policy_ppo_train), and attributes both the skew and the
+# compute to their respective worst ranks. The correct read is
+#
+#     r* = argmax_r(policy_ppo_train);  then report THAT rank's row set.
+#
+# which is the rank the driver actually waited for. Use p95 across ranks only to describe spread.
 #
 # These do NOT close against the driver's policy_train, and the difference
 #
@@ -171,10 +190,34 @@ TELEMETRY_FLUSH_TIMEOUT_SECONDS = 1.0
 POLICY_TRAIN_SPANS = (
     "policy_entry_barrier",
     "policy_span_publish",
-    "policy_training_step",
+    "policy_forward",
+    "policy_backward",
+    "policy_optimizer_step",
+    "policy_entropy_allreduce",
+    "policy_training_step_other",
     "policy_metric_allreduce",
     "policy_final_barrier",
 )
+
+
+def unconfigured_telemetry_reason() -> str | None:
+    """Why these spans would publish nothing, or None if they will publish.
+
+    Checked once at worker start, because the failure is otherwise invisible: on an unconfigured
+    runtime ``record`` is discarded, ``flush`` returns **True**, and the loss counters stay at zero.
+    Every signal reads healthy and the run produces no rows at all -- a full step spent to learn
+    nothing. Verified empirically, not assumed.
+    """
+    status = telemetry.runtime_status()
+    if getattr(status, "configured", False):
+        return None
+    return (
+        "rigging telemetry is not configured in this process, so every policy_train span will be "
+        "discarded silently: record() is a no-op, flush() still returns True, and lost_records stays "
+        "at 0. Check that the telemetry endpoint, run id and execution uid reached this Ray actor "
+        "(cloud/iris/telemetry_env.py scopes SKYRL_EXECUTION_UID to TASK_RUNTIME and DRIVER, not "
+        "RAY_WORKER, so inheritance is what carries it)."
+    )
 
 
 class WorkerSpanAccumulator:
@@ -215,6 +258,15 @@ class WorkerSpanAccumulator:
             self._sync()
             self._totals[name] = self._totals.get(name, 0.0) + (time.perf_counter() - started)
 
+    def record_zero(self, name: str) -> None:
+        """Record an explicit zero for a span whose region did not execute.
+
+        A missing row and a zero row are not the same claim: the first says nothing was measured,
+        the second says the region cost nothing. Conditional regions must say which.
+        """
+        if self.enabled:
+            self._totals.setdefault(name, 0.0)
+
     def _sync(self) -> None:
         if not self.synchronize:
             return
@@ -235,7 +287,9 @@ class WorkerSpanAccumulator:
         if total_seconds is not None:
             totals["policy_ppo_train"] = total_seconds
             covered = sum(totals.get(name, 0.0) for name in POLICY_TRAIN_SPANS)
-            totals["policy_span_residual"] = max(total_seconds - covered, 0.0)
+            # Signed on purpose. Clamping at zero hides over-coverage, which is exactly the
+            # double-counting an auditable residual is for.
+            totals["policy_span_residual"] = total_seconds - covered
         return totals
 
 
