@@ -64,6 +64,7 @@ PARAMETER_NAMES = [
 BIAS_NAMES = [f"model.layers.{idx}{GRUG_ROUTER_BIAS_SUFFIX}" for idx in range(NUM_LAYERS)]
 LOGPROB_MAX_ABS_TOLERANCE = 2e-1
 LOGPROB_MEAN_ABS_TOLERANCE = 3e-2
+TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE = 1e-3
 
 
 def _write_tiny_checkpoint(path: Path) -> None:
@@ -247,6 +248,45 @@ def test_grug_megatron_forward_matches_hf(tmp_path, world_size: int, pp: int, ep
         policy = _init_policy(cfg, world_size)
         actual = _megatron_response_logprobs(policy, batch)
         _assert_logprobs_close(actual, expected, batch["response_mask"])
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("world_size", "pp", "ep"),
+    [(1, 1, 1), (2, 2, 1), (4, 2, 2)],
+    ids=["pp1", "pp2", "pp2_ep2"],
+)
+@pytest.mark.parametrize("gradient_checkpointing", [True, False], ids=["recompute", "no_recompute"])
+@pytest.mark.parametrize("micro_train_batch_size", [2, 1], ids=["same_shapes", "narrower_train_micro"])
+def test_grug_megatron_train_forward_matches_eval_forward(
+    tmp_path, world_size: int, pp: int, ep: int, gradient_checkpointing: bool, micro_train_batch_size: int
+):
+    """The training forward must reproduce the eval-mode log-probs it is scored against.
+
+    With one update per batch the PPO ratio is exp(train_logprob - eval_logprob), so any
+    train/eval drift shows up as spurious clipping. FSDP2 reports exactly zero here.
+    """
+    require_hoppers(world_size)
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    _write_tiny_checkpoint(model_path)
+    cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
+    cfg.trainer.gradient_checkpointing = gradient_checkpointing
+    cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size
+    pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
+    batch = _padded_batch(pad_token_id)
+    initialize_ray(cfg)
+    try:
+        policy = _init_policy(cfg, world_size)
+        eval_logprobs = _megatron_response_logprobs(policy, batch)
+        batch["action_log_probs"] = (eval_logprobs * batch["response_mask"]).float()
+        status = _train_step(policy, batch)
+        print(
+            f"train/eval log-ratio: mean abs {status['log_ratio_abs_mean']:.6f}, max abs {status['log_ratio_abs_max']:.6f}, "
+            f"exact-unit fraction {status['ppo_ratio_exact_unit_fraction']:.4f}"
+        )
+        assert status["log_ratio_abs_max"] < TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE, status["log_ratio_abs_max"]
     finally:
         ray.shutdown()
 
