@@ -118,8 +118,13 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         CHECKPOINT_EXPORT_ENTRYPOINT,
         "--priority",
         spec.priority,
-        # An export job must not be retried into a second export.
+        # An export job must not be retried into a second export. Both budgets, because they are
+        # separate: --max-retries bounds failures, and preemption relaunches are counted apart and
+        # default to 1000. This job is 8 nodes x 8 H100 with a two-hour timeout per attempt, so an
+        # unbounded preemption budget can spend it repeatedly.
         "--max-retries",
+        "0",
+        "--max-retries-preemption",
         "0",
         "--timeout",
         str(spec.timeout),
