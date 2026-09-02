@@ -200,6 +200,32 @@ POLICY_TRAIN_SPANS = (
 )
 
 
+policy_step_counter = telemetry.histogram("policy_train_count", unit="1")
+
+
+def publish_worker_counters(counters: Mapping[str, float], *, step: int, rank: int) -> None:
+    """Publish per-step counts and token accounting.
+
+    Separate from the spans on purpose. These are not durations and must never be summed into
+    policy_ppo_train or subtracted from the residual, so they go to their own instrument rather than
+    riding phase_duration with a units mismatch nobody would notice downstream.
+
+    micro_step_count is the H3 multiplier: at micro_train_batch_size_per_gpu=1 the FSDP all-gather
+    count is linear in it, so `policy_ppo_train / micro_step_count` is the number that says whether a
+    micro-batch change bought anything. The token counts are the H7 keystone: packing is rejected for
+    Grug, so batches are BSHD-padded and eager attention is quadratic on the PADDED shape -- which is
+    why a linear padded-token fraction understates the cost and `attention_work_ratio` is carried
+    alongside it.
+    """
+    if not counters:
+        return
+    for name, value in counters.items():
+        policy_step_counter.record(
+            float(value),
+            attributes={"counter": name, "role": WORKER_ROLE, "rank": str(rank), "step": str(step)},
+        )
+
+
 def unconfigured_telemetry_reason() -> str | None:
     """Why these spans would publish nothing, or None if they will publish.
 
