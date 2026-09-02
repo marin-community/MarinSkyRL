@@ -23,6 +23,23 @@ from skyrl_train.timing_observability import (
 )
 
 
+def _stub_telemetry(monkeypatch, module, *, settled=True, lost_delta=0):
+    """Stub the export surface: flush result plus the counters loss is actually detected from."""
+    from types import SimpleNamespace
+
+    calls = {"flush": [], "status": 0}
+
+    def _status():
+        calls["status"] += 1
+        lost = lost_delta if calls["status"] > 1 else 0
+        return SimpleNamespace(lost_records=lost, rejected_records=0)
+
+    monkeypatch.setattr(module.telemetry, "flush", lambda timeout: calls["flush"].append(timeout) or settled)
+    monkeypatch.setattr(module.telemetry, "runtime_status", _status)
+    monkeypatch.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+    return calls
+
+
 def _accumulator(**kwargs) -> WorkerSpanAccumulator:
     kwargs.setdefault("enabled", True)
     kwargs.setdefault("synchronize", False)
@@ -155,42 +172,77 @@ def test_publish_flushes_so_the_last_step_survives_ray_kill(monkeypatch):
     """Ray does not run atexit handlers on ray.kill, so durability has to be at publish time."""
     import skyrl_train.timing_observability as module
 
-    flushed: list[float] = []
-    monkeypatch.setattr(module.telemetry, "flush", lambda timeout: flushed.append(timeout) or True)
-    monkeypatch.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+    calls = _stub_telemetry(monkeypatch, module)
+    elapsed = publish_worker_spans({"policy_ppo_train": 1.0}, step=3, rank=0)
+    assert calls["flush"] == [module.TELEMETRY_FLUSH_TIMEOUT_SECONDS]
+    assert elapsed >= 0.0, "the publish cost is returned so it can be carried into the next step"
 
-    publish_worker_spans({"policy_ppo_train": 1.0}, step=3, rank=0)
-    assert flushed == [module.TELEMETRY_FLUSH_TIMEOUT_SECONDS]
-
-    flushed.clear()
-    publish_worker_spans({}, step=3, rank=0)
-    assert flushed == [], "nothing to publish means nothing to flush"
+    calls["flush"].clear()
+    assert publish_worker_spans({}, step=3, rank=0) == 0.0
+    assert calls["flush"] == [], "nothing to publish means nothing to flush"
 
 
-def test_a_flush_that_does_not_settle_is_logged_not_swallowed(monkeypatch, caplog):
-    """flush() settles the queue; it does not guarantee delivery.
+def test_dropped_records_are_detected_from_counters_not_from_the_flush_result(monkeypatch, caplog):
+    """flush() returns True once dropped records have SETTLED, so True does not mean delivered.
 
-    A silently short row set understates max and p95 in exactly the same direction as losing rows at
-    shutdown, so the False return has to be loud.
+    Detecting loss from the return value alone would let a short row set -- which understates max and
+    p95 over ranks -- pass as a clean measurement.
     """
     import logging
 
     import skyrl_train.timing_observability as module
 
-    monkeypatch.setattr(module.telemetry, "flush", lambda timeout: False)
-    monkeypatch.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
-
+    _stub_telemetry(monkeypatch, module, settled=True, lost_delta=3)
     with caplog.at_level(logging.WARNING, logger=module.logger.name):
         publish_worker_spans({"policy_ppo_train": 1.0}, step=9, rank=2)
 
-    assert any("did not settle" in record.message for record in caplog.records)
+    assert any("lost 3 record" in r.message for r in caplog.records), (
+        "a True flush with dropped records must still warn"
+    )
 
 
-def test_flush_timeout_stays_off_the_critical_path():
-    """It blocks the worker's return, so every second lands in driver policy_train unattributed."""
+def test_a_flush_that_does_not_settle_is_logged(monkeypatch, caplog):
+    import logging
+
+    import skyrl_train.timing_observability as module
+
+    _stub_telemetry(monkeypatch, module, settled=False)
+    with caplog.at_level(logging.WARNING, logger=module.logger.name):
+        publish_worker_spans({"policy_ppo_train": 1.0}, step=9, rank=2)
+
+    assert any("did not settle" in r.message for r in caplog.records)
+
+
+def test_flush_timeout_stays_short_because_it_blocks_the_workers_return():
     import skyrl_train.timing_observability as module
 
     assert module.TELEMETRY_FLUSH_TIMEOUT_SECONDS <= 1.0
+
+
+def test_publish_cost_has_a_span_so_it_is_attributable():
+    """It happens after the window closes; carried forward one step beats being unmeasured."""
+    assert TIMING_PARENTS["policy_span_publish"] == "policy_ppo_train"
+    assert "policy_span_publish" in POLICY_TRAIN_SPANS
+
+
+def test_previous_publish_cost_is_carried_forward_and_reduces_the_residual():
+    """Without this the flush is unmeasured time on the critical path, hidden in the residual."""
+    accumulator = _accumulator()
+    with accumulator.span("policy_training_step"):
+        pass
+
+    without = accumulator.totals(total_seconds=10.0)
+    assert "policy_span_publish" not in without
+
+    with_publish = accumulator.totals(total_seconds=10.0, publish_seconds=2.0)
+    assert with_publish["policy_span_publish"] == 2.0
+    assert with_publish["policy_span_residual"] == pytest.approx(without["policy_span_residual"] - 2.0)
+
+
+def test_a_zero_publish_cost_emits_no_span():
+    """The first step has no previous publish to carry, and a zero row would read as a measurement."""
+    accumulator = _accumulator()
+    assert "policy_span_publish" not in accumulator.totals(total_seconds=1.0, publish_seconds=0.0)
 
 
 def test_worker_init_configures_telemetry_for_the_worker_role():
@@ -214,3 +266,29 @@ def test_worker_init_configures_telemetry_for_the_worker_role():
     assert 'cfg.trainer.get("policy_train_spans", False)' in source
     # Ray kills actors rather than unwinding them, so the drain must be registered, not relied upon.
     assert "atexit.register" in source
+
+
+def test_ppo_train_wires_the_span_layer():
+    """The wiring itself, which no behavioural test can reach.
+
+    ``ppo_train`` needs a live torch.distributed rendezvous and a Ray actor, so the seam it calls is
+    tested directly (above) while its *use* is asserted structurally. Weak, but it catches the
+    regressions that leave a green suite: timing that starts after the entry barrier, a publish that
+    never carries the previous cost forward, or a return value that is dropped so every step reports
+    a publish cost of zero.
+    """
+    import inspect
+
+    from skyrl_train.workers.worker import PolicyWorkerBase
+
+    # PolicyWorkerBase, not Worker: CriticWorkerBase has its own ppo_train and is not instrumented.
+    source = inspect.getsource(PolicyWorkerBase.ppo_train)
+    # The clock starts before the drain barrier, not after it.
+    assert source.index("_policy_spans_started = time.perf_counter()") < source.index(
+        "WORKER_PPO_TRAIN_DRAIN_BARRIER"
+    )
+    # The self-synchronising region opts out of the leading synchronise.
+    assert 'span("policy_entry_barrier", presync=False)' in source
+    # The previous step's publish cost is carried forward, and this step's is retained.
+    assert 'publish_seconds=getattr(self, "_policy_span_publish_seconds", 0.0)' in source
+    assert "self._policy_span_publish_seconds = publish_worker_spans(" in source

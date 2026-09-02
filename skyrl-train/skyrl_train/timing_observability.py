@@ -32,6 +32,7 @@ TIMING_PARENTS: dict[str, str | None] = {
     # goes. Published with role=worker and clock_domain=exclusive_wall; see WorkerSpanAccumulator.
     "policy_ppo_train": "policy_train",
     "policy_entry_barrier": "policy_ppo_train",
+    "policy_span_publish": "policy_ppo_train",
     "policy_training_step": "policy_ppo_train",
     "policy_metric_allreduce": "policy_ppo_train",
     "policy_final_barrier": "policy_ppo_train",
@@ -145,24 +146,31 @@ def publish_startup_timings(
 #
 #     policy_train - max_over_ranks(policy_ppo_train)
 #
-# is a LOWER BOUND on driver-side overhead -- not an upper one, and not an isolation of it. The
-# driver waits for the LAST-RETURNING worker, which is not necessarily the LONGEST-RUNNING one: a
-# rank that starts late and runs briefly can return last. Subtracting the maximum duration therefore
-# understates the overhead whenever those differ, so a small value does NOT rule out large dispatch,
-# skew or transport cost. It also carries the worker epilogue after the span closes, the transport of
-# the result back, and the publish/flush below. Quote it as a floor, never as "dispatch cost".
+# does NOT measure driver-side overhead. Do not publish it as such. It is a lower bound on total
+# UNMEASURED critical-path time, and that total is dominated by things which are not the driver:
+# the worker epilogue after the span closes, the publish and flush below, and the fact that the
+# driver waits for the LAST-RETURNING rank while this subtracts the LONGEST-RUNNING one, which need
+# not be the same rank. A large value therefore does not demonstrate driver overhead, and a small
+# one does not rule it out. It is not a useful quantity in either direction.
+#
+# Isolating driver-side overhead needs something this instrument does not have: a per-rank entry
+# timestamp the driver can difference against its own dispatch timestamp, on a shared clock. That is
+# worth building if dispatch is ever suspected; it is not built here, and nothing here substitutes
+# for it.
 #
 # policy_ppo_train does start at true function entry, before the R3 co-arrival drain, so the arrival
 # spread the driver pays for lands in policy_entry_barrier rather than vanishing.
 
-# Deliberately well under Rigging's 5 s default: this blocks the worker's return to the driver, so
-# every second here lands in driver policy_train without appearing in any span.
 logger = logging.getLogger(__name__)
 
+# Deliberately well under Rigging's 5 s default: this blocks the worker's return to the driver, so
+# every second here lands in driver policy_train. It is carried forward as policy_span_publish so it
+# is at least attributable, but the cheapest version of that is a short timeout.
 TELEMETRY_FLUSH_TIMEOUT_SECONDS = 1.0
 
 POLICY_TRAIN_SPANS = (
     "policy_entry_barrier",
+    "policy_span_publish",
     "policy_training_step",
     "policy_metric_allreduce",
     "policy_final_barrier",
@@ -215,7 +223,7 @@ class WorkerSpanAccumulator:
         if torch.cuda.is_available() and torch.cuda.is_initialized():
             torch.cuda.synchronize()
 
-    def totals(self, *, total_seconds: float | None = None) -> dict[str, float]:
+    def totals(self, *, total_seconds: float | None = None, publish_seconds: float = 0.0) -> dict[str, float]:
         """Return the accumulated spans, plus the residual when the enclosing wall is known.
 
         The residual is what makes the decomposition auditable: a large one means the spans are
@@ -224,6 +232,11 @@ class WorkerSpanAccumulator:
         if not self.enabled:
             return {}
         totals = dict(self._totals)
+        # The previous step's publish cost. It happens after this step's window closes, so it cannot
+        # be measured into its own batch; carrying it forward one step is the difference between
+        # attributable and unmeasured.
+        if publish_seconds:
+            totals["policy_span_publish"] = publish_seconds
         if total_seconds is not None:
             totals["policy_ppo_train"] = total_seconds
             covered = sum(totals.get(name, 0.0) for name in POLICY_TRAIN_SPANS)
@@ -257,33 +270,41 @@ class WorkerTimingSink:
             )
 
 
-def publish_worker_spans(timings: Mapping[str, float], *, step: int, rank: int) -> None:
-    """Publish one worker's policy_train decomposition, then settle the queue.
+def publish_worker_spans(timings: Mapping[str, float], *, step: int, rank: int) -> float:
+    """Publish one worker's policy_train decomposition, settle the queue, and report what it cost.
 
-    The flush is the durability mechanism, and it belongs here rather than at shutdown: Ray tears
-    actors down with ``ray.kill``, which does not run ``atexit`` handlers. Relying on shutdown loses
-    the last step's rows from exactly the slowest ranks -- understating max and p95, i.e. biasing
-    every number in the direction that makes the instrumentation look successful.
+    Returns the wall seconds spent publishing and flushing, so the caller can fold it into the NEXT
+    step's spans as ``policy_span_publish``. Without that it is unmeasured time on the critical path
+    and nothing downstream can subtract it.
 
-    Two properties of the flush that its callers have to know:
-
-    * It settles the queue; it does not guarantee delivery. Records can still be rejected or
-      dropped, and ``flush`` reports that by returning ``False``. **A false return is logged at
-      WARNING**, because a silently short row set understates max and p95 in exactly the same
-      direction as losing them at shutdown.
-    * It runs on the critical path, AFTER ``policy_ppo_train``'s window has closed. So it inflates
-      the driver's ``policy_train`` without appearing in any span -- bounded by the timeout below,
-      per step, per rank in parallel. Keep the timeout small, and subtract it before reading
-      anything into the driver gap above.
+    Loss is detected from Rigging's own counters rather than from ``flush``'s return value.
+    ``flush`` reports only whether the queue *settled*: it returns ``True`` once rejected and dropped
+    records have settled too, so a ``True`` return does **not** mean every rank's rows arrived.
+    Treating it as if it did would let a short row set -- which understates max and p95 -- pass as a
+    clean measurement.
     """
     if not timings:
-        return
+        return 0.0
+    started = time.perf_counter()
+    before = telemetry.runtime_status()
     WorkerTimingSink(rank).publish(phase_timing_observations(timings), step)
-    if not telemetry.flush(TELEMETRY_FLUSH_TIMEOUT_SECONDS):
+    settled = telemetry.flush(TELEMETRY_FLUSH_TIMEOUT_SECONDS)
+    after = telemetry.runtime_status()
+
+    dropped = (after.lost_records - before.lost_records) + (after.rejected_records - before.rejected_records)
+    if dropped > 0:
         logger.warning(
-            "policy_train span flush did not settle within %.1fs at step %d rank %d; "
-            "these rows may be missing, which understates max and p95",
+            "policy_train spans lost %d record(s) at step %d rank %d; max and p95 over ranks are "
+            "understated and must not be quoted",
+            dropped,
+            step,
+            rank,
+        )
+    elif not settled:
+        logger.warning(
+            "policy_train span flush did not settle within %.1fs at step %d rank %d; rows may still be in flight",
             TELEMETRY_FLUSH_TIMEOUT_SECONDS,
             step,
             rank,
         )
+    return time.perf_counter() - started
