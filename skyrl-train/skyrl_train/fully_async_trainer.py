@@ -362,7 +362,8 @@ class _AsyncDataloader:
         Return the next batch of training data.
 
         If we loaded from a checkpoint, it skips already-consumed data. DAPO filter sampling starts a new source
-        pass after exhaustion so rejected prompts can be generated again. Other modes return None at exhaustion.
+        pass after exhaustion so rejected prompts can be generated again. Returns None when finite sampling ends or
+        when a complete filter pass contains no eligible UID.
         """
         assert self._iter is not None and self._lock is not None, "Dataloader not initialized; call reset() first"
         async with self._lock:
