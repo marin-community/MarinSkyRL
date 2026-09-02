@@ -64,6 +64,12 @@ def test_max_turns_reaches_the_agent_without_deprecated_max_episodes():
     assert "max_episodes" not in kwargs
 
 
+def test_llm_call_kwargs_reach_the_agent():
+    kwargs = _agent_kwargs({"name": "terminus-2", "llm_call_kwargs": {"max_tokens": 4096}})
+
+    assert kwargs["llm_call_kwargs"] == {"max_tokens": 4096}
+
+
 def test_passthrough_exceptions_are_never_retried():
     cfg = OmegaConf.create(
         {

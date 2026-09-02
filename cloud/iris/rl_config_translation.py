@@ -100,6 +100,7 @@ _DERIVED_CONTEXT_FIELDS = (
     ("generator", "engine_init_kwargs", "max_model_len"),
     ("terminal_bench", "harbor", "max_episodes"),
     ("terminal_bench", "harbor", "max_turns"),
+    ("terminal_bench", "harbor", "llm_call_kwargs", "max_tokens"),
     ("terminal_bench", "model_info", "max_input_tokens"),
     ("terminal_bench", "model_info", "max_output_tokens"),
     ("generator", "trajectory_reward_shaping", "overlong", "l_max"),
@@ -282,7 +283,9 @@ def _materialize_context_budget(
     }
 
     if terminal_bench is not None:
-        terminal_bench.setdefault("harbor", {})["max_turns"] = budget.max_turns
+        harbor = terminal_bench.setdefault("harbor", {})
+        harbor["max_turns"] = budget.max_turns
+        harbor.setdefault("llm_call_kwargs", {})["max_tokens"] = budget.max_new_tokens_per_turn
         model_info = terminal_bench.get("model_info") or {}
         model_info["max_input_tokens"] = budget.max_input_tokens
         model_info["max_output_tokens"] = budget.max_new_tokens_per_turn

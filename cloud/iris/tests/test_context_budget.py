@@ -75,6 +75,7 @@ def test_all_iris_configs_materialize_one_coherent_context_budget():
         assert parsed.generator["max_turns"] == turns
         if parsed.terminal_bench is not None:
             assert parsed.terminal_bench["harbor"]["max_turns"] == turns
+            assert parsed.terminal_bench["harbor"]["llm_call_kwargs"]["max_tokens"] == output
             assert parsed.terminal_bench["model_info"] == {
                 "max_input_tokens": parsed.context_budget.max_input_tokens,
                 "max_output_tokens": output,
@@ -102,6 +103,7 @@ def test_context_budget_derives_all_hydra_length_arguments():
     assert "++terminal_bench_config.model_info.max_input_tokens=114688" in args
     assert "++terminal_bench_config.model_info.max_output_tokens=16384" in args
     assert "++terminal_bench_config.harbor.max_turns=90" in args
+    assert "++terminal_bench_config.harbor.llm_call_kwargs.max_tokens=16384" in args
     assert "generator.trajectory_reward_shaping.overlong.l_max=65536" in args
     assert "generator.trajectory_reward_shaping.overlong.l_cache=16384" in args
 

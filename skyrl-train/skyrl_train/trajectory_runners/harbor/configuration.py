@@ -110,6 +110,7 @@ AGENT_SCHEMA = SectionSchema(
         "interleaved_thinking": FieldMapping("interleaved_thinking", field_type="kwargs", default=False),
         # Extra body params passed to LLM API (e.g., chat_template_kwargs for enable_thinking)
         "extra_body": FieldMapping("extra_body", field_type="kwargs"),
+        "llm_call_kwargs": FieldMapping("llm_call_kwargs", field_type="kwargs"),
         # Rollout details collection (for TIS in async training)
         # When true, collects per-token logprobs needed for importance sampling correction
         "collect_rollout_details": FieldMapping("collect_rollout_details", field_type="kwargs", default=False),
