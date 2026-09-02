@@ -1586,6 +1586,17 @@ def create_parser() -> argparse.ArgumentParser:
         help="Max retries on failure (iris auto-retries preemptions separately).",
     )
     parser.add_argument(
+        "--max-task-failures",
+        "--max_task_failures",
+        dest="max_task_failures",
+        type=int,
+        default=None,
+        help="Task-attempt failures tolerated before the job fails. Defaults to --max-retries, which "
+        "is what it was hardcoded to -- but they are different questions: --max-retries asks whether "
+        "to re-run the whole job, and this asks how many task blips a gang absorbs before it dies. A "
+        "measurement run wants 0 retries and may still want a nonzero tolerance here.",
+    )
+    parser.add_argument(
         "--max-retries-preemption",
         "--max_retries_preemption",
         dest="max_retries_preemption",
@@ -2581,7 +2592,11 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
             replicas=replicas,
             max_retries_failure=args.max_retries,
             max_retries_preemption=args.max_retries_preemption,
-            max_task_failures=args.max_retries,
+            # Falls back to the retry budget, which is what this was hardcoded to before it
+            # became a flag -- so no existing launch changes. launch() is reachable with args that
+            # never passed through resolved_launch_args, so the fallback lives here rather than
+            # there. Explicit None check: 0 is a meaningful value.
+            max_task_failures=(args.max_retries if args.max_task_failures is None else args.max_task_failures),
             priority_band=priority_band,
             timeout=None if args.timeout == 0 else _seconds_to_duration(args.timeout),
         )
