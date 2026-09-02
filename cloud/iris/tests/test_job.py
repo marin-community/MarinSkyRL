@@ -29,6 +29,7 @@ from cloud.iris.protocol import (  # noqa: E402
     SkyRLOutputPaths,
     SkyRLRolePlan,
     SkyRLTopology,
+    job_spec,
 )
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
 from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
@@ -293,6 +294,42 @@ def test_execute_job_exports_terminal_checkpoint_before_committing_model(tmp_pat
     assert response.state == AttemptState.SUCCEEDED
     assert response.model is not None
     assert response.model.policy_export_uri.endswith("/global_step_8/policy")
+
+
+@dataclass(frozen=True)
+class ExportRefusingBackend(FakeLaunchBackend):
+    def export_terminal_policy(self, _spec: SkyRLJobSpec, _config_path: str) -> None:
+        raise AssertionError("a telemetry-only run must not submit a terminal export job")
+
+
+def test_execute_job_commits_a_telemetry_run_that_has_no_model(tmp_path: Path) -> None:
+    envelope = _spec(tmp_path)
+    envelope = replace(envelope, request=replace(envelope.request, telemetry_only=True))
+    resolved = Path(envelope.request.output.resolved_config_uri.removeprefix("file://"))
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text('{"entrypoint":"skyrl_train.entrypoints.main_base","hydra_args":[]}')
+    backend = ExportRefusingBackend(
+        IrisLaunchOutcome(
+            job_id="01KTEST",
+            job_state="succeeded",
+            exit_code=0,
+        )
+    )
+
+    response = execute_job(envelope, backend=backend)
+
+    assert response.state == AttemptState.SUCCEEDED
+    assert response.model is None
+    terminal = json.loads(Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).read_text())
+    assert terminal["response"] == asdict(response)
+    assert terminal["request"]["telemetry_only"] is True
+
+
+def test_job_spec_parses_a_telemetry_only_request(tmp_path: Path) -> None:
+    envelope = _spec(tmp_path)
+    envelope = replace(envelope, request=replace(envelope.request, telemetry_only=True))
+
+    assert job_spec(json.loads(json.dumps(asdict(envelope)))) == envelope
 
 
 def test_execute_job_detaches_without_validating_terminal_artifacts(tmp_path: Path) -> None:
