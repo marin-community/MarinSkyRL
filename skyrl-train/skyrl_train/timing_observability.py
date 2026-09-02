@@ -8,6 +8,8 @@ from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequenc
 from dataclasses import dataclass
 from typing import Protocol
 
+from rigging import telemetry
+
 from skyrl_train.telemetry import TRAINER_ROLE, WORKER_ROLE, phase_duration
 
 
@@ -138,15 +140,19 @@ def publish_startup_timings(
 # and execution uid from the task runtime, so each worker publishes its own rows directly and the
 # aggregation (max, p95) happens at query time over the rank attribute.
 #
-# These do NOT close against the driver's policy_train, and that gap is a measurement, not an
-# omission: policy_train also covers Ray dispatch and argument materialisation, which happen on the
-# driver and cannot be seen from here. Read
+# These do NOT close against the driver's policy_train.
 #
 #     policy_train - max_over_ranks(policy_ppo_train)
 #
-# as the dispatch and transport overhead. policy_ppo_train starts at true function entry, before the
-# R3 co-arrival drain, so the arrival spread the driver is paying for lands in policy_entry_barrier
-# rather than vanishing.
+# is an UPPER BOUND on driver-side overhead, not an isolation of it. It also contains the skew
+# between ranks' start times -- the worker intervals are measured on different hosts against
+# unsynchronised clocks -- plus the worker epilogue after the span closes and the transport of the
+# result back. Quote it as a bound and never as "dispatch cost".
+#
+# policy_ppo_train does start at true function entry, before the R3 co-arrival drain, so the arrival
+# spread the driver pays for lands in policy_entry_barrier rather than vanishing.
+
+TELEMETRY_FLUSH_TIMEOUT_SECONDS = 5.0
 
 POLICY_TRAIN_SPANS = (
     "policy_entry_barrier",
@@ -175,11 +181,18 @@ class WorkerSpanAccumulator:
         self._totals: dict[str, float] = {}
 
     @contextlib.contextmanager
-    def span(self, name: str) -> Iterator[None]:
+    def span(self, name: str, *, presync: bool = True) -> Iterator[None]:
+        """Time one span.
+
+        ``presync=False`` for a region that performs its own device synchronise: the leading sync
+        would drain the queue first and leave the wrapped one measuring nothing, pushing the real
+        drain cost into the residual and making the region look free.
+        """
         if not self.enabled:
             yield
             return
-        self._sync()
+        if presync:
+            self._sync()
         started = time.perf_counter()
         try:
             yield
@@ -238,7 +251,15 @@ class WorkerTimingSink:
 
 
 def publish_worker_spans(timings: Mapping[str, float], *, step: int, rank: int) -> None:
-    """Publish one worker's policy_train decomposition. A no-op on an empty mapping."""
+    """Publish one worker's policy_train decomposition, then settle the queue.
+
+    The flush is the durability mechanism, and it has to be here rather than at shutdown: Ray tears
+    actors down with ``ray.kill``, which does not run ``atexit`` handlers, and even the graceful path
+    allows less than Rigging's request timeout. Relying on shutdown loses the last step's rows from
+    exactly the slowest ranks -- which would understate max and p95 and inflate the apparent driver
+    gap, i.e. bias every number in the direction that makes the instrumentation look successful.
+    """
     if not timings:
         return
     WorkerTimingSink(rank).publish(phase_timing_observations(timings), step)
+    telemetry.flush(TELEMETRY_FLUSH_TIMEOUT_SECONDS)
