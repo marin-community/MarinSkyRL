@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import List, Dict, Any, Union, Callable, Optional, TypedDict
+from typing import List, Dict, Any, Union, Callable, Optional, TypedDict, cast
 from dataclasses import dataclass
 from omegaconf import OmegaConf, DictConfig
 from enum import Enum
@@ -16,6 +16,12 @@ from skyrl_train.dynamic_sampling import (
     DynamicSamplingCriteria,
     DynamicSamplingType,
     group_is_informative_for_dynamic_sampling,
+)
+from skyrl_train.group_admission import (
+    AdmissionRejection,
+    GroupAdmissionPolicy,
+    GroupAdvantageInvariant,
+    TrainingGroupInvariantError,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
@@ -280,12 +286,116 @@ class DynamicSamplingState(TypedDict, total=False):
     num_prompts_in_batch: Optional[int]
 
 
+class GroupAdmissionSamplingState(TypedDict, total=False):
+    """Accepted synchronous groups collected while replacements are generated."""
+
+    sample_batch_count: int
+    collected_trajectory_batch: Optional[TrajectoryBatch]
+    collected_uids: List[str]
+    num_prompts_in_batch: int
+    rejection_counts: Dict[str, int]
+    inspected_count: int
+
+
 @dataclass(frozen=True)
 class DynamicSamplingResult:
     trajectory_batch: TrajectoryBatch
     uids: List[str]
     keep_sampling: bool
     state: Optional[DynamicSamplingState]
+
+
+@dataclass(frozen=True)
+class GroupAdmissionSamplingResult:
+    trajectory_batch: TrajectoryBatch
+    uids: List[str]
+    keep_sampling: bool
+    state: Optional[GroupAdmissionSamplingState]
+    rejection_counts: Dict[AdmissionRejection, int]
+    inspected_count: int
+
+
+@dataclass(frozen=True)
+class _AdmissionAccumulation:
+    trajectory_batch: TrajectoryBatch
+    uids: List[str]
+    keep_sampling: bool
+    state: Optional[GroupAdmissionSamplingState]
+
+
+def handle_group_admission_sampling(
+    trajectory_batch: TrajectoryBatch,
+    uids: List[str],
+    *,
+    invariant: GroupAdvantageInvariant,
+    rollout_logprobs_required: bool,
+    target_batch_size: int,
+    tis_lcs_alert_threshold: float,
+    collected_state: GroupAdmissionSamplingState,
+) -> GroupAdmissionSamplingResult:
+    """Drop retryable sync groups and collect a complete replacement batch."""
+    policy = GroupAdmissionPolicy(
+        invariant,
+        max_staleness_steps=0,
+        rollout_logprobs_required=rollout_logprobs_required,
+    )
+    admissions = policy.evaluate_batch(trajectory_batch, uids, global_step=0)
+    retryable = {AdmissionRejection.FULLY_MASKED, AdmissionRejection.BELOW_MINIMUM_GROUP_SIZE}
+    rejection_counts = {rejection: 0 for rejection in AdmissionRejection}
+    kept_uids = []
+    for admission in admissions:
+        if admission.decision.accepted:
+            kept_uids.append(admission.uid)
+            continue
+        assert admission.decision.primary_rejection is not None
+        rejection_counts[admission.decision.primary_rejection] += 1
+        if any(rejection not in retryable for rejection in admission.decision.rejections):
+            raise TrainingGroupInvariantError(
+                uid=admission.uid,
+                decision=admission.decision,
+                physical_count=admission.physical_count,
+                expected_physical_count=invariant.physical_group_size,
+                row_indices=admission.row_indices,
+            )
+
+    accumulated_rejections = collected_state.setdefault("rejection_counts", {})
+    for rejection, count in rejection_counts.items():
+        accumulated_rejections[rejection.value] = accumulated_rejections.get(rejection.value, 0) + count
+    collected_state["inspected_count"] = collected_state.get("inspected_count", 0) + len(admissions)
+
+    if (
+        len(kept_uids) == target_batch_size
+        and collected_state.get("collected_trajectory_batch") is None
+        and not any(accumulated_rejections.values())
+    ):
+        return GroupAdmissionSamplingResult(
+            trajectory_batch=trajectory_batch,
+            uids=uids,
+            keep_sampling=False,
+            state=None,
+            rejection_counts={rejection: 0 for rejection in AdmissionRejection},
+            inspected_count=collected_state["inspected_count"],
+        )
+
+    accumulated = _accumulate_admitted_groups(
+        trajectory_batch,
+        uids,
+        kept_uids,
+        target_batch_size=target_batch_size,
+        tis_lcs_alert_threshold=tis_lcs_alert_threshold,
+        require_rollout_logprobs=rollout_logprobs_required,
+        collected_state=collected_state,
+    )
+    return GroupAdmissionSamplingResult(
+        trajectory_batch=accumulated.trajectory_batch,
+        uids=accumulated.uids,
+        keep_sampling=accumulated.keep_sampling,
+        state=accumulated.state,
+        rejection_counts={
+            rejection: accumulated_rejections.get(rejection.value, 0) for rejection in AdmissionRejection
+        },
+        inspected_count=collected_state["inspected_count"],
+    )
 
 
 def handle_dynamic_sampling(
@@ -441,6 +551,58 @@ def _rekey_collected_uid_collisions(uids: List[str], collected_uids: List[str], 
     return [remapped_uids[uid] for uid in uids]
 
 
+def _accumulate_admitted_groups(
+    trajectory_batch: TrajectoryBatch,
+    uids: List[str],
+    kept_uids: List[str],
+    *,
+    target_batch_size: int,
+    tis_lcs_alert_threshold: float,
+    require_rollout_logprobs: bool,
+    collected_state: GroupAdmissionSamplingState,
+) -> _AdmissionAccumulation:
+    kept_uid_set = set(kept_uids)
+    kept_indices = [index for index, uid in enumerate(uids) if uid in kept_uid_set]
+    filtered_uids = [uids[index] for index in kept_indices]
+    collected_uids = collected_state.get("collected_uids", [])
+    if collected_uids:
+        filtered_uids = _rekey_collected_uid_collisions(
+            filtered_uids,
+            collected_uids,
+            collected_state["sample_batch_count"],
+        )
+
+    if kept_indices:
+        filtered_output = filter_trajectory_batch(trajectory_batch, kept_indices)
+        collected_batch = collected_state.get("collected_trajectory_batch")
+        if collected_batch is None:
+            collected_state["collected_trajectory_batch"] = filtered_output
+        else:
+            collected_state["collected_trajectory_batch"] = concatenate_trajectory_batches(
+                [collected_batch, filtered_output],
+                require_rollout_logprobs=require_rollout_logprobs,
+                tis_lcs_alert_threshold=tis_lcs_alert_threshold,
+            )
+        collected_uids.extend(filtered_uids)
+        collected_state["collected_uids"] = collected_uids
+
+    collected_group_count = len(dict.fromkeys(collected_uids))
+    collected_state["num_prompts_in_batch"] = collected_group_count
+    if collected_group_count < target_batch_size:
+        return _AdmissionAccumulation(trajectory_batch, uids, True, collected_state)
+
+    selected_uids = set(list(dict.fromkeys(collected_uids))[:target_batch_size])
+    selected_indices = [index for index, uid in enumerate(collected_uids) if uid in selected_uids]
+    final_batch = collected_state.get("collected_trajectory_batch")
+    assert final_batch is not None
+    return _AdmissionAccumulation(
+        filter_trajectory_batch(final_batch, selected_indices),
+        [collected_uids[index] for index in selected_indices],
+        False,
+        None,
+    )
+
+
 def handle_filter_sampling(
     trajectory_batch: TrajectoryBatch,
     uids: List[str],
@@ -552,31 +714,16 @@ def get_bad_sample_replacements(good_uids: List[str], bad_uids: List[str]) -> Li
 
 def filter_trajectory_batch(output: TrajectoryBatch, kept_indices: List[int]) -> TrajectoryBatch:
     """Filter TrajectoryBatch based on kept indices."""
-    filtered = {
-        "prompt_token_ids": [output["prompt_token_ids"][i] for i in kept_indices],
-        "response_ids": [output["response_ids"][i] for i in kept_indices],
-        "rewards": [output["rewards"][i] for i in kept_indices],
-        "unshaped_rewards": (
-            [output["unshaped_rewards"][i] for i in kept_indices]
-            if output.get("unshaped_rewards") is not None
-            else None
-        ),
-        "loss_masks": [output["loss_masks"][i] for i in kept_indices],
-        "stop_reasons": None,
-        "rollout_metrics": output.get("rollout_metrics"),
-        "rollout_logprobs": (
-            [output["rollout_logprobs"][i] for i in kept_indices] if output["rollout_logprobs"] else None
-        ),
-    }
-
-    if output.get("stop_reasons"):
-        filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
-    for key in REWARD_SHAPING_ROW_KEYS:
-        if output.get(key) is not None:
-            filtered[key] = [deepcopy(output[key][i]) for i in kept_indices]
+    row_count = len(output["response_ids"])
+    filtered = {}
+    for key, value in output.items():
+        if isinstance(value, list) and len(value) == row_count:
+            filtered[key] = [deepcopy(value[index]) for index in kept_indices]
+        else:
+            filtered[key] = value
     refresh_trajectory_reward_shaping_metrics(filtered)
 
-    return filtered
+    return cast(TrajectoryBatch, filtered)
 
 
 def build_dataloader(

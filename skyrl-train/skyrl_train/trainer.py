@@ -58,7 +58,12 @@ from skyrl_train.distributed.dispatch import (
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.group_admission import GroupAdvantageInvariant, assert_training_groups_eligible
+from skyrl_train.group_admission import (
+    AdmissionRejection,
+    GroupAdvantageInvariant,
+    InsufficientEligibleGroupsError,
+    assert_training_groups_eligible,
+)
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from skyrl_train.checkpoint_listing import extract_step_from_path
@@ -69,6 +74,8 @@ from skyrl_train.utils.trainer_utils import (
     validate_consistency_for_latest_checkpoint,
     ResumeMode,
     DynamicSamplingState,
+    GroupAdmissionSamplingState,
+    GroupAdmissionSamplingResult,
     build_dataloader,
 )
 from skyrl_train.utils.utils import (
@@ -160,6 +167,7 @@ class RayPPOTrainer:
         self._node_ids: Optional[List[str]] = None
 
         self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
+        self.group_admission_state: Optional[GroupAdmissionSamplingState] = None
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         configure_ray_worker_logging()
@@ -618,6 +626,13 @@ class RayPPOTrainer:
                         uids = [trajectory_id.instance_id for trajectory_id in trajectory_batch["trajectory_ids"]]
 
                     self._update_curriculum_sampler(trajectory_batch, uids)
+
+                    admission = self.handle_group_admission(trajectory_batch, uids)
+                    trajectory_batch = admission.trajectory_batch
+                    uids = admission.uids
+                    if admission.keep_sampling:
+                        pbar.update(1)
+                        continue
 
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
@@ -2022,6 +2037,61 @@ class RayPPOTrainer:
             # Reset state when sampling is complete
             self.dynamic_sampling_state = None
 
+        return result
+
+    def handle_group_admission(
+        self, trajectory_batch: TrajectoryBatch, uids: List[str]
+    ) -> GroupAdmissionSamplingResult:
+        """Hold synchronous training until a complete eligible group batch is available."""
+        if self.group_admission_state is None:
+            self.group_admission_state = {"sample_batch_count": 1}
+        else:
+            self.group_admission_state["sample_batch_count"] += 1
+
+        result = trainer_utils.handle_group_admission_sampling(
+            trajectory_batch,
+            uids,
+            invariant=self.group_advantage_invariant,
+            rollout_logprobs_required=policy_loss_requires_rollout_logprobs(
+                self.cfg.trainer.algorithm.policy_loss_type
+            ),
+            target_batch_size=int(self.cfg.trainer.train_batch_size),
+            tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
+            collected_state=self.group_admission_state,
+        )
+        rejected_count = sum(result.rejection_counts.values())
+        self.all_metrics.update(
+            {
+                "sync/admission/rejected_count": float(rejected_count),
+                "sync/admission/rejected_rate": rejected_count / max(result.inspected_count, 1),
+                **{
+                    f"sync/admission/rejected_count/{reason.value}": float(result.rejection_counts[reason])
+                    for reason in AdmissionRejection
+                },
+            }
+        )
+
+        max_sample_batches = int(self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches)
+        if (
+            result.keep_sampling
+            and max_sample_batches > 0
+            and self.group_admission_state["sample_batch_count"] >= max_sample_batches
+        ):
+            accepted_count = int(self.group_admission_state.get("num_prompts_in_batch", 0))
+            raise InsufficientEligibleGroupsError(
+                f"Synchronous generation collected {accepted_count} of {self.cfg.trainer.train_batch_size} "
+                f"eligible groups after {max_sample_batches} batches; rejections="
+                f"{self.group_admission_state.get('rejection_counts', {})}"
+            )
+
+        self.group_admission_state = result.state
+        if rejected_count:
+            rejection_summary = {reason.value: count for reason, count in result.rejection_counts.items() if count}
+            logger.warning(
+                f"Rejected synchronous rollout groups before step {self.global_step}; "
+                f"reasons={rejection_summary}. "
+                f"Waiting for a complete {self.cfg.trainer.train_batch_size}-group replacement batch."
+            )
         return result
 
     def _get_dp_group_models(self, rank: int, model_type: str = ""):

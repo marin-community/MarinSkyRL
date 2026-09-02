@@ -2,7 +2,7 @@
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer_utils.py
 """
 
-from skyrl_train.group_admission import GroupAdvantageInvariant, assert_training_groups_eligible
+from skyrl_train.group_admission import AdmissionRejection, GroupAdvantageInvariant, assert_training_groups_eligible
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from skyrl_train.utils.trainer_utils import (
     run_on_each_node,
@@ -14,6 +14,7 @@ from skyrl_train.utils.trainer_utils import (
     handle_dynamic_sampling,
     handle_replace_sampling,
     handle_filter_sampling,
+    handle_group_admission_sampling,
     filter_trajectory_batch,
     build_dataloader,
 )
@@ -819,6 +820,62 @@ def test_filter_trajectory_batch():
     ]
     assert filtered["reward_shaping_versions"] == [2, 2]
     assert [collection["tests"][0]["record_id"] for collection in filtered["verifier_tests"]] == ["a", "c"]
+
+
+def test_sync_group_admission_waits_for_replacement_of_fully_masked_group():
+    first_batch = TrajectoryBatch(
+        prompt_token_ids=[[1], [1], [2], [2]],
+        response_ids=[[3], [3], [4], [4]],
+        rewards=[1.0, 0.0, 0.0, 0.0],
+        loss_masks=[[1], [1], [0], [0]],
+        stop_reasons=["stop", "stop", "error", "error"],
+        rollout_metrics={},
+        rollout_logprobs=[[-0.1], [-0.2], [0.0], [0.0]],
+        exclude_from_baseline=[False, False, True, True],
+    )
+    state = {"sample_batch_count": 1}
+
+    incomplete = handle_group_admission_sampling(
+        first_batch,
+        ["kept", "kept", "masked", "masked"],
+        invariant=GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        rollout_logprobs_required=True,
+        target_batch_size=2,
+        tis_lcs_alert_threshold=0.005,
+        collected_state=state,
+    )
+
+    assert incomplete.keep_sampling
+    assert incomplete.rejection_counts[AdmissionRejection.FULLY_MASKED] == 1
+
+    replacement_batch = TrajectoryBatch(
+        prompt_token_ids=[[5], [5]],
+        response_ids=[[6], [6]],
+        rewards=[0.0, 1.0],
+        loss_masks=[[1], [1]],
+        stop_reasons=["stop", "stop"],
+        rollout_metrics={},
+        rollout_logprobs=[[-0.3], [-0.4]],
+        exclude_from_baseline=[False, False],
+    )
+    state = incomplete.state
+    assert state is not None
+    state["sample_batch_count"] += 1
+
+    complete = handle_group_admission_sampling(
+        replacement_batch,
+        ["replacement", "replacement"],
+        invariant=GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        rollout_logprobs_required=True,
+        target_batch_size=2,
+        tis_lcs_alert_threshold=0.005,
+        collected_state=state,
+    )
+
+    assert not complete.keep_sampling
+    assert complete.uids == ["kept", "kept", "replacement", "replacement"]
+    assert complete.trajectory_batch["loss_masks"] == [[1], [1], [1], [1]]
+    assert complete.trajectory_batch["exclude_from_baseline"] == [False, False, False, False]
 
 
 def test_validate_trajectory_batch_valid_case():
