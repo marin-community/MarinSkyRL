@@ -353,7 +353,9 @@ def validate_batch_sizes(cfg: DictConfig):
     # Validate policy mini batch size
     policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
 
-    if cfg.trainer.strategy == "megatron":
+    if cfg.trainer.strategy == "levanter":
+        policy_dp_size = int(cfg.trainer.policy.levanter.data_parallel_size)
+    elif cfg.trainer.strategy == "megatron":
         pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
         cp = cfg.trainer.policy.megatron_config.context_parallel_size
         tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size

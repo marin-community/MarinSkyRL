@@ -118,6 +118,10 @@ trainer:
     sequence_parallel_size: 1
     use_torch_compile: false
     record_memory: false
+    levanter:
+      endpoint_urls: []
+      data_parallel_size: 1
+      request_timeout_seconds: 1800
   ref:
     model:
       path: ${trainer.policy.model.path}

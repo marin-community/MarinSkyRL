@@ -64,6 +64,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.enable_http_endpoint = full_config.generator.enable_http_endpoint
         self.http_endpoint_host = full_config.generator.http_endpoint_host
         self.http_endpoint_port = full_config.generator.http_endpoint_port
+        self.http_endpoint_advertise_host = ray._private.services.get_node_ip_address()
         self.generation_paused_event = threading.Event()
         self._dead_engines: set[int] = set()
 

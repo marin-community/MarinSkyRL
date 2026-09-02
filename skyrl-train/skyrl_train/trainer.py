@@ -865,6 +865,16 @@ class RayPPOTrainer:
 
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
+        if cfg.trainer.strategy == "levanter":
+            if use_ref_model or cfg.trainer.critic.model.path:
+                raise ValueError("The Levanter policy shim currently requires KL/reference and critic models disabled")
+            self.policy_model = PolicyWorker(cfg)
+            self.critic_model = None
+            self.ref_model = None
+            self._initialize_model_actors(cfg, self.policy_model, None, None)
+            logger.info("init external Levanter policy model done")
+            return
+
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
             num_critic_gpus = cfg.trainer.placement.critic_num_gpus_per_node * cfg.trainer.placement.critic_num_nodes

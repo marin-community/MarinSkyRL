@@ -51,10 +51,13 @@ class CompletionBackend(Protocol):
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
+    async def update_named_weights(self, request: Dict[str, Any]): ...
+
 
 # Global state to hold the inference engine client and backend
 _global_inference_engine_client: Optional[CompletionBackend] = None
 _global_uvicorn_server: Optional[uvicorn.Server] = None
+_weight_update_task: asyncio.Task | None = None
 
 
 # Adapted from vllm.entrypoints.openai.protocol.ErrorResponse
@@ -75,6 +78,31 @@ def set_global_state(inference_engine_client: CompletionBackend, uvicorn_server:
     global _global_uvicorn_server
     _global_inference_engine_client = inference_engine_client
     _global_uvicorn_server = uvicorn_server
+
+
+async def start_weight_update(raw_request: Request):
+    """Start one weight receive without blocking the NCCL sender's control request."""
+    global _weight_update_task
+    if _global_inference_engine_client is None:
+        raise fastapi.HTTPException(status_code=503, detail="Inference engine client not initialized")
+    if _weight_update_task is not None and not _weight_update_task.done():
+        raise fastapi.HTTPException(status_code=409, detail="A weight update is already in flight")
+    request = await raw_request.json()
+    _weight_update_task = asyncio.create_task(_global_inference_engine_client.update_named_weights(request))
+    return {"status": "receiving"}
+
+
+async def wait_for_weight_update():
+    """Wait until the receive started by :func:`start_weight_update` is loaded."""
+    global _weight_update_task
+    if _weight_update_task is None:
+        raise fastapi.HTTPException(status_code=409, detail="No weight update is in flight")
+    task = _weight_update_task
+    try:
+        await task
+    finally:
+        _weight_update_task = None
+    return {"status": "loaded"}
 
 
 def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Optional[ErrorResponse]:
@@ -486,6 +514,9 @@ def create_app(
     @app.get("/health")
     async def health_check():
         return {"status": "healthy"}
+
+    app.add_api_route("/weights/update", start_weight_update, methods=["POST"])
+    app.add_api_route("/weights/wait", wait_for_weight_update, methods=["POST"])
 
     # This handler only catches unexpected server-side exceptions
     @app.exception_handler(Exception)
