@@ -29,7 +29,8 @@ trainer:
   train_batch_size: 64
   policy_mini_batch_size: 64
   eval_batch_size: 64
-  micro_forward_batch_size_per_gpu: 2
+  # Equal to micro_train_batch_size_per_gpu so both passes run the same kernels (see docs).
+  micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
   eval_before_train: false
   eval_interval: -1

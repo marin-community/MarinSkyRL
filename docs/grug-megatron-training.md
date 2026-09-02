@@ -41,6 +41,56 @@ colocated reference model needs the same room for its forward, so disaggregated
 runs set `trainer.offload_optimizer_during_rollouts=true` to keep the optimizer
 state and gradient buffers on CPU from each policy update until the next one.
 
+## Numerics
+
+Two Megatron behaviours break the on-policy contract that the recomputed old
+log-probabilities equal the training forward, which FSDP2 satisfies exactly:
+
+- Megatron's unfused unpermute combines the top-k expert outputs with an atomic
+  scatter-add. For top-2 routing the two-term sum is order-independent, but Grug
+  routes top-4, so the forward was not reproducible run to run. The bridge forces
+  `moe_permute_fusion`, whose Transformer Engine kernels reduce in a fixed order.
+- cuBLAS selects kernels per GEMM shape, and at Grug's width the per-row rounding
+  differs between kernels. The log-probability forward and the training forward
+  must therefore use the same micro-batch size
+  (`micro_forward_batch_size_per_gpu == micro_train_batch_size_per_gpu`); the
+  trainer warns when they differ.
+
+`test_grug_megatron_train_forward_matches_eval_forward` guards both on a toy
+model and on a Snowball-shaped tiny model (256 experts, top-4, 20/5 heads,
+2048-token window) with variable-length rows at long sequences, and
+`test_grug_megatron_eval_forward_is_independent_of_peer_rank_batch` checks that
+expert-parallel co-batching does not leak between ranks.
+
+## Memory
+
+Policy nodes for the 67B-A2B snowball checkpoint need 1800GB of host memory
+and 1000GB of disk to save a Megatron checkpoint: the writer stages about 146GB
+per rank in host RAM, then leaves a 46GB shard per rank in `/tmp` beside the
+staged HF checkpoint until the upload finishes. On the GPU, the last pipeline
+stage holds the vocab-sized logits; the loss computes entropy under no_grad
+unless an entropy loss is configured, which avoids saving two vocab-sized
+copies for backward. The snowball configs also set
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+
+## Throughput
+
+At the round-5 curriculum geometry (1024-token prompts, 8192-token
+generations, 64 prompts x 8 samples, four policy nodes at PP2 x EP8 x DP16 and
+four vLLM nodes at DP8 x EP8), measured on cw-us-east-02a:
+
+| phase | Megatron | FSDP2 |
+| --- | --- | --- |
+| step | 189-194s | 634s |
+| policy_train | 26-27s | 457s |
+| generate | 135-138s | 131s |
+| fwd_logprobs | 5.4s | 32s |
+| sync_weights | 15s | 11.3s |
+
+The Megatron numbers use `cloud/iris/configs/snowball_megatron_full.yaml` with
+`overlap_grad_reduce`, `overlap_param_gather`, bf16 gradient reduction, and
+`micro_forward_batch_size_per_gpu=4`. Rollout is now about 70% of the step.
+
 ## Query bias
 
 Only the frozen query-bias mode is supported on Megatron. The bias steers

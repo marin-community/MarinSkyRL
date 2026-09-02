@@ -172,15 +172,21 @@ def _padded_batch(
     batch_size: int = 4,
     prompt_length: int = PROMPT_LENGTH,
     response_length: int = RESPONSE_LENGTH,
+    variable_lengths: bool = False,
 ) -> TrainingInputBatch:
-    """Return a bf16-friendly batch with left and right padding and fixed content."""
+    """Return a bf16-friendly batch with left and right padding and fixed content.
+
+    With ``variable_lengths`` each row's body is shorter than the previous one, as rollouts
+    are, so consecutive micro-batches have different widths.
+    """
     generator = torch.Generator().manual_seed(5)
-    body_length = prompt_length + response_length
-    total_length = body_length + 6
+    full_body_length = prompt_length + response_length
+    total_length = full_body_length + 6
     pad_before = [3, 0, 5, 1]
     sequences = []
     masks = []
     for row in range(batch_size):
+        body_length = full_body_length - (37 * row if variable_lengths else 0)
         body = torch.randint(10, 500, (body_length,), generator=generator).tolist()
         before = pad_before[row % len(pad_before)]
         after = total_length - body_length - before
@@ -308,8 +314,9 @@ def test_grug_megatron_train_forward_matches_eval_forward(
 
     With one update per batch the PPO ratio is exp(train_logprob - eval_logprob), so any
     train/eval drift shows up as spurious clipping. FSDP2 reports exactly zero here. Top-4
-    routing at long sequences is the case that exposed Megatron's unfused, atomic
-    unpermute; the bridge now forces the fused kernels.
+    routing exposed Megatron's unfused, atomic unpermute (the bridge now forces the fused
+    kernels), and Snowball's width exposed cuBLAS kernel selection changing with the
+    micro-batch shape (the two passes must use equal micro-batch sizes).
     """
     require_hoppers(world_size)
     model_path = tmp_path / "model"
@@ -318,9 +325,13 @@ def test_grug_megatron_train_forward_matches_eval_forward(
         model_path, max_position_embeddings=4096, num_experts_per_tok=num_experts_per_tok, shape=shape
     )
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
+    # The forward and training passes must see the same micro-batch shapes; see the trainer docs.
+    cfg.trainer.micro_forward_batch_size_per_gpu = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
-    batch = _padded_batch(pad_token_id, prompt_length=prompt_length, response_length=response_length)
+    batch = _padded_batch(
+        pad_token_id, prompt_length=prompt_length, response_length=response_length, variable_lengths=True
+    )
     initialize_ray(cfg)
     try:
         policy = _init_policy(cfg, world_size)
