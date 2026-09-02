@@ -155,15 +155,18 @@ def execute_job(
             return _record_failed_attempt(spec, outcome, f"Iris job reached {outcome.job_state}")
         if mode is LaunchMode.DETACH:
             return _launch_response(spec, AttemptState.SUBMITTED, outcome=outcome)
-        try:
-            active_backend.export_terminal_policy(spec, config_file.name)
-        except (OSError, subprocess.CalledProcessError, ValueError) as error:
-            return _record_failed_attempt(spec, outcome, f"Terminal policy export failed: {error}")
+        if not request.telemetry_only:
+            try:
+                active_backend.export_terminal_policy(spec, config_file.name)
+            except (OSError, subprocess.CalledProcessError, ValueError) as error:
+                return _record_failed_attempt(spec, outcome, f"Terminal policy export failed: {error}")
 
-    try:
-        model = _policy_export(request)
-    except ValueError as error:
-        return _record_failed_attempt(spec, outcome, str(error))
+    model: SkyRLModel | None = None
+    if not request.telemetry_only:
+        try:
+            model = _policy_export(request)
+        except ValueError as error:
+            return _record_failed_attempt(spec, outcome, str(error))
     if not _path_exists(request.output.resolved_config_uri):
         return _record_failed_attempt(
             spec,
