@@ -74,3 +74,6 @@ data:
   kind: parquet
   train_data: []
   val_data: []
+
+extra_env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
