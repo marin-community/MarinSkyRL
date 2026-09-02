@@ -223,7 +223,7 @@ class WorkerSpanAccumulator:
         if torch.cuda.is_available() and torch.cuda.is_initialized():
             torch.cuda.synchronize()
 
-    def totals(self, *, total_seconds: float | None = None, publish_seconds: float = 0.0) -> dict[str, float]:
+    def totals(self, *, total_seconds: float | None = None) -> dict[str, float]:
         """Return the accumulated spans, plus the residual when the enclosing wall is known.
 
         The residual is what makes the decomposition auditable: a large one means the spans are
@@ -232,11 +232,6 @@ class WorkerSpanAccumulator:
         if not self.enabled:
             return {}
         totals = dict(self._totals)
-        # The previous step's publish cost. It happens after this step's window closes, so it cannot
-        # be measured into its own batch; carrying it forward one step is the difference between
-        # attributable and unmeasured.
-        if publish_seconds:
-            totals["policy_span_publish"] = publish_seconds
         if total_seconds is not None:
             totals["policy_ppo_train"] = total_seconds
             covered = sum(totals.get(name, 0.0) for name in POLICY_TRAIN_SPANS)
@@ -270,7 +265,13 @@ class WorkerTimingSink:
             )
 
 
-def publish_worker_spans(timings: Mapping[str, float], *, step: int, rank: int) -> float:
+def publish_worker_spans(
+    timings: Mapping[str, float],
+    *,
+    step: int,
+    rank: int,
+    previous_publish: tuple[int, float] | None = None,
+) -> float:
     """Publish one worker's policy_train decomposition, settle the queue, and report what it cost.
 
     Returns the wall seconds spent publishing and flushing, so the caller can fold it into the NEXT
@@ -287,11 +288,20 @@ def publish_worker_spans(timings: Mapping[str, float], *, step: int, rank: int) 
         return 0.0
     started = time.perf_counter()
     before = telemetry.runtime_status()
-    WorkerTimingSink(rank).publish(phase_timing_observations(timings), step)
+    sink = WorkerTimingSink(rank)
+    sink.publish(phase_timing_observations(timings), step)
+    if previous_publish is not None:
+        # Emitted under the step it actually belongs to, and deliberately NOT folded into that step's
+        # totals: it happened after that interval closed, so subtracting it from that step's residual
+        # would remove time the interval never contained. The last step's publish is never emitted --
+        # there is no later call to carry it -- and that is the honest cost of measuring it at all.
+        previous_step, seconds = previous_publish
+        sink.publish(phase_timing_observations({"policy_span_publish": seconds}), previous_step)
     settled = telemetry.flush(TELEMETRY_FLUSH_TIMEOUT_SECONDS)
     after = telemetry.runtime_status()
 
-    dropped = (after.lost_records - before.lost_records) + (after.rejected_records - before.rejected_records)
+    # lost_records already includes rejected ones; adding both deltas reported 2N for N losses.
+    dropped = after.lost_records - before.lost_records
     if dropped > 0:
         logger.warning(
             "policy_train spans lost %d record(s) at step %d rank %d; max and p95 over ranks are "
