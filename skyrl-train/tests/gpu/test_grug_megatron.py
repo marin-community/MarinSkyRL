@@ -190,11 +190,15 @@ def _padded_batch(
     pad_before = [3, 0, 5, 1]
     sequences = []
     masks = []
+    # Each row loses this many tokens relative to the previous one; the last row still
+    # keeps some response tokens once total padding is accounted for.
+    shrink = response_length // (2 * batch_size) if variable_lengths else 0
     for row in range(batch_size):
-        body_length = full_body_length - (37 * row if variable_lengths else 0)
+        body_length = full_body_length - shrink * row
         body = torch.randint(10, 500, (body_length,), generator=generator).tolist()
         before = pad_before[row % len(pad_before)]
         after = total_length - body_length - before
+        assert after < response_length, (row, after, response_length)
         sequences.append([pad_token_id] * before + body + [pad_token_id] * after)
         masks.append([0] * before + [1] * body_length + [0] * after)
     sequences = torch.tensor(sequences, dtype=torch.long)
@@ -294,7 +298,7 @@ def test_grug_megatron_forward_matches_hf(tmp_path, world_size: int, pp: int, ep
 @pytest.mark.parametrize(
     ("shape", "num_experts_per_tok", "prompt_length", "response_length"),
     [
-        (TOY_SHAPE, 2, PROMPT_LENGTH, RESPONSE_LENGTH),
+        (TOY_SHAPE, 2, 24, 16),
         (TOY_SHAPE, 4, 1000, 200),
         (SNOWBALL_LIKE_SHAPE, 4, 2400, 300),
     ],
