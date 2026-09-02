@@ -378,6 +378,11 @@ def test_ppo_train_wires_the_span_layer():
     assert 'getattr(self, "_policy_span_publish", None)' in source
     assert "previous_publish=_previous_publish" in source
     assert "self._policy_span_publish = (" in source
+    # The counter call G3 found untested: it must ride the spans publish, not stand alone, or a
+    # dropped counter row is invisible (Rigging swallows emission exceptions).
+    assert "counters=_counters if _policy_spans.enabled else None" in source
+    assert "micro_step_count" in source
+    assert "attention_work_ratio" in source
 
 
 def test_counters_go_to_their_own_instrument_not_the_span_tree():
@@ -418,3 +423,52 @@ def test_counters_go_to_their_own_instrument_not_the_span_tree():
 
 def test_publishing_no_counters_is_a_no_op():
     publish_worker_counters({}, step=1, rank=0)
+
+
+def test_counters_ride_the_spans_publish_so_loss_detection_covers_them(monkeypatch):
+    """Published separately they sat outside the before/after loss window and were invisible."""
+    import skyrl_train.timing_observability as module
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(module.telemetry, "flush", lambda timeout: True)
+    monkeypatch.setattr(
+        module.telemetry,
+        "runtime_status",
+        lambda: type("S", (), {"lost_records": 0, "rejected_records": 0})(),
+    )
+    monkeypatch.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+    monkeypatch.setattr(
+        module,
+        "policy_step_counter",
+        type("_H", (), {"record": lambda self, v, attributes: seen.setdefault(attributes["counter"], v)})(),
+    )
+
+    module.publish_worker_spans({"policy_ppo_train": 1.0}, step=4, rank=1, counters={"micro_step_count": 64.0})
+    assert seen == {"micro_step_count": 64.0}
+
+
+def test_counters_alone_still_publish():
+    """Spans may be empty on a step that produced none; the counters must not be dropped with them."""
+    import skyrl_train.timing_observability as module
+
+    import pytest as _pytest
+
+    seen: list[str] = []
+    monkey = _pytest.MonkeyPatch()
+    try:
+        monkey.setattr(module.telemetry, "flush", lambda timeout: True)
+        monkey.setattr(
+            module.telemetry,
+            "runtime_status",
+            lambda: type("S", (), {"lost_records": 0, "rejected_records": 0})(),
+        )
+        monkey.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+        monkey.setattr(
+            module,
+            "policy_step_counter",
+            type("_H", (), {"record": lambda self, v, attributes: seen.append(attributes["counter"])})(),
+        )
+        module.publish_worker_spans({}, step=4, rank=1, counters={"tokens_real": 7.0})
+    finally:
+        monkey.undo()
+    assert seen == ["tokens_real"]

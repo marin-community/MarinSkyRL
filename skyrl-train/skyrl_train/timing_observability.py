@@ -358,6 +358,7 @@ def publish_worker_spans(
     step: int,
     rank: int,
     previous_publish: tuple[int, float] | None = None,
+    counters: Mapping[str, float] | None = None,
 ) -> float:
     """Publish one worker's policy_train decomposition, settle the queue, and report what it cost.
 
@@ -371,12 +372,18 @@ def publish_worker_spans(
     Treating it as if it did would let a short row set -- which understates max and p95 -- pass as a
     clean measurement.
     """
-    if not timings:
+    if not timings and not counters:
         return 0.0
     started = time.perf_counter()
     before = telemetry.runtime_status()
     sink = WorkerTimingSink(rank)
     sink.publish(phase_timing_observations(timings), step)
+    # Inside the same before/after window as the spans, so the loss check below covers them too.
+    # Published separately they were invisible: emission exceptions are swallowed by Rigging and the
+    # counters went out before any baseline was taken, so a dropped counter row looked like a phase
+    # that simply was not measured.
+    if counters:
+        publish_worker_counters(counters, step=step, rank=rank)
     if previous_publish is not None:
         # Emitted under the step it actually belongs to, and deliberately NOT folded into that step's
         # totals: it happened after that interval closed, so subtracting it from that step's residual
