@@ -39,6 +39,11 @@ def test_export_command_encodes_lifecycle_storage_as_valid_hydra_values(parse_hy
     assert command[command.index("--memory") + 1] == spec.memory
     assert command[command.index("--disk") + 1] == spec.disk
     assert command[command.index("--storage-user") + 1] == spec.storage_user
+    # Both retry budgets, asserted as literals. An export job must not be retried into a second
+    # export, and preemption relaunches are a separate axis that defaults to 1000 -- this job is
+    # 8 nodes x 8 H100 with a two-hour timeout per attempt.
+    assert command[command.index("--max-retries") + 1] == "0"
+    assert command[command.index("--max-retries-preemption") + 1] == "0"
     assert "--target-cluster" not in command
     assert overrides["checkpoint_export.checkpoint_path"] == request.checkpoint_path
     assert overrides["checkpoint_export.export_root"] == request.export_path
