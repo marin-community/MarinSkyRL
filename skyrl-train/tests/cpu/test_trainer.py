@@ -17,7 +17,8 @@ from unittest.mock import MagicMock, patch
 
 
 from skyrl_train.distributed.dispatch import MeshRank
-from skyrl_train.group_admission import GroupAdvantageInvariant, InsufficientEligibleGroupsError
+from skyrl_train.group_admission import GroupAdvantageInvariant
+from skyrl_train.sync_group_admission import InsufficientEligibleGroupsError
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import ResumeMode
@@ -56,7 +57,7 @@ def test_sync_group_admission_exhaustion_raises_typed_error():
                 "algorithm": {
                     "policy_loss_type": "regular",
                     "tis_lcs_alert_threshold": 0.005,
-                    "dynamic_sampling": {"max_sample_batches": 1},
+                    "group_admission": {"max_sample_batches": 1},
                 },
             }
         }

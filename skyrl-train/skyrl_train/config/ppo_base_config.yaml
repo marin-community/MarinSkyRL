@@ -230,6 +230,10 @@ trainer:
       min_replace_ratio: 0.3
       informative_on: shaped
       min_reward_std: 0.0
+
+    group_admission:
+      # Bound replacement generation when completed groups cannot enter training.
+      max_sample_batches: 30
     
     clip_cov:
       clip_ratio: 0.0002

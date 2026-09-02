@@ -3,6 +3,8 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer_utils.py
 """
 
 from skyrl_train.group_admission import AdmissionRejection, GroupAdvantageInvariant, assert_training_groups_eligible
+from skyrl_train.sync_group_admission import admit_or_collect_replacements
+from skyrl_train.batch_sampling import filter_trajectory_batch
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from skyrl_train.utils.trainer_utils import (
     run_on_each_node,
@@ -14,8 +16,6 @@ from skyrl_train.utils.trainer_utils import (
     handle_dynamic_sampling,
     handle_replace_sampling,
     handle_filter_sampling,
-    handle_group_admission_sampling,
-    filter_trajectory_batch,
     build_dataloader,
 )
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
@@ -835,14 +835,14 @@ def test_sync_group_admission_waits_for_replacement_of_fully_masked_group():
     )
     state = {"sample_batch_count": 1}
 
-    incomplete = handle_group_admission_sampling(
+    incomplete = admit_or_collect_replacements(
         first_batch,
         ["kept", "kept", "masked", "masked"],
         invariant=GroupAdvantageInvariant.exact_physical(physical_group_size=2),
         rollout_logprobs_required=True,
         target_batch_size=2,
         tis_lcs_alert_threshold=0.005,
-        collected_state=state,
+        state=state,
     )
 
     assert incomplete.keep_sampling
@@ -862,14 +862,14 @@ def test_sync_group_admission_waits_for_replacement_of_fully_masked_group():
     assert state is not None
     state["sample_batch_count"] += 1
 
-    complete = handle_group_admission_sampling(
+    complete = admit_or_collect_replacements(
         replacement_batch,
         ["replacement", "replacement"],
         invariant=GroupAdvantageInvariant.exact_physical(physical_group_size=2),
         rollout_logprobs_required=True,
         target_batch_size=2,
         tis_lcs_alert_threshold=0.005,
-        collected_state=state,
+        state=state,
     )
 
     assert not complete.keep_sampling

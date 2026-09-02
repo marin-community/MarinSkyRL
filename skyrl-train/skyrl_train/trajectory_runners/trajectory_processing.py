@@ -626,6 +626,17 @@ def _outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
     return [NormalizedReward.from_output(reward).outcome for reward in rewards]
 
 
+def _rollout_logprob_presence(trajectory_batches: List[TrajectoryBatch], *, required: bool) -> List[bool]:
+    """Validate missing logprobs and return their per-group presence mask."""
+    presence = [output.get("rollout_logprobs") is not None for output in trajectory_batches]
+    if not required:
+        return presence
+    for output, has_logprobs in zip(trajectory_batches, presence, strict=True):
+        if not has_logprobs and not group_is_fully_excluded_from_training(output):
+            raise ValueError("rollout_logprobs are required for every generated group")
+    return presence
+
+
 def concatenate_trajectory_batches(
     trajectory_batches: List[TrajectoryBatch],
     *,
@@ -639,16 +650,8 @@ def concatenate_trajectory_batches(
     those that use `env_metrics` or `env_classes`.
     """
     assert len(trajectory_batches) > 0
-    has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in trajectory_batches]
+    has_rollout_logprobs = _rollout_logprob_presence(trajectory_batches, required=require_rollout_logprobs)
     any_has_logprobs = any(has_rollout_logprobs)
-    if require_rollout_logprobs:
-        missing_required_logprobs = [
-            output
-            for output, has_logprobs in zip(trajectory_batches, has_rollout_logprobs, strict=True)
-            if not has_logprobs and not group_is_fully_excluded_from_training(output)
-        ]
-        if missing_required_logprobs:
-            raise ValueError("rollout_logprobs are required for every generated group")
 
     # Handle mixed rollout_logprobs: if some batches have logprobs and others don't,
     # fill in placeholder [0.0] values for the batches that don't have them.

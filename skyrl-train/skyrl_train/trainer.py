@@ -61,8 +61,13 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import (
     AdmissionRejection,
     GroupAdvantageInvariant,
-    InsufficientEligibleGroupsError,
     assert_training_groups_eligible,
+)
+from skyrl_train.sync_group_admission import (
+    GroupAdmissionSamplingResult,
+    GroupAdmissionSamplingState,
+    InsufficientEligibleGroupsError,
+    admit_or_collect_replacements,
 )
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
@@ -74,8 +79,6 @@ from skyrl_train.utils.trainer_utils import (
     validate_consistency_for_latest_checkpoint,
     ResumeMode,
     DynamicSamplingState,
-    GroupAdmissionSamplingState,
-    GroupAdmissionSamplingResult,
     build_dataloader,
 )
 from skyrl_train.utils.utils import (
@@ -2048,7 +2051,7 @@ class RayPPOTrainer:
         else:
             self.group_admission_state["sample_batch_count"] += 1
 
-        result = trainer_utils.handle_group_admission_sampling(
+        result = admit_or_collect_replacements(
             trajectory_batch,
             uids,
             invariant=self.group_advantage_invariant,
@@ -2057,7 +2060,7 @@ class RayPPOTrainer:
             ),
             target_batch_size=int(self.cfg.trainer.train_batch_size),
             tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
-            collected_state=self.group_admission_state,
+            state=self.group_admission_state,
         )
         rejected_count = sum(result.rejection_counts.values())
         self.all_metrics.update(
@@ -2071,7 +2074,7 @@ class RayPPOTrainer:
             }
         )
 
-        max_sample_batches = int(self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches)
+        max_sample_batches = int(self.cfg.trainer.algorithm.group_admission.max_sample_batches)
         if (
             result.keep_sampling
             and max_sample_batches > 0

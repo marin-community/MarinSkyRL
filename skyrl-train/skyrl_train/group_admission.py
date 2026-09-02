@@ -128,10 +128,6 @@ class TrainingGroupInvariantError(ValueError):
         )
 
 
-class InsufficientEligibleGroupsError(RuntimeError):
-    """Synchronous generation exhausted its replacement budget before filling a batch."""
-
-
 class GeneratedGroup(Protocol):
     trajectory_batch: Mapping[str, object]
     earliest_model_step: int
