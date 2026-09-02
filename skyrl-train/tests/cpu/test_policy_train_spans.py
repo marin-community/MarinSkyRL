@@ -284,9 +284,7 @@ def test_ppo_train_wires_the_span_layer():
     # PolicyWorkerBase, not Worker: CriticWorkerBase has its own ppo_train and is not instrumented.
     source = inspect.getsource(PolicyWorkerBase.ppo_train)
     # The clock starts before the drain barrier, not after it.
-    assert source.index("_policy_spans_started = time.perf_counter()") < source.index(
-        "WORKER_PPO_TRAIN_DRAIN_BARRIER"
-    )
+    assert source.index("_policy_spans_started = time.perf_counter()") < source.index("WORKER_PPO_TRAIN_DRAIN_BARRIER")
     # The self-synchronising region opts out of the leading synchronise.
     assert 'span("policy_entry_barrier", presync=False)' in source
     # The previous step's publish cost is carried forward, and this step's is retained.
