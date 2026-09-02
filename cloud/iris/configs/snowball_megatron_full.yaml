@@ -1,4 +1,4 @@
-# Snowball 67B-A2B on the Megatron trainer at the curriculum round-5 geometry:
+# Snowball 67B-A2B on the Megatron trainer at the long-generation benchmark geometry:
 # 1024-token prompts, 8192-token generations, 64 prompts x 8 samples per step,
 # four PP2 x EP8 policy nodes (reference model colocated) and four expert-parallel
 # vLLM nodes. Checkpoints are off (ckpt_interval past max_steps): the Megatron
@@ -47,6 +47,10 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
+      ddp_config:
+        overlap_grad_reduce: true
+        overlap_param_gather: true
+        grad_reduce_in_fp32: false
   ref:
     megatron_config:
       tensor_model_parallel_size: 1

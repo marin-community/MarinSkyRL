@@ -27,7 +27,15 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.torch_utils import logprobs_from_logits
 from tests.gpu.grug_gpu_gates import require_hoppers
-from tests.gpu.grug_serving import grug_engine_client
+from tests.gpu.grug_serving import (
+    LM_HEAD_NAME,
+    ROUTER_NAME,
+    STACKED_EXPERT_NAME,
+    assert_engine_weights,
+    grug_engine_client,
+    rank0_validation_snapshot,
+    rollout_training_batch,
+)
 from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -36,13 +44,10 @@ NUM_EXPERTS = 8
 ROLLOUT_WORLD_SIZE = 2
 RESPONSE_LENGTH = 8
 PROMPT_LENGTH = 12
-STACKED_EXPERT_NAME = "model.layers.0.mlp.experts.gate_proj.weight"
 SERVING_EXPERT_INDEX_BY_NAME = {
     "model.layers.0.mlp.experts.0.gate_proj.weight": 0,
     "model.layers.0.mlp.experts.5.gate_proj.weight": 5,
 }
-LM_HEAD_NAME = "lm_head.weight"
-ROUTER_NAME = "model.layers.0.mlp.router.weight"
 LONG_LAYER_Q_NAME = "model.layers.3.self_attn.q_proj.weight"
 ATTN_GATE_NAME = "model.layers.1.self_attn.attn_gate.weight"
 GATED_NORM_NAME = "model.layers.1.attn_gated_norm.up_proj.weight"
@@ -245,11 +250,6 @@ def _assert_logprobs_close(actual: torch.Tensor, expected: torch.Tensor, respons
     assert diff.mean().item() < LOGPROB_MEAN_ABS_TOLERANCE, diff.mean()
 
 
-def _snapshot(policy, names: list[str]) -> dict[str, torch.Tensor]:
-    snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot", names))
-    return next(snapshot for snapshot in snapshots if snapshot.rank == 0).weights
-
-
 def _init_policy(cfg, world_size: int):
     return init_worker_with_type(
         "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=world_size, num_nodes=1, cfg=cfg
@@ -413,7 +413,7 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
         policy = _init_policy(cfg, world_size)
         names = [*PARAMETER_NAMES, *BIAS_NAMES]
         original = GrugMoeForCausalLM.from_pretrained(model_path, dtype=torch.float32).state_dict()
-        before = _snapshot(policy, names)
+        before = rank0_validation_snapshot(policy, names)
         for name in PARAMETER_NAMES:
             # Megatron holds bf16 parameters; the fp32 checkpoint rounds once on load.
             torch.testing.assert_close(before[name], original[name].to(torch.bfloat16).float(), rtol=0, atol=0)
@@ -421,7 +421,7 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
             torch.testing.assert_close(before[name], original[name].float(), rtol=0, atol=0)
 
         _train_step(policy, batch)
-        after = _snapshot(policy, names)
+        after = rank0_validation_snapshot(policy, names)
         for name in PARAMETER_NAMES:
             assert not torch.equal(after[name], before[name]), f"{name} did not update"
         for name in BIAS_NAMES:
@@ -437,59 +437,6 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
         _assert_logprobs_close(post_update, reloaded, batch["response_mask"])
     finally:
         ray.shutdown()
-
-
-def _rollout_batch(prompts: list[list[int]], rollout) -> TrainingInputBatch:
-    sequences = torch.tensor(
-        [prompt + response for prompt, response in zip(prompts, rollout["response_ids"])], dtype=torch.long
-    )
-    logprobs = torch.tensor(rollout["response_logprobs"], dtype=torch.float32)
-    ones = torch.ones_like(logprobs)
-    advantages = torch.tensor([[-1.0, -0.25, 0.5, 1.0], [1.0, 0.5, -0.25, -1.0]]).repeat(2, 1)[: sequences.shape[0]]
-    batch = TrainingInputBatch(
-        {
-            "sequences": sequences,
-            "attention_mask": torch.ones_like(sequences),
-            "action_log_probs": logprobs,
-            "base_action_log_probs": logprobs.clone(),
-            "rollout_logprobs": logprobs.clone(),
-            "values": torch.zeros_like(ones),
-            "returns": torch.zeros_like(ones),
-            "advantages": advantages,
-            "loss_mask": ones.long(),
-            "response_mask": ones.long(),
-        }
-    )
-    batch.metadata = {"response_length": logprobs.shape[1], "global_step": 0}
-    return batch
-
-
-def _assert_engine_weights(client, training: dict[str, torch.Tensor]) -> None:
-    names = [*BIAS_NAMES, *SERVING_EXPERT_INDEX_BY_NAME, LM_HEAD_NAME, ROUTER_NAME, ATTN_GATE_NAME, GATED_NORM_NAME]
-    found = {name: False for name in names}
-    for engine in client.engines:
-        per_rank = ray.get(engine.inference_engine_actor.read_engine_weights.remote(names, False))
-        if isinstance(per_rank, dict):
-            per_rank = [per_rank]
-        for rank_values in per_rank:
-            for name in names:
-                entry = rank_values[name]
-                if entry.get("skip"):
-                    continue
-                assert entry["found"], (name, entry)
-                found[name] = True
-                expected_dtype = "float32" if name in BIAS_NAMES or name == ROUTER_NAME else "bfloat16"
-                assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
-                expert_index = SERVING_EXPERT_INDEX_BY_NAME.get(name)
-                expected = training[STACKED_EXPERT_NAME][expert_index] if expert_index is not None else training[name]
-                actual = entry["tensor"]
-                if name not in BIAS_NAMES:
-                    expected = expected.to(torch.bfloat16).to(actual.dtype)
-                if name == LM_HEAD_NAME:
-                    assert actual.shape[0] >= expected.shape[0], (actual.shape, expected.shape)
-                    actual = actual[: expected.shape[0]]
-                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert all(found.values()), found
 
 
 @pytest.mark.vllm
@@ -519,15 +466,23 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
 
         policy = _init_policy(cfg, policy_world_size)
         names = [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME]
-        before = _snapshot(policy, names)
-        _train_step(policy, _rollout_batch(prompts, first_rollout))
-        training = _snapshot(policy, names)
+        before = rank0_validation_snapshot(policy, names)
+        _train_step(policy, rollout_training_batch(prompts, first_rollout))
+        training = rank0_validation_snapshot(policy, names)
         for name in PARAMETER_NAMES:
             assert not torch.equal(training[name], before[name]), f"{name} did not update"
 
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        _assert_engine_weights(client, training)
+        sync_names = [
+            *BIAS_NAMES,
+            *SERVING_EXPERT_INDEX_BY_NAME,
+            LM_HEAD_NAME,
+            ROUTER_NAME,
+            ATTN_GATE_NAME,
+            GATED_NORM_NAME,
+        ]
+        assert_engine_weights(client, sync_names, training, BIAS_NAMES, SERVING_EXPERT_INDEX_BY_NAME)
 
         asyncio.run(client.reset_prefix_cache())
         second_logprob = asyncio.run(client.generate(score_input))["prompt_logprobs"][0][-1][first_token]

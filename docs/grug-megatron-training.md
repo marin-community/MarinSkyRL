@@ -75,9 +75,9 @@ copies for backward. The snowball configs also set
 
 ## Throughput
 
-At the round-5 curriculum geometry (1024-token prompts, 8192-token
-generations, 64 prompts x 8 samples, four policy nodes at PP2 x EP8 x DP16 and
-four vLLM nodes at DP8 x EP8), measured on cw-us-east-02a:
+With 1024-token prompts, 8192-token generations, 64 prompts x 8 samples per
+step, four policy nodes at PP2 x EP8 x DP16 and four vLLM nodes at DP8 x EP8,
+against the FSDP2 trainer at the same geometry:
 
 | phase | Megatron | FSDP2 |
 | --- | --- | --- |
@@ -87,9 +87,10 @@ four vLLM nodes at DP8 x EP8), measured on cw-us-east-02a:
 | fwd_logprobs | 5.4s | 32s |
 | sync_weights | 15s | 11.3s |
 
-The Megatron numbers use `cloud/iris/configs/snowball_megatron_full.yaml` with
-`overlap_grad_reduce`, `overlap_param_gather`, bf16 gradient reduction, and
-`micro_forward_batch_size_per_gpu=4`. Rollout is now about 70% of the step.
+The Megatron numbers use `cloud/iris/configs/snowball_megatron_full.yaml`,
+which overlaps gradient reduction and parameter gathering with compute and
+reduces gradients in bf16. Generation takes about 70% of the step, so further
+gains come from the generator rather than the trainer.
 
 ## Query bias
 

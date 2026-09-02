@@ -48,6 +48,8 @@ GRUG_FLASH_ATTENTION_BACKEND = "flash_attention_2"
 GRUG_SUPPORTED_ATTENTION_BACKENDS = frozenset({GRUG_EAGER_ATTENTION_BACKEND, GRUG_FLASH_ATTENTION_BACKEND})
 GRUG_GATED_NORM_RANK = 128
 GRUG_ROUTING_RENORM_SUM = 2.5
+# Per-head output gate: sigmoid scaled so an untrained gate passes attention through unchanged.
+GRUG_ATTN_GATE_SCALE = 2.0
 GRUG_QK_RMS_NORM_EPS = 1e-6
 GRUG_XSA_EPS = 1e-6
 GRUG_ROUTER_RENORM_EPS = 1e-9
@@ -668,7 +670,7 @@ class GrugMoeAttention(nn.Module):
         dot = (attn_output * v_for_xsa).sum(dim=-1, keepdim=True)
         v_norm_sq = v_for_xsa.square().sum(dim=-1, keepdim=True)
         attn_output = attn_output - (dot / (v_norm_sq + GRUG_XSA_EPS)) * v_for_xsa
-        gate = 2.0 * torch.sigmoid(self.attn_gate(hidden_states)).unsqueeze(-1)
+        gate = GRUG_ATTN_GATE_SCALE * torch.sigmoid(self.attn_gate(hidden_states)).unsqueeze(-1)
         attn_output = attn_output * gate.to(attn_output.dtype)
         return self.o_proj(attn_output.reshape(batch, seq_len, -1))
 

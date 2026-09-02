@@ -40,6 +40,7 @@ from megatron.core.typed_torch import apply_module
 from torch import nn
 
 from skyrl_train.models.grug_moe import (
+    GRUG_ATTN_GATE_SCALE,
     GRUG_GATED_NORM_RANK,
     GRUG_ROUTER_RENORM_EPS,
     GRUG_ROUTING_RENORM_SUM,
@@ -210,7 +211,7 @@ class GrugSelfAttention(SelfAttention):
         """Scale every head by ``2 * sigmoid(attn_gate(x))``."""
 
         heads = core_attn_out.view(*gate.shape, self.hidden_size_per_attention_head)
-        gated = heads * (2.0 * torch.sigmoid(gate.float())).unsqueeze(-1).to(heads.dtype)
+        gated = heads * (GRUG_ATTN_GATE_SCALE * torch.sigmoid(gate.float())).unsqueeze(-1).to(heads.dtype)
         return gated.reshape(core_attn_out.shape)
 
 
