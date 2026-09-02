@@ -19,8 +19,6 @@ import torch
 from transformers import AutoConfig, AutoTokenizer
 
 from skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
@@ -31,6 +29,7 @@ from skyrl_train.models.grug_moe import (
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
+from tests.gpu.grug_serving import grug_engine_client
 from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
 
@@ -197,33 +196,6 @@ def _training_batch(prompts: list[list[int]], rollout) -> TrainingInputBatch:
     return _make_training_batch(sequences, torch.tensor(rollout["response_logprobs"], dtype=torch.float32))
 
 
-def _engine_client(cfg, model_path: str) -> InferenceEngineClient:
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    engines = create_ray_wrapped_inference_engines(
-        num_inference_engines=cfg.generator.num_inference_engines,
-        tensor_parallel_size=1,
-        data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
-        expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
-        model_dtype="bfloat16",
-        pretrain=model_path,
-        seed=23,
-        vllm_v1_disable_multiproc=True,
-        enable_prefix_caching=False,
-        enforce_eager=True,
-        engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
-        shared_pg=None,
-        gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
-        inference_engine_enable_sleep=False,
-        async_engine=True,
-        max_num_batched_tokens=128 * cfg.generator.inference_engine_data_parallel_size,
-        max_num_seqs=cfg.trainer.train_batch_size,
-        tokenizer=tokenizer,
-        backend="vllm",
-        engine_init_kwargs={"max_model_len": 128},
-    )
-    return InferenceEngineClient(engines, tokenizer, cfg)
-
-
 def _validation_snapshots(policy, names=()):
     return ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot", names))
 
@@ -377,7 +349,7 @@ def _run_full_cycle(
     available_gpus = int(ray.cluster_resources().get("GPU", 0))
     if available_gpus < required_gpus:
         pytest.skip(f"topology requires {required_gpus} Ray GPUs, found {available_gpus}")
-    client = _engine_client(cfg, model_path)
+    client = grug_engine_client(cfg, model_path)
     try:
         prompt_pattern = [[1, 17, 29, 5, 11, 3], [1, 19, 31, 7, 13, 3]]
         prompts = [prompt_pattern[idx % len(prompt_pattern)] for idx in range(cfg.trainer.train_batch_size)]

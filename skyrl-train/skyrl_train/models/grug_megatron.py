@@ -41,14 +41,13 @@ from torch import nn
 
 from skyrl_train.models.grug_moe import (
     GRUG_GATED_NORM_RANK,
-    GRUG_QK_RMS_NORM_EPS,
+    GRUG_ROUTER_RENORM_EPS,
     GRUG_ROUTING_RENORM_SUM,
+    GRUG_XSA_EPS,
     grug_long_layer_flags,
+    grug_rms_norm_no_weight,
     jax_top_k,
 )
-
-XSA_EPS = 1e-6
-ROUTER_RENORM_EPS = 1e-9
 
 
 def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None) -> torch.Tensor | None:
@@ -56,12 +55,7 @@ def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None
 
 
 class GrugGatedRMSNorm(nn.Module):
-    """RMSNorm followed by Grug's low-rank sigmoid gate: ``norm(x) * sigmoid(up(silu(down(norm(x)))))``.
-
-    The gate projections are replicated across tensor-parallel ranks. Their
-    ``sequence_parallel`` attribute makes Megatron all-reduce their gradients
-    when sequence parallelism splits the token dimension.
-    """
+    """RMSNorm followed by Grug's low-rank sigmoid gate: ``norm(x) * sigmoid(up(silu(down(norm(x)))))``."""
 
     def __init__(self, config: TransformerConfig, hidden_size: int, eps: float):
         super().__init__()
@@ -73,6 +67,7 @@ class GrugGatedRMSNorm(nn.Module):
         self.up_proj = nn.Linear(
             GRUG_GATED_NORM_RANK, hidden_size, bias=False, device=device, dtype=config.params_dtype
         )
+        # Replicated across TP ranks; the attribute makes Megatron all-reduce their grads under SP.
         for param in (self.down_proj.weight, self.up_proj.weight):
             param.sequence_parallel = config.sequence_parallel
 
@@ -83,15 +78,13 @@ class GrugGatedRMSNorm(nn.Module):
 
 
 class GrugQKNorm(nn.Module):
-    """Weightless RMS norm applied to each query and key head in fp32."""
+    """Weightless RMS norm applied to each query and key head."""
 
     def __init__(self, config: TransformerConfig, hidden_size: int, eps: float):
         super().__init__()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        fp32 = hidden_states.float()
-        scale = torch.rsqrt(fp32.square().mean(dim=-1, keepdim=True) + GRUG_QK_RMS_NORM_EPS)
-        return (fp32 * scale).to(hidden_states.dtype)
+        return grug_rms_norm_no_weight(hidden_states)
 
 
 class GrugSelfAttention(SelfAttention):
@@ -210,7 +203,7 @@ class GrugSelfAttention(SelfAttention):
         v = expanded_value.float()
         dot = (out * v).sum(dim=-1, keepdim=True)
         v_norm = v.square().sum(dim=-1, keepdim=True)
-        out = out - (dot / (v_norm + XSA_EPS)) * v
+        out = out - (dot / (v_norm + GRUG_XSA_EPS)) * v
         return out.to(core_attn_out.dtype).reshape(core_attn_out.shape)
 
     def _apply_head_gate(self, core_attn_out: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
@@ -239,7 +232,7 @@ class GrugTopKRouter(TopKRouter):
         _, topk_indices = jax_top_k(biased_logits, self.topk + 1)
         selected = topk_indices[:, : self.topk]
         combine = torch.sigmoid(torch.gather(logits, dim=-1, index=selected))
-        combine = combine * (GRUG_ROUTING_RENORM_SUM / (combine.sum(dim=-1, keepdim=True) + ROUTER_RENORM_EPS))
+        combine = combine * (GRUG_ROUTING_RENORM_SUM / (combine.sum(dim=-1, keepdim=True) + GRUG_ROUTER_RENORM_EPS))
         probs = torch.zeros_like(logits).scatter(1, selected, combine)
         routing_map = torch.zeros_like(logits, dtype=torch.bool).scatter(1, selected, True)
         return probs, routing_map

@@ -70,51 +70,45 @@ class GrugModelProvider(GPTModelProvider):
         )
 
 
-class GrugStackedExpertMapping(AutoMapping):
-    """Map one Megatron per-expert weight to a slice of Grug's stacked ``[E, ...]`` HF tensor."""
+class _StackedExpertExport:
+    """Mixin for mappings whose HF side is one stacked ``[E, ...]`` tensor per layer.
+
+    Grouped export re-stacks the per-expert Megatron weights; on import each
+    mapping slices its own expert out of the stacked HF tensor.
+    """
 
     is_grouped_export = True
 
-    def __init__(self, megatron_param: str, hf_param: str, permute_dims=None):
-        super().__init__(megatron_param, hf_param, permute_dims)
-        self.allow_hf_name_mismatch = True
-
-    @property
-    def group_key(self) -> str:
-        return self.hf_param
-
-    def hf_to_megatron(self, hf_weights: torch.Tensor, megatron_module):
-        expert = extract_expert_number_from_param(self.megatron_param)
-        return super().hf_to_megatron(hf_weights[expert].contiguous(), megatron_module)
-
-    def megatron_to_hf(self, megatron_weights, megatron_module):
-        if megatron_weights is not None:
-            megatron_weights = megatron_weights.contiguous()
-        return super().megatron_to_hf(megatron_weights, megatron_module)
-
-
-class GrugStackedGatedExpertMapping(GatedMLPMapping):
-    """Map one Megatron fused ``[gate; up]`` expert weight to slices of Grug's stacked gate/up tensors."""
-
-    is_grouped_export = True
-
-    def __init__(self, megatron_param: str, gate: str, up: str):
-        super().__init__(megatron_param, gate, up)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The base constructor resets this instance attribute, so set it afterwards.
         self.allow_hf_name_mismatch = True
 
     @property
     def group_key(self) -> str:
         return str(self.hf_param)
 
-    def hf_to_megatron(self, hf_weights: dict[str, torch.Tensor], megatron_module):
-        expert = extract_expert_number_from_param(self.megatron_param)
-        sliced = {name: weight[expert].contiguous() for name, weight in hf_weights.items()}
-        return super().hf_to_megatron(sliced, megatron_module)
-
     def megatron_to_hf(self, megatron_weights, megatron_module):
         if megatron_weights is not None:
             megatron_weights = megatron_weights.contiguous()
         return super().megatron_to_hf(megatron_weights, megatron_module)
+
+
+class GrugStackedExpertMapping(_StackedExpertExport, AutoMapping):
+    """Map one Megatron per-expert weight to a slice of Grug's stacked HF tensor."""
+
+    def hf_to_megatron(self, hf_weights: torch.Tensor, megatron_module):
+        expert = extract_expert_number_from_param(self.megatron_param)
+        return super().hf_to_megatron(hf_weights[expert].contiguous(), megatron_module)
+
+
+class GrugStackedGatedExpertMapping(_StackedExpertExport, GatedMLPMapping):
+    """Map one Megatron fused ``[gate; up]`` expert weight to slices of Grug's stacked gate/up tensors."""
+
+    def hf_to_megatron(self, hf_weights: dict[str, torch.Tensor], megatron_module):
+        expert = extract_expert_number_from_param(self.megatron_param)
+        sliced = {name: weight[expert].contiguous() for name, weight in hf_weights.items()}
+        return super().hf_to_megatron(sliced, megatron_module)
 
 
 def _gated_norm_mappings(megatron_prefix: str, hf_norm: str, hf_gate_prefix: str) -> list[ReplicatedMapping]:

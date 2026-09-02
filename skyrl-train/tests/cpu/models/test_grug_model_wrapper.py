@@ -59,14 +59,18 @@ def test_grug_training_options_ignore_other_models():
     )
 
 
-@pytest.mark.parametrize("strategy", [None, "fsdp", "deepspeed", "megatron"])
-def test_grug_training_strategy_rejects_non_fsdp2_backends(strategy):
-    with pytest.raises(ValueError, match="trainer.strategy=fsdp2"):
+@pytest.mark.parametrize("strategy", [None, "fsdp", "deepspeed"])
+def test_grug_training_strategy_rejects_unsupported_backends(strategy):
+    with pytest.raises(ValueError, match="trainer.strategy in"):
         validate_grug_training_strategy(GRUG_MOE_MODEL_TYPE, strategy)
 
 
-def test_grug_training_strategy_accepts_fsdp2_and_ignores_other_models():
-    validate_grug_training_strategy(GRUG_MOE_MODEL_TYPE, "fsdp2")
+@pytest.mark.parametrize("strategy", ["fsdp2", "megatron"])
+def test_grug_training_strategy_accepts_supported_backends(strategy):
+    validate_grug_training_strategy(GRUG_MOE_MODEL_TYPE, strategy)
+
+
+def test_grug_training_strategy_ignores_other_models():
     validate_grug_training_strategy("qwen3", "deepspeed")
 
 

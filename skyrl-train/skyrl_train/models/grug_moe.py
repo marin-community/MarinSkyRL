@@ -49,6 +49,8 @@ GRUG_SUPPORTED_ATTENTION_BACKENDS = frozenset({GRUG_EAGER_ATTENTION_BACKEND, GRU
 GRUG_GATED_NORM_RANK = 128
 GRUG_ROUTING_RENORM_SUM = 2.5
 GRUG_QK_RMS_NORM_EPS = 1e-6
+GRUG_XSA_EPS = 1e-6
+GRUG_ROUTER_RENORM_EPS = 1e-9
 GRUG_SUPPORTED_TRAINING_STRATEGIES = frozenset({"fsdp2", "megatron"})
 
 
@@ -314,7 +316,7 @@ class GrugMoeRMSNorm(nn.Module):
         return (normalized * self.weight.float()).to(input_dtype)
 
 
-def _rms_norm_no_weight(hidden_states: torch.Tensor) -> torch.Tensor:
+def grug_rms_norm_no_weight(hidden_states: torch.Tensor) -> torch.Tensor:
     input_dtype = hidden_states.dtype
     fp32 = hidden_states.float()
     return (fp32 * torch.rsqrt(fp32.square().mean(dim=-1, keepdim=True) + GRUG_QK_RMS_NORM_EPS)).to(input_dtype)
@@ -473,7 +475,7 @@ class GrugMoeRouter(nn.Module, NativeRouterObserverEmitter):
             selected_logits = torch.gather(router_logits, dim=-1, index=selected_experts)
             combine_weights = torch.sigmoid(selected_logits)
             combine_weights = combine_weights * (
-                GRUG_ROUTING_RENORM_SUM / (combine_weights.sum(dim=-1, keepdim=True) + 1e-9)
+                GRUG_ROUTING_RENORM_SUM / (combine_weights.sum(dim=-1, keepdim=True) + GRUG_ROUTER_RENORM_EPS)
             )
 
             emit_router_forward(
@@ -648,8 +650,8 @@ class GrugMoeAttention(nn.Module):
         q = self.q_proj(hidden_states).view(batch, seq_len, self.config.num_attention_heads, self.config.head_dim)
         k = self.k_proj(hidden_states).view(batch, seq_len, self.config.num_key_value_heads, self.config.head_dim)
         v = self.v_proj(hidden_states).view(batch, seq_len, self.config.num_key_value_heads, self.config.head_dim)
-        q = _rms_norm_no_weight(q)
-        k = _rms_norm_no_weight(k)
+        q = grug_rms_norm_no_weight(q)
+        k = grug_rms_norm_no_weight(k)
         if not is_long:
             q, k = _apply_half_rope(q, k, position_ids, self.config.rope_theta)
         scale = self.config.qk_mult * (self.config.qk_mult_long_scale if is_long else 1.0)
@@ -665,7 +667,7 @@ class GrugMoeAttention(nn.Module):
 
         dot = (attn_output * v_for_xsa).sum(dim=-1, keepdim=True)
         v_norm_sq = v_for_xsa.square().sum(dim=-1, keepdim=True)
-        attn_output = attn_output - (dot / (v_norm_sq + 1e-6)) * v_for_xsa
+        attn_output = attn_output - (dot / (v_norm_sq + GRUG_XSA_EPS)) * v_for_xsa
         gate = 2.0 * torch.sigmoid(self.attn_gate(hidden_states)).unsqueeze(-1)
         attn_output = attn_output * gate.to(attn_output.dtype)
         return self.o_proj(attn_output.reshape(batch, seq_len, -1))

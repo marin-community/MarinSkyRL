@@ -21,14 +21,13 @@ from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeConfig, GrugMoeForCausalLM
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.torch_utils import logprobs_from_logits
 from tests.gpu.grug_gpu_gates import require_hoppers
+from tests.gpu.grug_serving import grug_engine_client
 from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -204,6 +203,7 @@ def _megatron_response_logprobs(policy, batch: TrainingInputBatch) -> torch.Tens
 def _assert_logprobs_close(actual: torch.Tensor, expected: torch.Tensor, response_mask: torch.Tensor) -> None:
     valid = response_mask.bool()
     diff = (actual[valid] - expected[valid]).abs()
+    print(f"logprob parity over {valid.sum().item()} tokens: max abs {diff.max().item():.4f}, mean abs {diff.mean().item():.4f}")
     assert diff.max().item() < LOGPROB_MAX_ABS_TOLERANCE, diff.max()
     assert diff.mean().item() < LOGPROB_MEAN_ABS_TOLERANCE, diff.mean()
 
@@ -290,33 +290,6 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
         ray.shutdown()
 
 
-def _engine_client(cfg, model_path: str) -> InferenceEngineClient:
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    engines = create_ray_wrapped_inference_engines(
-        num_inference_engines=cfg.generator.num_inference_engines,
-        tensor_parallel_size=1,
-        data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
-        expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
-        model_dtype="bfloat16",
-        pretrain=model_path,
-        seed=23,
-        vllm_v1_disable_multiproc=True,
-        enable_prefix_caching=False,
-        enforce_eager=True,
-        engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
-        shared_pg=None,
-        gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
-        inference_engine_enable_sleep=False,
-        async_engine=True,
-        max_num_batched_tokens=128 * cfg.generator.inference_engine_data_parallel_size,
-        max_num_seqs=cfg.trainer.train_batch_size,
-        tokenizer=tokenizer,
-        backend="vllm",
-        engine_init_kwargs={"max_model_len": 128},
-    )
-    return InferenceEngineClient(engines, tokenizer, cfg)
-
-
 def _rollout_batch(prompts: list[list[int]], rollout) -> TrainingInputBatch:
     sequences = torch.tensor(
         [prompt + response for prompt, response in zip(prompts, rollout["response_ids"])], dtype=torch.long
@@ -380,7 +353,7 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
     _write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=policy_world_size, pp=2, ep=1)
     initialize_ray(cfg)
-    client = _engine_client(cfg, str(model_path))
+    client = grug_engine_client(cfg, str(model_path))
     try:
         prompt_pattern = [[1, 17, 29, 5, 11, 3], [1, 19, 31, 7, 13, 3]]
         prompts = [prompt_pattern[idx % 2] for idx in range(cfg.trainer.train_batch_size)]
