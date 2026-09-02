@@ -203,7 +203,9 @@ def _megatron_response_logprobs(policy, batch: TrainingInputBatch) -> torch.Tens
 def _assert_logprobs_close(actual: torch.Tensor, expected: torch.Tensor, response_mask: torch.Tensor) -> None:
     valid = response_mask.bool()
     diff = (actual[valid] - expected[valid]).abs()
-    print(f"logprob parity over {valid.sum().item()} tokens: max abs {diff.max().item():.4f}, mean abs {diff.mean().item():.4f}")
+    print(
+        f"logprob parity over {valid.sum().item()} tokens: max abs {diff.max().item():.4f}, mean abs {diff.mean().item():.4f}"
+    )
     assert diff.max().item() < LOGPROB_MAX_ABS_TOLERANCE, diff.max()
     assert diff.mean().item() < LOGPROB_MEAN_ABS_TOLERANCE, diff.mean()
 
