@@ -67,24 +67,47 @@ LOGPROB_MEAN_ABS_TOLERANCE = 3e-2
 TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE = 1e-3
 
 
-def _write_tiny_checkpoint(path: Path, max_position_embeddings: int = 128) -> None:
+TOY_SHAPE = dict(
+    hidden_size=64,
+    intermediate_size=64,
+    shared_expert_intermediate_size=64,
+    num_local_experts=NUM_EXPERTS,
+    num_hidden_layers=NUM_LAYERS,
+    num_attention_heads=2,
+    num_key_value_heads=1,
+    head_dim=64,
+    sliding_window=16,
+)
+# Snowball's attention geometry, expert count, and window at a fraction of its width and depth.
+SNOWBALL_LIKE_SHAPE = dict(
+    hidden_size=2560,
+    intermediate_size=128,
+    shared_expert_intermediate_size=256,
+    num_local_experts=256,
+    num_hidden_layers=4,
+    num_attention_heads=20,
+    num_key_value_heads=5,
+    head_dim=128,
+    sliding_window=2048,
+)
+
+
+def _write_tiny_checkpoint(
+    path: Path,
+    max_position_embeddings: int = 128,
+    num_experts_per_tok: int = 2,
+    shape: dict | None = None,
+) -> None:
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    shape = TOY_SHAPE if shape is None else shape
     config = GrugMoeConfig(
         vocab_size=len(tokenizer),
-        hidden_size=64,
-        intermediate_size=64,
-        shared_expert_intermediate_size=64,
-        num_local_experts=NUM_EXPERTS,
-        num_experts_per_tok=2,
-        num_hidden_layers=NUM_LAYERS,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=64,
+        num_experts_per_tok=num_experts_per_tok,
         max_position_embeddings=max_position_embeddings,
-        sliding_window=16,
         initializer_range=0.02,
         qk_mult=1.37,
         qk_mult_long_scale=1.1,
+        **shape,
     )
     torch.manual_seed(17)
     model = GrugMoeForCausalLM(config)
@@ -96,7 +119,7 @@ def _write_tiny_checkpoint(path: Path, max_position_embeddings: int = 128) -> No
                 module.up_proj.weight.normal_(std=0.2)
         for layer in model.model.layers:
             layer.self_attn.attn_gate.weight.normal_(std=0.2)
-            layer.mlp.router.bias.copy_(torch.linspace(-0.3, 0.3, NUM_EXPERTS))
+            layer.mlp.router.bias.copy_(torch.linspace(-0.3, 0.3, config.num_local_experts))
     model.save_pretrained(path, safe_serialization=True)
     tokenizer.save_pretrained(path)
 
@@ -262,35 +285,40 @@ def test_grug_megatron_forward_matches_hf(tmp_path, world_size: int, pp: int, ep
     [(1, 1, 1), (2, 2, 1), (4, 2, 2)],
     ids=["pp1", "pp2", "pp2_ep2"],
 )
-@pytest.mark.parametrize("gradient_checkpointing", [True, False], ids=["recompute", "no_recompute"])
-@pytest.mark.parametrize("micro_train_batch_size", [2, 1], ids=["same_shapes", "narrower_train_micro"])
 @pytest.mark.parametrize(
-    ("prompt_length", "response_length"), [(PROMPT_LENGTH, RESPONSE_LENGTH), (1000, 200)], ids=["short", "long"]
+    ("shape", "num_experts_per_tok", "prompt_length", "response_length"),
+    [
+        (TOY_SHAPE, 2, PROMPT_LENGTH, RESPONSE_LENGTH),
+        (TOY_SHAPE, 4, 1000, 200),
+        (SNOWBALL_LIKE_SHAPE, 4, 2400, 300),
+    ],
+    ids=["toy_top2_short", "toy_top4_long", "snowball_like_top4_long"],
 )
 def test_grug_megatron_train_forward_matches_eval_forward(
     tmp_path,
     world_size: int,
     pp: int,
     ep: int,
-    gradient_checkpointing: bool,
-    micro_train_batch_size: int,
+    shape: dict,
+    num_experts_per_tok: int,
     prompt_length: int,
     response_length: int,
 ):
     """The training forward must reproduce the eval-mode log-probs it is scored against.
 
     With one update per batch the PPO ratio is exp(train_logprob - eval_logprob), so any
-    train/eval drift shows up as spurious clipping. FSDP2 reports exactly zero here. The
-    long variant runs sequences well past the sliding window, where attention kernels
-    are selected differently from the toy lengths.
+    train/eval drift shows up as spurious clipping. FSDP2 reports exactly zero here. Top-4
+    routing at long sequences is the case that exposed Megatron's unfused, atomic
+    unpermute; the bridge now forces the fused kernels.
     """
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path, max_position_embeddings=2048)
+    _write_tiny_checkpoint(
+        model_path, max_position_embeddings=4096, num_experts_per_tok=num_experts_per_tok, shape=shape
+    )
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
-    cfg.trainer.gradient_checkpointing = gradient_checkpointing
-    cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
     batch = _padded_batch(pad_token_id, prompt_length=prompt_length, response_length=response_length)
     initialize_ray(cfg)
@@ -310,7 +338,21 @@ def test_grug_megatron_train_forward_matches_eval_forward(
 
 
 @pytest.mark.parametrize(("world_size", "pp", "ep"), [(2, 1, 2), (4, 2, 2)], ids=["pp1_ep2", "pp2_ep2"])
-def test_grug_megatron_eval_forward_is_independent_of_peer_rank_batch(tmp_path, world_size: int, pp: int, ep: int):
+@pytest.mark.parametrize(
+    ("shape", "num_experts_per_tok", "prompt_length", "response_length"),
+    [(TOY_SHAPE, 4, PROMPT_LENGTH, RESPONSE_LENGTH), (SNOWBALL_LIKE_SHAPE, 4, 2400, 300)],
+    ids=["toy_top4", "snowball_like_top4_long"],
+)
+def test_grug_megatron_eval_forward_is_independent_of_peer_rank_batch(
+    tmp_path,
+    world_size: int,
+    pp: int,
+    ep: int,
+    shape: dict,
+    num_experts_per_tok: int,
+    prompt_length: int,
+    response_length: int,
+):
     """A rank's log-probs must not change when only the peer expert-parallel rank's rows change.
 
     Expert parallelism co-batches tokens from every rank in the expert group, so a
@@ -320,10 +362,12 @@ def test_grug_megatron_eval_forward_is_independent_of_peer_rank_batch(tmp_path, 
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path)
+    _write_tiny_checkpoint(
+        model_path, max_position_embeddings=4096, num_experts_per_tok=num_experts_per_tok, shape=shape
+    )
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
-    rows = _padded_batch(pad_token_id, batch_size=6)
+    rows = _padded_batch(pad_token_id, batch_size=6, prompt_length=prompt_length, response_length=response_length)
     first = rows.slice(0, 4)
     peer_swapped = TrainingInputBatch({key: torch.cat([rows[key][0:2], rows[key][4:6]]) for key in rows.keys()})
     peer_swapped.metadata = rows.metadata

@@ -172,6 +172,11 @@ class GrugMoeBridge(MegatronModelBridge):
         provider.moe_router_load_balancing_type = "none"
         provider.moe_aux_loss_coeff = 0.0
         provider.moe_grouped_gemm = True
+        # Megatron's unfused unpermute combines the top-k expert outputs with an atomic
+        # scatter-add. For k > 2 the summation order varies between runs, so the eval-mode
+        # old log-probs never match the training forward. TE's fused kernels reduce in a
+        # fixed order and are bit-reproducible.
+        provider.moe_permute_fusion = True
         return provider
 
     def mapping_registry(self) -> MegatronMappingRegistry:
