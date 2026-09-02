@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Drive SkyRL training from rank zero of an Iris-managed Ray cluster.
+"""Drive SkyRL training from rank zero of an Iris-managed allocation.
 
-Runs on rank 0 inside the frozen Iris task environment after the controller
-(``task_runtime.py``) has bootstrapped one cross-node Ray cluster and
-exported ``RAY_ADDRESS``. This runner parses the RL config, resolves HF task data,
-builds the SkyRL Hydra args, and execs the MarinSkyRL entrypoint attached to that
-Ray cluster (SkyRL's bare ``ray.init()`` honors ``RAY_ADDRESS``).
+For multi-node jobs, this runs after ``task_runtime.py`` has bootstrapped Ray and
+exported ``RAY_ADDRESS``. A single-node allocation can instead let SkyRL start local
+Ray. This runner parses the RL config, resolves task data, builds the Hydra args, and
+execs the MarinSkyRL entrypoint.
 
 Usage::
 
@@ -468,24 +467,22 @@ class LocalRLRunner:
         print(f"  WANDB_DIR={wandb_dir}")
 
     def _run_skyrl(self, entrypoint: str, hydra_args: List[str]) -> int:
-        """Exec the SkyRL entrypoint attached to the externally-managed Ray cluster.
-
-        The controller exported RAY_ADDRESS, so SkyRL's ``initialize_ray()`` (a bare
-        ``ray.init()``) attaches to the existing cluster; this runner must NOT call
-        its own ``ray.init(num_cpus=, num_gpus=)`` (forbidden when attaching).
-        """
+        """Exec SkyRL using local Ray or the controller-managed Ray cluster."""
         ray_address = os.environ.get("RAY_ADDRESS")
-        if not ray_address:
+        if not ray_address and self.config.num_nodes > 1:
             print(
                 "ERROR: RAY_ADDRESS is not set. This runner attaches to a Ray cluster "
                 "bootstrapped by task_runtime.py; run it via that controller.",
                 file=sys.stderr,
             )
             return 1
-        print(
-            f"\nAttaching to external Ray cluster at {ray_address} "
-            f"(num_nodes={self.config.num_nodes}, gpus_per_node={self._gpus_per_node()})"
-        )
+        if ray_address:
+            print(
+                f"\nAttaching to external Ray cluster at {ray_address} "
+                f"(num_nodes={self.config.num_nodes}, gpus_per_node={self._gpus_per_node()})"
+            )
+        else:
+            print("\nRAY_ADDRESS is unset; SkyRL will start local Ray for this single-node allocation")
 
         python_exe = str(self.rl_env_path / "bin" / "python") if self.rl_env_path else sys.executable
         cmd = [python_exe, "-m", entrypoint] + hydra_args
