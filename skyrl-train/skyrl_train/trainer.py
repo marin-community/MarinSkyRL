@@ -493,16 +493,10 @@ class RayPPOTrainer:
                     self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
                 finally:
                     await self._sync_weights_and_restore_rollout_residency()
-            elif self.cfg.trainer.offload_optimizer_for_weight_sync:
-                with Timer("offload_policy_optimizer_to_cpu", self.all_timings):
-                    self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-                try:
-                    with Timer("sync_weights", self.all_timings):
-                        ray.get(self.sync_policy_weights_to_inference_engines())
-                finally:
-                    with Timer("backload_policy_optimizer_to_gpu", self.all_timings):
-                        self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=False)
             else:
+                if self.cfg.trainer.offload_optimizer_during_rollouts:
+                    with Timer("offload_policy_optimizer_to_cpu", self.all_timings):
+                        self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
                 with Timer("sync_weights", self.all_timings):
                     ray.get(self.sync_policy_weights_to_inference_engines())
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
@@ -1933,6 +1927,9 @@ class RayPPOTrainer:
                     operation="policy ppo_train",
                 )
         else:
+            if self.cfg.trainer.offload_optimizer_during_rollouts:
+                with Timer("backload_policy_optimizer_to_gpu", self.all_timings):
+                    self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=False)
             if self.critic_model is not None:
                 with Timer("policy_critic_overlap_train", self.all_timings):
                     policy_refs = self.policy_model.async_run_ray_method("mesh", "ppo_train", data)

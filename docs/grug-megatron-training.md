@@ -36,9 +36,10 @@ its own weight-sync bucket; every other tensor is sent in the generator dtype.
 Re-stacking gathers every expert of a layer onto each rank before the tensor
 is sent, which needs a few GiB of headroom beyond the resident model, gradient
 buffers, and optimizer state. On the 67B-A2B snowball checkpoint at PP2 x EP8 x
-DP2 that headroom does not exist once the optimizer state is materialized, so
-disaggregated runs set `trainer.offload_optimizer_for_weight_sync=true` to move
-the optimizer state and gradient buffers to CPU for the duration of each sync.
+DP2 that headroom does not exist once the optimizer state is materialized, and a
+colocated reference model needs the same room for its forward, so disaggregated
+runs set `trainer.offload_optimizer_during_rollouts=true` to keep the optimizer
+state and gradient buffers on CPU from each policy update until the next one.
 
 ## Query bias
 

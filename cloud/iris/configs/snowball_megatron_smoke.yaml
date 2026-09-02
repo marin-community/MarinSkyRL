@@ -1,8 +1,9 @@
 # Snowball 67B-A2B on the Megatron trainer: four PP2 x EP8 policy nodes and one
 # expert-parallel vLLM node. Sized as a two-step smoke of rollout, update, and sync.
-# Launch policy nodes with 1800GB of host memory: the Megatron checkpoint writer
-# stages about 146GB of host RAM per rank (eight ranks per node) before writing,
-# and Ray kills the node at 95% of the pod limit during the save.
+# Launch policy nodes with 1800GB of host memory and 1000GB of disk. The Megatron
+# checkpoint writer stages about 146GB of host RAM per rank (eight ranks per
+# node) before writing, then each rank leaves a 46GB shard in /tmp next to the
+# 125GB staged HF checkpoint until the S3 upload finishes.
 entrypoint: standard
 
 context_budget:
@@ -17,7 +18,7 @@ trainer:
   strategy: megatron
   flash_attn: false
   use_sample_packing: false
-  offload_optimizer_for_weight_sync: true
+  offload_optimizer_during_rollouts: true
   gradient_checkpointing: true
   algorithm:
     advantage_estimator: grpo

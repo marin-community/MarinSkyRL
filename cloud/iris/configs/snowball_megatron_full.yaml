@@ -2,8 +2,8 @@
 # 1024-token prompts, 8192-token generations, 64 prompts x 8 samples per step,
 # four PP2 x EP8 policy nodes (reference model colocated) and four expert-parallel
 # vLLM nodes. Checkpoints are off (ckpt_interval past max_steps): the Megatron
-# checkpoint writer stages about 146GB of host RAM per rank before writing, which
-# needs 1800GB per node; see the smoke config.
+# checkpoint writer stages about 146GB of host RAM per rank before writing and
+# leaves 46GB per rank on disk during the upload; see the smoke config.
 entrypoint: standard
 
 context_budget:
@@ -18,7 +18,7 @@ trainer:
   strategy: megatron
   flash_attn: false
   use_sample_packing: false
-  offload_optimizer_for_weight_sync: true
+  offload_optimizer_during_rollouts: true
   gradient_checkpointing: true
   algorithm:
     advantage_estimator: grpo
