@@ -1183,7 +1183,7 @@ class PolicyWorkerBase(Worker):
                         local_step=local_step,
                     ),
                 ):
-                    with _policy_spans.span("policy_training_step_other"):
+                    with _policy_spans.span("policy_training_step"):
                         status = self.training_step(
                             experience,
                             global_step,

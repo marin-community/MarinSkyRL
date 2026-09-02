@@ -42,7 +42,11 @@ TIMING_PARENTS: dict[str, str | None] = {
     "policy_backward": "policy_ppo_train",
     "policy_optimizer_step": "policy_ppo_train",
     "policy_entropy_allreduce": "policy_ppo_train",
-    "policy_training_step_other": "policy_ppo_train",
+    # Inclusive of forward/backward/optimizer/entropy below it -- it wraps training_step,
+    # which contains them. Deliberately NOT in POLICY_TRAIN_SPANS: including it would count
+    # its children twice and drive the residual to roughly -parent, which is exactly what the
+    # first instrumented run showed (-1703 s against a 1706 s parent).
+    "policy_training_step": "policy_ppo_train",
     "policy_metric_allreduce": "policy_ppo_train",
     "policy_final_barrier": "policy_ppo_train",
     "policy_span_residual": "policy_ppo_train",
@@ -194,7 +198,6 @@ POLICY_TRAIN_SPANS = (
     "policy_backward",
     "policy_optimizer_step",
     "policy_entropy_allreduce",
-    "policy_training_step_other",
     "policy_metric_allreduce",
     "policy_final_barrier",
 )
@@ -337,7 +340,11 @@ class WorkerTimingSink:
                     "phase": observation.name,
                     "root": observation.root,
                     "parent": TIMING_PARENTS.get(observation.name) or "",
-                    "clock_domain": ("inclusive_wall" if observation.name == "policy_ppo_train" else "exclusive_wall"),
+                    "clock_domain": (
+                        "inclusive_wall"
+                        if observation.name in ("policy_ppo_train", "policy_training_step")
+                        else "exclusive_wall"
+                    ),
                     "role": WORKER_ROLE,
                     "rank": str(self.rank),
                     "step": str(step),
