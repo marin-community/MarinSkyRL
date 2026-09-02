@@ -117,7 +117,11 @@ def test_training_step_is_split_not_one_coarse_span():
     for name in ("policy_forward", "policy_backward", "policy_optimizer_step", "policy_entropy_allreduce"):
         assert TIMING_PARENTS[name] == "policy_ppo_train"
         assert name in POLICY_TRAIN_SPANS
-    assert "policy_training_step" not in TIMING_PARENTS, "the coarse span must be gone, not merely joined"
+    # It is registered but INCLUSIVE: it wraps training_step, which contains the four leaves above.
+    # Keeping it out of POLICY_TRAIN_SPANS is what stops the residual double-counting them -- the
+    # first instrumented run reported -1703 s against a 1706 s parent before this was fixed.
+    assert TIMING_PARENTS["policy_training_step"] == "policy_ppo_train"
+    assert "policy_training_step" not in POLICY_TRAIN_SPANS
 
 
 def test_published_rows_carry_worker_role_rank_and_an_exclusive_clock_domain():
@@ -172,7 +176,10 @@ def test_every_child_of_policy_ppo_train_is_either_a_measured_span_or_the_residu
     the residual.
     """
     children = {name for name, parent in TIMING_PARENTS.items() if parent == "policy_ppo_train"}
-    assert children == set(POLICY_TRAIN_SPANS) | {"policy_span_residual"}
+    # policy_training_step is the one INCLUSIVE child: it wraps training_step, which contains
+    # forward/backward/optimizer/entropy. It is registered so the tree is navigable, and excluded
+    # from POLICY_TRAIN_SPANS so the residual does not count its children a second time.
+    assert children == set(POLICY_TRAIN_SPANS) | {"policy_span_residual", "policy_training_step"}
 
 
 def test_presync_false_leaves_a_self_synchronising_region_measurable():
