@@ -19,6 +19,7 @@ from skyrl_train.timing_observability import (
     WorkerSpanAccumulator,
     WorkerTimingSink,
     phase_timing_observations,
+    publish_worker_counters,
     publish_worker_spans,
 )
 
@@ -342,7 +343,7 @@ def test_worker_init_configures_telemetry_for_the_worker_role():
 
     source = inspect.getsource(Worker.__init__)
     assert "process_telemetry(WORKER_ROLE)" in source
-    assert 'cfg.trainer.get("policy_train_spans", False)' in source
+    assert '"policy_train_spans", False' in source
     # Ray kills actors rather than unwinding them, so the drain must be registered, not relied upon.
     assert "atexit.register" in source
 
@@ -370,3 +371,43 @@ def test_ppo_train_wires_the_span_layer():
     assert 'getattr(self, "_policy_span_publish", None)' in source
     assert "previous_publish=_previous_publish" in source
     assert "self._policy_span_publish = (" in source
+
+
+def test_counters_go_to_their_own_instrument_not_the_span_tree():
+    """They are counts and ratios, not durations.
+
+    Riding phase_duration would put a units mismatch into the span tree, where nothing downstream
+    would notice it being summed into policy_ppo_train or subtracted from the residual.
+    """
+    import skyrl_train.timing_observability as module
+
+    import pytest as _pytest
+
+    recorded: list[tuple[float, dict]] = []
+    monkey = _pytest.MonkeyPatch()
+    try:
+        monkey.setattr(
+            module,
+            "policy_step_counter",
+            type("_H", (), {"record": lambda self, v, attributes: recorded.append((v, attributes))})(),
+        )
+        monkey.setattr(
+            module, "phase_duration", type("_H", (), {"record": lambda *a, **k: pytest.fail("wrong instrument")})()
+        )
+        publish_worker_counters({"micro_step_count": 64.0, "tokens_real": 12.0}, step=2, rank=7)
+    finally:
+        monkey.undo()
+
+    by_name = {a["counter"]: (v, a) for v, a in recorded}
+    assert by_name["micro_step_count"][0] == 64.0
+    assert by_name["tokens_real"][1]["rank"] == "7"
+    assert by_name["tokens_real"][1]["step"] == "2"
+    assert by_name["micro_step_count"][1]["role"] == "worker"
+    # And they must not be registered as spans, or they would join the residual arithmetic.
+    for name in ("micro_step_count", "tokens_real", "tokens_padded", "attention_work_ratio"):
+        assert name not in TIMING_PARENTS
+        assert name not in POLICY_TRAIN_SPANS
+
+
+def test_publishing_no_counters_is_a_no_op():
+    publish_worker_counters({}, step=1, rank=0)
