@@ -36,7 +36,7 @@ trainer:
 
   policy:
     model:
-      path: Qwen/Qwen3-0.6B
+      path: Qwen/Qwen3-0.6B-Instruct
     levanter:
       endpoint_urls: []
       data_parallel_size: 1
