@@ -716,6 +716,7 @@ def test_parser_defers_runtime_identity_to_resolution_and_keeps_recovery_retries
     assert args.runtime_commit is None
     assert args.runtime_profile is None
     assert args.max_retries == 6
+    assert args.max_retries_preemption == 1000
     assert args.memory == "auto"
     assert args.disk == "auto"
 
@@ -727,6 +728,8 @@ def test_launch_applies_failure_retry_budget_to_tasks_and_job(tmp_path, monkeypa
         [
             "--job-name",
             "retry-budget",
+            "--max-retries-preemption",
+            "0",
             "--memory",
             "64Gi",
             "--disk",
@@ -763,6 +766,10 @@ def test_launch_applies_failure_retry_budget_to_tasks_and_job(tmp_path, monkeypa
     assert outcome.job_id == "retry-budget-job"
     assert submitted["max_retries_failure"] == 3
     assert submitted["max_task_failures"] == 3
+    # A separate axis from the failure budget, and asserted as a literal 0 rather than against args:
+    # iris's own default is 1000, so comparing the two would pass even when the value never reaches
+    # submit at all.
+    assert submitted["max_retries_preemption"] == 0
 
 
 def test_direct_launcher_exports_terminal_policy_after_training(monkeypatch):
