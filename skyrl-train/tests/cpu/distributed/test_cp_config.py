@@ -83,6 +83,9 @@ ADDITIVE_DYNAMIC_SAMPLING_FIELDS = {
     "informative_on": "shaped",
     "min_reward_std": 0.0,
 }
+ADDITIVE_GROUP_ADMISSION_FIELDS = {
+    "max_sample_batches": 30,
+}
 ADDITIVE_OVERLONG_FIELDS = {
     "penalty_scale": 1.0,
 }
@@ -169,6 +172,10 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         container["trainer"]["algorithm"].pop(k, None)
     for k in ADDITIVE_DYNAMIC_SAMPLING_FIELDS:
         container["trainer"]["algorithm"]["dynamic_sampling"].pop(k, None)
+    for k in ADDITIVE_GROUP_ADMISSION_FIELDS:
+        container["trainer"]["algorithm"]["group_admission"].pop(k, None)
+    if not container["trainer"]["algorithm"]["group_admission"]:
+        container["trainer"]["algorithm"].pop("group_admission")
     for k in ADDITIVE_GENERATOR_FIELDS:
         container["generator"].pop(k, None)
     for k in ADDITIVE_TEACHER_FIELDS:
