@@ -13,7 +13,7 @@ from skyrl_train.fully_async_trainer import (
     _AsyncStalenessManager,
     _GenerationQueues,
 )
-from skyrl_train.dynamic_sampling import GroupSelectionPolicy, resolve_dynamic_sampling_criteria
+from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, resolve_dynamic_sampling_criteria
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
@@ -131,7 +131,7 @@ async def test_dapo_dataloader_resamples_discarded_prompts_after_finite_source_e
         source,
         mini_batch_size=2,
         data_tracker=tracker,
-        dynamic_sampling_type="filter",
+        dynamic_sampling_type=DynamicSamplingType.FILTER,
     )
 
     first = await dataloader.get_next_non_consumed_data()
@@ -149,7 +149,7 @@ async def test_dapo_dataloader_stops_when_every_source_uid_was_consumed():
         _DatasetRows(["consumed"]),
         mini_batch_size=1,
         data_tracker=tracker,
-        dynamic_sampling_type="filter",
+        dynamic_sampling_type=DynamicSamplingType.FILTER,
     )
 
     assert await dataloader.get_next_non_consumed_data() is None
@@ -306,7 +306,7 @@ async def test_batch_assembly_fails_when_dynamic_sampling_exhausts_candidate_bud
     trainer, queues = _batch_assembly_state(
         mini_batch_size=2,
         accepted=2,
-        dynamic_sampling_type="filter",
+        dynamic_sampling_type=DynamicSamplingType.FILTER,
         informative_on="unshaped",
         max_sample_batches=1,
     )
@@ -325,7 +325,7 @@ async def test_dapo_replacement_sampling_remains_bounded_by_candidate_budget():
         _DatasetRows(["trained", "discarded"]),
         mini_batch_size=1,
         data_tracker=tracker,
-        dynamic_sampling_type="filter",
+        dynamic_sampling_type=DynamicSamplingType.FILTER,
     )
     trainer, queues = _batch_assembly_state(
         mini_batch_size=1,

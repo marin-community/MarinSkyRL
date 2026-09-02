@@ -306,14 +306,11 @@ class _AsyncDataloader:
         train_dataloader: StatefulDataLoader,
         mini_batch_size: int,
         data_tracker: DataConsumptionTracker,
-        dynamic_sampling_type: DynamicSamplingType | str | None = None,
+        dynamic_sampling_type: DynamicSamplingType | None = None,
     ):
         self._train_dataloader = train_dataloader
         self._train_dataloader_initial_state = train_dataloader.state_dict()
-        resolved_sampling_type = (
-            DynamicSamplingType(dynamic_sampling_type) if dynamic_sampling_type is not None else None
-        )
-        self._sample_with_replacement = resolved_sampling_type is DynamicSamplingType.FILTER
+        self._sample_with_replacement = dynamic_sampling_type is DynamicSamplingType.FILTER
         self._effective_dataloader_length = (
             len(self._train_dataloader)
             if self._sample_with_replacement
