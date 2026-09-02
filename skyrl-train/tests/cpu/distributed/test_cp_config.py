@@ -186,6 +186,8 @@ def test_all_defaults_is_structurally_identical_to_baseline():
     container["trainer"]["policy"].pop("host_memory_monitor", None)
     container["trainer"]["algorithm"].pop("tis_splice", None)
     container["trainer"]["algorithm"].pop("tis_lcs_alert_threshold", None)
+    container["trainer"]["algorithm"].pop("group_admission", None)
+    container["trainer"]["policy"]["megatron_config"].pop("check_train_eval_parity", None)
     golden = OmegaConf.to_container(OmegaConf.load(GOLDEN), resolve=False, throw_on_missing=False)
     assert container == golden, "default config drifted from the no-CP baseline"
 
