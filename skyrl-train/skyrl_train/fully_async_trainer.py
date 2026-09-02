@@ -293,24 +293,38 @@ class _AsyncDataloader:
     A train dataloader wrapper that accommodates the need of fully async training, including:
     - Thread-safe dataloader iteration with a lock, as there are multiple parallel generation workers polling data.
     - Skip-on-resume: uses DataConsumptionTracker's epoch-scoped UIDs to skip already-consumed data.
-    - Set the effective dataloader length to be divisible by mini-batch size, since we cannot rely on `drop_last`
-      because the batch size is 1 in fully async training.
+    - Finite iteration for ordinary async training and replacement passes for DAPO filter sampling.
+    - For finite iteration, set the effective length to a multiple of the mini-batch size because the underlying
+      fully async dataloader has batch size 1 and cannot use `drop_last` for the training mini-batch.
 
     Data consumption tracking (UID recording, epoch transitions, checkpoint persistence)
     is handled by DataConsumptionTracker + DataTrackingCallback, not by this class.
     """
 
     def __init__(
-        self, train_dataloader: StatefulDataLoader, mini_batch_size: int, data_tracker: DataConsumptionTracker
+        self,
+        train_dataloader: StatefulDataLoader,
+        mini_batch_size: int,
+        data_tracker: DataConsumptionTracker,
+        dynamic_sampling_type: DynamicSamplingType | str | None = None,
     ):
         self._train_dataloader = train_dataloader
         self._train_dataloader_initial_state = train_dataloader.state_dict()
-        self._effective_dataloader_length = len(self._train_dataloader) // mini_batch_size * mini_batch_size
+        resolved_sampling_type = (
+            DynamicSamplingType(dynamic_sampling_type) if dynamic_sampling_type is not None else None
+        )
+        self._sample_with_replacement = resolved_sampling_type is DynamicSamplingType.FILTER
+        self._effective_dataloader_length = (
+            len(self._train_dataloader)
+            if self._sample_with_replacement
+            else len(self._train_dataloader) // mini_batch_size * mini_batch_size
+        )
         self._iter = enumerate(self._train_dataloader)
         self._lock: asyncio.Lock = asyncio.Lock()
         self._data_tracker = data_tracker
         self._pending_uids: set[str] = set()
         self._exhausted: bool = False
+        self._eligible_rows_returned_in_pass = 0
 
     def reserve_pending_uids(self, uids: set[str]) -> None:
         """Exclude checkpointed pending work from restarted dataset iteration."""
@@ -330,6 +344,7 @@ class _AsyncDataloader:
         # the beginning of the dataset (not the exhausted iterator from __init__).
         self._iter = enumerate(self._train_dataloader)
         self._exhausted = False
+        self._eligible_rows_returned_in_pass = 0
 
     async def reset_at_epoch_end(self) -> None:
         """Reset dataloader iterator for the next epoch.
@@ -343,29 +358,37 @@ class _AsyncDataloader:
             self._iter = enumerate(self._train_dataloader)
             self._pending_uids.clear()
             self._exhausted = False
+            self._eligible_rows_returned_in_pass = 0
 
     async def get_next_non_consumed_data(self):
         """
         Return the next batch of training data.
 
-        If we loaded from a checkpoint, it will skip the already-consumed data. Returns None if the dataloader is exhausted.
+        If we loaded from a checkpoint, it skips already-consumed data. DAPO filter sampling starts a new source
+        pass after exhaustion so rejected prompts can be generated again. Other modes return None at exhaustion.
         """
         assert self._iter is not None and self._lock is not None, "Dataloader not initialized; call reset() first"
-        # Resume skips groups that already trained and groups restored as pending work.
-        skip_set = self._data_tracker.get_consumed_uids_in_epoch() | self._pending_uids
         async with self._lock:
-            try:
-                while True:
+            # Read consumed UIDs after acquiring the iterator lock. Replacement passes can overlap a training step.
+            skip_set = self._data_tracker.get_consumed_uids_in_epoch() | self._pending_uids
+            while True:
+                try:
                     # Keep polling until we get a non-consumed data or the dataloader is exhausted.
-                    iter_idx, rand_prompts = next(self._iter)
-                    if iter_idx >= self._effective_dataloader_length:
-                        raise StopIteration
-                    uid = rand_prompts[0]["uid"]
-                    if uid not in skip_set:
-                        return rand_prompts
-            except StopIteration:
-                self._exhausted = True
-                return None
+                    while True:
+                        iter_idx, rand_prompts = next(self._iter)
+                        if iter_idx >= self._effective_dataloader_length:
+                            raise StopIteration
+                        uid = rand_prompts[0]["uid"]
+                        if uid not in skip_set:
+                            self._eligible_rows_returned_in_pass += 1
+                            return rand_prompts
+                except StopIteration:
+                    if self._sample_with_replacement and self._eligible_rows_returned_in_pass:
+                        self._iter = enumerate(self._train_dataloader)
+                        self._eligible_rows_returned_in_pass = 0
+                        continue
+                    self._exhausted = True
+                    return None
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
@@ -457,7 +480,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             mini_batch_size=self.mini_batch_size,
             num_steps_per_epoch=self.num_steps_per_epoch,
         )
-        self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.mini_batch_size, self.data_tracker)
+        self.async_train_dataloader = _AsyncDataloader(
+            self.train_dataloader,
+            self.mini_batch_size,
+            self.data_tracker,
+            self._dynamic_sampling_type,
+        )
         # Register the data tracking callback for checkpoint persistence and epoch transitions
         self.callback_handler.add_callback(DataTrackingCallback(self.data_tracker))
         # Register buffer checkpoint callback for saving/restoring generation buffer on resume
@@ -1384,7 +1412,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 completed_groups = _drain_queue(queues.completed)
                 partition = self._partition_completed_groups(
                     completed_groups,
-                    occupied_uids={group.uid for group in accepted_groups},
+                    occupied_uids={group.uid for group in accepted_groups}
+                    | self.data_tracker.get_consumed_uids_in_epoch(),
                 )
                 for group, decision in partition.rejected_groups:
                     queues.retries.put_nowait(group.source_prompts)

@@ -19,6 +19,7 @@ from skyrl_train.fully_async_trainer import (
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
 from skyrl_train.dynamic_sampling import GroupSelectionPolicy
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
+from skyrl_train.utils.data_tracker import DataConsumptionTracker
 
 
 def _make_queues(*, active_producers=0) -> _GenerationQueues:
@@ -55,6 +56,7 @@ def _bare_trainer(
         max_staleness_steps=0,
         rollout_logprobs_required=False,
     )
+    trainer.data_tracker = DataConsumptionTracker(mini_batch_size=mini_batch_size, num_steps_per_epoch=1)
     return trainer
 
 
