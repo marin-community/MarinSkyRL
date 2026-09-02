@@ -2,7 +2,6 @@
 
 import asyncio
 import io
-import socket
 from dataclasses import dataclass
 
 import numpy as np
@@ -118,10 +117,13 @@ class LevanterPolicyProxy:
         if inference_engine_client.backend != "vllm":
             raise ValueError("Levanter weight sync currently requires the vLLM generator backend")
 
-        master_addr = ray._private.services.get_node_ip_address()
-        with socket.socket() as sock:
-            sock.bind(("", 0))
-            master_port = sock.getsockname()[1]
+        rendezvous = requests.get(
+            f"{self.endpoint}/weight_sync_address",
+            timeout=self.timeout_seconds,
+        )
+        rendezvous.raise_for_status()
+        master_addr = str(rendezvous.json()["master_addr"])
+        master_port = int(rendezvous.json()["master_port"])
         world_size = (
             int(self._generator_config.num_inference_engines)
             * int(self._generator_config.inference_engine_tensor_parallel_size)
