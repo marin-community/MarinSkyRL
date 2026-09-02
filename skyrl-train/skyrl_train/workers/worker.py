@@ -367,8 +367,9 @@ class Worker(DistributedTorchRayActor):
         if cfg.trainer.get("policy_train_spans", False):
             self._policy_span_telemetry = contextlib.ExitStack()
             self._policy_span_telemetry.enter_context(process_telemetry(WORKER_ROLE))
-            # Ray kills actors rather than unwinding them, so the drain has to be registered here or
-            # the last step's rows are lost on shutdown.
+            # Best effort only. Ray tears actors down with ray.kill, which does not run atexit
+            # handlers, so durability comes from the flush after each step's publish -- see
+            # publish_worker_spans -- and not from here.
             atexit.register(self._policy_span_telemetry.close)
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
 
@@ -1047,7 +1048,9 @@ class PolicyWorkerBase(Worker):
             # (staggered entry), then RELEASE together — the timestamp CLUSTER at release proves
             # co-arrival; unshard #6936 must NOT time out afterward.
             logger.info(f"WORKER_PPO_TRAIN_DRAIN_BARRIER rank={self._rank}")
-            with _policy_spans.span("policy_entry_barrier"):
+            # presync=False: this region synchronises itself, and a leading sync would drain the
+            # queue first and leave the wrapped one timing nothing.
+            with _policy_spans.span("policy_entry_barrier", presync=False):
                 torch.cuda.synchronize()
                 torch.distributed.barrier()
 
