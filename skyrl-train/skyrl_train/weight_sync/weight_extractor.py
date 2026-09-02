@@ -39,7 +39,7 @@ def validate_weight_sync_mode(model_type: str, *, fuse_weights: bool) -> None:
     """Reject transport modes that cannot preserve a model's state contract."""
 
     if model_type == GRUG_MOE_MODEL_TYPE and fuse_weights:
-        raise ValueError("Grug FSDP2 weight sync does not support fused weights")
+        raise ValueError("Grug weight sync does not support fused weights")
 
 
 class WeightExtractor(ABC):

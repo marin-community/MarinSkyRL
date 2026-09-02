@@ -46,9 +46,10 @@ GRUG_MOE_ARTIFACT_SCHEMA_VERSION = 1
 GRUG_EAGER_ATTENTION_BACKEND = "eager"
 GRUG_FLASH_ATTENTION_BACKEND = "flash_attention_2"
 GRUG_SUPPORTED_ATTENTION_BACKENDS = frozenset({GRUG_EAGER_ATTENTION_BACKEND, GRUG_FLASH_ATTENTION_BACKEND})
-_GATED_NORM_RANK = 128
-_ROUTING_RENORM_SUM = 2.5
-_QK_RMS_NORM_EPS = 1e-6
+GRUG_GATED_NORM_RANK = 128
+GRUG_ROUTING_RENORM_SUM = 2.5
+GRUG_QK_RMS_NORM_EPS = 1e-6
+GRUG_SUPPORTED_TRAINING_STRATEGIES = frozenset({"fsdp2", "megatron"})
 
 
 def is_grug_router_bias(model_type: str | None, name: str) -> bool:
@@ -60,8 +61,20 @@ def is_grug_router_bias(model_type: str | None, name: str) -> bool:
 def validate_grug_training_strategy(model_type: str | None, training_strategy: str | None) -> None:
     """Reject Grug before an unsupported trainer backend allocates the model."""
 
-    if model_type == GRUG_MOE_MODEL_TYPE and training_strategy != "fsdp2":
-        raise ValueError("Grug policy training requires trainer.strategy=fsdp2")
+    if model_type == GRUG_MOE_MODEL_TYPE and training_strategy not in GRUG_SUPPORTED_TRAINING_STRATEGIES:
+        raise ValueError(
+            f"Grug policy training requires trainer.strategy in {sorted(GRUG_SUPPORTED_TRAINING_STRATEGIES)}"
+        )
+
+
+def grug_long_layer_flags(num_layers: int) -> tuple[bool, ...]:
+    """Return which decoder layers use full causal attention without RoPE.
+
+    Grug makes every fourth layer and the final layer a "long" layer; the
+    remaining layers use sliding-window attention with half-RoPE.
+    """
+
+    return tuple(idx % 4 == 3 or idx == num_layers - 1 for idx in range(num_layers))
 
 
 def _validate_flash_attention_mask(attention_mask: torch.Tensor) -> None:
@@ -103,7 +116,7 @@ def validate_grug_expert_parallel_runtime(*, use_grouped_mm: bool, ep_comm_backe
         raise ValueError(f"Grug expert parallelism supports only ep_comm_backend={GRUG_EP_COMM_BACKEND}")
 
 
-def _jax_top_k(values: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+def jax_top_k(values: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Return JAX-compatible top-k results, including its lower-index tie rule."""
 
     sorted_values, sorted_indices = torch.sort(values, dim=-1, descending=True, stable=True)
@@ -304,14 +317,14 @@ class GrugMoeRMSNorm(nn.Module):
 def _rms_norm_no_weight(hidden_states: torch.Tensor) -> torch.Tensor:
     input_dtype = hidden_states.dtype
     fp32 = hidden_states.float()
-    return (fp32 * torch.rsqrt(fp32.square().mean(dim=-1, keepdim=True) + _QK_RMS_NORM_EPS)).to(input_dtype)
+    return (fp32 * torch.rsqrt(fp32.square().mean(dim=-1, keepdim=True) + GRUG_QK_RMS_NORM_EPS)).to(input_dtype)
 
 
 class GrugMoeGatedNorm(nn.Module):
     def __init__(self, hidden_size: int) -> None:
         super().__init__()
-        self.down_proj = nn.Linear(hidden_size, _GATED_NORM_RANK, bias=False)
-        self.up_proj = nn.Linear(_GATED_NORM_RANK, hidden_size, bias=False)
+        self.down_proj = nn.Linear(hidden_size, GRUG_GATED_NORM_RANK, bias=False)
+        self.up_proj = nn.Linear(GRUG_GATED_NORM_RANK, hidden_size, bias=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate = torch.sigmoid(self.up_proj(F.silu(self.down_proj(hidden_states))))
@@ -454,13 +467,13 @@ class GrugMoeRouter(nn.Module, NativeRouterObserverEmitter):
             router_logits = F.linear(hidden_states.float(), self.weight.float())
             bias = self.bias.detach().to(device=router_logits.device, dtype=torch.float32)
             biased_logits = router_logits + bias
-            topk_logits, topk_indices = _jax_top_k(biased_logits, self.top_k + 1)
+            topk_logits, topk_indices = jax_top_k(biased_logits, self.top_k + 1)
             alpha = topk_logits[:, -1:]
             selected_experts = topk_indices[:, :-1]
             selected_logits = torch.gather(router_logits, dim=-1, index=selected_experts)
             combine_weights = torch.sigmoid(selected_logits)
             combine_weights = combine_weights * (
-                _ROUTING_RENORM_SUM / (combine_weights.sum(dim=-1, keepdim=True) + 1e-9)
+                GRUG_ROUTING_RENORM_SUM / (combine_weights.sum(dim=-1, keepdim=True) + 1e-9)
             )
 
             emit_router_forward(
@@ -882,8 +895,9 @@ class GrugMoeModel(GrugMoePreTrainedModel):
         if all_hidden_states is not None:
             all_hidden_states += (hidden_states,)
 
+        long_layer_flags = grug_long_layer_flags(len(self.layers))
         for layer_idx, layer in enumerate(self.layers):
-            is_long = layer_idx % 4 == 3 or layer_idx == len(self.layers) - 1
+            is_long = long_layer_flags[layer_idx]
             if self.gradient_checkpointing and self.training:
                 hidden_states = self._gradient_checkpointing_func(
                     layer.__call__, hidden_states, attention_mask, position_ids, is_long
