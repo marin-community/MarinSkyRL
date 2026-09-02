@@ -68,7 +68,13 @@ def _ids() -> torch.Tensor:
 
 def test_g4a_1_grouped_mm_zeroes_the_padded_tail_rows():
     """The pytorch#186365 mitigation, asserted directly rather than assumed."""
-    from skyrl_train.models.layers.moe import _run_experts_grouped_mm
+    # The BARE impl, not the @expert_parallel-decorated wrapper. The decorator runs
+    # generate_permute_indices first and expects num_tokens_per_expert in the EP-sharded
+    # 128-wide cross-rank layout, so calling the wrapper with a plain per-expert count vector
+    # dies in torchtitan with "shape '[0, -1]' is invalid". The impl is also where the
+    # pytorch#186365 mitigation lives, which is what this gate is about.
+    # NOTE the argument order: (w1, w2, w3, x, counts), not (x, w1, w2, w3, counts).
+    from skyrl_train.models.layers.moe import _run_experts_grouped_mm_impl
 
     torch.manual_seed(3)
     n_experts, hidden, inter = 4, 32, 64
@@ -81,7 +87,7 @@ def test_g4a_1_grouped_mm_zeroes_the_padded_tail_rows():
     counts = torch.tensor([10, 10, 10, 10], device="cuda", dtype=torch.int32)
     assert int(counts.sum()) == routed
 
-    out = _run_experts_grouped_mm(x, w1, w2, w3, counts)
+    out = _run_experts_grouped_mm_impl(w1, w2, w3, x, counts)
     tail = out[routed:]
     assert tail.shape[0] == padded - routed
     assert torch.equal(tail, torch.zeros_like(tail)), (
