@@ -39,7 +39,6 @@ from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagn
 from skyrl_train.telemetry import WORKER_ROLE, process_telemetry
 from skyrl_train.timing_observability import (
     WorkerSpanAccumulator,
-    publish_worker_counters,
     publish_worker_spans,
     unconfigured_telemetry_reason,
 )
@@ -1219,11 +1218,12 @@ class PolicyWorkerBase(Worker):
         # Published from the worker, not returned: trainer.py keeps only policy_statuses[0]'s
         # "train_status", so a sibling key here would be transported and then dropped -- and rank 0
         # is the wrong rank, because the driver waits for the slowest.
+        _counters: dict[str, float] = {}
         if _policy_spans.enabled:
             # H3's multiplier and H7's padding keystone. Counted from the batch itself rather than
             # derived from config, so a mismatch between the two is visible instead of assumed.
             _attn = train_data["attention_mask"] if "attention_mask" in train_data.keys() else None
-            _counters: dict[str, float] = {"micro_step_count": float(policy_update_steps)}
+            _counters = {"micro_step_count": float(policy_update_steps)}
             if _attn is not None:
                 _real = float(_attn.sum().item())
                 _padded = float(_attn.numel())
@@ -1239,7 +1239,6 @@ class PolicyWorkerBase(Worker):
                         ),
                     }
                 )
-            publish_worker_counters(_counters, step=global_step, rank=self._rank)
 
         _previous_publish = getattr(self, "_policy_span_publish", None)
         self._policy_span_publish = (
@@ -1249,6 +1248,7 @@ class PolicyWorkerBase(Worker):
                 step=global_step,
                 rank=self._rank,
                 previous_publish=_previous_publish,
+                counters=_counters if _policy_spans.enabled else None,
             ),
         )
 
