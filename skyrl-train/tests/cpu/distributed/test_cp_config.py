@@ -59,6 +59,7 @@ DEBUG_MODE_TRAINER_FIELDS = {
 }
 RUNTIME_CONFIG_TRAINER_FIELDS = {
     "collective_phase_diagnostics": False,
+    "offload_optimizer_for_weight_sync": False,
     "distributed": {
         "placement_group_timeout_seconds": 180,
         "worker_collective_timeout_seconds": 1800,
