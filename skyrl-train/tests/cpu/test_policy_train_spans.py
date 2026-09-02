@@ -225,24 +225,80 @@ def test_publish_cost_has_a_span_so_it_is_attributable():
     assert "policy_span_publish" in POLICY_TRAIN_SPANS
 
 
-def test_previous_publish_cost_is_carried_forward_and_reduces_the_residual():
-    """Without this the flush is unmeasured time on the critical path, hidden in the residual."""
+def test_previous_publish_is_emitted_under_its_own_step_not_this_one():
+    """Labelling step n-1's publish as step n, and subtracting it from step n's residual, removes
+    time that interval never contained."""
+    import skyrl_train.timing_observability as module
+
+    rows: list[tuple[str, int]] = []
+
+    class _Histogram:
+        def record(self, value, attributes):
+            rows.append((attributes["phase"], int(attributes["step"])))
+
+    import pytest as _pytest
+
+    monkey = _pytest.MonkeyPatch()
+    try:
+        monkey.setattr(module, "phase_duration", _Histogram())
+        monkey.setattr(module.telemetry, "flush", lambda timeout: True)
+        monkey.setattr(
+            module.telemetry,
+            "runtime_status",
+            lambda: type("S", (), {"lost_records": 0, "rejected_records": 0})(),
+        )
+        publish_worker_spans({"policy_ppo_train": 9.0}, step=5, rank=0, previous_publish=(4, 0.25))
+    finally:
+        monkey.undo()
+
+    assert ("policy_ppo_train", 5) in rows
+    assert ("policy_span_publish", 4) in rows, "the publish cost belongs to the step that incurred it"
+    assert ("policy_span_publish", 5) not in rows
+
+
+def test_totals_does_not_absorb_the_publish_cost():
+    """It happens after the window closes, so it is not part of that interval's decomposition."""
     accumulator = _accumulator()
     with accumulator.span("policy_training_step"):
         pass
-
-    without = accumulator.totals(total_seconds=10.0)
-    assert "policy_span_publish" not in without
-
-    with_publish = accumulator.totals(total_seconds=10.0, publish_seconds=2.0)
-    assert with_publish["policy_span_publish"] == 2.0
-    assert with_publish["policy_span_residual"] == pytest.approx(without["policy_span_residual"] - 2.0)
+    totals = accumulator.totals(total_seconds=10.0)
+    assert "policy_span_publish" not in totals
 
 
-def test_a_zero_publish_cost_emits_no_span():
-    """The first step has no previous publish to carry, and a zero row would read as a measurement."""
-    accumulator = _accumulator()
-    assert "policy_span_publish" not in accumulator.totals(total_seconds=1.0, publish_seconds=0.0)
+def test_dropped_records_are_not_double_counted():
+    """Rigging already folds rejected records into lost_records; summing both reports 2N for N."""
+    import logging
+
+    import skyrl_train.timing_observability as module
+
+    import pytest as _pytest
+
+    monkey = _pytest.MonkeyPatch()
+    seen = {"n": 0}
+
+    def _status():
+        seen["n"] += 1
+        lost = 3 if seen["n"] > 1 else 0
+        return type("S", (), {"lost_records": lost, "rejected_records": lost})()
+
+    try:
+        monkey.setattr(module.telemetry, "runtime_status", _status)
+        monkey.setattr(module.telemetry, "flush", lambda timeout: True)
+        monkey.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+        import _pytest.logging  # noqa: F401
+
+        records: list[str] = []
+        handler = logging.Handler()
+        handler.emit = lambda r: records.append(r.getMessage())  # type: ignore[method-assign]
+        module.logger.addHandler(handler)
+        try:
+            publish_worker_spans({"policy_ppo_train": 1.0}, step=1, rank=0)
+        finally:
+            module.logger.removeHandler(handler)
+    finally:
+        monkey.undo()
+
+    assert any("lost 3 record" in m for m in records), f"expected 3, got: {records}"
 
 
 def test_worker_init_configures_telemetry_for_the_worker_role():
@@ -287,6 +343,7 @@ def test_ppo_train_wires_the_span_layer():
     assert source.index("_policy_spans_started = time.perf_counter()") < source.index("WORKER_PPO_TRAIN_DRAIN_BARRIER")
     # The self-synchronising region opts out of the leading synchronise.
     assert 'span("policy_entry_barrier", presync=False)' in source
-    # The previous step's publish cost is carried forward, and this step's is retained.
-    assert 'publish_seconds=getattr(self, "_policy_span_publish_seconds", 0.0)' in source
-    assert "self._policy_span_publish_seconds = publish_worker_spans(" in source
+    # The previous step's publish cost is passed with its own step label, and this step's retained.
+    assert 'getattr(self, "_policy_span_publish", None)' in source
+    assert "previous_publish=_previous_publish" in source
+    assert "self._policy_span_publish = (" in source
