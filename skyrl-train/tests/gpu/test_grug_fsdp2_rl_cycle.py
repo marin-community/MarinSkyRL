@@ -8,6 +8,7 @@ train, checkpoint restore, exact serving readback, and a second rollout.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import math
 from dataclasses import dataclass
 from enum import StrEnum
@@ -51,6 +52,13 @@ SERVING_EXPERT_INDEX_BY_NAME = {
     "model.layers.0.mlp.experts.0.gate_proj.weight": 0,
     "model.layers.0.mlp.experts.4.gate_proj.weight": 4,
 }
+
+
+# The fused policy path needs the optional compiled FlashAttention package, which the
+# Megatron runtime closure does not ship.
+requires_flash_attention = pytest.mark.skipif(
+    importlib.util.find_spec("flash_attn") is None, reason="flash_attn is not installed"
+)
 
 
 class _PolicyAttentionBackend(StrEnum):
@@ -414,7 +422,7 @@ def test_grug_one_gpu_vllm_generation(tmp_path):
 @pytest.mark.parametrize(
     "policy_attention_backend",
     [
-        pytest.param(_PolicyAttentionBackend.FLASH_ATTENTION, id="fused"),
+        pytest.param(_PolicyAttentionBackend.FLASH_ATTENTION, id="fused", marks=requires_flash_attention),
         pytest.param(_PolicyAttentionBackend.EAGER, id="eager"),
     ],
 )
@@ -433,6 +441,7 @@ def test_grug_four_gpu_disaggregated_rollout_train_broadcast_rollout(
     )
 
 
+@requires_flash_attention
 @pytest.mark.vllm
 def test_grug_six_h100_mixed_ep_disaggregated_rollout_train_broadcast_rollout(tmp_path):
     """Exercise EP-owned experts and exact sync on disjoint trainer/rollout GPUs."""
