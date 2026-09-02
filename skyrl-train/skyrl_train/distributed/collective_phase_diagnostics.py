@@ -16,6 +16,7 @@ from pathlib import Path
 
 import torch.distributed as dist
 from loguru import logger
+from skyrl_train.distributed import flight_recorder_summary
 from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, ensure_debug_artifact_directories
 
 _ENV = "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"
@@ -138,6 +139,9 @@ def region(
         return
     if device_mesh is None:
         raise ValueError("enabled collective phase diagnostics require a device mesh")
+    region_metadata = metadata or CollectiveRegionMetadata()
+    if kind is CollectiveRegionKind.POLICY_TRAINING_STEP:
+        flight_recorder_summary.capture_at_step_boundary(rank, region_metadata.global_step)
     with _region_ids_lock:
         region_id = next(_region_ids)
     token = _region.set(
@@ -145,7 +149,7 @@ def region(
             region_id=region_id,
             kind=kind,
             rank=rank,
-            metadata=metadata or CollectiveRegionMetadata(),
+            metadata=region_metadata,
             device_mesh=device_mesh,
         )
     )
