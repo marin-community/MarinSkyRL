@@ -89,7 +89,12 @@ def _batch_assembly_state(
         max_staleness_steps=2,
         rollout_logprobs_required=False,
     )
-    queues = _GenerationQueues(completed=asyncio.Queue(), retries=asyncio.Queue(), condition=asyncio.Condition())
+    queues = _GenerationQueues(
+        completed=asyncio.Queue(),
+        retries=asyncio.Queue(),
+        condition=asyncio.Condition(),
+        active_producers=1,
+    )
     return trainer, queues
 
 

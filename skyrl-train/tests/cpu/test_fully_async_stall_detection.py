@@ -83,7 +83,11 @@ async def test_admission_stall_timeout_stops_live_but_unproductive_generators(hi
     trainer = _bare_trainer(step_times=history, tasks=[alive_task], admission_stall_timeout=21_600)
     try:
         with pytest.raises(GenerationStalledError, match="active_producers=1"):
-            trainer._raise_admission_stall(elapsed=21_600.0, rejection_counts=collections.Counter())
+            trainer._raise_admission_stall(
+                elapsed=21_600.0,
+                rejection_counts=collections.Counter(),
+                active_producers=1,
+            )
     finally:
         alive_task.cancel()
 

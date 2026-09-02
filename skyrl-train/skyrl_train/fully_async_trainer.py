@@ -1289,11 +1289,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         median = sorted_times[len(sorted_times) // 2]
         return max(median * 5.0, 600.0)
 
-    def _raise_admission_stall(self, elapsed: float, rejection_counts: collections.Counter[str]) -> None:
+    def _raise_admission_stall(
+        self,
+        elapsed: float,
+        rejection_counts: collections.Counter[str],
+        *,
+        active_producers: int,
+    ) -> None:
         """Bound a step that has admitted no new groups, even if producer tasks remain alive."""
         raise GenerationStalledError(
             f"Generation stalled: no groups admitted for {elapsed:.0f}s; "
-            f"active_producers={sum(not task.done() for task in self._active_trajectory_tasks)}, "
+            f"active_producers={active_producers}, "
             f"rejected_completions={dict(rejection_counts)}"
         )
 
@@ -1361,12 +1367,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     elapsed = loop.time() - last_admitted_progress
                     remaining = stall_timeout - elapsed
                     if remaining <= 0:
-                        self._raise_admission_stall(elapsed, rejection_counts_since_admission)
+                        self._raise_admission_stall(
+                            elapsed,
+                            rejection_counts_since_admission,
+                            active_producers=queues.active_producers,
+                        )
                     try:
                         await asyncio.wait_for(queues.condition.wait(), timeout=remaining)
                     except asyncio.TimeoutError:
                         self._raise_admission_stall(
-                            loop.time() - last_admitted_progress, rejection_counts_since_admission
+                            loop.time() - last_admitted_progress,
+                            rejection_counts_since_admission,
+                            active_producers=queues.active_producers,
                         )
 
                 completed_groups = _drain_queue(queues.completed)
