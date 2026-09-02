@@ -330,11 +330,47 @@ class MegatronWorker:
                 micro_batch_size=mbs,
                 temperature=self.cfg.generator.sampling_params.temperature,
             )
+        if self.cfg.trainer.policy.megatron_config.check_train_eval_parity:
+            self._log_forward_fingerprint("forward", micro_dicts)
+            with torch.no_grad():
+                repeated = self.model.forward(
+                    micro_batches=micro_dicts,
+                    seq_len=seq_len,
+                    micro_batch_size=mbs,
+                    temperature=self.cfg.generator.sampling_params.temperature,
+                )
+            if mpu.is_pipeline_last_stage(ignore_virtual=True):
+                diff = (repeated.float() - log_probs.float()).abs()
+                logger.info(
+                    f"parity probe forward() repeat dp_rank={mpu.get_data_parallel_rank()}: mean abs "
+                    f"{diff.mean().item():.6f}, max abs {diff.max().item():.6f}"
+                )
 
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch({"output": log_probs})
         output.metadata = data.metadata
         return output
+
+    def _log_forward_fingerprint(self, call: str, micro_dicts: List[dict]) -> None:
+        """Log checksums of this rank's inputs and parameters so two calls can be compared."""
+        token_sum = sum(int(micro["sequences"].long().sum().item()) for micro in micro_dicts)
+        mask_sum = sum(int(micro["attention_mask"].long().sum().item()) for micro in micro_dicts)
+        position_sum = sum(int(micro["position_ids"].long().sum().item()) for micro in micro_dicts)
+        shapes = [tuple(micro["sequences"].shape) for micro in micro_dicts[:3]]
+        with torch.no_grad():
+            param_sum = 0.0
+            param_count = 0
+            for chunk in self.actor_module:
+                for param in chunk.parameters():
+                    param_sum += param.double().sum().item()
+                    param_count += param.numel()
+        logger.info(
+            f"parity probe {call} fingerprint rank={torch.distributed.get_rank()} "
+            f"dp_rank={mpu.get_data_parallel_rank()} pp_rank={mpu.get_pipeline_model_parallel_rank()} "
+            f"micros={len(micro_dicts)} shapes={shapes} tokens={token_sum} mask={mask_sum} "
+            f"positions={position_sum} num_actions={micro_dicts[0]['num_actions']} "
+            f"params={param_count} param_sum={param_sum:.6f}"
+        )
 
     def _log_train_eval_parity_probe(self, micro_buffer: List[MegatronPolicyMicroBatch]) -> None:
         """Re-run forward-only passes on the training micro-batches and compare them with the old log-probs.
@@ -352,6 +388,7 @@ class MegatronWorker:
             }
             for micro in micro_buffer
         ]
+        self._log_forward_fingerprint("ppo_train", micro_dicts)
         seq_len = micro_buffer[0].sequences.shape[1]
         micro_bsz = micro_buffer[0].sequences.shape[0]
         old = torch.cat([micro.old_action_log_probs for micro in micro_buffer]).float()
