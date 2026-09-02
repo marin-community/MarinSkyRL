@@ -734,6 +734,9 @@ def test_parser_defers_runtime_identity_to_resolution_and_keeps_recovery_retries
     assert args.runtime_profile is None
     assert args.max_retries == 6
     assert args.max_retries_preemption == 1000
+    # Unset at parse time; launch() falls back to --max-retries, which is what this was hardcoded to
+    # before it became a flag.
+    assert args.max_task_failures is None
     assert args.memory == "auto"
     assert args.disk == "auto"
 
@@ -787,6 +790,12 @@ def test_launch_applies_failure_retry_budget_to_tasks_and_job(tmp_path, monkeypa
     # iris's own default is 1000, so comparing the two would pass even when the value never reaches
     # submit at all.
     assert submitted["max_retries_preemption"] == 0
+    # Decoupled: the retry budget and the task-failure tolerance are different questions, and
+    # binding them meant a measurement run's max_retries=0 also removed all fault tolerance.
+    # The literal, not args: --max-task-failures is unset here, so this asserts the FALLBACK to
+    # --max-retries actually happened. Comparing against args.max_task_failures (None) would pass
+    # whether or not the fallback ran.
+    assert submitted["max_task_failures"] == 3
 
 
 def test_direct_launcher_exports_terminal_policy_after_training(monkeypatch):
@@ -989,3 +998,19 @@ trainer:
 
     with pytest.raises(SystemExit, match=r"policy_num_nodes = 2"):
         resolve_launch_defaults(args)
+
+
+def test_max_task_failures_can_be_set_apart_from_the_retry_budget():
+    """They answer different questions.
+
+    --max-retries asks whether to re-run the whole job; this asks how many task blips a gang absorbs
+    before it dies. Binding them meant a measurement run's max_retries=0 also removed all fault
+    tolerance, which is how two smoke runs died on a single OOM in one task.
+    """
+    from cloud.iris.iris_backend import create_parser
+
+    base = ["--rl_config", "x", "--model_path", "y"]
+    assert create_parser().parse_args(base + ["--max-retries", "0"]).max_task_failures is None
+    apart = create_parser().parse_args(base + ["--max-retries", "0", "--max-task-failures", "2"])
+    assert apart.max_retries == 0
+    assert apart.max_task_failures == 2
