@@ -278,6 +278,12 @@ trainer:
   resume_path: null
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
+
+  # Decompose policy_train from inside the policy worker. Off by default: the spans are cheap but
+  # policy_train_spans_synchronize is not -- it serialises CUDA to attribute time to the right span,
+  # which is what you want when attributing and not what you want when measuring end-to-end.
+  policy_train_spans: false
+  policy_train_spans_synchronize: true
   ckpt_interval: 5
   hf_save_interval: ${trainer.ckpt_interval}
   hf_upload_mode: latest
