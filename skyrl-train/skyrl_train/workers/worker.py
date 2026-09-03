@@ -989,8 +989,14 @@ def _policy_span_counters(worker, spans, train_data, policy_update_steps: float)
         lengths = attention_mask.sum(dim=-1).to(torch.float64)
         counters.update(
             {
-                "tokens_real": float(attention_mask.sum().item()),
-                "tokens_padded": float(attention_mask.numel()),
+                # `_rank_` in the name, deliberately. These are THIS rank's tokens, published per
+                # rank and never reduced, so a consumer that sums them across rows gets the global
+                # total only when every rank holds distinct data -- under sequence, context, expert
+                # or Megatron tensor/pipeline parallelism the replicas hold the SAME tokens and the
+                # sum is multiplied by the replication factor. The old names said "tokens" and
+                # invited exactly that.
+                "rank_tokens_real": float(attention_mask.sum().item()),
+                "rank_tokens_padded": float(attention_mask.numel()),
                 # Eager attention is quadratic on the PADDED shape, so the linear padded fraction
                 # understates its cost; this ratio is the attention-work proxy.
                 "attention_work_ratio": float(

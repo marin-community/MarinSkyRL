@@ -437,20 +437,20 @@ def test_counters_go_to_their_own_instrument_not_the_span_tree():
         monkey.setattr(
             module, "phase_duration", type("_H", (), {"record": lambda *a, **k: pytest.fail("wrong instrument")})()
         )
-        publish_worker_counters({"micro_step_count": 64.0, "tokens_real": 12.0}, step=2, rank=7)
+        publish_worker_counters({"micro_step_count": 64.0, "rank_tokens_real": 12.0}, step=2, rank=7)
     finally:
         monkey.undo()
 
     by_name = {a["counter"]: (v, a) for v, a in recorded}
     assert by_name["micro_step_count"][0] == 64.0
-    assert by_name["tokens_real"][1]["rank"] == "7"
-    assert by_name["tokens_real"][1]["step"] == "2"
+    assert by_name["rank_tokens_real"][1]["rank"] == "7"
+    assert by_name["rank_tokens_real"][1]["step"] == "2"
     assert by_name["micro_step_count"][1]["role"] == "worker"
     # And they must not be registered as spans, or they would join the residual arithmetic.
     for name in (
         "micro_step_count",
-        "tokens_real",
-        "tokens_padded",
+        "rank_tokens_real",
+        "rank_tokens_padded",
         "attention_work_ratio",
         "peak_allocated_bytes",
         "peak_reserved_bytes",
@@ -508,10 +508,10 @@ def test_counters_alone_still_publish():
             "policy_step_counter",
             type("_H", (), {"record": lambda self, v, attributes: seen.append(attributes["counter"])})(),
         )
-        module.publish_worker_spans({}, step=4, rank=1, counters={"tokens_real": 7.0})
+        module.publish_worker_spans({}, step=4, rank=1, counters={"rank_tokens_real": 7.0})
     finally:
         monkey.undo()
-    assert seen == ["tokens_real"]
+    assert seen == ["rank_tokens_real"]
 
 
 # --- allocator counters, and the trap in the raw values ------------------------------------------
