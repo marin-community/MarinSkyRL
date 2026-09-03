@@ -47,6 +47,11 @@ from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 POLICY_WORLD_SIZE = 2
+# The batch is built with exactly this many rows and train_batch_size is set to match. They must
+# agree: the ratio diagnostics finalize on the LAST micro-step of the accumulation window
+# (`worker.py:1490`), so a batch wider than train_batch_size leaves that window open and the metric
+# never appears -- which is how the first run of this test died on a bare KeyError.
+BATCH_ROWS = 4
 
 # Russell Power's tolerance for the same gate on the Megatron backend. Not zero: cuBLAS picks
 # kernels per GEMM shape, so equal micro-batch sizes are required and a little rounding remains.
@@ -100,8 +105,8 @@ def _config(model_path: str, *, use_grouped_mm: bool):
     cfg.trainer.use_sample_packing = False
     # 🔑 The invariant's precondition: one optimizer update per step, so both forwards see the same
     # weights. If a later edit makes these differ, the test stops testing what it claims to.
-    cfg.trainer.train_batch_size = POLICY_WORLD_SIZE
-    cfg.trainer.policy_mini_batch_size = POLICY_WORLD_SIZE
+    cfg.trainer.train_batch_size = BATCH_ROWS
+    cfg.trainer.policy_mini_batch_size = BATCH_ROWS
     cfg.trainer.update_epochs_per_batch = 1
     # Equal forward and train micro-batch sizes: cuBLAS selects kernels per GEMM shape, so unequal
     # sizes make the two passes use different kernels. Megatron's validate_cfg rejects that outright;
@@ -134,7 +139,7 @@ def _variable_length_batch(pad_token_id: int, *, prompt_length: int, response_le
     torch.manual_seed(17)
     width = prompt_length + response_length
     rows = []
-    for real in (width, width - 7, width - 23, width - 41):
+    for real in (width, width - 7, width - 23, width - 41)[:BATCH_ROWS]:
         row = torch.randint(low=1, high=1000, size=(width,), dtype=torch.long)
         row[real:] = pad_token_id
         rows.append(row)
@@ -210,6 +215,13 @@ def test_grug_fsdp2_train_forward_matches_eval_forward(
 
         train_output = ray.get(policy.async_run_ray_method("mesh", "ppo_train", batch))[0]
         status = train_output.metadata["train_status"]
+        # Distinguish "the gate did not run" from "the gate failed". The diagnostics finalize only
+        # on the last micro-step of the accumulation window, so a geometry mistake silently removes
+        # the key -- and a bare KeyError reads like a broken test rather than an unmeasured run.
+        assert "log_ratio_abs_max" in status, (
+            "the ratio diagnostics never finalized, so this run measured NOTHING about the "
+            f"invariant. Check the accumulation geometry. status keys: {sorted(status)}"
+        )
         print(
             f"use_grouped_mm={use_grouped_mm} experts={shape['num_local_experts']}: "
             f"log_ratio_abs_max {status['log_ratio_abs_max']:.6e}, "
