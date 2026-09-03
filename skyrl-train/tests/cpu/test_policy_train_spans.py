@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -379,12 +380,13 @@ def test_ppo_train_wires_the_span_layer():
     # The self-synchronising region opts out of the leading synchronise.
     assert 'span("policy_entry_barrier", presync=False)' in source
     # The previous step's publish cost is passed with its own step label, and this step's retained.
-    assert 'getattr(self, "_policy_span_publish", None)' in source
-    assert "previous_publish=_previous_publish" in source
+    # The previous step's publish cost is carried forward and this step's retained. Both now go
+    # through _publish_policy_spans, whose behaviour is asserted directly below.
+    assert 'previous_publish=getattr(self, "_policy_span_publish", None)' in source
     assert "self._policy_span_publish = (" in source
-    # The counter call G3 found untested: it must ride the spans publish, not stand alone, or a
-    # dropped counter row is invisible (Rigging swallows emission exceptions).
-    assert "counters=_counters if _policy_spans.enabled else None" in source
+    # The counter call G3 found untested rides the spans publish rather than standing alone, so a
+    # dropped counter row is not invisible. That gating now lives in _publish_policy_spans and is
+    # asserted behaviourally below.
     # The counters live in their own function so the caller can guard them; assert the names there.
     counters_source = inspect.getsource(worker_module._policy_span_counters)
     assert "micro_step_count" in counters_source
@@ -393,12 +395,10 @@ def test_ppo_train_wires_the_span_layer():
     # final barrier, and both issue CUDA synchronisations and allocator queries; a raise there
     # discards work already paid for -- an hour of 80 H100s at E6 geometry -- to lose a telemetry
     # row. docs/telemetry.md states the contract: export failures do not change training results.
-    assert source.count("except Exception:") >= 2, "the post-step telemetry is not guarded"
-    # And the recorded cost is REAL, not a false zero: a failed publish still spent time on the
-    # critical path, and zero would understate the next step's policy_span_publish by exactly what
-    # the failure cost.
-    assert "_publish_cost = time.perf_counter() - _publish_started" in source
-    assert "_publish_cost = 0.0" not in source, "a false zero is a measurement, not a gap"
+    assert "except Exception:" in source, "the counter gathering is not guarded"
+    # The publish path's own guarantees are asserted BEHAVIOURALLY below, against the function
+    # rather than against this source text.
+    assert "_publish_policy_spans(" in source
     # H2's keystone. Three OOMs in this workstream asked for the eager attention score tensor and
     # no memory series existed to see any of them coming. The counters now come from the probe.
     assert "_step_memory.counters()" in counters_source
@@ -645,3 +645,89 @@ def test_unsynchronized_spans_do_not_ship_the_synchronized_clock_domain():
     assert synced == {"policy_ppo_train": "inclusive_wall", "policy_backward": "exclusive_wall"}
     assert launched == {"policy_ppo_train": "inclusive_launch", "policy_backward": "exclusive_launch"}
     assert not set(synced.values()) & set(launched.values()), "the two modes must not share a label"
+
+
+def test_a_failing_publish_does_not_raise_and_reports_its_real_cost(monkeypatch):
+    """🚨 Behavioural, not a source-text match.
+
+    This runs after the step's GPU work is already paid for. A raise here discards a completed step
+    -- an hour of 80 H100s at E6 geometry -- to lose a telemetry row. And the cost it reports must be
+    the REAL elapsed time: the next step subtracts it as policy_span_publish, so a convenient zero
+    would understate that step by exactly what the failure cost.
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    def _boom(*args, **kwargs):
+        time.sleep(0.02)
+        raise RuntimeError("finelog is down")
+
+    monkeypatch.setattr(worker_module, "publish_worker_spans", _boom)
+    spans = WorkerSpanAccumulator(enabled=True, synchronize=False)
+
+    cost = worker_module._publish_policy_spans(
+        spans, total_seconds=1.0, step=3, rank=0, previous_publish=None, counters={}
+    )
+    assert cost >= 0.02, f"a failed publish reported {cost}s; it actually spent at least 0.02s"
+
+
+def test_a_successful_publish_returns_the_publisher_s_own_cost(monkeypatch):
+    """The happy path must pass the publisher's number through untouched, not re-time it."""
+    import skyrl_train.workers.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "publish_worker_spans", lambda *a, **k: 0.125)
+    spans = WorkerSpanAccumulator(enabled=True, synchronize=False)
+    cost = worker_module._publish_policy_spans(
+        spans, total_seconds=1.0, step=3, rank=0, previous_publish=None, counters={}
+    )
+    assert cost == 0.125
+
+
+def test_the_publisher_is_told_which_clock_mode_produced_the_spans(monkeypatch):
+    """The mode changes what the numbers mean, so it must reach the sink rather than default."""
+    import skyrl_train.workers.worker as worker_module
+
+    seen = {}
+    monkeypatch.setattr(worker_module, "publish_worker_spans", lambda *a, **k: seen.update(k) or 0.0)
+    for synchronize in (True, False):
+        worker_module._publish_policy_spans(
+            WorkerSpanAccumulator(enabled=True, synchronize=synchronize),
+            total_seconds=1.0,
+            step=1,
+            rank=0,
+            previous_publish=None,
+            counters={},
+        )
+        assert seen["synchronize"] is synchronize
+
+
+def test_disabled_spans_publish_no_counters_even_when_some_are_gathered(monkeypatch):
+    """The counters ride the spans publish. With spans off, none may reach the sink.
+
+    Behavioural: the old assertion matched the source line `counters=... if enabled else None`,
+    which a rename would break and a logic inversion would not.
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    seen = {}
+    monkeypatch.setattr(worker_module, "publish_worker_spans", lambda *a, **k: seen.update(k) or 0.0)
+    counters = {"micro_step_count": 4.0}
+
+    worker_module._publish_policy_spans(
+        WorkerSpanAccumulator(enabled=False),
+        total_seconds=1.0,
+        step=1,
+        rank=0,
+        previous_publish=None,
+        counters=counters,
+    )
+    assert seen["counters"] is None, "spans are off; nothing may be published"
+
+    worker_module._publish_policy_spans(
+        WorkerSpanAccumulator(enabled=True),
+        total_seconds=1.0,
+        step=1,
+        rank=0,
+        previous_publish=None,
+        counters=counters,
+    )
+    assert seen["counters"] == counters
