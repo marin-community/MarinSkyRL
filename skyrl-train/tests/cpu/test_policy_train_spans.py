@@ -11,9 +11,14 @@ reporting nothing.
 
 from __future__ import annotations
 
+import inspect
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from skyrl_train.timing_observability import (
+    StepMemoryProbe,
     POLICY_TRAIN_SPANS,
     TIMING_PARENTS,
     WorkerSpanAccumulator,
@@ -344,7 +349,6 @@ def test_worker_init_configures_telemetry_for_the_worker_role():
     off-actor: it needs a live torch.distributed rendezvous. A structural check is weak, but it does
     catch the regression that matters -- someone deleting the wiring and leaving a green suite.
     """
-    import inspect
 
     from skyrl_train.workers.worker import Worker
 
@@ -364,7 +368,6 @@ def test_ppo_train_wires_the_span_layer():
     never carries the previous cost forward, or a return value that is dropped so every step reports
     a publish cost of zero.
     """
-    import inspect
 
     from skyrl_train.workers.worker import PolicyWorkerBase
 
@@ -384,11 +387,20 @@ def test_ppo_train_wires_the_span_layer():
     assert "micro_step_count" in source
     assert "attention_work_ratio" in source
     # H2's keystone. Three OOMs in this workstream asked for the eager attention score tensor and
-    # no memory series existed to see any of them coming.
-    assert "peak_allocated_bytes" in source
-    assert "alloc_retries" in source
-    # The peak must span the whole step: resetting here would hide the forward that sets it.
-    assert "reset_peak_memory_stats" not in source
+    # no memory series existed to see any of them coming. The counters now come from the probe.
+    assert "self._step_memory.counters()" in source
+    # Rebased at the TOP, before any forward. Published raw, max_memory_allocated is the peak since
+    # the process began, so a step attribute on it is a lie: after whichever step sets the
+    # high-water mark, every later step republishes the same number.
+    assert source.index("self._step_memory.begin_step()") < source.index("WORKER_PPO_TRAIN_DRAIN_BARRIER")
+    # And reset NOWHERE ELSE -- asserted on the probe, not on this source text. The old guard read
+    # `"reset_peak_memory_stats" not in source` and went vacuous the moment the call moved into
+    # begin_step: it passed because the string had left ppo_train, not because the invariant held.
+    import skyrl_train.timing_observability as timing_module
+
+    probe_source = inspect.getsource(timing_module.StepMemoryProbe)
+    assert probe_source.count("reset_peak_memory_stats") == 1
+    assert "reset_peak_memory_stats" in inspect.getsource(timing_module.StepMemoryProbe.begin_step)
 
 
 def test_counters_go_to_their_own_instrument_not_the_span_tree():
@@ -487,3 +499,102 @@ def test_counters_alone_still_publish():
     finally:
         monkey.undo()
     assert seen == ["tokens_real"]
+
+
+# --- allocator counters, and the trap in the raw values ------------------------------------------
+
+
+class _FakeCuda:
+    """A scripted allocator. `peaks` and `allocs` are consumed in call order."""
+
+    def __init__(self, peaks, allocs, retries=0, ooms=0):
+        self._peaks, self._allocs = iter(peaks), iter(allocs)
+        self.retries, self.ooms, self.resets = retries, ooms, 0
+
+    is_available = staticmethod(lambda: True)
+    is_initialized = staticmethod(lambda: True)
+
+    def reset_peak_memory_stats(self):
+        self.resets += 1
+
+    def max_memory_allocated(self):
+        return next(self._peaks)
+
+    def max_memory_reserved(self):
+        return 0.0
+
+    def memory_allocated(self):
+        return next(self._allocs)
+
+    def memory_stats(self):
+        return {"num_alloc_retries": self.retries, "num_ooms": self.ooms}
+
+
+def _with_cuda(monkeypatch, cuda):
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=cuda))
+
+
+def test_the_memory_probe_is_inert_when_disabled():
+    """It rides trainer.policy_train_spans, so an off run pays nothing and publishes nothing."""
+    probe = StepMemoryProbe(enabled=False)
+    probe.begin_step()
+    assert probe.counters() == {}
+
+
+def test_the_allocator_peak_is_rebased_so_it_describes_this_step(monkeypatch):
+    """🚨 max_memory_allocated is "peak since the beginning of this program".
+
+    Published per step without a baseline it is a process-lifetime high-water mark wearing a step
+    attribute: after whichever step sets it, every later step republishes the same number and the
+    series looks flat and healthy while measuring nothing. begin_step is the only reset.
+    """
+    cuda = _FakeCuda(peaks=[500.0], allocs=[])
+    _with_cuda(monkeypatch, cuda)
+    probe = StepMemoryProbe(enabled=True)
+    probe.begin_step()
+    assert cuda.resets == 1, "the peak must be rebased at the top of the step"
+    assert probe.counters()["peak_allocated_bytes"] == 500.0
+
+
+def test_the_cumulative_allocator_counters_are_published_as_deltas(monkeypatch):
+    """num_alloc_retries and num_ooms are cumulative for the PROCESS.
+
+    Published raw and tagged by step, summing them across steps counts old events again. A step that
+    had no retries must publish zero, not the running total.
+    """
+    cuda = _FakeCuda(peaks=[0.0], allocs=[], retries=7, ooms=2)
+    _with_cuda(monkeypatch, cuda)
+    probe = StepMemoryProbe(enabled=True)
+    probe.begin_step()
+    cuda.retries, cuda.ooms = 9, 2  # two more retries during the step, no new OOM
+    counters = probe.counters()
+    assert counters["alloc_retries"] == 2.0, "the seven that predate this step are not ours"
+    assert counters["alloc_ooms"] == 0.0
+
+
+def test_a_byte_valued_counter_does_not_ride_the_unit_one_instrument(monkeypatch):
+    """A byte value on a unit-1 histogram is a lie a consumer cannot see.
+
+    Same suffix dispatch the driver counters already use.
+    """
+    import skyrl_train.timing_observability as module
+
+    counts: list[str] = []
+    byte_rows: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "policy_step_counter",
+        type("_H", (), {"record": lambda self, v, attributes: counts.append(attributes["counter"])})(),
+    )
+    monkeypatch.setattr(
+        module,
+        "policy_step_bytes",
+        type("_H", (), {"record": lambda self, v, attributes: byte_rows.append(attributes["counter"])})(),
+    )
+    module.publish_worker_counters(
+        {"peak_allocated_bytes": 1.0, "micro_step_count": 2.0, "optimizer_step_peak_delta_bytes": 3.0},
+        step=1,
+        rank=0,
+    )
+    assert sorted(byte_rows) == ["optimizer_step_peak_delta_bytes", "peak_allocated_bytes"]
+    assert counts == ["micro_step_count"]
