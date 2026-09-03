@@ -18,6 +18,13 @@ from skyrl_train.io import io
 DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])
 
 
+# The torch op each name maps to. Module level so a test can pin `min` to ReduceOp.MIN without a
+# CUDA device -- all_reduce moves its tensor to the current device before reducing, so the branch
+# below is not reachable on a CPU-only runner and a mutation there would otherwise go uncaught.
+# `mean` is deliberately absent: it is a SUM after a division by world_size.
+REDUCE_OPS = {"max": dist.ReduceOp.MAX, "min": dist.ReduceOp.MIN}
+
+
 class DistributedStrategy(ABC):
     device_mesh: DeviceMesh | None = None
     ep_size: int = 1
@@ -98,9 +105,13 @@ class DistributedStrategy(ABC):
                 data = data.to(torch.cuda.current_device())
             if op == "mean":
                 data /= self.world_size
-            _REDUCE_OPS = {"max": dist.ReduceOp.MAX, "min": dist.ReduceOp.MIN}
-            # mean is a SUM here; the division by world_size already happened above.
-            dist.all_reduce(data, op=_REDUCE_OPS.get(op, dist.ReduceOp.SUM))
+            # mean and sum are both a SUM collective -- mean's division by world_size happened
+            # above. Anything else must be in REDUCE_OPS: a silent `.get(op, SUM)` default here
+            # would be the same defect just removed from policy_training_metrics one file over, and
+            # a `min` that quietly became a SUM publishes 80.0 for a healthy step at 80 ranks.
+            collective = REDUCE_OPS[op] if op in REDUCE_OPS else dist.ReduceOp.SUM
+            assert op in REDUCE_OPS or op in ("mean", "sum"), f"no collective for reduction op {op!r}"
+            dist.all_reduce(data, op=collective)
             if is_cpu_tensor:
                 data = data.cpu()
             return data.item() if not is_tensor else data

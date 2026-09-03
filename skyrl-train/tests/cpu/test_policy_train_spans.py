@@ -76,9 +76,27 @@ def test_no_span_is_opened_with_a_manual_enter_exit_pair():
     """
     import skyrl_train.workers.worker as worker_module
 
+    import ast
+
     source = inspect.getsource(worker_module)
     assert ".__enter__()" not in source, "open spans with `with`, so an exception still closes them"
     assert ".__exit__(None, None, None)" not in source
+
+    # Forbidding two strings is not enough: DELETING the span outright satisfies both while
+    # policy_forward vanishes from the tree into the residual. So assert the regions are opened, by
+    # walking for `_spans.span("<name>")` rather than searching text.
+    opened: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if getattr(func, "attr", None) != "span" or not node.args:
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            opened.add(arg.value)
+    for name in ("policy_forward", "policy_backward", "policy_optimizer_step"):
+        assert name in opened, f"{name} is never opened; its time would fall into the residual"
 
 
 def test_publish_cost_is_not_charged_to_a_parent_that_does_not_contain_it():

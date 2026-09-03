@@ -146,3 +146,13 @@ driver rows per step. Budget accordingly before enabling the policy tree on a lo
   and is gate-grade.
 - Allocator counters are scoped to one `ppo_train` call. Megatron overrides `ppo_train` and does not
   publish them.
+- **The whole worker subtree names `policy_train` as its ancestor, and that row is absent when the
+  critic overlaps.** With a critic configured and `colocate_all` off, the trainer runs `ppo_train`
+  under `Timer("policy_critic_overlap_train")` *instead of* `policy_train`
+  (`trainer.py:1977`), so no `policy_train` row is published that step -- while `policy_ppo_train`
+  and `policy_span_publish` still name it as their parent. The rows are all still there and their
+  values are right; a consumer walking parents upward just finds a gap for that step. It is a
+  pre-existing property of the tree rather than of any one span, and fixing it needs the parent to
+  be chosen at publish time from the phase that actually ran, which `TIMING_PARENTS` -- a static
+  map -- cannot express. Our own E6 runs configure no critic (`critic.model.path` is empty), so this
+  is unexercised here.
