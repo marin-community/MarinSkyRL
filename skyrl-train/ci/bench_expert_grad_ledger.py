@@ -42,11 +42,20 @@ ROWS_PER_EXPERT = 112  # held constant across the E sweep so per-expert GEMM sha
 def _config(num_experts: int) -> GrugMoeConfig:
     """E6 Snowball dims (W1-e6-config-of-record.md), one layer, E overridable."""
     return GrugMoeConfig(
-        vocab_size=128256, hidden_size=2560, intermediate_size=1280,
-        shared_expert_intermediate_size=2560, num_local_experts=num_experts,
-        num_experts_per_tok=4, num_hidden_layers=1, num_attention_heads=20,
-        num_key_value_heads=5, head_dim=128, max_position_embeddings=65536,
-        sliding_window=2048, qk_mult=1.0, initializer_range=0.02,
+        vocab_size=128256,
+        hidden_size=2560,
+        intermediate_size=1280,
+        shared_expert_intermediate_size=2560,
+        num_local_experts=num_experts,
+        num_experts_per_tok=4,
+        num_hidden_layers=1,
+        num_attention_heads=20,
+        num_key_value_heads=5,
+        head_dim=128,
+        max_position_embeddings=65536,
+        sliding_window=2048,
+        qk_mult=1.0,
+        initializer_range=0.02,
     )
 
 
@@ -116,8 +125,7 @@ def _time(fn, *, warmup, iters):
     return {
         "wall_s": min(walls),
         "device_s": min(devs),
-        "alloc_bytes_per_iter": (now["allocated_bytes.all.allocated"]
-                                 - base["allocated_bytes.all.allocated"]) / iters,
+        "alloc_bytes_per_iter": (now["allocated_bytes.all.allocated"] - base["allocated_bytes.all.allocated"]) / iters,
         "num_alloc_retries": now["num_alloc_retries"],
         "reserved_peak_bytes": now["reserved_bytes.all.peak"],
     }
@@ -136,11 +144,14 @@ def _run_arm(arm, num_experts, warmup, iters, rows_per_expert):
         # NOTE the bare impl and ITS argument order (w1,w2,w3,x,counts). The decorated
         # _run_experts_grouped_mm takes (x,w1,w2,w3,counts) and wants the EP-sharded layout.
         from skyrl_train.models.layers.moe import _run_experts_grouped_mm_impl
-        w1 = nn.Parameter(_fill(torch.empty(num_experts, cfg.intermediate_size, cfg.hidden_size,
-                                            device=dev, dtype=torch.bfloat16)))
+
+        w1 = nn.Parameter(
+            _fill(torch.empty(num_experts, cfg.intermediate_size, cfg.hidden_size, device=dev, dtype=torch.bfloat16))
+        )
         w3 = nn.Parameter(_fill(torch.empty_like(w1)))
-        w2 = nn.Parameter(_fill(torch.empty(num_experts, cfg.hidden_size, cfg.intermediate_size,
-                                            device=dev, dtype=torch.bfloat16)))
+        w2 = nn.Parameter(
+            _fill(torch.empty(num_experts, cfg.hidden_size, cfg.intermediate_size, device=dev, dtype=torch.bfloat16))
+        )
         rows = hidden.repeat_interleave(cfg.num_experts_per_tok, dim=0)[: rows_per_expert * num_experts]
         counts = torch.full((num_experts,), rows_per_expert, device=dev, dtype=torch.int32)
         fwd = lambda: _run_experts_grouped_mm_impl(w1, w2, w3, rows, counts)  # noqa: E731
@@ -167,8 +178,7 @@ def _run_arm(arm, num_experts, warmup, iters, rows_per_expert):
     f = _time(forward_only, warmup=warmup, iters=iters)
     forward_only()  # a live graph for the backward timer
     b = _time(backward_only, warmup=warmup, iters=iters)
-    return {"arm": arm, "num_experts": num_experts, "rows_per_expert": rows_per_expert,
-            "forward": f, "backward": b}
+    return {"arm": arm, "num_experts": num_experts, "rows_per_expert": rows_per_expert, "forward": f, "backward": b}
 
 
 def main() -> None:
@@ -181,45 +191,57 @@ def main() -> None:
     ap.add_argument("--profile-at", type=int, default=0)
     a = ap.parse_args()
 
-    print(torch.cuda.get_device_name(0), "| torch", torch.__version__,
-          f"| rows/expert {a.rows_per_expert}")
+    print(torch.cuda.get_device_name(0), "| torch", torch.__version__, f"| rows/expert {a.rows_per_expert}")
     rows = []
     for e in a.experts:
         for arm in a.arms:
             r = _run_arm(arm, e, a.warmup, a.iters, a.rows_per_expert)
             rows.append(r)
-            print(f"E={e:4d} {arm:9s} fwd {r['forward']['wall_s']*1e3:9.2f} ms  "
-                  f"bwd {r['backward']['wall_s']*1e3:9.2f} ms  "
-                  f"bwd_dev/wall {r['backward']['device_s']/max(r['backward']['wall_s'],1e-9):.3f}  "
-                  f"bwd_alloc {r['backward']['alloc_bytes_per_iter']/1e9:9.1f} GB  "
-                  f"retries {r['backward']['num_alloc_retries']}")
+            print(
+                f"E={e:4d} {arm:9s} fwd {r['forward']['wall_s'] * 1e3:9.2f} ms  "
+                f"bwd {r['backward']['wall_s'] * 1e3:9.2f} ms  "
+                f"bwd_dev/wall {r['backward']['device_s'] / max(r['backward']['wall_s'], 1e-9):.3f}  "
+                f"bwd_alloc {r['backward']['alloc_bytes_per_iter'] / 1e9:9.1f} GB  "
+                f"retries {r['backward']['num_alloc_retries']}"
+            )
             torch.cuda.empty_cache()
 
     by = {(r["arm"], r["num_experts"]): r["backward"]["wall_s"] for r in rows}
-    pts = [(e, by[("sliced", e)] - by[("separate", e)]) for e in a.experts
-           if ("sliced", e) in by and ("separate", e) in by]
+    pts = [
+        (e, by[("sliced", e)] - by[("separate", e)]) for e in a.experts if ("sliced", e) in by and ("separate", e) in by
+    ]
     if pts:
         print("\nselect term = bwd(sliced) - bwd(separate):")
         for e, v in pts:
-            print(f"  E={e:4d}  {v*1e3:9.2f} ms")
+            print(f"  E={e:4d}  {v * 1e3:9.2f} ms")
     if len(pts) >= 2:
         xs = [math.log(e) for e, _ in pts]
         ys = [math.log(max(v, 1e-9)) for _, v in pts]
-        n = len(xs); mx = sum(xs)/n; my = sum(ys)/n
-        slope = sum((x-mx)*(y-my) for x, y in zip(xs, ys)) / sum((x-mx)**2 for x in xs)
+        n = len(xs)
+        mx = sum(xs) / n
+        my = sum(ys) / n
+        slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs)
         print(f"\nEXPONENT = {slope:.3f}   (O4 predicts 2.0 +/- 0.1; node-overhead predicts 1.0)")
-        verdict = ("O4-CONFIRMED" if 1.85 <= slope <= 2.15 else
-                   "NODE-OVERHEAD-CONSISTENT" if 0.85 <= slope <= 1.15 else "NEITHER")
+        verdict = (
+            "O4-CONFIRMED"
+            if 1.85 <= slope <= 2.15
+            else "NODE-OVERHEAD-CONSISTENT"
+            if 0.85 <= slope <= 1.15
+            else "NEITHER"
+        )
         big = by.get(("sliced", 256))
         if big is not None:
-            print(f"PROJECTION: 26 layers x {big:.3f} s = {26*big:.1f} s   "
-                  f"vs measured true backward 43.3 s/micro-step (F7 run3 step 2)")
+            print(
+                f"PROJECTION: 26 layers x {big:.3f} s = {26 * big:.1f} s   "
+                f"vs measured true backward 43.3 s/micro-step (F7 run3 step 2)"
+            )
         print(f"VERDICT: {verdict}")
 
     if a.profile_at and "sliced" in a.arms:
         print(f"\n::: profiler attribution, sliced, E={a.profile_at}, ONE iteration")
         print("::: wall times under the profiler are distorted -- read the RANKING only")
         from torch.profiler import ProfilerActivity, profile
+
         cfg = _config(a.profile_at)
         dev = torch.device("cuda")
         mod = _init(GrugMoeExperts(cfg)).to(device=dev, dtype=torch.bfloat16)
@@ -229,8 +251,12 @@ def main() -> None:
         c = torch.rand(nt, cfg.num_experts_per_tok, device=dev, dtype=torch.bfloat16)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             out = mod.forward_eager(h, r, c)
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                     record_shapes=True, with_stack=False, profile_memory=False) as prof:
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            with_stack=False,
+            profile_memory=False,
+        ) as prof:
             out.float().sum().backward()
             torch.cuda.synchronize()
         print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=15))

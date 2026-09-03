@@ -135,9 +135,7 @@ def _dump_trace() -> Mapping[str, Any] | None:
         # Emptiness here is the ONLY symptom this bug ever had: no rows, no error, for four steps
         # and a full cluster run. Say it out loud, once, rather than returning quietly.
         detail = "" if n else f" -- recorder is EMPTY; payload keys {sorted(payload)}"
-        (logger.info if n else logger.warning)(
-            f"{LOG_PREFIX}bound {name}, first read returned {n} entries{detail}"
-        )
+        (logger.info if n else logger.warning)(f"{LOG_PREFIX}bound {name}, first read returned {n} entries{detail}")
     return payload
 
 

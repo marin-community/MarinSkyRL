@@ -8,7 +8,10 @@ symbol is absent entirely, which is what made the wrong one look correct.
 
 This runs on ONE GPU and prints the answer.
 """
-import json, os, sys
+
+import json
+import os
+import sys
 import torch
 import torch.distributed as dist
 
@@ -38,9 +41,11 @@ for name in ("_dump_fr_trace_json", "_dump_nccl_trace_json"):
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from skyrl_train.distributed import flight_recorder_summary as frs  # noqa: E402
+
 tr = frs._dump_trace()
 n = len(((tr or {}).get("entries")) or ())
 print(f"\nOUR _dump_trace() -> entries={n}")
-print("VERDICT:", "READS NCCL — instrument works" if n else
-      "READS THE WRONG (EMPTY) RECORDER — this is O5's root cause")
+print(
+    "VERDICT:", "READS NCCL — instrument works" if n else "READS THE WRONG (EMPTY) RECORDER — this is O5's root cause"
+)
 dist.destroy_process_group()
