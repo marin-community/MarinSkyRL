@@ -1643,7 +1643,12 @@ class PolicyWorkerBase(Worker):
         # No offline probe can settle it: a 4-layer model at production width, real weights and
         # production tokens-per-expert is bitwise clean on one GPU. It needs the real 26-layer,
         # FSDP2-sharded, two-code-path run.
-        if self._policy_spans.enabled and self.cfg.trainer.get("log_ratio_repeat_probe", False):
+        # getattr, not attribute access: this method runs during fwd_logprobs_values_reward, which
+        # the trainer calls BEFORE ppo_train -- and ppo_train is where _policy_spans is assigned. A
+        # bare `self._policy_spans` raises AttributeError on the FIRST forward of step 1, on every
+        # run, probe enabled or not. Mirrors the existing guard in training_step.
+        _spans = getattr(self, "_policy_spans", None)
+        if _spans is not None and _spans.enabled and self.cfg.trainer.get("log_ratio_repeat_probe", False):
             with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
                 repeat = self.model(
                     sequences,
@@ -1655,9 +1660,10 @@ class PolicyWorkerBase(Worker):
                 )
             delta = (repeat - policy_logprob).abs().max().item()
             logger.info(
-                "[F25] old-logprob forward repeated on the same micro-batch: max|delta| %.6e "
-                "(exactly 0 means this pass is deterministic, so any eval-vs-train divergence is a "
-                "SEAM, not nondeterminism)",
+                "[F25] old-logprob forward repeated on the same micro-batch: max|delta| %.6e. "
+                "NON-ZERO proves this pass is nondeterministic. ZERO proves nothing on its own -- "
+                "one agreeing pair is not determinism, so read it across micro-batches and steps, "
+                "and only a long run of zeros makes a seam the better explanation.",
                 delta,
             )
 

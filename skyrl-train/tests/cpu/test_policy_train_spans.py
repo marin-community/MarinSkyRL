@@ -731,3 +731,42 @@ def test_disabled_spans_publish_no_counters_even_when_some_are_gathered(monkeypa
         counters=counters,
     )
     assert seen["counters"] == counters
+
+
+def test_the_old_logprob_forward_does_not_touch_spans_before_ppo_train_creates_them():
+    """🚨 The forward runs BEFORE ppo_train, and ppo_train is where _policy_spans is assigned.
+
+    `fwd_logprobs_values_reward` is called at trainer.py:706; `ppo_train` at :723. So on step 1 the
+    first `_forward_micro_batch` happens on a worker that has no `_policy_spans` attribute at all.
+    A bare `self._policy_spans.enabled` raises AttributeError there — on EVERY run, whether or not
+    the probe is enabled — which is exactly the crash this asserts against.
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    source = inspect.getsource(worker_module.PolicyWorkerBase._forward_micro_batch)
+    assert "self._policy_spans." not in source, (
+        "_forward_micro_batch dereferences _policy_spans directly; it does not exist yet on step 1"
+    )
+    assert 'getattr(self, "_policy_spans", None)' in source
+
+    # And behaviourally: the guard must survive a worker that has never run ppo_train.
+    class _Bare:
+        pass
+
+    bare = _Bare()
+    spans = getattr(bare, "_policy_spans", None)
+    assert spans is None, "the getattr form is what makes a fresh worker safe"
+
+
+def test_the_repeat_probe_does_not_claim_determinism_from_one_pair():
+    """A single agreeing pair is not determinism, and the log must not say it is.
+
+    The distinction decides which fix is correct: non-zero proves nondeterminism and points at the
+    combine; zero on its own points nowhere, and only a long run of zeros makes a deterministic
+    eval/train seam the better explanation.
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    source = inspect.getsource(worker_module.PolicyWorkerBase._forward_micro_batch)
+    assert "ZERO proves nothing on its own" in source
+    assert "exactly 0 means this pass is deterministic" not in source

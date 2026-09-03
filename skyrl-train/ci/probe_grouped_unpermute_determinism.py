@@ -50,20 +50,40 @@ REPEATS = 20
 
 def _config(top_k: int) -> GrugMoeConfig:
     return GrugMoeConfig(
-        vocab_size=48, hidden_size=256, intermediate_size=256, shared_expert_intermediate_size=128,
-        num_local_experts=64, num_experts_per_tok=top_k, num_hidden_layers=1,
-        num_attention_heads=4, num_key_value_heads=2, head_dim=64,
-        max_position_embeddings=64, sliding_window=4, qk_mult=1.37, initializer_range=0.02,
+        vocab_size=48,
+        hidden_size=256,
+        intermediate_size=256,
+        shared_expert_intermediate_size=128,
+        num_local_experts=64,
+        num_experts_per_tok=top_k,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        max_position_embeddings=64,
+        sliding_window=4,
+        qk_mult=1.37,
+        initializer_range=0.02,
     )
 
 
 def _probe(top_k: int, grouped: bool, experts: int, hidden: int, tokens: int) -> dict:
     torch.manual_seed(17)
     cfg = GrugMoeConfig(
-        vocab_size=48, hidden_size=hidden, intermediate_size=hidden, shared_expert_intermediate_size=hidden // 2,
-        num_local_experts=experts, num_experts_per_tok=top_k, num_hidden_layers=1,
-        num_attention_heads=4, num_key_value_heads=2, head_dim=64,
-        max_position_embeddings=64, sliding_window=4, qk_mult=1.37, initializer_range=0.02,
+        vocab_size=48,
+        hidden_size=hidden,
+        intermediate_size=hidden,
+        shared_expert_intermediate_size=hidden // 2,
+        num_local_experts=experts,
+        num_experts_per_tok=top_k,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        max_position_embeddings=64,
+        sliding_window=4,
+        qk_mult=1.37,
+        initializer_range=0.02,
     )
     block = GrugMoeSparseMoeBlock(cfg).to(device="cuda", dtype=torch.bfloat16)
     if grouped:
@@ -78,8 +98,10 @@ def _probe(top_k: int, grouped: bool, experts: int, hidden: int, tokens: int) ->
     # torch.equal, not a max-diff: a NaN anywhere poisons a subtraction and reports `nan` for both
     # "identical" and "different", which is how the first version of this probe failed to answer.
     identical = all(torch.equal(first, r) for r in repeats)
-    finite_diffs = [float((r - first)[torch.isfinite(r - first)].abs().max()) if torch.isfinite(r - first).any() else 0.0
-                    for r in repeats]
+    finite_diffs = [
+        float((r - first)[torch.isfinite(r - first)].abs().max()) if torch.isfinite(r - first).any() else 0.0
+        for r in repeats
+    ]
     repeat_diff = max(finite_diffs) if finite_diffs else 0.0
     nans = int(torch.isnan(first).sum())
 
@@ -91,12 +113,25 @@ def _probe(top_k: int, grouped: bool, experts: int, hidden: int, tokens: int) ->
     seam_identical = torch.equal(eval_out, train_out)
 
     return {
-        "identical": identical, "repeat_diff": repeat_diff, "nans": nans,
-        "numel": int(first.numel()), "seam_identical": seam_identical,
+        "identical": identical,
+        "repeat_diff": repeat_diff,
+        "nans": nans,
+        "numel": int(first.numel()),
+        "seam_identical": seam_identical,
     }
 
 
 def main() -> None:
+    # 🔻 REFUSES TO RUN. The docstring above says this probe's subject was never initialised, but a
+    # docstring does not stop a runner from executing it and printing "CONFIRMED" off uninitialised
+    # memory. Kept for the lesson, not for the result.
+    raise SystemExit(
+        "probe_grouped_unpermute_determinism is INVALID and will not run: it builds "
+        "GrugMoeSparseMoeBlock directly, so post_init() never fires and the stacked expert weights "
+        "stay at the torch.empty they were allocated with. Its tiny arm returned all-NaN for that "
+        "reason. Use ci/probe_grug_eval_train_parity.py, which builds GrugMoeForCausalLM."
+    )
+
     if not torch.cuda.is_available():
         raise SystemExit("needs a GPU: the defect is in a CUDA atomicAdd and cannot appear on CPU")
 
@@ -114,21 +149,26 @@ def main() -> None:
     for label, grouped, experts, hidden, tokens, k in arms:
         r = _probe(k, grouped, experts, hidden, tokens)
         rows[label] = r
-        print(f"{label:30s} {k:>2d} {str(r['identical']):>21s} {r['repeat_diff']:>11.3e} "
-              f"{r['nans']:>6d}/{r['numel']:<5d} {str(r['seam_identical']):>12s}")
+        print(
+            f"{label:30s} {k:>2d} {str(r['identical']):>21s} {r['repeat_diff']:>11.3e} "
+            f"{r['nans']:>6d}/{r['numel']:<5d} {str(r['seam_identical']):>12s}"
+        )
 
     prod = rows["grouped, PRODUCTION shape"]
     ctrl = rows["eager,   PRODUCTION shape"]
     print()
     if prod["nans"]:
-        print(f"🚨 The grouped path produced {prod['nans']} NaNs at production shape where eager produced "
-              f"{ctrl['nans']}.")
+        print(
+            f"🚨 The grouped path produced {prod['nans']} NaNs at production shape where eager produced {ctrl['nans']}."
+        )
         print("   That is a SEPARATE and more serious defect than nondeterminism -- suspect")
         print("   uninitialised rows past routed_rows (pytorch#186365 class), not the atomic add.")
     elif not prod["identical"]:
         print("🚨 CONFIRMED: the grouped combine is NONDETERMINISTIC at production shape.")
-        print(f"   Twenty identical forwards differ by up to {prod['repeat_diff']:.3e} while eager is "
-              f"{'identical' if ctrl['identical'] else 'ALSO nondeterministic -- investigate'}.")
+        print(
+            f"   Twenty identical forwards differ by up to {prod['repeat_diff']:.3e} while eager is "
+            f"{'identical' if ctrl['identical'] else 'ALSO nondeterministic -- investigate'}."
+        )
         print("   Cause is the atomic scatter_add over duplicate token indices; the fix is a fixed-order")
         print("   reduction, which is PR #488's fix for the same structure on Megatron.")
     elif not prod["seam_identical"]:

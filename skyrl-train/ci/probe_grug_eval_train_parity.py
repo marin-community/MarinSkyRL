@@ -33,7 +33,7 @@ import torch
 from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM
 
 LAYERS = 4
-TOKENS = 6800          # production padded length, so ~106 routed rows per expert at top-4
+TOKENS = 6800  # production padded length, so ~106 routed rows per expert at top-4
 EXPERTS = 256
 HIDDEN = 2560
 INTERMEDIATE = 1280
@@ -43,11 +43,20 @@ TOP_K = 4
 def _model(grouped: bool) -> GrugMoeForCausalLM:
     torch.manual_seed(17)
     cfg = GrugMoeConfig(
-        vocab_size=512, hidden_size=HIDDEN, intermediate_size=INTERMEDIATE,
-        shared_expert_intermediate_size=INTERMEDIATE, num_local_experts=EXPERTS,
-        num_experts_per_tok=TOP_K, num_hidden_layers=LAYERS,
-        num_attention_heads=20, num_key_value_heads=4, head_dim=128,
-        max_position_embeddings=8192, sliding_window=2048, qk_mult=1.37, initializer_range=0.02,
+        vocab_size=512,
+        hidden_size=HIDDEN,
+        intermediate_size=INTERMEDIATE,
+        shared_expert_intermediate_size=INTERMEDIATE,
+        num_local_experts=EXPERTS,
+        num_experts_per_tok=TOP_K,
+        num_hidden_layers=LAYERS,
+        num_attention_heads=20,
+        num_key_value_heads=4,
+        head_dim=128,
+        max_position_embeddings=8192,
+        sliding_window=2048,
+        qk_mult=1.37,
+        initializer_range=0.02,
     )
     model = GrugMoeForCausalLM(cfg).to(device="cuda", dtype=torch.bfloat16)
     if grouped:
@@ -67,7 +76,7 @@ def _routes(model) -> list[torch.Tensor]:
 
         def hook(_mod, _inp, out, _seen=seen):
             # The router returns (scores, indices) in some order; keep the integer one.
-            for t in (out if isinstance(out, tuple) else (out,)):
+            for t in out if isinstance(out, tuple) else (out,):
                 if torch.is_tensor(t) and not t.is_floating_point():
                     _seen.append(t.detach().clone())
                     return
@@ -128,9 +137,11 @@ def main() -> None:
             d = (x.float() - y.float()).abs()
             return float(d.max()) if d.numel() else 0.0
 
-        print(f"[{label}] eval==eval {str(eval_det):5s}  eval==train {str(seam):5s}  "
-              f"routes: det {str(route_det):5s} seam {str(route_seam):5s}  "
-              f"max|d| eval/eval {worst(eval_a, eval_b):.3e}  eval/train {worst(eval_a, train_c):.3e}")
+        print(
+            f"[{label}] eval==eval {str(eval_det):5s}  eval==train {str(seam):5s}  "
+            f"routes: det {str(route_det):5s} seam {str(route_seam):5s}  "
+            f"max|d| eval/eval {worst(eval_a, eval_b):.3e}  eval/train {worst(eval_a, train_c):.3e}"
+        )
         for i, (a, b, c) in enumerate(zip(routes_a, routes_b, routes_c)):
             flips_det = int((a != b).sum())
             flips_seam = int((a != c).sum())
