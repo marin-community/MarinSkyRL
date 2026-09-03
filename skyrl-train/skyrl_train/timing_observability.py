@@ -814,10 +814,22 @@ class WorkerTimingSink:
 
     ``clock_domain`` is deliberately not ``inclusive_wall``: these are exclusive durations, and
     mixing the two under one domain would let a consumer sum a child into its parent twice.
+
+    It also carries the SYNCHRONIZE mode, because that decides what the numbers mean. CUDA kernels
+    launch asynchronously, so without a device synchronise a span measures *launch* time and charges
+    a backward's real cost to whatever later call happens to block; with it, the span measures
+    execution and the pipeline is serialised. The accumulator's own docstring says never to compare
+    the two -- and a consumer cannot obey that if both ship under the same label. `_launch` rows are
+    end-to-end-honest and attribution-poor; `_wall` rows are the reverse.
     """
 
-    def __init__(self, rank: int) -> None:
+    def __init__(self, rank: int, *, synchronize: bool = True) -> None:
         self.rank = rank
+        self.synchronize = synchronize
+
+    def _clock_domain(self, name: str) -> str:
+        containment = "inclusive" if name in ("policy_ppo_train", "policy_training_step") else "exclusive"
+        return f"{containment}_{'wall' if self.synchronize else 'launch'}"
 
     def publish(self, observations: Sequence[PhaseTiming], step: int) -> None:
         for observation in observations:
@@ -827,11 +839,7 @@ class WorkerTimingSink:
                     "phase": observation.name,
                     "root": observation.root,
                     "parent": TIMING_PARENTS.get(observation.name) or "",
-                    "clock_domain": (
-                        "inclusive_wall"
-                        if observation.name in ("policy_ppo_train", "policy_training_step")
-                        else "exclusive_wall"
-                    ),
+                    "clock_domain": self._clock_domain(observation.name),
                     "role": WORKER_ROLE,
                     "rank": str(self.rank),
                     "step": str(step),
@@ -846,6 +854,7 @@ def publish_worker_spans(
     rank: int,
     previous_publish: tuple[int, float] | None = None,
     counters: Mapping[str, float] | None = None,
+    synchronize: bool = True,
 ) -> float:
     """Publish one worker's policy_train decomposition, settle the queue, and report what it cost.
 
@@ -863,7 +872,7 @@ def publish_worker_spans(
         return 0.0
     started = time.perf_counter()
     before = telemetry.runtime_status()
-    sink = WorkerTimingSink(rank)
+    sink = WorkerTimingSink(rank, synchronize=synchronize)
     sink.publish(phase_timing_observations(timings), step)
     # Inside the same before/after window as the spans, so the loss check below covers them too.
     # Published separately they were invisible: emission exceptions are swallowed by Rigging and the
