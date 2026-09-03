@@ -1,12 +1,16 @@
 from types import SimpleNamespace
 
 import pytest
-from skyrl_gym.verification import RewardResult
+from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from omegaconf import OmegaConf
 
 try:
     import skyrl_train.trajectory_runners.harbor.runner as harbor_runner_module
-    from skyrl_train.trajectory_runners.harbor.runner import HarborTrajectoryRunner
+    from skyrl_train.trajectory_runners.harbor.runner import (
+        HarborTrajectoryRunner,
+        TerminalBenchAgentOutput,
+        _build_step_wise_turns,
+    )
 except ImportError:
     pytest.skip("harbor deps unavailable (agentic RL extra not installed)", allow_module_level=True)
 
@@ -62,6 +66,7 @@ def _trial_runner() -> HarborTrajectoryRunner:
     runner._tis_splice = True
     runner._truncation_penalty = 0.0
     runner._enable_token_reward_channel = False
+    runner._step_wise_training = False
     runner._chat_template_kwargs = {}
     runner.custom_chat_template_content = None
     runner.tokenizer = _Tokenizer()
@@ -69,6 +74,59 @@ def _trial_runner() -> HarborTrajectoryRunner:
         {"sampling_params": {"max_generate_length": 16}, "max_input_length": 16}
     )
     return runner
+
+
+def test_harbor_step_wise_projection_uses_exact_turn_transport_and_terminal_reward():
+    turns = _build_step_wise_turns(
+        [[1], [1, 2, 9]],
+        [[2], [3, 4]],
+        [[-0.1], [-0.2, -0.3]],
+        None,
+        rollout_logprobs_required=True,
+    )
+    output = TerminalBenchAgentOutput(
+        evidence=RolloutEvidence(
+            stop_reason="complete",
+            prompt_token_ids=(1,),
+            response_token_ids=(2, 9, 3, 4),
+        ),
+        verification=VerificationResult.verified(1.0),
+        reward_result=RewardResult(unshaped_reward=1.0, optimization_reward=0.75),
+        disposition=TrainingDisposition(loss_eligible=True, baseline_eligible=True, reason="verified"),
+        loss_mask=[1, 0, 1, 1],
+        trajectory_id=TrajectoryID(instance_id="task", repetition_id=2),
+        step_wise_turns=turns,
+    )
+    runner = object.__new__(HarborTrajectoryRunner)
+    runner._reward_shaping_enabled = False
+    runner._moe_router_replay = False
+
+    batch = runner._project_step_wise_outputs(
+        [output],
+        rollout_metrics={"generate/example": 1.0},
+        actual_global_step=7,
+        is_eval=False,
+    )
+
+    assert batch["prompt_token_ids"] == [[1], [1, 2, 9]]
+    assert batch["response_ids"] == [[2], [3, 4]]
+    assert batch["rollout_logprobs"] == [[-0.1], [-0.2, -0.3]]
+    assert batch["rewards"] == [0.0, 0.75]
+    assert batch["unshaped_rewards"] == [0.0, 1.0]
+    assert batch["is_last_step"] == [False, True]
+    assert [item.step for item in batch["trajectory_ids"]] == [0, 1]
+    assert batch["actual_global_step"] == 7
+
+
+def test_harbor_step_wise_transport_rejects_misaligned_logprobs():
+    with pytest.raises(ValueError, match="align one-for-one"):
+        _build_step_wise_turns(
+            [[1]],
+            [[2, 3]],
+            [[-0.1]],
+            None,
+            rollout_logprobs_required=True,
+        )
 
 
 @pytest.mark.parametrize(

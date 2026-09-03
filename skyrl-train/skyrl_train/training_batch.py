@@ -3,7 +3,8 @@
 import io
 import math
 import pickle
-from typing import Any, Dict, Generic, Iterator, List, Optional, TypeVar, TypedDict
+from copy import deepcopy
+from typing import Any, Dict, Generic, Iterator, List, Optional, Tuple, TypeVar, TypedDict
 
 import torch
 from jaxtyping import Float, Integer
@@ -32,6 +33,58 @@ def gradient_accumulation_steps(per_rank_mini_batch_size: int, micro_batch_size:
             f"of micro-batch size {micro_batch_size}"
         )
     return steps
+
+
+PROMPT_MINI_BATCH_BOUNDARIES_METADATA_KEYS = {
+    "policy": "policy_prompt_mini_batch_boundaries",
+    "critic": "critic_prompt_mini_batch_boundaries",
+}
+
+
+def optimizer_micro_batches_per_mini_batch(
+    dataloader_length: int,
+    per_rank_mini_batch_size: int,
+    micro_batch_size: int,
+    *,
+    step_wise_training: bool,
+) -> int:
+    """Count optimizer microbatches for fixed-row or prompt-partitioned input."""
+    if step_wise_training:
+        return dataloader_length
+    return gradient_accumulation_steps(per_rank_mini_batch_size, micro_batch_size)
+
+
+def prompt_mini_batch_boundaries(uids: List[str], prompts_per_mini_batch: int) -> List[Tuple[int, int]]:
+    """Return row slices containing a fixed number of contiguous prompts."""
+    if not uids:
+        raise ValueError("uids must be non-empty")
+    if prompts_per_mini_batch < 1:
+        raise ValueError("prompts_per_mini_batch must be positive")
+
+    prompt_end_indices = []
+    completed_uids = set()
+    for index in range(1, len(uids)):
+        if uids[index] == uids[index - 1]:
+            continue
+        completed_uids.add(uids[index - 1])
+        if uids[index] in completed_uids:
+            raise ValueError(f"uid {uids[index]!r} appears in non-contiguous rows")
+        prompt_end_indices.append(index)
+    prompt_end_indices.append(len(uids))
+
+    num_prompts = len(prompt_end_indices)
+    if num_prompts % prompts_per_mini_batch:
+        raise ValueError(
+            f"{num_prompts} prompts cannot be divided into mini-batches of {prompts_per_mini_batch} prompts"
+        )
+
+    boundaries = []
+    start = 0
+    for prompt_index in range(prompts_per_mini_batch - 1, num_prompts, prompts_per_mini_batch):
+        end = prompt_end_indices[prompt_index]
+        boundaries.append((start, end))
+        start = end
+    return boundaries
 
 
 # NOTE (sumanthrh): This is inspired by `TensorDict` but is much simpler.
@@ -385,6 +438,32 @@ class TrainingInputBatch(TensorBatch[TrainingInput]):
     """Training input data"""
 
     pass
+
+
+def pad_training_input_batch(batch: TrainingInputBatch, multiple: int) -> TrainingInputBatch:
+    """Pad to a row multiple with copies that cannot contribute to training."""
+    if multiple < 1:
+        raise ValueError("multiple must be positive")
+    pad_size = (-batch.batch_size) % multiple
+    if pad_size == 0:
+        return batch
+
+    source_indices = torch.arange(pad_size, device=batch.device) % batch.batch_size
+    tensors = {}
+    for key, tensor in batch.items():
+        if tensor is None:
+            tensors[key] = None
+            continue
+        padding = tensor.index_select(0, source_indices)
+        if key in ("loss_mask", "response_mask", "rewards"):
+            padding = torch.zeros_like(padding)
+        elif key == "is_last_step":
+            padding = torch.ones_like(padding)
+        tensors[key] = torch.cat((tensor, padding), dim=0)
+
+    padded = TrainingInputBatch(tensors)
+    padded.metadata = deepcopy(batch.metadata)
+    return padded
 
 
 class TrainingBatchIterator(Iterator[Experience]):

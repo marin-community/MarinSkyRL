@@ -224,15 +224,16 @@ class StepWiseRolloutCollector:
             input_ids, loss_mask = self._get_next_input_ids_with_multiturn_chat_template(
                 input_ids, output_ids, new_obs, done, added_eos
             )
+            generation_loss_mask = loss_mask[: len(output_ids)]
             if response_logprobs is not None:
-                response_logprobs += [0] * (len(loss_mask) - len(response_logprobs))
+                response_logprobs += [0] * (len(output_ids) - len(response_logprobs))
 
             if retokenize_chat_history:
                 # update the chat history
                 chat_history = self._update_chat_history(chat_history, output, new_obs)
 
             per_step_rewards.append((step_reward, response_end_idx))
-            response_ids = copy.deepcopy(input_ids[current_prompt_length:])
+            response_ids = copy.deepcopy(output_ids)
             per_step_output = AgentLoopOutput(
                 evidence=RolloutEvidence(
                     response=output,
@@ -245,7 +246,7 @@ class StepWiseRolloutCollector:
                 verification=verification,
                 reward=reward_from_env_step(env_step_output, verification),
                 disposition=TrainingDisposition.train(),
-                loss_mask=copy.deepcopy(loss_mask),
+                loss_mask=copy.deepcopy(generation_loss_mask),
                 env_metrics=environment_metrics_from_step(env_step_output, env.get_metrics() if done else {}),
                 token_provenance=engine_output["token_provenance"],
             )

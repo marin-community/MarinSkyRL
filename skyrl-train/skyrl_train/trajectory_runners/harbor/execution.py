@@ -110,6 +110,7 @@ class HarborRunnerSpec:
             tito_full=algorithm.get("tito_full", None),
             tis_splice=bool(algorithm.tis_splice),
             tis_lcs_alert_threshold=float(algorithm.tis_lcs_alert_threshold),
+            step_wise_training=bool(self.config.trainer.get("step_wise_training", False)),
         )
 
 

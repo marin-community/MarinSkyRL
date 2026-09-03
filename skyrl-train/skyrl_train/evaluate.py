@@ -139,6 +139,7 @@ async def _collect_evaluation_rollouts(
     return _EvaluationRollouts(
         batch=concatenate_trajectory_batches(
             trajectory_batches,
+            step_wise=cfg.trainer.step_wise_training,
             tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
         ),
         env_classes=accumulator.env_classes,

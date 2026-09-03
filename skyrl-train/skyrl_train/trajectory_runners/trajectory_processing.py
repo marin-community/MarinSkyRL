@@ -1,6 +1,7 @@
+import copy
 import torch
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol
+from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol, cast
 from collections import defaultdict
 import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
@@ -642,6 +643,7 @@ def concatenate_trajectory_batches(
     trajectory_batches: List[TrajectoryBatch],
     *,
     require_rollout_logprobs: bool = False,
+    step_wise: bool = False,
     tis_lcs_alert_threshold: float,
 ) -> TrajectoryBatch:
     """
@@ -842,20 +844,21 @@ def concatenate_trajectory_batches(
     result["rollout_metrics"] = rollout_metrics
     refresh_trajectory_reward_shaping_metrics(result)
 
-    num_prompts = len(result["prompt_token_ids"])
-    validate_trajectory_batch(num_prompts, result)
+    if step_wise:
+        validate_step_wise_trajectory_batch(result)
+    else:
+        validate_trajectory_batch(len(result["prompt_token_ids"]), result)
 
     return result
 
 
-def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatch) -> None:
-    """Validate the shape and value categories of a trajectory batch."""
+def _validate_trajectory_batch_fields(trajectory_batch: TrajectoryBatch) -> int:
+    """Validate common fields and return the response count."""
     if not trajectory_batch["response_ids"]:
         raise RuntimeError("No outputs generated")
 
     num_responses = len(trajectory_batch["response_ids"])
     num_prompt_tokens = len(trajectory_batch["prompt_token_ids"])
-    assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
     assert num_responses == num_prompt_tokens, (
         f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
     )
@@ -899,6 +902,140 @@ def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatc
         assert all(not isinstance(reward, list) for reward in rewards), (
             "rewards must be `List[float]` or `List[List[float]]`"
         )
+
+    return num_responses
+
+
+def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatch) -> None:
+    """Validate a one-response-per-prompt trajectory batch."""
+    num_responses = _validate_trajectory_batch_fields(trajectory_batch)
+    assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
+
+
+def validate_step_wise_trajectory_batch(trajectory_batch: TrajectoryBatch) -> None:
+    """Validate a variable-turn trajectory batch and its terminal boundaries."""
+    num_responses = _validate_trajectory_batch_fields(trajectory_batch)
+    _validate_step_wise_fields(trajectory_batch, num_responses)
+
+
+_MERGEABLE_STEP_WISE_TOKEN_FIELDS = frozenset(
+    {
+        "loss_masks",
+        "rollout_logprobs",
+    }
+)
+
+
+def _is_token_prefix(prefix: List[int], tokens: List[int]) -> bool:
+    return len(prefix) <= len(tokens) and prefix == tokens[: len(prefix)]
+
+
+def merge_step_wise_trajectory_batch(trajectory_batch: TrajectoryBatch) -> TrajectoryBatch:
+    """Greedily compact step-wise rows when the next prompt extends the current token stream.
+
+    Observation tokens inserted between assistant turns remain in the response
+    tensor with zero loss, reward, shaping, and behavior-logprob values. Fields
+    that describe a whole row are taken from the final row in each merged group.
+    """
+    validate_step_wise_trajectory_batch(trajectory_batch)
+    if trajectory_batch.get("rollout_routed_experts") is not None:
+        raise ValueError("prefix-aware step-wise merging does not support rollout_routed_experts")
+    if trajectory_batch.get("reward_shaping_loop_spans") is not None:
+        raise ValueError("prefix-aware step-wise merging does not support reward_shaping_loop_spans")
+
+    row_count = len(trajectory_batch["response_ids"])
+    row_fields = {key for key, value in trajectory_batch.items() if isinstance(value, list) and len(value) == row_count}
+    merged = {key: [] if key in row_fields else copy.deepcopy(value) for key, value in trajectory_batch.items()}
+    token_fields = {
+        key for key in _MERGEABLE_STEP_WISE_TOKEN_FIELDS if key in row_fields and trajectory_batch.get(key) is not None
+    }
+    rewards_are_token_level = isinstance(trajectory_batch["rewards"][0], list)
+    if rewards_are_token_level:
+        token_fields.add("rewards")
+
+    accumulated_prompt = []
+    accumulated_response = []
+    accumulated_tokens = {}
+
+    def start_group(index: int) -> None:
+        nonlocal accumulated_prompt, accumulated_response, accumulated_tokens
+        accumulated_prompt = copy.deepcopy(trajectory_batch["prompt_token_ids"][index])
+        accumulated_response = copy.deepcopy(trajectory_batch["response_ids"][index])
+        accumulated_tokens = {key: copy.deepcopy(trajectory_batch[key][index]) for key in token_fields}
+
+    def append_turn(index: int) -> bool:
+        full_stream = accumulated_prompt + accumulated_response
+        next_prompt = trajectory_batch["prompt_token_ids"][index]
+        if not _is_token_prefix(full_stream, next_prompt):
+            return False
+        observation_delta = next_prompt[len(full_stream) :]
+        accumulated_response.extend(observation_delta)
+        accumulated_response.extend(trajectory_batch["response_ids"][index])
+        for key, values in accumulated_tokens.items():
+            values.extend([0] * len(observation_delta))
+            values.extend(trajectory_batch[key][index])
+        return True
+
+    def flush_group(last: int) -> None:
+        merged["prompt_token_ids"].append(accumulated_prompt)
+        merged["response_ids"].append(accumulated_response)
+        for key in row_fields:
+            if key in ("prompt_token_ids", "response_ids"):
+                continue
+            if key in token_fields:
+                merged[key].append(accumulated_tokens[key])
+            else:
+                merged[key].append(copy.deepcopy(trajectory_batch[key][last]))
+
+    start_group(0)
+    is_last_step = trajectory_batch["is_last_step"]
+    for index in range(1, row_count):
+        previous_was_terminal = is_last_step[index - 1]
+        if previous_was_terminal or not append_turn(index):
+            flush_group(index - 1)
+            start_group(index)
+    flush_group(row_count - 1)
+
+    result = cast(TrajectoryBatch, merged)
+    validate_step_wise_trajectory_batch(result)
+    return result
+
+
+def validate_contiguous_trajectory_keys(trajectory_keys: Iterable[Any]) -> None:
+    """Require every trajectory's rows to form one contiguous block."""
+    completed = set()
+    previous = object()
+    for key in trajectory_keys:
+        if key == previous:
+            continue
+        if key in completed:
+            raise ValueError("steps from the same trajectory must be contiguous")
+        completed.add(previous)
+        previous = key
+
+
+def _validate_step_wise_fields(trajectory_batch: TrajectoryBatch, num_responses: int) -> None:
+    """Validate trajectory boundaries required by step-wise advantage broadcast."""
+    is_last_step = trajectory_batch.get("is_last_step")
+    trajectory_ids = trajectory_batch.get("trajectory_ids")
+    if is_last_step is None or trajectory_ids is None:
+        raise ValueError("step-wise training requires is_last_step and trajectory_ids")
+    if len(is_last_step) != num_responses or len(trajectory_ids) != num_responses:
+        raise ValueError("step-wise fields must have one entry per response")
+    if not is_last_step[-1]:
+        raise ValueError("the final step-wise response must end its trajectory")
+
+    trajectory_keys = [(item.instance_id, item.repetition_id) for item in trajectory_ids]
+    validate_contiguous_trajectory_keys(trajectory_keys)
+    for index in range(num_responses - 1):
+        current_id = trajectory_keys[index]
+        next_id = trajectory_keys[index + 1]
+        if current_id == next_id:
+            if is_last_step[index]:
+                raise ValueError("a trajectory may contain only one final step")
+            continue
+        if not is_last_step[index]:
+            raise ValueError("every step-wise trajectory boundary must mark its final step")
 
 
 def apply_overlong_filtering(

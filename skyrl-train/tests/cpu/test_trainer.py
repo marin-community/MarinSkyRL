@@ -21,9 +21,15 @@ from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.sync_group_admission import InsufficientEligibleGroupsError
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.policy_losses import ppo_policy_loss
-from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.training_batch import (
+    TrainingBatchIterator,
+    TrainingInputBatch,
+    TrainingOutputBatch,
+    prompt_mini_batch_boundaries,
+)
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.models.grug_query_bias import (
@@ -103,14 +109,19 @@ class DummyDataset:
 
 
 class _CapturingPolicyGroup:
-    def __init__(self):
-        self.actor_infos = [SimpleNamespace(rank=SimpleNamespace(dp_size=2)) for _ in range(4)]
+    def __init__(self, *, actor_count=4, capture_many=False):
+        self.actor_infos = [SimpleNamespace(rank=SimpleNamespace(dp_size=2)) for _ in range(actor_count)]
         self.training_batch = None
+        self.training_batches = []
+        self._capture_many = capture_many
 
     def async_run_ray_method(self, dispatch_type, method_name, *args):
         del dispatch_type
         if method_name == "ppo_train":
-            self.training_batch = args[0]
+            if self._capture_many:
+                self.training_batches.append(args[0])
+            else:
+                self.training_batch = args[0]
             return [object()]
         if method_name == "empty_cache":
             return []
@@ -259,6 +270,93 @@ def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypat
     trainer.train_critic_and_policy(batch)
 
     assert trainer.policy_model.training_batch.metadata["global_loss_denom"] == 32.0
+
+
+def test_step_wise_training_dispatches_one_optimizer_batch_per_prompt_mini_batch(monkeypatch):
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "step_wise_training": True,
+                "micro_train_batch_size_per_gpu": 2,
+                "algorithm": {"loss_reduction": "token_mean"},
+            }
+        }
+    )
+    trainer.global_step = 3
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer.colocate_all = False
+    trainer.critic_model = None
+    trainer.policy_model = _CapturingPolicyGroup(actor_count=1, capture_many=True)
+
+    status = TrainingOutputBatch()
+    status.metadata = {"train_status": {"policy_loss": 0.5, "policy_update_steps": 1.0}}
+    monkeypatch.setattr(trainer_module, "collect_actor_results", lambda *args, **kwargs: [status])
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+
+    batch = TrainingInputBatch(
+        {
+            "advantages": torch.arange(14, dtype=torch.float).reshape(7, 2),
+            "loss_mask": torch.ones(7, 2),
+            "response_mask": torch.ones(7, 2),
+        }
+    )
+    batch.metadata = {"policy_prompt_mini_batch_boundaries": [(0, 3), (3, 7)]}
+
+    result = trainer.train_critic_and_policy(batch)
+
+    assert [len(item) for item in trainer.policy_model.training_batches] == [4, 4]
+    assert trainer.policy_model.training_batches[0]["loss_mask"][-1].sum() == 0
+    assert trainer.policy_model.training_batches[0]["response_mask"][-1].sum() == 0
+    assert result["policy_update_steps"] == 2.0
+
+
+def test_prompt_mini_batch_boundaries_count_prompts_in_variable_turn_batches():
+    uids = ["a", "a", "a", "b", "b", "c", "d", "d", "d", "d"]
+
+    assert prompt_mini_batch_boundaries(uids, prompts_per_mini_batch=2) == [(0, 5), (5, 10)]
+
+
+def test_prompt_mini_batch_boundaries_reject_noncontiguous_prompt_rows():
+    with pytest.raises(ValueError, match="non-contiguous"):
+        prompt_mini_batch_boundaries(["a", "b", "a", "b"], prompts_per_mini_batch=2)
+
+
+def test_step_wise_postprocess_merges_prefix_rows_and_contracts_uids():
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {"step_wise_training": True},
+            "generator": {"n_samples_per_prompt": 1, "merge_step_wise_output": True},
+        }
+    )
+    trainer.all_metrics = {}
+    trajectory_id = TrajectoryID(instance_id="prompt", repetition_id=0)
+    batch = {
+        "prompt_token_ids": [[1], [1, 2, 9]],
+        "response_ids": [[2], [3, 4]],
+        "rewards": [0.0, 1.5],
+        "unshaped_rewards": [0.0, 1.5],
+        "loss_masks": [[1], [1, 1]],
+        "stop_reasons": ["complete", "complete"],
+        "rollout_metrics": {},
+        "rollout_logprobs": [[-0.1], [-0.2, -0.3]],
+        "trajectory_ids": [trajectory_id, trajectory_id],
+        "is_last_step": [False, True],
+        "exclude_from_baseline": [False, False],
+    }
+    uids = ["prompt", "prompt"]
+
+    result = trainer.postprocess_trajectory_batch(batch, uids)
+
+    assert uids == ["prompt"]
+    assert result["response_ids"] == [[2, 9, 3, 4]]
+    assert result["loss_masks"] == [[1, 0, 1, 1]]
+    assert result["rollout_logprobs"] == [[-0.1, 0, -0.2, -0.3]]
+    assert result["rewards"] == [[0.0, 0.0, 0.0, 1.5]]
+    assert trainer.all_metrics["generate/num_seq_before_merge"] == 2
+    assert trainer.all_metrics["generate/num_seq_after_merge"] == 1
 
 
 @pytest.fixture
@@ -659,6 +757,67 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config, dum
     )
 
 
+def test_step_wise_advantages_use_each_turns_response_mask():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "step_wise_training": True,
+                "algorithm": {
+                    "advantage_estimator": "grpo",
+                    "gamma": 1.0,
+                    "lambd": 1.0,
+                    "grpo_norm_by_std": False,
+                },
+            }
+        }
+    )
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=2)
+    trainer.all_metrics = {}
+    response_mask = torch.tensor(
+        [
+            [0, 0, 1, 1, 1, 1],
+            [0, 0, 0, 0, 0, 1],
+            [0, 0, 0, 1, 1, 1],
+            [0, 0, 0, 0, 1, 1],
+            [0, 0, 0, 0, 0, 0],
+        ]
+    )
+    rewards = torch.zeros(5, 6)
+    rewards[1, -1] = 2.0
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.zeros(5, 6, dtype=torch.long),
+            "attention_mask": torch.ones(5, 6),
+            "loss_mask": response_mask.clone(),
+            "response_mask": response_mask,
+            "rewards": rewards,
+            "values": torch.zeros(5, 6),
+            "is_last_step": torch.tensor([False, True, False, True, True]),
+        }
+    )
+    data.metadata = {
+        "uids": ["group", "group", "group", "group", "pad0"],
+        "avg_response_length": 2.5,
+        "pad_size": 1,
+    }
+
+    result = trainer.compute_advantages_and_returns(data)
+
+    expected = torch.tensor(
+        [
+            [0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, -1.0, -1.0, -1.0],
+            [0.0, 0.0, 0.0, 0.0, -1.0, -1.0],
+        ]
+    )
+    torch.testing.assert_close(result["advantages"], expected)
+    torch.testing.assert_close(result["returns"], expected)
+    assert result.batch_size == 4
+    assert result.metadata["pad_size"] == 0
+
+
 @pytest.mark.parametrize(
     ("loss_reduction", "expected_policy_loss"),
     [("token_mean", 0.05), ("sequence_mean", 0.04375)],
@@ -745,6 +904,29 @@ def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_t
         batch["loop_advantages"],
         torch.tensor([[0.0, -0.1, -0.1], [-0.2, 0.0, 0.0]]),
     )
+
+
+def test_step_wise_global_padding_does_not_create_advantage_samples():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.policy_model = SimpleNamespace(actor_infos=[SimpleNamespace(rank=SimpleNamespace(dp_size=2))])
+    trainer.critic_model = None
+    trainer.ref_model = None
+    batch = TrainingInputBatch(
+        {
+            "loss_mask": torch.ones(3, 2),
+            "response_mask": torch.ones(3, 2),
+            "rewards": torch.ones(3, 2),
+            "is_last_step": torch.tensor([False, True, True]),
+        }
+    )
+    batch.metadata = {"uids": ["a", "a", "b"], "trajectory_ids": ["a", "a", "b"]}
+
+    padded = trainer.pad_batch(batch)
+
+    assert padded["loss_mask"][-1].sum() == 0
+    assert padded["response_mask"][-1].sum() == 0
+    assert padded["rewards"][-1].sum() == 0
+    assert padded["is_last_step"][-1]
 
 
 def test_normalize_mini_batch_size():

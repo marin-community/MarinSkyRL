@@ -18,8 +18,11 @@ from skyrl_train.utils.trainer_utils import (
     handle_filter_sampling,
     build_dataloader,
 )
-from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
-from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
+from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryID, TrajectoryRequestBatch
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    validate_step_wise_trajectory_batch,
+    validate_trajectory_batch,
+)
 from typing import Union
 import ray
 import os
@@ -907,6 +910,53 @@ def test_validate_trajectory_batch_valid_case():
     # valid rollout logprobs
     trajectory_batch["rollout_logprobs"] = [[0.11, 0.12, 0.13], [0.2, 0.3], [0.4]]
     validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+
+
+def test_validate_trajectory_batch_accepts_contiguous_step_wise_trajectories():
+    first = TrajectoryID("first", 0)
+    second = TrajectoryID("second", 0)
+    trajectory_batch = TrajectoryBatch(
+        prompt_token_ids=[[1], [1, 2], [3]],
+        response_ids=[[4], [5], [6]],
+        rewards=[[0.0], [1.0], [0.0]],
+        loss_masks=[[1], [1], [1]],
+        stop_reasons=["stop", "stop", "stop"],
+        rollout_logprobs=None,
+        trajectory_ids=[first, first, second],
+        is_last_step=[False, True, True],
+    )
+
+    validate_step_wise_trajectory_batch(trajectory_batch)
+
+
+@pytest.mark.parametrize(
+    ("trajectory_ids", "is_last_step", "error"),
+    [
+        ([TrajectoryID("a", 0), TrajectoryID("b", 0)], [False, True], "boundary"),
+        ([TrajectoryID("a", 0), TrajectoryID("a", 0)], [True, True], "only one final"),
+        ([TrajectoryID("a", 0), TrajectoryID("b", 0)], [True, False], "final step-wise response"),
+        (
+            [TrajectoryID("a", 0), TrajectoryID("b", 0), TrajectoryID("a", 0)],
+            [True, True, True],
+            "contiguous",
+        ),
+    ],
+)
+def test_validate_trajectory_batch_rejects_malformed_step_wise_boundaries(trajectory_ids, is_last_step, error):
+    size = len(trajectory_ids)
+    trajectory_batch = TrajectoryBatch(
+        prompt_token_ids=[[1]] * size,
+        response_ids=[[2]] * size,
+        rewards=[[0.0]] * size,
+        loss_masks=[[1]] * size,
+        stop_reasons=["stop"] * size,
+        rollout_logprobs=None,
+        trajectory_ids=trajectory_ids,
+        is_last_step=is_last_step,
+    )
+
+    with pytest.raises(ValueError, match=error):
+        validate_step_wise_trajectory_batch(trajectory_batch)
 
 
 def test_validate_trajectory_batch_empty_response_ids():

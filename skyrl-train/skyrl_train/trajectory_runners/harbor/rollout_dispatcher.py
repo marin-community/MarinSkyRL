@@ -18,7 +18,10 @@ from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch, TrajectoryBatch
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
-from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    concatenate_trajectory_batches,
+    validate_contiguous_trajectory_keys,
+)
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.utils.fd_monitor import start_fd_monitor
@@ -369,6 +372,7 @@ class RolloutDispatcher:
             result = concatenate_trajectory_batches(
                 outputs,
                 require_rollout_logprobs=rollout_logprobs_enabled(self._spec.config.trainer.algorithm),
+                step_wise=bool(self._spec.config.trainer.get("step_wise_training", False)),
                 tis_lcs_alert_threshold=float(self._spec.config.trainer.algorithm.tis_lcs_alert_threshold),
             )
             actual_steps = [output.get("actual_global_step") for output in outputs]
@@ -429,15 +433,18 @@ class RolloutDispatcher:
         if returned_ids is None:
             raise ValueError("trajectory runner output omitted trajectory IDs")
         returned = [trajectory_id.to_string() for trajectory_id in returned_ids]
-        if len(returned) != len(set(returned)) or set(returned) != set(expected):
+        if set(returned) != set(expected):
             raise ValueError(f"trajectory runner output identity mismatch: expected {expected}, got {returned}")
+        validate_contiguous_trajectory_keys(returned)
 
     @staticmethod
     def _restore_request_order(output: TrajectoryBatch, requested_ids: list[TrajectoryID]) -> None:
         returned_ids = output.get("trajectory_ids")
         assert returned_ids is not None
-        returned_positions = {trajectory_id.to_string(): index for index, trajectory_id in enumerate(returned_ids)}
-        order = [returned_positions[trajectory_id.to_string()] for trajectory_id in requested_ids]
+        returned_positions: dict[str, list[int]] = defaultdict(list)
+        for index, trajectory_id in enumerate(returned_ids):
+            returned_positions[trajectory_id.to_string()].append(index)
+        order = [index for trajectory_id in requested_ids for index in returned_positions[trajectory_id.to_string()]]
         row_count = len(returned_ids)
         for key, values in list(output.items()):
             if isinstance(values, list) and len(values) == row_count:

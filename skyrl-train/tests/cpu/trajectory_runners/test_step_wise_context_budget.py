@@ -25,13 +25,18 @@ class _RecordingInferenceEngine:
             "responses": ["ok"],
             "response_ids": [[7, 8]],
             "stop_reasons": ["stop"],
-            "response_logprobs": [None],
+            "response_logprobs": [[-0.7, -0.8]],
         }
 
 
 def _tokenizer() -> MagicMock:
     tokenizer = MagicMock()
-    tokenizer.apply_chat_template.return_value = [1, 2, 3, 4]
+
+    def apply_chat_template(messages, **_kwargs):
+        suffix = [9, 10] if any(message.get("content") == "observation" for message in messages) else []
+        return [1, 2, 3, 4, *suffix]
+
+    tokenizer.apply_chat_template.side_effect = apply_chat_template
     tokenizer.eos_token_id = 4
     tokenizer.eos_token = "<eos>"
     return tokenizer
@@ -57,7 +62,9 @@ async def test_step_wise_generation_clamps_final_request_to_tokenized_window(moc
 
     environment = MagicMock()
     environment.init.return_value = ([{"role": "user", "content": "task"}], {})
-    environment.step.return_value = BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+    environment.step.return_value = BaseTextEnvStepOutput(
+        observations=[{"role": "user", "content": "observation"}], reward=1.0, done=True, metadata={}
+    )
     environment.get_metrics.return_value = {}
     mock_make.return_value = environment
     engine = _RecordingInferenceEngine()
@@ -80,4 +87,6 @@ async def test_step_wise_generation_clamps_final_request_to_tokenized_window(moc
     )
 
     assert outputs[0].evidence.response_token_ids == (7, 8)
+    assert outputs[0].loss_mask == [1, 1]
+    assert outputs[0].evidence.behavior_logprobs == (-0.7, -0.8)
     assert engine.requests[0]["sampling_params"]["max_tokens"] == 2

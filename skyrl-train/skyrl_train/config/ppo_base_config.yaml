@@ -327,6 +327,8 @@ trainer:
   step_wise_training: false
 
 generator:
+  # Compact consecutive step-wise turns when each next prompt extends the prior token stream.
+  merge_step_wise_output: false
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16"
   timeout_multiplier: 1.0

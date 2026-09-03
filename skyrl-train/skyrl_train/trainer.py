@@ -5,7 +5,7 @@ import os
 import shutil
 import threading
 import time
-from typing import Any, List, Optional, Dict, Tuple, Union
+from typing import Any, List, Optional, Dict, Tuple, Union, cast
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -22,7 +22,14 @@ import numpy as np
 from skyrl_train.curriculum import CurriculumSampler
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.training_batch import (
+    GLOBAL_LOSS_DENOM_METADATA_KEY,
+    PROMPT_MINI_BATCH_BOUNDARIES_METADATA_KEYS,
+    TrainingInputBatch,
+    TrainingOutputBatch,
+    pad_training_input_batch,
+    prompt_mini_batch_boundaries,
+)
 from skyrl_train.trajectory_runners.base import (
     TrajectoryRequestBatch,
     TrajectoryBatch,
@@ -31,7 +38,9 @@ from skyrl_train.trajectory_runners.base import (
 import copy
 from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
+    merge_step_wise_trajectory_batch,
     prepare_trajectory_request,
+    validate_step_wise_trajectory_batch,
     validate_trajectory_batch,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
@@ -88,6 +97,7 @@ from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
 )
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.utils.metrics import mean_metrics
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks import (
@@ -114,6 +124,36 @@ from skyrl_train.hf_export_schema import (
     HFUploadMode,
     TRAINER_STATE_FILENAME,
 )
+
+
+def _terminal_step_wise_metrics_view(
+    trajectory_batch: TrajectoryBatch, uids: List[str]
+) -> Tuple[TrajectoryBatch, List[str]]:
+    """Select one terminal row per trajectory for outcome metrics."""
+    terminal = trajectory_batch["is_last_step"]
+    terminal_indices = [index for index, is_last_step in enumerate(terminal) if is_last_step]
+    view = {
+        key: [value[index] for index in terminal_indices]
+        for key, value in trajectory_batch.items()
+        if isinstance(value, list) and len(value) == len(terminal)
+    }
+    return cast(TrajectoryBatch, view), [uids[index] for index in terminal_indices]
+
+
+def _response_rewards_to_token_rewards(
+    rewards: Union[List[float], List[List[float]]], responses: List[List[int]]
+) -> List[List[float]]:
+    """Place scalar outcomes on the final token while preserving token rewards."""
+    if rewards and isinstance(rewards[0], list):
+        return cast(List[List[float]], rewards)
+    per_token_rewards = []
+    for reward, response in zip(cast(List[float], rewards), responses):
+        token_rewards = [0.0] * len(response)
+        if token_rewards:
+            token_rewards[-1] = float(reward)
+        per_token_rewards.append(token_rewards)
+    return per_token_rewards
+
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
@@ -1329,10 +1369,15 @@ class RayPPOTrainer:
                 trajectory_id.to_string() for trajectory_id in trajectory_batch["trajectory_ids"]
             ]
             training_input.metadata["avg_response_length"] = sum(
-                len(sample_response_ids)
-                for sample_response_ids, is_last_step in zip(response_ids, trajectory_batch["is_last_step"])
-                if is_last_step
+                len(sample_response_ids) for sample_response_ids in response_ids
             ) / len(response_ids)
+            training_input.metadata[PROMPT_MINI_BATCH_BOUNDARIES_METADATA_KEYS["policy"]] = (
+                prompt_mini_batch_boundaries(uids, self.cfg.trainer.policy_mini_batch_size)
+            )
+            if self.critic_model is not None:
+                training_input.metadata[PROMPT_MINI_BATCH_BOUNDARIES_METADATA_KEYS["critic"]] = (
+                    prompt_mini_batch_boundaries(uids, self.cfg.trainer.critic_mini_batch_size)
+                )
         else:
             training_input.metadata["avg_response_length"] = sum(
                 len(sample_response_ids) for sample_response_ids in response_ids
@@ -1369,7 +1414,9 @@ class RayPPOTrainer:
         if trajectory_batch["rollout_metrics"] is not None:
             self.all_metrics.update(trajectory_batch["rollout_metrics"])
 
-        if not self.cfg.trainer.step_wise_training:
+        if self.cfg.trainer.step_wise_training:
+            validate_step_wise_trajectory_batch(trajectory_batch)
+        else:
             validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
         record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"), self.global_step)
         response_tokens = sum(len(response_ids) for response_ids in trajectory_batch["response_ids"])
@@ -1395,17 +1442,7 @@ class RayPPOTrainer:
         trajectory_batch_for_metrics = trajectory_batch
         uids_for_metrics = uids
         if self.cfg.trainer.step_wise_training:
-            trajectory_batch_for_metrics = defaultdict(list)
-            for key in trajectory_batch:
-                if isinstance(trajectory_batch[key], list):
-                    trajectory_batch_for_metrics[key] = [
-                        trajectory_batch[key][i]
-                        for i in range(len(trajectory_batch[key]))
-                        if trajectory_batch["is_last_step"][i]
-                    ]
-            uids_for_metrics = [
-                uid for uid, is_last_step in zip(uids, trajectory_batch["is_last_step"]) if is_last_step
-            ]
+            trajectory_batch_for_metrics, uids_for_metrics = _terminal_step_wise_metrics_view(trajectory_batch, uids)
 
         # only use `trajectory_batch_for_metrics` for metrics calculation
         # For step-wise training, we only calculate metrics for the last step of each trajectory
@@ -1424,29 +1461,6 @@ class RayPPOTrainer:
             [float(r) for r in step_rewards] if step_rewards and not isinstance(step_rewards[0], list) else []
         )
 
-        # these use the full trajectory batch
-        rewards: Union[List[float], List[List[float]]] = trajectory_batch["rewards"]
-        responses: List[List[int]] = trajectory_batch["response_ids"]
-        per_token_rewards: List[List[float]] = []
-
-        # Check if rewards are already token-level (List[List[float]]) or response-level (List[float])
-        if rewards and isinstance(rewards[0], list):
-            # Token-level rewards: rewards is List[List[float]]
-            per_token_rewards = rewards
-        else:
-            # Response-level rewards: rewards is List[float], convert to per-token rewards
-            for reward, response in zip(rewards, responses):
-                per_token_reward = [0.0] * len(response)
-                # Guard the zero-token-response edge case: an agentic rollout
-                # trajectory can legitimately produce an empty response_ids list
-                # (e.g. a trial that emits no assistant tokens before erroring/
-                # terminating). `per_token_reward[-1] = ...` then IndexErrors on
-                # the empty list. With no tokens there is nowhere to place the
-                # response-level reward, so leave the (empty) per-token list as-is.
-                if per_token_reward:
-                    per_token_reward[-1] = float(reward)
-                per_token_rewards.append(per_token_reward)
-
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
 
         reward_metrics = {
@@ -1456,8 +1470,22 @@ class RayPPOTrainer:
         self.all_metrics.update(reward_metrics)
         logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
 
-        # re-assign reward but now it's per token rewards
-        trajectory_batch["rewards"] = per_token_rewards
+        if self.cfg.generator.get("merge_step_wise_output", False):
+            num_rows_before_merge = len(trajectory_batch["response_ids"])
+            trajectory_batch = merge_step_wise_trajectory_batch(trajectory_batch)
+            num_rows_after_merge = len(trajectory_batch["response_ids"])
+            logger.info(f"Merged step-wise rows: {num_rows_before_merge} -> {num_rows_after_merge}")
+            self.all_metrics.update(
+                {
+                    "generate/num_seq_before_merge": num_rows_before_merge,
+                    "generate/num_seq_after_merge": num_rows_after_merge,
+                }
+            )
+            uids[:] = [trajectory_id.instance_id for trajectory_id in trajectory_batch["trajectory_ids"]]
+
+        trajectory_batch["rewards"] = _response_rewards_to_token_rewards(
+            trajectory_batch["rewards"], trajectory_batch["response_ids"]
+        )
         return trajectory_batch
 
     def _update_curriculum_sampler(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> None:
@@ -1495,14 +1523,29 @@ class RayPPOTrainer:
             - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["rewards"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `.metadata["uids"]`: List[str]
+            - Step-wise batches additionally provide `["is_last_step"]` and may
+              provide `.metadata["pad_size"]` from distributed forward padding.
 
         Adds:
             - `["advantages"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["returns"]`: Float[torch.Tensor, "batch_size seqlen"]
-        """
-        token_level_rewards = data["rewards"]
 
+        Step-wise padding rows are removed before grouped advantage estimation,
+        so the returned batch can be smaller than the input batch.
+        """
         if self.cfg.trainer.step_wise_training:
+            pad_size = data.metadata.get("pad_size", 0)
+            if pad_size:
+                real_batch_size = data.batch_size - pad_size
+                data = data[:real_batch_size]
+                data.metadata = copy.deepcopy(data.metadata)
+                for key in ("uids", "trajectory_ids", "exclude_from_baseline"):
+                    value = data.metadata.get(key)
+                    if isinstance(value, (list, np.ndarray)):
+                        data.metadata[key] = value[:real_batch_size]
+                data.metadata["pad_size"] = 0
+
+            token_level_rewards = data["rewards"]
             is_last_step = data["is_last_step"].bool()
             response_mask = data["response_mask"]
             index = np.array(data.metadata["uids"])
@@ -1513,10 +1556,10 @@ class RayPPOTrainer:
             lambd = self.cfg.trainer.algorithm.lambd
             grpo_norm_by_std = self.cfg.trainer.algorithm.grpo_norm_by_std
             last_step_rewards = token_level_rewards[is_last_step]
-            # compatible with any advantage estimator
+            last_step_response_mask = response_mask[is_last_step]
             last_step_advantages, last_step_returns = compute_advantages_and_returns(
                 token_level_rewards=last_step_rewards,
-                response_mask=response_mask[is_last_step],
+                response_mask=torch.ones_like(last_step_response_mask, dtype=torch.float),
                 index=index[is_last_step.cpu().numpy()],
                 adv_estimator=adv_estimator,
                 values=values[is_last_step] if values is not None else None,
@@ -1533,9 +1576,11 @@ class RayPPOTrainer:
             assert num_groups == len(last_step_advantages), (
                 f"number of groups {num_groups} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
             )
-            advantages = last_step_advantages[traj_ids]
-            returns = last_step_returns[traj_ids]
+            response_mask_float = response_mask.to(last_step_advantages.dtype)
+            advantages = last_step_advantages[traj_ids] * response_mask_float
+            returns = last_step_returns[traj_ids] * response_mask_float
         else:
+            token_level_rewards = data["rewards"]
             # For RLOO-N: pass exclude_from_baseline if present in metadata
             exclude_from_baseline = data.metadata.get("exclude_from_baseline", None)
             # Stage C (F6): thread the per-token PBS shaping channel into the
@@ -1636,48 +1681,29 @@ class RayPPOTrainer:
 
     def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
         """Pad the batch to be divisible by dp size"""
-        import math
-
         dp_size = self.policy_model.actor_infos[0].rank.dp_size
         if self.critic_model is not None:
             dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
         if self.ref_model is not None:
             dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
 
-        pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
-        new_tensors = {}
-        training_input.metadata["pad_size"] = pad_size
+        original_batch_size = training_input.batch_size
+        new_training_input = pad_training_input_batch(training_input, dp_size)
+        pad_size = new_training_input.batch_size - original_batch_size
+        new_training_input.metadata["pad_size"] = pad_size
         if pad_size == 0:
-            return training_input
-        for key, tensor in training_input.items():
-            if tensor is not None:
-                additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
+            return new_training_input
 
-                if key == "is_last_step":
-                    padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                elif key == "loss_mask":
-                    # ensures that padding tensors don't count towards the loss
-                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                else:
-                    # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
-                    # `pad_size` is guaranteed to be smaller than batch_size
-                    padding_tensor = tensor[:pad_size].clone()
-                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
-
-        new_training_input = TrainingInputBatch(new_tensors)
-        new_training_input.metadata = {}
         new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
         if "trajectory_ids" in training_input.metadata:
             new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
                 f"pad{i}" for i in range(pad_size)
             ]
-        for key, value in training_input.metadata.items():
-            if key not in ["uids", "trajectory_ids"]:
-                # Extend numpy bool arrays so they stay aligned with the padded batch
-                if key == "exclude_from_baseline" and isinstance(value, np.ndarray):
-                    new_training_input.metadata[key] = np.concatenate([value, np.ones(pad_size, dtype=value.dtype)])
-                else:
-                    new_training_input.metadata[key] = copy.deepcopy(value)
+        exclude_from_baseline = training_input.metadata.get("exclude_from_baseline")
+        if isinstance(exclude_from_baseline, np.ndarray):
+            new_training_input.metadata["exclude_from_baseline"] = np.concatenate(
+                [exclude_from_baseline, np.ones(pad_size, dtype=exclude_from_baseline.dtype)]
+            )
         return new_training_input
 
     @torch.no_grad()
@@ -1927,6 +1953,8 @@ class RayPPOTrainer:
                 self.cfg.trainer.algorithm.max_seq_len,
                 ranks_per_dp_group,
             )
+        if self.cfg.trainer.get("step_wise_training", False):
+            return self._train_critic_and_policy_step_wise(data)
         if self.colocate_all:
             if self.critic_model is not None:
                 with Timer("critic_train", self.all_timings):
@@ -1970,19 +1998,75 @@ class RayPPOTrainer:
                         operation="policy ppo_train",
                     )
 
+        policy_status = policy_statuses[0].metadata["train_status"]
+        critic_status = critic_statuses[0].metadata["train_status"] if self.critic_model is not None else None
+        return self._finish_model_training(policy_status, critic_status)
+
+    def _train_step_wise_model(self, model_group, role: str, data: TrainingInputBatch) -> dict[str, float]:
+        """Train one role once per prompt-defined mini-batch."""
+        boundaries = data.metadata[PROMPT_MINI_BATCH_BOUNDARIES_METADATA_KEYS[role]]
+        dp_size = model_group.actor_infos[0].rank.dp_size
+        row_multiple = dp_size * self.cfg.trainer.micro_train_batch_size_per_gpu
+        statuses = []
+        for start, end in boundaries:
+            mini_batch = pad_training_input_batch(data[start:end], row_multiple)
+            refs = model_group.async_run_ray_method("mesh", "ppo_train", mini_batch)
+            actor_statuses = collect_actor_results(
+                model_group.actor_infos,
+                refs,
+                operation=f"{role} ppo_train",
+            )
+            statuses.append(actor_statuses[0].metadata["train_status"])
+
+        values_by_name = defaultdict(list)
+        for status in statuses:
+            for name, value in status.items():
+                values_by_name[name].append(value)
+        combined = mean_metrics(values_by_name)
+        for name, values in values_by_name.items():
+            if name.endswith("_update_steps"):
+                combined[name] = sum(values)
+        return combined
+
+    def _train_critic_and_policy_step_wise(self, data: TrainingInputBatch) -> dict[str, float]:
+        """Run prompt-counted optimizer updates for variable-turn batches.
+
+        Unlike the fixed-row path, non-colocated policy and critic work cannot
+        overlap because each role may have different prompt mini-batch boundaries.
+        """
+        critic_status = None
+        if self.colocate_all:
+            if self.critic_model is not None:
+                with Timer("critic_train", self.all_timings):
+                    self.critic_model.backload_to_gpu()
+                    critic_status = self._train_step_wise_model(self.critic_model, "critic", data)
+                    self.critic_model.offload_to_cpu()
+            with Timer("policy_train", self.all_timings):
+                self.policy_model.backload_to_gpu()
+                policy_status = self._train_step_wise_model(self.policy_model, "policy", data)
+        else:
+            if self.critic_model is not None:
+                with Timer("critic_train", self.all_timings):
+                    critic_status = self._train_step_wise_model(self.critic_model, "critic", data)
+            with Timer("policy_train", self.all_timings):
+                policy_status = self._train_step_wise_model(self.policy_model, "policy", data)
+
+        return self._finish_model_training(policy_status, critic_status)
+
+    def _finish_model_training(
+        self,
+        policy_status: dict[str, float],
+        critic_status: Optional[dict[str, float]],
+    ) -> dict[str, float]:
+        """Record role metrics and release transient worker caches."""
         empty_cache_refs = []
         if self.critic_model is not None:
-            critic_status = critic_statuses[0].metadata["train_status"]
-            for k, v in critic_status.items():
-                self.all_metrics.update({f"critic/{k}": v})
+            assert critic_status is not None
+            self.all_metrics.update({f"critic/{name}": value for name, value in critic_status.items()})
             empty_cache_refs += self.critic_model.async_run_ray_method("pass_through", "empty_cache")
-
-        policy_status = policy_statuses[0].metadata["train_status"]
-        for k, v in policy_status.items():
-            self.all_metrics.update({f"policy/{k}": v})
+        self.all_metrics.update({f"policy/{name}": value for name, value in policy_status.items()})
         empty_cache_refs += self.policy_model.async_run_ray_method("pass_through", "empty_cache")
         ray.get(empty_cache_refs)
-
         return policy_status
 
     def handle_dynamic_sampling(
@@ -2015,6 +2099,7 @@ class RayPPOTrainer:
             "train_batch_size": self.cfg.trainer.train_batch_size,
             "n_samples_per_prompt": self.cfg.generator.n_samples_per_prompt,
             "tis_lcs_alert_threshold": self.cfg.trainer.algorithm.tis_lcs_alert_threshold,
+            "step_wise_training": self.cfg.trainer.step_wise_training,
         }
 
         if self.dynamic_sampling_state is None:
@@ -2069,6 +2154,7 @@ class RayPPOTrainer:
             target_batch_size=int(self.cfg.trainer.train_batch_size),
             tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
             state=self.group_admission_state,
+            step_wise=self.cfg.trainer.get("step_wise_training", False),
         )
         rejected_count = sum(result.rejection_counts.values())
         self.all_metrics.update(

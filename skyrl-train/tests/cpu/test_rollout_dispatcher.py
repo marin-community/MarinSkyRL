@@ -134,6 +134,38 @@ async def test_dispatcher_partitions_complete_groups_and_restores_request_order(
 
 
 @pytest.mark.asyncio
+async def test_dispatcher_restores_step_wise_trajectory_blocks(harbor_runner_spec):
+    async def run_group(input_batch, _global_step):
+        rows = [trajectory_id for trajectory_id in reversed(input_batch["trajectory_ids"]) for _ in range(2)]
+        output = _output(rows)
+        output["response_ids"] = [
+            [trajectory_id.repetition_id, step]
+            for trajectory_id in reversed(input_batch["trajectory_ids"])
+            for step in range(2)
+        ]
+        output["loss_masks"] = [[1, 1] for _ in rows]
+        output["is_last_step"] = [False, True] * len(input_batch["trajectory_ids"])
+        return output
+
+    ids = [TrajectoryID("a", 0), TrajectoryID("b", 0), TrajectoryID("a", 1), TrajectoryID("b", 1)]
+    dispatcher = _dispatcher([_Coordinator(run_group), _Coordinator(run_group)], harbor_runner_spec)
+
+    result = await dispatcher.run(_request(ids))
+
+    assert [trajectory_id.to_string() for trajectory_id in result["trajectory_ids"]] == [
+        "a_0",
+        "a_0",
+        "b_0",
+        "b_0",
+        "a_1",
+        "a_1",
+        "b_1",
+        "b_1",
+    ]
+    assert result["response_ids"] == [[0, 0], [0, 1], [0, 0], [0, 1], [1, 0], [1, 1], [1, 0], [1, 1]]
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_concatenates_fully_excluded_group_without_logprobs(harbor_runner_spec):
     harbor_runner_spec.config.trainer.algorithm.use_tis = True
 

@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import logging
 import os
 import re
@@ -37,6 +38,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     extract_prompt_token_ids_from_rollout_details,
     extract_routed_experts_from_rollout_details,
     normalize_token_ids,
+    validate_step_wise_trajectory_batch,
     AlignmentStats,
     _sentinel_routed_experts_row,
     SENTINEL_EXPERT_ID,
@@ -234,6 +236,61 @@ class TerminalBenchAgentOutput:
     # original_reward==0 + truncation_penalty>0). Counted into rollout_metrics.
     truncation_penalized: bool = False
     error_treatment: str | None = None
+    step_wise_turns: Optional[List["HarborStepWiseTurn"]] = None
+
+
+@dataclass(frozen=True)
+class HarborStepWiseTurn:
+    """Exact token transport captured for one Harbor assistant turn."""
+
+    prompt_token_ids: tuple[int, ...]
+    response_token_ids: tuple[int, ...]
+    behavior_logprobs: Optional[tuple[float, ...]] = None
+    routed_experts: Optional[tuple[tuple[tuple[int, ...], ...], ...]] = None
+
+
+def _build_step_wise_turns(
+    prompt_token_ids: Optional[List[List[int]]],
+    response_token_ids: Optional[List[List[int]]],
+    behavior_logprobs: Optional[List[List[float]]],
+    routed_experts: Optional[List[List[List[List[int]]]]],
+    *,
+    rollout_logprobs_required: bool,
+) -> List[HarborStepWiseTurn]:
+    """Validate and normalize Harbor's exact per-turn rollout transport."""
+    if not prompt_token_ids or not response_token_ids:
+        raise ValueError("step-wise Harbor training requires per-turn prompt_token_ids and completion_token_ids")
+    turn_count = len(response_token_ids)
+    if len(prompt_token_ids) != turn_count:
+        raise ValueError("Harbor prompt_token_ids and completion_token_ids must have the same number of turns")
+    if behavior_logprobs is not None and len(behavior_logprobs) != turn_count:
+        raise ValueError("Harbor logprobs and completion_token_ids must have the same number of turns")
+    if routed_experts is not None and len(routed_experts) != turn_count:
+        raise ValueError("Harbor routed_experts and completion_token_ids must have the same number of turns")
+    if rollout_logprobs_required and behavior_logprobs is None:
+        raise ValueError("step-wise Harbor training requires per-turn rollout logprobs for this policy objective")
+
+    turns = []
+    for index, (prompt_ids, response_ids) in enumerate(zip(prompt_token_ids, response_token_ids)):
+        logprobs = None if behavior_logprobs is None else behavior_logprobs[index]
+        if logprobs is not None and len(logprobs) != len(response_ids):
+            raise ValueError(f"Harbor turn {index} logprobs must align one-for-one with completion_token_ids")
+        turn_routes = None if routed_experts is None else routed_experts[index]
+        if turn_routes is not None and len(turn_routes) != len(response_ids):
+            raise ValueError(f"Harbor turn {index} routed_experts must align one-for-one with completion_token_ids")
+        turns.append(
+            HarborStepWiseTurn(
+                prompt_token_ids=tuple(prompt_ids),
+                response_token_ids=tuple(response_ids),
+                behavior_logprobs=None if logprobs is None else tuple(logprobs),
+                routed_experts=(
+                    None
+                    if turn_routes is None
+                    else tuple(tuple(tuple(layer) for layer in token) for token in turn_routes)
+                ),
+            )
+        )
+    return turns
 
 
 def _failed_agent_output(
@@ -323,6 +380,7 @@ def _clear_failed_trajectory(output: TerminalBenchAgentOutput) -> None:
     output.response_span_tags = None
     output.alignment_stats = None
     output.truncation_penalized = False
+    output.step_wise_turns = None
     output.reward_result = _zero_reward()
     if output.disposition.loss_eligible:
         output.disposition = replace(
@@ -343,6 +401,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         rollout_logprobs_required: bool = False,
         tito_full: Optional[bool] = None,
         tis_splice: bool = True,
+        step_wise_training: bool = False,
     ):
         """
         Args:
@@ -357,6 +416,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 behavior-policy logprobs. Full-TITO rollout assembly defaults to this.
             tito_full: ``trainer.algorithm.tito_full`` — explicit full-TITO override.
                 None = auto (default to ``rollout_logprobs_required``); True/False = force.
+            step_wise_training: Emit one trainer row per exact Harbor assistant turn.
         """
         self.base_url = f"http://{trajectory_runner_cfg.http_endpoint_host}:{trajectory_runner_cfg.http_endpoint_port}"
         # Native controller-ingress (opencode-RL literal capture): when the runner stood up
@@ -412,6 +472,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         self._tito_full = tito_full
         self._tis_splice = tis_splice
         self._tis_lcs_alert_threshold = tis_lcs_alert_threshold
+        self._step_wise_training = step_wise_training
 
         # Core terminal bench config
         self.trials_dir = terminal_bench_cfg.trials_dir
@@ -442,6 +503,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # emits neither field, so the TrajectoryBatch is byte-identical to today.
         self._enable_token_reward_channel = bool(self._reward_shaping_config.get("enable_token_reward_channel", False))
         self._enable_span_tagging = bool(self._reward_shaping_config.get("enable_span_tagging", True))
+        if self._step_wise_training and self._enable_token_reward_channel:
+            raise ValueError("step-wise Harbor training does not support the token reward channel")
 
         # Loop-behavior reward shaping (Stage C / F2 + F6): potential-based
         # shaping (PBS) of the EDIT-token span from the in-trajectory test-delta.
@@ -476,6 +539,12 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # TIS (Truncated Importance Sampling) config
         # Only show TIS-related warnings when collect_rollout_details is enabled
         self._collect_rollout_details = self._harbor_config_builder.get_collect_rollout_details()
+        if self._step_wise_training and not self._collect_rollout_details:
+            raise ValueError(
+                "step-wise Harbor training requires terminal_bench_config.harbor.collect_rollout_details=true"
+            )
+        if self._step_wise_training and self._harbor_config_builder.get_enable_summarize():
+            raise ValueError("step-wise Harbor training requires terminal_bench_config.harbor.enable_summarize=false")
 
         # Tracked exception types for per-step error counters.
         # Sourced from the retry config's exclude_exceptions (the terminal failures
@@ -918,7 +987,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             reason=exception_type,
             exception_type=exception_type,
         )
-        return {
+        batch: TrajectoryBatch = {
             "prompt_token_ids": [[0] for _ in range(num_trials)],
             "response_ids": [[0] for _ in range(num_trials)],
             "rewards": [float(reward.optimization_reward) for _ in range(num_trials)],
@@ -937,6 +1006,10 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "rollout_logprobs": None,
             "exclude_from_baseline": [not disposition.baseline_eligible for _ in range(num_trials)],
         }
+        if self._step_wise_training:
+            batch["trajectory_ids"] = list(trajectory_ids)
+            batch["is_last_step"] = [True] * num_trials
+        return batch
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """
@@ -1413,37 +1486,153 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         if actual_global_step is None:
             actual_global_step = entry_global_step
 
-        trajectory_batch: TrajectoryBatch = {
-            "prompt_token_ids": [list(output.evidence.prompt_token_ids) for output in all_outputs],
-            "response_ids": [list(output.evidence.response_token_ids) for output in all_outputs],
-            "rewards": [output.reward_result.optimization_reward for output in all_outputs],
-            "unshaped_rewards": [float(output.reward_result.unshaped_reward or 0.0) for output in all_outputs],
-            "loss_masks": [
-                project_loss_mask(output, list(output.evidence.response_token_ids)) for output in all_outputs
-            ],
-            "stop_reasons": [output.evidence.stop_reason for output in all_outputs],
-            "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": rollout_logprobs_list,
-            "exclude_from_baseline": [not output.disposition.baseline_eligible for output in all_outputs],
-            "actual_global_step": actual_global_step,
-        }
-        attach_terminal_classifications(trajectory_batch, all_outputs)
-        if self._reward_shaping_enabled:
-            trajectory_batch["verifier_tests"] = [output.verifier_tests for output in all_outputs]
+        if self._step_wise_training:
+            trajectory_batch = self._project_step_wise_outputs(
+                all_outputs,
+                rollout_metrics=rollout_metrics,
+                actual_global_step=actual_global_step,
+                is_eval=is_eval,
+            )
+        else:
+            trajectory_batch = {
+                "prompt_token_ids": [list(output.evidence.prompt_token_ids) for output in all_outputs],
+                "response_ids": [list(output.evidence.response_token_ids) for output in all_outputs],
+                "rewards": [output.reward_result.optimization_reward for output in all_outputs],
+                "unshaped_rewards": [float(output.reward_result.unshaped_reward or 0.0) for output in all_outputs],
+                "loss_masks": [
+                    project_loss_mask(output, list(output.evidence.response_token_ids)) for output in all_outputs
+                ],
+                "stop_reasons": [output.evidence.stop_reason for output in all_outputs],
+                "rollout_metrics": rollout_metrics,
+                "rollout_logprobs": rollout_logprobs_list,
+                "exclude_from_baseline": [not output.disposition.baseline_eligible for output in all_outputs],
+                "actual_global_step": actual_global_step,
+            }
+            attach_terminal_classifications(trajectory_batch, all_outputs)
+            if self._reward_shaping_enabled:
+                trajectory_batch["verifier_tests"] = [output.verifier_tests for output in all_outputs]
 
-        # Only attach routed_experts when router-replay is on, so the flag-off
-        # TrajectoryBatch dict is byte-identical to today (key absent, not None).
-        if rollout_routed_experts_list is not None:
+        # The step-wise projection attaches its exact per-turn routes itself.
+        # Keep the legacy whole-trajectory field absent when its feature is off.
+        if rollout_routed_experts_list is not None and not self._step_wise_training:
             trajectory_batch["rollout_routed_experts"] = rollout_routed_experts_list
 
-        # Attach the Stage B channel + tags only when present, so the flag-off
-        # TrajectoryBatch dict is byte-identical to today (keys absent, not None).
-        if token_level_shaping_list is not None:
+        # Step-wise mode rejects the token reward channel and does not synthesize
+        # response tags. Preserve the legacy whole-trajectory fields otherwise.
+        if token_level_shaping_list is not None and not self._step_wise_training:
             trajectory_batch["token_level_shaping"] = token_level_shaping_list
-        if response_span_tags_list is not None:
+        if response_span_tags_list is not None and not self._step_wise_training:
             trajectory_batch["response_span_tags"] = response_span_tags_list
 
         return trajectory_batch
+
+    def _project_step_wise_outputs(
+        self,
+        outputs: List[TerminalBenchAgentOutput],
+        *,
+        rollout_metrics: Dict[str, Any],
+        actual_global_step: Optional[int],
+        is_eval: bool,
+    ) -> TrajectoryBatch:
+        """Expand completed Harbor trials into exact per-assistant-turn rows."""
+        prompt_token_ids = []
+        response_ids = []
+        rewards = []
+        unshaped_rewards = []
+        loss_masks = []
+        stop_reasons = []
+        trajectory_ids = []
+        is_last_step = []
+        exclude_from_baseline = []
+        exception_types = []
+        error_treatments = []
+        verifier_tests = []
+        turn_logprobs: List[Optional[List[float]]] = []
+        turn_routes: List[Optional[List[List[List[int]]]]] = []
+
+        for output in outputs:
+            turns = output.step_wise_turns
+            if not turns:
+                turns = [
+                    HarborStepWiseTurn(
+                        prompt_token_ids=output.evidence.prompt_token_ids,
+                        response_token_ids=output.evidence.response_token_ids,
+                        behavior_logprobs=output.evidence.behavior_logprobs,
+                        routed_experts=output.evidence.routed_experts,
+                    )
+                ]
+            for step_index, turn in enumerate(turns):
+                terminal = step_index == len(turns) - 1
+                response = list(turn.response_token_ids)
+                trajectory_id = copy.deepcopy(output.trajectory_id)
+                trajectory_id.step = step_index
+
+                prompt_token_ids.append(list(turn.prompt_token_ids))
+                response_ids.append(response)
+                rewards.append(output.reward_result.optimization_reward if terminal else 0.0)
+                raw_reward = output.reward_result.unshaped_reward
+                unshaped_rewards.append(float(raw_reward if terminal and raw_reward is not None else 0.0))
+                trainable = output.disposition.loss_eligible
+                if output.evidence.stop_reason == "length" and self.trajectory_runner_cfg.apply_overlong_filtering:
+                    trainable = False
+                loss_masks.append([1] * len(response) if trainable else [0] * len(response))
+                stop_reasons.append(
+                    output.evidence.stop_reason if terminal or output.evidence.stop_reason == "length" else "complete"
+                )
+                trajectory_ids.append(trajectory_id)
+                is_last_step.append(terminal)
+                exclude_from_baseline.append(not output.disposition.baseline_eligible)
+                exception_types.append(output.disposition.exception_type if terminal else None)
+                error_treatments.append(output.error_treatment if terminal else None)
+                verifier_tests.append(output.verifier_tests if terminal else None)
+                turn_logprobs.append(None if turn.behavior_logprobs is None else list(turn.behavior_logprobs))
+                turn_routes.append(
+                    None
+                    if turn.routed_experts is None
+                    else [[list(layer) for layer in token] for token in turn.routed_experts]
+                )
+
+        rollout_logprobs = None
+        if not is_eval and any(values is not None for values in turn_logprobs):
+            rollout_logprobs = [
+                values if values is not None else [0.0] * len(response)
+                for values, response in zip(turn_logprobs, response_ids)
+            ]
+
+        batch: TrajectoryBatch = {
+            "prompt_token_ids": prompt_token_ids,
+            "response_ids": response_ids,
+            "rewards": rewards,
+            "unshaped_rewards": unshaped_rewards,
+            "loss_masks": loss_masks,
+            "stop_reasons": stop_reasons,
+            "rollout_metrics": rollout_metrics,
+            "rollout_logprobs": rollout_logprobs,
+            "trajectory_ids": trajectory_ids,
+            "is_last_step": is_last_step,
+            "exclude_from_baseline": exclude_from_baseline,
+            "actual_global_step": actual_global_step,
+        }
+        if any(value is not None for value in exception_types):
+            batch["exception_types"] = exception_types
+        if any(value is not None for value in error_treatments):
+            batch["error_treatments"] = error_treatments
+        if self._reward_shaping_enabled:
+            batch["verifier_tests"] = verifier_tests
+
+        if self._moe_router_replay and not is_eval and any(values is not None for values in turn_routes):
+            sentinel_row = [[SENTINEL_EXPERT_ID]]
+            for values in turn_routes:
+                if values:
+                    sentinel_row = _sentinel_routed_experts_row(values[0])
+                    break
+            batch["rollout_routed_experts"] = [
+                values if values is not None else [copy.deepcopy(sentinel_row) for _ in response]
+                for values, response in zip(turn_routes, response_ids)
+            ]
+
+        validate_step_wise_trajectory_batch(batch)
+        return batch
 
     def _classify_exception(self, exception: Exception) -> tuple[ErrorTreatment, str]:
         """Classify an exception and return its treatment and persisted type name."""
@@ -2281,6 +2470,15 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             preserve_exception_type=preserve_exception_type,
             terminal_exception_type=terminal_exception_type,
         )
+        step_wise_turns = None
+        if self._step_wise_training:
+            step_wise_turns = _build_step_wise_turns(
+                assistant_prompt_token_ids,
+                assistant_token_ids,
+                assistant_logprobs,
+                assistant_routed_experts,
+                rollout_logprobs_required=self._rollout_logprobs_required,
+            )
         return TerminalBenchAgentOutput(
             evidence=evidence,
             verification=verification,
@@ -2294,4 +2492,5 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             response_span_tags=response_span_tags,
             truncation_penalized=truncation_penalized,
             error_treatment=None if terminal_error_treatment is None else terminal_error_treatment.value,
+            step_wise_turns=step_wise_turns,
         )

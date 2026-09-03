@@ -54,6 +54,7 @@ def accumulate_selected_groups(
     tis_lcs_alert_threshold: float,
     require_rollout_logprobs: bool,
     state: MutableMapping[str, Any],
+    step_wise: bool = False,
 ) -> SelectedGroupBatch:
     """Bank selected groups and return an exact-size batch when enough are available."""
     selected_uid_set = set(selected_uids)
@@ -72,6 +73,7 @@ def accumulate_selected_groups(
             else concatenate_trajectory_batches(
                 [collected_batch, selected_batch],
                 require_rollout_logprobs=require_rollout_logprobs,
+                step_wise=step_wise,
                 tis_lcs_alert_threshold=tis_lcs_alert_threshold,
             )
         )

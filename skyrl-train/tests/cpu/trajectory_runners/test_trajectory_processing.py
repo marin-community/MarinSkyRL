@@ -14,7 +14,9 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_batch_failure_metrics,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
+    merge_step_wise_trajectory_batch,
 )
+from skyrl_train.trajectory_runners.base import TrajectoryID
 from transformers import AutoTokenizer
 
 
@@ -1039,3 +1041,50 @@ def test_required_rollout_logprobs_reject_fully_masked_baseline_contributor():
             require_rollout_logprobs=True,
             tis_lcs_alert_threshold=0.005,
         )
+
+
+def test_step_wise_prefix_merge_masks_inserted_observation_tokens():
+    trajectory_id = TrajectoryID("prompt", 0)
+    batch = {
+        "prompt_token_ids": [[1], [1, 2, 3, 4], [1, 2, 3, 4, 5]],
+        "response_ids": [[2, 3], [5], [6]],
+        "rewards": [0.0, 0.0, 2.0],
+        "loss_masks": [[1, 1], [1], [1]],
+        "stop_reasons": ["complete", "complete", "done"],
+        "rollout_metrics": {},
+        "rollout_logprobs": [[-0.1, -0.2], [-0.3], [-0.4]],
+        "trajectory_ids": [trajectory_id, trajectory_id, trajectory_id],
+        "is_last_step": [False, False, True],
+    }
+
+    merged = merge_step_wise_trajectory_batch(batch)
+
+    assert merged["prompt_token_ids"] == [[1]]
+    assert merged["response_ids"] == [[2, 3, 4, 5, 6]]
+    assert merged["loss_masks"] == [[1, 1, 0, 1, 1]]
+    assert merged["rollout_logprobs"] == [[-0.1, -0.2, 0, -0.3, -0.4]]
+    assert merged["rewards"] == [2.0]
+    assert merged["stop_reasons"] == ["done"]
+    assert merged["is_last_step"] == [True]
+
+
+def test_step_wise_prefix_merge_keeps_rows_when_prefix_breaks():
+    trajectory_id = TrajectoryID("prompt", 0)
+    batch = {
+        "prompt_token_ids": [[1], [9]],
+        "response_ids": [[2], [10]],
+        "rewards": [0.0, 1.0],
+        "loss_masks": [[1], [1]],
+        "stop_reasons": ["complete", "done"],
+        "rollout_metrics": {},
+        "rollout_logprobs": [[-0.1], [-0.2]],
+        "trajectory_ids": [trajectory_id, trajectory_id],
+        "is_last_step": [False, True],
+    }
+
+    merged = merge_step_wise_trajectory_batch(batch)
+
+    assert merged["prompt_token_ids"] == [[1], [9]]
+    assert merged["response_ids"] == [[2], [10]]
+    assert merged["rewards"] == [0.0, 1.0]
+    assert merged["is_last_step"] == [False, True]

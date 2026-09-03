@@ -47,6 +47,7 @@ def admit_or_collect_replacements(
     target_batch_size: int,
     tis_lcs_alert_threshold: float,
     state: GroupAdmissionSamplingState,
+    step_wise: bool = False,
 ) -> GroupAdmissionSamplingResult:
     """Drop retryable groups and collect a complete replacement batch."""
     policy = GroupAdmissionPolicy(
@@ -101,6 +102,7 @@ def admit_or_collect_replacements(
         tis_lcs_alert_threshold=tis_lcs_alert_threshold,
         require_rollout_logprobs=rollout_logprobs_required,
         state=state,
+        step_wise=step_wise,
     )
     return GroupAdmissionSamplingResult(
         trajectory_batch=accumulated.trajectory_batch,

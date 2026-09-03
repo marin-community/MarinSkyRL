@@ -858,9 +858,16 @@ class HarborConfigBuilder:
         Returns:
             True if rollout details collection is enabled.
         """
-        mapping = AGENT_SCHEMA.fields.get("collect_rollout_details")
+        return self._get_agent_bool("collect_rollout_details", default)
+
+    def get_enable_summarize(self, default: bool = True) -> bool:
+        """Return whether the configured Harbor agent may compact its conversation."""
+        return self._get_agent_bool("enable_summarize", default)
+
+    def _get_agent_bool(self, field_name: str, default: bool) -> bool:
+        mapping = AGENT_SCHEMA.fields.get(field_name)
         if mapping:
-            value = self._harbor_cfg.get("collect_rollout_details", mapping.default)
+            value = self._harbor_cfg.get(field_name, mapping.default)
             if value is not None:
                 return bool(value)
         return default

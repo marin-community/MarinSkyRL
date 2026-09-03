@@ -51,7 +51,7 @@ from skyrl_train.training_batch import (
     TrainingBatchIterator,
     TrainingInputBatch,
     TrainingOutputBatch,
-    gradient_accumulation_steps,
+    optimizer_micro_batches_per_mini_batch,
     per_data_parallel_batch_size,
 )
 from skyrl_train.utils.metrics import mean_metrics, policy_progress_metrics, policy_training_metrics
@@ -1074,9 +1074,11 @@ class PolicyWorkerBase(Worker):
         # (matches CriticWorkerBase.ppo_train behavior)
         torch.cuda.empty_cache()
 
-        micro_batches_per_mini_batch = gradient_accumulation_steps(
+        micro_batches_per_mini_batch = optimizer_micro_batches_per_mini_batch(
+            len(dataloader),
             self.policy_mini_batch_size_per_gpu,
             self.cfg.trainer.micro_train_batch_size_per_gpu,
+            step_wise_training=self.cfg.trainer.get("step_wise_training", False),
         )
         # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
         accumulation_steps = micro_batches_per_mini_batch
@@ -1532,9 +1534,11 @@ class CriticWorkerBase(Worker):
         torch.cuda.empty_cache()
         self.model.train()
 
-        micro_batches_per_mini_batch = gradient_accumulation_steps(
+        micro_batches_per_mini_batch = optimizer_micro_batches_per_mini_batch(
+            len(dataloader),
             self.critic_mini_batch_size_per_gpu,
             self.cfg.trainer.micro_train_batch_size_per_gpu,
+            step_wise_training=self.cfg.trainer.get("step_wise_training", False),
         )
         # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
         accumulation_steps = micro_batches_per_mini_batch

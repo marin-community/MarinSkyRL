@@ -470,6 +470,7 @@ def handle_filter_sampling(
         tis_lcs_alert_threshold=float(sampling_config.get("tis_lcs_alert_threshold", 0.005)),
         require_rollout_logprobs=False,
         state=collected_state,
+        step_wise=bool(sampling_config.get("step_wise_training", False)),
     )
 
     # Check if we have enough prompts

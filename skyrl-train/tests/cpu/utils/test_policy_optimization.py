@@ -328,6 +328,38 @@ def test_validate_cfg_accepts_all_loss_reductions(loss_reduction):
         )
 
 
+@pytest.mark.parametrize("advantage_estimator", ["gae", "reinforce++"])
+def test_validate_cfg_rejects_temporal_advantages_for_step_wise_training(advantage_estimator):
+    pytest.importorskip("hydra")
+    cfg = _validatable_dummy_config()
+    cfg.trainer.step_wise_training = True
+    cfg.trainer.algorithm.advantage_estimator = advantage_estimator
+
+    with pytest.raises(ValueError, match="not supported with step_wise_training"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_step_wise_merge_without_step_wise_training():
+    pytest.importorskip("hydra")
+    cfg = _validatable_dummy_config()
+    cfg.trainer.step_wise_training = False
+    cfg.generator.merge_step_wise_output = True
+
+    with pytest.raises(ValueError, match="merge_step_wise_output=true requires"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_step_wise_merge_with_reward_shaping_metadata():
+    pytest.importorskip("hydra")
+    cfg = _validatable_dummy_config()
+    cfg.trainer.step_wise_training = True
+    cfg.generator.merge_step_wise_output = True
+    cfg.generator.trajectory_reward_shaping.enabled = True
+
+    with pytest.raises(ValueError, match="does not support trajectory reward shaping metadata"):
+        validate_cfg(cfg)
+
+
 def test_global_loss_denom_driver_matches_allreduce_sum():
     """The DRIVER-side collective-free global loss denominator Z must be BIT-IDENTICAL
     to the historical in-worker ``all_reduce(sum)`` of per-rank ``local_num_seqs`` over
