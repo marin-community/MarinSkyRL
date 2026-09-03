@@ -18,6 +18,10 @@ from skyrl_train.inference_engines.vllm.stats import (
 from skyrl_train.telemetry import TelemetryConfig
 
 
+VLLM_MAX_RECORDS_PER_ENGINE = 512
+PUBLICATION_LOSS_METRIC = "metric_publication_dropped_records"
+
+
 class InferenceMetricsSink(Protocol):
     """An interchangeable destination for one callback-owned snapshot."""
 
@@ -116,7 +120,10 @@ class FinelogInferenceMetricsSink:
     def __init__(self) -> None:
         from rigging.telemetry.metrics import MetricSnapshotPublisher  # noqa: PLC0415
 
-        self._publisher = MetricSnapshotPublisher(max_records=512, attributes={"metric_source": "vllm"})
+        self._publisher = MetricSnapshotPublisher(
+            max_records=VLLM_MAX_RECORDS_PER_ENGINE,
+            attributes={"metric_source": "vllm"},
+        )
         self._bridge_publisher = MetricSnapshotPublisher(
             max_records=512, attributes={"metric_source": "inference_http_bridge"}
         )
@@ -125,9 +132,12 @@ class FinelogInferenceMetricsSink:
         from rigging import telemetry  # noqa: PLC0415
         from rigging.telemetry.metrics import MetricSnapshot  # noqa: PLC0415
 
+        sample_limit_dropped = 0
+        telemetry_lost = 0
         for engine in snapshot.engines:
             records = []
-            base = {**engine.attributes, "engine": engine.engine_id, "step": str(step)}
+            cumulative_base = {**engine.attributes, "engine": engine.engine_id}
+            current_base = {**cumulative_base, "step": str(step)}
             current = engine.current
             for name, value, unit, attributes in (
                 ("num_requests_running", current.running_requests, "{request}", {}),
@@ -156,7 +166,7 @@ class FinelogInferenceMetricsSink:
                         name=name,
                         value=value,
                         unit=unit,
-                        attributes={**base, **attributes},
+                        attributes={**current_base, **attributes},
                         source_kind="gauge",
                         source_temporality=telemetry.CURRENT_SNAPSHOT,
                     )
@@ -179,33 +189,76 @@ class FinelogInferenceMetricsSink:
                         name=name,
                         value=value,
                         unit=unit,
-                        attributes={**base, **attributes},
+                        attributes={**cumulative_base, **attributes},
                         source_kind="counter",
                         source_temporality=telemetry.CUMULATIVE_SNAPSHOT,
                     )
                 )
             for histogram in engine.histograms:
-                records.extend(_histogram_records(histogram, base, MetricSnapshot, telemetry.CUMULATIVE_SNAPSHOT))
-            if records:
-                self._publisher.publish(records)
+                records.extend(
+                    _histogram_records(histogram, cumulative_base, MetricSnapshot, telemetry.CUMULATIVE_SNAPSHOT)
+                )
+            if len(records) > VLLM_MAX_RECORDS_PER_ENGINE:
+                sample_limit_dropped += len(records)
+                logger.warning(
+                    "Rejected oversized vLLM metric batch for engine {}: {} records exceeds {}",
+                    engine.engine_id,
+                    len(records),
+                    VLLM_MAX_RECORDS_PER_ENGINE,
+                )
+            elif not _metric_batch_is_valid(records):
+                telemetry_lost += len(records)
+                logger.warning(
+                    "Rejected invalid vLLM metric batch for engine {} before publication: {} records",
+                    engine.engine_id,
+                    len(records),
+                )
+            elif records:
+                result = self._publisher.publish(records)
+                if result.configured:
+                    sample_limit_dropped += result.sample_limit_dropped_records
+                    telemetry_lost += result.telemetry_lost_records
+                if result.sample_limit_dropped_records or result.telemetry_lost_records:
+                    logger.warning(
+                        "vLLM metric publication lost records: sample_limit={}, telemetry_queue={}",
+                        result.sample_limit_dropped_records,
+                        result.telemetry_lost_records,
+                    )
+        _record_publication_health(telemetry, "vllm", sample_limit_dropped, telemetry_lost)
         if snapshot.http_bridge is not None:
             records = []
             for histogram in snapshot.http_bridge.histograms:
                 records.extend(
                     _histogram_records(
                         histogram,
-                        {"step": str(step)},
+                        {},
                         MetricSnapshot,
                         telemetry.CUMULATIVE_SNAPSHOT,
                     )
                 )
             if records:
-                self._bridge_publisher.publish(records)
+                result = self._bridge_publisher.publish(records)
+                if result.sample_limit_dropped_records or result.telemetry_lost_records:
+                    logger.warning(
+                        "HTTP bridge metric publication lost records: sample_limit={}, telemetry_queue={}",
+                        result.sample_limit_dropped_records,
+                        result.telemetry_lost_records,
+                    )
+                _record_publication_health(
+                    telemetry,
+                    "inference_http_bridge",
+                    result.sample_limit_dropped_records if result.configured else 0,
+                    result.telemetry_lost_records if result.configured else 0,
+                )
 
 
 class _MetricRecord(Protocol):
     name: str
+    value: float
+    unit: str
     attributes: Mapping[str, str]
+    source_kind: str
+    source_temporality: str
 
 
 class _MetricRecordFactory(Protocol):
@@ -221,13 +274,45 @@ class _MetricRecordFactory(Protocol):
     ) -> _MetricRecord: ...
 
 
+class _Gauge(Protocol):
+    def set(self, value: float, *, attributes: Mapping[str, str]) -> None: ...
+
+
+class _Telemetry(Protocol):
+    def gauge(self, name: str, *, unit: str) -> _Gauge: ...
+
+
+def _metric_batch_is_valid(records: list[_MetricRecord]) -> bool:
+    """Mirror Rigging's per-record validation before admitting an engine batch."""
+    from rigging.telemetry import serialization  # noqa: PLC0415
+
+    try:
+        for record in records:
+            serialization.validate_string(record.name, "name")
+            if record.unit:
+                serialization.validate_string(record.unit, "unit")
+            if not math.isfinite(float(record.value)):
+                raise ValueError("metric value must be finite")
+            serialization.validate_attributes(
+                {
+                    **record.attributes,
+                    "metric_source": "vllm",
+                    "source_kind": record.source_kind,
+                    "source_temporality": record.source_temporality,
+                }
+            )
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return True
+
+
 def _histogram_records(
     histogram: VLLMHistogramSnapshot,
     base: Mapping[str, str],
     metric_snapshot_type: _MetricRecordFactory,
     cumulative: str,
 ) -> list[_MetricRecord]:
-    attributes = {**base, **histogram.attributes}
+    attributes = {**histogram.attributes, **base}
     records = [
         metric_snapshot_type(
             name=f"{histogram.name}_bucket",
@@ -251,3 +336,12 @@ def _histogram_records(
             )
         )
     return records
+
+
+def _record_publication_health(
+    telemetry: _Telemetry, metric_source: str, sample_limit: int, telemetry_loss: int
+) -> None:
+    """Publish current loss state; this best-effort signal cannot attest to its own delivery."""
+    gauge = telemetry.gauge(PUBLICATION_LOSS_METRIC, unit="{record}")
+    for reason, value in (("sample_limit", sample_limit), ("telemetry_loss", telemetry_loss)):
+        gauge.set(value, attributes={"metric_source": metric_source, "drop_reason": reason})

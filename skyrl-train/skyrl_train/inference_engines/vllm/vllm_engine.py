@@ -1199,24 +1199,54 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
     """
 
     # Class-level registry mapping engine IDs to their accumulated stats
-    _stats_registry: Dict[int, Dict[str, Any]] = {}
+    _stats_registry: Dict[str, Dict[str, Any]] = {}
     _registry_lock = threading.Lock()
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.log_interval = 5
-        self._engine_id: Optional[int] = None
+        self._engine_id: Optional[str] = None
         config = args[0] if args else kwargs["vllm_config"]
         engine_index = args[1] if len(args) > 1 else kwargs.get("engine_index", 0)
         self._native_attributes = {
             "model_name": str(config.model_config.served_model_name),
-            "engine": str(engine_index),
+            "engine_index": str(engine_index),
         }
         self._token_histogram_bounds = build_1_2_5_buckets(config.model_config.max_model_len)
 
-    def set_engine_id(self, engine_id: int) -> None:
-        """Set the engine ID for this stat logger instance."""
+    def set_engine_id(self, engine_id: str) -> None:
+        """Set the engine ID and make its process-start zero snapshot readable."""
         self._engine_id = engine_id
+        with V1LoggingStatLoggerFixed._registry_lock:
+            V1LoggingStatLoggerFixed._stats_registry.setdefault(engine_id, self._new_registry_entry())
+
+    def _new_registry_entry(self) -> Dict[str, Any]:
+        return {
+            "_samples_prompt_tp": [],
+            "_samples_gen_tp": [],
+            "_samples_running": [],
+            "_samples_waiting": [],
+            "_samples_cache": [],
+            "_prefix_hit": PrefixCacheHitRateAccumulator(),
+            "_samples_prefill_time": [],
+            "_samples_decode_time": [],
+            "_samples_e2e_latency": [],
+            "_samples_queued_time": [],
+            "_samples_ttft": [],
+            "_total_preempted": 0,
+            "_native": VLLMNativeStatsAccumulator(
+                self._token_histogram_bounds,
+                self._native_attributes,
+            ),
+            "_peak_prompt_tp": 0.0,
+            "_peak_gen_tp": 0.0,
+            "_peak_running": 0,
+            "_peak_waiting": 0,
+            "_peak_cache": 0.0,
+            "_num_samples": 0,
+            "_num_active_samples": 0,
+            "timestamp": time.time(),
+        }
 
     def record(self, *args: Any, **kwargs: Any) -> None:
         # Call parent with original arguments - important to preserve vLLM's calling convention
@@ -1293,65 +1323,32 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                 existing = V1LoggingStatLoggerFixed._stats_registry.get(self._engine_id)
 
                 if existing is None:
-                    # Initialize with sample lists for median calculation
-                    existing = {
-                        # Sample lists for computing median (only active samples)
-                        "_samples_prompt_tp": [current_prompt_tp] if is_active else [],
-                        "_samples_gen_tp": [current_gen_tp] if is_active else [],
-                        "_samples_running": [current_running] if is_active else [],
-                        "_samples_waiting": [current_waiting] if is_active else [],
-                        "_samples_cache": [current_cache_usage] if is_active else [],
-                        "_prefix_hit": PrefixCacheHitRateAccumulator(),
-                        # Per-request latency samples (accumulated from finished requests)
-                        "_samples_prefill_time": list(finished_prefill_times),
-                        "_samples_decode_time": list(finished_decode_times),
-                        "_samples_e2e_latency": list(finished_e2e_latencies),
-                        "_samples_queued_time": list(finished_queued_times),
-                        "_samples_ttft": list(finished_ttfts),
-                        "_total_preempted": finished_num_preempted,
-                        "_native": VLLMNativeStatsAccumulator(
-                            self._token_histogram_bounds,
-                            self._native_attributes,
-                        ),
-                        # Peak values
-                        "_peak_prompt_tp": current_prompt_tp,
-                        "_peak_gen_tp": current_gen_tp,
-                        "_peak_running": current_running,
-                        "_peak_waiting": current_waiting,
-                        "_peak_cache": current_cache_usage,
-                        # Counters
-                        "_num_samples": 1,
-                        "_num_active_samples": 1 if is_active else 0,
-                        "timestamp": time.time(),
-                    }
+                    existing = self._new_registry_entry()
                     V1LoggingStatLoggerFixed._stats_registry[self._engine_id] = existing
-                else:
-                    # Update peak values
-                    existing["_peak_prompt_tp"] = max(existing["_peak_prompt_tp"], current_prompt_tp)
-                    existing["_peak_gen_tp"] = max(existing["_peak_gen_tp"], current_gen_tp)
-                    existing["_peak_running"] = max(existing["_peak_running"], current_running)
-                    existing["_peak_waiting"] = max(existing["_peak_waiting"], current_waiting)
-                    existing["_peak_cache"] = max(existing["_peak_cache"], current_cache_usage)
 
-                    # Accumulate per-request latency samples
-                    existing["_samples_prefill_time"].extend(finished_prefill_times)
-                    existing["_samples_decode_time"].extend(finished_decode_times)
-                    existing["_samples_e2e_latency"].extend(finished_e2e_latencies)
-                    existing["_samples_queued_time"].extend(finished_queued_times)
-                    existing["_samples_ttft"].extend(finished_ttfts)
-                    existing["_total_preempted"] += finished_num_preempted
+                existing["_peak_prompt_tp"] = max(existing["_peak_prompt_tp"], current_prompt_tp)
+                existing["_peak_gen_tp"] = max(existing["_peak_gen_tp"], current_gen_tp)
+                existing["_peak_running"] = max(existing["_peak_running"], current_running)
+                existing["_peak_waiting"] = max(existing["_peak_waiting"], current_waiting)
+                existing["_peak_cache"] = max(existing["_peak_cache"], current_cache_usage)
 
-                    # Append to sample lists (only for active samples to get meaningful medians)
-                    if is_active:
-                        existing["_samples_prompt_tp"].append(current_prompt_tp)
-                        existing["_samples_gen_tp"].append(current_gen_tp)
-                        existing["_samples_running"].append(current_running)
-                        existing["_samples_waiting"].append(current_waiting)
-                        existing["_samples_cache"].append(current_cache_usage)
-                        existing["_num_active_samples"] += 1
+                existing["_samples_prefill_time"].extend(finished_prefill_times)
+                existing["_samples_decode_time"].extend(finished_decode_times)
+                existing["_samples_e2e_latency"].extend(finished_e2e_latencies)
+                existing["_samples_queued_time"].extend(finished_queued_times)
+                existing["_samples_ttft"].extend(finished_ttfts)
+                existing["_total_preempted"] += finished_num_preempted
 
-                    existing["_num_samples"] += 1
-                    existing["timestamp"] = time.time()
+                if is_active:
+                    existing["_samples_prompt_tp"].append(current_prompt_tp)
+                    existing["_samples_gen_tp"].append(current_gen_tp)
+                    existing["_samples_running"].append(current_running)
+                    existing["_samples_waiting"].append(current_waiting)
+                    existing["_samples_cache"].append(current_cache_usage)
+                    existing["_num_active_samples"] += 1
+
+                existing["_num_samples"] += 1
+                existing["timestamp"] = time.time()
 
                 existing["_prefix_hit"].observe(prefix_cache_stats, is_active=is_active)
                 existing["_native"].observe(scheduler_stats, iteration_stats)
@@ -1374,7 +1371,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
         return sorted_samples[mid]
 
     @classmethod
-    def get_stats_by_engine_id(cls, engine_id: int, reset: bool = True) -> Optional[VLLMEngineStatsSnapshot]:
+    def get_stats_by_engine_id(cls, engine_id: str, reset: bool = True) -> Optional[VLLMEngineStatsSnapshot]:
         """Return the engine's typed metric snapshot, optionally resetting interval fields."""
         with cls._registry_lock:
             stats = cls._stats_registry.get(engine_id)
@@ -1489,7 +1486,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def __init__(self, *args, **kwargs):
         # Generate unique engine ID before calling super().__init__() which calls _create_engine
-        self._stats_engine_id = id(self)
+        self._stats_engine_id = uuid4().hex
         super().__init__(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
 

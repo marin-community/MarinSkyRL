@@ -61,10 +61,14 @@ async def get_vllm_stats_snapshot(mode: IntervalReadMode) -> VLLMEngineStatsSnap
 `VLLMCurrentStats` contains running and waiting requests, waiting requests by reason, and KV-cache usage.
 `VLLMCumulativeStats` contains prompt and generation token counts, prefix-cache hits and queries,
 preemptions, completions by finish reason, and histograms for queue, prefill, decode, end-to-end and
-time-to-first-token latency plus generated tokens per request. `VLLMIntervalStats` contains the current
-callback contract: peak and median running and waiting requests, prompt and generation throughput,
-KV-cache usage and prefix-cache hit rate; mean and p90 request latencies; finished requests; preemptions;
-and observation counts.
+time-to-first-token latency plus generated tokens per request. It also carries vLLM-compatible
+`iteration_tokens_total` and `request_time_per_output_token_seconds` histograms. Finish-reason counters
+exist from process start for the bounded `stop`, `length`, `abort`, `error`, and `repetition` labels.
+Physical engine identity is the globally unique `engine`; vLLM's local index is `engine_index`. Cumulative
+series never include the training step, while current gauges retain it as context. `VLLMIntervalStats`
+contains the current callback contract: peak and median running and waiting requests, prompt and generation
+throughput, KV-cache usage and prefix-cache hit rate, mean and p90 request latencies, finished requests,
+preemptions, and observation counts.
 
 Metric names and supported labels are enums or dataclass fields, not free-form dictionaries. Adding a
 measurement requires updating the snapshot schema and its projection disposition in the same change.
@@ -81,6 +85,11 @@ The callback has two independent sinks:
    runtime with `metric_source="vllm"`: Rigging owns one runtime per process, so a callback cannot also
    configure an independent `service="vllm"` runtime. Marin's serving dashboards must select either the
    serving service or the trainer service plus metric source, as appropriate.
+
+The Finelog sink admits each physical engine's complete record batch or rejects that whole batch before
+calling Rigging. It checks every publication result, logs any loss, and emits best-effort current
+`metric_publication_dropped_records` signals for `sample_limit` and `telemetry_loss`. A zero is evidence only
+when fresh; a positive value means the snapshot is incomplete; absent or stale evidence remains unknown.
 
 Both sinks consume `VLLMEngineStatsSnapshot`; neither reads vLLM internals or a Prometheus registry. A
 failure in one sink does not suppress the other. Collection failures are reported by the callback and keep

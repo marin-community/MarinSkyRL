@@ -17,6 +17,29 @@ HTTP_BRIDGE_HISTOGRAM_BOUNDS = {
 }
 HTTP_BRIDGE_METRIC_NAMES = tuple(HTTP_BRIDGE_HISTOGRAM_BOUNDS)
 VLLM_NUM_ENGINES_METRIC = "vllm/num_engines"
+VLLM_FINISH_REASONS = ("stop", "length", "abort", "error", "repetition")
+VLLM_ITERATION_TOKEN_BOUNDS = (1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384)
+VLLM_TPOT_BOUNDS = (
+    0.01,
+    0.025,
+    0.05,
+    0.075,
+    0.1,
+    0.15,
+    0.2,
+    0.3,
+    0.4,
+    0.5,
+    0.75,
+    1.0,
+    2.5,
+    5.0,
+    7.5,
+    10.0,
+    20.0,
+    40.0,
+    80.0,
+)
 
 
 class IntervalReadMode(StrEnum):
@@ -49,7 +72,7 @@ class VLLMCumulativeStats:
     prefix_cache_hits: int = 0
     prefix_cache_queries: int = 0
     preemptions: int = 0
-    finished_by_reason: Mapping[str, int] = field(default_factory=dict)
+    finished_by_reason: Mapping[str, int] = field(default_factory=lambda: {reason: 0 for reason in VLLM_FINISH_REASONS})
 
 
 @dataclass(frozen=True)
@@ -207,12 +230,18 @@ class FinishedRequestStatsLike(Protocol):
     decode_time: float
     e2e_latency: float
     num_generation_tokens: int
+    mean_time_per_output_token: float
+
+
+class PromptTokenStatsLike(Protocol):
+    computed: int
 
 
 class IterationStatsLike(Protocol):
     num_prompt_tokens: int
     num_generation_tokens: int
     num_preempted_reqs: int
+    prompt_token_stats: PromptTokenStatsLike
     time_to_first_tokens_iter: Sequence[float]
     finished_requests: Sequence[FinishedRequestStatsLike]
 
@@ -260,7 +289,7 @@ class VLLMNativeStatsAccumulator:
     prefix_cache_hits: int = 0
     prefix_cache_queries: int = 0
     preemptions: int = 0
-    finished_by_reason: dict[str, int] = field(default_factory=dict)
+    finished_by_reason: dict[str, int] = field(default_factory=lambda: {reason: 0 for reason in VLLM_FINISH_REASONS})
     histograms: dict[str, HistogramAccumulator] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -318,6 +347,8 @@ class VLLMNativeStatsAccumulator:
             "e2e_request_latency_seconds": HistogramAccumulator(latency),
             "time_to_first_token_seconds": HistogramAccumulator(ttft),
             "request_generation_tokens": HistogramAccumulator(self.token_bounds),
+            "iteration_tokens_total": HistogramAccumulator(VLLM_ITERATION_TOKEN_BOUNDS),
+            "request_time_per_output_token_seconds": HistogramAccumulator(VLLM_TPOT_BOUNDS),
         }
 
     def observe(self, scheduler_stats: SchedulerStatsLike | None, iteration_stats: IterationStatsLike | None) -> None:
@@ -336,17 +367,22 @@ class VLLMNativeStatsAccumulator:
         self.prompt_tokens += int(iteration_stats.num_prompt_tokens)
         self.generation_tokens += int(iteration_stats.num_generation_tokens)
         self.preemptions += int(iteration_stats.num_preempted_reqs)
+        self.histograms["iteration_tokens_total"].observe(
+            float(iteration_stats.prompt_token_stats.computed + iteration_stats.num_generation_tokens)
+        )
         for ttft in iteration_stats.time_to_first_tokens_iter:
             self.histograms["time_to_first_token_seconds"].observe(float(ttft))
         for request in iteration_stats.finished_requests:
             reason = str(request.finish_reason)
-            self.finished_by_reason[reason] = self.finished_by_reason.get(reason, 0) + 1
+            if reason in self.finished_by_reason:
+                self.finished_by_reason[reason] += 1
             for name, value in (
                 ("request_queue_time_seconds", request.queued_time),
                 ("request_prefill_time_seconds", request.prefill_time),
                 ("request_decode_time_seconds", request.decode_time),
                 ("e2e_request_latency_seconds", request.e2e_latency),
                 ("request_generation_tokens", request.num_generation_tokens),
+                ("request_time_per_output_token_seconds", request.mean_time_per_output_token),
             ):
                 self.histograms[name].observe(float(value))
 
@@ -360,7 +396,11 @@ class VLLMNativeStatsAccumulator:
             finished_by_reason=dict(self.finished_by_reason),
         )
         histograms = tuple(
-            accumulator.snapshot(name, "{token}" if name == "request_generation_tokens" else "s", self.attributes)
+            accumulator.snapshot(
+                name,
+                "{token}" if name in ("request_generation_tokens", "iteration_tokens_total") else "s",
+                self.attributes,
+            )
             for name, accumulator in self.histograms.items()
         )
         return VLLMNativeStatsSnapshot(self.current, cumulative, histograms)

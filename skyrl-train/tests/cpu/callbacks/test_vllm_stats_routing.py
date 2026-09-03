@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import fields
+from dataclasses import fields, replace
 
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.callbacks.builtin import InferenceStatsCallback
@@ -153,3 +153,31 @@ def test_stats_are_collected_only_on_the_configured_interval():
     trainer = _run_step(_snapshot(), global_step=3, log_every_steps=2)
     assert trainer.all_metrics == {}
     assert trainer.inference_engine_client.read_modes == []
+
+
+def test_train_begin_publishes_zero_finish_reasons_before_the_first_increment():
+    initial = _snapshot()
+    first_engine = initial.engines[0]
+    positive_reasons = {**first_engine.cumulative.finished_by_reason, "stop": 1}
+    positive = replace(
+        initial,
+        engines=(replace(first_engine, cumulative=VLLMCumulativeStats(finished_by_reason=positive_reasons)),),
+    )
+    sink = _Sink()
+    trainer = _Trainer(initial)
+    callback = InferenceStatsCallback(sinks=(sink,), poll_interval_seconds=0, log_to_console=False)
+    state = TrainerState(global_step=0, epoch=0, total_steps=10, num_steps_per_epoch=10)
+    control = TrainerControl()
+
+    async def publish_zero_then_increment():
+        await callback.on_train_begin_async(state, control, trainer=trainer)
+        trainer.inference_engine_client.snapshot = positive
+        await callback.on_step_end_async(state, control, trainer=trainer)
+
+    asyncio.run(publish_zero_then_increment())
+
+    assert trainer.inference_engine_client.read_modes == [IntervalReadMode.PEEK, IntervalReadMode.RESET]
+    assert [call_snapshot.engines[0].cumulative.finished_by_reason for call_snapshot, _ in sink.calls] == [
+        VLLMCumulativeStats().finished_by_reason,
+        positive_reasons,
+    ]
