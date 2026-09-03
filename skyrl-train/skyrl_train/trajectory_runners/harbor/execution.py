@@ -9,6 +9,7 @@ from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
+from skyrl_train.timing_observability import RolloutTimings
 from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink
 
@@ -18,7 +19,17 @@ class HarborRunner(Protocol):
 
     async def startup(self) -> None: ...
 
-    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
+    async def run(
+        self,
+        input_batch: TrajectoryRequestBatch,
+        disable_tqdm: bool = False,
+        *,
+        # The trainer passes this unconditionally (trainer.py). A runner written to this Protocol
+        # without it dies with TypeError on the FIRST generate of step 1 -- after full model and
+        # engine bring-up. Accepting and ignoring it is a valid implementation; not declaring it
+        # is not.
+        phase_timings: RolloutTimings | None = None,
+    ) -> TrajectoryBatch: ...
 
     async def shutdown(self) -> None: ...
 
