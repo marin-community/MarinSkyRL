@@ -1197,7 +1197,7 @@ class PolicyWorkerBase(Worker):
                 # One collective per micro-step, and at micro_train_batch_size_per_gpu=1 that is 64
                 # of them per rank per step at E6's geometry. Timed because nobody has attributed it.
                 with _policy_spans.span("policy_metric_allreduce"):
-                    status = self.strategy.all_reduce(status)
+                    status = self.strategy.all_reduce_status(status)
 
                 # weighted mean for kl
                 # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.

@@ -402,6 +402,11 @@ class _CpuPolicyStrategy:
     def all_reduce(self, value, op="mean"):
         return value
 
+    def all_reduce_status(self, status):
+        # Single "rank", so every op is the identity. The real per-key op selection is covered in
+        # tests/cpu/test_importance_ratio_diagnostics.py against the production Strategy.
+        return dict(status)
+
     def backward(self, loss, model, optimizer):
         loss.backward()
 
