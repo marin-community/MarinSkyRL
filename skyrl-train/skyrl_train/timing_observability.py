@@ -286,6 +286,14 @@ class RolloutTimings:
     durations: dict[str, float] = field(default_factory=dict)
     counters: dict[str, float] = field(default_factory=dict)
     supported: bool = False
+    # What record_generate_spans has already folded out of ``durations``. The trainer holds ONE of
+    # these per step (trainer.py, `phase_timings = RolloutTimings()`), so a step that generates twice
+    # folds the same accumulator twice -- and durations accumulate while generate_seconds is
+    # per-call. Without this, the second fold adds the running total again and subtracts it from a
+    # single call's wall: with two 6 s calls and 5 s of leaves each, the residual publishes -3
+    # against a true +2, and a NEGATIVE residual is the design's signal for double-counting. It
+    # would fire falsely, on the one detector the tree has.
+    _folded: dict[str, float] = field(default_factory=dict)
 
     def mark_supported(self) -> None:
         """Declare every leaf measured, seeding explicit zeros.
@@ -542,11 +550,14 @@ def record_generate_spans(
     if not timings.supported:
         # An uninstrumented runner publishes nothing at all, not a residual equal to its parent.
         return
+    # Fold the DELTA since the last fold, not the running total -- see RolloutTimings._folded.
     covered = 0.0
     for name, seconds in timings.durations.items():
-        all_timings[name] = all_timings.get(name, 0.0) + seconds
+        new_seconds = seconds - timings._folded.get(name, 0.0)
+        timings._folded[name] = seconds
+        all_timings[name] = all_timings.get(name, 0.0) + new_seconds
         if name in GENERATE_SPANS:
-            covered += seconds
+            covered += new_seconds
     all_timings["generate_span_residual"] = all_timings.get("generate_span_residual", 0.0) + (
         generate_seconds - covered
     )
