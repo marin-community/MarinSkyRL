@@ -196,6 +196,19 @@ GENERATE_LEAF_SPANS = GENERATE_SPANS + GENERATE_NESTED_SPANS
 ROLLOUT_ENGINE_AWAIT = "rollout_engine_await"
 ROLLOUT_ENV_AWAIT = "rollout_env_await"
 
+# The waits that carry a per-trajectory tail. A trajectory that closes without ever waiting
+# contributes a real 0.0 to these, which is why they are enumerated rather than discovered from
+# whatever happened to fire: an agent loop can return before its first engine await (an overlong
+# prompt is rejected up front), and a missing row there would read as "not measured" when the true
+# answer is zero.
+ROLLOUT_TAILED_WAITS = (ROLLOUT_ENGINE_AWAIT, ROLLOUT_ENV_AWAIT)
+
+# How many trajectory scopes closed. THE DENOMINATOR THAT MAKES THE TAIL COMPARABLE: `_count` counts
+# timed CALLS, of which one trajectory makes several, so `sum/_count` is a mean per call while
+# `_seconds_max` is a max per trajectory -- two different populations presented side by side. Divide
+# the sum by this instead to get a per-trajectory mean the tail can actually be read against.
+ROLLOUT_TRAJECTORY_COUNT = "rollout_trajectory_count"
+
 # 🚨 rollout_env_await is deliberately THREE numbers, not one.
 #
 # A single bracket around run_in_executor measures submission-to-resumption, and at E6 geometry that
@@ -238,6 +251,7 @@ ROLLOUT_COUNTERS = (
     f"{ROLLOUT_ENV_QUEUE}{_SUM_SUFFIX}",
     f"{ROLLOUT_ENV_EXEC}{_SUM_SUFFIX}",
     f"{ROLLOUT_ENV_RESUME}{_SUM_SUFFIX}",
+    ROLLOUT_TRAJECTORY_COUNT,
 )
 
 # Physical instruments with the units the values actually carry. Not policy_train_count: that name
@@ -339,9 +353,12 @@ def rollout_trajectory() -> Iterator[None]:
         yield
     finally:
         ROLLOUT_TRAJECTORY_WAITS.reset(token)
-        for name, seconds in waits.items():
+        timings.counters[ROLLOUT_TRAJECTORY_COUNT] = timings.counters.get(ROLLOUT_TRAJECTORY_COUNT, 0.0) + 1.0
+        for name in ROLLOUT_TAILED_WAITS:
             key = f"{name}{_MAX_SUFFIX}"
-            timings.counters[key] = max(timings.counters.get(key, 0.0), seconds)
+            # `waits.get(name, 0.0)`, not `waits.items()`: a trajectory that never waited still
+            # closed, and its zero is a measurement.
+            timings.counters[key] = max(timings.counters.get(key, 0.0), waits.get(name, 0.0))
 
 
 def traced_trajectory(fn):

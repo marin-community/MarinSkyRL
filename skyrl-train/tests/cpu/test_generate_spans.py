@@ -36,6 +36,7 @@ from skyrl_train.timing_observability import (
     ROLLOUT_ENV_QUEUE,
     ROLLOUT_ENV_RESUME,
     ROLLOUT_TIMINGS,
+    ROLLOUT_TRAJECTORY_COUNT,
     TIMING_PARENTS,
     RolloutTimings,
     phase_timing_observations,
@@ -240,6 +241,58 @@ def test_the_per_trajectory_max_is_a_tail_and_not_another_sum(clock):
     assert timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_count"] == 4.0
     assert total == 4.0, "every wait must reach the sum"
     assert tail == 3.0, "the tail is the LONGEST trajectory's total; folded with + it would be 4.0"
+
+
+def test_a_trajectory_that_never_waited_still_publishes_a_zero_tail(clock):
+    """🚨 A closed trajectory that never waited is a MEASURED zero, not a gap.
+
+    An agent loop can return before its first engine await — an overlong prompt is rejected up
+    front. Folding only the waits that fired leaves that trajectory's tail absent, which reads as
+    "not measured" when the true answer is zero, and it silently shrinks the population the max is
+    taken over.
+    """
+    timings = RolloutTimings()
+    with rollout_timings_scope(timings):
+        with rollout_trajectory():  # returns having awaited nothing
+            pass
+        with rollout_trajectory():
+            with rollout_wait(ROLLOUT_ENGINE_AWAIT):
+                clock.advance(2.0)
+
+    assert timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_max"] == 2.0
+    assert timings.counters[f"{ROLLOUT_ENV_AWAIT}_seconds_max"] == 0.0, (
+        "neither trajectory touched the environment, and that zero is a measurement"
+    )
+    assert timings.counters[ROLLOUT_TRAJECTORY_COUNT] == 2.0
+
+
+def test_the_tail_and_the_mean_describe_the_same_population(clock):
+    """`_count` counts timed CALLS; `_seconds_max` is a max per TRAJECTORY.
+
+    Dividing the sum by `_count` gives a mean per call and presenting it beside a per-trajectory max
+    compares two different populations. ROLLOUT_TRAJECTORY_COUNT is the denominator that makes them
+    comparable: here two trajectories make three engine calls totalling 6 s, so the per-call mean is
+    2.0 and the per-trajectory mean is 3.0 against a tail of 4.0.
+    """
+    timings = RolloutTimings()
+    with rollout_timings_scope(timings):
+        with rollout_trajectory():
+            for _ in range(2):
+                with rollout_wait(ROLLOUT_ENGINE_AWAIT):
+                    clock.advance(2.0)
+        with rollout_trajectory():
+            with rollout_wait(ROLLOUT_ENGINE_AWAIT):
+                clock.advance(2.0)
+
+    total = timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_sum"]
+    calls = timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_count"]
+    trajectories = timings.counters[ROLLOUT_TRAJECTORY_COUNT]
+    tail = timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_max"]
+
+    assert (total, calls, trajectories, tail) == (6.0, 3.0, 2.0, 4.0)
+    assert total / calls == 2.0, "the per-CALL mean, which the tail must not be read against"
+    assert total / trajectories == 3.0, "the per-TRAJECTORY mean, which it must"
+    assert tail > total / trajectories, "the straggler is above the population the tail is drawn from"
 
 
 def test_a_wait_outside_any_trajectory_still_sums_but_contributes_no_tail():
