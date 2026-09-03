@@ -82,6 +82,9 @@ POLICY_SPAN_TRAINER_FIELDS = {
     # here or the golden-diff guards below fail -- which is what they are for.
     "policy_train_spans": False,
     "policy_train_spans_synchronize": True,
+    # Driver-side decomposition of generate. Default-ON, unlike the policy spans: it has no CUDA
+    # synchronise to pay for, measuring ~21 ms against a ~98 s generate.
+    "generate_spans": True,
 }
 ADDITIVE_ALGORITHM_FIELDS = {
     "batch_invariant": False,

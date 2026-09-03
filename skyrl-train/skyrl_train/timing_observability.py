@@ -118,6 +118,13 @@ def phase_timing_observations(timings: Mapping[str, float]) -> tuple[PhaseTiming
     )
 
 
+# A residual is what its parent's wall does NOT contain, so it is exclusive by construction and may
+# legitimately be negative. WorkerTimingSink already selects the domain per name for exactly this
+# reason -- mixing the two under one domain lets a consumer sum a child into its parent twice -- and
+# policy_span_residual ships as exclusive_wall. The driver's residual is the same shape.
+EXCLUSIVE_DRIVER_SPANS = frozenset({"generate_span_residual"})
+
+
 class FinelogTimingSink:
     def publish(self, observations: Sequence[PhaseTiming], step: int) -> None:
         for observation in observations:
@@ -127,7 +134,9 @@ class FinelogTimingSink:
                     "phase": observation.name,
                     "root": observation.root,
                     "parent": observation.parent or "",
-                    "clock_domain": "inclusive_wall",
+                    "clock_domain": (
+                        "exclusive_wall" if observation.name in EXCLUSIVE_DRIVER_SPANS else "inclusive_wall"
+                    ),
                     "role": TRAINER_ROLE,
                     "step": str(step),
                 },
@@ -363,11 +372,11 @@ def rollout_span(name: str) -> Iterator[None]:
     # trajectory_reward_shaping -> trajectory_runners -> base -> timing_observability), and Timer
     # logs two loguru records per region unless log_events=False -- tens of thousands of synchronous
     # log records per step, on the event-loop thread, inside the phase being measured.
-    started = time.monotonic()
+    started = time.perf_counter()
     try:
         yield
     finally:
-        timings.durations[name] = timings.durations.get(name, 0.0) + (time.monotonic() - started)
+        timings.durations[name] = timings.durations.get(name, 0.0) + (time.perf_counter() - started)
 
 
 def _record_wait(timings: RolloutTimings, name: str, elapsed: float) -> None:
@@ -391,11 +400,11 @@ def rollout_wait(name: str) -> Iterator[None]:
     if timings is None:
         yield
         return
-    started = time.monotonic()
+    started = time.perf_counter()
     try:
         yield
     finally:
-        _record_wait(timings, name, time.monotonic() - started)
+        _record_wait(timings, name, time.perf_counter() - started)
 
 
 async def timed_env_call(executor, func, /, *args, **kwargs):
@@ -416,11 +425,11 @@ async def timed_env_call(executor, func, /, *args, **kwargs):
         # not read a large rollout_env_await here as executor contention.
         if timings is None:
             return func(*args, **kwargs)
-        started = time.monotonic()
+        started = time.perf_counter()
         try:
             return func(*args, **kwargs)
         finally:
-            _record_env_wait(timings, queued=0.0, executed=time.monotonic() - started, resumed=0.0)
+            _record_env_wait(timings, queued=0.0, executed=time.perf_counter() - started, resumed=0.0)
 
     loop = asyncio.get_running_loop()
     # A closure rather than run_in_executor(executor, func, *args): the stamps have to be taken
@@ -432,28 +441,31 @@ async def timed_env_call(executor, func, /, *args, **kwargs):
     stamps: list[float] = []  # [picked_up, finished], both written on the pool thread
 
     def _stamped():
-        stamps.append(time.monotonic())
+        stamps.append(time.perf_counter())
         try:
             return func(*args, **kwargs)
         finally:
-            stamps.append(time.monotonic())
+            stamps.append(time.perf_counter())
 
-    submitted = time.monotonic()
+    submitted = time.perf_counter()
     try:
         return await loop.run_in_executor(executor, _stamped)
     finally:
-        resumed = time.monotonic()
-        if len(stamps) == 2:
+        resumed = time.perf_counter()
+        # Read the list ONCE. The pool thread can append between a len() and an index, and a stamp
+        # that arrives in that window would make resumed - stamps[1] negative.
+        marks = tuple(stamps)
+        if len(marks) == 2:
             _record_env_wait(
                 timings,
-                queued=stamps[0] - submitted,
-                executed=stamps[1] - stamps[0],
-                resumed=resumed - stamps[1],
+                queued=marks[0] - submitted,
+                executed=marks[1] - marks[0],
+                resumed=max(0.0, resumed - marks[1]),
             )
-        else:
-            # The pool never ran the work (shutdown, rejection) or died between the two stamps.
-            # Attribute the whole wait to queueing rather than inventing an execution time.
-            _record_env_wait(timings, queued=resumed - submitted, executed=0.0, resumed=0.0)
+        # Otherwise the call never completed: the pool rejected it, the executor shut down, or the
+        # await was cancelled while func was still running. Record nothing. Attributing the wait to
+        # queueing would report a cancellation as executor undersizing, and counting it would
+        # inflate the denominator of every derived mean with a call that never happened.
 
 
 def _record_env_wait(timings: RolloutTimings, *, queued: float, executed: float, resumed: float) -> None:
@@ -519,16 +531,27 @@ def publish_driver_counters(counters: Mapping[str, float], *, step: int) -> None
         # no-op, flush() still returns True, and the run finishes having published nothing.
         reason = unconfigured_telemetry_reason()
         if reason is not None:
-            logger.warning(f"generate span tree will publish nothing: {reason}")
+            logger.warning("generate span tree will publish nothing: %s", reason)
+    before = telemetry.runtime_status()
     for name, value in counters.items():
         if name not in ROLLOUT_COUNTERS:
             # Drop, do not raise. This runs in the trainer's step epilogue, AFTER the step's work
             # is paid for -- raising here converts a telemetry-naming mistake into a killed
             # training run. The condition is statically decidable and is asserted at import below.
-            logger.warning(f"{name!r} has no rollout counter instrument; dropping the row")
+            logger.warning("%r has no rollout counter instrument; dropping the row", name)
             continue
         instrument = rollout_count if name.endswith(_COUNT_SUFFIX) else rollout_wait_seconds
         instrument.record(float(value), attributes={"counter": name, "role": TRAINER_ROLE, "step": str(step)})
+    # Same accounting publish_worker_spans does, and it matters more here: a dropped row understates
+    # a MAX, and an understated tail is the one number this tree exists to report.
+    dropped = telemetry.runtime_status().lost_records - before.lost_records
+    if dropped > 0:
+        logger.warning(
+            "rollout counters lost %d record(s) at step %d; the engine and environment tails are "
+            "understated and must not be quoted",
+            dropped,
+            step,
+        )
 
 
 # --- Worker-side spans inside policy_train ------------------------------------------------------
@@ -814,9 +837,19 @@ for _name in ROLLOUT_COUNTERS:
             f"or {_COUNT_SUFFIX!r}; publish_driver_counters would route it to the wrong instrument"
         )
 
+# The same guard for the span half, which had only a test. An unregistered span name is dropped by
+# phase_timing_observations -- but trainer.py splats all_timings into W&B unfiltered, so a typo
+# publishes a W&B series nobody expects, publishes nothing to finelog, and (being outside
+# GENERATE_SPANS) is absorbed by the residual with no row explaining it. Every signal reads healthy.
+for _name in (*GENERATE_LEAF_SPANS, "generate_span_residual"):
+    if _name not in TIMING_PARENTS:
+        raise AssertionError(f"{_name!r} is not in TIMING_PARENTS; phase_timing_observations would drop it")
+
 # A _seconds_max row is folded with max across generate calls and a _seconds_sum row with addition,
 # so a name that reads as one and is treated as the other is a silent arithmetic error rather than a
 # missing row. record_generate_spans dispatches on the same suffix; keep the two in step.
 for _name in ROLLOUT_COUNTERS:
     if _name.endswith(_MAX_SUFFIX) and f"{_name[: -len(_MAX_SUFFIX)]}{_SUM_SUFFIX}" not in ROLLOUT_COUNTERS:
         raise AssertionError(f"{_name!r} has no matching {_SUM_SUFFIX!r} row, so no mean is derivable beside its tail")
+
+del _name

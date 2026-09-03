@@ -47,6 +47,18 @@ class TrajectoryRunner(ABC):
     #: waits; until then absence is the honest signal.
     generate_spans_instrumented: bool = False
 
+    def __init_subclass__(cls, **kwargs) -> None:
+        """Revoke an inherited instrumented flag from a subclass that replaces the bracketed body.
+
+        The flag certifies the call sites in ``_run`` and the loops it drives. A subclass that
+        overrides ``_run`` without re-declaring the flag would inherit True and publish a seeded
+        all-zero decomposition -- the "measured zero" lie the flag exists to prevent, made
+        indistinguishable from truth by the explicit zeros.
+        """
+        super().__init_subclass__(**kwargs)
+        if "_run" in cls.__dict__ and "generate_spans_instrumented" not in cls.__dict__:
+            cls.generate_spans_instrumented = False
+
     async def run(
         self,
         input_batch: TrajectoryRequestBatch,

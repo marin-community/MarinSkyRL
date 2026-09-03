@@ -284,6 +284,11 @@ trainer:
   # which is what you want when attributing and not what you want when measuring end-to-end.
   policy_train_spans: false
   policy_train_spans_synchronize: true
+
+  # Decompose generate from the driver's event loop. On by default: measured at ~21 ms per generate
+  # against a ~98 s wall, and unlike the policy spans there is no CUDA synchronise to pay for. The
+  # flag exists so its own cost can be A/B'd on a real run without editing code.
+  generate_spans: true
   ckpt_interval: 5
   hf_save_interval: ${trainer.ckpt_interval}
   hf_upload_mode: latest

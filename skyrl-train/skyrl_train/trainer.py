@@ -630,7 +630,7 @@ class RayPPOTrainer:
                     )
 
                     # 1.1 generation phase
-                    rollout_timings = RolloutTimings()
+                    rollout_timings = RolloutTimings() if self.cfg.trainer.generate_spans else None
                     with (
                         Timer("generate", self.all_timings) as generate_timer,
                         critical_phase("rollout_or_inference_wait", self.global_step),
@@ -640,12 +640,13 @@ class RayPPOTrainer:
                         )
                     # After the Timer closes, because the residual is generate minus its children and
                     # generate is only known once the wall it measures has ended.
-                    record_generate_spans(
-                        rollout_timings,
-                        generate_timer.duration,
-                        self.all_timings,
-                        self.all_rollout_counters,
-                    )
+                    if rollout_timings is not None:
+                        record_generate_spans(
+                            rollout_timings,
+                            generate_timer.duration,
+                            self.all_timings,
+                            self.all_rollout_counters,
+                        )
 
                     if self.cfg.trainer.step_wise_training:
                         # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
