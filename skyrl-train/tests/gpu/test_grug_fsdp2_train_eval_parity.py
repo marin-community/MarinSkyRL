@@ -107,6 +107,14 @@ def _config(model_path: str, *, use_grouped_mm: bool):
     # weights. If a later edit makes these differ, the test stops testing what it claims to.
     cfg.trainer.train_batch_size = BATCH_ROWS
     cfg.trainer.policy_mini_batch_size = BATCH_ROWS
+    # 🚨 n_samples_per_prompt MULTIPLIES the per-rank mini-batch:
+    #   policy_mini_batch_size_per_gpu = policy_mini_batch_size * n_samples_per_prompt // dp_size
+    # (`worker.py:1093`), and accumulation_steps is that divided by the micro size. The base config
+    # ships 5, which made the window 10 micro-steps wide while each rank held only 2 rows -- so
+    # `(local_step + 1) % accumulation_steps == 0` never fired, the ratio diagnostics never
+    # finalized, and every arm reported no metric at all. The batch here is a fixed set of rows,
+    # not prompts x samples, so this must be 1.
+    cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.update_epochs_per_batch = 1
     # Equal forward and train micro-batch sizes: cuBLAS selects kernels per GEMM shape, so unequal
     # sizes make the two passes use different kernels. Megatron's validate_cfg rejects that outright;
@@ -201,6 +209,18 @@ def test_grug_fsdp2_train_forward_matches_eval_forward(
     cfg = _config(str(model_path), use_grouped_mm=use_grouped_mm)
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
     batch = _variable_length_batch(pad_token_id, prompt_length=prompt_length, response_length=response_length)
+
+    # Assert the derived geometry rather than trusting it. Both of these silently disable the
+    # measurement rather than failing: an accumulation window wider than the rows a rank holds
+    # never closes, and unequal micro sizes put the two passes on different cuBLAS kernels.
+    dp_size = POLICY_WORLD_SIZE
+    per_rank_mini_batch = BATCH_ROWS * cfg.generator.n_samples_per_prompt // dp_size
+    accumulation_steps = per_rank_mini_batch // cfg.trainer.micro_train_batch_size_per_gpu
+    assert accumulation_steps == BATCH_ROWS // dp_size, (
+        f"accumulation window is {accumulation_steps} micro-steps but each rank holds "
+        f"{BATCH_ROWS // dp_size} rows; the ratio diagnostics would never finalize"
+    )
+    assert cfg.trainer.micro_forward_batch_size_per_gpu == cfg.trainer.micro_train_batch_size_per_gpu
 
     initialize_ray(cfg)
     try:
