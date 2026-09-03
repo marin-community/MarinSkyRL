@@ -2085,7 +2085,7 @@ wheels = [
 [[package]]
 name = "harbor"
 version = "0.8.1"
-source = { git = "https://github.com/marin-community/harbor.git#2a688903e0362645b558f839808b64b76601013d" }
+source = { git = "https://github.com/marin-community/harbor.git#90eadebacd9265d8f7f96e41e5b41b86b118f29a" }
 dependencies = [
     { name = "dirhash", marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "fastapi", marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2122,7 +2122,7 @@ daytona = [
 [[package]]
 name = "harbor-config"
 version = "0.1.0"
-source = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2a688903e0362645b558f839808b64b76601013d/harbor_config-0.1.0-py3-none-any.whl" }
+source = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-90eadebacd9265d8f7f96e41e5b41b86b118f29a/harbor_config-0.1.0-py3-none-any.whl" }
 dependencies = [
     { name = "pydantic", marker = "sys_platform == 'linux' or extra == 'extra-10-marinskyrl-cpu'" },
     { name = "pyyaml", marker = "sys_platform == 'linux' or extra == 'extra-10-marinskyrl-cpu'" },
@@ -2131,7 +2131,7 @@ dependencies = [
     { name = "universal-pathlib", marker = "sys_platform == 'linux' or extra == 'extra-10-marinskyrl-cpu'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2a688903e0362645b558f839808b64b76601013d/harbor_config-0.1.0-py3-none-any.whl", hash = "sha256:9f50f0cc4e071efcc8460690d13c09703050d100fc0af26034f38dbc5bbcf18b" },
+    { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-90eadebacd9265d8f7f96e41e5b41b86b118f29a/harbor_config-0.1.0-py3-none-any.whl", hash = "sha256:9f50f0cc4e071efcc8460690d13c09703050d100fc0af26034f38dbc5bbcf18b" },
 ]
 
 [package.metadata]
@@ -3046,11 +3046,11 @@ requires-dist = [
     { name = "fsspec", specifier = ">=2024.0.0" },
     { name = "func-timeout" },
     { name = "harbor", extras = ["analysis", "datasets", "daytona"], marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/marin-community/harbor.git" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'cuda'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2a688903e0362645b558f839808b64b76601013d/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'deepspeed'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2a688903e0362645b558f839808b64b76601013d/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2a688903e0362645b558f839808b64b76601013d/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2a688903e0362645b558f839808b64b76601013d/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "extra == 'cpu'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2a688903e0362645b558f839808b64b76601013d/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'cuda'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-90eadebacd9265d8f7f96e41e5b41b86b118f29a/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'deepspeed'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-90eadebacd9265d8f7f96e41e5b41b86b118f29a/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-90eadebacd9265d8f7f96e41e5b41b86b118f29a/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-90eadebacd9265d8f7f96e41e5b41b86b118f29a/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "extra == 'cpu'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-90eadebacd9265d8f7f96e41e5b41b86b118f29a/harbor_config-0.1.0-py3-none-any.whl" },
     { name = "hf-transfer" },
     { name = "huggingface-hub", specifier = ">=0.34.0" },
     { name = "hydra-core", specifier = "==1.3.2" },
