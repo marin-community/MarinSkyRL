@@ -37,6 +37,7 @@ UNDEFINED_GROUP_DESCRIPTION = "undefined"
 
 collectives = telemetry.counter("nccl_collectives", unit="{collective}")
 collective_elements = telemetry.counter("nccl_collective_elements", unit="{element}")
+collective_output_elements = telemetry.counter("nccl_collective_output_elements", unit="{element}")
 collective_seconds = telemetry.counter("nccl_collective_seconds", unit="s")
 
 
@@ -52,6 +53,13 @@ class CollectiveBucket:
 class CollectiveTotals:
     count: int = 0
     input_elements: int = 0
+    # torch records the LOCAL SHARD as an all-gather's input and the FULL TENSOR as a
+    # reduce-scatter's input (flight_recorder/components/types.py asserts
+    # output_numel == input_numel * pg_size). So input_elements alone is a record inventory,
+    # NOT a traffic meter, and it is not additive across collective types -- on the first real
+    # window it understated bytes actually received by 10.2x (419 GB reported vs 4.29 TB moved).
+    # The FR already carries output_sizes and this publisher was ignoring it.
+    output_elements: int = 0
     duration_seconds: float = 0.0
     timed_count: int = 0
 
@@ -171,6 +179,7 @@ def summarize(
         totals = delta.totals.setdefault(_bucket(entry), CollectiveTotals())
         totals.count += 1
         totals.input_elements += _element_count(entry.get("input_sizes"))
+        totals.output_elements += _element_count(entry.get("output_sizes"))
         duration_ms = entry.get("duration_ms")
         if duration_ms is not None:
             totals.duration_seconds += float(duration_ms) / 1000.0
@@ -213,6 +222,7 @@ def publish(delta: FlightRecorderDelta, *, rank: int) -> None:
         }
         collectives.add(totals.count, attributes=attributes)
         collective_elements.add(totals.input_elements, attributes=attributes)
+        collective_output_elements.add(totals.output_elements, attributes=attributes)
         if totals.timed_count:
             collective_seconds.add(totals.duration_seconds, attributes=attributes)
 
