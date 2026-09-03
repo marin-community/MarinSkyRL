@@ -20,8 +20,8 @@ import importlib
 import inspect
 import re
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,7 +47,15 @@ from skyrl_train.timing_observability import (
     rollout_wait,
     timed_env_call,
 )
+import skyrl_train.timing_observability as timing_module
+import skyrl_train.trajectory_runners.harbor.execution as harbor_execution
+import skyrl_train.trajectory_runners.harbor.rollout_dispatcher as harbor_dispatcher
+from loguru import logger
+from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
+from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
+from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
 
 
 # Every tokenizer call the whole-trajectory and step-wise collectors make per step. __init__'s
@@ -59,9 +67,39 @@ EXPECTED_TOKENIZE_REGIONS = {"skyrl_gym": 7, "step_wise": 3}
 # decision someone has to write down here.
 TOKENIZE_EXEMPT_FUNCTIONS = {"__init__"}
 
-# One awaited unit in the tail tests. Bounds are stated as multiples of it and are one-sided or
-# relative, so a contended runner that turns a 10 ms sleep into 30 ms cannot breach them.
-PER_WAIT = 0.01
+
+class FakeClock:
+    """A stand-in for the ``time`` timing_module, installed only on timing_observability.
+
+    Follows tests/cpu/utils/test_timer.py. Durations here are exact rather than approximate, so
+    every bound below is an equality and none of them can flake on a loaded runner --
+    TESTING-core.md bans time.sleep() in tests for exactly that reason. ``advance`` is callable from
+    the executor thread, which is what lets a test say "the environment took 0.1 s" without one.
+    """
+
+    def __init__(self, start: float = 0.0) -> None:
+        self._now = start
+        self.reads = 0
+
+    def perf_counter(self) -> float:
+        self.reads += 1
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Bind a scripted clock to the module under test and nothing else.
+
+    Patching time globally would also retime the asyncio event loop, which schedules off the same
+    clock.
+    """
+
+    fake = FakeClock()
+    monkeypatch.setattr(timing_module, "time", fake)
+    return fake
 
 
 class _InstrumentedRunner(TrajectoryRunner):
@@ -182,7 +220,7 @@ def test_spans_accumulate_across_regions_and_waits_stay_separate():
 # --- the tail, which is the whole point on a tail-latency-bound phase ----------------------------
 
 
-def test_the_per_trajectory_max_is_a_tail_and_not_another_sum():
+def test_the_per_trajectory_max_is_a_tail_and_not_another_sum(clock):
     """F20: generate is tail-latency-bound -- the wall is set by the LAST trajectory to finish.
 
     A mean over 4,096 trajectories cannot tell a uniformly slow rollout from a fast one with three
@@ -196,16 +234,12 @@ def test_the_per_trajectory_max_is_a_tail_and_not_another_sum():
             with rollout_trajectory():
                 for _ in range(waits):
                     with rollout_wait(ROLLOUT_ENGINE_AWAIT):
-                        time.sleep(PER_WAIT)
+                        clock.advance(1.0)
     total = timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_sum"]
     tail = timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_max"]
-    # Ordinal bounds only. time.sleep never returns early, so the floors are exact; the ceiling is
-    # relative to the other measurement rather than to wall-clock, so a loaded runner cannot breach
-    # it. The third line is the discriminating one: folded with + the tail equals the total.
     assert timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_count"] == 4.0
-    assert tail >= 3 * PER_WAIT
-    assert total >= 4 * PER_WAIT
-    assert tail <= total - PER_WAIT, "a max folded as a sum would equal the total"
+    assert total == 4.0, "every wait must reach the sum"
+    assert tail == 3.0, "the tail is the LONGEST trajectory's total; folded with + it would be 4.0"
 
 
 def test_a_wait_outside_any_trajectory_still_sums_but_contributes_no_tail():
@@ -218,7 +252,7 @@ def test_a_wait_outside_any_trajectory_still_sums_but_contributes_no_tail():
     assert f"{ROLLOUT_ENGINE_AWAIT}_seconds_max" not in timings.counters
 
 
-def test_concurrent_trajectories_do_not_pool_their_waits():
+def test_concurrent_trajectories_do_not_pool_their_waits(clock):
     """Each trajectory is its own task and so its own context copy. Sharing one dict would make
     every trajectory's tail the whole rollout's sum."""
 
@@ -229,8 +263,13 @@ def test_concurrent_trajectories_do_not_pool_their_waits():
             async def _trajectory(waits: int):
                 with rollout_trajectory():
                     for _ in range(waits):
+                        # Yield BETWEEN brackets, not inside one. The tasks still interleave --
+                        # which is what makes this a context-isolation test -- but each bracket is
+                        # atomic on the loop, so a shared clock cannot charge one wait for another's
+                        # overlap and confound the question being asked.
+                        await asyncio.sleep(0)
                         with rollout_wait(ROLLOUT_ENGINE_AWAIT):
-                            await asyncio.sleep(PER_WAIT)
+                            clock.advance(1.0)
 
             await asyncio.gather(_trajectory(3), _trajectory(1))
         return timings
@@ -239,99 +278,124 @@ def test_concurrent_trajectories_do_not_pool_their_waits():
     assert timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_count"] == 4.0
     tail = timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_max"]
     total = timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_sum"]
-    assert tail >= 3 * PER_WAIT, "the tail must be one trajectory's whole total"
-    assert tail <= total - PER_WAIT, "pooled into one dict, every tail would be the whole rollout"
+    assert total == 4.0
+    assert tail == 3.0, "pooled into one dict, every trajectory's tail would be the whole rollout"
 
 
 # --- the env split, which is where a single bracket lies ----------------------------------------
 
 
-def test_env_queueing_is_not_reported_as_environment_runtime():
+def _gated(gate, work):
+    """Hold the pool's single worker until every call has been submitted.
+
+    A scripted clock removes timing nondeterminism but not SCHEDULING nondeterminism: without this
+    the pool can finish call 1 before call 2 has been submitted, so call 2 records no queue and the
+    test measures thread scheduling rather than the split under test.
+    """
+    gate.wait(5.0)
+    work()
+
+
+async def _submit_then_release(pool, gate, calls):
+    """Start every call, let each reach its await, then release the worker."""
+    pending = [asyncio.ensure_future(call(pool)) for call in calls]
+    for _ in range(3):
+        await asyncio.sleep(0)
+    gate.set()
+    return await asyncio.gather(*pending)
+
+
+def test_env_queueing_is_not_reported_as_environment_runtime(clock):
     """🚨 The regression this split exists for.
 
     One bracket around run_in_executor measures submission-to-resumption. With N concurrent
     trajectories against W pool threads that sum is O(N^2/W): at E6 geometry, 4,096 coroutines and a
     32-worker pool produce tens of seconds of "env await" for an environment that did not change,
-    and it moves with the batch size. Here: 8 calls of 50 ms through ONE worker. Execution is linear
-    (8 x 50 ms); queueing is quadratic (50 ms x (0+1+...+7)). A single bracket would report ~1.8 s of
-    environment runtime for 0.4 s of environment.
-    """
-    sleep_seconds, calls = 0.05, 8
+    and it moves with the batch size.
 
-    async def _one(pool):
-        """Measure the submitted -> resumed bracket from OUTSIDE, as the caller experiences it."""
-        started = time.perf_counter()
-        await timed_env_call(pool, time.sleep, sleep_seconds)
-        return time.perf_counter() - started
+    Here one worker serialises 4 calls of 1.0 s, so the queue each sees is 0, 1, 2, 3 -- 6.0 s of
+    backlog against 4.0 s of environment. A single bracket reports all 10.0 s as environment.
+    """
+    calls = 4
+    gate = threading.Event()
 
     async def _drive():
         timings = RolloutTimings()
         with rollout_timings_scope(timings):
             with ThreadPoolExecutor(max_workers=1) as pool:
-                brackets = await asyncio.gather(*(_one(pool) for _ in range(calls)))
-        return timings, sum(brackets)
+                await _submit_then_release(
+                    pool,
+                    gate,
+                    [lambda p: timed_env_call(p, _gated, gate, lambda: clock.advance(1.0))] * calls,
+                )
+        return timings
 
-    timings, observed = asyncio.run(_drive())
+    timings = asyncio.run(_drive())
     executed = timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"]
     queued = timings.counters[f"{ROLLOUT_ENV_QUEUE}_seconds_sum"]
     resumed = timings.counters[f"{ROLLOUT_ENV_RESUME}_seconds_sum"]
     awaited = timings.counters[f"{ROLLOUT_ENV_AWAIT}_seconds_sum"]
 
     assert timings.counters[f"{ROLLOUT_ENV_AWAIT}_count"] == float(calls)
-    # Execution is the environment, and it is LINEAR in the number of calls. A lower bound only:
-    # sleep never returns early, and an upper bound would be the flaky half on a loaded runner.
-    assert executed >= calls * sleep_seconds
-    # Queueing is the pool, and it dominates: 28 units of backlog against 8 of work. THIS is the
-    # assertion -- collapsed into one bracket, all 1.8 s reads as environment runtime.
-    assert queued > 2 * executed, f"queue {queued:.3f}s should dominate exec {executed:.3f}s"
-    # The three terms partition the caller-observed wait. Measured independently by the caller,
-    # because _record_env_wait DEFINES awaited as their sum -- comparing it to itself is a tautology.
-    assert queued + executed + resumed == pytest.approx(observed, abs=5e-3), "the split loses time"
-    # And rollout_env_await is that same total, which is what a consumer reads as "time in the env".
-    assert awaited == pytest.approx(observed, abs=5e-3)
+    # The environment, and only the environment: LINEAR in the number of calls.
+    assert executed == float(calls), f"exec {executed} should be the {calls} x 1.0 s of env work"
+    # The pool's backlog: 0 + 1 + 2 + 3, quadratic in the number of calls.
+    assert queued == 6.0, f"queue {queued} should be the serialised backlog"
+    # The three terms partition the caller-observed wait.
+    assert awaited == queued + executed + resumed
 
 
-def test_env_execution_is_stamped_on_the_pool_thread_not_the_loop_thread():
-    """The stamps have to be taken where the work runs, or exec absorbs the queue again."""
-    seen: list[str] = []
+def test_env_execution_is_stamped_on_the_pool_thread_not_the_loop_thread(clock):
+    """The stamps have to be taken where the work runs, or exec absorbs the queue again.
+
+    Two calls through one worker: the first advances 1.0 s, the second does nothing. Stamped on the
+    pool thread, exec is 1.0 and the second call's whole wait is queue. Stamped on the loop thread
+    exec would be 2.0, which is what this bound separates.
+    """
+    ran_on: list[str] = []
+    gate = threading.Event()
+
+    def _slow():
+        ran_on.append(threading.current_thread().name)
+        clock.advance(1.0)
 
     async def _drive():
         timings = RolloutTimings()
         with rollout_timings_scope(timings):
             with ThreadPoolExecutor(max_workers=1) as pool:
-
-                def _work():
-                    seen.append(threading.current_thread().name)
-
-                await asyncio.gather(timed_env_call(pool, time.sleep, 0.1), timed_env_call(pool, _work))
+                await _submit_then_release(
+                    pool,
+                    gate,
+                    [
+                        lambda p: timed_env_call(p, _gated, gate, _slow),
+                        lambda p: timed_env_call(p, _gated, gate, lambda: None),
+                    ],
+                )
         return timings
 
     timings = asyncio.run(_drive())
-    assert seen and seen[0] != threading.main_thread().name, "the work did not run on the pool"
-    # Two calls through ONE worker: a 100 ms sleep and a no-op. Stamped on the pool thread, exec is
-    # ~0.1 s and the no-op's wait is queueing. Stamped on the loop thread it would be ~0.2 s, so
-    # this bound is what separates the two.
-    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] == pytest.approx(0.1, abs=0.04)
-    assert timings.counters[f"{ROLLOUT_ENV_QUEUE}_seconds_sum"] >= 0.09
+    assert ran_on and ran_on[0] != threading.main_thread().name, "the work did not run on the pool"
+    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] == 1.0
+    assert timings.counters[f"{ROLLOUT_ENV_QUEUE}_seconds_sum"] == 1.0, "the second call waited out the first"
 
 
-def test_with_no_executor_the_whole_env_wait_is_execution():
+def test_with_no_executor_the_whole_env_wait_is_execution(clock):
     """Despite the `await`, this is a synchronous call on the loop thread: no queue, no resume."""
 
     async def _drive():
         timings = RolloutTimings()
         with rollout_timings_scope(timings):
-            await timed_env_call(None, time.sleep, 0.02)
+            await timed_env_call(None, clock.advance, 2.0)
         return timings
 
     timings = asyncio.run(_drive())
     assert timings.counters[f"{ROLLOUT_ENV_QUEUE}_seconds_sum"] == 0.0
     assert timings.counters[f"{ROLLOUT_ENV_RESUME}_seconds_sum"] == 0.0
     # A lower bound, so recording (0, 0, 0) fails. approx(0.02, abs=0.05) admitted zero.
-    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] >= 0.02
+    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] == 2.0
 
 
-def test_an_env_call_that_raises_still_records_its_wait():
+def test_an_env_call_that_raises_still_records_its_wait(clock):
     """A failing environment is exactly when the number is wanted."""
 
     async def _drive():
@@ -339,16 +403,23 @@ def test_an_env_call_that_raises_still_records_its_wait():
         with rollout_timings_scope(timings):
             with ThreadPoolExecutor(max_workers=1) as pool:
                 with pytest.raises(ValueError):
-                    await timed_env_call(pool, _raise_value_error)
+                    await timed_env_call(pool, _raise_value_error, clock)
         return timings
 
     timings = asyncio.run(_drive())
     assert timings.counters[f"{ROLLOUT_ENV_AWAIT}_count"] == 1.0
-    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] > 0.0
+    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] == 1.0, "a failing env still ran for 1 s"
 
 
-def _raise_value_error():
+def _raise_value_error(clock):
+    clock.advance(1.0)
     raise ValueError("environment failed")
+
+
+def _block_until(entered, release):
+    """Signal that the pool thread is inside func, then wait to be let go."""
+    entered.set()
+    release.wait(5.0)
 
 
 def test_a_cancelled_env_call_records_nothing_rather_than_inventing_a_queue():
@@ -362,11 +433,13 @@ def test_a_cancelled_env_call_records_nothing_rather_than_inventing_a_queue():
         timings = RolloutTimings()
         with rollout_timings_scope(timings):
             with ThreadPoolExecutor(max_workers=1) as pool:
-                task = asyncio.ensure_future(timed_env_call(pool, time.sleep, 0.2))
-                await asyncio.sleep(0.02)
+                entered, release = threading.Event(), threading.Event()
+                task = asyncio.ensure_future(timed_env_call(pool, _block_until, entered, release))
+                await asyncio.to_thread(entered.wait, 5.0)
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
+                release.set()
         return timings
 
     timings = asyncio.run(_drive())
@@ -382,7 +455,7 @@ def test_an_executor_that_cannot_run_the_work_records_nothing_and_still_raises()
         pool.shutdown()
         with rollout_timings_scope(timings):
             with pytest.raises(RuntimeError):
-                await timed_env_call(pool, time.sleep, 0.01)
+                await timed_env_call(pool, lambda: None)
         return timings
 
     timings = asyncio.run(_drive())
@@ -395,17 +468,16 @@ def test_the_residual_is_published_as_an_exclusive_remainder():
     WorkerTimingSink already selects the domain per name so a consumer cannot sum a child into its
     parent twice; policy_span_residual ships exclusive_wall and this is the same shape.
     """
-    import skyrl_train.timing_observability as module
 
     rows: list[dict[str, str]] = []
     monkey = pytest.MonkeyPatch()
     try:
         monkey.setattr(
-            module,
+            timing_module,
             "phase_duration",
             type("_H", (), {"record": lambda self, v, attributes: rows.append(attributes)})(),
         )
-        module.FinelogTimingSink().publish(
+        timing_module.FinelogTimingSink().publish(
             phase_timing_observations({"generate": 98.0, "rollout_collect": 90.0, "generate_span_residual": 8.0}),
             step=3,
         )
@@ -496,7 +568,6 @@ def test_an_uninstrumented_runner_publishes_nothing_not_a_full_residual():
 
 def test_the_skyrl_gym_runner_declares_itself_instrumented():
     """The one runner whose every engine, environment and tokenizer call site is bracketed."""
-    from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 
     assert SkyRLGymTrajectoryRunner.generate_spans_instrumented is True
 
@@ -551,27 +622,28 @@ def test_repeated_generate_calls_in_one_step_accumulate_but_tails_fold_with_max(
 def test_driver_counter_rows_carry_the_trainer_role_and_no_rank():
     """publish_worker_counters hardcodes role="worker" and requires a rank. The driver has neither,
     and a consumer that read rank off these rows raised KeyError on the first correct one."""
-    import skyrl_train.timing_observability as module
 
     waits: list[tuple[float, dict[str, str]]] = []
     counts: list[tuple[float, dict[str, str]]] = []
     monkey = pytest.MonkeyPatch()
     try:
         monkey.setattr(
-            module,
+            timing_module,
             "rollout_wait_seconds",
             type("_H", (), {"record": lambda self, v, attributes: waits.append((v, attributes))})(),
         )
         monkey.setattr(
-            module,
+            timing_module,
             "rollout_count",
             type("_H", (), {"record": lambda self, v, attributes: counts.append((v, attributes))})(),
         )
         monkey.setattr(
-            module, "phase_duration", type("_H", (), {"record": lambda *a, **k: pytest.fail("wrong instrument")})()
+            timing_module,
+            "phase_duration",
+            type("_H", (), {"record": lambda *a, **k: pytest.fail("wrong instrument")})(),
         )
         monkey.setattr(
-            module,
+            timing_module,
             "policy_step_counter",
             type("_H", (), {"record": lambda *a, **k: pytest.fail("policy instrument is worker-only")})(),
         )
@@ -606,15 +678,14 @@ def test_an_unregistered_counter_is_dropped_and_warned_not_fatal(monkeypatch):
     bottom of timing_observability). Here we assert the runtime behaviour: the bad row is dropped,
     the good row still publishes, and a warning says so.
     """
-    import skyrl_train.timing_observability as module
 
     warned: list[str] = []
     # The publisher logs lazily (`logger.warning("%r ...", name)`), matching publish_worker_spans, so
     # the double has to render the args or every assertion below matches the format string instead.
-    monkeypatch.setattr(module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
+    monkeypatch.setattr(timing_module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
     published: list[tuple[float, dict]] = []
     monkeypatch.setattr(
-        module,
+        timing_module,
         "rollout_count",
         type("_H", (), {"record": lambda self, v, attributes: published.append((v, attributes))})(),
     )
@@ -632,15 +703,14 @@ def test_unconfigured_telemetry_is_announced_once_rather_than_publishing_in_sile
     at 0: every signal reads healthy and the run produces no rows at all. That is a whole step spent
     to learn nothing, and the only defence is saying so out loud.
     """
-    import skyrl_train.timing_observability as module
 
     warned: list[str] = []
     # The publisher logs lazily (`logger.warning("%r ...", name)`), matching publish_worker_spans, so
     # the double has to render the args or every assertion below matches the format string instead.
-    monkeypatch.setattr(module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
-    monkeypatch.setattr(module, "unconfigured_telemetry_reason", lambda: "endpoint is unset")
-    monkeypatch.setattr(module, "rollout_count", type("_H", (), {"record": lambda *a, **k: None})())
-    monkeypatch.setattr(module, "_driver_counter_check_done", False)
+    monkeypatch.setattr(timing_module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
+    monkeypatch.setattr(timing_module, "unconfigured_telemetry_reason", lambda: "endpoint is unset")
+    monkeypatch.setattr(timing_module, "rollout_count", type("_H", (), {"record": lambda *a, **k: None})())
+    monkeypatch.setattr(timing_module, "_driver_counter_check_done", False)
 
     for _ in range(3):
         publish_driver_counters({f"{ROLLOUT_ENGINE_AWAIT}_count": 1.0}, step=1)
@@ -651,13 +721,14 @@ def test_unconfigured_telemetry_is_announced_once_rather_than_publishing_in_sile
 
 def test_publishing_no_counters_is_a_no_op(monkeypatch):
     """Asserted, not merely executed: an empty step must reach no instrument at all."""
-    import skyrl_train.timing_observability as module
 
     monkeypatch.setattr(
-        module, "rollout_count", type("_H", (), {"record": lambda *a, **k: pytest.fail("published an empty step")})()
+        timing_module,
+        "rollout_count",
+        type("_H", (), {"record": lambda *a, **k: pytest.fail("published an empty step")})(),
     )
     monkeypatch.setattr(
-        module,
+        timing_module,
         "rollout_wait_seconds",
         type("_H", (), {"record": lambda *a, **k: pytest.fail("published an empty step")})(),
     )
@@ -734,7 +805,6 @@ def test_the_env_call_is_bracketed_on_the_event_loop_thread_and_split_three_ways
     """A ContextVar does not cross run_in_executor, so a span opened inside the executor thread
     finds no accumulator. And a single bracket around the whole submission reports the pool's
     backlog as environment runtime."""
-    from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 
     source = inspect.getsource(SkyRLGymTrajectoryRunner._run_in_executor_if_available)
     assert "timed_env_call(" in source
@@ -792,8 +862,6 @@ def test_every_wait_site_is_inside_a_trajectory_scope(module_name):
 
 def test_every_agent_loop_scopes_its_own_trajectory():
     """Without it there is no tail, only a mean -- and F20 says the mean is the wrong statistic."""
-    from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
-    from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
 
     for owner in (SkyRLGymTrajectoryRunner, StepWiseRolloutCollector):
         assert getattr(owner.agent_loop, "__wrapped__", None) is not None, (
@@ -808,7 +876,6 @@ def test_a_region_emits_no_log_record():
     At ~4e4 regions per step that is ~8e4 synchronous log records on the event-loop thread, inside
     the phase being measured. This asserts the observable consequence rather than the flag.
     """
-    from loguru import logger
 
     records: list[object] = []
     sink_id = logger.add(records.append, level="TRACE")
@@ -931,38 +998,53 @@ def test_an_unbound_run_inside_a_bound_one_records_nothing():
     assert outer.counters[f"{ROLLOUT_ENGINE_AWAIT}_count"] == 1.0
 
 
-def test_the_shared_epilogue_is_measured_and_retention_is_its_own_leaf():
+def test_the_shared_epilogue_is_measured_and_retention_is_its_own_leaf(clock):
     """retain_trajectories is on by default and writes the whole batch -- ~8 MiB at E6 -- blocking,
     on the event-loop thread. Without its own leaf it lands in the residual, which already has
-    several known occupants and so explains nothing."""
+    several known occupants and so explains nothing.
+
+    Driven through a real TrajectorySink rather than by monkeypatching the retention helper: the
+    sink is the public seam, and proving wiring by patching an internal proves only that the patch
+    took.
+    """
+
+    class _RecordingSink:
+        """A fake standing in for TrajectorySink: the seam retain_trajectories actually uses.
+
+        Duck-typed rather than a subclass, because TrajectorySink.__init__ starts a publication
+        subprocess. retain_trajectories reads `.retain` and `.config.required`; the runner reads
+        `.bind_runner`. Nothing else is touched.
+        """
+
+        config = SimpleNamespace(required=True)
+
+        def __init__(self) -> None:
+            self.runner: str | None = None
+            self.batches = 0
+
+        def bind_runner(self, runner_name: str) -> None:
+            self.runner = runner_name
+
+        def retain(self, input_batch, output):
+            self.batches += 1
+            clock.advance(1.0)
+            return {}
 
     class _Sinking(_InstrumentedRunner):
         generate_spans_instrumented = True
 
         async def _run(self, input_batch, disable_tqdm: bool = False):
-            return {"response_ids": [], "loss_masks": [], "rollout_metrics": None}
+            return {"response_ids": [], "loss_masks": [], "rollout_metrics": None, "rewards": []}
 
     runner = _Sinking()
+    sink = _RecordingSink()
+    runner.set_trajectory_sink(sink)
+    timings = RolloutTimings()
+    asyncio.run(runner.run({"prompts": [], "env_classes": [], "env_extras": []}, phase_timings=timings))
 
-    class _Sink:
-        def bind_runner(self, name):  # noqa: D102 - test double
-            pass
-
-    async def _retain(sink, input_batch, output):
-        await asyncio.sleep(0.01)
-
-    import skyrl_train.trajectory_runners.base as base_module
-
-    monkey = pytest.MonkeyPatch()
-    try:
-        monkey.setattr(base_module, "retain_trajectories", _retain)
-        runner.set_trajectory_sink(_Sink())
-        timings = RolloutTimings()
-        asyncio.run(runner.run({}, phase_timings=timings))
-    finally:
-        monkey.undo()
-
-    assert timings.durations["rollout_retain"] >= 0.01
+    assert sink.batches == 1, "the fake sink was never actually written to"
+    assert sink.runner == "_Sinking", "the sink was never bound to this runner"
+    assert timings.durations["rollout_retain"] == 1.0
     assert timings.durations["rollout_finalize"] >= timings.durations["rollout_retain"], (
         "retain nests inside finalize; a finalize smaller than its child means the brackets crossed"
     )
@@ -974,7 +1056,6 @@ def test_the_shared_epilogue_is_measured_and_retention_is_its_own_leaf():
 def test_the_fully_async_trainer_binds_no_accumulator():
     """Up to 768 concurrent run() calls. Accumulating overlapping walls into one dict decomposes
     nothing, and the residual it produced would be an arbitrary number with a units label."""
-    from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 
     source = inspect.getsource(FullyAsyncRayPPOTrainer._run_generate_for_a_group_loop)
     assert "trajectory_runner.run(" in source
@@ -984,20 +1065,18 @@ def test_the_fully_async_trainer_binds_no_accumulator():
 def test_the_harbor_dispatcher_forwards_no_accumulator_to_its_shards():
     """It runs K coordinators concurrently. Handing one accumulator to all of them sums overlapping
     walls, which is the same defect one layer down from the fully-async trainer."""
-    import skyrl_train.trajectory_runners.harbor.rollout_dispatcher as module
 
-    assert "phase_timings" in inspect.signature(module.RolloutDispatcher.run).parameters, (
+    assert "phase_timings" in inspect.signature(harbor_dispatcher.RolloutDispatcher.run).parameters, (
         "it must still accept the call the trainer makes on whatever holds the runner slot"
     )
-    assert "phase_timings=" not in inspect.getsource(module), "no shard may be handed the accumulator"
+    assert "phase_timings=" not in inspect.getsource(harbor_dispatcher), "no shard may be handed the accumulator"
 
 
 def test_the_harbor_runner_protocol_declares_the_argument_the_trainer_passes():
     """A third runner written to this Protocol without it dies with TypeError on the FIRST generate
     of step 1 -- after full model and engine bring-up."""
-    import skyrl_train.trajectory_runners.harbor.execution as module
 
-    assert "phase_timings" in inspect.getsource(module.HarborRunner)
+    assert "phase_timings" in inspect.getsource(harbor_execution.HarborRunner)
 
 
 def test_the_trainer_wires_the_generate_span_layer():
@@ -1005,7 +1084,6 @@ def test_the_trainer_wires_the_generate_span_layer():
     inference engines and a dataloader. Structural, but it catches the regressions that leave a
     green suite -- a residual computed against a wall that has not closed, or spans collected and
     then dropped on the floor."""
-    from skyrl_train.trainer import RayPPOTrainer
 
     source = inspect.getsource(RayPPOTrainer._train_loop)
     # The residual is generate minus its children, so it is computed after the Timer closes.
@@ -1014,7 +1092,7 @@ def test_the_trainer_wires_the_generate_span_layer():
     assert "self.all_rollout_counters" in source
 
     generate = inspect.getsource(RayPPOTrainer.generate)
-    assert "phase_timings=rollout_timings" in generate
+    assert "phase_timings=phase_timings" in generate
 
     # The counters ride their own publisher, next to the phase publish rather than inside it.
     assert "publish_driver_counters(self.all_rollout_counters" in source

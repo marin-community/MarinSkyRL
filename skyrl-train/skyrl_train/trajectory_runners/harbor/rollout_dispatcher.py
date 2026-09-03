@@ -384,8 +384,9 @@ class RolloutDispatcher:
 
         ``phase_timings`` is accepted and dropped: this path runs K coordinators concurrently, and
         the generate span tree decomposes a single wall. Forwarding it to every shard would sum
-        overlapping walls into one dict and produce a residual with no meaning. A run through the
-        dispatcher therefore reports generate_span_residual == generate, which is the honest claim.
+        overlapping walls into one dict and produce a residual with no meaning. The dispatcher
+        therefore publishes no generate spans at all -- absence, rather than a residual equal to the
+        whole parent, which would read as "generate is entirely unaccounted for".
         """
         del disable_tqdm, phase_timings
         metadata = input_batch.get("batch_metadata")

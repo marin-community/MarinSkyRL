@@ -22,12 +22,7 @@ from skyrl_train.telemetry import TRAINER_ROLE, WORKER_ROLE, phase_duration, tel
 TIMING_PARENTS: dict[str, str | None] = {
     "step": None,
     "generate": "step",
-    # Inside generate, measured on the driver's event loop. generate is 64% of an E6 step at PR488
-    # geometry with nothing measured inside it. See the generate tree below: rollout_collect,
-    # rollout_assemble and rollout_finalize partition it against generate_span_residual, and
-    # rollout_tokenize / rollout_retain are INCLUSIVE children of collect and finalize (registered
-    # so the tree is navigable, excluded from GENERATE_SPANS so the residual does not count them
-    # twice).
+    # Inside generate, measured on the driver's event loop. See the generate tree below.
     "rollout_collect": "generate",
     "rollout_assemble": "generate",
     "rollout_finalize": "generate",
@@ -410,13 +405,9 @@ def rollout_wait(name: str) -> Iterator[None]:
 async def timed_env_call(executor, func, /, *args, **kwargs):
     """Run one environment call, splitting the caller-observed wait into its three real terms.
 
-    See the ROLLOUT_ENV_* block above for why one number here is worse than useless: on a pool of W
-    threads serving N concurrent trajectories, a single submitted-to-resumed bracket sums to
-    O(N^2/W) and moves with the batch size while the environment is unchanged.
-
     The stamps are taken on the pool thread, where the work actually starts and ends, and read back
-    on the loop thread -- which is the only place the accumulator is reachable, because a ContextVar
-    does not cross ``run_in_executor``.
+    on the loop thread -- the only place the accumulator is reachable, because a ContextVar does not
+    cross ``run_in_executor``.
     """
     timings = ROLLOUT_TIMINGS.get()
     if executor is None:
@@ -641,9 +632,10 @@ def publish_worker_counters(counters: Mapping[str, float], *, step: int, rank: i
 
 
 def unconfigured_telemetry_reason() -> str | None:
-    """Why these spans would publish nothing, or None if they will publish.
+    """Why spans would publish nothing, or None if they will publish.
 
-    Checked once at worker start, because the failure is otherwise invisible: on an unconfigured
+    Used by both the worker spans and the driver's rollout counters. Checked once per process,
+    because the failure is otherwise invisible: on an unconfigured
     runtime ``record`` is discarded, ``flush`` returns **True**, and the loss counters stay at zero.
     Every signal reads healthy and the run produces no rows at all -- a full step spent to learn
     nothing. Verified empirically, not assumed.
@@ -652,7 +644,7 @@ def unconfigured_telemetry_reason() -> str | None:
     if getattr(status, "configured", False):
         return None
     return (
-        "rigging telemetry is not configured in this process, so every policy_train span will be "
+        "rigging telemetry is not configured in this process, so every span and counter will be "
         "discarded silently: record() is a no-op, flush() still returns True, and lost_records stays "
         "at 0. Check that the telemetry endpoint, run id and execution uid reached this Ray actor "
         "(cloud/iris/telemetry_env.py scopes SKYRL_EXECUTION_UID to TASK_RUNTIME and DRIVER, not "
