@@ -33,11 +33,13 @@ class _Coordinator:
 @ray.remote
 class _BlockingCoordinator:
     def __init__(self):
+        self._started = asyncio.Event()
         self._release = asyncio.Event()
         self._finished = asyncio.Event()
         self._cancelled = False
 
     async def run_shard(self, input_batch, *_args):
+        self._started.set()
         try:
             await self._release.wait()
             ids = input_batch["trajectory_ids"]
@@ -59,6 +61,9 @@ class _BlockingCoordinator:
 
     async def release(self):
         self._release.set()
+
+    async def wait_for_start(self):
+        await self._started.wait()
 
     async def wait_for_completion(self):
         await self._finished.wait()
@@ -209,15 +214,17 @@ async def test_coordinator_rpc_returns_one_group_unchanged(harbor_runner_spec):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_rpc_timeout_does_not_cancel_remote_work(ray_init, harbor_runner_spec):
+async def test_coordinator_rpc_timeout_cancels_remote_work(ray_init, harbor_runner_spec):
     actor = _BlockingCoordinator.remote()
     dispatcher = _dispatcher([actor], harbor_runner_spec, timeout=0.1)
 
+    run = asyncio.create_task(dispatcher.run(_request([TrajectoryID("a", 0)])))
+    await actor.wait_for_start.remote()
     with pytest.raises(RolloutCoordinatorRPCTimeoutError):
-        await dispatcher.run(_request([TrajectoryID("a", 0)]))
+        await run
 
-    await actor.release.remote()
-    assert await actor.wait_for_completion.remote() is False
+    async with asyncio.timeout(1):
+        assert await actor.wait_for_completion.remote() is True
 
 
 @pytest.mark.asyncio

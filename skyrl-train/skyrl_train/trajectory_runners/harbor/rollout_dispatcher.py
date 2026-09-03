@@ -398,6 +398,14 @@ class RolloutDispatcher:
         except TimeoutError as error:
             if not rpc_deadline.expired():
                 raise
+            # The watchdog has declared this result unusable. Cancel the async
+            # actor task as well as the local wait so Harbor can unwind its
+            # trials and provider resources instead of poisoning the
+            # coordinator with detached work.
+            try:
+                ray.cancel(rpc, force=False, recursive=True)
+            except Exception:
+                _log().exception(f"[RolloutDispatcher] failed to cancel timed-out coordinator {coordinator_index} RPC")
             raise RolloutCoordinatorRPCTimeoutError(
                 f"Rollout coordinator {coordinator_index} RPC did not return within "
                 f"{self._coordinator_rpc_timeout:g} seconds"
