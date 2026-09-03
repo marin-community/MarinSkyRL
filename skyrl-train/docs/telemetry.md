@@ -80,6 +80,14 @@ it is handed in.
 | `rollout_env_exec_seconds_sum` | the environment itself, stamped on the pool thread |
 | `rollout_env_resume_seconds_sum` | the environment returning until the coroutine resumes — a direct read of **event-loop backlog** |
 | `rollout_*_seconds_max` | the longest single trajectory's cumulative wait |
+| `rollout_trajectory_count` | how many trajectory scopes closed — **the denominator the tail must be read against** |
+
+⚠️ **`_count` and `_seconds_max` are different populations, and mixing them is the easy mistake.**
+`_count` counts timed *calls*, of which one trajectory makes several, so `sum / _count` is a mean
+**per call**. `_seconds_max` is a max **per trajectory**. Use `sum / rollout_trajectory_count` for a
+per-trajectory mean, which is the number the tail is comparable to. A trajectory that closed without
+ever waiting contributes a real `0.0` to the max and a `1` to the count, so the population is
+complete.
 
 The three environment terms partition the caller-observed wait exactly. They are separate because
 one bracket around the executor submission measures *queueing*, which on W pool threads serving N
