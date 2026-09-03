@@ -23,7 +23,9 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 # ⚠️ The frozen TRAINING environment ships no pytest, and a missing pytest exits fast in a way that
 # is indistinguishable from a pass from the outside. Install it INTO that env -- not a fresh one --
 # so the test imports the same torch and skyrl_train the trainer runs.
-"$PYTHON" -m pip install --quiet pytest
+# The frozen env is a uv venv with no pip ("No module named pip" -- cost one submit to find).
+# uv is on the base image, and --python targets THAT env rather than making a new one.
+uv pip install --quiet --python "$PYTHON" pytest
 "$PYTHON" -c "import pytest, torch, ray; print(f'pytest {pytest.__version__} | torch {torch.__version__} | ray {ray.__version__}')"
 
 # ⚠️ No -x. There are four independent arms and -x would report the first failure while silently
