@@ -29,5 +29,13 @@ echo "::: A11-TOKENS EXIT=$?"
 # H4 control: if expandable_segments moves the answer, the number is fragmentation, not bandwidth.
 echo "::: A11 allocator control -- expandable_segments (the run's own setting, F6's fix)"
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+# `set -e` would abort here on a failing gate, so the status line after it could only ever
+# print 0 -- a health signal true by construction, which is the defect this branch exists to
+# eliminate. A gate's failure IS its result, so disable the guard across the gate only,
+# capture the status, and exit on it.
+set +e
   "$PYTHON" ci/bench_expert_grad_ledger.py --experts 256 --arms sliced separate
-echo "::: A11-ALLOC EXIT=$?"
+status=$?
+set -e
+echo "::: A11-ALLOC EXIT=$status"
+exit "$status"

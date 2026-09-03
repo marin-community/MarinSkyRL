@@ -40,7 +40,17 @@ MAX_REDUCED_METRIC_KEYS = ("log_ratio_abs_max", "log_ratio_diagnostics_failed")
 # across a step's mini-batches (policy_training_metrics). Keeping one map is what stops the two
 # axes disagreeing -- reducing correctly across ranks and then averaging the result back down is
 # the same category error one level lower.
-STATUS_REDUCTION_OPS: dict[str, str] = {key: "max" for key in MAX_REDUCED_METRIC_KEYS}
+# A binary did-every-rank-succeed flag: one rank skipping its optimizer step must publish 0, not
+# 79/80. Under the default mean that reads 0.9875, which is 1 on any dashboard -- the same category
+# error this map exists to prevent, on the most gate-like value in the status dict. `min` is the only
+# right op; max and sum are both wrong, which is why Strategy.all_reduce had to learn it rather than
+# the flag being bent to fit an op that was already there.
+MIN_REDUCED_METRIC_KEYS = ("optimizer_step_succeeded",)
+
+STATUS_REDUCTION_OPS: dict[str, str] = {
+    **{key: "max" for key in MAX_REDUCED_METRIC_KEYS},
+    **{key: "min" for key in MIN_REDUCED_METRIC_KEYS},
+}
 
 
 LOG_RATIO_BASE_METRIC_KEYS = (

@@ -125,8 +125,17 @@ def test_the_two_reduction_axes_share_one_op_map():
 
 def test_every_specially_reduced_key_is_declared_once():
     """One map, so the two axes cannot drift apart."""
-    assert set(STATUS_REDUCTION_OPS) == set(MAX_REDUCED_METRIC_KEYS)
+    from skyrl_train.utils.importance_ratio_diagnostics import MIN_REDUCED_METRIC_KEYS
+
+    assert set(STATUS_REDUCTION_OPS) == set(MAX_REDUCED_METRIC_KEYS) | set(MIN_REDUCED_METRIC_KEYS)
     assert all(STATUS_REDUCTION_OPS[key] == "max" for key in MAX_REDUCED_METRIC_KEYS)
+    assert all(STATUS_REDUCTION_OPS[key] == "min" for key in MIN_REDUCED_METRIC_KEYS)
+    # No key may be declared under two ops; the whole point of one map is that the rank axis and the
+    # mini-batch axis cannot disagree about a key's meaning.
+    assert not set(MAX_REDUCED_METRIC_KEYS) & set(MIN_REDUCED_METRIC_KEYS)
+    # Every op in the map must be one the reducers actually implement, on BOTH axes. An op only one
+    # axis knows is how a key gets reduced two different ways.
+    assert set(STATUS_REDUCTION_OPS.values()) <= {"max", "min", "sum"}
     # Deliberately absent, because neither available op is right for them.
     assert "log_ratio_abs_p99" not in STATUS_REDUCTION_OPS
     assert "n_tokens_dp_gt_1pct" not in STATUS_REDUCTION_OPS

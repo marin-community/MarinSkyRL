@@ -30,13 +30,23 @@ def policy_training_metrics(
     """
     scalars = {name: values for name, values in metrics.items() if name != "response_length"}
     status = mean_metrics({name: v for name, v in scalars.items() if name not in STATUS_REDUCTION_OPS})
+    # Explicit dispatch. The earlier form was `max(values) if op == "max" else sum(values)`, which
+    # silently SUMMED any op it did not know -- so adding a new op to the map would have published a
+    # sum of flags and looked like a number. An unknown op must fail loudly instead.
+    reducers = {"max": max, "min": min, "sum": sum}
     for name, values in scalars.items():
         op = STATUS_REDUCTION_OPS.get(name)
         if op is None:
             continue
         if not values:
             raise ValueError(f"No values for metric {name}")
-        status[name] = max(values) if op == "max" else sum(values)
+        # mean_metrics rejects non-numeric values; this path must too, or a 0-d tensor is published
+        # where a float is expected on exactly the keys designated gate-grade.
+        if not all(isinstance(value, (int, float)) for value in values):
+            raise TypeError(f"Metric {name} contains a non-numeric value")
+        if op not in reducers:
+            raise ValueError(f"Metric {name} has unknown reduction op {op!r}")
+        status[name] = reducers[op](values)
     status["policy_update_steps"] = policy_update_steps
     return status
 

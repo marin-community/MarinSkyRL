@@ -1371,9 +1371,13 @@ class PolicyWorkerBase(Worker):
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
-        _forward_span = _spans.span("policy_forward")
-        _forward_span.__enter__()
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        # A real `with`, not a manual __enter__/__exit__ pair. On any raise inside the forward or
+        # compute_policy_objective -- OOM being the documented failure of this exact region -- the
+        # manual form never ran __exit__, so the generator's finally (which calls
+        # torch.cuda.synchronize() when synchronize=True) fired later from the GC finalizer and
+        # recorded an elapsed value bounded by GC timing rather than by the forward. policy_backward
+        # two blocks down already does it this way.
+        with _spans.span("policy_forward"), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
             action_log_probs, output = self.model(
                 sequences,
@@ -1404,7 +1408,6 @@ class PolicyWorkerBase(Worker):
                 scaling=LossScaling.CALLER,
                 global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
             )
-        _forward_span.__exit__(None, None, None)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_EXIT)
         loss = objective.optimization_loss
         policy_loss = objective.policy_loss

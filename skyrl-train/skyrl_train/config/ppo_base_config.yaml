@@ -285,9 +285,11 @@ trainer:
   policy_train_spans: false
   policy_train_spans_synchronize: true
 
-  # Decompose generate from the driver's event loop. On by default: measured at ~21 ms per generate
-  # against a ~98 s wall, and unlike the policy spans there is no CUDA synchronise to pay for. The
-  # flag exists so its own cost can be A/B'd on a real run without editing code.
+  # Decompose generate from the driver's event loop. On by default: there is no CUDA synchronise to
+  # pay for, and a microbenchmark of the context managers alone bounds the bookkeeping at ~21 ms.
+  # That bound is NOT a measured end-to-end overhead -- no matched spans-on/spans-off pair at one
+  # SHA has been run, and a single run cannot measure its own overhead. The flag exists so that
+  # cost can be A/B'd on a real run without editing code.
   generate_spans: true
   ckpt_interval: 5
   hf_save_interval: ${trainer.ckpt_interval}
