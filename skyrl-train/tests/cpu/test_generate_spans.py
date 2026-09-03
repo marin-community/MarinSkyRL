@@ -59,9 +59,18 @@ EXPECTED_TOKENIZE_REGIONS = {"skyrl_gym": 7, "step_wise": 3}
 # decision someone has to write down here.
 TOKENIZE_EXEMPT_FUNCTIONS = {"__init__"}
 
+# One awaited unit in the tail tests. Bounds are stated as multiples of it and are one-sided or
+# relative, so a contended runner that turns a 10 ms sleep into 30 ms cannot breach them.
+PER_WAIT = 0.01
+
 
 class _InstrumentedRunner(TrajectoryRunner):
-    """Stands in for SkyRLGymTrajectoryRunner: declares its call sites bracketed."""
+    """Stands in for SkyRLGymTrajectoryRunner: declares its call sites bracketed.
+
+    Every subclass re-declares the flag because TrajectoryRunner.__init_subclass__ revokes it from
+    anything that overrides _run without saying so -- which is the production semantics, and what
+    keeps a new runner from publishing a seeded all-zero decomposition it never measured.
+    """
 
     generate_spans_instrumented = True
 
@@ -155,7 +164,6 @@ def test_a_wait_records_an_exact_matched_triple_so_a_mean_and_a_tail_are_derivab
             with rollout_wait(ROLLOUT_ENGINE_AWAIT):
                 pass
     assert timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_count"] == 3.0
-    assert timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_sum"] >= 0.0
     assert timings.durations == {}, "a concurrent wait must never land on the duration path"
 
 
@@ -188,13 +196,16 @@ def test_the_per_trajectory_max_is_a_tail_and_not_another_sum():
             with rollout_trajectory():
                 for _ in range(waits):
                     with rollout_wait(ROLLOUT_ENGINE_AWAIT):
-                        time.sleep(0.01)
+                        time.sleep(PER_WAIT)
     total = timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_sum"]
     tail = timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_max"]
+    # Ordinal bounds only. time.sleep never returns early, so the floors are exact; the ceiling is
+    # relative to the other measurement rather than to wall-clock, so a loaded runner cannot breach
+    # it. The third line is the discriminating one: folded with + the tail equals the total.
     assert timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_count"] == 4.0
-    assert tail == pytest.approx(0.03, abs=0.02)
-    assert tail < total, "a max folded as a sum would equal the total"
-    assert total == pytest.approx(0.04, abs=0.03)
+    assert tail >= 3 * PER_WAIT
+    assert total >= 4 * PER_WAIT
+    assert tail <= total - PER_WAIT, "a max folded as a sum would equal the total"
 
 
 def test_a_wait_outside_any_trajectory_still_sums_but_contributes_no_tail():
@@ -219,7 +230,7 @@ def test_concurrent_trajectories_do_not_pool_their_waits():
                 with rollout_trajectory():
                     for _ in range(waits):
                         with rollout_wait(ROLLOUT_ENGINE_AWAIT):
-                            await asyncio.sleep(0.01)
+                            await asyncio.sleep(PER_WAIT)
 
             await asyncio.gather(_trajectory(3), _trajectory(1))
         return timings
@@ -228,8 +239,8 @@ def test_concurrent_trajectories_do_not_pool_their_waits():
     assert timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_count"] == 4.0
     tail = timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_max"]
     total = timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_sum"]
-    assert tail == pytest.approx(0.03, abs=0.02), "the tail must be one trajectory's total, not both"
-    assert tail < total, "pooled into one dict, every trajectory's tail would be the whole rollout"
+    assert tail >= 3 * PER_WAIT, "the tail must be one trajectory's whole total"
+    assert tail <= total - PER_WAIT, "pooled into one dict, every tail would be the whole rollout"
 
 
 # --- the env split, which is where a single bracket lies ----------------------------------------
@@ -247,26 +258,37 @@ def test_env_queueing_is_not_reported_as_environment_runtime():
     """
     sleep_seconds, calls = 0.05, 8
 
+    async def _one(pool):
+        """Measure the submitted -> resumed bracket from OUTSIDE, as the caller experiences it."""
+        started = time.perf_counter()
+        await timed_env_call(pool, time.sleep, sleep_seconds)
+        return time.perf_counter() - started
+
     async def _drive():
         timings = RolloutTimings()
         with rollout_timings_scope(timings):
             with ThreadPoolExecutor(max_workers=1) as pool:
-                await asyncio.gather(*(timed_env_call(pool, time.sleep, sleep_seconds) for _ in range(calls)))
-        return timings
+                brackets = await asyncio.gather(*(_one(pool) for _ in range(calls)))
+        return timings, sum(brackets)
 
-    timings = asyncio.run(_drive())
+    timings, observed = asyncio.run(_drive())
     executed = timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"]
     queued = timings.counters[f"{ROLLOUT_ENV_QUEUE}_seconds_sum"]
     resumed = timings.counters[f"{ROLLOUT_ENV_RESUME}_seconds_sum"]
     awaited = timings.counters[f"{ROLLOUT_ENV_AWAIT}_seconds_sum"]
 
     assert timings.counters[f"{ROLLOUT_ENV_AWAIT}_count"] == float(calls)
-    # Execution is the environment, and it is LINEAR in the number of calls.
-    assert executed == pytest.approx(calls * sleep_seconds, rel=0.5)
-    # Queueing is the pool, and it dominates. 28 units of backlog against 8 of work.
+    # Execution is the environment, and it is LINEAR in the number of calls. A lower bound only:
+    # sleep never returns early, and an upper bound would be the flaky half on a loaded runner.
+    assert executed >= calls * sleep_seconds
+    # Queueing is the pool, and it dominates: 28 units of backlog against 8 of work. THIS is the
+    # assertion -- collapsed into one bracket, all 1.8 s reads as environment runtime.
     assert queued > 2 * executed, f"queue {queued:.3f}s should dominate exec {executed:.3f}s"
-    # The three terms are a partition of the caller-observed wait, exactly.
-    assert awaited == pytest.approx(queued + executed + resumed, rel=1e-6)
+    # The three terms partition the caller-observed wait. Measured independently by the caller,
+    # because _record_env_wait DEFINES awaited as their sum -- comparing it to itself is a tautology.
+    assert queued + executed + resumed == pytest.approx(observed, abs=5e-3), "the split loses time"
+    # And rollout_env_await is that same total, which is what a consumer reads as "time in the env".
+    assert awaited == pytest.approx(observed, abs=5e-3)
 
 
 def test_env_execution_is_stamped_on_the_pool_thread_not_the_loop_thread():
@@ -281,12 +303,16 @@ def test_env_execution_is_stamped_on_the_pool_thread_not_the_loop_thread():
                 def _work():
                     seen.append(threading.current_thread().name)
 
-                await timed_env_call(pool, _work)
+                await asyncio.gather(timed_env_call(pool, time.sleep, 0.1), timed_env_call(pool, _work))
         return timings
 
     timings = asyncio.run(_drive())
     assert seen and seen[0] != threading.main_thread().name, "the work did not run on the pool"
-    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] >= 0.0
+    # Two calls through ONE worker: a 100 ms sleep and a no-op. Stamped on the pool thread, exec is
+    # ~0.1 s and the no-op's wait is queueing. Stamped on the loop thread it would be ~0.2 s, so
+    # this bound is what separates the two.
+    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] == pytest.approx(0.1, abs=0.04)
+    assert timings.counters[f"{ROLLOUT_ENV_QUEUE}_seconds_sum"] >= 0.09
 
 
 def test_with_no_executor_the_whole_env_wait_is_execution():
@@ -301,7 +327,8 @@ def test_with_no_executor_the_whole_env_wait_is_execution():
     timings = asyncio.run(_drive())
     assert timings.counters[f"{ROLLOUT_ENV_QUEUE}_seconds_sum"] == 0.0
     assert timings.counters[f"{ROLLOUT_ENV_RESUME}_seconds_sum"] == 0.0
-    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] == pytest.approx(0.02, abs=0.05)
+    # A lower bound, so recording (0, 0, 0) fails. approx(0.02, abs=0.05) admitted zero.
+    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] >= 0.02
 
 
 def test_an_env_call_that_raises_still_records_its_wait():
@@ -317,11 +344,100 @@ def test_an_env_call_that_raises_still_records_its_wait():
 
     timings = asyncio.run(_drive())
     assert timings.counters[f"{ROLLOUT_ENV_AWAIT}_count"] == 1.0
-    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] >= 0.0
+    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] > 0.0
 
 
 def _raise_value_error():
     raise ValueError("environment failed")
+
+
+def test_a_cancelled_env_call_records_nothing_rather_than_inventing_a_queue():
+    """A cancellation is not an environment call.
+
+    Attributing its wait to rollout_env_queue -- documented as "pool too small / env slow" -- would
+    read as executor undersizing, and counting it would inflate the denominator of every mean.
+    """
+
+    async def _drive():
+        timings = RolloutTimings()
+        with rollout_timings_scope(timings):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                task = asyncio.ensure_future(timed_env_call(pool, time.sleep, 0.2))
+                await asyncio.sleep(0.02)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        return timings
+
+    timings = asyncio.run(_drive())
+    assert timings.counters == {}, f"a cancelled call recorded {timings.counters}"
+
+
+def test_an_executor_that_cannot_run_the_work_records_nothing_and_still_raises():
+    """A rejected submission has no execution time to report, and inventing one is worse than a gap."""
+
+    async def _drive():
+        timings = RolloutTimings()
+        pool = ThreadPoolExecutor(max_workers=1)
+        pool.shutdown()
+        with rollout_timings_scope(timings):
+            with pytest.raises(RuntimeError):
+                await timed_env_call(pool, time.sleep, 0.01)
+        return timings
+
+    timings = asyncio.run(_drive())
+    assert timings.counters == {}
+
+
+def test_the_residual_is_published_as_an_exclusive_remainder():
+    """It is what the parent's wall does NOT contain, and it may be negative.
+
+    WorkerTimingSink already selects the domain per name so a consumer cannot sum a child into its
+    parent twice; policy_span_residual ships exclusive_wall and this is the same shape.
+    """
+    import skyrl_train.timing_observability as module
+
+    rows: list[dict[str, str]] = []
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(
+            module,
+            "phase_duration",
+            type("_H", (), {"record": lambda self, v, attributes: rows.append(attributes)})(),
+        )
+        module.FinelogTimingSink().publish(
+            phase_timing_observations({"generate": 98.0, "rollout_collect": 90.0, "generate_span_residual": 8.0}),
+            step=3,
+        )
+    finally:
+        monkey.undo()
+
+    domains = {row["phase"]: row["clock_domain"] for row in rows}
+    assert domains["generate_span_residual"] == "exclusive_wall"
+    assert domains["rollout_collect"] == "inclusive_wall"
+
+
+def test_an_instrumented_flag_is_not_inherited_by_a_runner_that_replaces_the_body():
+    """The flag certifies the call sites in _run. A subclass that overrides _run without saying so
+    would inherit True and publish a seeded all-zero decomposition it never measured -- the measured
+    zero lie, made indistinguishable from truth by the explicit zeros."""
+
+    class _Replaces(_InstrumentedRunner):
+        async def _run(self, input_batch, disable_tqdm: bool = False):
+            return {}
+
+    class _Reaffirms(_InstrumentedRunner):
+        generate_spans_instrumented = True
+
+        async def _run(self, input_batch, disable_tqdm: bool = False):
+            return {}
+
+    class _KeepsTheBody(_InstrumentedRunner):
+        pass
+
+    assert _Replaces.generate_spans_instrumented is False
+    assert _Reaffirms.generate_spans_instrumented is True
+    assert _KeepsTheBody.generate_spans_instrumented is True
 
 
 def test_timed_env_call_passes_arguments_and_returns_the_result_unchanged():
@@ -493,7 +609,9 @@ def test_an_unregistered_counter_is_dropped_and_warned_not_fatal(monkeypatch):
     import skyrl_train.timing_observability as module
 
     warned: list[str] = []
-    monkeypatch.setattr(module.logger, "warning", lambda m, *a, **k: warned.append(str(m)))
+    # The publisher logs lazily (`logger.warning("%r ...", name)`), matching publish_worker_spans, so
+    # the double has to render the args or every assertion below matches the format string instead.
+    monkeypatch.setattr(module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
     published: list[tuple[float, dict]] = []
     monkeypatch.setattr(
         module,
@@ -517,7 +635,9 @@ def test_unconfigured_telemetry_is_announced_once_rather_than_publishing_in_sile
     import skyrl_train.timing_observability as module
 
     warned: list[str] = []
-    monkeypatch.setattr(module.logger, "warning", lambda m, *a, **k: warned.append(str(m)))
+    # The publisher logs lazily (`logger.warning("%r ...", name)`), matching publish_worker_spans, so
+    # the double has to render the args or every assertion below matches the format string instead.
+    monkeypatch.setattr(module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
     monkeypatch.setattr(module, "unconfigured_telemetry_reason", lambda: "endpoint is unset")
     monkeypatch.setattr(module, "rollout_count", type("_H", (), {"record": lambda *a, **k: None})())
     monkeypatch.setattr(module, "_driver_counter_check_done", False)
@@ -542,17 +662,6 @@ def test_publishing_no_counters_is_a_no_op(monkeypatch):
         type("_H", (), {"record": lambda *a, **k: pytest.fail("published an empty step")})(),
     )
     publish_driver_counters({}, step=1)
-
-
-def test_every_declared_rollout_counter_routes_to_an_instrument():
-    """The import-time guard that replaced the epilogue raise. Assert it bites on the real set."""
-    for name in ROLLOUT_COUNTERS:
-        assert name.endswith(("_seconds_sum", "_seconds_max", "_count")), name
-    for name in ROLLOUT_COUNTERS:
-        if name.endswith("_seconds_max"):
-            assert name.replace("_seconds_max", "_seconds_sum") in ROLLOUT_COUNTERS, (
-                f"{name} has no sum beside it, so no mean is derivable next to the tail"
-            )
 
 
 # --- call-site coverage -------------------------------------------------------------------------
@@ -632,10 +741,53 @@ def test_the_env_call_is_bracketed_on_the_event_loop_thread_and_split_three_ways
     # The method's own NAME contains run_in_executor, so match the call, not the substring.
     assert "loop.run_in_executor(" not in source, "the split lives in timed_env_call, not beside it"
 
-    split = inspect.getsource(timed_env_call)
-    assert "loop.run_in_executor(" in split
-    for term in (ROLLOUT_ENV_QUEUE, ROLLOUT_ENV_EXEC, ROLLOUT_ENV_RESUME):
-        assert term in inspect.getsource(importlib.import_module("skyrl_train.timing_observability"))
+    assert "loop.run_in_executor(" in inspect.getsource(timed_env_call)
+
+
+# Functions whose body is one trajectory. Every engine and environment wait must be reachable only
+# from inside one of these, or its time lands in the sums with no tail beside it.
+TRAJECTORY_SCOPED_FUNCTIONS = {"agent_loop", "collect_batched"}
+
+
+@pytest.mark.parametrize("module_name", ["skyrl_gym", "step_wise"])
+def test_every_wait_site_is_inside_a_trajectory_scope(module_name):
+    """🚨 The regression test for a max published smaller than its own mean.
+
+    The batched path once scoped only its engine await, leaving env.init / env.step / env.close
+    outside it. Those waits still reached rollout_env_await_seconds_sum and _count, but never the
+    per-trajectory dict -- so _seconds_max stayed at the 0.0 that mark_supported seeds, and the row
+    published as a MEASURED zero beside a non-zero mean. Counting decorators would not have caught
+    it; this walks the call sites.
+    """
+    module = importlib.import_module(f"skyrl_train.trajectory_runners.{module_name}")
+    tree = ast.parse(inspect.getsource(module))
+
+    scoped: set[int] = set()
+    holder: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for line in range(node.lineno, node.end_lineno + 1):
+            holder.setdefault(line, node.name)
+        if node.name not in TRAJECTORY_SCOPED_FUNCTIONS:
+            continue
+        assert any(isinstance(d, ast.Name) and d.id == "traced_trajectory" for d in node.decorator_list), (
+            f"{module_name}.{node.name} holds waits but is not @traced_trajectory"
+        )
+        scoped.update(range(node.lineno, node.end_lineno + 1))
+
+    unscoped: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name not in {"_run_in_executor_if_available", "rollout_wait"}:
+            continue
+        if node.lineno not in scoped:
+            unscoped.append(
+                f"{module_name}:{node.lineno} {name}() in {holder.get(node.lineno)!r}, outside a trajectory"
+            )
+    assert not unscoped, "\n".join(unscoped)
 
 
 def test_every_agent_loop_scopes_its_own_trajectory():
@@ -647,6 +799,7 @@ def test_every_agent_loop_scopes_its_own_trajectory():
         assert getattr(owner.agent_loop, "__wrapped__", None) is not None, (
             f"{owner.__name__}.agent_loop is not scoped as a trajectory"
         )
+    assert getattr(SkyRLGymTrajectoryRunner.collect_batched, "__wrapped__", None) is not None
 
 
 def test_a_region_emits_no_log_record():
@@ -677,6 +830,8 @@ def test_a_region_emits_no_log_record():
 
 
 class _CountingRunner(_InstrumentedRunner):
+    generate_spans_instrumented = True
+
     """A runner whose only work is a fixed number of awaited engine calls."""
 
     def __init__(self, awaits: int) -> None:
@@ -692,6 +847,8 @@ class _CountingRunner(_InstrumentedRunner):
 
 
 class _ParameterisedRunner(_InstrumentedRunner):
+    generate_spans_instrumented = True
+
     """One instance, many concurrent run() calls, each asking for a different number of awaits."""
 
     async def _run(self, input_batch, disable_tqdm: bool = False):
@@ -736,6 +893,8 @@ def test_a_failing_run_on_a_shared_instance_leaves_the_next_one_clean():
     runner = _ParameterisedRunner()
 
     class _Failing(_InstrumentedRunner):
+        generate_spans_instrumented = True
+
         async def _run(self, input_batch, disable_tqdm: bool = False):
             with rollout_wait(ROLLOUT_ENGINE_AWAIT):
                 await asyncio.sleep(0)
@@ -759,6 +918,8 @@ def test_an_unbound_run_inside_a_bound_one_records_nothing():
     so the inner one accumulates into the dict it was handed -- here, none."""
 
     class _Nesting(_InstrumentedRunner):
+        generate_spans_instrumented = True
+
         async def _run(self, input_batch, disable_tqdm: bool = False):
             await _CountingRunner(5).run({})
             with rollout_wait(ROLLOUT_ENGINE_AWAIT):
@@ -776,6 +937,8 @@ def test_the_shared_epilogue_is_measured_and_retention_is_its_own_leaf():
     several known occupants and so explains nothing."""
 
     class _Sinking(_InstrumentedRunner):
+        generate_spans_instrumented = True
+
         async def _run(self, input_batch, disable_tqdm: bool = False):
             return {"response_ids": [], "loss_masks": [], "rollout_metrics": None}
 
