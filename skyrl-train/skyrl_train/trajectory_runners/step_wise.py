@@ -8,6 +8,7 @@ from uuid import uuid4
 import skyrl_gym
 from typing import Callable, List, Dict, Any, Optional, Tuple
 
+from skyrl_train.timing_observability import ROLLOUT_ENGINE_AWAIT, rollout_span, rollout_wait, traced_trajectory
 from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch
 from skyrl_train.trajectory_runners.types import AgentLoopOutput
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
@@ -74,6 +75,7 @@ class StepWiseRolloutCollector:
     async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False):
         return await collect_agent_loops(self._runner, request, self.agent_loop, disable_tqdm=disable_tqdm)
 
+    @traced_trajectory
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -121,14 +123,15 @@ class StepWiseRolloutCollector:
         # init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
 
-        input_ids = normalize_token_ids(
-            self.tokenizer.apply_chat_template(
-                chat_history,
-                add_generation_prompt=True,
-                tokenize=True,
-                **self.trajectory_runner_cfg.chat_template_kwargs,
+        with rollout_span("rollout_tokenize"):
+            input_ids = normalize_token_ids(
+                self.tokenizer.apply_chat_template(
+                    chat_history,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    **self.trajectory_runner_cfg.chat_template_kwargs,
+                )
             )
-        )
 
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, int]] = []
@@ -138,15 +141,16 @@ class StepWiseRolloutCollector:
         max_model_len = self.trajectory_runner_cfg.get("engine_init_kwargs", {}).get("max_model_len")
         while not done:
             if retokenize_chat_history:
-                input_ids = normalize_token_ids(
-                    self.tokenizer.apply_chat_template(
-                        chat_history,
-                        add_generation_prompt=True,
-                        # chat_template=None,
-                        tokenize=True,
-                        **self.trajectory_runner_cfg.chat_template_kwargs,
+                with rollout_span("rollout_tokenize"):
+                    input_ids = normalize_token_ids(
+                        self.tokenizer.apply_chat_template(
+                            chat_history,
+                            add_generation_prompt=True,
+                            # chat_template=None,
+                            tokenize=True,
+                            **self.trajectory_runner_cfg.chat_template_kwargs,
+                        )
                     )
-                )
 
             current_prompt_length = len(input_ids)
             if max_model_len is None:
@@ -175,7 +179,8 @@ class StepWiseRolloutCollector:
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=request_sampling_params
             )
-            engine_output = await self.model_client.generate(engine_input)
+            with rollout_wait(ROLLOUT_ENGINE_AWAIT):
+                engine_output = await self.model_client.generate(engine_input)
             # Capture global_step after first inference returns — at this point the vLLM
             # engine has definitively served the request with its current weights.
             if captured_global_step is None and global_step_fn is not None:
@@ -335,14 +340,15 @@ class StepWiseRolloutCollector:
         if len(new_obs) > 0:
             # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
             # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
-            observation_ids = normalize_token_ids(
-                self.tokenizer.apply_chat_template(
-                    [*self.base_conversation, *new_obs],
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    **self.trajectory_runner_cfg.chat_template_kwargs,
-                )
-            )[len(self.base_conversation_token_ids) :]
+            with rollout_span("rollout_tokenize"):
+                observation_ids = normalize_token_ids(
+                    self.tokenizer.apply_chat_template(
+                        [*self.base_conversation, *new_obs],
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        **self.trajectory_runner_cfg.chat_template_kwargs,
+                    )
+                )[len(self.base_conversation_token_ids) :]
             input_ids += observation_ids
             loss_mask += [0] * len(observation_ids)
         else:

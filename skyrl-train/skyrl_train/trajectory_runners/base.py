@@ -10,6 +10,7 @@ from skyrl_train.metric_names import (
     TIS_LCS_FALLBACK_MESSAGES_METRIC,
     TIS_UNALIGNED_FRACTION_METRIC,
 )
+from skyrl_train.timing_observability import RolloutTimings, rollout_span, rollout_timings_scope
 from skyrl_train.trajectory_runners.types import (
     BatchMetadata as BatchMetadata,
     ConversationType as ConversationType,
@@ -38,30 +39,60 @@ class TrajectoryRunner(ABC):
     trajectory_runner_cfg = MappingProxyType({})
     trajectory_sink: TrajectorySink | None = None
 
-    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+    #: Whether every call site inside this runner's rollout is bracketed for the generate span tree.
+    #: False is the safe default and means this runner publishes NO generate spans -- not even a
+    #: residual. A residual equal to the whole parent from an unbracketed runner would read as
+    #: "generate is entirely unaccounted for", which is a claim about the rollout rather than about
+    #: the instrument. A new runner opts in only after bracketing its own engine and environment
+    #: waits; until then absence is the honest signal.
+    generate_spans_instrumented: bool = False
+
+    async def run(
+        self,
+        input_batch: TrajectoryRequestBatch,
+        disable_tqdm: bool = False,
+        *,
+        phase_timings: RolloutTimings | None = None,
+    ) -> TrajectoryBatch:
         """Acquire trajectories and apply runner-independent output finalization.
 
         Returns outputs in the same order as the input batch.
 
         Args:
             input_batch (TrajectoryRequestBatch): Input batch
+            phase_timings: accumulator for the generate span tree, or None to measure nothing. A
+                caller that runs several run() calls concurrently must pass None: overlapping walls
+                accumulated into one dict are not a decomposition of anything.
         Returns:
             TrajectoryBatch: Generated trajectories
         """
-        output = await self._run(input_batch, disable_tqdm=disable_tqdm)
-        trajectory_ids = input_batch.get("trajectory_ids")
-        if trajectory_ids is not None and output.get("trajectory_ids") is None:
-            if len(trajectory_ids) != len(output["response_ids"]):
-                raise ValueError("trajectory runner output rows must align with request trajectory IDs")
-            output["trajectory_ids"] = list(trajectory_ids)
-        return await self._finalize_output(input_batch, output)
+        if phase_timings is not None and self.generate_spans_instrumented:
+            phase_timings.mark_supported()
+        else:
+            phase_timings = None
+        with rollout_timings_scope(phase_timings):
+            # rollout_collect / rollout_assemble are opened by the runner's own _run, which knows
+            # where its fan-out ends and its projection begins. Only the shared epilogue is bracketed
+            # here, because only it is shared.
+            output = await self._run(input_batch, disable_tqdm=disable_tqdm)
+            trajectory_ids = input_batch.get("trajectory_ids")
+            if trajectory_ids is not None and output.get("trajectory_ids") is None:
+                if len(trajectory_ids) != len(output["response_ids"]):
+                    raise ValueError("trajectory runner output rows must align with request trajectory IDs")
+                output["trajectory_ids"] = list(trajectory_ids)
+            with rollout_span("rollout_finalize"):
+                return await self._finalize_output(input_batch, output)
 
     async def _finalize_output(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> TrajectoryBatch:
         """Apply runner-independent shaping, metrics, and retention."""
         shape_trajectory_rewards(output, self.trajectory_runner_cfg.get("trajectory_reward_shaping"))
         self._add_alignment_metrics(output)
         if self.trajectory_sink is not None:
-            await retain_trajectories(self.trajectory_sink, input_batch, output)
+            # On by default, and a blocking write of the whole batch -- ~8 MiB at E6 geometry -- on
+            # the event-loop thread. Without its own leaf it lands in generate_span_residual, which
+            # already has several known occupants and so explains nothing.
+            with rollout_span("rollout_retain"):
+                await retain_trajectories(self.trajectory_sink, input_batch, output)
         return output
 
     def set_trajectory_sink(self, sink: TrajectorySink) -> None:

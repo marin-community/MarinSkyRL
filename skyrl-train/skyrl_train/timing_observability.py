@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import functools
 import logging
 import time
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Protocol
 
 # Via skyrl_train.telemetry, NOT `from rigging import telemetry`: that module guards the import
@@ -19,6 +22,18 @@ from skyrl_train.telemetry import TRAINER_ROLE, WORKER_ROLE, phase_duration, tel
 TIMING_PARENTS: dict[str, str | None] = {
     "step": None,
     "generate": "step",
+    # Inside generate, measured on the driver's event loop. generate is 64% of an E6 step at PR488
+    # geometry with nothing measured inside it. See the generate tree below: rollout_collect,
+    # rollout_assemble and rollout_finalize partition it against generate_span_residual, and
+    # rollout_tokenize / rollout_retain are INCLUSIVE children of collect and finalize (registered
+    # so the tree is navigable, excluded from GENERATE_SPANS so the residual does not count them
+    # twice).
+    "rollout_collect": "generate",
+    "rollout_assemble": "generate",
+    "rollout_finalize": "generate",
+    "rollout_tokenize": "rollout_collect",
+    "rollout_retain": "rollout_finalize",
+    "generate_span_residual": "generate",
     "wait_for_generation_buffer": "step",
     "postprocess_trajectory_batch": "step",
     "convert_to_training_input": "step",
@@ -141,6 +156,379 @@ def publish_startup_timings(
     payload = {f"startup/{name}": duration for name, duration in startup_timings.items()}
     console(payload, step=step, kind="startup")
     tracker.log(payload, step=step, commit=False)
+
+
+# --- Driver-side spans inside generate ----------------------------------------------------------
+#
+# generate is 64% of an E6 step and is measured as one wall. The regions below decompose it on the
+# driver's event loop, where the rollout actually runs: SkyRLGymTrajectoryRunner fans thousands of
+# agent_loop coroutines out over one loop thread, so the interesting question is how much of the
+# wall is the fan-out (rollout_collect), how much is projecting the results into a trainer batch
+# (rollout_assemble), how much is the shared output finalization (rollout_finalize), and how much is
+# neither.
+#
+# 🚨 A SUM OVER CONCURRENT COROUTINES IS NOT A DURATION. The wait counters below are summed over up
+# to 4,096 in-flight trajectories, so at E6 geometry they are order 1e5 seconds against a ~98 s
+# parent. They must never reach self.all_timings, which feeds W&B (no attributes, so nothing can
+# mark such a row), every callback, finelog (which stamps clock_domain="inclusive_wall", asserting
+# containment that is false here) and tools/spans.py. They go to their own instruments as exact
+# sum/count/max triples instead, and the mean wait is a division the consumer does.
+#
+# Only regions with NO await inside may be summed across coroutines, because only those cannot
+# overlap: rollout_tokenize holds the loop thread for its whole extent. rollout_collect,
+# rollout_assemble and rollout_finalize are single walls on the loop, not sums, so they are additive
+# by construction.
+
+# Disjoint top-level regions. Their sum is subtracted from generate to form the residual.
+GENERATE_SPANS = ("rollout_collect", "rollout_assemble", "rollout_finalize")
+
+# Inclusive children of one of the above. Published so the tree is navigable, and deliberately NOT
+# subtracted from the residual -- doing so would count them twice. rollout_tokenize nests inside
+# rollout_collect; rollout_retain nests inside rollout_finalize.
+GENERATE_NESTED_SPANS = ("rollout_tokenize", "rollout_retain")
+
+GENERATE_LEAF_SPANS = GENERATE_SPANS + GENERATE_NESTED_SPANS
+
+ROLLOUT_ENGINE_AWAIT = "rollout_engine_await"
+ROLLOUT_ENV_AWAIT = "rollout_env_await"
+
+# 🚨 rollout_env_await is deliberately THREE numbers, not one.
+#
+# A single bracket around run_in_executor measures submission-to-resumption, and at E6 geometry that
+# is dominated by neither the environment nor anything actionable: 4,096 coroutines queue against a
+# 32-worker pool, so the SUM of that bracket grows as N^2/(2W) and reports tens of seconds of "env
+# await" for an environment that did not change. It is the same misattribution as reading a queue
+# depth as a service time. The three terms below are disjoint and sum to that bracket exactly:
+#
+#   rollout_env_queue    submitted -> the pool thread picks the work up   (pool too small / env slow)
+#   rollout_env_exec     the pool thread runs func                        (the environment itself)
+#   rollout_env_resume   func returns -> the coroutine runs again         (the EVENT LOOP is behind)
+#
+# The resume term is the one worth the plumbing. It is a direct measurement of event-loop backlog,
+# and so a second, independent witness for the question rollout_tokenize answers: whether the
+# driver's single thread, not the engines, is what generate is waiting on.
+ROLLOUT_ENV_QUEUE = "rollout_env_queue"
+ROLLOUT_ENV_EXEC = "rollout_env_exec"
+ROLLOUT_ENV_RESUME = "rollout_env_resume"
+
+_SUM_SUFFIX = "_seconds_sum"
+_MAX_SUFFIX = "_seconds_max"
+_COUNT_SUFFIX = "_count"
+
+# Matched triples so both a mean and a tail are derivable. Deliberately not `..._requests`: one
+# timed await can issue several engine requests, because InferenceEngineClient retries an aborted
+# generation in place and fails over to another engine when one dies.
+#
+# The _seconds_max rows are per-TRAJECTORY cumulative waits, not per-await maxima. F20 established
+# that generate is tail-latency-bound -- the wall is set by the last trajectory to finish -- and a
+# mean over 4,096 trajectories cannot tell a uniformly slow rollout from a fast one with three
+# stragglers. That distinction is the difference between "buy more engines" and "fix the tail", so
+# the tail is measured rather than inferred.
+ROLLOUT_COUNTERS = (
+    f"{ROLLOUT_ENGINE_AWAIT}{_SUM_SUFFIX}",
+    f"{ROLLOUT_ENGINE_AWAIT}{_COUNT_SUFFIX}",
+    f"{ROLLOUT_ENGINE_AWAIT}{_MAX_SUFFIX}",
+    f"{ROLLOUT_ENV_AWAIT}{_SUM_SUFFIX}",
+    f"{ROLLOUT_ENV_AWAIT}{_COUNT_SUFFIX}",
+    f"{ROLLOUT_ENV_AWAIT}{_MAX_SUFFIX}",
+    f"{ROLLOUT_ENV_QUEUE}{_SUM_SUFFIX}",
+    f"{ROLLOUT_ENV_EXEC}{_SUM_SUFFIX}",
+    f"{ROLLOUT_ENV_RESUME}{_SUM_SUFFIX}",
+)
+
+# Physical instruments with the units the values actually carry. Not policy_train_count: that name
+# says policy_train, and these are trainer-role rows from the rollout.
+rollout_wait_seconds = telemetry.histogram("rollout_wait_seconds", unit="s")
+rollout_count = telemetry.histogram("rollout_count", unit="1")
+
+
+@dataclass
+class RolloutTimings:
+    """One generate call's accumulator.
+
+    ``durations`` are disjoint regions on the event-loop thread and become phase rows.
+    ``counters`` are sums, counts and maxima over concurrent coroutines and must never become phase
+    rows.
+
+    ``supported`` is what separates "measured zero" from "not measured". A runner that has not
+    instrumented its call sites leaves it False, and nothing at all is published for that generate --
+    no leaves and, critically, no residual. Publishing a residual equal to the whole parent from an
+    uninstrumented runner would read as "generate is entirely unaccounted for", which is a claim
+    about the rollout rather than about the instrument.
+    """
+
+    durations: dict[str, float] = field(default_factory=dict)
+    counters: dict[str, float] = field(default_factory=dict)
+    supported: bool = False
+
+    def mark_supported(self) -> None:
+        """Declare every leaf measured, seeding explicit zeros.
+
+        A leaf that is genuinely zero -- no retokenization configured, no environment executor --
+        must publish 0.0 rather than go missing, or a consumer cannot tell it apart from a call site
+        someone forgot to bracket.
+        """
+        self.supported = True
+        for name in GENERATE_LEAF_SPANS:
+            self.durations.setdefault(name, 0.0)
+        for name in ROLLOUT_COUNTERS:
+            self.counters.setdefault(name, 0.0)
+
+
+# Bound per TrajectoryRunner.run call rather than stashed on the runner, because run() is genuinely
+# reentrant: the fully-async trainer keeps up to 768 background run() calls in flight and awaits
+# eval(), which calls run() on the same instance. asyncio copies the context at task creation, so
+# the coroutines a run() spawns see that call's accumulator and separate calls are isolated by
+# construction -- no flag, no assertion, and nothing to get wrong in a third trainer.
+ROLLOUT_TIMINGS: ContextVar[RolloutTimings | None] = ContextVar("rollout_timings", default=None)
+
+# One trajectory's own cumulative waits, folded into the run's maxima when the trajectory ends.
+# Isolated by the same mechanism: every trajectory is launched as a task (utils/progress.py gather
+# -> ensure_future; asyncio.gather wraps coroutines the same way), and a task copies the context.
+ROLLOUT_TRAJECTORY_WAITS: ContextVar[dict[str, float] | None] = ContextVar("rollout_trajectory_waits", default=None)
+
+
+@contextlib.contextmanager
+def rollout_timings_scope(timings: RolloutTimings | None) -> Iterator[None]:
+    """Bind one accumulator for the extent of a ``TrajectoryRunner.run`` call.
+
+    ``None`` binds nothing and makes every region below a no-op, which is how a nested run() -- the
+    harbor dispatcher's sub-runner, or the fully-async trainer's concurrent calls -- is kept out of
+    an enclosing call's totals rather than doubling them.
+
+    ⚠️ The scope is the awaiting task's, not the fan-out's. A failed fan-out does not cancel its
+    siblings, so a sibling task can outlive this ``with`` still holding the copied context and still
+    writing into ``timings``. That is harmless -- the accumulator outlives the scope and the late
+    write lands in a dict nobody reads again -- but it means the reset below bounds THIS task, not
+    every task that inherited the binding.
+    """
+    token = ROLLOUT_TIMINGS.set(timings)
+    try:
+        yield
+    finally:
+        ROLLOUT_TIMINGS.reset(token)
+
+
+@contextlib.contextmanager
+def rollout_trajectory() -> Iterator[None]:
+    """Scope one trajectory so its waits can be reduced with max, not only summed.
+
+    On the batched path there is one "trajectory" per generate call, so max == sum and the count is
+    1. That is the honest reading: the batched path issues a single engine request for the whole
+    batch, and it has no per-trajectory tail to measure.
+    """
+    timings = ROLLOUT_TIMINGS.get()
+    if timings is None:
+        yield
+        return
+    waits: dict[str, float] = {}
+    token = ROLLOUT_TRAJECTORY_WAITS.set(waits)
+    try:
+        yield
+    finally:
+        ROLLOUT_TRAJECTORY_WAITS.reset(token)
+        for name, seconds in waits.items():
+            key = f"{name}{_MAX_SUFFIX}"
+            timings.counters[key] = max(timings.counters.get(key, 0.0), seconds)
+
+
+def traced_trajectory(fn):
+    """Scope one agent_loop coroutine as a trajectory.
+
+    A decorator rather than an inline ``with`` so the two runners that own an agent_loop opt in the
+    same way and a third cannot half-adopt it: the scope is the whole coroutine, by construction.
+    """
+
+    @functools.wraps(fn)
+    async def _traced(*args, **kwargs):
+        with rollout_trajectory():
+            return await fn(*args, **kwargs)
+
+    return _traced
+
+
+@contextlib.contextmanager
+def rollout_span(name: str) -> Iterator[None]:
+    """Accumulate one disjoint generate-tree region.
+
+    Only for regions that hold the event-loop thread throughout, or that the loop runs one at a time.
+    A region containing an ``await`` that yields to concurrent siblings overlaps them, and its sum is
+    not a partition of anything -- use :func:`rollout_wait` for those.
+    """
+    timings = ROLLOUT_TIMINGS.get()
+    if timings is None:
+        yield
+        return
+    # Not utils.utils.Timer: importing it here closes a cycle (utils.utils ->
+    # trajectory_reward_shaping -> trajectory_runners -> base -> timing_observability), and Timer
+    # logs two loguru records per region unless log_events=False -- tens of thousands of synchronous
+    # log records per step, on the event-loop thread, inside the phase being measured.
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        timings.durations[name] = timings.durations.get(name, 0.0) + (time.monotonic() - started)
+
+
+def _record_wait(timings: RolloutTimings, name: str, elapsed: float) -> None:
+    """Fold one concurrent await into its run-level triple and its trajectory's total."""
+    timings.counters[f"{name}{_SUM_SUFFIX}"] = timings.counters.get(f"{name}{_SUM_SUFFIX}", 0.0) + elapsed
+    timings.counters[f"{name}{_COUNT_SUFFIX}"] = timings.counters.get(f"{name}{_COUNT_SUFFIX}", 0.0) + 1.0
+    waits = ROLLOUT_TRAJECTORY_WAITS.get()
+    if waits is not None:
+        waits[name] = waits.get(name, 0.0) + elapsed
+
+
+@contextlib.contextmanager
+def rollout_wait(name: str) -> Iterator[None]:
+    """Accumulate one concurrent await into its counter triple.
+
+    Enter and exit run on the event-loop thread, which is what makes this usable around an await
+    that hands work to a ThreadPoolExecutor: a ContextVar does not cross ``run_in_executor``, so
+    reading the accumulator inside the executor thread would find nothing.
+    """
+    timings = ROLLOUT_TIMINGS.get()
+    if timings is None:
+        yield
+        return
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        _record_wait(timings, name, time.monotonic() - started)
+
+
+async def timed_env_call(executor, func, /, *args, **kwargs):
+    """Run one environment call, splitting the caller-observed wait into its three real terms.
+
+    See the ROLLOUT_ENV_* block above for why one number here is worse than useless: on a pool of W
+    threads serving N concurrent trajectories, a single submitted-to-resumed bracket sums to
+    O(N^2/W) and moves with the batch size while the environment is unchanged.
+
+    The stamps are taken on the pool thread, where the work actually starts and ends, and read back
+    on the loop thread -- which is the only place the accumulator is reachable, because a ContextVar
+    does not cross ``run_in_executor``.
+    """
+    timings = ROLLOUT_TIMINGS.get()
+    if executor is None:
+        # `await` notwithstanding, this is a synchronous call on the loop thread. There is no queue
+        # and no resume delay, so the whole wait is execution -- which is also why the caller must
+        # not read a large rollout_env_await here as executor contention.
+        if timings is None:
+            return func(*args, **kwargs)
+        started = time.monotonic()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            _record_env_wait(timings, queued=0.0, executed=time.monotonic() - started, resumed=0.0)
+
+    loop = asyncio.get_running_loop()
+    # A closure rather than run_in_executor(executor, func, *args): the stamps have to be taken
+    # inside the pool thread, on both sides of func. It also means kwargs survive, which the bare
+    # run_in_executor form silently could not accept.
+    if timings is None:
+        return await loop.run_in_executor(executor, functools.partial(func, *args, **kwargs))
+
+    stamps: list[float] = []  # [picked_up, finished], both written on the pool thread
+
+    def _stamped():
+        stamps.append(time.monotonic())
+        try:
+            return func(*args, **kwargs)
+        finally:
+            stamps.append(time.monotonic())
+
+    submitted = time.monotonic()
+    try:
+        return await loop.run_in_executor(executor, _stamped)
+    finally:
+        resumed = time.monotonic()
+        if len(stamps) == 2:
+            _record_env_wait(
+                timings,
+                queued=stamps[0] - submitted,
+                executed=stamps[1] - stamps[0],
+                resumed=resumed - stamps[1],
+            )
+        else:
+            # The pool never ran the work (shutdown, rejection) or died between the two stamps.
+            # Attribute the whole wait to queueing rather than inventing an execution time.
+            _record_env_wait(timings, queued=resumed - submitted, executed=0.0, resumed=0.0)
+
+
+def _record_env_wait(timings: RolloutTimings, *, queued: float, executed: float, resumed: float) -> None:
+    counters = timings.counters
+    for name, seconds in (
+        (ROLLOUT_ENV_QUEUE, queued),
+        (ROLLOUT_ENV_EXEC, executed),
+        (ROLLOUT_ENV_RESUME, resumed),
+    ):
+        counters[f"{name}{_SUM_SUFFIX}"] = counters.get(f"{name}{_SUM_SUFFIX}", 0.0) + seconds
+    _record_wait(timings, ROLLOUT_ENV_AWAIT, queued + executed + resumed)
+
+
+def record_generate_spans(
+    timings: RolloutTimings,
+    generate_seconds: float,
+    all_timings: MutableMapping[str, float],
+    counters: MutableMapping[str, float],
+) -> None:
+    """Fold one generate call into the step's timings and counters.
+
+    Accumulates rather than assigns, because a step can generate more than once: group admission
+    and dynamic sampling both resample without closing the step, and Timer accumulates the same way.
+    Maxima fold with max for the same reason -- adding two tails would invent a third.
+
+    The residual is signed on purpose. It is the audit: a negative one means a child is being
+    counted inside another, and clamping would hide the only automatic detector of that.
+    """
+    if not timings.supported:
+        # An uninstrumented runner publishes nothing at all, not a residual equal to its parent.
+        return
+    covered = 0.0
+    for name, seconds in timings.durations.items():
+        all_timings[name] = all_timings.get(name, 0.0) + seconds
+        if name in GENERATE_SPANS:
+            covered += seconds
+    all_timings["generate_span_residual"] = all_timings.get("generate_span_residual", 0.0) + (
+        generate_seconds - covered
+    )
+    for name, value in timings.counters.items():
+        if name.endswith(_MAX_SUFFIX):
+            counters[name] = max(counters.get(name, 0.0), value)
+        else:
+            counters[name] = counters.get(name, 0.0) + value
+
+
+_driver_counter_check_done = False
+
+
+def publish_driver_counters(counters: Mapping[str, float], *, step: int) -> None:
+    """Publish the rollout's concurrent-wait sums, counts and tails under the trainer role.
+
+    Deliberately not publish_worker_counters: that hardcodes role="worker" and requires a rank, and
+    these rows come from the driver, which has neither. They carry no phase, parent or clock_domain
+    either -- attributes that would invite a consumer to band a 1e5-second sum into a 98 s parent.
+    """
+    if not counters:
+        return
+    global _driver_counter_check_done
+    if not _driver_counter_check_done:
+        _driver_counter_check_done = True
+        # R10, on the driver. Same failure as on the worker and just as invisible: record() is a
+        # no-op, flush() still returns True, and the run finishes having published nothing.
+        reason = unconfigured_telemetry_reason()
+        if reason is not None:
+            logger.warning(f"generate span tree will publish nothing: {reason}")
+    for name, value in counters.items():
+        if name not in ROLLOUT_COUNTERS:
+            # Drop, do not raise. This runs in the trainer's step epilogue, AFTER the step's work
+            # is paid for -- raising here converts a telemetry-naming mistake into a killed
+            # training run. The condition is statically decidable and is asserted at import below.
+            logger.warning(f"{name!r} has no rollout counter instrument; dropping the row")
+            continue
+        instrument = rollout_count if name.endswith(_COUNT_SUFFIX) else rollout_wait_seconds
+        instrument.record(float(value), attributes={"counter": name, "role": TRAINER_ROLE, "step": str(step)})
 
 
 # --- Worker-side spans inside policy_train ------------------------------------------------------
@@ -412,3 +800,23 @@ def publish_worker_spans(
             rank,
         )
     return time.perf_counter() - started
+
+
+# Statically decidable, so check it once at import rather than in the step epilogue (see
+# publish_driver_counters). A mistake here fails the process at start, not after a paid-for step.
+# publish_driver_counters dispatches on the name suffix, so every declared counter must carry one
+# of the two recognised suffixes or it would silently land on the wrong instrument (a seconds value
+# on a unit-1 histogram, which nothing downstream would notice).
+for _name in ROLLOUT_COUNTERS:
+    if not _name.endswith((_SUM_SUFFIX, _MAX_SUFFIX, _COUNT_SUFFIX)):
+        raise AssertionError(
+            f"ROLLOUT_COUNTERS names {_name!r}, which ends in none of {_SUM_SUFFIX!r}, {_MAX_SUFFIX!r} "
+            f"or {_COUNT_SUFFIX!r}; publish_driver_counters would route it to the wrong instrument"
+        )
+
+# A _seconds_max row is folded with max across generate calls and a _seconds_sum row with addition,
+# so a name that reads as one and is treated as the other is a silent arithmetic error rather than a
+# missing row. record_generate_spans dispatches on the same suffix; keep the two in step.
+for _name in ROLLOUT_COUNTERS:
+    if _name.endswith(_MAX_SUFFIX) and f"{_name[: -len(_MAX_SUFFIX)]}{_SUM_SUFFIX}" not in ROLLOUT_COUNTERS:
+        raise AssertionError(f"{_name!r} has no matching {_SUM_SUFFIX!r} row, so no mean is derivable beside its tail")

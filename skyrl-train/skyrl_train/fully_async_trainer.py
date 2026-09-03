@@ -1123,6 +1123,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 global_step_at_start = self.global_step
 
                 # Disable each runner's progress bar so concurrent workers do not flood the console.
+                # No phase_timings: this loop keeps up to 768 run() calls in flight, and summing
+                # overlapping walls into one dict decomposes nothing. The generate span tree is for
+                # the synchronous trainer, whose generate is one wall.
                 cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
                     trajectory_request, disable_tqdm=True
                 )

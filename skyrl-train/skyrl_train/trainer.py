@@ -99,7 +99,13 @@ from skyrl_train.callbacks import (
     RefModelUpdateCallback,
 )
 from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
-from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
+from skyrl_train.timing_observability import (
+    RolloutTimings,
+    publish_driver_counters,
+    publish_startup_timings,
+    publish_step_timings,
+    record_generate_spans,
+)
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
@@ -157,6 +163,8 @@ class RayPPOTrainer:
 
         self.all_metrics = {}
         self.all_timings = {}
+        # Kept out of all_timings: these are sums over concurrent rollout coroutines, not durations.
+        self.all_rollout_counters: dict[str, float] = {}
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
         self._shutdown_complete = False
@@ -622,11 +630,22 @@ class RayPPOTrainer:
                     )
 
                     # 1.1 generation phase
+                    rollout_timings = RolloutTimings()
                     with (
-                        Timer("generate", self.all_timings),
+                        Timer("generate", self.all_timings) as generate_timer,
                         critical_phase("rollout_or_inference_wait", self.global_step),
                     ):
-                        trajectory_batch: TrajectoryBatch = await self.generate(trajectory_request)
+                        trajectory_batch: TrajectoryBatch = await self.generate(
+                            trajectory_request, rollout_timings=rollout_timings
+                        )
+                    # After the Timer closes, because the residual is generate minus its children and
+                    # generate is only known once the wall it measures has ended.
+                    record_generate_spans(
+                        rollout_timings,
+                        generate_timer.duration,
+                        self.all_timings,
+                        self.all_rollout_counters,
+                    )
 
                     if self.cfg.trainer.step_wise_training:
                         # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
@@ -801,7 +820,9 @@ class RayPPOTrainer:
 
                 self.all_metrics = {}
                 publish_step_timings(self.all_timings, self.global_step)
+                publish_driver_counters(self.all_rollout_counters, step=self.global_step)
                 self.all_timings = {}
+                self.all_rollout_counters = {}
 
                 # 10. Update progress bar and global step
                 pbar.update(1)
@@ -1348,6 +1369,7 @@ class RayPPOTrainer:
     async def generate(
         self,
         input_batch: TrajectoryRequestBatch,
+        rollout_timings: RolloutTimings | None = None,
     ) -> TrajectoryBatch:
         """
         Generate rollouts.
@@ -1364,7 +1386,7 @@ class RayPPOTrainer:
             self.global_step,
             len(input_batch["prompts"]),
         )
-        trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
+        trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch, phase_timings=rollout_timings)
         # add rollout metrics to self.all_metrics
         if trajectory_batch["rollout_metrics"] is not None:
             self.all_metrics.update(trajectory_batch["rollout_metrics"])
