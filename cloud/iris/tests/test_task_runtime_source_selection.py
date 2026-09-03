@@ -110,6 +110,13 @@ def _isolate_head_runtime(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(task_runtime.signal, "signal", lambda *_args: None)
     monkeypatch.setattr(task_runtime, "training_driver_env", lambda _ifname: {"SKYRL_HOME": str(tmp_path)})
     monkeypatch.setattr(task_runtime, "ray_metrics_telemetry", lambda *_args: contextlib.nullcontext())
+    # Do not let host-specific /tmp, GPU, process, or dmesg scans consume the fixture's
+    # bounded artifact-persistence window.
+    monkeypatch.setattr(
+        task_runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="diagnostic output"),
+    )
 
 
 def test_head_kills_a_silent_driver_and_records_the_stall_reason(tmp_path, monkeypatch) -> None:
