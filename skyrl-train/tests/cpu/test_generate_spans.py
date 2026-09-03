@@ -776,6 +776,42 @@ def test_unconfigured_telemetry_is_announced_once_rather_than_publishing_in_sile
     assert len([w for w in warned if "endpoint is unset" in w]) == 1, "once per process, not once per step"
 
 
+def test_driver_loss_detection_flushes_before_it_samples(monkeypatch):
+    """A rejection that lands after the sample is invisible, and looks exactly like a clean publish.
+
+    record() only enqueues. The worker path flushes before reading runtime_status a second time
+    (publish_worker_spans); the driver path did not, so an asynchronous rejection was absorbed into
+    the NEXT call's baseline and the step that actually lost the row warned about nothing -- while
+    the tail it understates is the one number this tree exists to report.
+
+    The double makes the loss visible ONLY after flush, so the pre-fix ordering cannot pass.
+    """
+
+    from types import SimpleNamespace
+
+    state = {"flushed": False}
+    warned: list[str] = []
+
+    def _flush(timeout):
+        state["flushed"] = True
+        return True
+
+    monkeypatch.setattr(timing_module.telemetry, "flush", _flush)
+    monkeypatch.setattr(
+        timing_module.telemetry,
+        "runtime_status",
+        lambda: SimpleNamespace(lost_records=3 if state["flushed"] else 0, rejected_records=0),
+    )
+    monkeypatch.setattr(timing_module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
+    monkeypatch.setattr(timing_module, "rollout_count", type("_H", (), {"record": lambda *a, **k: None})())
+
+    publish_driver_counters({f"{ROLLOUT_ENGINE_AWAIT}_count": 1.0}, step=4)
+
+    assert [w for w in warned if "lost 3 record(s) at step 4" in w], (
+        "a loss visible only after the flush must still be reported against its own step"
+    )
+
+
 def test_publishing_no_counters_is_a_no_op(monkeypatch):
     """Asserted, not merely executed: an empty step must reach no instrument at all."""
 
