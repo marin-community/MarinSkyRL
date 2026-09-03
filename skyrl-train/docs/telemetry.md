@@ -124,6 +124,11 @@ driver rows per step. Budget accordingly before enabling the policy tree on a lo
 
 ### Known limits
 
+- `rank_tokens_real` / `rank_tokens_padded` are **this rank's** tokens, published per rank and never
+  reduced. Summing them across rows gives the global total only when every rank holds distinct data:
+  under sequence, context, expert or Megatron tensor/pipeline parallelism the replicas hold the same
+  tokens and the sum is multiplied by the replication factor. The `rank_` prefix is there to make
+  that visible at the point of use.
 - `n_tokens_dp_gt_*pct` are reduced with a **mean**, so they are a per-rank average rather than a
   global count. A sum would be worse: the reduction is over WORLD, and under sequence, context,
   expert or Megatron tensor/pipeline parallelism the replicas hold the same tokens, so a sum
