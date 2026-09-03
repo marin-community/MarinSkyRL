@@ -47,16 +47,25 @@ class TrajectoryRunner(ABC):
     #: waits; until then absence is the honest signal.
     generate_spans_instrumented: bool = False
 
-    def __init_subclass__(cls, **kwargs) -> None:
-        """Revoke an inherited instrumented flag from a subclass that replaces the bracketed body.
+    #: Overriding any of these replaces bracketed code, so a subclass that does so without
+    #: re-declaring the certificate loses it. ``_run`` drives the rollout; ``agent_loop`` and
+    #: ``collect_batched`` ARE the bracketed loops -- they hold the engine awaits, the environment
+    #: calls and the trajectory scopes, and a subclass overriding one of them keeps every seeded
+    #: zero while measuring none of it. An earlier version listed only ``_run``, which left the two
+    #: methods the certificate is actually about uncovered.
+    BRACKETED_METHODS = ("_run", "agent_loop", "collect_batched")
 
-        The flag certifies the call sites in ``_run`` and the loops it drives. A subclass that
-        overrides ``_run`` without re-declaring the flag would inherit True and publish a seeded
-        all-zero decomposition -- the "measured zero" lie the flag exists to prevent, made
-        indistinguishable from truth by the explicit zeros.
+    def __init_subclass__(cls, **kwargs) -> None:
+        """Revoke an inherited instrumented flag from a subclass that replaces bracketed code.
+
+        A subclass that overrides one of BRACKETED_METHODS without re-declaring the flag would
+        inherit True and publish a seeded all-zero decomposition -- the "measured zero" lie the flag
+        exists to prevent, made indistinguishable from truth by the explicit zeros.
         """
         super().__init_subclass__(**kwargs)
-        if "_run" in cls.__dict__ and "generate_spans_instrumented" not in cls.__dict__:
+        if "generate_spans_instrumented" in cls.__dict__:
+            return
+        if any(method in cls.__dict__ for method in TrajectoryRunner.BRACKETED_METHODS):
             cls.generate_spans_instrumented = False
 
     async def run(

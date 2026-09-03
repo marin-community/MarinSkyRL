@@ -900,6 +900,40 @@ def test_a_subclass_that_replaces_run_is_not_recertified_by_its_collector():
     assert (ReplacesRun.generate_spans_instrumented and collector_is_instrumented(certified_collector)) is False
 
 
+def test_another_producers_loss_is_not_blamed_on_the_rollout_counters(monkeypatch):
+    """The window must open on a settled queue, or it inherits someone else's rejection.
+
+    The trainer publishes the step's phase rows one call before this one. Sampling `before` without
+    settling those first put their rejections inside our window, and the warning says "the engine and
+    environment tails are understated and must not be quoted" -- telling an operator the tails are
+    bad when they may be complete, and pointing at the wrong producer.
+    """
+    from types import SimpleNamespace
+
+    state = {"flushes": 0}
+    warned: list[str] = []
+
+    def _flush(timeout):
+        state["flushes"] += 1
+        return True
+
+    # The loss is already present before we publish anything: it belongs to an earlier producer.
+    monkeypatch.setattr(timing_module.telemetry, "flush", _flush)
+    monkeypatch.setattr(
+        timing_module.telemetry,
+        "runtime_status",
+        lambda: SimpleNamespace(lost_records=7, rejected_records=0),
+    )
+    monkeypatch.setattr(timing_module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
+    monkeypatch.setattr(timing_module, "rollout_count", type("_H", (), {"record": lambda *a, **k: None})())
+
+    publish_driver_counters({f"{ROLLOUT_ENGINE_AWAIT}_count": 1.0}, step=4)
+
+    assert not [w for w in warned if "rollout counters lost" in w], (
+        "a loss that predates this publish is not ours to report"
+    )
+
+
 def test_the_trajectory_count_is_absent_where_no_trajectory_scope_closes():
     """It is a DIVISOR, so a seeded zero is worse than a missing row.
 
@@ -914,6 +948,29 @@ def test_the_trajectory_count_is_absent_where_no_trajectory_scope_closes():
     # The seeding it must NOT break: the sum/count pair still says "bracketed and never waited".
     assert timings.counters[f"{timing_module.ROLLOUT_ENGINE_AWAIT}_count"] == 0.0
     assert timings.counters[f"{timing_module.ROLLOUT_ENGINE_AWAIT}_seconds_sum"] == 0.0
+
+
+def test_an_unregistered_name_raises_at_both_entry_points():
+    """Behavioural coverage for the guards themselves, not for the call sites they protect.
+
+    The static walk below validates the literals at every call site; it says nothing about whether
+    the guard exists. Deleting the raise from BOTH rollout_span and rollout_wait left the entire
+    1,543-test suite green -- so the headline fix of one review round and its mirror in the next were
+    each unprotected against simply being removed.
+    """
+    with pytest.raises(AssertionError, match="not a registered generate span"):
+        with rollout_span("rollout_collct"):
+            pass
+    with pytest.raises(AssertionError, match="not a registered rollout wait"):
+        with rollout_wait("rollout_engine_awiat"):
+            pass
+    # And the guards must not fire on the real names, with or without an accumulator bound.
+    for name in GENERATE_SPANS:
+        with rollout_span(name):
+            pass
+    for name in timing_module.ROLLOUT_WAIT_NAMES:
+        with rollout_wait(name):
+            pass
 
 
 def test_every_accepted_wait_name_has_all_three_rows_declared():
@@ -1005,23 +1062,26 @@ def test_driver_loss_detection_flushes_before_it_samples(monkeypatch):
     the NEXT call's baseline and the step that actually lost the row warned about nothing -- while
     the tail it understates is the one number this tree exists to report.
 
-    The double makes the loss visible ONLY after flush, so the pre-fix ordering cannot pass.
+    There are TWO flushes: one settling other producers' rows before the window opens, and one
+    settling ours before the second sample. The double reveals the loss only after the SECOND, which
+    is the only shape that means "the rollout counters lost it" -- a loss visible after the first
+    belongs to whoever published before us, and reporting it here blames the wrong producer.
     """
 
     from types import SimpleNamespace
 
-    state = {"flushed": False}
+    state = {"flushes": 0}
     warned: list[str] = []
 
     def _flush(timeout):
-        state["flushed"] = True
+        state["flushes"] += 1
         return True
 
     monkeypatch.setattr(timing_module.telemetry, "flush", _flush)
     monkeypatch.setattr(
         timing_module.telemetry,
         "runtime_status",
-        lambda: SimpleNamespace(lost_records=3 if state["flushed"] else 0, rejected_records=0),
+        lambda: SimpleNamespace(lost_records=3 if state["flushes"] >= 2 else 0, rejected_records=0),
     )
     monkeypatch.setattr(timing_module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
     monkeypatch.setattr(timing_module, "rollout_count", type("_H", (), {"record": lambda *a, **k: None})())

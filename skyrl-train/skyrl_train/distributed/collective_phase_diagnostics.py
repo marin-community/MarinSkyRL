@@ -138,7 +138,6 @@ def region(
         return
     if device_mesh is None:
         raise ValueError("enabled collective phase diagnostics require a device mesh")
-    region_metadata = metadata or CollectiveRegionMetadata()
     with _region_ids_lock:
         region_id = next(_region_ids)
     token = _region.set(
@@ -146,7 +145,7 @@ def region(
             region_id=region_id,
             kind=kind,
             rank=rank,
-            metadata=region_metadata,
+            metadata=metadata or CollectiveRegionMetadata(),
             device_mesh=device_mesh,
         )
     )

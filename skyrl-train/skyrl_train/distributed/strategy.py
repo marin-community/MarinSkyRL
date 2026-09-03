@@ -18,11 +18,15 @@ from skyrl_train.io import io
 DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])
 
 
-# The torch op each name maps to. Module level so a test can pin `min` to ReduceOp.MIN without a
-# CUDA device -- all_reduce moves its tensor to the current device before reducing, so the branch
-# below is not reachable on a CPU-only runner and a mutation there would otherwise go uncaught.
-# `mean` is deliberately absent: it is a SUM after a division by world_size.
-REDUCE_OPS = {"max": dist.ReduceOp.MAX, "min": dist.ReduceOp.MIN}
+# The collective each reduction op dispatches to. EVERY op all_reduce accepts must be here, so the
+# lookup can be a direct index with no default -- see the note at the dispatch. `mean` maps to SUM
+# because the division by world_size happens locally, before the collective.
+REDUCE_OPS = {
+    "max": dist.ReduceOp.MAX,
+    "min": dist.ReduceOp.MIN,
+    "sum": dist.ReduceOp.SUM,
+    "mean": dist.ReduceOp.SUM,
+}
 
 
 class DistributedStrategy(ABC):
@@ -105,13 +109,13 @@ class DistributedStrategy(ABC):
                 data = data.to(torch.cuda.current_device())
             if op == "mean":
                 data /= self.world_size
-            # mean and sum are both a SUM collective -- mean's division by world_size happened
-            # above. Anything else must be in REDUCE_OPS: a silent `.get(op, SUM)` default here
-            # would be the same defect just removed from policy_training_metrics one file over, and
-            # a `min` that quietly became a SUM publishes 80.0 for a healthy step at 80 ranks.
-            collective = REDUCE_OPS[op] if op in REDUCE_OPS else dist.ReduceOp.SUM
-            assert op in REDUCE_OPS or op in ("mean", "sum"), f"no collective for reduction op {op!r}"
-            dist.all_reduce(data, op=collective)
+            # Indexed, with no default. The previous form was
+            # `REDUCE_OPS[op] if op in REDUCE_OPS else SUM` under a comment claiming the silent
+            # `.get(op, SUM)` default had been removed -- that IS .get, written out, and the assert
+            # beside it was dead because line 91 already closes the set. An op missing from the map
+            # would have become a SUM, and a `min` that quietly becomes a SUM publishes 80.0 for a
+            # healthy step at 80 ranks. A KeyError here is the loud failure that was intended.
+            dist.all_reduce(data, op=REDUCE_OPS[op])
             if is_cpu_tensor:
                 data = data.cpu()
             return data.item() if not is_tensor else data
