@@ -660,7 +660,13 @@ def test_the_residual_closes_generate_and_is_signed():
 def test_repeated_generate_calls_in_one_step_accumulate_but_tails_fold_with_max():
     """Group admission and dynamic sampling resample without closing the step, and Timer accumulates
     generate the same way. Assigning would report the last rollout against the summed wall -- and
-    ADDING two tails would invent a third that no trajectory ever had."""
+    ADDING two tails would invent a third that no trajectory ever had.
+
+    ⚠️ This builds a FRESH accumulator per call, which is one of the two shapes a caller can use. The
+    trainer uses the other -- one step-scoped RolloutTimings folded repeatedly -- and that shape is
+    covered by test_a_step_that_generates_twice_reuses_one_accumulator_without_double_counting.
+    Passing here said nothing about it, which is how the double-count survived.
+    """
     all_timings: dict[str, float] = {}
     counters: dict[str, float] = {}
     for tail in (5.0, 3.0):
@@ -780,6 +786,36 @@ def test_unconfigured_telemetry_is_announced_once_rather_than_publishing_in_sile
 
     assert [w for w in warned if "endpoint is unset" in w], "the inert-telemetry case must warn"
     assert len([w for w in warned if "endpoint is unset" in w]) == 1, "once per process, not once per step"
+
+
+def test_a_step_that_generates_twice_reuses_one_accumulator_without_double_counting():
+    """The trainer holds ONE RolloutTimings per step, and durations accumulate across calls.
+
+    The earlier fold recomputed `covered` from the running total while generate_seconds stayed
+    per-call, so the second fold subtracted the accumulated leaves from a single call's wall. Two 6 s
+    calls with 5 s of leaves each published a residual of -3 against a true +2 -- and a NEGATIVE
+    residual is the design's signal that a child is being counted inside another. It would have fired
+    falsely, on the only automatic detector the tree has.
+
+    This models the trainer's actual variable scope: one accumulator, folded twice.
+    """
+    timings = RolloutTimings()
+    timings.mark_supported()
+    all_timings: dict[str, float] = {}
+    counters: dict[str, float] = {}
+
+    timings.durations["rollout_collect"] = 5.0
+    record_generate_spans(timings, 6.0, all_timings, counters)
+    assert all_timings["rollout_collect"] == pytest.approx(5.0)
+    assert all_timings["generate_span_residual"] == pytest.approx(1.0)
+
+    # Second generate in the same step: durations accumulate, so this is 5 more seconds of collect.
+    timings.durations["rollout_collect"] = 10.0
+    record_generate_spans(timings, 6.0, all_timings, counters)
+    assert all_timings["rollout_collect"] == pytest.approx(10.0), "the leaf must total both calls"
+    assert all_timings["generate_span_residual"] == pytest.approx(2.0), (
+        "12 s of generate against 10 s of leaves is +2; the pre-fix arithmetic published -3"
+    )
 
 
 def test_an_injected_collector_does_not_inherit_the_instrumentation_certificate():
