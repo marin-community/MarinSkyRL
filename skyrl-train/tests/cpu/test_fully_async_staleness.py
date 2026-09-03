@@ -24,7 +24,7 @@ def _generated_group(
     earliest_model_step: int,
     *,
     fully_masked: bool = False,
-    rewards: list[float] | None = None,
+    rewards: list[float] | list[list[float]] | None = None,
     unshaped_rewards: list[float] | None = None,
 ) -> GeneratedOutputGroup:
     rewards = rewards or [0.0, 1.0]
@@ -270,7 +270,13 @@ async def test_batch_assembly_discards_insufficient_reward_spread_and_waits_for_
     assert queues.retries.empty()
 
     async with queues.condition:
-        queues.completed.put_nowait(_generated_group("fresh", earliest_model_step=10))
+        queues.completed.put_nowait(
+            _generated_group(
+                "fresh",
+                earliest_model_step=10,
+                rewards=[[0.2, 0.3], [0.0, 1.0]],
+            )
+        )
         queues.condition.notify_all()
     batch = await asyncio.wait_for(pending_batch, timeout=1)
 
@@ -278,7 +284,7 @@ async def test_batch_assembly_discards_insufficient_reward_spread_and_waits_for_
     assert trainer.all_metrics["async/dynamic_sampling/discarded_count"] == 1
     assert trainer.all_metrics["async/dynamic_sampling/candidate_count"] == 2
     assert trainer.all_metrics["async/dynamic_sampling/candidate_trajectory_count"] == 4
-    assert trainer.all_metrics["async/dynamic_sampling/candidate_optimization_reward_mean"] == pytest.approx(0.2)
+    assert trainer.all_metrics["async/dynamic_sampling/candidate_optimization_reward_mean"] == pytest.approx(0.325)
     assert trainer.all_metrics["async/dynamic_sampling/candidate_outcome_reward_mean"] == pytest.approx(0.25)
     assert trainer.all_metrics["async/dynamic_sampling/candidate_pass_at_2"] == pytest.approx(0.5)
 
