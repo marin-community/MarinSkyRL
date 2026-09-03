@@ -18,7 +18,6 @@ from loguru import logger
 from skyrl_train.timing_observability import (
     ROLLOUT_ENGINE_AWAIT,
     rollout_span,
-    rollout_trajectory,
     rollout_wait,
     timed_env_call,
     traced_trajectory,
@@ -543,6 +542,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             token_provenance=token_provenance,
         )
 
+    # The scope is the WHOLE batched collect, not the engine await alone: env.init, env.step and
+    # env.close all run out here, so a scope around the engine call would leave
+    # rollout_env_await_seconds_max at its seeded 0.0 beside a non-zero sum and count -- a published
+    # max smaller than its own mean. One batched call is one "trajectory", so max == sum here.
+    @traced_trajectory
     async def collect_batched(
         self,
         prompts: List[ConversationType],
@@ -575,10 +579,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
         # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
-        # One request for the whole batch, so this path has exactly one "trajectory": the count is 1
-        # and the max equals the sum. That is the honest reading -- a batched call has no
-        # per-trajectory tail, which is itself the answer to whether its tail is worth chasing.
-        with rollout_trajectory(), rollout_wait(ROLLOUT_ENGINE_AWAIT):
+        with rollout_wait(ROLLOUT_ENGINE_AWAIT):
             engine_output = await self.model_client.generate(engine_input)
         outputs = engine_output["responses"]
         responses = engine_output["response_ids"]
