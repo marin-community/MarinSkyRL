@@ -24,8 +24,9 @@ TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log
 #
 # ⚠️ Two keys are deliberately ABSENT, because for them neither available op is right.
 #
-# `n_tokens_dp_gt_*pct` are token COUNTS, so a mean reads low by the world size -- 1000 offending
-# tokens on one of 80 ranks publishes 12.5. But a SUM is worse: Strategy.all_reduce reduces over
+# `n_tokens_dp_gt_*pct` are token COUNTS, so a mean reads low by the number of UNIQUE data shards
+# (the world size only when every rank holds distinct data) -- 1000 offending tokens on one of 80
+# data-parallel ranks publishes 12.5. But a SUM is worse: Strategy.all_reduce reduces over
 # WORLD, and under sequence, context, expert or Megatron tensor/pipeline parallelism the replicas
 # hold the SAME tokens, so a sum multiplies the count by the replication factor (16x at CP2xEP8).
 # A correct global count needs a reduction over the data-parallel group alone, which the current
@@ -34,16 +35,12 @@ TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log
 # `log_ratio_abs_p99` stays a mean because a max of per-rank p99 APPROXIMATIONS is not a quantile
 # either. It is monitoring-grade colour rather than a gate.
 MAX_REDUCED_METRIC_KEYS = ("log_ratio_abs_max", "log_ratio_diagnostics_failed")
-SUM_REDUCED_METRIC_KEYS: tuple[str, ...] = ()
 
 # The op to apply per key, for both reduction axes: across ranks (Strategy.all_reduce_status) and
 # across a step's mini-batches (policy_training_metrics). Keeping one map is what stops the two
 # axes disagreeing -- reducing correctly across ranks and then averaging the result back down is
 # the same category error one level lower.
-STATUS_REDUCTION_OPS: dict[str, str] = {
-    **{key: "max" for key in MAX_REDUCED_METRIC_KEYS},
-    **{key: "sum" for key in SUM_REDUCED_METRIC_KEYS},
-}
+STATUS_REDUCTION_OPS: dict[str, str] = {key: "max" for key in MAX_REDUCED_METRIC_KEYS}
 
 
 LOG_RATIO_BASE_METRIC_KEYS = (

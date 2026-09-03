@@ -369,6 +369,7 @@ def test_ppo_train_wires_the_span_layer():
     a publish cost of zero.
     """
 
+    import skyrl_train.workers.worker as worker_module
     from skyrl_train.workers.worker import PolicyWorkerBase
 
     # PolicyWorkerBase, not Worker: CriticWorkerBase has its own ppo_train and is not instrumented.
@@ -384,11 +385,19 @@ def test_ppo_train_wires_the_span_layer():
     # The counter call G3 found untested: it must ride the spans publish, not stand alone, or a
     # dropped counter row is invisible (Rigging swallows emission exceptions).
     assert "counters=_counters if _policy_spans.enabled else None" in source
-    assert "micro_step_count" in source
-    assert "attention_work_ratio" in source
+    # The counters live in their own function so the caller can guard them; assert the names there.
+    counters_source = inspect.getsource(worker_module._policy_span_counters)
+    assert "micro_step_count" in counters_source
+    assert "attention_work_ratio" in counters_source
+    # 🚨 Neither gathering nor publishing may kill a step. Both run AFTER the optimizer step and the
+    # final barrier, and both issue CUDA synchronisations and allocator queries; a raise there
+    # discards work already paid for -- an hour of 80 H100s at E6 geometry -- to lose a telemetry
+    # row. docs/telemetry.md states the contract: export failures do not change training results.
+    assert source.count("except Exception:") >= 2, "the post-step telemetry is not guarded"
+    assert "_publish_cost = 0.0" in source, "a failed publish must still record a cost for the next step"
     # H2's keystone. Three OOMs in this workstream asked for the eager attention score tensor and
     # no memory series existed to see any of them coming. The counters now come from the probe.
-    assert "self._step_memory.counters()" in source
+    assert "_step_memory.counters()" in counters_source
     # Rebased at the TOP, before any forward. Published raw, max_memory_allocated is the peak since
     # the process began, so a step attribute on it is a lie: after whichever step sets the
     # high-water mark, every later step republishes the same number.

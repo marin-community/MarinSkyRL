@@ -324,9 +324,10 @@ def rollout_timings_scope(timings: RolloutTimings | None) -> Iterator[None]:
 def rollout_trajectory() -> Iterator[None]:
     """Scope one trajectory so its waits can be reduced with max, not only summed.
 
-    On the batched path there is one "trajectory" per generate call, so max == sum and the count is
-    1. That is the honest reading: the batched path issues a single engine request for the whole
-    batch, and it has no per-trajectory tail to measure.
+    The batched collector deliberately opens NO scope: it issues one engine request for a whole batch
+    and loops the environment over every row, so a scope there would accumulate the batch into one
+    "trajectory" and publish that sum under a ``_seconds_max`` name. Its tail rows are absent
+    instead, which is the only true thing to say about a path with no trajectories.
     """
     timings = ROLLOUT_TIMINGS.get()
     if timings is None:
