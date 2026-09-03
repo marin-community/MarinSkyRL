@@ -39,6 +39,7 @@ from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagn
 from skyrl_train.telemetry import WORKER_ROLE, process_telemetry
 from skyrl_train.timing_observability import (
     WorkerSpanAccumulator,
+    StepMemoryProbe,
     publish_worker_spans,
     unconfigured_telemetry_reason,
 )
@@ -1014,6 +1015,11 @@ class PolicyWorkerBase(Worker):
             synchronize=bool(_trainer_cfg.get("policy_train_spans_synchronize", True)),
         )
         self._policy_spans = _policy_spans
+        # Rides the same flag. begin_step is the ONLY place the allocator peak is reset: without it
+        # the published peak is a process-lifetime high-water mark wearing a step attribute, and
+        # every step after the one that sets it republishes the same number.
+        self._step_memory = StepMemoryProbe(enabled=_policy_spans.enabled)
+        self._step_memory.begin_step()
         _policy_spans_started = time.perf_counter()
 
         # ── Co-arrival drain before the first training FSDP unshard (80B gs1 SIGABRT #1-6) ──
@@ -1239,27 +1245,9 @@ class PolicyWorkerBase(Worker):
                         ),
                     }
                 )
-            # H2's keystone, and the gap three OOMs went through: every crash in this workstream
-            # asked for the eager attention score tensor (num_heads * L^2 * 4 B ~= 3.4-3.6 GiB) and
-            # we had no memory series to see it coming. These are free -- the allocator already
-            # tracks them -- and peak is what binds micro_train_batch_size_per_gpu to 1.
-            # The allocator peak is deliberately NOT reset here: it is wanted across the whole
-            # step, and clearing it at this point would hide the forward that actually sets it.
-            # (test_ppo_train_wires_the_span_layer asserts the reset call is absent, by source
-            # text -- so do not name it here either, or the guard stops biting.)
-            _mem = torch.cuda.memory_stats()
-            _counters.update(
-                {
-                    "peak_allocated_bytes": float(torch.cuda.max_memory_allocated()),
-                    "peak_reserved_bytes": float(torch.cuda.max_memory_reserved()),
-                    # Fragmentation, not capacity, is what killed step 2 before
-                    # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True. A retry means the allocator
-                    # had the bytes but not a contiguous block; it is the leading indicator of the
-                    # OOM, and it is invisible in a peak-bytes series alone.
-                    "alloc_retries": float(_mem.get("num_alloc_retries", 0)),
-                    "alloc_ooms": float(_mem.get("num_ooms", 0)),
-                }
-            )
+            # Allocator counters, rebased at begin_step so they describe THIS step. See
+            # StepMemoryProbe for why the raw values are a trap.
+            _counters.update(self._step_memory.counters())
 
         _previous_publish = getattr(self, "_policy_span_publish", None)
         self._policy_span_publish = (
