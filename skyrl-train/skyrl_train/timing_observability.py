@@ -606,6 +606,8 @@ POLICY_TRAIN_SPANS = (
 
 
 policy_step_counter = telemetry.histogram("policy_train_count", unit="1")
+# Bytes do not belong on a unit-1 histogram. Same suffix dispatch the driver counters use.
+policy_step_bytes = telemetry.histogram("policy_train_bytes", unit="By")
 
 
 def publish_worker_counters(counters: Mapping[str, float], *, step: int, rank: int) -> None:
@@ -625,7 +627,8 @@ def publish_worker_counters(counters: Mapping[str, float], *, step: int, rank: i
     if not counters:
         return
     for name, value in counters.items():
-        policy_step_counter.record(
+        instrument = policy_step_bytes if name.endswith("_bytes") else policy_step_counter
+        instrument.record(
             float(value),
             attributes={"counter": name, "role": WORKER_ROLE, "rank": str(rank), "step": str(step)},
         )
@@ -723,6 +726,80 @@ class WorkerSpanAccumulator:
             # double-counting an auditable residual is for.
             totals["policy_span_residual"] = total_seconds - covered
         return totals
+
+
+class StepMemoryProbe:
+    """Allocator counters scoped to ONE policy_train call.
+
+    ``torch.cuda.max_memory_allocated`` is documented as "peak allocated memory since the beginning
+    of this program", and ``num_alloc_retries`` / ``num_ooms`` are cumulative for the process.
+    Published per step without a baseline they read as per-step values and are not: after whichever
+    step sets the high-water mark, every later step republishes it unchanged and the series looks
+    flat and healthy while measuring nothing, and summing retries counts old events again. A number
+    that looks valid and is wrong is worse than a missing one.
+
+    :meth:`begin_step` takes the baseline and is the ONLY place the peak is reset. Resetting it
+    later in the step would clear the forward that actually sets it.
+
+    ⚠️ **This does not decompose the peak, and deliberately so.** A per-window probe was built here
+    and removed: it was meant to decide whether resident optimizer state could grow -- an fp32
+    ``exp_avg_sq`` is +2 bytes per parameter per shard -- by checking whether the optimizer window
+    was where the peak occurred. That reasoning is wrong. ``backload_to_gpu`` runs immediately
+    before ``ppo_train`` with ``backload_optimizer=True``, and the offload is after training, so the
+    optimizer state is GPU-resident throughout forward and backward and the peak grows by that
+    amount wherever it falls. The question is plain headroom against the per-step peak below, and it
+    needs no extra instrument.
+    """
+
+    def __init__(self, *, enabled: bool = False) -> None:
+        self.enabled = enabled
+        self._baseline_retries = 0.0
+        self._baseline_ooms = 0.0
+
+    @staticmethod
+    def _cuda():
+        # Local, matching WorkerSpanAccumulator.span in this file: torch is heavy and this module is
+        # imported by the driver, which has no CUDA context.
+        import torch
+
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            return torch.cuda
+        return None
+
+    def begin_step(self) -> None:
+        """Rebase the peak and the cumulative counters. Call once, at the top of the step."""
+        if not self.enabled:
+            return
+        cuda = self._cuda()
+        if cuda is None:
+            return
+        cuda.reset_peak_memory_stats()
+        stats = cuda.memory_stats()
+        self._baseline_retries = float(stats.get("num_alloc_retries", 0))
+        self._baseline_ooms = float(stats.get("num_ooms", 0))
+
+    def counters(self) -> dict[str, float]:
+        """Per-step allocator counters, or nothing if disabled or off-device."""
+        if not self.enabled:
+            return {}
+        cuda = self._cuda()
+        if cuda is None:
+            return {}
+        stats = cuda.memory_stats()
+        return {
+            # Peaks since begin_step, not since process start. H2's keystone and the gap three OOMs
+            # went through: every crash in this workstream asked for the eager attention score
+            # tensor (num_heads * L^2 * 4 B ~= 3.4-3.6 GiB) and we had no memory series to see it
+            # coming. Peak is also what binds micro_train_batch_size_per_gpu to 1.
+            "peak_allocated_bytes": float(cuda.max_memory_allocated()),
+            "peak_reserved_bytes": float(cuda.max_memory_reserved()),
+            # Deltas since begin_step. Fragmentation, not capacity, is what killed step 2 before
+            # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True. A retry means the allocator had the
+            # bytes but not a contiguous block; it is the leading indicator of the OOM, and it is
+            # invisible in a peak-bytes series alone.
+            "alloc_retries": float(stats.get("num_alloc_retries", 0)) - self._baseline_retries,
+            "alloc_ooms": float(stats.get("num_ooms", 0)) - self._baseline_ooms,
+        }
 
 
 class WorkerTimingSink:
