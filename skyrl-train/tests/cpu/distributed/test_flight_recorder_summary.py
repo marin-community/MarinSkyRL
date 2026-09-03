@@ -91,15 +91,66 @@ def test_step_boundary_publishes_once_per_global_step_and_advances_the_cursor(mo
     assert second["first_record_id"] == 3
 
 
-def test_step_boundary_publishes_nothing_when_the_recorder_holds_no_collectives(monkeypatch):
+def test_step_boundary_publishes_no_COUNTERS_when_the_recorder_holds_no_collectives(monkeypatch):
+    """A process with no communicator must not publish a summary of nothing every step.
+
+    ⚠️ This deliberately asserts on COUNTERS, not on log silence. The previous version asserted
+    `messages == []`, which is an absence assertion -- it rewarded the instrument for saying
+    nothing, and saying nothing for four steps and a full cluster run is exactly how the wrong
+    recorder went unnoticed. An empty read must now be LOUD (a one-time warning) and still publish
+    no rows.
+    """
     monkeypatch.setattr(flight_recorder_summary, "_dump_trace", lambda: {"entries": []})
-    messages: list[str] = []
-    monkeypatch.setattr(flight_recorder_summary.logger, "info", messages.append)
+    published: list = []
+    monkeypatch.setattr(flight_recorder_summary, "publish", lambda *a, **k: published.append(a))
 
     flight_recorder_summary.capture_at_step_boundary(0, 0)
     flight_recorder_summary.capture_at_step_boundary(0, 1)
 
-    assert messages == []
+    assert published == []
+
+
+def test_the_NCCL_recorder_is_preferred_over_the_generic_one(monkeypatch):
+    """The O5 regression gate. Proven on an H100: after 8 NCCL all_reduces
+    `_dump_nccl_trace_json` held 8 entries and `_dump_fr_trace_json` held 0. Reading the generic
+    recorder therefore yields nothing on GPU, silently, forever.
+
+    This asserts on the published COUNT, so reversing the preference fails on a number rather than
+    on an absence. It runs on CPU: the two dump symbols are stubbed, which is the only way to test
+    the choice at all, since the NCCL symbol does not exist on a CPU wheel.
+    """
+    import json as _json
+
+    entry = {
+        "record_id": 1,
+        "process_group": ("0", "default_pg"),
+        "profiling_name": "nccl:all_reduce",
+        "input_sizes": [[4]],
+        "input_dtypes": ["Float"],
+        "state": "completed",
+    }
+    nccl_payload = _json.dumps({"entries": [dict(entry, record_id=i) for i in range(1, 4)]})
+    generic_payload = _json.dumps({"pg_config": {}})  # torch OMITS "entries" when empty
+
+    class _Stub:
+        _dump_nccl_trace_json = staticmethod(lambda *a: nccl_payload)
+        _dump_fr_trace_json = staticmethod(lambda *a: generic_payload)
+
+    monkeypatch.setattr(flight_recorder_summary.torch._C, "_distributed_c10d", _Stub)
+    monkeypatch.setattr(flight_recorder_summary, "_dump_binding", None)
+    monkeypatch.setattr(flight_recorder_summary, "_dump_logged", False)
+    monkeypatch.setattr(flight_recorder_summary, "_state", type(flight_recorder_summary._state)())
+
+    published: list = []
+    monkeypatch.setattr(flight_recorder_summary, "publish",
+                        lambda delta, rank: published.append(delta))
+
+    flight_recorder_summary.capture_at_step_boundary(0, 1)
+    flight_recorder_summary.capture_at_step_boundary(0, 2)
+
+    assert published, "nothing was published -- the generic (empty) recorder was read"
+    total = sum(t.count for d in published for t in d.totals.values())
+    assert total == 3, f"expected the 3 NCCL entries, got {total}"
 
 
 def test_training_step_region_captures_the_recorder_and_inference_region_does_not(monkeypatch):
