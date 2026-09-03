@@ -50,8 +50,10 @@ else is exclusive. Rows carry `phase`, `root`, `parent`, `clock_domain`, `role=w
 
 ### `generate`, measured on the driver's event loop
 
-Enabled by `trainer.generate_spans` (default on: measured at ~21 ms against a ~98 s phase, and
-there is no CUDA synchronise to pay for).
+Enabled by `trainer.generate_spans`, default on. The tree adds no CUDA synchronise, and a
+microbenchmark of the context managers alone costs ~21 ms against a ~98 s phase. That is a bound on
+the bookkeeping, **not a measured end-to-end overhead**: no matched spans-on/spans-off pair has been
+run at the same SHA, and a single run cannot measure its own overhead.
 
 | span | contains | subtracted from the residual |
 |---|---|---|
