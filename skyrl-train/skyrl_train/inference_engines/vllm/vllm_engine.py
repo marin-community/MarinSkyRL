@@ -62,6 +62,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
 from skyrl_train.models.grug_moe import is_grug_router_bias
@@ -946,13 +947,6 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
 
-        # Set NUMA affinity for TP>1 workers via collective_rpc
-        if self._tp_size > 1 or self._pp_size > 1:
-            try:
-                self.llm.collective_rpc("set_numa_affinity")
-            except Exception:
-                pass
-
         # Weight loader is created by subclass after engine initialization
         self._weight_loader = None
 
@@ -1090,6 +1084,10 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         openai_kwargs = pop_openai_kwargs(kwargs)
         self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
         return vllm.LLM(*args, **kwargs)
+
+    async def initialize_worker_numa_affinity(self):
+        """Apply affinity on every synchronous vLLM worker."""
+        return await set_sync_worker_numa_affinity(self.llm.collective_rpc)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
@@ -1503,6 +1501,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             return logger_instance
 
         return factory
+
+    async def initialize_worker_numa_affinity(self):
+        """Apply affinity on every asynchronous vLLM worker."""
+        return await set_async_worker_numa_affinity(self.llm.collective_rpc)
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
