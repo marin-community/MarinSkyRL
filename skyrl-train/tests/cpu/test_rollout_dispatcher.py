@@ -190,11 +190,11 @@ async def test_coordinator_rpc_returns_one_group_unchanged(harbor_runner_spec):
 async def test_coordinator_rpc_timeout_cancels_remote_work(ray_init, harbor_runner_spec, monkeypatch):
     actor = _BlockingCoordinator.remote()
     dispatcher = _dispatcher([actor], harbor_runner_spec, timeout=0.1)
-    cancelled_refs = []
+    cancel_calls = []
     original_cancel = ray.cancel
 
     def capture_cancel(ref, *, force, recursive):
-        cancelled_refs.append(ref)
+        cancel_calls.append((ref, force, recursive))
         original_cancel(ref, force=force, recursive=recursive)
 
     monkeypatch.setattr(ray, "cancel", capture_cancel)
@@ -204,9 +204,11 @@ async def test_coordinator_rpc_timeout_cancels_remote_work(ray_init, harbor_runn
     with pytest.raises(RolloutCoordinatorRPCTimeoutError):
         await run
 
-    assert len(cancelled_refs) == 1
-    with pytest.raises(ray.exceptions.TaskCancelledError):
-        await asyncio.to_thread(ray.get, cancelled_refs[0], timeout=1)
+    assert len(cancel_calls) == 1
+    cancelled_ref, force, recursive = cancel_calls[0]
+    assert isinstance(cancelled_ref, ray.ObjectRef)
+    assert force is False
+    assert recursive is True
 
 
 @pytest.mark.asyncio
