@@ -30,7 +30,7 @@ RETAINED_RUNNER_NAME = "HarborTrajectoryRunner"
 
 
 class RolloutCoordinatorRPCTimeoutError(TimeoutError):
-    """The rollout coordinator did not return before its RPC watchdog expired."""
+    """The rollout coordinator made no group progress before its RPC watchdog expired."""
 
 
 def _log():
@@ -249,6 +249,12 @@ class RolloutDispatcher:
         self._trajectory_sink: Optional[TrajectorySink] = None
 
         self._actors: List = []
+        # Ray async actors admit every group RPC concurrently. Harbor then applies
+        # its per-coordinator trial semaphore, so a group's wall time can include
+        # useful queueing behind other groups. Track completions across each actor
+        # and reserve the watchdog for a coordinator that makes no group progress.
+        self._actor_pending_rpcs = [0 for _ in range(self._num_coordinators)]
+        self._actor_last_progress: list[float | None] = [None for _ in range(self._num_coordinators)]
         self._rr = itertools.cycle(range(self._num_coordinators))
         self._pg = None
         # When an eval session is active, run() is pinned to shard 0 (the
@@ -390,27 +396,45 @@ class RolloutDispatcher:
             coordinator_index = next(self._rr)
             actor = self._actors[coordinator_index]
         global_step = self._current_global_step()
-        rpc = actor.run_shard.remote(input_batch, global_step)
-        rpc_deadline = asyncio.timeout(self._coordinator_rpc_timeout)
+        loop = asyncio.get_running_loop()
+        if self._actor_pending_rpcs[coordinator_index] == 0:
+            self._actor_last_progress[coordinator_index] = loop.time()
+        self._actor_pending_rpcs[coordinator_index] += 1
         try:
-            async with rpc_deadline:
-                output = await asyncio.shield(rpc)
-        except TimeoutError as error:
-            if not rpc_deadline.expired():
-                raise
-            # The watchdog has declared this result unusable. Cancel the async
-            # actor task as well as the local wait so Harbor can unwind its
-            # trials and provider resources instead of poisoning the
-            # coordinator with detached work.
-            try:
-                ray.cancel(rpc, force=False, recursive=True)
-            except Exception:
-                _log().exception(f"[RolloutDispatcher] failed to cancel timed-out coordinator {coordinator_index} RPC")
-            raise RolloutCoordinatorRPCTimeoutError(
-                f"Rollout coordinator {coordinator_index} RPC did not return within "
-                f"{self._coordinator_rpc_timeout:g} seconds"
-            ) from error
-        return output
+            rpc = actor.run_shard.remote(input_batch, global_step)
+            rpc_future = asyncio.ensure_future(rpc)
+            while True:
+                observed_progress = self._actor_last_progress[coordinator_index]
+                assert observed_progress is not None
+                rpc_deadline = asyncio.timeout_at(observed_progress + self._coordinator_rpc_timeout)
+                try:
+                    async with rpc_deadline:
+                        output = await asyncio.shield(rpc_future)
+                except TimeoutError as error:
+                    if not rpc_deadline.expired():
+                        raise
+                    if self._actor_last_progress[coordinator_index] != observed_progress:
+                        continue
+                    # The watchdog has declared this result unusable. Cancel the async
+                    # actor task as well as the local wait so Harbor can unwind its
+                    # trials and provider resources instead of poisoning the
+                    # coordinator with detached work.
+                    try:
+                        ray.cancel(rpc, force=False, recursive=True)
+                    except Exception:
+                        _log().exception(
+                            f"[RolloutDispatcher] failed to cancel timed-out coordinator {coordinator_index} RPC"
+                        )
+                    raise RolloutCoordinatorRPCTimeoutError(
+                        f"Rollout coordinator {coordinator_index} made no group progress for "
+                        f"{self._coordinator_rpc_timeout:g} seconds"
+                    ) from error
+                self._actor_last_progress[coordinator_index] = loop.time()
+                return output
+        finally:
+            self._actor_pending_rpcs[coordinator_index] -= 1
+            if self._actor_pending_rpcs[coordinator_index] == 0:
+                self._actor_last_progress[coordinator_index] = None
 
     @staticmethod
     def _select_request_rows(input_batch: TrajectoryRequestBatch, indices: list[int]) -> TrajectoryRequestBatch:

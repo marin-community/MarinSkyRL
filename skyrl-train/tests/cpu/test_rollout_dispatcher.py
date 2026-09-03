@@ -187,6 +187,27 @@ async def test_coordinator_rpc_returns_one_group_unchanged(harbor_runner_spec):
 
 
 @pytest.mark.asyncio
+async def test_coordinator_rpc_timeout_resets_on_same_actor_progress(harbor_runner_spec):
+    class _TimedRemoteMethod:
+        def remote(self, input_batch, _global_step):
+            result = asyncio.get_running_loop().create_future()
+            instance_id = input_batch["trajectory_ids"][0].instance_id
+            delay = 0.4 if instance_id == "b" else 0.7
+            asyncio.get_running_loop().call_later(delay, result.set_result, _output(input_batch["trajectory_ids"]))
+            return result
+
+    class _TimedCoordinator:
+        run_shard = _TimedRemoteMethod()
+
+    ids = [TrajectoryID("a", 0), TrajectoryID("b", 0)]
+    dispatcher = _dispatcher([_TimedCoordinator()], harbor_runner_spec, timeout=0.5)
+
+    result = await dispatcher.run(_request(ids))
+
+    assert result["trajectory_ids"] == ids
+
+
+@pytest.mark.asyncio
 async def test_coordinator_rpc_timeout_cancels_remote_work(ray_init, harbor_runner_spec, monkeypatch):
     actor = _BlockingCoordinator.remote()
     dispatcher = _dispatcher([actor], harbor_runner_spec, timeout=0.1)
