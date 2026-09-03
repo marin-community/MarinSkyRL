@@ -88,8 +88,13 @@ it is handed in.
 `_count` counts timed *calls*, of which one trajectory makes several, so `sum / _count` is a mean
 **per call**. `_seconds_max` is a max **per trajectory**. Use `sum / rollout_trajectory_count` for a
 per-trajectory mean, which is the number the tail is comparable to. A trajectory that closed without
-ever waiting contributes a real `0.0` to the max and a `1` to the count, so the population is
-complete.
+ever waiting contributes a real `0.0` to the max and a `1` to **`rollout_trajectory_count`** — not to
+the await `_count`s, which only a timed call increments. So the *trajectory* population is complete
+while the await counts are over calls that actually waited.
+
+🚨 **`rollout_trajectory_count` is ABSENT on the batched path**, where no trajectory scope closes. It
+is a denominator, so a seeded `0.0` there would make every per-trajectory mean a division by zero;
+absent, you can tell the mean is not derivable. Check for the row before dividing.
 
 The three environment terms partition the caller-observed wait exactly. They are separate because
 one bracket around the executor submission measures *queueing*, which on W pool threads serving N
@@ -106,7 +111,7 @@ from a fast one with three stragglers.
 |---|---|---|---|
 | `SkyRLGymTrajectoryRunner`, agent-loop | ✅ | ✅ | ✅ |
 | `SkyRLGymTrajectoryRunner`, step-wise | ✅ | ✅ | ✅ |
-| `SkyRLGymTrajectoryRunner`, **batched** | ✅ | ✅ | ❌ **absent** — one request serves a whole batch, so there is no per-trajectory tail to report |
+| `SkyRLGymTrajectoryRunner`, **batched** | ✅ | ✅ | ❌ **absent** — one request serves a whole batch, so there is no per-trajectory tail to report, and `rollout_trajectory_count` is absent with them |
 | `HarborTrajectoryRunner`, `RolloutDispatcher` | ❌ **absent** | ❌ | ❌ |
 | `MiniSweTrajectoryRunner` | ❌ **absent** | ❌ | ❌ |
 | `FullyAsyncRayPPOTrainer` | ❌ **absent** | ❌ | ❌ — it keeps hundreds of overlapping `run()` calls in flight, and summing overlapping walls into one dict decomposes nothing |
