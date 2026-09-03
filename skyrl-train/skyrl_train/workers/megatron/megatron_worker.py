@@ -6,6 +6,7 @@ from transformers import AutoTokenizer, AutoConfig
 from huggingface_hub import snapshot_download
 
 import asyncio
+import importlib.util
 import os
 from enum import StrEnum
 from typing import List, Dict, Any, Optional
@@ -30,7 +31,8 @@ from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
 from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
-from skyrl_train.models.grug_moe import validate_grug_training_strategy
+import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
+from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, is_grug_router_bias, validate_grug_training_strategy
 from skyrl_train.training_batch import (
     GLOBAL_LOSS_DENOM_METADATA_KEY,
     TrainingBatchIterator,
@@ -46,6 +48,8 @@ from skyrl_train.workers.worker import (
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper, MegatronPolicyMicroBatch
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode, weight_sync_dtype
+from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 
 
 class _MegatronInitMode(StrEnum):
@@ -61,6 +65,7 @@ class MegatronWeightExtractor(WeightExtractor):
     Args:
         bridge: Megatron AutoBridge instance for weight conversion
         actor_module: The actor module to extract weights from
+        model_type: HF ``model_type`` of the policy; selects per-tensor wire dtypes (Grug's router bias stays fp32)
         enable_bucketing: If True, group parameters into size-based buckets for packing
         bucket_size_threshold_GB: Size threshold in GB for bucketing (only used if enable_bucketing=True)
         training_dtype: Training dtype for size calculation (only used if enable_bucketing=True)
@@ -70,12 +75,14 @@ class MegatronWeightExtractor(WeightExtractor):
         self,
         bridge,
         actor_module,
+        model_type: str,
         enable_bucketing: bool = False,
         bucket_size_threshold_GB: float = 1.0,
         training_dtype: torch.dtype = torch.bfloat16,
     ):
         self.bridge = bridge
         self.actor_module = actor_module
+        self.model_type = model_type
         self.enable_bucketing = enable_bucketing
         self.bucket_size_threshold_GB = bucket_size_threshold_GB
         self.training_dtype = training_dtype
@@ -122,15 +129,32 @@ class MegatronWeightExtractor(WeightExtractor):
                 )
             )
 
-        # Group parameters into buckets based on size threshold
+        # Group parameters into buckets based on size threshold. Each bucket is packed into one
+        # buffer of a single dtype, so tensors with a non-default wire dtype get their own bucket.
         self.param_buckets = [[]]
         curr_size = 0
         for task, size in param_info:
-            if curr_size + size > self.bucket_size_threshold_GB * 1024**3:
+            separate = self._has_special_wire_dtype(task)
+            if separate or curr_size + size > self.bucket_size_threshold_GB * 1024**3:
                 self.param_buckets.append([])
                 curr_size = 0
             self.param_buckets[-1].append(task)
             curr_size += size
+            if separate:
+                self.param_buckets.append([])
+                curr_size = 0
+        self.param_buckets = [bucket for bucket in self.param_buckets if bucket]
+
+    def _has_special_wire_dtype(self, task) -> bool:
+        hf_names = task.mapping.hf_param
+        if isinstance(hf_names, dict):
+            hf_names = hf_names.values()
+        else:
+            hf_names = [hf_names]
+        return any(is_grug_router_bias(self.model_type, name) for name in hf_names)
+
+    def _wire_tensor(self, name: str, tensor: torch.Tensor, dtype: torch.dtype, device) -> torch.Tensor:
+        return tensor.to(device=device, dtype=weight_sync_dtype(self.model_type, name, dtype), non_blocking=True)
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from Megatron model.
@@ -152,12 +176,11 @@ class MegatronWeightExtractor(WeightExtractor):
             )
 
             for name, tensor in hf_params_generator:
-                # Move to device and convert dtype
-                tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+                tensor = self._wire_tensor(name, tensor, dtype, device)
 
                 yield WeightChunk(
                     names=[name],
-                    dtypes=[str(dtype)],
+                    dtypes=[str(tensor.dtype)],
                     shapes=[list(tensor.shape)],
                     tensors=[tensor],
                 )
@@ -177,11 +200,10 @@ class MegatronWeightExtractor(WeightExtractor):
                 tensors = []
 
                 for name, tensor in hf_params_generator:
-                    # Move to device and convert dtype
-                    tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+                    tensor = self._wire_tensor(name, tensor, dtype, device)
 
                     names.append(name)
-                    dtypes_list.append(str(dtype))
+                    dtypes_list.append(str(tensor.dtype))
                     shapes.append(list(tensor.shape))
                     tensors.append(tensor)
 
@@ -235,6 +257,9 @@ class MegatronWorker:
         provider.variable_seq_lengths = True
         provider.masked_softmax_fusion = True
         provider.moe_token_dispatcher_type = "alltoall"
+        # Megatron-Bridge enables wgrad fusion whenever Transformer Engine is present, but the
+        # non-TE output layer still needs APEX's fused_weight_gradient_mlp_cuda extension.
+        provider.gradient_accumulation_fusion = importlib.util.find_spec("fused_weight_gradient_mlp_cuda") is not None
 
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
@@ -305,11 +330,86 @@ class MegatronWorker:
                 micro_batch_size=mbs,
                 temperature=self.cfg.generator.sampling_params.temperature,
             )
+        if self.cfg.trainer.policy.megatron_config.check_train_eval_parity:
+            self._log_forward_fingerprint("forward", micro_dicts)
+            with torch.no_grad():
+                repeated = self.model.forward(
+                    micro_batches=micro_dicts,
+                    seq_len=seq_len,
+                    micro_batch_size=mbs,
+                    temperature=self.cfg.generator.sampling_params.temperature,
+                )
+            if mpu.is_pipeline_last_stage(ignore_virtual=True):
+                diff = (repeated.float() - log_probs.float()).abs()
+                logger.info(
+                    f"parity probe forward() repeat dp_rank={mpu.get_data_parallel_rank()}: mean abs "
+                    f"{diff.mean().item():.6f}, max abs {diff.max().item():.6f}"
+                )
 
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch({"output": log_probs})
         output.metadata = data.metadata
         return output
+
+    def _log_forward_fingerprint(self, call: str, micro_dicts: List[dict]) -> None:
+        """Log checksums of this rank's inputs and parameters so two calls can be compared."""
+        token_sum = sum(int(micro["sequences"].long().sum().item()) for micro in micro_dicts)
+        mask_sum = sum(int(micro["attention_mask"].long().sum().item()) for micro in micro_dicts)
+        position_sum = sum(int(micro["position_ids"].long().sum().item()) for micro in micro_dicts)
+        shapes = [tuple(micro["sequences"].shape) for micro in micro_dicts[:3]]
+        with torch.no_grad():
+            param_sum = 0.0
+            param_count = 0
+            for chunk in self.actor_module:
+                for param in chunk.parameters():
+                    param_sum += param.double().sum().item()
+                    param_count += param.numel()
+        logger.info(
+            f"parity probe {call} fingerprint rank={torch.distributed.get_rank()} "
+            f"dp_rank={mpu.get_data_parallel_rank()} pp_rank={mpu.get_pipeline_model_parallel_rank()} "
+            f"micros={len(micro_dicts)} shapes={shapes} tokens={token_sum} mask={mask_sum} "
+            f"positions={position_sum} num_actions={micro_dicts[0]['num_actions']} "
+            f"params={param_count} param_sum={param_sum:.6f}"
+        )
+
+    def _log_train_eval_parity_probe(self, micro_buffer: List[MegatronPolicyMicroBatch]) -> None:
+        """Re-run forward-only passes on the training micro-batches and compare them with the old log-probs.
+
+        The eval-mode pass measures whether the log-prob forward is repeatable at all; the
+        train-mode pass isolates module train/eval behaviour from the backward pass. The
+        training metrics then report the remaining forward-backward drift.
+        """
+        micro_dicts = [
+            {
+                "sequences": micro.sequences,
+                "attention_mask": micro.attention_mask,
+                "position_ids": micro.position_ids,
+                "num_actions": micro.num_actions,
+            }
+            for micro in micro_buffer
+        ]
+        self._log_forward_fingerprint("ppo_train", micro_dicts)
+        seq_len = micro_buffer[0].sequences.shape[1]
+        micro_bsz = micro_buffer[0].sequences.shape[0]
+        old = torch.cat([micro.old_action_log_probs for micro in micro_buffer]).float()
+        mask = torch.cat([micro.loss_mask for micro in micro_buffer]).bool()
+        for mode in ("eval", "train"):
+            self.model.eval() if mode == "eval" else self.model.train()
+            with torch.no_grad():
+                repeated = self.model.forward(
+                    micro_batches=micro_dicts,
+                    seq_len=seq_len,
+                    micro_batch_size=micro_bsz,
+                    temperature=self.cfg.generator.sampling_params.temperature,
+                )
+            if not mpu.is_pipeline_last_stage(ignore_virtual=True):
+                continue
+            diff = (repeated.float() - old.to(repeated.device)).abs()[mask.to(repeated.device)]
+            logger.info(
+                f"train/eval parity probe dp_rank={mpu.get_data_parallel_rank()} {mode}-mode forward vs old "
+                f"log-probs: mean abs {diff.mean().item():.6f}, max abs {diff.max().item():.6f}, "
+                f"exact fraction {(diff == 0).float().mean().item():.4f}"
+            )
 
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
@@ -460,9 +560,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
         # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
         # transfer strategy, we can enable it for other strategies as well.
+        model_type = self.strategy.hf_config.model_type
+        validate_weight_sync_mode(model_type, fuse_weights=bool(self.cfg.generator.fuse_weights))
         self.weight_extractor = MegatronWeightExtractor(
             bridge=self.bridge,
             actor_module=self.actor_module,
+            model_type=model_type,
             enable_bucketing=self.use_cuda_ipc,
             bucket_size_threshold_GB=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32,
@@ -533,6 +636,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 )
 
                 if len(micro_buffer) == micro_batches_per_mini_batch:
+                    if self.cfg.trainer.policy.megatron_config.check_train_eval_parity:
+                        self._log_train_eval_parity_probe(micro_buffer)
                     # run mini-batch forward-backward and then one optimizer step
                     self.model.train()
                     for chunk in self.actor_module:
@@ -642,7 +747,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         inference_engine_client.update_named_weights(
                             {
                                 "names": [name],
-                                "dtypes": [self.cfg.generator.model_dtype],
+                                "dtypes": [chunk.dtypes[0]],
                                 "shapes": [list(tensor.shape)],
                             }
                         )
@@ -674,21 +779,23 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 # Each chunk contains all parameters in one bucket
                 # Calculate total size for packing (in number of elements)
                 total_numel = sum(t.numel() for t in chunk.tensors)
+                chunk_dtypes = {t.dtype for t in chunk.tensors}
+                assert len(chunk_dtypes) == 1, f"packed weight chunk mixes dtypes: {chunk_dtypes}"
                 packed_tensor = torch.empty(
                     total_numel,
                     device=device,
-                    dtype=generator_dtype,
+                    dtype=chunk_dtypes.pop(),
                     requires_grad=False,
                 )
 
                 offset = 0
                 # Copy tensors into consolidated buffers
-                for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
+                for name, tensor, shape, dtype_name in zip(chunk.names, chunk.tensors, chunk.shapes, chunk.dtypes):
                     size = tensor.numel()
                     packed_tensor[offset : offset + size].copy_(tensor.detach().view(-1))
                     offset += size
                     weights_update_request["names"].append(name)
-                    weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
+                    weights_update_request["dtypes"].append(dtype_name)
                     weights_update_request["shapes"].append(shape)
                     weights_update_request["sizes"].append(size)
 
@@ -718,6 +825,29 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             await cache_reset_task
         torch.cuda.empty_cache()
         torch.distributed.barrier()
+
+    def grug_validation_snapshot(self, names=()):
+        """Return the calling rank and requested Grug weights in HF layout, gathered on rank 0.
+
+        Every rank must call this with the same names because the bridge export
+        is collective. The weights mapping is empty on nonzero ranks.
+        """
+        if self.strategy.hf_config.model_type != GRUG_MOE_MODEL_TYPE:
+            raise ValueError("grug_validation_snapshot is only valid for Grug models")
+        wanted = set(names)
+        is_rank0 = torch.distributed.get_rank() == 0
+        weights = {}
+        for name, tensor in self.bridge.export_hf_weights(self.actor_module, show_progress=False):
+            if is_rank0 and name in wanted:
+                weights[name] = tensor.detach().to("cpu", dtype=torch.float32).contiguous()
+        missing = wanted.difference(weights) if is_rank0 else set()
+        if missing:
+            raise KeyError(f"missing Grug state entries: {sorted(missing)}")
+        return GrugValidationSnapshot(
+            rank=torch.distributed.get_rank(),
+            attention_backend=str(self.provider.attention_backend),
+            weights=weights,
+        )
 
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""

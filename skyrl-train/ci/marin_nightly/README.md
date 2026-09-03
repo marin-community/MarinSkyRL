@@ -1,18 +1,22 @@
 # Nightly end-to-end gates
 
-The nightly runs dense Qwen GRPO on one H100 and a tiny Grug RL cycle on four GB200s
-from the frozen root environment. The H100 run is scored against a checked-in spec;
-the GB200 run proves the locked Marin vLLM wheel can load Grug, generate rollouts,
-train the eager FSDP2 policy, synchronize mixed-dtype weights, and generate again.
+The nightly runs dense Qwen GRPO on one H100, a tiny Grug RL cycle on four GB200s,
+and the Grug Megatron gates on four H100s, all from the frozen root environment. The
+GSM8K run is scored against a checked-in spec; the GB200 run proves the locked Marin
+vLLM wheel can load Grug, generate rollouts, train the eager FSDP2 policy, synchronize
+mixed-dtype weights, and generate again; the Megatron run checks that the Megatron
+port of Grug matches the HF reference, keeps the training forward bit-identical to
+the recomputed old log-probs, and completes a rollout/train/broadcast/rollout cycle.
 These are integration gates, not model-quality experiments.
 
 | file | role |
 | --- | --- |
 | `run_h100.sh` | sync the frozen root environment, slice GSM8K, train, and gate on H100 |
 | `run_grug_vllm.sh` | run a tiny Grug rollout/train/broadcast/rollout cycle on four GB200s |
+| `run_grug_megatron.sh` | run the Grug Megatron parity, training, and serving gates on four H100s |
 | `gate.py` | reads a run's log and decides whether it was healthy (`python -m ci.marin_nightly.gate`) |
 | `specs/gsm8k-qwen3-0.6b.json` | the thresholds, with provenance for why each one is what it is |
-| `../../../.github/workflows/marin-nightly.yaml` | provisions both GPU gates through Iris and tears them down |
+| `../../../.github/workflows/marin-nightly.yaml` | provisions the GPU gates through Iris and tears them down |
 
 ## How the gate sees the run
 
@@ -52,6 +56,9 @@ The GB200 lane additionally imports `vllm._C` and the cuMem allocator, verifies 
 Grug model registry entry, then runs a real rollout, eager FSDP2 policy update,
 mixed-dtype weight broadcast, and second rollout. The eager policy path keeps this
 gate independent of the optional compiled FlashAttention package.
+
+The Megatron lane runs `tests/gpu/test_grug_megatron.py` with the Megatron runtime
+closure; see `docs/grug-megatron-training.md` for what each test guards.
 
 To exercise the whole path — provision, train, gate, tear down — trigger the workflow:
 

@@ -3,6 +3,7 @@ import collections
 
 import pytest
 import torch
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 from skyrl_train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
@@ -12,7 +13,7 @@ from skyrl_train.fully_async_trainer import (
     _AsyncStalenessManager,
     _GenerationQueues,
 )
-from skyrl_train.dynamic_sampling import GroupSelectionPolicy, resolve_dynamic_sampling_criteria
+from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, resolve_dynamic_sampling_criteria
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
@@ -23,7 +24,7 @@ def _generated_group(
     earliest_model_step: int,
     *,
     fully_masked: bool = False,
-    rewards: list[float] | None = None,
+    rewards: list[float] | list[list[float]] | None = None,
     unshaped_rewards: list[float] | None = None,
 ) -> GeneratedOutputGroup:
     rewards = rewards or [0.0, 1.0]
@@ -89,6 +90,7 @@ def _batch_assembly_state(
         max_staleness_steps=2,
         rollout_logprobs_required=False,
     )
+    trainer.data_tracker = DataConsumptionTracker(mini_batch_size=mini_batch_size, num_steps_per_epoch=1)
     queues = _GenerationQueues(
         completed=asyncio.Queue(),
         retries=asyncio.Queue(),
@@ -113,6 +115,58 @@ class _DatasetRows:
 
     def load_state_dict(self, state):
         assert state == {}
+
+
+@pytest.mark.asyncio
+async def test_dapo_dataloader_resamples_discarded_prompts_after_finite_source_exhaustion():
+    tracker = DataConsumptionTracker(mini_batch_size=2, num_steps_per_epoch=1)
+    await tracker.mark_consumed(["accepted-1", "accepted-2"])
+    source = StatefulDataLoader(
+        [{"uid": "accepted-1"}, {"uid": "accepted-2"}, {"uid": "discarded"}],
+        batch_size=1,
+        shuffle=False,
+        collate_fn=lambda rows: rows,
+    )
+    dataloader = _AsyncDataloader(
+        source,
+        mini_batch_size=2,
+        data_tracker=tracker,
+        dynamic_sampling_type=DynamicSamplingType.FILTER,
+    )
+
+    first = await dataloader.get_next_non_consumed_data()
+    replacement = await dataloader.get_next_non_consumed_data()
+
+    assert first[0]["uid"] == "discarded"
+    assert replacement[0]["uid"] == "discarded"
+
+
+@pytest.mark.asyncio
+async def test_dapo_dataloader_stops_when_every_source_uid_was_consumed():
+    tracker = DataConsumptionTracker(mini_batch_size=1, num_steps_per_epoch=1)
+    await tracker.mark_consumed(["consumed"])
+    dataloader = _AsyncDataloader(
+        _DatasetRows(["consumed"]),
+        mini_batch_size=1,
+        data_tracker=tracker,
+        dynamic_sampling_type=DynamicSamplingType.FILTER,
+    )
+
+    assert await dataloader.get_next_non_consumed_data() is None
+
+
+@pytest.mark.asyncio
+async def test_async_dataloader_without_dapo_stops_after_finite_source_exhaustion():
+    tracker = DataConsumptionTracker(mini_batch_size=1, num_steps_per_epoch=1)
+    dataloader = _AsyncDataloader(
+        _DatasetRows(["only"]),
+        mini_batch_size=1,
+        data_tracker=tracker,
+        dynamic_sampling_type=None,
+    )
+
+    assert (await dataloader.get_next_non_consumed_data())[0]["uid"] == "only"
+    assert await dataloader.get_next_non_consumed_data() is None
 
 
 @pytest.mark.asyncio
@@ -205,7 +259,7 @@ async def test_batch_assembly_discards_insufficient_reward_spread_and_waits_for_
         _generated_group(
             "uniform",
             earliest_model_step=10,
-            rewards=[0.0, -0.1],
+            rewards=[-0.1, -0.1],
             unshaped_rewards=[0.0, 0.0],
         )
     )
@@ -216,13 +270,23 @@ async def test_batch_assembly_discards_insufficient_reward_spread_and_waits_for_
     assert queues.retries.empty()
 
     async with queues.condition:
-        queues.completed.put_nowait(_generated_group("fresh", earliest_model_step=10))
+        queues.completed.put_nowait(
+            _generated_group(
+                "fresh",
+                earliest_model_step=10,
+                rewards=[[0.2, 0.3], [0.0, 1.0]],
+            )
+        )
         queues.condition.notify_all()
     batch = await asyncio.wait_for(pending_batch, timeout=1)
 
     assert [group.uid for group in batch] == ["fresh"]
     assert trainer.all_metrics["async/dynamic_sampling/discarded_count"] == 1
     assert trainer.all_metrics["async/dynamic_sampling/candidate_count"] == 2
+    assert trainer.all_metrics["async/dynamic_sampling/candidate_trajectory_count"] == 4
+    assert trainer.all_metrics["async/dynamic_sampling/candidate_optimization_reward_mean"] == pytest.approx(0.325)
+    assert trainer.all_metrics["async/dynamic_sampling/candidate_outcome_reward_mean"] == pytest.approx(0.25)
+    assert trainer.all_metrics["async/dynamic_sampling/candidate_pass_at_2"] == pytest.approx(0.5)
 
 
 @pytest.mark.asyncio
@@ -252,7 +316,7 @@ async def test_batch_assembly_fails_when_dynamic_sampling_exhausts_candidate_bud
     trainer, queues = _batch_assembly_state(
         mini_batch_size=2,
         accepted=2,
-        dynamic_sampling_type="filter",
+        dynamic_sampling_type=DynamicSamplingType.FILTER,
         informative_on="unshaped",
         max_sample_batches=1,
     )
@@ -261,6 +325,44 @@ async def test_batch_assembly_fails_when_dynamic_sampling_exhausts_candidate_bud
 
     with pytest.raises(RuntimeError, match="dynamic sampling limit"):
         await trainer._get_admitted_generation_group_mini_batch(queues)
+
+
+@pytest.mark.asyncio
+async def test_dapo_replacement_sampling_remains_bounded_by_candidate_budget():
+    tracker = DataConsumptionTracker(mini_batch_size=1, num_steps_per_epoch=1)
+    await tracker.mark_consumed(["trained"])
+    dataloader = _AsyncDataloader(
+        _DatasetRows(["trained", "discarded"]),
+        mini_batch_size=1,
+        data_tracker=tracker,
+        dynamic_sampling_type=DynamicSamplingType.FILTER,
+    )
+    trainer, queues = _batch_assembly_state(
+        mini_batch_size=1,
+        accepted=2,
+        dynamic_sampling_type="filter",
+        informative_on="unshaped",
+        max_sample_batches=2,
+    )
+
+    first_prompts = await dataloader.get_next_non_consumed_data()
+    queues.completed.put_nowait(
+        _generated_group(first_prompts[0]["uid"], earliest_model_step=10, unshaped_rewards=[0.0, 0.0])
+    )
+    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    done, _ = await asyncio.wait({pending_batch}, timeout=0)
+    assert pending_batch not in done
+
+    replacement_prompts = await dataloader.get_next_non_consumed_data()
+    assert replacement_prompts[0]["uid"] == first_prompts[0]["uid"]
+    async with queues.condition:
+        queues.completed.put_nowait(
+            _generated_group(replacement_prompts[0]["uid"], earliest_model_step=10, unshaped_rewards=[1.0, 1.0])
+        )
+        queues.condition.notify_all()
+
+    with pytest.raises(RuntimeError, match="dynamic sampling limit"):
+        await asyncio.wait_for(pending_batch, timeout=1)
 
 
 @pytest.mark.asyncio
@@ -313,6 +415,19 @@ async def test_batch_assembly_discards_duplicate_uid_received_in_a_later_scan():
     batch = await asyncio.wait_for(pending_batch, timeout=1)
 
     assert [group.uid for group in batch] == ["first", "second"]
+    assert trainer.all_metrics["async/rejected_count/duplicate_uid"] == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_does_not_readmit_a_uid_consumed_by_an_earlier_step():
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=2)
+    await trainer.data_tracker.mark_consumed(["trained"])
+    queues.completed.put_nowait(_generated_group("trained", earliest_model_step=10))
+    queues.completed.put_nowait(_generated_group("fresh", earliest_model_step=10))
+
+    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+
+    assert [group.uid for group in batch] == ["fresh"]
     assert trainer.all_metrics["async/rejected_count/duplicate_uid"] == 1
 
 

@@ -8,6 +8,7 @@ train, checkpoint restore, exact serving readback, and a second rollout.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import math
 from dataclasses import dataclass
 from enum import StrEnum
@@ -19,8 +20,6 @@ import torch
 from transformers import AutoConfig, AutoTokenizer
 
 from skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
@@ -31,6 +30,15 @@ from skyrl_train.models.grug_moe import (
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
+from tests.gpu.grug_serving import (
+    LM_HEAD_NAME,
+    ROUTER_NAME,
+    STACKED_EXPERT_NAME,
+    assert_engine_weights,
+    grug_engine_client,
+    rank0_validation_snapshot,
+    rollout_training_batch,
+)
 from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
 
@@ -40,13 +48,17 @@ ROLLOUT_WORLD_SIZE = 2
 EP1_DISAGGREGATED_NUM_GPUS = EP1_POLICY_WORLD_SIZE + ROLLOUT_WORLD_SIZE
 MIXED_EP_DISAGGREGATED_NUM_GPUS = MIXED_EP_POLICY_WORLD_SIZE + ROLLOUT_WORLD_SIZE
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
-STACKED_EXPERT_NAME = "model.layers.0.mlp.experts.gate_proj.weight"
 SERVING_EXPERT_INDEX_BY_NAME = {
     "model.layers.0.mlp.experts.0.gate_proj.weight": 0,
     "model.layers.0.mlp.experts.4.gate_proj.weight": 4,
 }
-LM_HEAD_NAME = "lm_head.weight"
-ROUTER_NAME = "model.layers.0.mlp.router.weight"
+
+
+# The fused policy path needs the optional compiled FlashAttention package, which the
+# Megatron runtime closure does not ship.
+requires_flash_attention = pytest.mark.skipif(
+    importlib.util.find_spec("flash_attn") is None, reason="flash_attn is not installed"
+)
 
 
 class _PolicyAttentionBackend(StrEnum):
@@ -165,73 +177,13 @@ def _config(
     return cfg
 
 
-def _make_training_batch(sequences: torch.Tensor, action_log_probs: torch.Tensor) -> TrainingInputBatch:
-    advantage_pattern = torch.tensor([[-1.0, -0.25, 0.5, 1.0], [1.0, 0.5, -0.25, -1.0]])
-    advantages = advantage_pattern.repeat(math.ceil(sequences.shape[0] / 2), 1)[: sequences.shape[0]]
-    ones = torch.ones_like(action_log_probs)
-    batch = TrainingInputBatch(
-        {
-            "sequences": sequences,
-            "attention_mask": torch.ones_like(sequences),
-            "action_log_probs": action_log_probs,
-            "base_action_log_probs": action_log_probs.clone(),
-            "rollout_logprobs": action_log_probs.clone(),
-            "values": torch.zeros_like(ones),
-            "returns": torch.zeros_like(ones),
-            "advantages": advantages,
-            "loss_mask": ones.long(),
-            "response_mask": ones.long(),
-        }
-    )
-    batch.metadata = {"response_length": action_log_probs.shape[1], "global_step": 0}
-    return batch
-
-
 def _training_batch(prompts: list[list[int]], rollout) -> TrainingInputBatch:
-    assert rollout["response_logprobs"] is not None
     assert all(len(ids) == 4 for ids in rollout["response_ids"])
-    sequences = torch.tensor(
-        [prompt + response for prompt, response in zip(prompts, rollout["response_ids"])],
-        dtype=torch.long,
-    )
-    return _make_training_batch(sequences, torch.tensor(rollout["response_logprobs"], dtype=torch.float32))
-
-
-def _engine_client(cfg, model_path: str) -> InferenceEngineClient:
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    engines = create_ray_wrapped_inference_engines(
-        num_inference_engines=cfg.generator.num_inference_engines,
-        tensor_parallel_size=1,
-        data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
-        expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
-        model_dtype="bfloat16",
-        pretrain=model_path,
-        seed=23,
-        vllm_v1_disable_multiproc=True,
-        enable_prefix_caching=False,
-        enforce_eager=True,
-        engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
-        shared_pg=None,
-        gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
-        inference_engine_enable_sleep=False,
-        async_engine=True,
-        max_num_batched_tokens=128 * cfg.generator.inference_engine_data_parallel_size,
-        max_num_seqs=cfg.trainer.train_batch_size,
-        tokenizer=tokenizer,
-        backend="vllm",
-        engine_init_kwargs={"max_model_len": 128},
-    )
-    return InferenceEngineClient(engines, tokenizer, cfg)
+    return rollout_training_batch(prompts, rollout)
 
 
 def _validation_snapshots(policy, names=()):
     return ray.get(policy.async_run_ray_method("pass_through", "grug_validation_snapshot", names))
-
-
-def _snapshot(policy, names=()):
-    snapshots = _validation_snapshots(policy, names)
-    rank0 = next(snapshot for snapshot in snapshots if snapshot.rank == 0)
-    return rank0.weights
 
 
 def _assert_policy_attention_backend(policy, expected: str) -> None:
@@ -262,10 +214,10 @@ def _representative_names(model_path: str) -> _RepresentativeNames:
     )
 
 
-def _train_and_snapshot(policy, batch: TrainingInputBatch, model_path: str) -> _TrainingSnapshot:
+def _train_andrank0_validation_snapshot(policy, batch: TrainingInputBatch, model_path: str) -> _TrainingSnapshot:
     """Run one policy step and return its post-update FP32 training snapshot."""
     names = _representative_names(model_path)
-    before = _snapshot(policy, names.parameter_names)
+    before = rank0_validation_snapshot(policy, names.parameter_names)
     train_output = ray.get(policy.async_run_ray_method("pass_through", "ppo_train", batch))[0]
     status = train_output.metadata["train_status"]
     assert math.isfinite(status["policy_loss"])
@@ -274,7 +226,7 @@ def _train_and_snapshot(policy, batch: TrainingInputBatch, model_path: str) -> _
     assert "raw_grad_norm" not in status
     assert status["optimizer_step_succeeded"] == 1.0
     snapshot_names = [*names.parameter_names, names.wire_bf16_sentinel_name, *names.bias_names]
-    weights = _snapshot(policy, snapshot_names)
+    weights = rank0_validation_snapshot(policy, snapshot_names)
     for name in names.parameter_names:
         assert not torch.equal(weights[name], before[name]), f"{name} did not update"
         assert (weights[name] - before[name]).dtype == torch.float32
@@ -301,12 +253,12 @@ def _assert_checkpoint_resume_next_step(
         policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint_path, tokenizer=tokenizer)
     )
     mutation_batch.metadata["global_step"] = 1
-    expected_next_step = _train_and_snapshot(policy, mutation_batch, model_path)
+    expected_next_step = _train_andrank0_validation_snapshot(policy, mutation_batch, model_path)
     ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint_path))
-    resumed = _snapshot(policy, names)
+    resumed = rank0_validation_snapshot(policy, names)
     for name in names:
         torch.testing.assert_close(resumed[name], expected_weights[name], rtol=0, atol=0)
-    resumed_next_step = _train_and_snapshot(policy, mutation_batch, model_path)
+    resumed_next_step = _train_andrank0_validation_snapshot(policy, mutation_batch, model_path)
     for name in names:
         torch.testing.assert_close(
             resumed_next_step.weights[name],
@@ -315,46 +267,6 @@ def _assert_checkpoint_resume_next_step(
             atol=0,
         )
     return resumed_next_step
-
-
-def _assert_engine_weights(client, names: list[str], training: _TrainingSnapshot) -> dict[str, int]:
-    """Check serving weights and return each named expert's serving EP rank."""
-    found = {name: False for name in names}
-    expert_owners = {name: set() for name in SERVING_EXPERT_INDEX_BY_NAME}
-    for engine in client.engines:
-        per_rank = ray.get(engine.inference_engine_actor.read_engine_weights.remote(names, False))
-        if isinstance(per_rank, dict):
-            per_rank = [per_rank]
-        for rank_values in per_rank:
-            serving_ep_rank = int(rank_values["__ranks__"]["ep_rank"])
-            for name in names:
-                entry = rank_values[name]
-                if entry.get("skip"):
-                    continue
-                assert entry["found"], (name, entry)
-                found[name] = True
-                expected_dtype = "float32" if name in training.bias_names or name == ROUTER_NAME else "bfloat16"
-                assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
-                expert_index = SERVING_EXPERT_INDEX_BY_NAME.get(name)
-                if expert_index is not None:
-                    expert_owners[name].add(serving_ep_rank)
-                expected = (
-                    training.weights[STACKED_EXPERT_NAME][expert_index]
-                    if expert_index is not None
-                    else training.weights[name]
-                )
-                actual = entry["tensor"]
-                if name not in training.bias_names:
-                    expected = expected.to(torch.bfloat16).to(actual.dtype)
-                if name == LM_HEAD_NAME:
-                    # vLLM aligns the vocabulary dimension (151665 -> 151680
-                    # for this tokenizer). The HF weight occupies the prefix.
-                    assert actual.shape[0] >= expected.shape[0], (actual.shape, expected.shape)
-                    actual = actual[: expected.shape[0]]
-                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert all(found.values()), found
-    assert all(len(owners) == 1 for owners in expert_owners.values()), expert_owners
-    return {name: next(iter(owners)) for name, owners in expert_owners.items()}
 
 
 def _run_full_cycle(
@@ -377,7 +289,7 @@ def _run_full_cycle(
     available_gpus = int(ray.cluster_resources().get("GPU", 0))
     if available_gpus < required_gpus:
         pytest.skip(f"topology requires {required_gpus} Ray GPUs, found {available_gpus}")
-    client = _engine_client(cfg, model_path)
+    client = grug_engine_client(cfg, model_path)
     try:
         prompt_pattern = [[1, 17, 29, 5, 11, 3], [1, 19, 31, 7, 13, 3]]
         prompts = [prompt_pattern[idx % len(prompt_pattern)] for idx in range(cfg.trainer.train_batch_size)]
@@ -413,10 +325,10 @@ def _run_full_cycle(
             assert all(tuple(item["mesh_shape"]) == (1, 2, 2) for item in geometry)
             assert {item["ep_coord"] for item in geometry} == {0, 1}
             assert unsharded_stacked_experts is not None
-            gathered_stacked_experts = _snapshot(policy, [STACKED_EXPERT_NAME])[STACKED_EXPERT_NAME]
+            gathered_stacked_experts = rank0_validation_snapshot(policy, [STACKED_EXPERT_NAME])[STACKED_EXPERT_NAME]
             stored_stacked_experts = unsharded_stacked_experts.to(torch.bfloat16).to(torch.float32)
             torch.testing.assert_close(gathered_stacked_experts, stored_stacked_experts, rtol=0, atol=0)
-        training = _train_and_snapshot(policy, _training_batch(prompts, first_rollout), model_path)
+        training = _train_andrank0_validation_snapshot(policy, _training_batch(prompts, first_rollout), model_path)
         checkpoint_names = [
             *training.bias_names,
             *training.parameter_names,
@@ -441,7 +353,9 @@ def _run_full_cycle(
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
 
-        serving_owners = _assert_engine_weights(client, sync_names, training)
+        serving_owners = assert_engine_weights(
+            client, sync_names, training.weights, training.bias_names, SERVING_EXPERT_INDEX_BY_NAME
+        )
         if expert_model_parallel_size > 1:
             experts_per_trainer_owner = (
                 AutoConfig.from_pretrained(model_path, trust_remote_code=False, local_files_only=True).num_local_experts
@@ -508,7 +422,7 @@ def test_grug_one_gpu_vllm_generation(tmp_path):
 @pytest.mark.parametrize(
     "policy_attention_backend",
     [
-        pytest.param(_PolicyAttentionBackend.FLASH_ATTENTION, id="fused"),
+        pytest.param(_PolicyAttentionBackend.FLASH_ATTENTION, id="fused", marks=requires_flash_attention),
         pytest.param(_PolicyAttentionBackend.EAGER, id="eager"),
     ],
 )
@@ -527,6 +441,7 @@ def test_grug_four_gpu_disaggregated_rollout_train_broadcast_rollout(
     )
 
 
+@requires_flash_attention
 @pytest.mark.vllm
 def test_grug_six_h100_mixed_ep_disaggregated_rollout_train_broadcast_rollout(tmp_path):
     """Exercise EP-owned experts and exact sync on disjoint trainer/rollout GPUs."""

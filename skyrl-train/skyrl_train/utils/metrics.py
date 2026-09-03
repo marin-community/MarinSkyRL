@@ -27,6 +27,10 @@ def policy_training_metrics(
     back down over mini-batches is the same category error one level lower: at n mini-batches per
     step a max becomes mean-of-n-maxima, and a "did any rank fail" flag becomes 1/n. The op map is
     shared with Strategy.all_reduce_status so the two axes cannot drift apart.
+
+    The learning rate is the third case: neither a mean nor a specially-reduced key, but the LATEST
+    value, because a schedule that moved during the step is described by where it ended rather than
+    by the average of where it was.
     """
     scalars = {name: values for name, values in metrics.items() if name != "response_length"}
     status = mean_metrics({name: v for name, v in scalars.items() if name not in STATUS_REDUCTION_OPS})
@@ -47,6 +51,8 @@ def policy_training_metrics(
         if op not in reducers:
             raise ValueError(f"Metric {name} has unknown reduction op {op!r}")
         status[name] = reducers[op](values)
+    if learning_rates := metrics.get("policy_lr"):
+        status["policy_lr"] = learning_rates[-1]
     status["policy_update_steps"] = policy_update_steps
     return status
 

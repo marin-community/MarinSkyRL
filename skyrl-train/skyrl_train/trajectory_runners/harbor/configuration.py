@@ -203,6 +203,8 @@ ENVIRONMENT_SCHEMA = SectionSchema(
         # snapshot_template_name: Use explicit snapshot name template (e.g., "harbor__{name}__snapshot")
         "auto_snapshot": FieldMapping("auto_snapshot", field_type="kwargs", default=False),
         "snapshot_template_name": FieldMapping("snapshot_template_name", field_type="kwargs"),
+        # Provider-enforced wall-clock cleanup, including unrecoverable ERROR sandboxes.
+        "ttl_minutes": FieldMapping("ttl_minutes", field_type="kwargs"),
     }
 )
 

@@ -286,7 +286,10 @@ class MegatronModelWrapper:
 
             action_log_probs = token_logprobs[:, -num_actions:]
 
-            token_entropies = self._token_entropies(logits, data.attention_mask.to(bool), packed_seq_params)
+            # Without an entropy loss the entropy is a metric only. Computing it under no_grad
+            # avoids saving two vocab-sized copies of the logits for backward on the last stage.
+            with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
+                token_entropies = self._token_entropies(logits, data.attention_mask.to(bool), packed_seq_params)
             objective = compute_policy_objective(
                 action_log_probs=action_log_probs,
                 old_action_log_probs=old_action_log_probs,

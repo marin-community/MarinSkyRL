@@ -780,6 +780,23 @@ def validate_cfg(cfg: DictConfig):
                 "`trainer.exclude_modules` is deprecated, use `trainer.policy.model.lora.exclude_modules` or `trainer.critic.model.lora.exclude_modules` instead"
             )
 
+    if (
+        cfg.trainer.strategy == "megatron"
+        and cfg.trainer.micro_forward_batch_size_per_gpu != cfg.trainer.micro_train_batch_size_per_gpu
+    ):
+        raise ValueError(
+            "Megatron recomputes old log-probs with micro_forward_batch_size_per_gpu="
+            f"{cfg.trainer.micro_forward_batch_size_per_gpu} but trains with micro_train_batch_size_per_gpu="
+            f"{cfg.trainer.micro_train_batch_size_per_gpu}; cuBLAS selects kernels per shape, so the two "
+            "passes disagree and PPO clipping acts on kernel noise. Use equal sizes."
+        )
+
+    if cfg.trainer.offload_optimizer_during_rollouts and cfg.trainer.placement.colocate_all:
+        raise ValueError(
+            "trainer.offload_optimizer_during_rollouts applies to disaggregated runs only; "
+            "colocated runs already offload the optimizer between policy updates"
+        )
+
     # Validate placement
     if cfg.trainer.placement.colocate_all:
         tp_pp_size = (

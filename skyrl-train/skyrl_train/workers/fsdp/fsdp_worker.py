@@ -38,6 +38,7 @@ from skyrl_train.workers.worker import (
     RefWorkerBase,
 )
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 from skyrl_train.weight_sync.weight_extractor import (
     prepare_weight_sync_tensor,
     validate_weight_sync_mode,
@@ -58,15 +59,6 @@ def _fsdp_moe_model_kwargs(fsdp_config) -> dict[str, bool]:
         "moe_grouped_gemm": bool(fsdp_config.get("moe_grouped_gemm", False)),
         "use_grouped_mm": bool(fsdp_config.get("use_grouped_mm", False)),
     }
-
-
-@dataclass(frozen=True)
-class GrugValidationSnapshot:
-    """Test-only snapshot of one policy rank's loaded Grug state."""
-
-    rank: int
-    attention_backend: str
-    weights: dict[str, torch.Tensor]
 
 
 @dataclass(frozen=True)

@@ -169,6 +169,7 @@ class RayPPOTrainer:
         self._checkpoint_save_failures = 0.0
         self._shutdown_complete = False
         self.global_step = 0
+        self._last_saved_step: int | None = None
 
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
@@ -453,7 +454,8 @@ class RayPPOTrainer:
                 await self.inference_engine_client.sleep()
                 self.policy_model.backload_to_gpu()
 
-            if self._control.should_save:
+            # The interval save may have just written this same step; do not write it twice.
+            if self._control.should_save and self._last_saved_step != self.global_step:
                 with Timer("save_checkpoints", self.all_timings):
                     await asyncio.to_thread(self.save_checkpoints)
                     logger.info("Saved final checkpoint.")
@@ -513,6 +515,9 @@ class RayPPOTrainer:
                 finally:
                     await self._sync_weights_and_restore_rollout_residency()
             else:
+                if self.cfg.trainer.offload_optimizer_during_rollouts:
+                    with Timer("offload_policy_optimizer_to_cpu", self.all_timings):
+                        self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
                 with Timer("sync_weights", self.all_timings):
                     ray.get(self.sync_policy_weights_to_inference_engines())
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
@@ -1965,6 +1970,9 @@ class RayPPOTrainer:
                     operation="policy ppo_train",
                 )
         else:
+            if self.cfg.trainer.offload_optimizer_during_rollouts:
+                with Timer("backload_policy_optimizer_to_gpu", self.all_timings):
+                    self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=False)
             if self.critic_model is not None:
                 with Timer("policy_critic_overlap_train", self.all_timings):
                     policy_refs = self.policy_model.async_run_ray_method("mesh", "ppo_train", data)
@@ -2197,6 +2205,7 @@ class RayPPOTrainer:
             f.write(str(self.global_step))
 
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
+        self._last_saved_step = self.global_step
 
         # Clean up old checkpoints after successful save
         with Timer("cleanup_old_checkpoints", self.all_timings):

@@ -51,6 +51,14 @@ jobs:
             iris_timeout: 3600
             task_script: skyrl-train/ci/marin_nightly/run_grug_vllm.sh
             log: grug-vllm.log
+          - lane: grug-megatron-h100
+            target_cluster: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
+            gpu: H100x4
+            cpu: 32
+            memory: 256GB
+            iris_timeout: 7200
+            task_script: skyrl-train/ci/marin_nightly/run_grug_megatron.sh
+            log: grug-megatron.log
     runs-on: ubuntu-latest
     timeout-minutes: 100
     permissions:

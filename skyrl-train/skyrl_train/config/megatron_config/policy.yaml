@@ -33,3 +33,7 @@ transformer_config_kwargs:
 empty_cuda_cache: true
 
 logprob_chunk_size: 1024
+
+# Re-run the eval-mode and train-mode forwards inside ppo_train and log how far each is
+# from the old log-probs, separating eval repeatability from train/eval drift.
+check_train_eval_parity: false

@@ -306,6 +306,11 @@ trainer:
   micro_forward_batch_size_per_gpu: 1
   update_ref_every_epoch: false
   use_sample_packing: true
+  # Disaggregated only: keep the policy's optimizer state and gradient buffers on
+  # CPU from the end of each policy update until the next one, covering the
+  # weight export, rollouts, and the log-probability forwards. Frees that memory
+  # for the export's gathered expert tensors and for a colocated reference model.
+  offload_optimizer_during_rollouts: false
   eval_batch_size: 1024
   eval_before_train: true
   eval_interval: 5

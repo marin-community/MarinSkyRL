@@ -55,6 +55,7 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     only the attributes the resume guard / finalize handler touch.
     """
     trainer = cls.__new__(cls)
+    trainer._last_saved_step = None
     trainer.global_step = global_step
     trainer.total_training_steps = total_training_steps
     trainer.colocate_all = colocate_all

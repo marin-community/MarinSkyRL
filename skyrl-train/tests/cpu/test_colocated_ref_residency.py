@@ -7,6 +7,7 @@ from tests.cpu.util import example_dummy_config
 def _single_gpu_config():
     cfg = example_dummy_config()
     cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
+    cfg.trainer.micro_forward_batch_size_per_gpu = cfg.trainer.micro_train_batch_size_per_gpu
     cfg.trainer.placement.policy_num_nodes = 1
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.trainer.placement.ref_num_nodes = 1
