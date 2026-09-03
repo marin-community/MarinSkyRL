@@ -126,3 +126,10 @@ def test_trial_attempt_timeout_reaches_harbor_trial_config():
 
 def test_trial_attempt_timeout_remains_unset_when_omitted():
     assert _trial_config({}).trial_attempt_timeout_sec is None
+
+
+def test_daytona_ttl_reaches_harbor_environment_config():
+    trial_config = _trial_config({"ttl_minutes": 90})
+
+    assert trial_config.environment.kwargs["ttl_minutes"] == 90
+    assert "ttl_minutes" in get_exposed_harbor_fields()["environment"]
