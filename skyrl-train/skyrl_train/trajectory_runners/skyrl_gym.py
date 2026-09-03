@@ -198,10 +198,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             )
 
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
-        # timed_env_call splits the caller-observed wait into queue / exec / resume. One bracket
-        # around the whole thing would report executor backlog as environment runtime: N concurrent
-        # trajectories against W pool threads make that sum O(N^2/W), so it moves with the batch size
-        # while the environment is unchanged.
+        # timed_env_call splits the caller-observed wait into queue / exec / resume; see the
+        # ROLLOUT_ENV_* block in timing_observability for why one number here is worse than useless.
         return await timed_env_call(self.env_executor, func, *args, **kwargs)
 
     @traced_trajectory
@@ -542,10 +540,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             token_provenance=token_provenance,
         )
 
-    # The scope is the WHOLE batched collect, not the engine await alone: env.init, env.step and
-    # env.close all run out here, so a scope around the engine call would leave
-    # rollout_env_await_seconds_max at its seeded 0.0 beside a non-zero sum and count -- a published
-    # max smaller than its own mean. One batched call is one "trajectory", so max == sum here.
+    # Scoped whole, not around the engine await alone: env.init, env.step and env.close all run out
+    # here, and leaving them outside published a max smaller than its own mean. One batched call is
+    # one trajectory, so its max equals its sum.
     @traced_trajectory
     async def collect_batched(
         self,

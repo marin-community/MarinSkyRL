@@ -625,19 +625,19 @@ class RayPPOTrainer:
                     )
 
                     # 1.1 generation phase
-                    rollout_timings = RolloutTimings() if self.cfg.trainer.generate_spans else None
+                    phase_timings = RolloutTimings() if self.cfg.trainer.generate_spans else None
                     with (
                         Timer("generate", self.all_timings) as generate_timer,
                         critical_phase("rollout_or_inference_wait", self.global_step),
                     ):
                         trajectory_batch: TrajectoryBatch = await self.generate(
-                            trajectory_request, rollout_timings=rollout_timings
+                            trajectory_request, phase_timings=phase_timings
                         )
                     # After the Timer closes, because the residual is generate minus its children and
                     # generate is only known once the wall it measures has ended.
-                    if rollout_timings is not None:
+                    if phase_timings is not None:
                         record_generate_spans(
-                            rollout_timings,
+                            phase_timings,
                             generate_timer.duration,
                             self.all_timings,
                             self.all_rollout_counters,
@@ -1365,7 +1365,7 @@ class RayPPOTrainer:
     async def generate(
         self,
         input_batch: TrajectoryRequestBatch,
-        rollout_timings: RolloutTimings | None = None,
+        phase_timings: RolloutTimings | None = None,
     ) -> TrajectoryBatch:
         """
         Generate rollouts.
@@ -1382,7 +1382,7 @@ class RayPPOTrainer:
             self.global_step,
             len(input_batch["prompts"]),
         )
-        trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch, phase_timings=rollout_timings)
+        trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch, phase_timings=phase_timings)
         # add rollout metrics to self.all_metrics
         if trajectory_batch["rollout_metrics"] is not None:
             self.all_metrics.update(trajectory_batch["rollout_metrics"])
