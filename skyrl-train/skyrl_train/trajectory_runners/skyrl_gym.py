@@ -540,10 +540,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             token_provenance=token_provenance,
         )
 
-    # Scoped whole, not around the engine await alone: env.init, env.step and env.close all run out
-    # here, and leaving them outside published a max smaller than its own mean. One batched call is
-    # one trajectory, so its max equals its sum.
-    @traced_trajectory
+    # Deliberately NOT @traced_trajectory. This path issues one engine request for the whole batch
+    # and loops env.init / env.step / env.close over every row, so a scope here would accumulate the
+    # WHOLE BATCH into one "trajectory" and publish that sum under a _seconds_max name. There is no
+    # per-trajectory tail on a batched call, so the tail rows are absent here rather than wrong --
+    # see rollout_trajectory.
     async def collect_batched(
         self,
         prompts: List[ConversationType],
