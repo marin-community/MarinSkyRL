@@ -76,17 +76,61 @@ class _CaptureState:
 _state = _CaptureState()
 
 
+# torch exposes TWO flight recorders and they are NOT the same object. Proven on an H100
+# (job atqamar-fr-probe): after 8 NCCL all_reduces, `_dump_nccl_trace_json` held 8 entries and
+# `_dump_fr_trace_json` held 0.
+#   _dump_nccl_trace_json  ProcessGroupNCCL's own FlightRecorder<at::cuda::CUDAEvent>
+#                          (ProcessGroupNCCL.hpp:1520) -- where NCCL collectives actually go.
+#   _dump_fr_trace_json    the generic FlightRecorder<c10::Event> (FlightRecorder.hpp:329) --
+#                          gloo and CPU. torch's own debug server lists them as two views,
+#                          "FlightRecorder NCCL" vs "FlightRecorder CPU".
+# ⚠️ The NCCL symbol is absent on a CPU wheel (USE_C10D_NCCL not compiled), which is exactly why
+# probing for it on a laptop "proved" the generic one was correct. Twice. A CUDA-only symbol
+# cannot be checked on a CPU build.
+_DUMP_PREFERENCE = ("_dump_nccl_trace_json", "_dump_fr_trace_json")
+_dump_binding: tuple[str, Any] | None = None
+_dump_logged = False
+
+
+def _resolve_dump() -> tuple[str, Any] | None:
+    global _dump_binding
+    if _dump_binding is None:
+        for name in _DUMP_PREFERENCE:
+            fn = getattr(torch._C._distributed_c10d, name, None)
+            if fn is not None:
+                _dump_binding = (name, fn)
+                break
+        else:
+            logger.error(
+                f"{LOG_PREFIX}no dump symbol on this torch: tried {', '.join(_DUMP_PREFERENCE)}. "
+                "NCCL collective telemetry is unavailable."
+            )
+            _dump_binding = ("", None)
+    return _dump_binding if _dump_binding[1] is not None else None
+
+
 def _dump_trace() -> Mapping[str, Any] | None:
     """Read the recorder, or None when this torch or this backend has nothing to read."""
-    # Renamed from _dump_nccl_trace_json before torch 2.11; the older name no longer exists.
-    dump = getattr(torch._C._distributed_c10d, "_dump_fr_trace_json", None)
-    if dump is None:
+    global _dump_logged
+    bound = _resolve_dump()
+    if bound is None:
         return None
+    name, dump = bound
     try:
-        return json.loads(dump(True, False))
+        payload = json.loads(dump(True, False))
     except Exception:  # noqa: BLE001 - a diagnostic must never fail the step it measures
-        logger.opt(exception=True).warning("Could not read the NCCL flight recorder")
+        logger.opt(exception=True).warning(f"Could not read the NCCL flight recorder via {name}")
         return None
+    if not _dump_logged:
+        _dump_logged = True
+        n = len(payload.get("entries") or ())
+        # Emptiness here is the ONLY symptom this bug ever had: no rows, no error, for four steps
+        # and a full cluster run. Say it out loud, once, rather than returning quietly.
+        detail = "" if n else f" -- recorder is EMPTY; payload keys {sorted(payload)}"
+        (logger.info if n else logger.warning)(
+            f"{LOG_PREFIX}bound {name}, first read returned {n} entries{detail}"
+        )
+    return payload
 
 
 def _element_count(shapes: Sequence[Sequence[int]] | None) -> int:
