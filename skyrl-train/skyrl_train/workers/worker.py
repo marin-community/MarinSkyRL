@@ -973,6 +973,38 @@ class PPORayActorGroup:
                 pass  # Actor may already be dead
 
 
+def _policy_span_counters(worker, spans, train_data, policy_update_steps: float) -> dict[str, float]:
+    """The per-step counters published beside the policy_train spans.
+
+    Split out so the caller can guard it: every value here costs a CUDA synchronise or an allocator
+    query, and it runs after the step's GPU work is already paid for.
+    """
+    if not spans.enabled:
+        return {}
+    # H3's multiplier and H7's padding keystone. Counted from the batch itself rather than derived
+    # from config, so a mismatch between the two is visible instead of assumed.
+    counters = {"micro_step_count": float(policy_update_steps)}
+    attention_mask = train_data["attention_mask"] if "attention_mask" in train_data.keys() else None
+    if attention_mask is not None:
+        lengths = attention_mask.sum(dim=-1).to(torch.float64)
+        counters.update(
+            {
+                "tokens_real": float(attention_mask.sum().item()),
+                "tokens_padded": float(attention_mask.numel()),
+                # Eager attention is quadratic on the PADDED shape, so the linear padded fraction
+                # understates its cost; this ratio is the attention-work proxy.
+                "attention_work_ratio": float(
+                    (attention_mask.shape[0] * attention_mask.shape[-1] ** 2)
+                    / max(float((lengths**2).sum().item()), 1.0)
+                ),
+            }
+        )
+    # Allocator counters, rebased at begin_step so they describe THIS step. See StepMemoryProbe for
+    # why the raw values are a trap.
+    counters.update(worker._step_memory.counters())
+    return counters
+
+
 class PolicyWorkerBase(Worker):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -1224,35 +1256,22 @@ class PolicyWorkerBase(Worker):
         # Published from the worker, not returned: trainer.py keeps only policy_statuses[0]'s
         # "train_status", so a sibling key here would be transported and then dropped -- and rank 0
         # is the wrong rank, because the driver waits for the slowest.
-        _counters: dict[str, float] = {}
-        if _policy_spans.enabled:
-            # H3's multiplier and H7's padding keystone. Counted from the batch itself rather than
-            # derived from config, so a mismatch between the two is visible instead of assumed.
-            _attn = train_data["attention_mask"] if "attention_mask" in train_data.keys() else None
-            _counters = {"micro_step_count": float(policy_update_steps)}
-            if _attn is not None:
-                _real = float(_attn.sum().item())
-                _padded = float(_attn.numel())
-                _lengths = _attn.sum(dim=-1).to(torch.float64)
-                _counters.update(
-                    {
-                        "tokens_real": _real,
-                        "tokens_padded": _padded,
-                        # Eager attention is quadratic on the PADDED shape, so the linear padded
-                        # fraction understates its cost; this ratio is the attention-work proxy.
-                        "attention_work_ratio": float(
-                            (_attn.shape[0] * _attn.shape[-1] ** 2) / max(float((_lengths**2).sum().item()), 1.0)
-                        ),
-                    }
-                )
-            # Allocator counters, rebased at begin_step so they describe THIS step. See
-            # StepMemoryProbe for why the raw values are a trap.
-            _counters.update(self._step_memory.counters())
+        # ⚠️ Everything from here to the publish runs AFTER the optimizer step and the final barrier,
+        # i.e. after this step's GPU work is already paid for, and it issues CUDA reductions,
+        # .item() synchronisations and allocator queries. A failure in any of them would discard a
+        # completed step -- at E6 geometry, an hour of 80 H100s -- to lose a telemetry row.
+        # docs/telemetry.md states the contract: export failures do not change training results.
+        # retain_trajectories guards itself for exactly this reason and for exactly this reason only;
+        # this is that precedent, not a general licence to swallow exceptions.
+        try:
+            _counters = _policy_span_counters(self, _policy_spans, train_data, policy_update_steps)
+        except Exception:
+            logger.exception("policy_train counters failed; publishing spans without them")
+            _counters = {}
 
         _previous_publish = getattr(self, "_policy_span_publish", None)
-        self._policy_span_publish = (
-            global_step,
-            publish_worker_spans(
+        try:
+            _publish_cost = publish_worker_spans(
                 _policy_spans.totals(total_seconds=time.perf_counter() - _policy_spans_started),
                 step=global_step,
                 rank=self._rank,
@@ -1260,8 +1279,11 @@ class PolicyWorkerBase(Worker):
                 counters=_counters if _policy_spans.enabled else None,
                 # The mode is part of what the numbers MEAN, so it rides with them.
                 synchronize=_policy_spans.synchronize,
-            ),
-        )
+            )
+        except Exception:
+            logger.exception("policy_train span publish failed; the step itself is unaffected")
+            _publish_cost = 0.0
+        self._policy_span_publish = (global_step, _publish_cost)
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()

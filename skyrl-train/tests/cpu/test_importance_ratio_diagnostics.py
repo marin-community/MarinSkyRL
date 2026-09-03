@@ -20,7 +20,6 @@ from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.utils.importance_ratio_diagnostics import (
     MAX_REDUCED_METRIC_KEYS,
     STATUS_REDUCTION_OPS,
-    SUM_REDUCED_METRIC_KEYS,
 )
 from skyrl_train.utils.metrics import policy_training_metrics
 
@@ -126,9 +125,8 @@ def test_the_two_reduction_axes_share_one_op_map():
 
 def test_every_specially_reduced_key_is_declared_once():
     """One map, so the two axes cannot drift apart."""
-    assert set(STATUS_REDUCTION_OPS) == set(MAX_REDUCED_METRIC_KEYS) | set(SUM_REDUCED_METRIC_KEYS)
+    assert set(STATUS_REDUCTION_OPS) == set(MAX_REDUCED_METRIC_KEYS)
     assert all(STATUS_REDUCTION_OPS[key] == "max" for key in MAX_REDUCED_METRIC_KEYS)
-    assert all(STATUS_REDUCTION_OPS[key] == "sum" for key in SUM_REDUCED_METRIC_KEYS)
     # Deliberately absent, because neither available op is right for them.
     assert "log_ratio_abs_p99" not in STATUS_REDUCTION_OPS
     assert "n_tokens_dp_gt_1pct" not in STATUS_REDUCTION_OPS
