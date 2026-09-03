@@ -394,7 +394,11 @@ def test_ppo_train_wires_the_span_layer():
     # discards work already paid for -- an hour of 80 H100s at E6 geometry -- to lose a telemetry
     # row. docs/telemetry.md states the contract: export failures do not change training results.
     assert source.count("except Exception:") >= 2, "the post-step telemetry is not guarded"
-    assert "_publish_cost = 0.0" in source, "a failed publish must still record a cost for the next step"
+    # And the recorded cost is REAL, not a false zero: a failed publish still spent time on the
+    # critical path, and zero would understate the next step's policy_span_publish by exactly what
+    # the failure cost.
+    assert "_publish_cost = time.perf_counter() - _publish_started" in source
+    assert "_publish_cost = 0.0" not in source, "a false zero is a measurement, not a gap"
     # H2's keystone. Three OOMs in this workstream asked for the eager attention score tensor and
     # no memory series existed to see any of them coming. The counters now come from the probe.
     assert "_step_memory.counters()" in counters_source

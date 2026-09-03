@@ -1270,6 +1270,7 @@ class PolicyWorkerBase(Worker):
             _counters = {}
 
         _previous_publish = getattr(self, "_policy_span_publish", None)
+        _publish_started = time.perf_counter()
         try:
             _publish_cost = publish_worker_spans(
                 _policy_spans.totals(total_seconds=time.perf_counter() - _policy_spans_started),
@@ -1282,7 +1283,10 @@ class PolicyWorkerBase(Worker):
             )
         except Exception:
             logger.exception("policy_train span publish failed; the step itself is unaffected")
-            _publish_cost = 0.0
+            # The real elapsed cost, not zero. A failed publish still spent time on the critical
+            # path, and carrying 0.0 forward would understate the NEXT step's policy_span_publish by
+            # exactly the amount the failure cost -- a false measurement in place of a missing one.
+            _publish_cost = time.perf_counter() - _publish_started
         self._policy_span_publish = (global_step, _publish_cost)
 
         # should return an `TrainingOutputBatch`
