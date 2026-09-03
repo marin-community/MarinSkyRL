@@ -101,25 +101,14 @@ class _Trainer:
         self.inference_engine_client = _EngineClient(snapshot)
 
 
-def _run_step(snapshot, *, global_step=3, sinks=(), **callback_kwargs):
+def _run_step(snapshot, *, global_step=3, **callback_kwargs):
     trainer = _Trainer(snapshot)
-    callback = InferenceStatsCallback(sinks=sinks, **callback_kwargs)
+    callback = InferenceStatsCallback(sinks=(), **callback_kwargs)
     state = TrainerState(global_step=global_step, epoch=0, total_steps=10, num_steps_per_epoch=10)
     control = TrainerControl()
     callback.on_train_begin(state, control, trainer=trainer)
     asyncio.run(callback.on_step_end_async(state, control, trainer=trainer))
     return trainer
-
-
-def test_callback_is_the_single_fanout_boundary_for_the_exact_snapshot():
-    snapshot = _snapshot()
-    sink = _Sink()
-
-    trainer = _run_step(snapshot, sinks=(sink,))
-
-    assert trainer.inference_engine_client.read_modes == [IntervalReadMode.RESET]
-    assert set(trainer.all_metrics) == EXPECTED_KEYS
-    assert sink.calls == [(snapshot, 3)]
 
 
 def test_every_interval_field_is_projected_or_deliberately_typed_only():
@@ -155,10 +144,11 @@ def test_stats_are_collected_only_on_the_configured_interval():
     assert trainer.inference_engine_client.read_modes == []
 
 
-def test_train_begin_publishes_zero_finish_reasons_before_the_first_increment():
+def test_callback_publishes_initial_zero_before_increment_and_fans_out_the_step():
+    zero_reasons = {"stop": 0, "length": 0, "abort": 0, "error": 0, "repetition": 0}
     initial = _snapshot()
     first_engine = initial.engines[0]
-    positive_reasons = {**first_engine.cumulative.finished_by_reason, "stop": 1}
+    positive_reasons = {**zero_reasons, "stop": 1}
     positive = replace(
         initial,
         engines=(replace(first_engine, cumulative=VLLMCumulativeStats(finished_by_reason=positive_reasons)),),
@@ -166,7 +156,7 @@ def test_train_begin_publishes_zero_finish_reasons_before_the_first_increment():
     sink = _Sink()
     trainer = _Trainer(initial)
     callback = InferenceStatsCallback(sinks=(sink,), poll_interval_seconds=0, log_to_console=False)
-    state = TrainerState(global_step=0, epoch=0, total_steps=10, num_steps_per_epoch=10)
+    state = TrainerState(global_step=3, epoch=0, total_steps=10, num_steps_per_epoch=10)
     control = TrainerControl()
 
     async def publish_zero_then_increment():
@@ -177,7 +167,9 @@ def test_train_begin_publishes_zero_finish_reasons_before_the_first_increment():
     asyncio.run(publish_zero_then_increment())
 
     assert trainer.inference_engine_client.read_modes == [IntervalReadMode.PEEK, IntervalReadMode.RESET]
+    assert set(trainer.all_metrics) == EXPECTED_KEYS
+    assert sink.calls == [(initial, 3), (positive, 3)]
     assert [call_snapshot.engines[0].cumulative.finished_by_reason for call_snapshot, _ in sink.calls] == [
-        VLLMCumulativeStats().finished_by_reason,
+        zero_reasons,
         positive_reasons,
     ]

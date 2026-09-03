@@ -1,6 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from skyrl_train.inference_engines.vllm.stats import (
     VLLM_FINISH_REASONS,
     VLLMHistogramSnapshot,
@@ -10,7 +12,6 @@ from skyrl_train.inference_engines.vllm.stats import (
 from skyrl_train.inference_engines.vllm.stats import (
     HTTPBridgeStatsAccumulator,
     IntervalReadMode,
-    VLLMCumulativeStats,
     VLLMEngineStatsSnapshot,
     VLLMIntervalStats,
     InferenceStatsSnapshot,
@@ -148,10 +149,6 @@ def test_native_accumulator_preserves_current_cumulative_labels_and_histograms()
     )
 
 
-def test_blank_cumulative_snapshot_exposes_every_finish_reason_at_zero():
-    assert VLLMCumulativeStats().finished_by_reason == {reason: 0 for reason in VLLM_FINISH_REASONS}
-
-
 def test_native_accumulator_is_cumulative_across_reads():
     accumulator = VLLMNativeStatsAccumulator((1, 10), {})
     iteration = SimpleNamespace(
@@ -214,6 +211,11 @@ def test_finelog_adapter_projects_every_typed_native_measurement(monkeypatch):
     assert {
         record.attributes["finished_reason"] for record in published if record.name == "request_success_total"
     } == set(VLLM_FINISH_REASONS)
+    assert {
+        record.attributes["finished_reason"]: record.value
+        for record in published
+        if record.name == "request_success_total"
+    } == {reason: 0 for reason in VLLM_FINISH_REASONS}
     assert all(record.attributes["step"] == "7" for record in published if record.source_kind == "gauge")
     assert all("step" not in record.attributes for record in published if record.source_kind != "gauge")
     assert health == [
@@ -245,38 +247,36 @@ def test_physical_engine_identity_survives_same_native_index_and_step_changes(mo
     assert all("step" not in record.attributes for batch in histogram_batches for record in batch)
 
 
-def test_oversized_engine_batch_is_rejected_whole_before_publish(monkeypatch):
-    oversized = VLLMHistogramSnapshot(
-        "oversized",
-        tuple((float(index), 0.0) for index in range(VLLM_MAX_RECORDS_PER_ENGINE + 1)),
-        0,
-        0,
-        "1",
-    )
+@pytest.mark.parametrize(
+    ("histogram", "drop_reason"),
+    [
+        (
+            VLLMHistogramSnapshot(
+                "oversized",
+                tuple((float(index), 0.0) for index in range(VLLM_MAX_RECORDS_PER_ENGINE + 1)),
+                0,
+                0,
+                "1",
+            ),
+            "sample_limit",
+        ),
+        (VLLMHistogramSnapshot("invalid", ((1.0, float("nan")),), 0, 0, "1"), "telemetry_loss"),
+    ],
+    ids=("oversized", "invalid"),
+)
+def test_unpublishable_engine_batch_is_rejected_whole(monkeypatch, histogram, drop_reason):
     publisher = _Publisher()
     sink = FinelogInferenceMetricsSink.__new__(FinelogInferenceMetricsSink)
     sink._publisher = publisher
     health = _capture_health(monkeypatch)
 
-    sink.publish(InferenceStatsSnapshot((_snapshot(histograms=(oversized,)),)), step=1)
+    sink.publish(InferenceStatsSnapshot((_snapshot(histograms=(histogram,)),)), step=1)
 
     assert publisher.calls == []
-    assert health[0][0] > VLLM_MAX_RECORDS_PER_ENGINE
-    assert health[1][0] == 0
-
-
-def test_invalid_engine_batch_is_rejected_whole_before_publish(monkeypatch):
-    invalid = VLLMHistogramSnapshot("invalid", ((1.0, float("nan")),), 0, 0, "1")
-    publisher = _Publisher()
-    sink = FinelogInferenceMetricsSink.__new__(FinelogInferenceMetricsSink)
-    sink._publisher = publisher
-    health = _capture_health(monkeypatch)
-
-    sink.publish(InferenceStatsSnapshot((_snapshot(histograms=(invalid,)),)), step=1)
-
-    assert publisher.calls == []
-    assert health[0][0] == 0
-    assert health[1][0] > 0
+    health_by_reason = {attributes["drop_reason"]: value for value, attributes in health}
+    other_reason = "telemetry_loss" if drop_reason == "sample_limit" else "sample_limit"
+    assert health_by_reason[drop_reason] > 0
+    assert health_by_reason[other_reason] == 0
 
 
 def test_publication_result_loss_is_exposed_as_current_health(monkeypatch):
