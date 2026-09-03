@@ -137,8 +137,9 @@ def test_the_rank_axis_maps_min_to_the_torch_min_op():
 
     assert REDUCE_OPS["min"] is dist.ReduceOp.MIN
     assert REDUCE_OPS["max"] is dist.ReduceOp.MAX
-    # mean must NOT be here: it is a SUM taken after dividing by world_size, and giving it an op
-    # would reduce twice.
+    # mean is deliberately absent. Adding it would be harmless today -- `ReduceOp.SUM` is what the
+    # fallback already selects -- but the map is meant to hold ops that are NOT the default, so that
+    # reading it answers "which reductions are special". A mean entry would say the opposite.
     assert "mean" not in REDUCE_OPS
     # Every op the status map declares must have a torch op or be the SUM default.
     for op in set(STATUS_REDUCTION_OPS.values()):
