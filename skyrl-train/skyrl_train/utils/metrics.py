@@ -2,6 +2,8 @@
 
 from collections.abc import Mapping, Sequence
 
+from skyrl_train.utils.importance_ratio_diagnostics import STATUS_REDUCTION_OPS
+
 
 def mean_metrics(metrics: Mapping[str, Sequence[float]]) -> dict[str, float]:
     """Average each scalar metric sequence, rejecting empty or nonnumeric values."""
@@ -19,8 +21,22 @@ def policy_training_metrics(
     metrics: Mapping[str, Sequence[float]],
     policy_update_steps: float,
 ) -> dict[str, float]:
-    """Average policy metrics, omit response length, and add update count."""
-    status = mean_metrics({name: values for name, values in metrics.items() if name != "response_length"})
+    """Combine a step's mini-batch metrics, omit response length, and add update count.
+
+    This is the SECOND reduction axis. Reducing correctly across ranks and then averaging the result
+    back down over mini-batches is the same category error one level lower: at n mini-batches per
+    step a max becomes mean-of-n-maxima, and a "did any rank fail" flag becomes 1/n. The op map is
+    shared with Strategy.all_reduce_status so the two axes cannot drift apart.
+    """
+    scalars = {name: values for name, values in metrics.items() if name != "response_length"}
+    status = mean_metrics({name: v for name, v in scalars.items() if name not in STATUS_REDUCTION_OPS})
+    for name, values in scalars.items():
+        op = STATUS_REDUCTION_OPS.get(name)
+        if op is None:
+            continue
+        if not values:
+            raise ValueError(f"No values for metric {name}")
+        status[name] = max(values) if op == "max" else sum(values)
     status["policy_update_steps"] = policy_update_steps
     return status
 

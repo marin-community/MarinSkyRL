@@ -12,6 +12,35 @@ from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP, masked_mean, safe
 
 
 TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log_ratio_abs_mean")
+
+# How each status key must be combined ACROSS RANKS, and across the mini-batches of one step.
+# Everything unlisted is a mean, which is the historical default and is right for a per-rank mean or
+# fraction. These are the keys where a mean is a category error.
+#
+# A max folded into a mean cannot see a divergence confined to a few ranks. Each rank computes a true
+# local max over its own tokens, so at 80 ranks one rank at 19.0 -- the value this repo has already
+# seen from MoE router replay -- with 79 clean publishes 0.2375, which reads as zero. That is the
+# expected shape of a sharding, kernel or routing bug, and the mean is what hides it.
+#
+# The gt_*pct keys are token COUNTS, not fractions: a mean divides the global count by world size, so
+# 1000 offending tokens on one of 80 ranks publishes 12.5.
+#
+# ⚠️ log_ratio_abs_p99 is deliberately NOT here. A max of per-rank p99 approximations is not a
+# quantile either, so neither op is right; it stays a mean and stays monitoring-grade colour rather
+# than a gate.
+MAX_REDUCED_METRIC_KEYS = ("log_ratio_abs_max", "log_ratio_diagnostics_failed")
+SUM_REDUCED_METRIC_KEYS = ("n_tokens_dp_gt_1pct", "n_tokens_dp_gt_10pct", "n_tokens_dp_gt_50pct")
+
+# The op to apply per key, for both reduction axes: across ranks (Strategy.all_reduce_status) and
+# across a step's mini-batches (policy_training_metrics). Keeping one map is what stops the two
+# axes disagreeing -- reducing correctly across ranks and then averaging the result back down is
+# the same category error one level lower.
+STATUS_REDUCTION_OPS: dict[str, str] = {
+    **{key: "max" for key in MAX_REDUCED_METRIC_KEYS},
+    **{key: "sum" for key in SUM_REDUCED_METRIC_KEYS},
+}
+
+
 LOG_RATIO_BASE_METRIC_KEYS = (
     "log_ratio_abs_mean",
     "log_ratio_abs_max",
