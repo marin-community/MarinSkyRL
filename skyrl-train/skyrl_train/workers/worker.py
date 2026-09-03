@@ -5,6 +5,7 @@ import time
 import logging
 import os
 import socket
+from collections.abc import Mapping
 from typing import Dict, Optional, Type, List, Any, Callable
 from skyrl_train.utils.progress import configure_progress, tqdm
 from marinskyrl.runtime_options import R3Transport
@@ -973,6 +974,41 @@ class PPORayActorGroup:
                 pass  # Actor may already be dead
 
 
+def _publish_policy_spans(
+    spans,
+    *,
+    total_seconds: float,
+    step: int,
+    rank: int,
+    previous_publish: tuple[int, float] | None,
+    counters: Mapping[str, float],
+) -> float:
+    """Publish one worker's spans and report what publishing cost, never raising.
+
+    This runs after the step's GPU work is already paid for, so a telemetry failure here would
+    discard a completed step -- an hour of 80 H100s at E6 geometry -- to lose a row.
+    docs/telemetry.md states the contract that export failures do not change training results, and
+    retain_trajectories guards itself for the same reason.
+
+    A failure still returns the REAL elapsed cost. Returning zero would understate the next step's
+    policy_span_publish by exactly what the failure cost: a false measurement in place of a gap.
+    """
+    started = time.perf_counter()
+    try:
+        return publish_worker_spans(
+            spans.totals(total_seconds=total_seconds),
+            step=step,
+            rank=rank,
+            previous_publish=previous_publish,
+            counters=counters if spans.enabled else None,
+            # The mode is part of what the numbers MEAN, so it rides with them.
+            synchronize=spans.synchronize,
+        )
+    except Exception:
+        logger.exception("policy_train span publish failed; the step itself is unaffected")
+        return time.perf_counter() - started
+
+
 def _policy_span_counters(worker, spans, train_data, policy_update_steps: float) -> dict[str, float]:
     """The per-step counters published beside the policy_train spans.
 
@@ -1275,25 +1311,17 @@ class PolicyWorkerBase(Worker):
             logger.exception("policy_train counters failed; publishing spans without them")
             _counters = {}
 
-        _previous_publish = getattr(self, "_policy_span_publish", None)
-        _publish_started = time.perf_counter()
-        try:
-            _publish_cost = publish_worker_spans(
-                _policy_spans.totals(total_seconds=time.perf_counter() - _policy_spans_started),
+        self._policy_span_publish = (
+            global_step,
+            _publish_policy_spans(
+                _policy_spans,
+                total_seconds=time.perf_counter() - _policy_spans_started,
                 step=global_step,
                 rank=self._rank,
-                previous_publish=_previous_publish,
-                counters=_counters if _policy_spans.enabled else None,
-                # The mode is part of what the numbers MEAN, so it rides with them.
-                synchronize=_policy_spans.synchronize,
-            )
-        except Exception:
-            logger.exception("policy_train span publish failed; the step itself is unaffected")
-            # The real elapsed cost, not zero. A failed publish still spent time on the critical
-            # path, and carrying 0.0 forward would understate the NEXT step's policy_span_publish by
-            # exactly the amount the failure cost -- a false measurement in place of a missing one.
-            _publish_cost = time.perf_counter() - _publish_started
-        self._policy_span_publish = (global_step, _publish_cost)
+                previous_publish=getattr(self, "_policy_span_publish", None),
+                counters=_counters,
+            ),
+        )
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
