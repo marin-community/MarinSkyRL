@@ -789,15 +789,19 @@ def test_unconfigured_telemetry_is_announced_once_rather_than_publishing_in_sile
 
 
 def test_a_step_that_generates_twice_reuses_one_accumulator_without_double_counting():
-    """The trainer holds ONE RolloutTimings per step, and durations accumulate across calls.
+    """Folding one accumulator twice must add only what is new -- on BOTH dicts.
 
-    The earlier fold recomputed `covered` from the running total while generate_seconds stayed
-    per-call, so the second fold subtracted the accumulated leaves from a single call's wall. Two 6 s
-    calls with 5 s of leaves each published a residual of -3 against a true +2 -- and a NEGATIVE
-    residual is the design's signal that a child is being counted inside another. It would have fired
-    falsely, on the only automatic detector the tree has.
+    ⚠️ The trainer does NOT do this: `phase_timings = RolloutTimings()` is inside the dataloader loop
+    and both resample paths `continue`, so production builds a fresh accumulator every time. This is
+    a contract test for the documented "accumulates rather than assigns" behaviour, not a regression
+    test for a live bug. Saying otherwise -- as an earlier version of this docstring did -- tells the
+    next reader the arithmetic is load-bearing where it is defensive.
 
-    This models the trainer's actual variable scope: one accumulator, folded twice.
+    Under that shape the earlier fold recomputed `covered` from the running total while
+    generate_seconds stayed per-call, so the second fold subtracted the accumulated leaves from a
+    single call's wall: two 6 s calls with 5 s of leaves each give a residual of -3 against a true
+    +2, and a negative residual is this tree's signal that a child is being counted inside another.
+    Counts had the same shape and published 24 for a true 16.
     """
     timings = RolloutTimings()
     timings.mark_supported()
@@ -910,6 +914,25 @@ def test_the_trajectory_count_is_absent_where_no_trajectory_scope_closes():
     # The seeding it must NOT break: the sum/count pair still says "bracketed and never waited".
     assert timings.counters[f"{timing_module.ROLLOUT_ENGINE_AWAIT}_count"] == 0.0
     assert timings.counters[f"{timing_module.ROLLOUT_ENGINE_AWAIT}_seconds_sum"] == 0.0
+
+
+def test_every_accepted_wait_name_has_all_three_rows_declared():
+    """rollout_wait emits a sum, a count AND a tail, so accepting a name without all three is a
+    guard that permits the failure it exists to prevent.
+
+    The first version of ROLLOUT_WAIT_NAMES was hand-listed and included the three env terms, which
+    carry a _seconds_sum only -- they are written by _record_env_wait directly. rollout_wait on one
+    of them emitted an undeclared `rollout_env_queue_count` that publish_driver_counters then
+    dropped with a warning. Deriving the set from the declared rows makes that unrepresentable.
+    """
+    for name in timing_module.ROLLOUT_WAIT_NAMES:
+        for suffix in ("_seconds_sum", "_count", "_seconds_max"):
+            assert f"{name}{suffix}" in timing_module.ROLLOUT_COUNTERS, (
+                f"rollout_wait({name!r}) would emit {name}{suffix}, which nothing declares"
+            )
+    # And the env terms must NOT be accepted: they are sum-only by design.
+    for name in (timing_module.ROLLOUT_ENV_QUEUE, timing_module.ROLLOUT_ENV_EXEC, timing_module.ROLLOUT_ENV_RESUME):
+        assert name not in timing_module.ROLLOUT_WAIT_NAMES
 
 
 def test_every_rollout_span_call_site_names_a_registered_span():
