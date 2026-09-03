@@ -123,6 +123,71 @@ def test_the_two_reduction_axes_share_one_op_map():
     assert status["policy_loss"] == 2.0
 
 
+def test_the_rank_axis_maps_min_to_the_torch_min_op():
+    """The other axis of the same reduction, pinned to the real torch op rather than a string.
+
+    all_reduce moves its tensor to the current CUDA device before reducing, so the dispatch itself is
+    unreachable on a CPU runner -- swapping ReduceOp.MIN for SUM there would otherwise change no
+    test while turning "did every rank succeed" into "how many did", which reads as 80 where 1 was
+    the healthy value.
+    """
+    import torch.distributed as dist
+
+    from skyrl_train.distributed.strategy import REDUCE_OPS
+
+    assert REDUCE_OPS["min"] is dist.ReduceOp.MIN
+    assert REDUCE_OPS["max"] is dist.ReduceOp.MAX
+    # mean must NOT be here: it is a SUM taken after dividing by world_size, and giving it an op
+    # would reduce twice.
+    assert "mean" not in REDUCE_OPS
+    # Every op the status map declares must have a torch op or be the SUM default.
+    for op in set(STATUS_REDUCTION_OPS.values()):
+        assert op in REDUCE_OPS or op == "sum", f"{op!r} has no rank-axis implementation"
+
+
+def test_the_mini_batch_axis_takes_a_min_for_min_reduced_keys():
+    """Behavioural, not declarative. The declaration test checks the MAP; this checks the ARITHMETIC.
+
+    optimizer_step_succeeded is a binary did-every-rank-succeed flag. Over a step's mini-batches, one
+    failed update among four must publish 0 -- a mean publishes 0.75 and a sum publishes 3, and both
+    read as "fine" next to a threshold of 1.
+    """
+    status = policy_training_metrics(
+        {"optimizer_step_succeeded": [1.0, 1.0, 0.0, 1.0], "policy_loss": [1.0, 3.0]},
+        policy_update_steps=4.0,
+    )
+    assert status["optimizer_step_succeeded"] == 0.0, "one failed update in the step is a failed step"
+    assert status["policy_loss"] == 2.0, "ordinary metrics still average"
+
+
+def test_the_mini_batch_axis_refuses_an_op_it_cannot_perform():
+    """The earlier form was `max(values) if op == "max" else sum(values)`.
+
+    Any op it did not know became a SUM, silently. Adding a third op to the map would then have
+    published a sum of flags and looked like a number.
+    """
+    from skyrl_train.utils import metrics as metrics_module
+
+    original = dict(metrics_module.STATUS_REDUCTION_OPS)
+    metrics_module.STATUS_REDUCTION_OPS["made_up_key"] = "median"
+    try:
+        with pytest.raises(ValueError, match="unknown reduction op"):
+            policy_training_metrics({"made_up_key": [1.0, 2.0]}, policy_update_steps=1.0)
+    finally:
+        metrics_module.STATUS_REDUCTION_OPS.clear()
+        metrics_module.STATUS_REDUCTION_OPS.update(original)
+
+
+def test_the_specially_reduced_path_rejects_a_non_numeric_value():
+    """mean_metrics rejects them; the max/min path dropped that check.
+
+    A 0-d tensor would otherwise be published where a float is expected, on the keys designated
+    gate-grade -- and it would compare and format without complaining.
+    """
+    with pytest.raises(TypeError, match="non-numeric"):
+        policy_training_metrics({"log_ratio_abs_max": [1.0, object()]}, policy_update_steps=1.0)
+
+
 def test_every_specially_reduced_key_is_declared_once():
     """One map, so the two axes cannot drift apart."""
     from skyrl_train.utils.importance_ratio_diagnostics import MIN_REDUCED_METRIC_KEYS

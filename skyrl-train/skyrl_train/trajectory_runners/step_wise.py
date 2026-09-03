@@ -58,6 +58,9 @@ def _sampling_params_with_generation_limit(
 class StepWiseRolloutCollector:
     """Collect per-transition SkyRL-Gym records for a reusable projection."""
 
+    #: Bracketed for the generate span tree -- see the rollout_span regions below.
+    generate_spans_instrumented = True
+
     def __init__(self, runner):
         self._runner = runner
 

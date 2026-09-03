@@ -804,50 +804,96 @@ def test_a_step_that_generates_twice_reuses_one_accumulator_without_double_count
     all_timings: dict[str, float] = {}
     counters: dict[str, float] = {}
 
+    count_key = f"{ROLLOUT_ENGINE_AWAIT}_count"
+    tail_key = f"{ROLLOUT_ENGINE_AWAIT}_seconds_max"
+
     timings.durations["rollout_collect"] = 5.0
+    timings.counters[count_key] = 8.0
+    timings.counters[tail_key] = 3.0
     record_generate_spans(timings, 6.0, all_timings, counters)
     assert all_timings["rollout_collect"] == pytest.approx(5.0)
     assert all_timings["generate_span_residual"] == pytest.approx(1.0)
+    assert counters[count_key] == pytest.approx(8.0)
 
-    # Second generate in the same step: durations accumulate, so this is 5 more seconds of collect.
+    # Second generate in the same step. Durations and additive counters BOTH accumulate inside the
+    # accumulator, so these are the running totals, not this call's contribution.
     timings.durations["rollout_collect"] = 10.0
+    timings.counters[count_key] = 16.0
+    timings.counters[tail_key] = 5.0
     record_generate_spans(timings, 6.0, all_timings, counters)
     assert all_timings["rollout_collect"] == pytest.approx(10.0), "the leaf must total both calls"
     assert all_timings["generate_span_residual"] == pytest.approx(2.0), (
         "12 s of generate against 10 s of leaves is +2; the pre-fix arithmetic published -3"
     )
+    assert counters[count_key] == pytest.approx(16.0), (
+        "counts accumulate in the accumulator too; folding cumulatively published 24"
+    )
+    assert counters[tail_key] == pytest.approx(5.0), "a tail folds with max and re-folding is idempotent"
 
 
-def test_an_injected_collector_does_not_inherit_the_instrumentation_certificate():
-    """The bracketed call sites live in the collector, and the collector is injected.
+def test_the_certificate_follows_the_collector_and_is_not_inherited():
+    """Exercises the exact rule the runner applies, on real collector classes.
 
-    __init_subclass__ guards the CLASS. It cannot see `pipeline=...`, which main_base already uses
-    and an adopting team is expected to. An uncertified collector inheriting True would make
-    mark_supported() seed 0.0 for every leaf and publish residual == generate -- a measured-zero lie
-    that the explicit seeds make indistinguishable from a real all-zero rollout.
+    The bracketed call sites live in the collector, and the collector is INJECTED -- main_base
+    already injects one when step_wise_training is set, and an adopting team is expected to.
+    __init_subclass__ guards the class and cannot see that. An uncertified collector inheriting True
+    would make mark_supported() seed 0.0 for every leaf and publish residual == generate: a
+    measured-zero lie that the explicit seeds make indistinguishable from a real all-zero rollout.
     """
-    from skyrl_train.trajectory_runners.skyrl_gym import INSTRUMENTED_COLLECTOR_TYPES
+    from skyrl_train.trajectory_runners.skyrl_gym import (
+        BatchedTrajectoryCollector,
+        WholeTrajectoryCollector,
+        collector_is_instrumented,
+    )
+    from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
+
+    # All three shipped collectors bracket their call sites and must be certified. StepWise is the
+    # one a central allowlist silently revoked -- it lives in another module.
+    for collector_type in (WholeTrajectoryCollector, BatchedTrajectoryCollector, StepWiseRolloutCollector):
+        assert collector_is_instrumented(collector_type.__new__(collector_type)), collector_type.__name__
 
     class UnbracketedCollector:
         def __init__(self, runner):
-            self.runner = runner
+            self._runner = runner
 
-    assert UnbracketedCollector not in INSTRUMENTED_COLLECTOR_TYPES
+    assert not collector_is_instrumented(UnbracketedCollector(None)), (
+        "a collector that brackets nothing must publish nothing, not a seeded zero"
+    )
 
-    # The rule the runner applies, asserted directly: an uncertified collector type is not covered.
-    certified = type(SkyRLGymTrajectoryRunner.__dict__.get("_sentinel", object)) in INSTRUMENTED_COLLECTOR_TYPES
-    assert not certified
-
-    # And a SUBCLASS of a certified collector is not covered either: it may override agent_loop or
+    # A SUBCLASS of a certified collector is NOT certified: it may override agent_loop or
     # collect_batched without the brackets, and those methods are what the certificate is about.
-    class SneakySubclass(INSTRUMENTED_COLLECTOR_TYPES[0]):
+    class SneakySubclass(WholeTrajectoryCollector):
         pass
 
-    assert SneakySubclass not in INSTRUMENTED_COLLECTOR_TYPES
-    assert type(SneakySubclass) not in INSTRUMENTED_COLLECTOR_TYPES
-    assert isinstance(SneakySubclass(None), INSTRUMENTED_COLLECTOR_TYPES), (
-        "isinstance would wrongly certify it, which is why the runner compares the exact type"
+    assert not collector_is_instrumented(SneakySubclass.__new__(SneakySubclass)), (
+        "getattr would inherit the flag here; the rule reads the class's own __dict__ for this reason"
     )
+
+
+def test_a_subclass_that_replaces_run_is_not_recertified_by_its_collector():
+    """The two certificates cover different halves and neither implies the other.
+
+    __init_subclass__ revokes the CLASS certificate from a subclass that replaces _run. The runner
+    then assigns an INSTANCE attribute, which shadows it -- so a subclass with its own unbracketed
+    _run, inheriting __init__ and getting the default (certified) collector, would be re-certified by
+    the very check meant to tighten certification. It would then seed 0.0 for every leaf and publish
+    residual == generate.
+    """
+
+    class ReplacesRun(SkyRLGymTrajectoryRunner):
+        async def _run(self, *args, **kwargs):  # pragma: no cover - never called
+            raise AssertionError("not invoked")
+
+    assert SkyRLGymTrajectoryRunner.generate_spans_instrumented is True
+    assert ReplacesRun.generate_spans_instrumented is False, "__init_subclass__ must revoke it"
+
+    # The expression __init__ evaluates, on a certified collector. The class certificate has to
+    # survive into it, or the instance attribute silently re-grants what __init_subclass__ removed.
+    from skyrl_train.trajectory_runners.skyrl_gym import WholeTrajectoryCollector, collector_is_instrumented
+
+    certified_collector = WholeTrajectoryCollector.__new__(WholeTrajectoryCollector)
+    assert collector_is_instrumented(certified_collector) is True
+    assert (ReplacesRun.generate_spans_instrumented and collector_is_instrumented(certified_collector)) is False
 
 
 def test_the_trajectory_count_is_absent_where_no_trajectory_scope_closes():
@@ -888,21 +934,43 @@ def test_every_rollout_span_call_site_names_a_registered_span():
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-            if name != "rollout_span" or not node.args:
+            fname = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if fname not in ("rollout_span", "rollout_wait"):
                 continue
-            arg = node.args[0]
-            assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
-                f"{path.name}:{node.lineno} passes a non-literal to rollout_span; this check cannot "
-                "see it, so the name would be unvalidated until it ran"
-            )
-            seen.append((path.name, node.lineno, arg.value))
+            # Keyword form too. `rollout_span(name="rollout_collct")` has EMPTY node.args, so an
+            # args-only walk skipped it in silence -- a hole in the check that exists to close a hole.
+            arg = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "name"), None)
+            assert arg is not None, f"{path.name}:{node.lineno} calls {fname} with no name argument"
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                value = arg.value
+            elif isinstance(arg, ast.Name):
+                # A module constant is SAFER than a literal -- a typo in the identifier is a
+                # NameError at import, before anything runs. Resolve it and check what it holds.
+                assert hasattr(timing_module, arg.id), (
+                    f"{path.name}:{node.lineno} passes {arg.id!r} to {fname}, which is not a "
+                    "timing_observability constant; this check cannot resolve it"
+                )
+                value = getattr(timing_module, arg.id)
+            else:
+                raise AssertionError(
+                    f"{path.name}:{node.lineno} passes a {type(arg).__name__} to {fname}; the name "
+                    "would be unvalidated until it ran"
+                )
+            seen.append((path.name, node.lineno, value, fname))
 
-    assert seen, "found no rollout_span call sites at all; the walk is not looking where they live"
-    for filename, lineno, value in seen:
-        assert value in timing_module.GENERATE_LEAF_SPANS, (
-            f"{filename}:{lineno} opens rollout_span({value!r}), which is not registered; its region "
-            f"would be dropped and absorbed by the residual"
+    assert seen, "found no rollout_span/rollout_wait call sites at all; the walk is looking in the wrong place"
+    assert {fname for *_, fname in seen} == {"rollout_span", "rollout_wait"}, (
+        "both name-taking entry points must be covered; a wait name that vanishes is worse than a "
+        "span name that lands in the residual"
+    )
+    registered = {
+        "rollout_span": timing_module.GENERATE_LEAF_SPANS,
+        "rollout_wait": timing_module.ROLLOUT_WAIT_NAMES,
+    }
+    for filename, lineno, value, fname in seen:
+        assert value in registered[fname], (
+            f"{filename}:{lineno} calls {fname}({value!r}), which is not registered; a span name is "
+            f"absorbed by the residual and a wait name is dropped outright"
         )
 
 

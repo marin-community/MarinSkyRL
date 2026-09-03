@@ -236,6 +236,11 @@ ROLLOUT_ENV_QUEUE = "rollout_env_queue"
 ROLLOUT_ENV_EXEC = "rollout_env_exec"
 ROLLOUT_ENV_RESUME = "rollout_env_resume"
 
+# The names rollout_wait accepts. A wait carries a sum, a count and a tail, so an unregistered name
+# loses all three -- and unlike a span it does not even reach the residual: publish_driver_counters
+# drops the row with a warning, and the series simply vanishes.
+ROLLOUT_WAIT_NAMES = (ROLLOUT_ENGINE_AWAIT, ROLLOUT_ENV_AWAIT, ROLLOUT_ENV_QUEUE, ROLLOUT_ENV_EXEC, ROLLOUT_ENV_RESUME)
+
 _SUM_SUFFIX = "_seconds_sum"
 _MAX_SUFFIX = "_seconds_max"
 _COUNT_SUFFIX = "_count"
@@ -286,14 +291,22 @@ class RolloutTimings:
     durations: dict[str, float] = field(default_factory=dict)
     counters: dict[str, float] = field(default_factory=dict)
     supported: bool = False
-    # What record_generate_spans has already folded out of ``durations``. The trainer holds ONE of
-    # these per step (trainer.py, `phase_timings = RolloutTimings()`), so a step that generates twice
-    # folds the same accumulator twice -- and durations accumulate while generate_seconds is
-    # per-call. Without this, the second fold adds the running total again and subtracts it from a
-    # single call's wall: with two 6 s calls and 5 s of leaves each, the residual publishes -3
-    # against a true +2, and a NEGATIVE residual is the design's signal for double-counting. It
-    # would fire falsely, on the one detector the tree has.
+    # What record_generate_spans has already folded, so a second fold of the SAME accumulator adds
+    # only what is new.
+    #
+    # ⚠️ The trainer does not currently need this. `phase_timings = RolloutTimings()` sits INSIDE the
+    # dataloader loop, and both resample paths (group admission, dynamic sampling) `continue`, which
+    # re-enters the loop and builds a fresh accumulator -- so today every fold sees an empty
+    # `_folded` and this is inert. It is here because the docstring promises the function
+    # "accumulates rather than assigns", and that promise is only true for one of the two shapes a
+    # caller can use. Without it, folding one accumulator twice subtracts the running total from a
+    # single call's wall: two 6 s calls with 5 s of leaves each publish a residual of -3 against a
+    # true +2, and a negative residual is this tree's signal that a child is being counted inside
+    # another. The function would accuse itself of the one defect the residual exists to catch.
     _folded: dict[str, float] = field(default_factory=dict)
+    # The same bookkeeping for the additive counters. Maxima need none: re-folding a max is
+    # idempotent, so they are deliberately absent from this dict rather than tracked and ignored.
+    _folded_counters: dict[str, float] = field(default_factory=dict)
 
     def mark_supported(self) -> None:
         """Declare every leaf measured, seeding explicit zeros.
@@ -453,6 +466,12 @@ def rollout_wait(name: str) -> Iterator[None]:
     that hands work to a ThreadPoolExecutor: a ContextVar does not cross ``run_in_executor``, so
     reading the accumulator inside the executor thread would find nothing.
     """
+    # The same validation rollout_span does, for the same reason. A wrong name here is NOT dropped
+    # in silence by phase_timing_observations -- it reaches publish_driver_counters, which drops the
+    # row with a warning. The engine-await series then simply vanishes and the run reads as an
+    # environment that never waited. Statically decidable, so fail on the first rollout.
+    if name not in ROLLOUT_WAIT_NAMES:
+        raise AssertionError(f"{name!r} is not a registered rollout wait; expected one of {ROLLOUT_WAIT_NAMES}")
     timings = ROLLOUT_TIMINGS.get()
     if timings is None:
         yield
@@ -563,9 +582,15 @@ def record_generate_spans(
     )
     for name, value in timings.counters.items():
         if name.endswith(_MAX_SUFFIX):
+            # A tail folds with max on both axes: the accumulator already holds the largest single
+            # trajectory, and re-folding it is idempotent. Adding two tails would invent a third.
             counters[name] = max(counters.get(name, 0.0), value)
         else:
-            counters[name] = counters.get(name, 0.0) + value
+            # Sums and counts accumulate INSIDE the accumulator too, so fold the delta for the same
+            # reason durations do -- folding one accumulator twice with counts 8 then 16 published
+            # 24. The first version of this fix handled durations and left this loop cumulative.
+            counters[name] = counters.get(name, 0.0) + (value - timings._folded_counters.get(name, 0.0))
+            timings._folded_counters[name] = value
 
 
 _driver_counter_check_done = False
