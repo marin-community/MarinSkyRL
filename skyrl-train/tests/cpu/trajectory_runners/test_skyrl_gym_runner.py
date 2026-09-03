@@ -1629,3 +1629,83 @@ def test_rollout_metrics_skip_unstepped_episode_metrics():
     )
 
     assert metrics["environment/acc"] == 1.0
+
+
+def test_the_instrumentation_certificate_is_evaluated_on_a_real_runner(
+    generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer
+):
+    """Executes the runner's own expression, rather than re-typing it in the test.
+
+    Two earlier tests asserted the rule and the collector flag separately and never constructed a
+    runner, so BOTH halves of the conjunction in __init__ could be deleted with the whole suite
+    green -- each deletion reinstating a defect a previous review round had found. The seam is
+    reachable from CPU tests; nothing was reading it.
+
+    The certificate has to be the AND of two independent things: the class certificate, which
+    __init_subclass__ revokes from a subclass that replaces the bracketed body, and the collector
+    certificate, which covers the injected half. Neither implies the other.
+    """
+    from skyrl_train.trajectory_runners.skyrl_gym import TrajectoryPipeline
+
+    def _runner(**kwargs):
+        return SkyRLGymTrajectoryRunner(
+            trajectory_runner_cfg=generator_cfg,
+            skyrl_gym_cfg=mock_env_cfg,
+            inference_engine_client=mock_llm,
+            tokenizer=mock_tokenizer,
+            **kwargs,
+        )
+
+    assert _runner().generate_spans_instrumented is True, "the shipped runner brackets its call sites"
+
+    class Unbracketed:
+        """A collector that brackets nothing. It satisfies the collector protocol and no more."""
+
+        def __init__(self, runner):
+            self._runner = runner
+
+        def validate(self) -> None:
+            pass
+
+        async def collect(self, request, *, disable_tqdm: bool = False):  # pragma: no cover
+            raise AssertionError("not invoked")
+
+    injected = _runner(pipeline=TrajectoryPipeline(Unbracketed, MagicMock()))
+    assert injected.generate_spans_instrumented is False, (
+        "an injected collector that brackets nothing must publish nothing, not a seeded all-zero tree"
+    )
+
+    class ReplacesRun(SkyRLGymTrajectoryRunner):
+        async def _run(self, *args, **kwargs):  # pragma: no cover - never called
+            raise AssertionError("not invoked")
+
+    subclassed = ReplacesRun(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    assert subclassed.generate_spans_instrumented is False, (
+        "a subclass that replaces _run keeps a certified collector; the class certificate must still revoke"
+    )
+
+    # agent_loop and collect_batched ARE the bracketed loops -- they hold the engine awaits, the
+    # environment calls and the trajectory scopes. Overriding one replaces instrumented code just as
+    # surely as replacing _run does, and an earlier version of the guard covered only _run, leaving
+    # the two methods its own docstring named uncovered.
+    for method in ("agent_loop", "collect_batched"):
+        overriding = type(
+            f"Overrides{method}",
+            (SkyRLGymTrajectoryRunner,),
+            {method: lambda self, *a, **k: None},
+        )
+        assert overriding.generate_spans_instrumented is False, (
+            f"overriding {method} replaces bracketed code; the certificate must not survive it"
+        )
+        instance = overriding(
+            trajectory_runner_cfg=generator_cfg,
+            skyrl_gym_cfg=mock_env_cfg,
+            inference_engine_client=mock_llm,
+            tokenizer=mock_tokenizer,
+        )
+        assert instance.generate_spans_instrumented is False

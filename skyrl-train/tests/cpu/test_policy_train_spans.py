@@ -83,20 +83,28 @@ def test_no_span_is_opened_with_a_manual_enter_exit_pair():
     assert ".__exit__(None, None, None)" not in source
 
     # Forbidding two strings is not enough: DELETING the span outright satisfies both while
-    # policy_forward vanishes from the tree into the residual. So assert the regions are opened, by
-    # walking for `_spans.span("<name>")` rather than searching text.
+    # policy_forward vanishes from the tree into the residual.
+    #
+    # And collecting `.span("<name>")` calls ANYWHERE is not enough either -- a bare
+    # `_spans.span("policy_forward")` statement creates the context manager and never enters it,
+    # which is the same defect as the manual pair this test replaced, and it passed. So walk `With`
+    # nodes and take only the context expressions.
     opened: set[str] = set()
     for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Call):
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
             continue
-        func = node.func
-        if getattr(func, "attr", None) != "span" or not node.args:
-            continue
-        arg = node.args[0]
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            opened.add(arg.value)
-    for name in ("policy_forward", "policy_backward", "policy_optimizer_step"):
-        assert name in opened, f"{name} is never opened; its time would fall into the residual"
+        for item in node.items:
+            call = item.context_expr
+            if not isinstance(call, ast.Call) or getattr(call.func, "attr", None) != "span" or not call.args:
+                continue
+            arg = call.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                opened.add(arg.value)
+    # Every span the residual subtracts must be entered somewhere, not just the three obvious ones:
+    # deleting policy_metric_allreduce or policy_final_barrier was green under the narrower list.
+    entered_by_the_worker = set(POLICY_TRAIN_SPANS) - {"policy_span_publish"}
+    missing = sorted(entered_by_the_worker - opened)
+    assert not missing, f"{missing} are subtracted from the residual but never entered as a `with`"
 
 
 def test_publish_cost_is_not_charged_to_a_parent_that_does_not_contain_it():

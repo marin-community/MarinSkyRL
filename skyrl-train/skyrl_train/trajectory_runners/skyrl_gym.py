@@ -119,9 +119,12 @@ SkyRLGymPipeline = (
 def collector_is_instrumented(collector: object) -> bool:
     """Whether this collector's own call sites are bracketed for the generate span tree.
 
-    Reads the collector's OWN ``__dict__`` rather than using getattr: inheritance would let a
-    subclass that overrides ``agent_loop`` or ``collect_batched`` without the brackets inherit the
-    certificate, and those methods are exactly what it certifies.
+    Reads the collector's OWN ``__dict__`` rather than using getattr, so a subclass of a certified
+    collector does not inherit the certificate without declaring it.
+
+    ⚠️ ``agent_loop`` and ``collect_batched`` live on the RUNNER, not here -- an earlier version of
+    this docstring said otherwise and named them as what this function covers. They are covered by
+    ``TrajectoryRunner.BRACKETED_METHODS``, and the runner requires both certificates.
 
     The runner cannot answer this for itself. Its bracketed call sites live in the collector, which
     is INJECTED (``pipeline=...``) -- ``main_base.get_trajectory_runner`` already injects one, and an
