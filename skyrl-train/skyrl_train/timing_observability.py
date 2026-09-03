@@ -236,10 +236,6 @@ ROLLOUT_ENV_QUEUE = "rollout_env_queue"
 ROLLOUT_ENV_EXEC = "rollout_env_exec"
 ROLLOUT_ENV_RESUME = "rollout_env_resume"
 
-# The names rollout_wait accepts. A wait carries a sum, a count and a tail, so an unregistered name
-# loses all three -- and unlike a span it does not even reach the residual: publish_driver_counters
-# drops the row with a warning, and the series simply vanishes.
-ROLLOUT_WAIT_NAMES = (ROLLOUT_ENGINE_AWAIT, ROLLOUT_ENV_AWAIT, ROLLOUT_ENV_QUEUE, ROLLOUT_ENV_EXEC, ROLLOUT_ENV_RESUME)
 
 _SUM_SUFFIX = "_seconds_sum"
 _MAX_SUFFIX = "_seconds_max"
@@ -265,6 +261,21 @@ ROLLOUT_COUNTERS = (
     f"{ROLLOUT_ENV_EXEC}{_SUM_SUFFIX}",
     f"{ROLLOUT_ENV_RESUME}{_SUM_SUFFIX}",
     ROLLOUT_TRAJECTORY_COUNT,
+)
+
+# The names rollout_wait accepts, DERIVED rather than listed: it emits a sum, a count and a tail, so
+# a name is only valid here if all three rows are declared above.
+#
+# ⚠️ Hand-listing this was wrong and the first version shipped the error. The three env terms carry a
+# `_seconds_sum` ONLY -- they are written by _record_env_wait directly, not through rollout_wait --
+# so blessing them let `rollout_wait(ROLLOUT_ENV_QUEUE)` emit an undeclared `rollout_env_queue_count`
+# that publish_driver_counters then drops. A guard against dropped rows that permits dropped rows.
+ROLLOUT_WAIT_NAMES = tuple(
+    name.removesuffix(_SUM_SUFFIX)
+    for name in ROLLOUT_COUNTERS
+    if name.endswith(_SUM_SUFFIX)
+    and f"{name.removesuffix(_SUM_SUFFIX)}{_COUNT_SUFFIX}" in ROLLOUT_COUNTERS
+    and f"{name.removesuffix(_SUM_SUFFIX)}{_MAX_SUFFIX}" in ROLLOUT_COUNTERS
 )
 
 # Physical instruments with the units the values actually carry. Not policy_train_count: that name
