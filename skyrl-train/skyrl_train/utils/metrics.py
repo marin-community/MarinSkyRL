@@ -19,8 +19,10 @@ def policy_training_metrics(
     metrics: Mapping[str, Sequence[float]],
     policy_update_steps: float,
 ) -> dict[str, float]:
-    """Average policy metrics, omit response length, and add update count."""
+    """Reduce policy metrics, preserving the latest optimizer learning rate."""
     status = mean_metrics({name: values for name, values in metrics.items() if name != "response_length"})
+    if learning_rates := metrics.get("policy_lr"):
+        status["policy_lr"] = learning_rates[-1]
     status["policy_update_steps"] = policy_update_steps
     return status
 
