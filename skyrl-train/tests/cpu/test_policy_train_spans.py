@@ -598,3 +598,37 @@ def test_a_byte_valued_counter_does_not_ride_the_unit_one_instrument(monkeypatch
     )
     assert sorted(byte_rows) == ["optimizer_step_peak_delta_bytes", "peak_allocated_bytes"]
     assert counts == ["micro_step_count"]
+
+
+def test_unsynchronized_spans_do_not_ship_the_synchronized_clock_domain():
+    """🚨 The mode decides what the number means, so it must be visible on the row.
+
+    Without a device synchronise a span measures kernel LAUNCH time and charges a backward's real
+    cost to whatever later call happens to block; with it, the span measures execution and the
+    pipeline is serialised. The accumulator's docstring says never to compare the two -- and a
+    consumer cannot obey that if both arrive under the same label.
+    """
+    import skyrl_train.timing_observability as timing_module
+
+    def _domains(synchronize):
+        rows: list[dict[str, str]] = []
+        monkey = pytest.MonkeyPatch()
+        try:
+            monkey.setattr(
+                timing_module,
+                "phase_duration",
+                type("_H", (), {"record": lambda self, v, attributes: rows.append(attributes)})(),
+            )
+            timing_module.WorkerTimingSink(0, synchronize=synchronize).publish(
+                timing_module.phase_timing_observations({"policy_ppo_train": 9.0, "policy_backward": 4.0}),
+                step=1,
+            )
+        finally:
+            monkey.undo()
+        return {row["phase"]: row["clock_domain"] for row in rows}
+
+    synced = _domains(True)
+    launched = _domains(False)
+    assert synced == {"policy_ppo_train": "inclusive_wall", "policy_backward": "exclusive_wall"}
+    assert launched == {"policy_ppo_train": "inclusive_launch", "policy_backward": "exclusive_launch"}
+    assert not set(synced.values()) & set(launched.values()), "the two modes must not share a label"
