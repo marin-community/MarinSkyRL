@@ -588,9 +588,15 @@ def test_a_supported_runner_seeds_explicit_zeros_for_every_leaf():
     timings.mark_supported()
     assert set(timings.durations) == set(GENERATE_SPANS) | set(GENERATE_NESTED_SPANS)
     assert set(timings.durations.values()) == {0.0}
-    # The tails are the exception: "the longest single trajectory" is undefined on a path with no
-    # per-trajectory scopes, so those rows stay ABSENT rather than seeded to a false zero.
-    seeded = {name for name in ROLLOUT_COUNTERS if not name.endswith("_seconds_max")}
+    # Two exceptions, both undefined on a path with no per-trajectory scopes and so ABSENT rather
+    # than seeded to a false zero: the tails ("the longest single trajectory") and the trajectory
+    # COUNT, which is the divisor docs/telemetry.md tells the consumer to use for a per-trajectory
+    # mean -- seeded, it makes that mean a division by zero.
+    seeded = {
+        name
+        for name in ROLLOUT_COUNTERS
+        if not name.endswith("_seconds_max") and name != timing_module.ROLLOUT_TRAJECTORY_COUNT
+    }
     assert set(timings.counters) == seeded
     assert set(timings.counters.values()) == {0.0}
     assert not any(name.endswith("_seconds_max") for name in timings.counters)
@@ -774,6 +780,94 @@ def test_unconfigured_telemetry_is_announced_once_rather_than_publishing_in_sile
 
     assert [w for w in warned if "endpoint is unset" in w], "the inert-telemetry case must warn"
     assert len([w for w in warned if "endpoint is unset" in w]) == 1, "once per process, not once per step"
+
+
+def test_an_injected_collector_does_not_inherit_the_instrumentation_certificate():
+    """The bracketed call sites live in the collector, and the collector is injected.
+
+    __init_subclass__ guards the CLASS. It cannot see `pipeline=...`, which main_base already uses
+    and an adopting team is expected to. An uncertified collector inheriting True would make
+    mark_supported() seed 0.0 for every leaf and publish residual == generate -- a measured-zero lie
+    that the explicit seeds make indistinguishable from a real all-zero rollout.
+    """
+    from skyrl_train.trajectory_runners.skyrl_gym import INSTRUMENTED_COLLECTOR_TYPES
+
+    class UnbracketedCollector:
+        def __init__(self, runner):
+            self.runner = runner
+
+    assert UnbracketedCollector not in INSTRUMENTED_COLLECTOR_TYPES
+
+    # The rule the runner applies, asserted directly: an uncertified collector type is not covered.
+    certified = type(SkyRLGymTrajectoryRunner.__dict__.get("_sentinel", object)) in INSTRUMENTED_COLLECTOR_TYPES
+    assert not certified
+
+    # And a SUBCLASS of a certified collector is not covered either: it may override agent_loop or
+    # collect_batched without the brackets, and those methods are what the certificate is about.
+    class SneakySubclass(INSTRUMENTED_COLLECTOR_TYPES[0]):
+        pass
+
+    assert SneakySubclass not in INSTRUMENTED_COLLECTOR_TYPES
+    assert type(SneakySubclass) not in INSTRUMENTED_COLLECTOR_TYPES
+    assert isinstance(SneakySubclass(None), INSTRUMENTED_COLLECTOR_TYPES), (
+        "isinstance would wrongly certify it, which is why the runner compares the exact type"
+    )
+
+
+def test_the_trajectory_count_is_absent_where_no_trajectory_scope_closes():
+    """It is a DIVISOR, so a seeded zero is worse than a missing row.
+
+    docs/telemetry.md tells the consumer to compute sum / rollout_trajectory_count for a
+    per-trajectory mean. The batched collector opens no trajectory scope, so seeding published a
+    hard 0.0 beside non-zero wait sums -- a division by zero, or an inf on a dashboard. Absent, the
+    consumer can tell that the mean is not derivable there.
+    """
+    timings = timing_module.RolloutTimings()
+    timings.mark_supported()
+    assert timing_module.ROLLOUT_TRAJECTORY_COUNT not in timings.counters
+    # The seeding it must NOT break: the sum/count pair still says "bracketed and never waited".
+    assert timings.counters[f"{timing_module.ROLLOUT_ENGINE_AWAIT}_count"] == 0.0
+    assert timings.counters[f"{timing_module.ROLLOUT_ENGINE_AWAIT}_seconds_sum"] == 0.0
+
+
+def test_every_rollout_span_call_site_names_a_registered_span():
+    """A typo in a call site is invisible to every other test, and it corrupts the decomposition.
+
+    The import-time guard checks that the CONSTANTS are registered; it cannot see what a call site
+    passes. Mutating "rollout_collect" to "rollout_collct" in skyrl_gym.py passed 407 CPU tests --
+    while on a real run that leaf vanishes, its ~60 s moves into generate_span_residual, and the tree
+    reports that generate is largely unaccounted for.
+
+    An AST walk rather than a substring search: it sees the literal actually passed as the argument,
+    so a name in a comment or docstring cannot satisfy it.
+    """
+    import ast
+    import pathlib
+
+    runners = pathlib.Path(timing_module.__file__).parent / "trajectory_runners"
+    seen: list[tuple[str, int, str]] = []
+    for path in sorted(runners.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name != "rollout_span" or not node.args:
+                continue
+            arg = node.args[0]
+            assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
+                f"{path.name}:{node.lineno} passes a non-literal to rollout_span; this check cannot "
+                "see it, so the name would be unvalidated until it ran"
+            )
+            seen.append((path.name, node.lineno, arg.value))
+
+    assert seen, "found no rollout_span call sites at all; the walk is not looking where they live"
+    for filename, lineno, value in seen:
+        assert value in timing_module.GENERATE_LEAF_SPANS, (
+            f"{filename}:{lineno} opens rollout_span({value!r}), which is not registered; its region "
+            f"would be dropped and absorbed by the residual"
+        )
 
 
 def test_driver_loss_detection_flushes_before_it_samples(monkeypatch):

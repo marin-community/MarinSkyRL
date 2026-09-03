@@ -106,6 +106,12 @@ SkyRLGymPipeline = (
 )
 
 
+# The collector types whose call sites are bracketed for the generate span tree. Adding a collector
+# here is the act of certifying it; the runner reads this per instance, so an injected collector that
+# is not listed publishes nothing rather than a seeded zero.
+INSTRUMENTED_COLLECTOR_TYPES: tuple[type, ...] = (WholeTrajectoryCollector, BatchedTrajectoryCollector)
+
+
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
     # Every engine await, environment call and tokenizer call on this runner's paths -- agent-loop,
     # batched and step-wise -- is bracketed, so its leaves are a real partition of generate and a
@@ -145,6 +151,18 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             )
         self.collector = pipeline.collector_type(self)
         self.projection = pipeline.projection
+        # 🚨 The certificate follows the COLLECTOR, not the class. Every bracketed call site on this
+        # runner lives in the collector, which is injected (`pipeline=...`) --
+        # main_base.get_trajectory_runner already passes one, and an adopting team is expected to.
+        # __init_subclass__ cannot see an instance-level injection, so a caller-supplied collector
+        # that brackets nothing would inherit True, mark_supported() would seed 0.0 for every leaf,
+        # and the step would publish an all-zero decomposition with residual == generate. That is
+        # the measured-zero lie the flag exists to prevent, made INDISTINGUISHABLE from truth by the
+        # explicit seeds -- strictly worse than the absence the design argues for.
+        #
+        # Exact type, not isinstance: a subclass of a bracketed collector may override agent_loop or
+        # collect_batched without the brackets, and it is those methods the certificate is about.
+        self.generate_spans_instrumented = type(self.collector) in INSTRUMENTED_COLLECTOR_TYPES
         self.max_turns = trajectory_runner_cfg.max_turns
         self.batched = trajectory_runner_cfg.batched
         self.use_conversation_multi_turn = trajectory_runner_cfg.use_conversation_multi_turn

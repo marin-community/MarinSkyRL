@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# A3 — the grouped_mm parity gate, on one H100, inside an Iris job.
-# Gates A2 (`--grouped-mm`): the native-Grug grouped path carries pytorch#186365 (uninitialised
-# ALIGN_SIZE_M tail rows) and had NO EP=1 coverage -- tests/gpu/test_grug_fsdp2_rl_cycle.py binds
-# use_grouped_mm to expert_model_parallel_size > 1, so the exact combination our arm runs is never
-# exercised. Builds the same frozen runtime the nightly uses, then runs the gate.
+# A12 — the flash-attention correctness gate, on one H100, inside an Iris job.
+# Gates `--flash-attn`: the arm reports 1.30x on policy_forward and fwd_logprobs together, and the
+# only thing separating a real speedup from a changed forward is a parity check against the eager
+# attention path at the same shapes. Builds the same frozen runtime the nightly uses, then runs it.
 set -euo pipefail
 REPOSITORY_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ENV_DIR="${ENV_DIR:-$REPOSITORY_ROOT/.iris-fagate-env}"
@@ -26,5 +25,13 @@ uv pip install --python "$PYTHON" --quiet pytest
 "$PYTHON" -m pytest --version
 
 echo "::: A12 flash-attention correctness gate"
+# `set -e` would abort here on a failing gate, so the status line after it could only ever
+# print 0 -- a health signal true by construction, which is the defect this branch exists to
+# eliminate. A gate's failure IS its result, so disable the guard across the gate only,
+# capture the status, and exit on it.
+set +e
 "$PYTHON" -m pytest tests/gpu/test_grug_flash_attention.py -v --no-header -p no:cacheprovider
-echo "::: FA EXIT=$?"
+status=$?
+set -e
+echo "::: FA EXIT=$status"
+exit "$status"
