@@ -84,6 +84,8 @@ POLICY_SPAN_TRAINER_FIELDS = {
     # Driver-side decomposition of generate. Default-ON, unlike the policy spans: it has no CUDA
     # synchronise to pay for, measuring ~21 ms against a ~98 s generate.
     "generate_spans": True,
+    # F25 diagnostic, off by default: one extra forward per micro-batch when enabled.
+    "log_ratio_repeat_probe": False,
 }
 ADDITIVE_ALGORITHM_FIELDS = {
     "batch_invariant": False,

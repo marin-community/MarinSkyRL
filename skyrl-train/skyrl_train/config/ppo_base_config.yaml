@@ -289,6 +289,11 @@ trainer:
   # against a ~98 s wall, and unlike the policy spans there is no CUDA synchronise to pay for. The
   # flag exists so its own cost can be A/B'd on a real run without editing code.
   generate_spans: true
+
+  # F25 diagnostic: repeat the old-logprob forward on the same micro-batch and log the difference.
+  # Costs one extra forward per micro-batch, so it is a diagnostic run, not a default. It rides
+  # policy_train_spans because it is only interpretable next to log_ratio_abs_max.
+  log_ratio_repeat_probe: false
   ckpt_interval: 5
   hf_save_interval: ${trainer.ckpt_interval}
   hf_upload_mode: latest

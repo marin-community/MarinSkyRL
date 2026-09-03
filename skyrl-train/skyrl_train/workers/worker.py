@@ -1624,6 +1624,43 @@ class PolicyWorkerBase(Worker):
                 temperature=self.cfg.generator.sampling_params.temperature,
                 rollout_routed_experts=rollout_routed_experts,
             )
+        # 🔬 The F25 discriminator. Off by default; one extra forward on this micro-batch when on.
+        #
+        # At one optimizer update per step this pass and the training forward run on IDENTICAL
+        # weights, so every token's PPO ratio must be exactly 1. With use_grouped_mm on it is not:
+        # ~1% of tokens carry a ratio up to 5.46x, and PPO clips them as if the policy had moved.
+        # Two families of cause remain, and they need opposite fixes:
+        #
+        #   this pass repeated != itself  -> NONDETERMINISM. The grouped combine's atomic
+        #                                    scatter_add over duplicate token indices is the
+        #                                    candidate; the fix is a fixed-order reduction.
+        #   repeats agree, but != train   -> a DETERMINISTIC eval/train seam. Then the combine is
+        #                                    innocent and the cause is state that differs between
+        #                                    the passes -- an uninitialised buffer, or the fact
+        #                                    that only THIS pass runs through asyncio.to_thread
+        #                                    (fsdp_worker.py) and so sees a different stream.
+        #
+        # No offline probe can settle it: a 4-layer model at production width, real weights and
+        # production tokens-per-expert is bitwise clean on one GPU. It needs the real 26-layer,
+        # FSDP2-sharded, two-code-path run.
+        if self._policy_spans.enabled and self.cfg.trainer.get("log_ratio_repeat_probe", False):
+            with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+                repeat = self.model(
+                    sequences,
+                    response_length,
+                    attention_mask,
+                    return_output=False,
+                    temperature=self.cfg.generator.sampling_params.temperature,
+                    rollout_routed_experts=rollout_routed_experts,
+                )
+            delta = (repeat - policy_logprob).abs().max().item()
+            logger.info(
+                "[F25] old-logprob forward repeated on the same micro-batch: max|delta| %.6e "
+                "(exactly 0 means this pass is deterministic, so any eval-vs-train divergence is a "
+                "SEAM, not nondeterminism)",
+                delta,
+            )
+
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
             {"output": policy_logprob},
