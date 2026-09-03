@@ -142,8 +142,7 @@ def test_the_NCCL_recorder_is_preferred_over_the_generic_one(monkeypatch):
     monkeypatch.setattr(flight_recorder_summary, "_state", type(flight_recorder_summary._state)())
 
     published: list = []
-    monkeypatch.setattr(flight_recorder_summary, "publish",
-                        lambda delta, rank: published.append(delta))
+    monkeypatch.setattr(flight_recorder_summary, "publish", lambda delta, rank: published.append(delta))
 
     flight_recorder_summary.capture_at_step_boundary(0, 1)
     flight_recorder_summary.capture_at_step_boundary(0, 2)
