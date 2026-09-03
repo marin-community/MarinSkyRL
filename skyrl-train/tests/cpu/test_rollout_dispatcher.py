@@ -34,33 +34,18 @@ class _Coordinator:
 class _BlockingCoordinator:
     def __init__(self):
         self._started = asyncio.Event()
-        self._release = asyncio.Event()
         self._finished = asyncio.Event()
         self._cancelled = False
 
-    async def run_shard(self, input_batch, *_args):
+    async def run_shard(self, *_args):
         self._started.set()
         try:
-            await self._release.wait()
-            ids = input_batch["trajectory_ids"]
-            return {
-                "prompt_token_ids": [[0] for _ in ids],
-                "response_ids": [[0] for _ in ids],
-                "rewards": [0.0 for _ in ids],
-                "loss_masks": [[1] for _ in ids],
-                "rollout_metrics": {},
-                "rollout_logprobs": None,
-                "trajectory_ids": ids,
-                "actual_global_step": 7,
-            }
+            await asyncio.Event().wait()
         except asyncio.CancelledError:
             self._cancelled = True
             raise
         finally:
             self._finished.set()
-
-    async def release(self):
-        self._release.set()
 
     async def wait_for_start(self):
         await self._started.wait()
