@@ -1628,7 +1628,9 @@ class PolicyWorkerBase(Worker):
         #
         # At one optimizer update per step this pass and the training forward run on IDENTICAL
         # weights, so every token's PPO ratio must be exactly 1. With use_grouped_mm on it is not:
-        # ~1% of tokens carry a ratio up to 5.46x, and PPO clips them as if the policy had moved.
+        # ~1% of tokens carry a ratio != 1, the worst of them 5.46x -- well outside eps_clip 0.2.
+        # (The clipped FRACTION is ppo_clip_ratio_low/high, a different metric; do not read it off
+        # ppo_ratio_exact_unit_fraction, which counts ratio == 1 and nothing about the bounds.)
         # Two families of cause remain, and they need opposite fixes:
         #
         #   this pass repeated != itself  -> NONDETERMINISM. The grouped combine's atomic
@@ -1659,8 +1661,10 @@ class PolicyWorkerBase(Worker):
                     rollout_routed_experts=rollout_routed_experts,
                 )
             delta = (repeat - policy_logprob).abs().max().item()
+            # loguru formats with str.format, not %. A %-placeholder here renders literally and
+            # DROPS the value: probe3 ran 24 H100 for 19 minutes and logged "max|delta| %.6e".
             logger.info(
-                "[F25] old-logprob forward repeated on the same micro-batch: max|delta| %.6e. "
+                "[F25] old-logprob forward repeated on the same micro-batch: max|delta| {:.6e}. "
                 "NON-ZERO proves this pass is nondeterministic. ZERO proves nothing on its own -- "
                 "one agreeing pair is not determinism, so read it across micro-batches and steps, "
                 "and only a long run of zeros makes a seam the better explanation.",

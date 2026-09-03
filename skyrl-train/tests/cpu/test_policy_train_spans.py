@@ -12,6 +12,7 @@ reporting nothing.
 from __future__ import annotations
 
 import inspect
+import re
 import sys
 import time
 from types import SimpleNamespace
@@ -770,3 +771,22 @@ def test_the_repeat_probe_does_not_claim_determinism_from_one_pair():
     source = inspect.getsource(worker_module.PolicyWorkerBase._forward_micro_batch)
     assert "ZERO proves nothing on its own" in source
     assert "exactly 0 means this pass is deterministic" not in source
+
+
+def test_the_repeat_probe_renders_its_delta():
+    """A probe that logs its placeholder instead of its value is a run that measured nothing.
+
+    worker.py logs through loguru, which formats with str.format. A %-placeholder renders
+    literally and the argument is dropped -- silently, with the line still present and still
+    reading like a result. That is what f25-probe3 did: 24 H100 for 19 minutes, every line
+    reporting "max|delta| %.6e".
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    source = inspect.getsource(worker_module.PolicyWorkerBase._forward_micro_batch)
+    f25 = source[source.index("[F25] old-logprob forward repeated") :]
+    message = f25[: f25.index("delta,")]
+    assert not re.search(r"%[-#0-9.]*[sdeEfgGr]", message), (
+        "loguru formats with str.format; a %-placeholder drops the value"
+    )
+    assert "{:.6e}" in message
