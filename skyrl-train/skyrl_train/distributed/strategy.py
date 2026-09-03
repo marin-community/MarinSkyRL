@@ -81,7 +81,7 @@ class DistributedStrategy(ABC):
 
     def all_reduce(self, data: DataT, op="mean") -> DataT:
         """Perform all_reduce across all processes"""
-        assert op in ("mean", "max", "sum")
+        assert op in ("mean", "max", "sum", "min")
         if isinstance(data, dict):
             ret = {}
             for k, v in data.items():
@@ -98,7 +98,9 @@ class DistributedStrategy(ABC):
                 data = data.to(torch.cuda.current_device())
             if op == "mean":
                 data /= self.world_size
-            dist.all_reduce(data, op=dist.ReduceOp.MAX if op == "max" else dist.ReduceOp.SUM)
+            _REDUCE_OPS = {"max": dist.ReduceOp.MAX, "min": dist.ReduceOp.MIN}
+            # mean is a SUM here; the division by world_size already happened above.
+            dist.all_reduce(data, op=_REDUCE_OPS.get(op, dist.ReduceOp.SUM))
             if is_cpu_tensor:
                 data = data.cpu()
             return data.item() if not is_tensor else data

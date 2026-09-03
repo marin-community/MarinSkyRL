@@ -26,5 +26,13 @@ uv pip install --python "$PYTHON" --quiet pytest
 "$PYTHON" -m pytest --version
 
 echo "::: A3 parity gate"
+# `set -e` would abort here on a failing gate, so the status line after it could only ever
+# print 0 -- a health signal true by construction, which is the defect this branch exists to
+# eliminate. A gate's failure IS its result, so disable the guard across the gate only,
+# capture the status, and exit on it.
+set +e
 "$PYTHON" -m pytest tests/gpu/gpu_ci/test_grug_grouped_mm_parity.py -v --no-header -p no:cacheprovider
-echo "::: A3 EXIT=$?"
+status=$?
+set -e
+echo "::: A3 EXIT=$status"
+exit "$status"

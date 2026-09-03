@@ -44,7 +44,15 @@ TIMING_PARENTS: dict[str, str | None] = {
     # goes. Published with role=worker and clock_domain=exclusive_wall; see WorkerSpanAccumulator.
     "policy_ppo_train": "policy_train",
     "policy_entry_barrier": "policy_ppo_train",
-    "policy_span_publish": "policy_ppo_train",
+    # 🔻 policy_train, NOT policy_ppo_train. This is the cost of publishing the PREVIOUS step's
+    # spans, and it is measured AFTER policy_ppo_train's total_seconds has been taken -- so its
+    # parent's wall does not contain it, while the driver's policy_train wait does. Parented to
+    # policy_ppo_train it made the exclusive children sum to parent + publish (up to the 1.0 s flush
+    # cap of over-coverage), and the signed residual could not see it, because the residual is
+    # computed from POLICY_TRAIN_SPANS which this is no longer a member of. A reader auditing the
+    # tree saw a positive discrepancy and was told by the design notes that it meant double-counting
+    # inside a child. It did not; it was a row on the wrong parent.
+    "policy_span_publish": "policy_train",
     # Split at the seams _phase_diagnostics already marks. A single policy_training_step span would
     # report ~95% of policy_ppo_train and reproduce the same black box one level down, at the cost of
     # a full step.
@@ -291,12 +299,18 @@ class RolloutTimings:
         collector issues one engine request for a whole batch. Seeded, they would publish 0.0 beside
         a non-zero mean; folded from a batch-wide scope they would publish a SUM under a max name.
         Absent, they say the only true thing.
+
+        ``rollout_trajectory_count`` is excluded by the identical argument, and it is worse than the
+        maxima because it is a DIVISOR: docs/telemetry.md tells the consumer to compute
+        ``sum / rollout_trajectory_count`` for a per-trajectory mean. Seeded on the batched path it
+        published a hard 0.0 next to non-zero wait sums, so that mean is a division by zero or an
+        ``inf`` on a dashboard. How many trajectory scopes closed is undefined where none are opened.
         """
         self.supported = True
         for name in GENERATE_LEAF_SPANS:
             self.durations.setdefault(name, 0.0)
         for name in ROLLOUT_COUNTERS:
-            if not name.endswith(_MAX_SUFFIX):
+            if not name.endswith(_MAX_SUFFIX) and name != ROLLOUT_TRAJECTORY_COUNT:
                 self.counters.setdefault(name, 0.0)
 
 
@@ -384,6 +398,21 @@ def rollout_span(name: str) -> Iterator[None]:
     A region containing an ``await`` that yields to concurrent siblings overlaps them, and its sum is
     not a partition of anything -- use :func:`rollout_wait` for those.
     """
+    # 🚨 Validate the NAME, not just the constants. The import-time guard below checks that every
+    # entry of GENERATE_LEAF_SPANS is registered; it cannot see what a call site actually passes, and
+    # this function took any string. A typo therefore published a W&B series nobody expects, wrote
+    # nothing to finelog, and moved its region silently into generate_span_residual -- so the tree
+    # reported "generate is largely unaccounted for", which is the one claim the design says must
+    # never be published. A mutation of "rollout_collect" to "rollout_collct" passed 407 CPU tests.
+    #
+    # Raising is right here, unlike in the publish epilogue where the policy is drop-and-warn: a
+    # region name is a literal, so this is a programming error that is wrong on the FIRST rollout,
+    # before a step has been paid for -- not a data-dependent condition discovered after the work.
+    if name not in GENERATE_LEAF_SPANS:
+        raise AssertionError(
+            f"{name!r} is not a registered generate span; it would be dropped by "
+            f"phase_timing_observations and absorbed by the residual. Expected one of {GENERATE_LEAF_SPANS}"
+        )
     timings = ROLLOUT_TIMINGS.get()
     if timings is None:
         yield
@@ -633,7 +662,6 @@ TELEMETRY_FLUSH_TIMEOUT_SECONDS = 1.0
 
 POLICY_TRAIN_SPANS = (
     "policy_entry_barrier",
-    "policy_span_publish",
     "policy_forward",
     "policy_backward",
     "policy_optimizer_step",

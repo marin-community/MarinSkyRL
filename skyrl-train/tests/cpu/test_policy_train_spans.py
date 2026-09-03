@@ -66,6 +66,35 @@ def test_every_span_is_registered_in_the_timing_tree():
         assert TIMING_PARENTS[name] == "policy_ppo_train"
 
 
+def test_no_span_is_opened_with_a_manual_enter_exit_pair():
+    """A manual __enter__/__exit__ leaks the span on any raise between them.
+
+    The generator's finally calls torch.cuda.synchronize() under synchronize=True, so on an
+    exception it runs later from the GC finalizer and records an elapsed value bounded by garbage
+    collection rather than by the region. OOM inside the forward is the documented failure of
+    exactly that region, so the leak fires precisely when the timing would be read.
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    source = inspect.getsource(worker_module)
+    assert ".__enter__()" not in source, "open spans with `with`, so an exception still closes them"
+    assert ".__exit__(None, None, None)" not in source
+
+
+def test_publish_cost_is_not_charged_to_a_parent_that_does_not_contain_it():
+    """policy_span_publish happens after policy_ppo_train's wall is already measured.
+
+    Parented there and listed in POLICY_TRAIN_SPANS, the exclusive children summed to
+    parent + publish while the signed residual -- the only automatic double-counting detector --
+    stayed at 0.0, because the residual is computed from POLICY_TRAIN_SPANS. The tree was over
+    its parent and said nothing. It belongs to the driver's policy_train wait, which does contain it.
+    """
+    assert TIMING_PARENTS["policy_span_publish"] == "policy_train"
+    assert "policy_span_publish" not in POLICY_TRAIN_SPANS, (
+        "subtracting it makes the children over-cover the parent, invisibly to the residual"
+    )
+
+
 def test_disabled_accumulator_records_nothing_and_costs_nothing():
     accumulator = WorkerSpanAccumulator(enabled=False)
     with accumulator.span("policy_forward"):
@@ -257,9 +286,14 @@ def test_flush_timeout_stays_short_because_it_blocks_the_workers_return():
 
 
 def test_publish_cost_has_a_span_so_it_is_attributable():
-    """It happens after the window closes; carried forward one step beats being unmeasured."""
-    assert TIMING_PARENTS["policy_span_publish"] == "policy_ppo_train"
-    assert "policy_span_publish" in POLICY_TRAIN_SPANS
+    """It happens after the window closes; carried forward one step beats being unmeasured.
+
+    ⚠️ This test previously asserted `parent == "policy_ppo_train"` and membership in
+    POLICY_TRAIN_SPANS -- it encoded the defect and passed, which is why the over-coverage survived
+    review. Attribution is the property worth asserting; which parent it attaches to is asserted by
+    test_publish_cost_is_not_charged_to_a_parent_that_does_not_contain_it.
+    """
+    assert "policy_span_publish" in TIMING_PARENTS, "unregistered means dropped, i.e. unmeasured"
 
 
 def test_previous_publish_is_emitted_under_its_own_step_not_this_one():
