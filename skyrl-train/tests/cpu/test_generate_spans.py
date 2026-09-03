@@ -534,9 +534,13 @@ def test_a_supported_runner_seeds_explicit_zeros_for_every_leaf():
     timings = RolloutTimings()
     timings.mark_supported()
     assert set(timings.durations) == set(GENERATE_SPANS) | set(GENERATE_NESTED_SPANS)
-    assert set(timings.counters) == set(ROLLOUT_COUNTERS)
     assert set(timings.durations.values()) == {0.0}
+    # The tails are the exception: "the longest single trajectory" is undefined on a path with no
+    # per-trajectory scopes, so those rows stay ABSENT rather than seeded to a false zero.
+    seeded = {name for name in ROLLOUT_COUNTERS if not name.endswith("_seconds_max")}
+    assert set(timings.counters) == seeded
     assert set(timings.counters.values()) == {0.0}
+    assert not any(name.endswith("_seconds_max") for name in timings.counters)
 
 
 def test_an_uninstrumented_runner_publishes_nothing_not_a_full_residual():
@@ -814,9 +818,14 @@ def test_the_env_call_is_bracketed_on_the_event_loop_thread_and_split_three_ways
     assert "loop.run_in_executor(" in inspect.getsource(timed_env_call)
 
 
-# Functions whose body is one trajectory. Every engine and environment wait must be reachable only
-# from inside one of these, or its time lands in the sums with no tail beside it.
-TRAJECTORY_SCOPED_FUNCTIONS = {"agent_loop", "collect_batched"}
+# Functions whose body is exactly one trajectory. These MUST carry @traced_trajectory.
+TRAJECTORY_SCOPED_FUNCTIONS = {"agent_loop"}
+
+# Functions that hold waits but are NOT one trajectory, so no tail is defined for them. These must
+# NOT carry @traced_trajectory: collect_batched issues one engine request for a whole batch and
+# loops the environment over every row, so a scope there would publish a batch-wide SUM under a
+# _seconds_max name. Absence is the only true answer.
+TAIL_FREE_FUNCTIONS = {"collect_batched"}
 
 
 @pytest.mark.parametrize("module_name", ["skyrl_gym", "step_wise"])
@@ -839,11 +848,17 @@ def test_every_wait_site_is_inside_a_trajectory_scope(module_name):
             continue
         for line in range(node.lineno, node.end_lineno + 1):
             holder.setdefault(line, node.name)
+        decorated = any(isinstance(d, ast.Name) and d.id == "traced_trajectory" for d in node.decorator_list)
+        if node.name in TAIL_FREE_FUNCTIONS:
+            assert not decorated, (
+                f"{module_name}.{node.name} is not one trajectory; a scope here would publish a "
+                "batch-wide sum under a _seconds_max name"
+            )
+            scoped.update(range(node.lineno, node.end_lineno + 1))
+            continue
         if node.name not in TRAJECTORY_SCOPED_FUNCTIONS:
             continue
-        assert any(isinstance(d, ast.Name) and d.id == "traced_trajectory" for d in node.decorator_list), (
-            f"{module_name}.{node.name} holds waits but is not @traced_trajectory"
-        )
+        assert decorated, f"{module_name}.{node.name} holds waits but is not @traced_trajectory"
         scoped.update(range(node.lineno, node.end_lineno + 1))
 
     unscoped: list[str] = []
@@ -855,7 +870,8 @@ def test_every_wait_site_is_inside_a_trajectory_scope(module_name):
             continue
         if node.lineno not in scoped:
             unscoped.append(
-                f"{module_name}:{node.lineno} {name}() in {holder.get(node.lineno)!r}, outside a trajectory"
+                f"{module_name}:{node.lineno} {name}() in {holder.get(node.lineno)!r}, in neither "
+                "TRAJECTORY_SCOPED_FUNCTIONS nor TAIL_FREE_FUNCTIONS"
             )
     assert not unscoped, "\n".join(unscoped)
 
@@ -867,7 +883,8 @@ def test_every_agent_loop_scopes_its_own_trajectory():
         assert getattr(owner.agent_loop, "__wrapped__", None) is not None, (
             f"{owner.__name__}.agent_loop is not scoped as a trajectory"
         )
-    assert getattr(SkyRLGymTrajectoryRunner.collect_batched, "__wrapped__", None) is not None
+    # And the batched collector deliberately is NOT: one batch is not one trajectory.
+    assert getattr(SkyRLGymTrajectoryRunner.collect_batched, "__wrapped__", None) is None
 
 
 def test_a_region_emits_no_log_record():

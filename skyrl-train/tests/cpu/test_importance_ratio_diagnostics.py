@@ -91,13 +91,20 @@ def test_a_max_valued_metric_reaches_the_real_reduce_op_max():
     assert ops == [torch.distributed.ReduceOp.SUM], "a mean is a local divide plus a SUM"
 
 
-def test_a_token_count_is_summed_across_ranks_not_averaged():
-    """The gt_*pct keys are token COUNTS. A mean divides the global count by world size, so 1000
-    offending tokens on one of 80 ranks publishes 12.5 -- nonzero, so an alert still fires, but every
-    magnitude 80x low and the series is not a token count."""
-    assert _reduce_one("n_tokens_dp_gt_1pct", 1000.0, [0.0, 0.0, 0.0], []) == 1000.0, (
-        "a mean would publish 250.0 for a count of 1000"
+def test_a_replicated_token_count_is_not_multiplied_by_the_replication_factor():
+    """🚨 A sum over WORLD is not a global count when ranks replicate.
+
+    Strategy.all_reduce reduces over WORLD. Under sequence, context, expert or Megatron
+    tensor/pipeline parallelism the replicas hold the SAME tokens, so summing multiplies the count
+    by the replication factor -- 16x at CP2xEP8. A mean reads low by the world size instead, which
+    is a documented per-rank average rather than a wrong global total. Neither op is right; a
+    correct count needs a data-parallel-group reduction this primitive cannot express.
+    """
+    assert "n_tokens_dp_gt_1pct" not in STATUS_REDUCTION_OPS, (
+        "summing this over WORLD overcounts every replicated topology"
     )
+    # Two ranks replicating the same 100 tokens: the mean is 100, a sum would be 200.
+    assert _reduce_one("n_tokens_dp_gt_1pct", 100.0, [100.0], []) == pytest.approx(100.0)
 
 
 def test_the_two_reduction_axes_share_one_op_map():
@@ -108,14 +115,12 @@ def test_the_two_reduction_axes_share_one_op_map():
         {
             "log_ratio_abs_max": [19.0, 0.0, 0.0, 0.0],
             "log_ratio_diagnostics_failed": [1.0, 0.0, 0.0, 0.0],
-            "n_tokens_dp_gt_1pct": [10.0, 20.0],
             "policy_loss": [1.0, 3.0],
         },
         policy_update_steps=1.0,
     )
     assert status["log_ratio_abs_max"] == 19.0, "a mean over mini-batches would publish 4.75"
     assert status["log_ratio_diagnostics_failed"] == 1.0, "any mini-batch failing is a failure"
-    assert status["n_tokens_dp_gt_1pct"] == 30.0
     assert status["policy_loss"] == 2.0
 
 
@@ -124,5 +129,6 @@ def test_every_specially_reduced_key_is_declared_once():
     assert set(STATUS_REDUCTION_OPS) == set(MAX_REDUCED_METRIC_KEYS) | set(SUM_REDUCED_METRIC_KEYS)
     assert all(STATUS_REDUCTION_OPS[key] == "max" for key in MAX_REDUCED_METRIC_KEYS)
     assert all(STATUS_REDUCTION_OPS[key] == "sum" for key in SUM_REDUCED_METRIC_KEYS)
-    # p99 is deliberately absent: a max of per-rank p99 approximations is not a quantile either.
+    # Deliberately absent, because neither available op is right for them.
     assert "log_ratio_abs_p99" not in STATUS_REDUCTION_OPS
+    assert "n_tokens_dp_gt_1pct" not in STATUS_REDUCTION_OPS
