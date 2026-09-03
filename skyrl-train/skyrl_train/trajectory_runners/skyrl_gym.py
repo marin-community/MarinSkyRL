@@ -7,7 +7,6 @@ For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_runn
 
 from __future__ import annotations
 
-import asyncio
 import copy
 from dataclasses import dataclass
 from uuid import uuid4
@@ -16,6 +15,14 @@ from typing import Callable, Generic, List, Dict, Any, Optional, Sequence, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 
+from skyrl_train.timing_observability import (
+    ROLLOUT_ENGINE_AWAIT,
+    rollout_span,
+    rollout_trajectory,
+    rollout_wait,
+    timed_env_call,
+    traced_trajectory,
+)
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -101,6 +108,11 @@ SkyRLGymPipeline = (
 
 
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
+    # Every engine await, environment call and tokenizer call on this runner's paths -- agent-loop,
+    # batched and step-wise -- is bracketed, so its leaves are a real partition of generate and a
+    # zero leaf means zero rather than "nobody looked".
+    generate_spans_instrumented = True
+
     def __init__(
         self,
         trajectory_runner_cfg: DictConfig,
@@ -187,12 +199,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             )
 
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
-        if (executor := self.env_executor) is not None:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(executor, func, *args, **kwargs)
-        else:
-            return func(*args, **kwargs)
+        # timed_env_call splits the caller-observed wait into queue / exec / resume. One bracket
+        # around the whole thing would report executor backlog as environment runtime: N concurrent
+        # trajectories against W pool threads make that sum O(N^2/W), so it moves with the batch size
+        # while the environment is unchanged.
+        return await timed_env_call(self.env_executor, func, *args, **kwargs)
 
+    @traced_trajectory
     async def agent_loop(
         self,
         prompt: ConversationType,
@@ -249,17 +262,19 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
         initial_chat_history_length = len(chat_history)
         chat_end_index = len(chat_history)
-        input_ids = normalize_token_ids(
-            self.tokenizer.apply_chat_template(
-                chat_history,
-                # If retokenize_chat_history==True, avoid including the generation prompt in both the
-                # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
-                add_generation_prompt=not retokenize_chat_history,
-                chat_template=self.custom_chat_template if retokenize_chat_history else None,
-                tokenize=True,
-                **self.trajectory_runner_cfg.chat_template_kwargs,
+        with rollout_span("rollout_tokenize"):
+            input_ids = normalize_token_ids(
+                self.tokenizer.apply_chat_template(
+                    chat_history,
+                    # If retokenize_chat_history==True, avoid including the generation prompt in both
+                    # the prompt_ids and response_ids due to how `response_encodings["input_ids"]`
+                    # works.
+                    add_generation_prompt=not retokenize_chat_history,
+                    chat_template=self.custom_chat_template if retokenize_chat_history else None,
+                    tokenize=True,
+                    **self.trajectory_runner_cfg.chat_template_kwargs,
+                )
             )
-        )
 
         initial_prompt_length = len(input_ids)
         if initial_prompt_length > max_input_length:
@@ -322,7 +337,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
                 )
-            engine_output = await self.model_client.generate(engine_input)
+            with rollout_wait(ROLLOUT_ENGINE_AWAIT):
+                engine_output = await self.model_client.generate(engine_input)
             if engine_output["token_provenance"] == TokenProvenance.RECONSTRUCTED:
                 token_provenance = TokenProvenance.RECONSTRUCTED
             # Capture global_step after first inference returns — at this point the vLLM
@@ -381,7 +397,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     "A better solution coming soon."
                 )
                 output = env_step_output["postprocessed_action"]
-                postprocessed_output_ids = self.tokenizer.encode(output, add_special_tokens=False)
+                with rollout_span("rollout_tokenize"):
+                    postprocessed_output_ids = self.tokenizer.encode(output, add_special_tokens=False)
                 if collect_logprobs and response_logprobs is not None and postprocessed_output_ids != output_ids:
                     logger.warning(
                         "Discarding rollout logprobs because postprocessed_action changed the generated token IDs"
@@ -439,15 +456,16 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
         prompt_ids = input_ids[:initial_prompt_length]
         if retokenize_chat_history:
-            response_encodings = self.tokenizer.apply_chat_template(
-                chat_history[initial_chat_history_length : len(chat_history) - len(new_obs)],
-                chat_template=self.custom_chat_template,
-                add_generation_prompt=False,
-                return_dict=True,
-                return_assistant_tokens_mask=True,
-                tokenize=True,
-                **self.trajectory_runner_cfg.chat_template_kwargs,
-            )
+            with rollout_span("rollout_tokenize"):
+                response_encodings = self.tokenizer.apply_chat_template(
+                    chat_history[initial_chat_history_length : len(chat_history) - len(new_obs)],
+                    chat_template=self.custom_chat_template,
+                    add_generation_prompt=False,
+                    return_dict=True,
+                    return_assistant_tokens_mask=True,
+                    tokenize=True,
+                    **self.trajectory_runner_cfg.chat_template_kwargs,
+                )
             loss_mask = response_encodings["assistant_masks"]
             response_ids = response_encodings["input_ids"]
         else:
@@ -557,7 +575,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
         # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
         engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
-        engine_output = await self.model_client.generate(engine_input)
+        # One request for the whole batch, so this path has exactly one "trajectory": the count is 1
+        # and the max equals the sum. That is the honest reading -- a batched call has no
+        # per-trajectory tail, which is itself the answer to whether its tail is worth chasing.
+        with rollout_trajectory(), rollout_wait(ROLLOUT_ENGINE_AWAIT):
+            engine_output = await self.model_client.generate(engine_input)
         outputs = engine_output["responses"]
         responses = engine_output["response_ids"]
         stop_reasons = engine_output["stop_reasons"]
@@ -625,11 +647,12 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # case. normalize_token_ids is NOT used here — its singleton-unwrap would
         # corrupt a one-element batch — and we key off the mapping interface (not
         # return_dict) so a tokenizer/mock that already returns list rows is unchanged.
-        prompt_encodings = self.tokenizer.apply_chat_template(
-            init_prompts,
-            add_generation_prompt=True,
-            tokenize=True,
-        )
+        with rollout_span("rollout_tokenize"):
+            prompt_encodings = self.tokenizer.apply_chat_template(
+                init_prompts,
+                add_generation_prompt=True,
+                tokenize=True,
+            )
         prompt_token_ids = prompt_encodings["input_ids"] if hasattr(prompt_encodings, "keys") else prompt_encodings
         rollout_metrics = get_rollout_metrics(
             responses,
@@ -658,8 +681,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Run the configured environment loop and project its interaction records."""
-        outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
-        return self.projection.project(outputs, input_batch)
+        with rollout_span("rollout_collect"):
+            outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
+        with rollout_span("rollout_assemble"):
+            return self.projection.project(outputs, input_batch)
 
     # ----------------------------------------------------------------------------
     # Three methods of managing chat history and input ids in `agent_loop()`
@@ -698,15 +723,16 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             chat_end_index += len(new_obs)
 
         # re-apply whole chat template so length check is correct
-        input_ids = normalize_token_ids(
-            self.tokenizer.apply_chat_template(
-                chat_history[:chat_end_index],
-                chat_template=self.custom_chat_template,
-                add_generation_prompt=False,
-                tokenize=True,
-                **self.trajectory_runner_cfg.chat_template_kwargs,
+        with rollout_span("rollout_tokenize"):
+            input_ids = normalize_token_ids(
+                self.tokenizer.apply_chat_template(
+                    chat_history[:chat_end_index],
+                    chat_template=self.custom_chat_template,
+                    add_generation_prompt=False,
+                    tokenize=True,
+                    **self.trajectory_runner_cfg.chat_template_kwargs,
+                )
             )
-        )
         return chat_history, chat_end_index, input_ids
 
     def _get_next_input_ids_with_multiturn_chat_template(
@@ -780,14 +806,15 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if len(new_obs) > 0:
             # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
             # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
-            observation_ids = normalize_token_ids(
-                self.tokenizer.apply_chat_template(
-                    [*self.base_conversation, *new_obs],
-                    add_generation_prompt=not done,
-                    tokenize=True,
-                    **self.trajectory_runner_cfg.chat_template_kwargs,
-                )
-            )[len(self.base_conversation_token_ids) :]
+            with rollout_span("rollout_tokenize"):
+                observation_ids = normalize_token_ids(
+                    self.tokenizer.apply_chat_template(
+                        [*self.base_conversation, *new_obs],
+                        add_generation_prompt=not done,
+                        tokenize=True,
+                        **self.trajectory_runner_cfg.chat_template_kwargs,
+                    )
+                )[len(self.base_conversation_token_ids) :]
             input_ids += observation_ids
             loss_mask += [0] * len(observation_ids)
             if rollout_logprobs is not None:
@@ -861,12 +888,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 logprobs += output_logprobs[: len(new_resp_tokens)]
 
         if len(new_obs) > 0:
-            for obs in new_obs:
-                obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
-                loss_mask += [0] * len(obs_tokens)
-                # logprobs for observation tokens doesn't matter since they will be masked out during loss computation
-                if logprobs is not None:
-                    logprobs += [0.0] * len(obs_tokens)
-                input_ids += obs_tokens
+            with rollout_span("rollout_tokenize"):
+                for obs in new_obs:
+                    obs_tokens = self.tokenizer.encode(obs["content"], add_special_tokens=False)
+                    loss_mask += [0] * len(obs_tokens)
+                    # logprobs for observation tokens doesn't matter since they will be masked out during loss computation
+                    if logprobs is not None:
+                        logprobs += [0.0] * len(obs_tokens)
+                    input_ids += obs_tokens
 
         return loss_mask, input_ids, logprobs, response_end_idx

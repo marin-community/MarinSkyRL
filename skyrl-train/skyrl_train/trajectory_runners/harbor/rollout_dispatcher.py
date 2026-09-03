@@ -16,6 +16,7 @@ from typing import Any, List, Optional
 import ray
 from omegaconf import DictConfig, OmegaConf
 
+from skyrl_train.timing_observability import RolloutTimings
 from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch, TrajectoryBatch
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
@@ -344,9 +345,21 @@ class RolloutDispatcher:
         sink.bind_runner(RETAINED_RUNNER_NAME)
         self._trajectory_sink = sink
 
-    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
-        """Run complete reward groups concurrently and restore input row order."""
-        del disable_tqdm
+    async def run(
+        self,
+        input_batch: TrajectoryRequestBatch,
+        disable_tqdm: bool = False,
+        *,
+        phase_timings: RolloutTimings | None = None,
+    ) -> TrajectoryBatch:
+        """Run complete reward groups concurrently and restore input row order.
+
+        ``phase_timings`` is accepted and dropped: this path runs K coordinators concurrently, and
+        the generate span tree decomposes a single wall. Forwarding it to every shard would sum
+        overlapping walls into one dict and produce a residual with no meaning. A run through the
+        dispatcher therefore reports generate_span_residual == generate, which is the honest claim.
+        """
+        del disable_tqdm, phase_timings
         trajectory_ids = input_batch.get("trajectory_ids")
         if not trajectory_ids or len(trajectory_ids) != len(input_batch["prompts"]):
             raise ValueError("process-isolated trajectory execution requires one trajectory ID per request row")
