@@ -768,7 +768,7 @@ def test_the_repeat_probe_does_not_claim_determinism_from_one_pair():
     """
     import skyrl_train.workers.worker as worker_module
 
-    source = inspect.getsource(worker_module.PolicyWorkerBase._forward_micro_batch)
+    source = inspect.getsource(worker_module._log_f25_repeat)
     assert "ZERO proves nothing on its own" in source
     assert "exactly 0 means this pass is deterministic" not in source
 
@@ -783,10 +783,29 @@ def test_the_repeat_probe_renders_its_delta():
     """
     import skyrl_train.workers.worker as worker_module
 
-    source = inspect.getsource(worker_module.PolicyWorkerBase._forward_micro_batch)
-    f25 = source[source.index("[F25] old-logprob forward repeated") :]
-    message = f25[: f25.index("delta,")]
+    source = inspect.getsource(worker_module._log_f25_repeat)
+    message = source[source.index("[F25] {} forward repeated") : source.index("tag,")]
     assert not re.search(r"%[-#0-9.]*[sdeEfgGr]", message), (
         "loguru formats with str.format; a %-placeholder drops the value"
     )
     assert "{:.6e}" in message
+
+
+def test_the_repeat_probe_covers_the_training_pass_too():
+    """An eval-only repeat cannot exclude train-only nondeterminism.
+
+    G3 pass 7: the old-logprob pass runs under model.eval() and the training pass under
+    model.train(), so a clean eval/eval repeat says nothing about the training path and must not
+    be read as a deterministic seam. Both call sites are what make the zero case interpretable.
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    eval_site = inspect.getsource(worker_module.PolicyWorkerBase._forward_micro_batch)
+    train_site = inspect.getsource(worker_module.PolicyWorkerBase.training_step)
+    assert '_log_f25_repeat("eval"' in eval_site
+    assert '_log_f25_repeat("train"' in train_site
+    # The train repeat must not be charged to the phase the workstream exists to measure.
+    forward_span_exit = train_site.index("_forward_span.__exit__")
+    assert train_site.index('_log_f25_repeat("train"') > forward_span_exit, (
+        "the repeat belongs outside policy_forward, or it inflates the span"
+    )

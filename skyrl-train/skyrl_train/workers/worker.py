@@ -974,6 +974,30 @@ class PPORayActorGroup:
                 pass  # Actor may already be dead
 
 
+def _log_f25_repeat(tag: str, reference: "torch.Tensor", repeat: "torch.Tensor") -> float:
+    """Report whether one forward pass reproduces itself, for the F25 mechanism hunt.
+
+    Two tags, and having BOTH is the point (G3 pass 7). ``eval`` repeats the old-logprob forward;
+    ``train`` repeats the training forward. The two passes run in different modes -- eval() there,
+    train() here -- so train-only nondeterminism would hide behind an eval that repeats perfectly,
+    and a clean eval alone must not be read as a deterministic seam.
+
+    loguru formats with str.format, so the placeholders are braces. A %-placeholder renders
+    literally and drops the value: that is how f25-probe3 ran 24 H100 for 19 minutes and logged
+    "max|delta| %.6e".
+    """
+    delta = (repeat - reference).abs().max().item()
+    logger.info(
+        "[F25] {} forward repeated on the same micro-batch: max|delta| {:.6e}. "
+        "NON-ZERO proves THIS pass is nondeterministic. ZERO proves nothing on its own -- one "
+        "agreeing pair is not determinism, so read it across micro-batches and steps, and read "
+        "BOTH tags: a deterministic eval/train seam needs eval AND train clean.",
+        tag,
+        delta,
+    )
+    return delta
+
+
 def _publish_policy_spans(
     spans,
     *,
@@ -1406,6 +1430,28 @@ class PolicyWorkerBase(Worker):
             )
         _forward_span.__exit__(None, None, None)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_EXIT)
+        # 🔬 The F25 discriminator, train side. Deliberately AFTER the span exits: an extra forward
+        # inside policy_forward would inflate the phase this workstream exists to measure.
+        #
+        # ⚠️ What this does and does not cover. It repeats the forward MATH in train() mode, which
+        # is where the suspected grouped-MoE combine lives. It runs under no_grad, so it does NOT
+        # exercise gradient-checkpoint recompute -- that happens inside backward, and a second
+        # grad-enabled forward would hold a second graph. Router replay is still installed here
+        # (teardown is deferred to after backward), so the repeat sees the same routing.
+        if _spans.enabled and self.cfg.trainer.get("log_ratio_repeat_probe", False):
+            with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+                _repeat_train_logprobs, _ = self.model(
+                    sequences,
+                    num_actions,
+                    attention_mask=attention_mask,
+                    temperature=self.cfg.generator.sampling_params.temperature,
+                    return_output=True,
+                    compute_entropy=True,
+                    entropy_requires_grad=False,
+                    rollout_routed_experts=rollout_routed_experts,
+                )
+            _log_f25_repeat("train", action_log_probs.detach(), _repeat_train_logprobs)
+            del _repeat_train_logprobs
         loss = objective.optimization_loss
         policy_loss = objective.policy_loss
         entropy = objective.entropy
@@ -1660,16 +1706,7 @@ class PolicyWorkerBase(Worker):
                     temperature=self.cfg.generator.sampling_params.temperature,
                     rollout_routed_experts=rollout_routed_experts,
                 )
-            delta = (repeat - policy_logprob).abs().max().item()
-            # loguru formats with str.format, not %. A %-placeholder here renders literally and
-            # DROPS the value: probe3 ran 24 H100 for 19 minutes and logged "max|delta| %.6e".
-            logger.info(
-                "[F25] old-logprob forward repeated on the same micro-batch: max|delta| {:.6e}. "
-                "NON-ZERO proves this pass is nondeterministic. ZERO proves nothing on its own -- "
-                "one agreeing pair is not determinism, so read it across micro-batches and steps, "
-                "and only a long run of zeros makes a seam the better explanation.",
-                delta,
-            )
+            _log_f25_repeat("eval", policy_logprob, repeat)
 
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
