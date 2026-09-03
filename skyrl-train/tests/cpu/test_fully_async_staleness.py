@@ -259,7 +259,7 @@ async def test_batch_assembly_discards_insufficient_reward_spread_and_waits_for_
         _generated_group(
             "uniform",
             earliest_model_step=10,
-            rewards=[0.0, -0.1],
+            rewards=[-0.1, -0.1],
             unshaped_rewards=[0.0, 0.0],
         )
     )
@@ -277,6 +277,10 @@ async def test_batch_assembly_discards_insufficient_reward_spread_and_waits_for_
     assert [group.uid for group in batch] == ["fresh"]
     assert trainer.all_metrics["async/dynamic_sampling/discarded_count"] == 1
     assert trainer.all_metrics["async/dynamic_sampling/candidate_count"] == 2
+    assert trainer.all_metrics["async/dynamic_sampling/candidate_trajectory_count"] == 4
+    assert trainer.all_metrics["async/dynamic_sampling/candidate_optimization_reward_mean"] == pytest.approx(0.2)
+    assert trainer.all_metrics["async/dynamic_sampling/candidate_outcome_reward_mean"] == pytest.approx(0.25)
+    assert trainer.all_metrics["async/dynamic_sampling/candidate_pass_at_2"] == pytest.approx(0.5)
 
 
 @pytest.mark.asyncio

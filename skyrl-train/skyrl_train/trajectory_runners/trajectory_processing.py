@@ -589,7 +589,7 @@ def get_metrics_from_trajectory_batch(trajectory_batch: TrajectoryBatch, uids: L
     if not len(rewards):
         raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
 
-    outcome_rewards = _outcome_rewards(trajectory_batch)
+    outcome_rewards = get_outcome_rewards(trajectory_batch)
 
     if isinstance(rewards[0], list):
         # Token-level rewards: rewards is List[List[float]]
@@ -613,7 +613,8 @@ def get_metrics_from_trajectory_batch(trajectory_batch: TrajectoryBatch, uids: L
     return mean_reward, pass_at_n
 
 
-def _outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
+def get_outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
+    """Return the unshaped task outcome associated with each trajectory."""
     rewards = trajectory_batch["rewards"]
     unshaped_rewards = trajectory_batch.get("unshaped_rewards")
     if unshaped_rewards is not None:
@@ -670,7 +671,7 @@ def concatenate_trajectory_batches(
 
     unshaped_rewards_concat = None
     if any(output.get("unshaped_rewards") is not None for output in trajectory_batches):
-        unshaped_rewards_concat = [reward for output in trajectory_batches for reward in _outcome_rewards(output)]
+        unshaped_rewards_concat = [reward for output in trajectory_batches for reward in get_outcome_rewards(output)]
 
     disposition_channels: dict[str, list[str | None]] = {}
     for key in ("exception_types", "error_treatments"):
