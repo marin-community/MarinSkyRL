@@ -187,13 +187,43 @@ async def test_coordinator_rpc_returns_one_group_unchanged(harbor_runner_spec):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_rpc_timeout_resets_on_same_actor_progress(harbor_runner_spec):
+async def test_coordinator_rpc_timeout_resets_on_same_actor_progress(harbor_runner_spec, monkeypatch):
+    slow_result = None
+    slow_task = None
+
+    class _FakeDeadline:
+        def __init__(self):
+            self._expired = False
+
+        async def __aenter__(self):
+            nonlocal slow_task
+            current_task = asyncio.current_task()
+            if slow_task is None:
+                slow_task = current_task
+            elif current_task is slow_task and not slow_result.done():
+                slow_result.set_result(_output([TrajectoryID("a", 0)]))
+            return self
+
+        async def __aexit__(self, exception_type, _exception, _traceback):
+            if exception_type is asyncio.CancelledError:
+                self._expired = True
+                raise TimeoutError
+            return False
+
+        def expired(self):
+            return self._expired
+
     class _TimedRemoteMethod:
         def remote(self, input_batch, _global_step):
-            result = asyncio.get_running_loop().create_future()
+            nonlocal slow_result
             instance_id = input_batch["trajectory_ids"][0].instance_id
-            delay = 0.4 if instance_id == "b" else 0.7
-            asyncio.get_running_loop().call_later(delay, result.set_result, _output(input_batch["trajectory_ids"]))
+            result = asyncio.get_running_loop().create_future()
+            if instance_id == "a":
+                slow_result = result
+                return result
+
+            result.set_result(_output(input_batch["trajectory_ids"]))
+            asyncio.get_running_loop().call_soon(slow_task.cancel)
             return result
 
     class _TimedCoordinator:
@@ -201,6 +231,7 @@ async def test_coordinator_rpc_timeout_resets_on_same_actor_progress(harbor_runn
 
     ids = [TrajectoryID("a", 0), TrajectoryID("b", 0)]
     dispatcher = _dispatcher([_TimedCoordinator()], harbor_runner_spec, timeout=0.5)
+    monkeypatch.setattr(asyncio, "timeout_at", lambda _deadline: _FakeDeadline())
 
     result = await dispatcher.run(_request(ids))
 
