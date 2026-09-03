@@ -624,6 +624,11 @@ def publish_driver_counters(counters: Mapping[str, float], *, step: int) -> None
         reason = unconfigured_telemetry_reason()
         if reason is not None:
             logger.warning("generate span tree will publish nothing: %s", reason)
+    # Settle whatever is already in flight BEFORE opening the window. The trainer publishes the
+    # step's phase rows one call earlier, so without this their rejections land inside our window and
+    # get reported as "the engine and environment tails are understated" -- telling an operator the
+    # tails are bad when the tails may be complete, and pointing them at the wrong producer.
+    telemetry.flush(TELEMETRY_FLUSH_TIMEOUT_SECONDS)
     before = telemetry.runtime_status()
     for name, value in counters.items():
         if name not in ROLLOUT_COUNTERS:

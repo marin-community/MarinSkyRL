@@ -137,13 +137,29 @@ def test_the_rank_axis_maps_min_to_the_torch_min_op():
 
     assert REDUCE_OPS["min"] is dist.ReduceOp.MIN
     assert REDUCE_OPS["max"] is dist.ReduceOp.MAX
-    # mean is deliberately absent. Adding it would be harmless today -- `ReduceOp.SUM` is what the
-    # fallback already selects -- but the map is meant to hold ops that are NOT the default, so that
-    # reading it answers "which reductions are special". A mean entry would say the opposite.
-    assert "mean" not in REDUCE_OPS
-    # Every op the status map declares must have a torch op or be the SUM default.
+    # mean and sum both dispatch to SUM: mean's division by world_size happens locally, before the
+    # collective. They are in the map because the lookup is now a direct index with NO default. An
+    # earlier version fell back to SUM for anything missing, under a comment claiming that fallback
+    # had been removed -- so a min quietly becoming a SUM would publish 80.0 for a healthy step at
+    # 80 ranks, and nothing would have failed.
+    assert REDUCE_OPS["sum"] is dist.ReduceOp.SUM
+    assert REDUCE_OPS["mean"] is dist.ReduceOp.SUM
+
+    # The map must COVER every op all_reduce accepts, or that direct index raises KeyError at
+    # collective time -- on a real run, at 80 ranks, in the step epilogue.
+    import inspect
+    import re as _re
+
+    from skyrl_train.distributed.strategy import DistributedStrategy
+
+    guard = _re.search(r"assert op in \(([^)]*)\)", inspect.getsource(DistributedStrategy.all_reduce))
+    assert guard, "all_reduce no longer declares the ops it accepts; this check cannot see them"
+    for op in _re.findall(r'"(\w+)"', guard.group(1)):
+        assert op in REDUCE_OPS, f"all_reduce accepts {op!r} but REDUCE_OPS has no collective for it"
+
+    # Every op the status map declares must be one the rank axis can perform.
     for op in set(STATUS_REDUCTION_OPS.values()):
-        assert op in REDUCE_OPS or op == "sum", f"{op!r} has no rank-axis implementation"
+        assert op in REDUCE_OPS, f"{op!r} has no rank-axis implementation"
 
 
 def test_the_mini_batch_axis_takes_a_min_for_min_reduced_keys():
