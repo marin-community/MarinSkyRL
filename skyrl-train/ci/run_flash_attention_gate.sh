@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# A3 — the grouped_mm parity gate, on one H100, inside an Iris job.
+# Gates A2 (`--grouped-mm`): the native-Grug grouped path carries pytorch#186365 (uninitialised
+# ALIGN_SIZE_M tail rows) and had NO EP=1 coverage -- tests/gpu/test_grug_fsdp2_rl_cycle.py binds
+# use_grouped_mm to expert_model_parallel_size > 1, so the exact combination our arm runs is never
+# exercised. Builds the same frozen runtime the nightly uses, then runs the gate.
+set -euo pipefail
+REPOSITORY_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ENV_DIR="${ENV_DIR:-$REPOSITORY_ROOT/.iris-fagate-env}"
+source "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/resolve_runtime.sh" \
+  "$REPOSITORY_ROOT" "$ENV_DIR" production
+
+cd "$REPOSITORY_ROOT/skyrl-train"
+# Ray's zip runtime flattens the sibling symlink; materialise it before setting source paths.
+rm -rf skyrl-gym && cp -R ../skyrl-gym skyrl-gym
+export PYTHONPATH="$PWD/skyrl-gym:$PWD:$REPOSITORY_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+echo "::: GPU"
+nvidia-smi --query-gpu=name,memory.total --format=csv
+"$PYTHON" -c "import torch;print('torch',torch.__version__,'cuda',torch.cuda.is_available())"
+
+# The frozen runtime is the training environment; it ships no pytest. Install it INTO that env
+# rather than a fresh one, so the test imports the same torch/skyrl_train the trainer runs.
+echo "::: installing pytest into the frozen runtime"
+uv pip install --python "$PYTHON" --quiet pytest
+"$PYTHON" -m pytest --version
+
+echo "::: A12 flash-attention correctness gate"
+"$PYTHON" -m pytest tests/gpu/test_grug_flash_attention.py -v --no-header -p no:cacheprovider
+echo "::: FA EXIT=$?"
