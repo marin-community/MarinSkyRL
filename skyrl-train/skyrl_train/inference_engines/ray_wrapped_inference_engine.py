@@ -702,6 +702,14 @@ def create_ray_wrapped_inference_engines(
         for actor_handle, rank_offset in zip(inference_engine_actors, weight_sync_relative_rank_offsets, strict=True)
     ]
 
+    if backend == "vllm" and (tensor_parallel_size > 1 or pipeline_parallel_size > 1):
+        numa_refs = [engine.inference_engine_actor.initialize_worker_numa_affinity.remote() for engine in engines]
+        wait_for_inference_engine_startup(
+            numa_refs,
+            [engine.inference_engine_actor for engine in engines],
+            timeout_seconds=engine_init_timeout_seconds,
+        )
+
     # Readiness gate (DISAGGREGATED-mode init-deadlock fix): block until every engine
     # actor has finished loading its model (weights + CUDA-graph capture) BEFORE the
     # trainer opens the weight-sync NCCL group in init_weight_sync_state. In COLOCATED
