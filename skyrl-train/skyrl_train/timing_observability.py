@@ -560,12 +560,25 @@ def publish_driver_counters(counters: Mapping[str, float], *, step: int) -> None
         instrument.record(float(value), attributes={"counter": name, "role": TRAINER_ROLE, "step": str(step)})
     # Same accounting publish_worker_spans does, and it matters more here: a dropped row understates
     # a MAX, and an understated tail is the one number this tree exists to report.
+    #
+    # FLUSH FIRST, exactly as the worker path does. record() only enqueues; a rejection can land
+    # after an immediate runtime_status() and then be absorbed into the NEXT call's baseline, so the
+    # step that actually lost the row reports zero and the warning never fires for it. Sampling
+    # without flushing makes a lossy publish and a clean one look identical -- the failure this whole
+    # file exists to make impossible.
+    settled = telemetry.flush(TELEMETRY_FLUSH_TIMEOUT_SECONDS)
     dropped = telemetry.runtime_status().lost_records - before.lost_records
     if dropped > 0:
         logger.warning(
             "rollout counters lost %d record(s) at step %d; the engine and environment tails are "
             "understated and must not be quoted",
             dropped,
+            step,
+        )
+    elif not settled:
+        logger.warning(
+            "rollout counter flush did not settle within %.1fs at step %d; rows may still be in flight",
+            TELEMETRY_FLUSH_TIMEOUT_SECONDS,
             step,
         )
 
