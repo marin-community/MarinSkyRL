@@ -1519,6 +1519,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             )
         # TODO (erictang000): potentially enable log requests for a debugging mode
         custom_chat_template_path = kwargs.pop("custom_chat_template_chat_completion_path", None)
+        chat_template_content_format = wrapper_kwargs.pop("chat_template_content_format", "auto")
         # Use factory to inject engine ID into stat logger
         stat_loggers = [self._create_stat_logger_factory()]
 
@@ -1685,7 +1686,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 model_registry=models.registry,
                 request_logger=None,
                 chat_template=custom_chat_template_content,
-                chat_template_content_format="auto",
+                chat_template_content_format=chat_template_content_format,
                 enable_auto_tools=enable_auto_tools,
                 tool_parser=tool_parser,
             )
@@ -1714,7 +1715,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 openai_serving_render=openai_serving_render,
                 request_logger=None,
                 chat_template=custom_chat_template_content,
-                chat_template_content_format="auto",
+                chat_template_content_format=chat_template_content_format,
                 enable_auto_tools=enable_auto_tools,
                 tool_parser=tool_parser,
                 **wrapper_kwargs,
@@ -1727,7 +1728,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     response_role="assistant",
                     request_logger=None,
                     chat_template=custom_chat_template_content,
-                    chat_template_content_format="auto",
+                    chat_template_content_format=chat_template_content_format,
                     **wrapper_kwargs,
                 )
             except TypeError:
@@ -1738,7 +1739,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     response_role="assistant",
                     request_logger=None,
                     chat_template=custom_chat_template_content,
-                    chat_template_content_format="auto",
+                    chat_template_content_format=chat_template_content_format,
                     **wrapper_kwargs,
                 )
 

@@ -372,6 +372,7 @@ generator:
   
   chat_template_kwargs: {}
 
+  # Engine-arg passthrough; vLLM pops its serving-only keys here, e.g. chat_template_content_format (auto|string|openai)
   engine_init_kwargs: {}
   
   override_existing_update_group: "auto"
