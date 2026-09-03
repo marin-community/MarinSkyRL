@@ -34,25 +34,13 @@ class _Coordinator:
 class _BlockingCoordinator:
     def __init__(self):
         self._started = asyncio.Event()
-        self._finished = asyncio.Event()
-        self._cancelled = False
 
     async def run_shard(self, *_args):
         self._started.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            self._cancelled = True
-            raise
-        finally:
-            self._finished.set()
+        await asyncio.Event().wait()
 
     async def wait_for_start(self):
         await self._started.wait()
-
-    async def wait_for_completion(self):
-        await self._finished.wait()
-        return self._cancelled
 
 
 def _request(ids: list[TrajectoryID]) -> dict:
@@ -199,17 +187,26 @@ async def test_coordinator_rpc_returns_one_group_unchanged(harbor_runner_spec):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_rpc_timeout_cancels_remote_work(ray_init, harbor_runner_spec):
+async def test_coordinator_rpc_timeout_cancels_remote_work(ray_init, harbor_runner_spec, monkeypatch):
     actor = _BlockingCoordinator.remote()
     dispatcher = _dispatcher([actor], harbor_runner_spec, timeout=0.1)
+    cancelled_refs = []
+    original_cancel = ray.cancel
+
+    def capture_cancel(ref, *, force, recursive):
+        cancelled_refs.append(ref)
+        original_cancel(ref, force=force, recursive=recursive)
+
+    monkeypatch.setattr(ray, "cancel", capture_cancel)
 
     run = asyncio.create_task(dispatcher.run(_request([TrajectoryID("a", 0)])))
     await actor.wait_for_start.remote()
     with pytest.raises(RolloutCoordinatorRPCTimeoutError):
         await run
 
-    async with asyncio.timeout(1):
-        assert await actor.wait_for_completion.remote() is True
+    assert len(cancelled_refs) == 1
+    with pytest.raises(ray.exceptions.TaskCancelledError):
+        await asyncio.to_thread(ray.get, cancelled_refs[0], timeout=1)
 
 
 @pytest.mark.asyncio
