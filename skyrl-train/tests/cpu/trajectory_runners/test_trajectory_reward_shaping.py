@@ -356,6 +356,8 @@ def test_concatenation_recomputes_shaping_metrics_from_retained_components():
     }
     shape_trajectory_rewards(short, config)
     shape_trajectory_rewards(long, config)
+    short["rollout_metrics"]["generate/reward_shaping/identity_aware/groups"] = 1
+    long["rollout_metrics"]["generate/reward_shaping/identity_aware/groups"] = 1
 
     concatenated = concatenate_trajectory_batches([short, long], tis_lcs_alert_threshold=0.005)
 
@@ -364,6 +366,7 @@ def test_concatenation_recomputes_shaping_metrics_from_retained_components():
     assert concatenated["rollout_metrics"]["generate/reward_shaping/successful_length_penalty_mean"] == pytest.approx(
         -0.15
     )
+    assert concatenated["rollout_metrics"]["generate/reward_shaping/identity_aware/groups"] == 2
 
 
 def test_concatenation_preserves_later_passthrough_disposition():

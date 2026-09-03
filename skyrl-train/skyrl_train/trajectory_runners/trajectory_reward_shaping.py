@@ -398,53 +398,53 @@ def refresh_trajectory_reward_shaping_metrics(output: TrajectoryBatch) -> None:
     ]
 
     metrics = output.get("rollout_metrics") or {}
-    for key in [key for key in metrics if key.startswith(f"{SHAPING_METRIC_PREFIX}/")]:
+    refreshed_metrics = {
+        f"{SHAPING_METRIC_PREFIX}/outcome_reward_mean": float(np.mean(trajectory_outcomes)),
+        f"{SHAPING_METRIC_PREFIX}/optimization_reward_before_mean": float(
+            np.mean([shaped - penalty for shaped, penalty in zip(shaped_totals, penalties)])
+        ),
+        f"{SHAPING_METRIC_PREFIX}/shaped_reward_mean": float(np.mean(shaped_totals)),
+        f"{SHAPING_METRIC_PREFIX}/penalty_mean": float(np.mean(penalties)),
+        f"{SHAPING_METRIC_PREFIX}/passthrough_penalty_mean": float(
+            np.mean([values.get("passthrough", 0.0) for values in trajectory_components])
+        ),
+        f"{SHAPING_METRIC_PREFIX}/non_termination_penalty_mean": float(
+            np.mean([values["non_termination"] for values in trajectory_components])
+        ),
+        f"{SHAPING_METRIC_PREFIX}/successful_length_penalty_mean": float(
+            np.mean([values["successful_length"] for values in trajectory_components])
+        ),
+        f"{SHAPING_METRIC_PREFIX}/overlong_penalty_mean": float(
+            np.mean([values["overlong"] for values in trajectory_components])
+        ),
+        f"{SHAPING_METRIC_PREFIX}/loop_incidence": float(np.mean(loop_incidence)),
+        f"{SHAPING_METRIC_PREFIX}/loop_incidence_correct": float(
+            np.mean(correct_loop_incidence) if correct_loop_incidence else 0.0
+        ),
+        f"{SHAPING_METRIC_PREFIX}/loop_advantage_mean": float(np.mean(trajectory_loop_advantages)),
+        f"{SHAPING_METRIC_PREFIX}/loop_advantage_per_token_mean": float(
+            np.mean(charged_loop_advantages) if charged_loop_advantages else 0.0
+        ),
+        f"{SHAPING_METRIC_PREFIX}/loop_charged_tokens_mean": float(np.mean(trajectory_loop_token_counts)),
+        f"{SHAPING_METRIC_PREFIX}/non_termination_incidence": float(
+            np.mean([values["non_termination"] < 0 for values in trajectory_components])
+        ),
+        f"{SHAPING_METRIC_PREFIX}/passthrough_incidence": float(
+            np.mean([values.get("passthrough", 0.0) < 0 for values in trajectory_components])
+        ),
+        f"{SHAPING_METRIC_PREFIX}/successful_length_incidence": float(
+            np.mean([values["successful_length"] < 0 for values in trajectory_components])
+        ),
+        f"{SHAPING_METRIC_PREFIX}/overlong_incidence": float(
+            np.mean([values["overlong"] < 0 for values in trajectory_components])
+        ),
+        f"{SHAPING_METRIC_PREFIX}/response_tokens_mean": float(np.mean(trajectory_lengths)),
+        f"{SHAPING_METRIC_PREFIX}/response_tokens_max": float(max(trajectory_lengths, default=0)),
+    }
+    stop_reason_prefix = f"{SHAPING_METRIC_PREFIX}/stop_reason/"
+    for key in [key for key in metrics if key in refreshed_metrics or key.startswith(stop_reason_prefix)]:
         del metrics[key]
-    metrics.update(
-        {
-            f"{SHAPING_METRIC_PREFIX}/outcome_reward_mean": float(np.mean(trajectory_outcomes)),
-            f"{SHAPING_METRIC_PREFIX}/optimization_reward_before_mean": float(
-                np.mean([shaped - penalty for shaped, penalty in zip(shaped_totals, penalties)])
-            ),
-            f"{SHAPING_METRIC_PREFIX}/shaped_reward_mean": float(np.mean(shaped_totals)),
-            f"{SHAPING_METRIC_PREFIX}/penalty_mean": float(np.mean(penalties)),
-            f"{SHAPING_METRIC_PREFIX}/passthrough_penalty_mean": float(
-                np.mean([values.get("passthrough", 0.0) for values in trajectory_components])
-            ),
-            f"{SHAPING_METRIC_PREFIX}/non_termination_penalty_mean": float(
-                np.mean([values["non_termination"] for values in trajectory_components])
-            ),
-            f"{SHAPING_METRIC_PREFIX}/successful_length_penalty_mean": float(
-                np.mean([values["successful_length"] for values in trajectory_components])
-            ),
-            f"{SHAPING_METRIC_PREFIX}/overlong_penalty_mean": float(
-                np.mean([values["overlong"] for values in trajectory_components])
-            ),
-            f"{SHAPING_METRIC_PREFIX}/loop_incidence": float(np.mean(loop_incidence)),
-            f"{SHAPING_METRIC_PREFIX}/loop_incidence_correct": float(
-                np.mean(correct_loop_incidence) if correct_loop_incidence else 0.0
-            ),
-            f"{SHAPING_METRIC_PREFIX}/loop_advantage_mean": float(np.mean(trajectory_loop_advantages)),
-            f"{SHAPING_METRIC_PREFIX}/loop_advantage_per_token_mean": float(
-                np.mean(charged_loop_advantages) if charged_loop_advantages else 0.0
-            ),
-            f"{SHAPING_METRIC_PREFIX}/loop_charged_tokens_mean": float(np.mean(trajectory_loop_token_counts)),
-            f"{SHAPING_METRIC_PREFIX}/non_termination_incidence": float(
-                np.mean([values["non_termination"] < 0 for values in trajectory_components])
-            ),
-            f"{SHAPING_METRIC_PREFIX}/passthrough_incidence": float(
-                np.mean([values.get("passthrough", 0.0) < 0 for values in trajectory_components])
-            ),
-            f"{SHAPING_METRIC_PREFIX}/successful_length_incidence": float(
-                np.mean([values["successful_length"] < 0 for values in trajectory_components])
-            ),
-            f"{SHAPING_METRIC_PREFIX}/overlong_incidence": float(
-                np.mean([values["overlong"] < 0 for values in trajectory_components])
-            ),
-            f"{SHAPING_METRIC_PREFIX}/response_tokens_mean": float(np.mean(trajectory_lengths)),
-            f"{SHAPING_METRIC_PREFIX}/response_tokens_max": float(max(trajectory_lengths, default=0)),
-        }
-    )
+    metrics.update(refreshed_metrics)
     for stop_reason in trajectory_stops:
         key = f"{SHAPING_METRIC_PREFIX}/stop_reason/{_metric_key(stop_reason)}"
         metrics[key] = metrics.get(key, 0.0) + 1.0
