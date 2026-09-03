@@ -73,3 +73,33 @@ def test_terminal_bench_launcher_overrides_compose_with_packaged_group():
 
     assert OmegaConf.to_container(cfg.terminal_bench_config.prm) == expected_prm
     assert OmegaConf.to_container(cfg.terminal_bench_config.trace_upload) == expected_trace_upload
+
+
+def test_trajectory_runner_settings_reach_skyrl_hydra_config(tmp_path):
+    config = tmp_path / "rl.yaml"
+    config.write_text(
+        """\
+entrypoint: terminal_bench
+context_budget:
+  request_window_tokens: 2
+  max_new_tokens_per_turn: 1
+  max_turns: 1
+trajectory_runner:
+  process_pool:
+    num_coordinators: 4
+    cpus_per_coordinator: 8
+    rpc_timeout_seconds: 1200
+"""
+    )
+
+    parsed = parse_rl_config(str(config))
+    hydra_args = build_skyrl_hydra_args(parsed, {"num_nodes": 4}, SimpleNamespace(gpus_per_node=8))
+
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=hydra_args)
+
+    process_pool = OmegaConf.to_container(cfg.trajectory_runner.process_pool)
+    assert process_pool["num_coordinators"] == 4
+    assert process_pool["cpus_per_coordinator"] == 8
+    assert process_pool["rpc_timeout_seconds"] == 1200
+    assert process_pool["executor_workers"] == 256

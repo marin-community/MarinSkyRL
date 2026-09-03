@@ -485,6 +485,7 @@ class ParsedRLConfig:
     generator: Dict[str, Any] = field(default_factory=dict)
     data: Dict[str, Any] = field(default_factory=dict)
     environment: Dict[str, Any] = field(default_factory=dict)
+    trajectory_runner: Dict[str, Any] = field(default_factory=dict)
     terminal_bench: Optional[Dict[str, Any]] = None
     teacher: Optional[Dict[str, Any]] = None
     tensor_parallel_size: int = 1
@@ -600,6 +601,7 @@ def parse_rl_config(
     trainer, generator, terminal_bench, materialized_raw = _materialize_context_budget(raw, context_budget)
     data = dict(raw.get("data", {}))
     environment = raw.get("environment", {})
+    trajectory_runner = raw.get("trajectory_runner", {})
     teacher = raw.get("teacher")
 
     # data.kind is a launcher-only routing key (parquet vs. terminal_bench tasks); pop it
@@ -635,6 +637,7 @@ def parse_rl_config(
         generator=generator,
         data=data,
         environment=environment,
+        trajectory_runner=trajectory_runner,
         terminal_bench=terminal_bench,
         teacher=teacher,
         tensor_parallel_size=tensor_parallel_size,
@@ -869,6 +872,7 @@ def build_skyrl_hydra_args(
     generator = dict(parsed.generator)
     data = dict(parsed.data)
     environment = dict(parsed.environment)
+    trajectory_runner = dict(parsed.trajectory_runner)
 
     # Derive paths if null.
     experiments_dir = exp_args.get("experiments_dir", "")
@@ -990,6 +994,7 @@ def build_skyrl_hydra_args(
         ("generator", generator),
         ("data", data),
         ("environment", environment),
+        ("trajectory_runner", trajectory_runner),
     ]:
         for key, val in _flatten_dict(values, section).items():
             prefix = "++" if any(pattern in key for pattern in _OPTIONAL_HYDRA_PATTERNS) else ""
