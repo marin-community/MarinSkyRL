@@ -22,14 +22,19 @@ TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log
 # seen from MoE router replay -- with 79 clean publishes 0.2375, which reads as zero. That is the
 # expected shape of a sharding, kernel or routing bug, and the mean is what hides it.
 #
-# The gt_*pct keys are token COUNTS, not fractions: a mean divides the global count by world size, so
-# 1000 offending tokens on one of 80 ranks publishes 12.5.
+# ⚠️ Two keys are deliberately ABSENT, because for them neither available op is right.
 #
-# ⚠️ log_ratio_abs_p99 is deliberately NOT here. A max of per-rank p99 approximations is not a
-# quantile either, so neither op is right; it stays a mean and stays monitoring-grade colour rather
-# than a gate.
+# `n_tokens_dp_gt_*pct` are token COUNTS, so a mean reads low by the world size -- 1000 offending
+# tokens on one of 80 ranks publishes 12.5. But a SUM is worse: Strategy.all_reduce reduces over
+# WORLD, and under sequence, context, expert or Megatron tensor/pipeline parallelism the replicas
+# hold the SAME tokens, so a sum multiplies the count by the replication factor (16x at CP2xEP8).
+# A correct global count needs a reduction over the data-parallel group alone, which the current
+# primitive cannot express. Until it can, these stay a mean and are read as a per-rank average.
+#
+# `log_ratio_abs_p99` stays a mean because a max of per-rank p99 APPROXIMATIONS is not a quantile
+# either. It is monitoring-grade colour rather than a gate.
 MAX_REDUCED_METRIC_KEYS = ("log_ratio_abs_max", "log_ratio_diagnostics_failed")
-SUM_REDUCED_METRIC_KEYS = ("n_tokens_dp_gt_1pct", "n_tokens_dp_gt_10pct", "n_tokens_dp_gt_50pct")
+SUM_REDUCED_METRIC_KEYS: tuple[str, ...] = ()
 
 # The op to apply per key, for both reduction axes: across ranks (Strategy.all_reduce_status) and
 # across a step's mini-batches (policy_training_metrics). Keeping one map is what stops the two

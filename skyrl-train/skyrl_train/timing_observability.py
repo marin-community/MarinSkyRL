@@ -271,12 +271,19 @@ class RolloutTimings:
         A leaf that is genuinely zero -- no retokenization configured, no environment executor --
         must publish 0.0 rather than go missing, or a consumer cannot tell it apart from a call site
         someone forgot to bracket.
+
+        The ``_seconds_max`` rows are the exception and are NOT seeded. They mean "the longest single
+        trajectory", which is undefined on a path that has no per-trajectory scopes -- the batched
+        collector issues one engine request for a whole batch. Seeded, they would publish 0.0 beside
+        a non-zero mean; folded from a batch-wide scope they would publish a SUM under a max name.
+        Absent, they say the only true thing.
         """
         self.supported = True
         for name in GENERATE_LEAF_SPANS:
             self.durations.setdefault(name, 0.0)
         for name in ROLLOUT_COUNTERS:
-            self.counters.setdefault(name, 0.0)
+            if not name.endswith(_MAX_SUFFIX):
+                self.counters.setdefault(name, 0.0)
 
 
 # Bound per TrajectoryRunner.run call rather than stashed on the runner, because run() is genuinely
