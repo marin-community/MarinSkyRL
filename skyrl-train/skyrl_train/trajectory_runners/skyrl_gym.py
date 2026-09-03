@@ -56,6 +56,11 @@ from skyrl_train.trajectory_runners.projections import (
 class WholeTrajectoryCollector:
     """Collect one complete interaction record per request."""
 
+    #: Every engine await, environment call and tokenizer call on this collector is bracketed,
+    #: which is what certifies the runner that installs it. Declared HERE rather than in a list
+    #: elsewhere, so a new collector cannot be forgotten from a registry it never sees.
+    generate_spans_instrumented = True
+
     def __init__(self, runner):
         self._runner = runner
 
@@ -68,6 +73,11 @@ class WholeTrajectoryCollector:
 
 class BatchedTrajectoryCollector:
     """Collect a batch from the supported single-turn batched environment path."""
+
+    #: Every engine await, environment call and tokenizer call on this collector is bracketed,
+    #: which is what certifies the runner that installs it. Declared HERE rather than in a list
+    #: elsewhere, so a new collector cannot be forgotten from a registry it never sees.
+    generate_spans_instrumented = True
 
     def __init__(self, runner):
         self._runner = runner
@@ -106,10 +116,27 @@ SkyRLGymPipeline = (
 )
 
 
-# The collector types whose call sites are bracketed for the generate span tree. Adding a collector
-# here is the act of certifying it; the runner reads this per instance, so an injected collector that
-# is not listed publishes nothing rather than a seeded zero.
-INSTRUMENTED_COLLECTOR_TYPES: tuple[type, ...] = (WholeTrajectoryCollector, BatchedTrajectoryCollector)
+def collector_is_instrumented(collector: object) -> bool:
+    """Whether this collector's own call sites are bracketed for the generate span tree.
+
+    Reads the collector's OWN ``__dict__`` rather than using getattr: inheritance would let a
+    subclass that overrides ``agent_loop`` or ``collect_batched`` without the brackets inherit the
+    certificate, and those methods are exactly what it certifies.
+
+    The runner cannot answer this for itself. Its bracketed call sites live in the collector, which
+    is INJECTED (``pipeline=...``) -- ``main_base.get_trajectory_runner`` already injects one, and an
+    adopting team is expected to. ``__init_subclass__`` guards the class and cannot see an
+    instance-level injection, so an uncertified collector would otherwise inherit True,
+    ``mark_supported()`` would seed 0.0 for every leaf, and the step would publish an all-zero
+    decomposition with ``residual == generate`` -- the measured-zero lie made indistinguishable from
+    truth by the explicit seeds.
+
+    ⚠️ A central allowlist was the first attempt and it was the wrong shape: it silently revoked
+    ``StepWiseRolloutCollector``, which lives in another module and brackets its call sites perfectly
+    well. Declaring the flag where each collector is defined means a new one cannot be forgotten from
+    a registry it never sees.
+    """
+    return bool(type(collector).__dict__.get("generate_spans_instrumented", False))
 
 
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
@@ -160,9 +187,20 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # the measured-zero lie the flag exists to prevent, made INDISTINGUISHABLE from truth by the
         # explicit seeds -- strictly worse than the absence the design argues for.
         #
-        # Exact type, not isinstance: a subclass of a bracketed collector may override agent_loop or
-        # collect_batched without the brackets, and it is those methods the certificate is about.
-        self.generate_spans_instrumented = type(self.collector) in INSTRUMENTED_COLLECTOR_TYPES
+        # BOTH certificates must hold, and this line is why.
+        #
+        # `type(self).generate_spans_instrumented` is the CLASS certificate, which
+        # TrajectoryRunner.__init_subclass__ revokes from a subclass that replaces _run. Assigning
+        # an instance attribute SHADOWS that -- so a subclass with its own unbracketed _run, which
+        # inherits this __init__ and gets the default certified collector, would have been
+        # re-certified by the very fix meant to tighten certification, and would publish a seeded
+        # all-zero decomposition with residual == generate.
+        #
+        # The collector certificate covers the injected half; the class certificate covers the _run
+        # half. Neither implies the other, so require both.
+        self.generate_spans_instrumented = type(self).generate_spans_instrumented and collector_is_instrumented(
+            self.collector
+        )
         self.max_turns = trajectory_runner_cfg.max_turns
         self.batched = trajectory_runner_cfg.batched
         self.use_conversation_multi_turn = trajectory_runner_cfg.use_conversation_multi_turn
