@@ -1258,6 +1258,8 @@ class PolicyWorkerBase(Worker):
                 rank=self._rank,
                 previous_publish=_previous_publish,
                 counters=_counters if _policy_spans.enabled else None,
+                # The mode is part of what the numbers MEAN, so it rides with them.
+                synchronize=_policy_spans.synchronize,
             ),
         )
 
