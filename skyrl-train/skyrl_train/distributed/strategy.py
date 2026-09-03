@@ -9,6 +9,8 @@ from torch.distributed.tensor import DeviceMesh
 from typing import Optional, Dict, Any, Union, TypeVar
 import torch.optim as optim
 from jaxtyping import Float
+
+from skyrl_train.utils.importance_ratio_diagnostics import STATUS_REDUCTION_OPS
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedTokenizer
 from skyrl_train.io import io
 
@@ -100,6 +102,20 @@ class DistributedStrategy(ABC):
             if is_cpu_tensor:
                 data = data.cpu()
             return data.item() if not is_tensor else data
+
+    def all_reduce_status(self, status: Dict[str, Any]) -> Dict[str, Any]:
+        """Reduce a per-rank status dict, giving each key the op its meaning requires.
+
+        The default is a mean, which is right for a per-rank mean or fraction and a category error
+        for a max or a count. See STATUS_REDUCTION_OPS for which keys are which and why.
+        """
+        by_op: Dict[str, Dict[str, Any]] = {}
+        for name, value in status.items():
+            by_op.setdefault(STATUS_REDUCTION_OPS.get(name, "mean"), {})[name] = value
+        reduced: Dict[str, Any] = {}
+        for op, values in by_op.items():
+            reduced.update(self.all_reduce(values, op=op))
+        return reduced
 
     def all_gather(self, data: DataT) -> DataT:
         """Perform all_gather across all processes"""
