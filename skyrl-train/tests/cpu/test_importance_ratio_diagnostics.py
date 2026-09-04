@@ -72,11 +72,38 @@ def _reduce_one(key, this_rank, peers, ops_seen):
         return strategy.all_reduce_status({key: this_rank})[key]
 
 
+def test_no_worker_reduces_a_status_dict_with_the_plain_mean():
+    """STATUS_REDUCTION_OPS is keyed by metric NAME, not by worker.
+
+    A `all_reduce(status)` left anywhere means the first key that worker ever shares with the policy
+    is silently meaned -- and the branch added AST walks for span names and for manual context
+    managers, so leaving this one unguarded is inconsistent with its own convention. The critic path
+    carried it: latent, because no shared key exists today, which is precisely why it would go
+    unnoticed when one appears.
+    """
+    import ast
+    import inspect
+
+    import skyrl_train.workers.worker as worker_module
+
+    offenders: list[str] = []
+    for node in ast.walk(ast.parse(inspect.getsource(worker_module))):
+        if not isinstance(node, ast.Call) or getattr(node.func, "attr", None) != "all_reduce":
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Name) and arg.id == "status":
+                offenders.append(f"line {node.lineno}")
+    assert not offenders, (
+        f"all_reduce(status) at {offenders}: a status dict must go through all_reduce_status, or "
+        "its specially-reduced keys silently take the default mean"
+    )
+
+
 def test_a_whole_status_dict_gives_every_key_its_own_op():
     """The shape production actually uses: one dict, several keys, three different ops.
 
     🚨 Every other test here reduces ONE key per call, so `all_reduce_status`'s grouping loop was
-    never exercised -- reducing every group with the first group's op left the entire 1,905-test
+    never exercised -- reducing every group with the first group's op left the entire
     suite green. That would silently mean `log_ratio_abs_max` whenever an ordinary metric sorted
     first, publishing 0.2375 for one rank at 19.0 among eighty, which is the exact number this
     branch exists to stop being invisible.
