@@ -1014,3 +1014,169 @@ def test_disabled_spans_publish_no_counters_even_when_some_are_gathered(monkeypa
         counters=counters,
     )
     assert seen["counters"] == counters
+
+
+# --- driving the real ppo_train -------------------------------------------------------------------
+#
+# 🚨 These replace source-text guards that a behaviour-preserving mutation walked straight past.
+# An AST walk proved a string was present; it could not see the receiver, an alias, or a dead
+# conditional. Syntactic presence can never prove runtime containment, so drive the real method.
+
+
+def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=None):
+    """Drive the REAL PolicyWorkerBase.ppo_train on CPU and return (output, published_spans)."""
+    import torch
+    from omegaconf import OmegaConf
+
+    import skyrl_train.timing_observability as timing_module
+    import skyrl_train.workers.worker as worker_module
+    from skyrl_train.training_batch import TrainingInputBatch
+    from skyrl_train.workers.worker import PolicyWorkerBase
+
+    worker = object.__new__(PolicyWorkerBase)
+    worker.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "micro_train_batch_size_per_gpu": 1,
+                "update_epochs_per_batch": 1,
+                "policy_train_spans": True,
+                "policy_train_spans_synchronize": False,
+                "algorithm": {"policy_loss_type": "regular"},
+                "policy": {
+                    "optimizer_config": {"max_grad_norm": 1.0},
+                    "fsdp_config": {},
+                    "grug_query_bias_update_mode": "frozen",
+                    "grug_query_bias_update_interval": 0,
+                },
+            },
+            "generator": {"r3_transport": "decentral" if r3_decentral else "colocate"},
+        }
+    )
+    worker._rank = 0
+    worker._world_size = 1
+    worker.policy_mini_batch_size_per_gpu = 1
+    worker.record_memory = False
+    worker._grug_query_bias_window = None
+    worker.model = worker.optimizer = worker.scheduler = None
+    worker.strategy = strategy
+    worker.training_step = training_step or (
+        lambda experience, gs, ls, acc: {
+            "policy_loss": 1.0,
+            "response_length": 2.0,
+            "policy_lr": 1e-6,
+            "policy_entropy": 0.5,
+            "policy_update_steps": 1.0,
+            "raw_grad_norm": 0.1,
+            "log_ratio_abs_max": 0.5,
+            "optimizer_step_succeeded": 1.0,
+        }
+    )
+
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.distributed, "barrier", lambda *a, **k: None)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+
+    published: list[dict[str, float]] = []
+    real_publish = worker_module._publish_policy_spans
+
+    def _capture(spans, *, total_seconds, step, rank, previous_publish=None, counters=None):
+        published.append(dict(spans.totals(total_seconds=total_seconds)))
+        return 0.0
+
+    monkeypatch.setattr(worker_module, "_publish_policy_spans", _capture)
+    assert real_publish is not _capture, "the capture did not replace anything"
+
+    batch_size, seq_len, actions = 2, 4, 2
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.zeros(batch_size, seq_len, dtype=torch.long),
+            "action_log_probs": torch.zeros(batch_size, actions),
+            "base_action_log_probs": torch.zeros(batch_size, actions),
+            "values": torch.zeros(batch_size, actions),
+            "returns": torch.zeros(batch_size, actions),
+            "advantages": torch.zeros(batch_size, actions),
+            "attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
+            "loss_mask": torch.ones(batch_size, actions),
+            "response_mask": torch.ones(batch_size, actions),
+        }
+    )
+    data.metadata = {"global_step": 0, "response_length": actions}
+    if r3_decentral:
+        data["rollout_routed_experts"] = torch.zeros(batch_size, 1)
+
+    output = worker.ppo_train(data)
+    assert published, "ppo_train published no spans at all"
+    del timing_module
+    return output, published[0]
+
+
+def test_the_barrier_publishes_an_explicit_zero_on_every_NON_decentral_step(monkeypatch):
+    """🚨 Driven, not walked. The AST version proved a `record_zero("policy_entry_barrier")` literal
+    existed somewhere in the module -- it could not see the RECEIVER, so calling it on a throwaway
+    `WorkerSpanAccumulator(enabled=False)` published nothing and left the suite green. Every
+    non-R3-decentral step -- which is everything but the 80B MoE path -- would then omit the row,
+    and a consumer could not tell "the barrier cost nothing" from "the barrier was not measured".
+    """
+
+    class _Strategy:
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            return dict(status)
+
+    _, totals = _run_ppo_train(monkeypatch, r3_decentral=False, strategy=_Strategy())
+    assert "policy_entry_barrier" in totals, "the explicit zero never reached the published totals"
+    assert totals["policy_entry_barrier"] == 0.0, (
+        f"published {totals['policy_entry_barrier']}; a non-decentral step does not run the barrier"
+    )
+
+
+def test_the_status_dict_keeps_its_per_key_ops_through_the_real_ppo_train(monkeypatch):
+    """🚨 Driven, not walked. The AST version matched any argument subtree containing an identifier
+    literally named `status`, so `metrics = status; all_reduce(metrics)` bypassed it with the suite
+    green -- and that path means a rank-local log_ratio_abs_max of 19.0 publishes ~0.24 across 80
+    ranks, which reads as zero on the one value this branch exists to make visible.
+
+    So assert the RESULT: a max survives as a max, a min as a min, an ordinary metric means.
+    """
+    PEER = 19.0
+
+    class _Strategy:
+        """A second rank whose log_ratio_abs_max is 19.0 and whose optimizer step FAILED."""
+
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            from skyrl_train.utils.importance_ratio_diagnostics import STATUS_REDUCTION_OPS
+
+            peers = {"log_ratio_abs_max": PEER, "optimizer_step_succeeded": 0.0}
+            out = {}
+            for name, value in status.items():
+                peer = peers.get(name, value)
+                op = STATUS_REDUCTION_OPS.get(name)
+                out[name] = max(value, peer) if op == "max" else min(value, peer) if op == "min" else (value + peer) / 2
+            return out
+
+        def all_reduce(self, data, op="mean"):
+            # The plain reducer: a mean for everything, which is the defect.
+            peers = {"log_ratio_abs_max": PEER, "optimizer_step_succeeded": 0.0}
+            return {name: (value + peers.get(name, value)) / 2 for name, value in data.items()}
+
+    output, _ = _run_ppo_train(monkeypatch, r3_decentral=False, strategy=_Strategy())
+    status = output.metadata["train_status"]
+
+    assert status["log_ratio_abs_max"] == PEER, (
+        f"published {status['log_ratio_abs_max']}, not the max: one rank's divergence was averaged "
+        "away, which is the exact failure the reduction map exists to prevent"
+    )
+    assert status["optimizer_step_succeeded"] == 0.0, (
+        "a rank that skipped its optimizer step must publish 0, not 79/80 rounded to 1"
+    )
+    assert status["policy_loss"] == pytest.approx(1.0), "an ordinary metric still means"
