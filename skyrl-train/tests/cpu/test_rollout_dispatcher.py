@@ -203,6 +203,26 @@ async def test_dispatcher_concatenates_fully_excluded_group_without_logprobs(har
 
 
 @pytest.mark.asyncio
+async def test_dispatcher_does_not_require_rollout_logprobs_during_eval(harbor_runner_spec):
+    harbor_runner_spec.config.trainer.algorithm.use_tis = True
+    calls: list[tuple[str, str]] = []
+    ids = [TrajectoryID("a", 0), TrajectoryID("b", 0)]
+    dispatcher = _dispatcher(
+        [_SessionCoordinator("eval", calls), _SessionCoordinator("train", calls)],
+        harbor_runner_spec,
+    )
+
+    await dispatcher.start_eval_session(run_name="run", eval_step=0)
+    try:
+        result = await dispatcher.run(_request(ids, "eval"))
+    finally:
+        await dispatcher.stop_eval_session()
+
+    assert result["trajectory_ids"] == ids
+    assert result["rollout_logprobs"] is None
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_rejects_output_from_the_wrong_group(harbor_runner_spec):
     async def wrong_group(_input_batch, _global_step):
         return _output([TrajectoryID("other", 0)])
