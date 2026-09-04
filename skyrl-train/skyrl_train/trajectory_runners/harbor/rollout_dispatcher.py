@@ -27,6 +27,7 @@ from skyrl_train.worker_setup import configure_worker_process
 # A literal because the harbor package does not import off Linux and this runs in the driver.
 # Nothing catches a rename of the class: fan-out would fail at startup on `bind_runner`.
 RETAINED_RUNNER_NAME = "HarborTrajectoryRunner"
+DEFAULT_CONCURRENT_TRIALS = 16
 
 
 class RolloutCoordinatorRPCTimeoutError(TimeoutError):
@@ -104,6 +105,13 @@ def _scale_terminal_bench_cfg(terminal_bench_cfg: DictConfig, num_coordinators: 
             )
 
     return scaled
+
+
+def _configured_concurrent_trials(terminal_bench_cfg: DictConfig) -> int:
+    harbor = terminal_bench_cfg.get("harbor", None)
+    if harbor is not None:
+        return int(harbor.get("n_concurrent_trials", DEFAULT_CONCURRENT_TRIALS))
+    return int(terminal_bench_cfg.get("n_concurrent_trials", DEFAULT_CONCURRENT_TRIALS))
 
 
 @ray.remote
@@ -209,8 +217,20 @@ class RolloutCoordinator:
         return await self._runner.run(sub_batch)
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
-    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
-        await self._runner.start_eval_session(run_name=run_name, eval_step=eval_step, val_set_name=val_set_name)
+    async def start_eval_session(
+        self,
+        *,
+        run_name: str,
+        eval_step: int,
+        val_set_name: str | None = None,
+        n_concurrent_trials: int,
+    ) -> None:
+        await self._runner.start_eval_session(
+            run_name=run_name,
+            eval_step=eval_step,
+            val_set_name=val_set_name,
+            n_concurrent_trials=n_concurrent_trials,
+        )
 
     async def stop_eval_session(self) -> None:
         await self._runner.stop_eval_session()
@@ -240,6 +260,7 @@ class RolloutDispatcher:
         self._cpus_per_coordinator = resources.cpus_per_coordinator
         self._executor_workers = resources.executor_workers
         self._coordinator_rpc_timeout = resources.rpc_timeout_seconds
+        self._eval_concurrent_trials = _configured_concurrent_trials(spec.terminal_bench_config)
 
         # Trainer sets this; default returns None until then.
         self.global_step_fn = None
@@ -502,7 +523,14 @@ class RolloutDispatcher:
     # Eval reserves shard 0 and waits for its prior training work to drain before
     # replacing that runner's active orchestrator. Other shards keep serving
     # asynchronous training requests during evaluation.
-    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
+    async def start_eval_session(
+        self,
+        *,
+        run_name: str,
+        eval_step: int,
+        val_set_name: str | None = None,
+        n_concurrent_trials: int | None = None,
+    ) -> None:
         if not self._actors:
             return
         async with self._routing_condition:
@@ -512,8 +540,14 @@ class RolloutDispatcher:
             while self._actor_pending_rpcs[0] > 0:
                 await self._routing_condition.wait()
         try:
+            eval_concurrent_trials = (
+                self._eval_concurrent_trials if n_concurrent_trials is None else n_concurrent_trials
+            )
             await self._actors[0].start_eval_session.remote(
-                run_name=run_name, eval_step=eval_step, val_set_name=val_set_name
+                run_name=run_name,
+                eval_step=eval_step,
+                val_set_name=val_set_name,
+                n_concurrent_trials=eval_concurrent_trials,
             )
         except BaseException:
             async with self._routing_condition:
