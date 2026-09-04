@@ -29,11 +29,12 @@ def _routing(num_tokens: int, seed: int) -> tuple[torch.Tensor, torch.Tensor, to
 
 
 def test_combine_routed_rows_sums_each_token_in_ascending_expert_order():
-    """Rows chosen so only the ascending-expert order gives the closed-form answer.
+    """Rows chosen so the ascending-expert chain gives a closed-form answer that other orders miss.
 
     Per token t, in ascending expert order, the rows are ``big, 1, -big, 3 + t`` with ``big`` at least
     2**24, so ``big + 1`` rounds back to ``big`` in float32 and the chain reduces to exactly ``3 + t``.
-    Any other order, or a bf16 accumulator, lands somewhere else.
+    Reversing the order, adding the residual before the big pair, or accumulating in bf16 lands
+    elsewhere. Swapping the first two addends cannot be told apart from any order: addition commutes.
     """
     num_tokens = 6
     selected, token_indices, expert_of_row = _routing(num_tokens, seed=3)

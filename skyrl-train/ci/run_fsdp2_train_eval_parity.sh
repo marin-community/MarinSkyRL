@@ -31,13 +31,19 @@ uv pip install --quiet --python "$PYTHON" pytest
 "$PYTHON" -c "import pytest, torch, ray; print(f'pytest {pytest.__version__} | torch {torch.__version__} | ray {ray.__version__}')"
 
 "$PYTHON" ci/probe_combine_order.py
-echo "::: COMBINE PROBE EXIT=$?"
+probe_status=$?
+echo "::: COMBINE PROBE EXIT=$probe_status"
 
 # No -x anywhere below: every arm is an independent result and -x would report the first failure while
 # silently running none of the others.
 "$PYTHON" -m pytest tests/gpu/gpu_ci/test_grug_grouped_mm_parity.py tests/gpu/gpu_ci/test_grouped_gemm_parity.py \
   -q -rA -s -p no:cacheprovider
-echo "::: ONE-GPU PARITY EXIT=$?"
+one_gpu_status=$?
+echo "::: ONE-GPU PARITY EXIT=$one_gpu_status"
 
 "$PYTHON" -m pytest tests/gpu/test_grug_fsdp2_train_eval_parity.py -q -rA -s -p no:cacheprovider
-echo "::: FSDP2 PARITY EXIT=$?"
+fsdp2_status=$?
+echo "::: FSDP2 PARITY EXIT=$fsdp2_status"
+
+# Every stage ran; now let the job's state say whether any of them failed.
+[ "$probe_status" -eq 0 ] && [ "$one_gpu_status" -eq 0 ] && [ "$fsdp2_status" -eq 0 ]
