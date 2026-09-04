@@ -4,8 +4,8 @@
 atomics, so the order of the top-k adds changed from launch to launch, and a float32 sum of bf16 rows
 is inexact once their exponents span more than 14. On the one-update PPO step the old-log-prob
 forward and the training forward then disagreed in the last bit on a few elements, and the routers
-downstream amplified that into `log_ratio_abs_max` up to 2.2 (F25, F26, F31). The order is now part
-of the contract, so the tests below use rows whose sum depends on it.
+downstream amplified that into `log_ratio_abs_max` up to 2.2 on 26-layer production runs. The order
+is now part of the contract, so the tests below use rows whose sum depends on it.
 """
 
 from __future__ import annotations
