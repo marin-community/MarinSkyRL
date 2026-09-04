@@ -11,6 +11,7 @@ reporting nothing.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import pathlib
 import sys
@@ -1037,7 +1038,7 @@ def test_disabled_spans_publish_no_counters_even_when_some_are_gathered(monkeypa
 # conditional. Syntactic presence can never prove runtime containment, so drive the real method.
 
 
-def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=None, windows=1):
+def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=None, windows=1, on_barrier=None):
     """Drive the REAL PolicyWorkerBase.ppo_train on CPU and return (output, published_spans)."""
     import torch
     from omegaconf import OmegaConf
@@ -1090,7 +1091,9 @@ def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=N
 
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
-    monkeypatch.setattr(torch.distributed, "barrier", lambda *a, **k: None)
+    # ⚠️ The hook goes through the harness. A caller that patches `barrier` itself is overwritten
+    # here and its observations silently never fire -- which reads as "the barrier did not run".
+    monkeypatch.setattr(torch.distributed, "barrier", lambda *a, **k: on_barrier and on_barrier())
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: r3_decentral)
 
     # 🚨 Stub only the EXTERNAL boundary -- the histogram, the flush, the runtime status. The real
@@ -1349,6 +1352,65 @@ def test_the_training_step_leaves_open_in_the_order_they_actually_run(monkeypatc
     assert opened.index("policy_forward") < opened.index("policy_backward"), (
         f"opened {opened}: forward must open before backward, and a swapped pair is exactly the "
         "mislabel a set-membership guard cannot see"
+    )
+
+
+def test_the_R3_barrier_runs_INSIDE_the_span_that_reports_it(monkeypatch):
+    """🚨 Containment, not entry. The test below proves the region was ENTERED; it does not prove
+    the synchronise and the barrier ran inside it.
+
+    Moving them one line out leaves an empty span reporting a plausible near-zero while the real
+    multi-minute arrival spread -- the twelve-minute stagger this barrier exists to absorb -- sits
+    outside every span and lands in the residual. So observe the ACTIVE span from inside the barrier
+    itself, and check the closing barrier reports the other name, because "some barrier ran under
+    some span" would pass while the two were swapped.
+    """
+
+    import skyrl_train.workers.worker as worker_module
+
+    active: list[str] = []
+    observed: list[str] = []
+
+    class _Recording(WorkerSpanAccumulator):
+        def span(self, name, presync=True):
+            outer = super().span(name, presync=presync)
+
+            @contextlib.contextmanager
+            def _tracked():
+                active.append(name)
+                try:
+                    with outer:
+                        yield
+                finally:
+                    active.pop()
+
+            return _tracked()
+
+    monkeypatch.setattr(worker_module, "WorkerSpanAccumulator", _Recording)
+
+    class _Strategy:
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            return dict(status)
+
+    _run_ppo_train(
+        monkeypatch,
+        r3_decentral=True,
+        strategy=_Strategy(),
+        on_barrier=lambda: observed.append(active[-1] if active else "<none>"),
+    )
+
+    assert observed, "no barrier ran at all"
+    assert observed[0] == "policy_entry_barrier", (
+        f"the first barrier ran under {observed[0]!r}: the entry barrier is outside the span that "
+        "reports it, so that span times an empty region"
+    )
+    assert observed[-1] == "policy_final_barrier", (
+        f"the closing barrier ran under {observed[-1]!r}, so the two barrier labels are swapped"
     )
 
 
