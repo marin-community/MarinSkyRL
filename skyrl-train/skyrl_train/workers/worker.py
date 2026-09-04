@@ -1725,7 +1725,11 @@ class CriticWorkerBase(Worker):
                 # TODO (sumanthrh): this assumes all workers are data parallel.
                 # We should get more accurate metrics with seq parallel or TP.
                 # There are metrics like entropy where we get average over local data size
-                status = self.strategy.all_reduce(status)
+                # all_reduce_status, not all_reduce: STATUS_REDUCTION_OPS is keyed by METRIC NAME,
+                # not by worker, so the plain mean here would silently apply to the first key the
+                # critic and policy ever share. No such key exists today -- optimizer_step_succeeded
+                # is emitted only on the policy side -- which is exactly why this would go unnoticed.
+                status = self.strategy.all_reduce_status(status)
 
                 for k, v in status.items():
                     all_metrics[k].append(v)

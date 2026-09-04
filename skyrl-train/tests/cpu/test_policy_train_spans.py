@@ -61,7 +61,10 @@ def test_every_span_is_registered_in_the_timing_tree():
     """
     for name in (*POLICY_TRAIN_SPANS, "policy_ppo_train", "policy_span_residual"):
         assert name in TIMING_PARENTS, f"{name} would be silently dropped"
-    assert TIMING_PARENTS["policy_ppo_train"] == "policy_train"
+    # train_critic_and_policy, not policy_train: the worker cannot know which driver phase wrapped
+    # it, and policy_train is ABSENT when the critic overlaps (trainer.py:1977). Naming it made the
+    # whole worker subtree claim a parent that does not exist on that path.
+    assert TIMING_PARENTS["policy_ppo_train"] == "train_critic_and_policy"
     for name in (*POLICY_TRAIN_SPANS, "policy_span_residual"):
         assert TIMING_PARENTS[name] == "policy_ppo_train"
 
@@ -102,9 +105,40 @@ def test_no_span_is_opened_with_a_manual_enter_exit_pair():
                 opened.add(arg.value)
     # Every span the residual subtracts must be entered somewhere, not just the three obvious ones:
     # deleting policy_metric_allreduce or policy_final_barrier was green under the narrower list.
-    entered_by_the_worker = set(POLICY_TRAIN_SPANS) - {"policy_span_publish"}
+    #
+    # And policy_training_step with them. It is deliberately NOT in POLICY_TRAIN_SPANS -- it is
+    # INCLUSIVE, wrapping the four exclusive leaves -- so a set built from POLICY_TRAIN_SPANS alone
+    # left the one row that bounds the children against their parent deletable with the whole suite
+    # green. The residual cannot see its loss either, for the same reason: it is computed from
+    # POLICY_TRAIN_SPANS.
+    inclusive = {name for name, parent in TIMING_PARENTS.items() if parent == "policy_ppo_train"}
+    entered_by_the_worker = (set(POLICY_TRAIN_SPANS) | inclusive) - {
+        "policy_span_publish",  # emitted for the PREVIOUS step, not opened as a region here
+        "policy_span_residual",  # computed, never entered
+    }
     missing = sorted(entered_by_the_worker - opened)
-    assert not missing, f"{missing} are subtracted from the residual but never entered as a `with`"
+    assert not missing, f"{missing} are declared children of policy_ppo_train but never entered as a `with`"
+
+
+def test_the_parent_walk_skips_phases_that_were_not_recorded():
+    """The walk-up is what keeps a consumer from orphaning a row when a phase is absent.
+
+    Collapsing it to a single `TIMING_PARENTS.get(name)` left the full 1,907-test suite green, so
+    nothing exercised the loop -- and this helper is exactly the mechanism that makes an absent
+    driver phase survivable. `policy_train` is one such phase: the trainer runs
+    `policy_critic_overlap_train` instead of it whenever a critic is configured.
+    """
+    from skyrl_train.timing_observability import declared_root, nearest_recorded_parent
+
+    # policy_forward -> policy_ppo_train -> train_critic_and_policy -> run_training -> step.
+    # With only the far ancestor recorded, the walk must climb past the ones that are missing.
+    assert nearest_recorded_parent("policy_forward", {"policy_ppo_train": 1.0}) == "policy_ppo_train"
+    assert nearest_recorded_parent("policy_forward", {"train_critic_and_policy": 1.0}) == "train_critic_and_policy"
+    assert nearest_recorded_parent("policy_forward", {"step": 1.0}) == "step"
+    # Nothing recorded: the walk runs off the top and says so rather than inventing a parent.
+    assert nearest_recorded_parent("policy_forward", {}) is None
+    # And the root is the top of the declared chain, not the nearest recorded one.
+    assert declared_root("policy_forward") == "step"
 
 
 def test_publish_cost_is_not_charged_to_a_parent_that_does_not_contain_it():
@@ -115,10 +149,18 @@ def test_publish_cost_is_not_charged_to_a_parent_that_does_not_contain_it():
     stayed at 0.0, because the residual is computed from POLICY_TRAIN_SPANS. The tree was over
     its parent and said nothing. It belongs to the driver's policy_train wait, which does contain it.
     """
-    assert TIMING_PARENTS["policy_span_publish"] == "policy_train"
+    assert TIMING_PARENTS["policy_span_publish"] == "train_critic_and_policy"
     assert "policy_span_publish" not in POLICY_TRAIN_SPANS, (
         "subtracting it makes the children over-cover the parent, invisibly to the residual"
     )
+    # No worker span may name a driver phase that a configuration can omit. policy_train and
+    # policy_critic_overlap_train are alternatives (trainer.py:1964 vs :1977), so neither is a safe
+    # parent; train_critic_and_policy (trainer.py:731) wraps both and is always published.
+    conditional = {"policy_train", "policy_critic_overlap_train"}
+    for name in (*POLICY_TRAIN_SPANS, "policy_ppo_train", "policy_span_publish", "policy_span_residual"):
+        assert TIMING_PARENTS[name] not in conditional, (
+            f"{name} would be orphaned whenever {TIMING_PARENTS[name]} is not the phase that ran"
+        )
 
 
 def test_disabled_accumulator_records_nothing_and_costs_nothing():
@@ -219,9 +261,9 @@ def test_published_rows_carry_worker_role_rank_and_an_exclusive_clock_domain():
     assert by_phase["policy_ppo_train"]["clock_domain"] == "inclusive_wall"
     assert by_phase["policy_forward"]["clock_domain"] == "exclusive_wall"
     assert by_phase["policy_final_barrier"]["clock_domain"] == "exclusive_wall"
-    # The parent is the declared one, not the nearest *recorded* one: policy_train is measured on the
-    # driver and is never in this mapping, so nearest_recorded_parent would orphan every leaf.
-    assert by_phase["policy_ppo_train"]["parent"] == "policy_train"
+    # The parent is the declared one, not the nearest *recorded* one: the driver phase is never in
+    # this mapping, so nearest_recorded_parent would orphan every leaf.
+    assert by_phase["policy_ppo_train"]["parent"] == "train_critic_and_policy"
     assert by_phase["policy_forward"]["parent"] == "policy_ppo_train"
 
 

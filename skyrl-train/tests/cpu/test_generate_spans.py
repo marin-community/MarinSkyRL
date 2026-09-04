@@ -900,6 +900,42 @@ def test_a_subclass_that_replaces_run_is_not_recertified_by_its_collector():
     assert (ReplacesRun.generate_spans_instrumented and collector_is_instrumented(certified_collector)) is False
 
 
+def test_an_unsettled_flush_is_reported_even_when_rows_were_also_lost(monkeypatch):
+    """The two conditions are independent, and together they are the worst case.
+
+    Under `elif`, a degraded endpoint that rejected two rows and still held forty at the one-second
+    cap reported only the two -- and an operator reasonably read the other forty as delivered. The
+    branch was also dead to the suite: deleting it entirely left the full 1,907 tests green.
+    """
+    from types import SimpleNamespace
+
+    warned: list[str] = []
+    # Key the loss on the FLUSH, not on a call count: the R10 unconfigured check reads
+    # runtime_status before the baseline does, so counting calls made the baseline itself see the
+    # loss and `dropped` came out zero. A fake that keys on the wrong event tests the wrong thing.
+    state = {"flushed": False}
+
+    def _flush(timeout):
+        state["flushed"] = True
+        return False  # timed out AND, below, rows were lost -- the combination `elif` used to hide
+
+    monkeypatch.setattr(timing_module.telemetry, "flush", _flush)
+    monkeypatch.setattr(
+        timing_module.telemetry,
+        "runtime_status",
+        lambda: SimpleNamespace(lost_records=2 if state["flushed"] else 0, rejected_records=0),
+    )
+    monkeypatch.setattr(timing_module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
+    monkeypatch.setattr(timing_module, "rollout_count", type("_H", (), {"record": lambda *a, **k: None})())
+
+    publish_driver_counters({f"{ROLLOUT_ENGINE_AWAIT}_count": 1.0}, step=4)
+
+    assert [w for w in warned if "were lost" in w], "the loss must be reported"
+    assert [w for w in warned if "did not settle" in w], (
+        "and so must the rows still in flight; under elif they were silent whenever anything was lost"
+    )
+
+
 def test_a_loss_warning_does_not_claim_more_than_lost_records_can_support(monkeypatch):
     """`lost_records` is process-wide, so this publisher cannot prove the lost rows were its own.
 
@@ -912,9 +948,11 @@ def test_a_loss_warning_does_not_claim_more_than_lost_records_can_support(monkey
 
     warned: list[str] = []
     state = {"flushes": 0}
+    timeouts: list[float] = []
 
     def _flush(timeout):
         state["flushes"] += 1
+        timeouts.append(timeout)
         return True
 
     monkeypatch.setattr(timing_module.telemetry, "flush", _flush)
@@ -929,6 +967,10 @@ def test_a_loss_warning_does_not_claim_more_than_lost_records_can_support(monkey
     publish_driver_counters({f"{ROLLOUT_ENGINE_AWAIT}_count": 1.0}, step=4)
 
     assert state["flushes"] == 1, "one flush per publish; a second was added once and cost 1 s/step"
+    assert timeouts == [timing_module.TELEMETRY_FLUSH_TIMEOUT_SECONDS], (
+        "the driver's flush must use the documented cap; raising it to 60 s was green, and this runs "
+        "in the step epilogue on the default path"
+    )
     losses = [w for w in warned if "record(s) were lost" in w]
     assert losses, "a loss inside the window must still be reported"
     assert "may be these counters or another producer" in losses[0], (
@@ -957,7 +999,7 @@ def test_an_unregistered_name_raises_at_both_entry_points():
 
     The static walk below validates the literals at every call site; it says nothing about whether
     the guard exists. Deleting the raise from BOTH rollout_span and rollout_wait left the entire
-    1,543-test suite green -- so the headline fix of one review round and its mirror in the next were
+    whole suite green -- so the headline fix of one review round and its mirror in the next were
     each unprotected against simply being removed.
     """
     with pytest.raises(AssertionError, match="not a registered generate span"):
@@ -1004,7 +1046,7 @@ def test_every_rollout_span_call_site_names_a_registered_span():
     """A typo in a call site is invisible to every other test, and it corrupts the decomposition.
 
     The import-time guard checks that the CONSTANTS are registered; it cannot see what a call site
-    passes. Mutating "rollout_collect" to "rollout_collct" in skyrl_gym.py passed 407 CPU tests --
+    passes. Mutating "rollout_collect" to "rollout_collct" in skyrl_gym.py passed the whole suite --
     while on a real run that leaf vanishes, its ~60 s moves into generate_span_residual, and the tree
     reports that generate is largely unaccounted for.
 

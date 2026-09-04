@@ -42,7 +42,15 @@ TIMING_PARENTS: dict[str, str | None] = {
     # Inside policy_train, measured on the worker rather than the driver. policy_train itself is
     # only a Ray dispatch plus a wait for the slowest worker, so these are where its time actually
     # goes. Published with role=worker and clock_domain=exclusive_wall; see WorkerSpanAccumulator.
-    "policy_ppo_train": "policy_train",
+    # 🔻 train_critic_and_policy, NOT policy_train. The worker cannot know which driver phase wrapped
+    # it: with a critic configured and colocate_all off, the trainer runs ppo_train under
+    # `policy_critic_overlap_train` INSTEAD of `policy_train` (trainer.py:1977), so naming
+    # policy_train made the whole worker subtree claim a parent that is absent on that path -- false
+    # machine-readable hierarchy, which is worse than a coarser true one. train_critic_and_policy
+    # (trainer.py:731) wraps both branches and is always published, so it is the deepest phase that
+    # actually contains this one on every path. The driver's policy_train and
+    # policy_critic_overlap_train are siblings of the worker tree, not its ancestors.
+    "policy_ppo_train": "train_critic_and_policy",
     "policy_entry_barrier": "policy_ppo_train",
     # 🔻 policy_train, NOT policy_ppo_train. This is the cost of publishing the PREVIOUS step's
     # spans, and it is measured AFTER policy_ppo_train's total_seconds has been taken -- so its
@@ -52,7 +60,10 @@ TIMING_PARENTS: dict[str, str | None] = {
     # computed from POLICY_TRAIN_SPANS which this is no longer a member of. A reader auditing the
     # tree saw a positive discrepancy and was told by the design notes that it meant double-counting
     # inside a child. It did not; it was a row on the wrong parent.
-    "policy_span_publish": "policy_train",
+    # Same reasoning as policy_ppo_train above: this is the cost of publishing the PREVIOUS step's
+    # spans, measured after that parent's wall closes, and it must not name a phase that can be
+    # absent.
+    "policy_span_publish": "train_critic_and_policy",
     # Split at the seams _phase_diagnostics already marks. A single policy_training_step span would
     # report ~95% of policy_ppo_train and reproduce the same black box one level down, at the cost of
     # a full step.
@@ -435,7 +446,7 @@ def rollout_span(name: str) -> Iterator[None]:
     # this function took any string. A typo therefore published a W&B series nobody expects, wrote
     # nothing to finelog, and moved its region silently into generate_span_residual -- so the tree
     # reported "generate is largely unaccounted for", which is the one claim the design says must
-    # never be published. A mutation of "rollout_collect" to "rollout_collct" passed 407 CPU tests.
+    # never be published. A mutation of "rollout_collect" to "rollout_collct" passed the whole suite.
     #
     # Raising is right here, unlike in the publish epilogue where the policy is drop-and-warn: a
     # region name is a literal, so this is a programming error that is wrong on the FIRST rollout,
@@ -659,9 +670,13 @@ def publish_driver_counters(counters: Mapping[str, float], *, step: int) -> None
             dropped,
             step,
         )
-    elif not settled:
+    # `if`, not `elif`. The two conditions are independent and the combination is the WORST case: a
+    # degraded endpoint that rejected two rows and still holds forty at the cap reported only the
+    # two, and an operator reasonably read the other forty as delivered.
+    if not settled:
         logger.warning(
-            "rollout counter flush did not settle within %.1fs at step %d; rows may still be in flight",
+            "rollout counter flush did not settle within %.1fs at step %d; rows may still be in "
+            "flight and are not counted in any loss figure above",
             TELEMETRY_FLUSH_TIMEOUT_SECONDS,
             step,
         )
@@ -1014,9 +1029,12 @@ def publish_worker_spans(
             step,
             rank,
         )
-    elif not settled:
+    # `if`, not `elif` -- see the same correction on the driver path. A flush that both lost rows and
+    # timed out reported only the losses, and the rows still in flight read as delivered.
+    if not settled:
         logger.warning(
-            "policy_train span flush did not settle within %.1fs at step %d rank %d; rows may still be in flight",
+            "policy_train span flush did not settle within %.1fs at step %d rank %d; rows may still "
+            "be in flight and are not counted in any loss figure above",
             TELEMETRY_FLUSH_TIMEOUT_SECONDS,
             step,
             rank,
