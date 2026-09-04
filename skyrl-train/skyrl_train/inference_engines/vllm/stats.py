@@ -7,7 +7,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import Any
 
 
 HTTP_BRIDGE_HISTOGRAM_BOUNDS = {
@@ -17,6 +17,17 @@ HTTP_BRIDGE_HISTOGRAM_BOUNDS = {
 }
 HTTP_BRIDGE_METRIC_NAMES = tuple(HTTP_BRIDGE_HISTOGRAM_BOUNDS)
 VLLM_NUM_ENGINES_METRIC = "vllm/num_engines"
+VLLM_FINISH_REASONS = ("stop", "length", "abort", "error", "repetition")
+VLLM_HISTOGRAM_UNITS = {
+    "request_queue_time_seconds": "s",
+    "request_prefill_time_seconds": "s",
+    "request_decode_time_seconds": "s",
+    "e2e_request_latency_seconds": "s",
+    "time_to_first_token_seconds": "s",
+    "request_generation_tokens": "{token}",
+    "iteration_tokens_total": "{token}",
+    "request_time_per_output_token_seconds": "s",
+}
 
 
 class IntervalReadMode(StrEnum):
@@ -49,7 +60,7 @@ class VLLMCumulativeStats:
     prefix_cache_hits: int = 0
     prefix_cache_queries: int = 0
     preemptions: int = 0
-    finished_by_reason: Mapping[str, int] = field(default_factory=dict)
+    finished_by_reason: Mapping[str, int] = field(default_factory=lambda: {reason: 0 for reason in VLLM_FINISH_REASONS})
 
 
 @dataclass(frozen=True)
@@ -187,39 +198,9 @@ class VLLMNativeStatsSnapshot:
     histograms: tuple[VLLMHistogramSnapshot, ...]
 
 
-class PrefixCacheStatsLike(Protocol):
-    hits: int
-    queries: int
-
-
-class SchedulerStatsLike(Protocol):
-    num_running_reqs: int
-    num_waiting_reqs: int
-    num_skipped_waiting_reqs: int
-    kv_cache_usage: float
-    prefix_cache_stats: PrefixCacheStatsLike
-
-
-class FinishedRequestStatsLike(Protocol):
-    finish_reason: str
-    queued_time: float
-    prefill_time: float
-    decode_time: float
-    e2e_latency: float
-    num_generation_tokens: int
-
-
-class IterationStatsLike(Protocol):
-    num_prompt_tokens: int
-    num_generation_tokens: int
-    num_preempted_reqs: int
-    time_to_first_tokens_iter: Sequence[float]
-    finished_requests: Sequence[FinishedRequestStatsLike]
-
-
 @dataclass
 class HistogramAccumulator:
-    """Process-local cumulative histogram owned by the canonical stat logger."""
+    """Process-local cumulative histogram for HTTP bridge observations."""
 
     bounds: tuple[float, ...]
     count: int = 0
@@ -248,131 +229,62 @@ class HistogramAccumulator:
         )
 
 
-@dataclass
-class VLLMNativeStatsAccumulator:
-    """Consume vLLM scheduler events once and retain its cumulative typed view."""
+def snapshot_vllm_prometheus_metrics(metrics: Sequence[Any], engine_index: str) -> VLLMNativeStatsSnapshot:
+    """Translate one engine's built-in vLLM Prometheus snapshot to the wire type."""
+    values: dict[str, float] = {}
+    finished = {reason: 0 for reason in VLLM_FINISH_REASONS}
+    histograms: list[VLLMHistogramSnapshot] = []
 
-    token_bounds: tuple[int, ...]
-    attributes: Mapping[str, str]
-    current: VLLMCurrentStats = field(default_factory=VLLMCurrentStats)
-    prompt_tokens: int = 0
-    generation_tokens: int = 0
-    prefix_cache_hits: int = 0
-    prefix_cache_queries: int = 0
-    preemptions: int = 0
-    finished_by_reason: dict[str, int] = field(default_factory=dict)
-    histograms: dict[str, HistogramAccumulator] = field(init=False)
-
-    def __post_init__(self) -> None:
-        latency = (
-            0.3,
-            0.5,
-            0.8,
-            1.0,
-            1.5,
-            2.0,
-            2.5,
-            5.0,
-            10.0,
-            15.0,
-            20.0,
-            30.0,
-            40.0,
-            50.0,
-            60.0,
-            120.0,
-            240.0,
-            480.0,
-            960.0,
-            1920.0,
-            7680.0,
-        )
-        ttft = (
-            0.001,
-            0.005,
-            0.01,
-            0.02,
-            0.04,
-            0.06,
-            0.08,
-            0.1,
-            0.25,
-            0.5,
-            0.75,
-            1.0,
-            2.5,
-            5.0,
-            7.5,
-            10.0,
-            20.0,
-            40.0,
-            80.0,
-            160.0,
-            640.0,
-            2560.0,
-        )
-        self.histograms = {
-            "request_queue_time_seconds": HistogramAccumulator(latency),
-            "request_prefill_time_seconds": HistogramAccumulator(latency),
-            "request_decode_time_seconds": HistogramAccumulator(latency),
-            "e2e_request_latency_seconds": HistogramAccumulator(latency),
-            "time_to_first_token_seconds": HistogramAccumulator(ttft),
-            "request_generation_tokens": HistogramAccumulator(self.token_bounds),
-        }
-
-    def observe(self, scheduler_stats: SchedulerStatsLike | None, iteration_stats: IterationStatsLike | None) -> None:
-        if scheduler_stats is not None:
-            self.current = VLLMCurrentStats(
-                running_requests=int(scheduler_stats.num_running_reqs),
-                waiting_capacity=int(scheduler_stats.num_waiting_reqs),
-                waiting_deferred=int(getattr(scheduler_stats, "num_skipped_waiting_reqs", 0)),
-                kv_cache_usage=float(scheduler_stats.kv_cache_usage),
+    for metric in metrics:
+        raw_name = str(getattr(metric, "name", ""))
+        labels = getattr(metric, "labels", {})
+        if not raw_name.startswith("vllm:") or labels.get("engine") != engine_index:
+            continue
+        name = raw_name.removeprefix("vllm:")
+        if name == "request_success":
+            reason = labels.get("finished_reason")
+            if reason in finished:
+                finished[reason] = int(metric.value)
+        elif name in VLLM_HISTOGRAM_UNITS and hasattr(metric, "buckets"):
+            attributes = {"engine_index": engine_index}
+            if model_name := labels.get("model_name"):
+                attributes["model_name"] = str(model_name)
+            histograms.append(
+                VLLMHistogramSnapshot(
+                    name=name,
+                    buckets=tuple(
+                        sorted(
+                            (
+                                (math.inf if bound == "+Inf" else float(bound), float(count))
+                                for bound, count in metric.buckets.items()
+                            ),
+                            key=lambda item: item[0],
+                        )
+                    ),
+                    count=float(metric.count),
+                    total=float(metric.sum),
+                    unit=VLLM_HISTOGRAM_UNITS[name],
+                    attributes=attributes,
+                )
             )
-            prefix = scheduler_stats.prefix_cache_stats
-            self.prefix_cache_hits += int(prefix.hits)
-            self.prefix_cache_queries += int(prefix.queries)
-        if iteration_stats is None:
-            return
-        self.prompt_tokens += int(iteration_stats.num_prompt_tokens)
-        self.generation_tokens += int(iteration_stats.num_generation_tokens)
-        self.preemptions += int(iteration_stats.num_preempted_reqs)
-        for ttft in iteration_stats.time_to_first_tokens_iter:
-            self.histograms["time_to_first_token_seconds"].observe(float(ttft))
-        for request in iteration_stats.finished_requests:
-            reason = str(request.finish_reason)
-            self.finished_by_reason[reason] = self.finished_by_reason.get(reason, 0) + 1
-            for name, value in (
-                ("request_queue_time_seconds", request.queued_time),
-                ("request_prefill_time_seconds", request.prefill_time),
-                ("request_decode_time_seconds", request.decode_time),
-                ("e2e_request_latency_seconds", request.e2e_latency),
-                ("request_generation_tokens", request.num_generation_tokens),
-            ):
-                self.histograms[name].observe(float(value))
+        elif hasattr(metric, "value"):
+            key = f"{name}:{labels.get('reason')}" if name == "num_requests_waiting_by_reason" else name
+            values[key] = float(metric.value)
 
-    def snapshot(self) -> VLLMNativeStatsSnapshot:
-        cumulative = VLLMCumulativeStats(
-            prompt_tokens=self.prompt_tokens,
-            generation_tokens=self.generation_tokens,
-            prefix_cache_hits=self.prefix_cache_hits,
-            prefix_cache_queries=self.prefix_cache_queries,
-            preemptions=self.preemptions,
-            finished_by_reason=dict(self.finished_by_reason),
-        )
-        histograms = tuple(
-            accumulator.snapshot(name, "{token}" if name == "request_generation_tokens" else "s", self.attributes)
-            for name, accumulator in self.histograms.items()
-        )
-        return VLLMNativeStatsSnapshot(self.current, cumulative, histograms)
-
-
-def build_1_2_5_buckets(max_value: int) -> tuple[int, ...]:
-    buckets = []
-    exponent = 0
-    while True:
-        for mantissa in (1, 2, 5):
-            value = mantissa * 10**exponent
-            if value > max_value:
-                return tuple(buckets)
-            buckets.append(value)
-        exponent += 1
+    return VLLMNativeStatsSnapshot(
+        current=VLLMCurrentStats(
+            running_requests=int(values.get("num_requests_running", 0)),
+            waiting_capacity=int(values.get("num_requests_waiting_by_reason:capacity", 0)),
+            waiting_deferred=int(values.get("num_requests_waiting_by_reason:deferred", 0)),
+            kv_cache_usage=values.get("kv_cache_usage_perc", 0.0),
+        ),
+        cumulative=VLLMCumulativeStats(
+            prompt_tokens=int(values.get("prompt_tokens", 0)),
+            generation_tokens=int(values.get("generation_tokens", 0)),
+            prefix_cache_hits=int(values.get("prefix_cache_hits", 0)),
+            prefix_cache_queries=int(values.get("prefix_cache_queries", 0)),
+            preemptions=int(values.get("num_preemptions", 0)),
+            finished_by_reason=finished,
+        ),
+        histograms=tuple(histograms),
+    )

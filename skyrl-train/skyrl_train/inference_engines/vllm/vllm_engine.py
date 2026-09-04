@@ -2,7 +2,7 @@ import json
 import os
 import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
-from dataclasses import dataclass, fields as _dataclass_fields
+from dataclasses import dataclass, fields as _dataclass_fields, replace
 from loguru import logger
 from http import HTTPStatus
 import ray
@@ -77,8 +77,7 @@ from skyrl_train.inference_engines.vllm.stats import (
     VLLMCurrentStats,
     VLLMEngineStatsSnapshot,
     VLLMIntervalStats,
-    VLLMNativeStatsAccumulator,
-    build_1_2_5_buckets,
+    snapshot_vllm_prometheus_metrics,
 )
 from skyrl_train.utils import get_tcp_url, str_to_torch_dtype, torch_dtype_to_str
 import time
@@ -1197,22 +1196,21 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
     """
 
     # Class-level registry mapping engine IDs to their accumulated stats
-    _stats_registry: Dict[int, Dict[str, Any]] = {}
+    _stats_registry: Dict[str, Dict[str, Any]] = {}
     _registry_lock = threading.Lock()
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.log_interval = 5
-        self._engine_id: Optional[int] = None
+        self._engine_id: Optional[str] = None
         config = args[0] if args else kwargs["vllm_config"]
         engine_index = args[1] if len(args) > 1 else kwargs.get("engine_index", 0)
-        self._native_attributes = {
+        self._attributes = {
             "model_name": str(config.model_config.served_model_name),
-            "engine": str(engine_index),
+            "engine_index": str(engine_index),
         }
-        self._token_histogram_bounds = build_1_2_5_buckets(config.model_config.max_model_len)
 
-    def set_engine_id(self, engine_id: int) -> None:
+    def set_engine_id(self, engine_id: str) -> None:
         """Set the engine ID for this stat logger instance."""
         self._engine_id = engine_id
 
@@ -1307,10 +1305,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                         "_samples_queued_time": list(finished_queued_times),
                         "_samples_ttft": list(finished_ttfts),
                         "_total_preempted": finished_num_preempted,
-                        "_native": VLLMNativeStatsAccumulator(
-                            self._token_histogram_bounds,
-                            self._native_attributes,
-                        ),
+                        "_attributes": self._attributes,
                         # Peak values
                         "_peak_prompt_tp": current_prompt_tp,
                         "_peak_gen_tp": current_gen_tp,
@@ -1352,7 +1347,6 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                     existing["timestamp"] = time.time()
 
                 existing["_prefix_hit"].observe(prefix_cache_stats, is_active=is_active)
-                existing["_native"].observe(scheduler_stats, iteration_stats)
 
         now = time.monotonic()
         if now - self.last_log_time > self.log_interval:
@@ -1372,7 +1366,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
         return sorted_samples[mid]
 
     @classmethod
-    def get_stats_by_engine_id(cls, engine_id: int, reset: bool = True) -> Optional[VLLMEngineStatsSnapshot]:
+    def get_stats_by_engine_id(cls, engine_id: str, reset: bool = True) -> Optional[VLLMEngineStatsSnapshot]:
         """Return the engine's typed metric snapshot, optionally resetting interval fields."""
         with cls._registry_lock:
             stats = cls._stats_registry.get(engine_id)
@@ -1413,12 +1407,11 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                 idx = int(len(sorted_s) * 0.9)
                 return sorted_s[min(idx, len(sorted_s) - 1)]
 
-            native = stats["_native"].snapshot()
             result = VLLMEngineStatsSnapshot(
                 engine_id=str(engine_id),
                 timestamp=float(stats["timestamp"]),
-                current=native.current,
-                cumulative=native.cumulative,
+                current=VLLMCurrentStats(),
+                cumulative=VLLMCumulativeStats(),
                 interval=VLLMIntervalStats(
                     peak_prompt_throughput=stats["_peak_prompt_tp"],
                     peak_generation_throughput=stats["_peak_gen_tp"],
@@ -1454,8 +1447,7 @@ class V1LoggingStatLoggerFixed(LoggingStatLogger):
                     samples=stats["_num_samples"],
                     active_samples=stats["_num_active_samples"],
                 ),
-                attributes=stats["_native"].attributes,
-                histograms=native.histograms,
+                attributes=stats["_attributes"],
             )
 
             if reset:
@@ -1487,7 +1479,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def __init__(self, *args, **kwargs):
         # Generate unique engine ID before calling super().__init__() which calls _create_engine
-        self._stats_engine_id = id(self)
+        self._stats_engine_id = uuid4().hex
+        self._stats_attributes: Dict[str, str] = {}
         super().__init__(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
 
@@ -1498,6 +1491,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         def factory(*args, **kwargs):
             logger_instance = V1LoggingStatLoggerFixed(*args, **kwargs)
             logger_instance.set_engine_id(engine_id)
+            self._stats_attributes = logger_instance._attributes
             return logger_instance
 
         return factory
@@ -1533,6 +1527,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             _engine_arg_fields = {f.name for f in _dataclass_fields(vllm.AsyncEngineArgs)}
         except TypeError:
             _engine_arg_fields = set()
+        # The custom interval logger keeps vLLM stats enabled. This flag only
+        # omits vLLM's duplicate console logger; its Prometheus logger remains.
         if "disable_log_stats" in _engine_arg_fields:
             kwargs["disable_log_stats"] = True
         if "enable_log_requests" in _engine_arg_fields:
@@ -2115,18 +2111,31 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET) -> VLLMEngineStatsSnapshot:
         """Return the engine's complete typed snapshot without publishing it."""
+        from vllm.v1.metrics.reader import get_metrics_snapshot  # noqa: PLC0415
+
+        native = snapshot_vllm_prometheus_metrics(
+            get_metrics_snapshot(),
+            engine_index=self._stats_attributes.get("engine_index", "0"),
+        )
         snapshot = V1LoggingStatLoggerFixed.get_stats_by_engine_id(
             self._stats_engine_id,
             reset=read_mode is IntervalReadMode.RESET,
         )
-        if snapshot is not None:
-            return snapshot
-        return VLLMEngineStatsSnapshot(
-            engine_id=str(self._stats_engine_id),
-            timestamp=time.time(),
-            current=VLLMCurrentStats(),
-            cumulative=VLLMCumulativeStats(),
-            interval=VLLMIntervalStats(),
+        if snapshot is None:
+            snapshot = VLLMEngineStatsSnapshot(
+                engine_id=str(self._stats_engine_id),
+                timestamp=time.time(),
+                current=VLLMCurrentStats(),
+                cumulative=VLLMCumulativeStats(),
+                interval=VLLMIntervalStats(),
+                attributes=self._stats_attributes,
+            )
+
+        return replace(
+            snapshot,
+            current=native.current,
+            cumulative=native.cumulative,
+            histograms=native.histograms,
         )
 
     async def pause_generation(self) -> None:

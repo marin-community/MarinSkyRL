@@ -613,8 +613,15 @@ class InferenceStatsCallback(TrainerCallback):
     async def on_train_begin_async(self, state: TrainerState, control: TrainerControl, **kwargs):
         self.on_train_begin(state, control, **kwargs)
         self._step = state.global_step
-        if self._inference_engine_client is not None and self._sinks and self.poll_interval_seconds > 0:
-            self._poll_task = asyncio.create_task(self._poll(), name="vllm-stats-poll")
+        if self._inference_engine_client is not None and self._sinks:
+            try:
+                async with self._read_lock:
+                    snapshot = await self._inference_engine_client.get_stats(read_mode=IntervalReadMode.PEEK)
+                self._publish_sinks(snapshot, self._step)
+            except Exception:
+                logger.warning("InferenceStatsCallback: initial collection failed", exc_info=True)
+            if self.poll_interval_seconds > 0:
+                self._poll_task = asyncio.create_task(self._poll(), name="vllm-stats-poll")
         return control
 
     async def on_train_end_async(self, state: TrainerState, control: TrainerControl, **kwargs):
