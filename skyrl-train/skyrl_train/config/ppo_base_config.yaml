@@ -285,11 +285,14 @@ trainer:
   policy_train_spans: false
   policy_train_spans_synchronize: true
 
-  # Decompose generate from the driver's event loop. On by default: there is no CUDA synchronise to
+  # Decompose generate from the driver's event loop. On by default. There is no CUDA synchronise to
   # pay for, and a microbenchmark of the context managers alone bounds the bookkeeping at ~21 ms.
-  # That bound is NOT a measured end-to-end overhead -- no matched spans-on/spans-off pair at one
-  # SHA has been run, and a single run cannot measure its own overhead. The flag exists so that
-  # cost can be A/B'd on a real run without editing code.
+  # ⚠️ That ~21 ms covers the CONTEXT MANAGERS ONLY. Publishing also runs one blocking
+  # telemetry.flush(1.0) in the step epilogue, so the worst case with a degraded endpoint is ~1 s
+  # per step, not ~21 ms -- and neither figure is a measured end-to-end overhead, since no matched
+  # spans-on/spans-off pair at one SHA has been run and a single run cannot measure its own cost.
+  # The flag exists so that cost can be A/B'd on a real run without editing code; expect the flush,
+  # not the bookkeeping, to dominate any difference you see.
   generate_spans: true
   ckpt_interval: 5
   hf_save_interval: ${trainer.ckpt_interval}

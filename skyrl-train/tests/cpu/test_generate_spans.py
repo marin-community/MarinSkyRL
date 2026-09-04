@@ -900,37 +900,39 @@ def test_a_subclass_that_replaces_run_is_not_recertified_by_its_collector():
     assert (ReplacesRun.generate_spans_instrumented and collector_is_instrumented(certified_collector)) is False
 
 
-def test_another_producers_loss_is_not_blamed_on_the_rollout_counters(monkeypatch):
-    """The window must open on a settled queue, or it inherits someone else's rejection.
+def test_a_loss_warning_does_not_claim_more_than_lost_records_can_support(monkeypatch):
+    """`lost_records` is process-wide, so this publisher cannot prove the lost rows were its own.
 
-    The trainer publishes the step's phase rows one call before this one. Sampling `before` without
-    settling those first put their rejections inside our window, and the warning says "the engine and
-    environment tails are understated and must not be quoted" -- telling an operator the tails are
-    bad when they may be complete, and pointing at the wrong producer.
+    An earlier version flushed before sampling the baseline to clean the window. That bought
+    precision for a second blocking 1 s flush per step on the critical path, by default -- and lost
+    the attribution anyway whenever the flush timed out. The warning now says rows were lost AROUND
+    this publish and that they may be another producer's, which is what the counter supports.
     """
     from types import SimpleNamespace
 
-    state = {"flushes": 0}
     warned: list[str] = []
+    state = {"flushes": 0}
 
     def _flush(timeout):
         state["flushes"] += 1
         return True
 
-    # The loss is already present before we publish anything: it belongs to an earlier producer.
     monkeypatch.setattr(timing_module.telemetry, "flush", _flush)
     monkeypatch.setattr(
         timing_module.telemetry,
         "runtime_status",
-        lambda: SimpleNamespace(lost_records=7, rejected_records=0),
+        lambda: SimpleNamespace(lost_records=3 if state["flushes"] else 0, rejected_records=0),
     )
     monkeypatch.setattr(timing_module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
     monkeypatch.setattr(timing_module, "rollout_count", type("_H", (), {"record": lambda *a, **k: None})())
 
     publish_driver_counters({f"{ROLLOUT_ENGINE_AWAIT}_count": 1.0}, step=4)
 
-    assert not [w for w in warned if "rollout counters lost" in w], (
-        "a loss that predates this publish is not ours to report"
+    assert state["flushes"] == 1, "one flush per publish; a second was added once and cost 1 s/step"
+    losses = [w for w in warned if "record(s) were lost" in w]
+    assert losses, "a loss inside the window must still be reported"
+    assert "may be these counters or another producer" in losses[0], (
+        "the warning must not assert the rows were ours; lost_records cannot show that"
     )
 
 
@@ -982,14 +984,20 @@ def test_every_accepted_wait_name_has_all_three_rows_declared():
     of them emitted an undeclared `rollout_env_queue_count` that publish_driver_counters then
     dropped with a warning. Deriving the set from the declared rows makes that unrepresentable.
     """
+    # Pin the ANSWER, not the derivation. Re-deriving the same predicate here was a tautology: it
+    # could only fail if someone replaced the derivation with a hand-list, which is a much narrower
+    # guarantee than "these are the names rollout_wait accepts".
+    assert timing_module.ROLLOUT_WAIT_NAMES == (
+        timing_module.ROLLOUT_ENGINE_AWAIT,
+        timing_module.ROLLOUT_ENV_AWAIT,
+    ), "exactly the two waits that carry a full sum/count/tail triple"
+
+    # And the property that answer has to satisfy, checked against the publisher's own registry.
     for name in timing_module.ROLLOUT_WAIT_NAMES:
         for suffix in ("_seconds_sum", "_count", "_seconds_max"):
             assert f"{name}{suffix}" in timing_module.ROLLOUT_COUNTERS, (
                 f"rollout_wait({name!r}) would emit {name}{suffix}, which nothing declares"
             )
-    # And the env terms must NOT be accepted: they are sum-only by design.
-    for name in (timing_module.ROLLOUT_ENV_QUEUE, timing_module.ROLLOUT_ENV_EXEC, timing_module.ROLLOUT_ENV_RESUME):
-        assert name not in timing_module.ROLLOUT_WAIT_NAMES
 
 
 def test_every_rollout_span_call_site_names_a_registered_span():
@@ -1007,7 +1015,7 @@ def test_every_rollout_span_call_site_names_a_registered_span():
     import pathlib
 
     runners = pathlib.Path(timing_module.__file__).parent / "trajectory_runners"
-    seen: list[tuple[str, int, str]] = []
+    seen: list[tuple[str, int, str, str]] = []
     for path in sorted(runners.rglob("*.py")):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
@@ -1062,33 +1070,30 @@ def test_driver_loss_detection_flushes_before_it_samples(monkeypatch):
     the NEXT call's baseline and the step that actually lost the row warned about nothing -- while
     the tail it understates is the one number this tree exists to report.
 
-    There are TWO flushes: one settling other producers' rows before the window opens, and one
-    settling ours before the second sample. The double reveals the loss only after the SECOND, which
-    is the only shape that means "the rollout counters lost it" -- a loss visible after the first
-    belongs to whoever published before us, and reporting it here blames the wrong producer.
+    The double makes the loss visible ONLY after the flush, so the pre-fix ordering cannot pass it.
     """
 
     from types import SimpleNamespace
 
-    state = {"flushes": 0}
+    state = {"flushed": False}
     warned: list[str] = []
 
     def _flush(timeout):
-        state["flushes"] += 1
+        state["flushed"] = True
         return True
 
     monkeypatch.setattr(timing_module.telemetry, "flush", _flush)
     monkeypatch.setattr(
         timing_module.telemetry,
         "runtime_status",
-        lambda: SimpleNamespace(lost_records=3 if state["flushes"] >= 2 else 0, rejected_records=0),
+        lambda: SimpleNamespace(lost_records=3 if state["flushed"] else 0, rejected_records=0),
     )
     monkeypatch.setattr(timing_module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
     monkeypatch.setattr(timing_module, "rollout_count", type("_H", (), {"record": lambda *a, **k: None})())
 
     publish_driver_counters({f"{ROLLOUT_ENGINE_AWAIT}_count": 1.0}, step=4)
 
-    assert [w for w in warned if "lost 3 record(s) at step 4" in w], (
+    assert [w for w in warned if "3 telemetry record(s) were lost around the step 4" in w], (
         "a loss visible only after the flush must still be reported against its own step"
     )
 
