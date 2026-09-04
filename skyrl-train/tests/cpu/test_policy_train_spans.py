@@ -120,10 +120,43 @@ def test_no_span_is_opened_with_a_manual_enter_exit_pair():
     assert not missing, f"{missing} are declared children of policy_ppo_train but never entered as a `with`"
 
 
+def test_the_worker_reports_an_unsettled_flush_even_when_rows_were_also_lost(monkeypatch):
+    """The worker half of the same `elif` defect, which the driver-side test does not cover.
+
+    An endpoint that both rejects rows and times out reported only the rejections, so rows still in
+    flight read as delivered -- on the path that carries the gate-grade metric. Reverting just this
+    line to `elif` left both existing worker tests passing.
+    """
+    import skyrl_train.timing_observability as module
+
+    warned: list[str] = []
+    state = {"flushed": False}
+
+    def _flush(timeout):
+        state["flushed"] = True
+        return False
+
+    monkeypatch.setattr(module.telemetry, "flush", _flush)
+    monkeypatch.setattr(
+        module.telemetry,
+        "runtime_status",
+        lambda: SimpleNamespace(lost_records=2 if state["flushed"] else 0, rejected_records=0),
+    )
+    monkeypatch.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+    monkeypatch.setattr(module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
+
+    publish_worker_spans({"policy_forward": 1.0}, step=3, rank=0)
+
+    assert [w for w in warned if "lost 2 record(s)" in w], "the loss must be reported"
+    assert [w for w in warned if "did not settle" in w], (
+        "and the rows still in flight with it; under elif they were silent whenever anything was lost"
+    )
+
+
 def test_the_parent_walk_skips_phases_that_were_not_recorded():
     """The walk-up is what keeps a consumer from orphaning a row when a phase is absent.
 
-    Collapsing it to a single `TIMING_PARENTS.get(name)` left the full 1,907-test suite green, so
+    Collapsing it to a single `TIMING_PARENTS.get(name)` left the whole suite green, so
     nothing exercised the loop -- and this helper is exactly the mechanism that makes an absent
     driver phase survivable. `policy_train` is one such phase: the trainer runs
     `policy_critic_overlap_train` instead of it whenever a critic is configured.
