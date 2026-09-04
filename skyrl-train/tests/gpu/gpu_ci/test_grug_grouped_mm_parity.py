@@ -171,10 +171,14 @@ def test_g4a_6_combine_is_repeatable_under_contention():
     rows = (torch.randn(num_tokens * top_k, hidden, device="cuda") * scale).to(torch.bfloat16)
 
     first = combine_routed_rows(rows, routing.token_indices, num_tokens, top_k)
+    # The contender lives entirely on the side stream: allocated there, consumed there, joined at
+    # the end, so it never races the default stream's allocator.
     side = torch.cuda.Stream()
-    contender = torch.randn(4096, 4096, device="cuda", dtype=torch.bfloat16)
+    with torch.cuda.stream(side):
+        contender = torch.randn(4096, 4096, device="cuda", dtype=torch.bfloat16)
     for _ in range(20):
         with torch.cuda.stream(side):
             contender = (contender @ contender).clamp_(-1, 1)
         again = combine_routed_rows(rows, routing.token_indices, num_tokens, top_k)
         assert torch.equal(again, first), "the combine changed between launches"
+    torch.cuda.current_stream().wait_stream(side)

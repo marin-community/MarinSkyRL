@@ -3,8 +3,9 @@
 One H100, about a minute. Production routing shape: 9216 tokens, top-4 of 256 experts, hidden 2560.
 For each row distribution it reports
 
-  1. the fraction of output elements whose four bf16 addends span more than 14 binades, which is when
-     a float32 sum of them depends on the order of the adds;
+  1. the fraction of output elements whose four bf16 addends span more than 14 binades, the only
+     elements whose float32 sum CAN depend on the order of the adds (a bound, not a count: for
+     instance [2**24, 2**24, 1, 1] spans 24 binades and sums to 2**25 in every order);
   2. how many elements the former ``scatter_add`` combine (float32 atomics) changed across repeated
      launches under a contending stream, before and after the cast to bf16;
   3. the same count for ``combine_routed_rows``, which must be zero.
@@ -30,7 +31,7 @@ TOP_K = 4
 HIDDEN = 2560
 INTERMEDIATE = 1280
 REPEATS = 30
-ORDER_SENSITIVE_BINADES = 14
+INEXACT_SUM_BINADES = 14
 
 
 def _routing(num_tokens: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -39,13 +40,14 @@ def _routing(num_tokens: int) -> tuple[torch.Tensor, torch.Tensor]:
     return routing.token_indices, selected
 
 
-def _contend() -> None:
-    """Occupy SMs on a second stream so block scheduling is not pristine."""
+def _contend() -> torch.cuda.Stream:
+    """Occupy SMs on a second stream so block scheduling is not pristine; the caller joins it."""
     side = torch.cuda.Stream()
-    a = torch.randn(4096, 4096, device="cuda", dtype=torch.bfloat16)
     with torch.cuda.stream(side):
+        a = torch.randn(4096, 4096, device="cuda", dtype=torch.bfloat16)
         for _ in range(50):
             a = (a @ a).clamp_(-1, 1)
+    return side
 
 
 def _former_combine(rows: torch.Tensor, token_indices: torch.Tensor, num_tokens: int) -> torch.Tensor:
@@ -56,14 +58,13 @@ def _former_combine(rows: torch.Tensor, token_indices: torch.Tensor, num_tokens:
     )
 
 
-def _order_sensitive_fraction(rows: torch.Tensor, token_indices: torch.Tensor, num_tokens: int) -> float:
+def _possibly_inexact_fraction(rows: torch.Tensor, token_indices: torch.Tensor, num_tokens: int) -> float:
     order = torch.argsort(token_indices, stable=True)
     per_token = rows.index_select(0, order).view(num_tokens, TOP_K, rows.shape[-1]).float().abs()
     exponent = torch.where(per_token > 0, torch.floor(torch.log2(per_token)), torch.full_like(per_token, float("nan")))
     hi = torch.nan_to_num(exponent, nan=-float("inf")).amax(dim=1)
     lo = torch.nan_to_num(exponent, nan=float("inf")).amin(dim=1)
-    sensitive = (hi - lo) > ORDER_SENSITIVE_BINADES
-    return float(sensitive.float().mean())
+    return float(((hi - lo) > INEXACT_SUM_BINADES).float().mean())
 
 
 def _count_varying(combine, rows: torch.Tensor, token_indices: torch.Tensor, num_tokens: int) -> tuple[int, int]:
@@ -73,10 +74,11 @@ def _count_varying(combine, rows: torch.Tensor, token_indices: torch.Tensor, num
     varying = torch.zeros_like(first, dtype=torch.bool)
     varying_bf16 = torch.zeros_like(first_bf16, dtype=torch.bool)
     for _ in range(REPEATS):
-        _contend()
+        side = _contend()
         again = combine(rows, token_indices, num_tokens)
         varying |= again != first
         varying_bf16 |= again.to(torch.bfloat16) != first_bf16
+        torch.cuda.current_stream().wait_stream(side)
     torch.cuda.synchronize()
     return int(varying.sum()), int(varying_bf16.sum())
 
@@ -134,7 +136,7 @@ def main() -> None:
 
     print(f"tokens={TOKENS} top_k={TOP_K} experts={EXPERTS} hidden={HIDDEN} repeats={REPEATS}")
     for name, rows, indices, num_tokens in cases:
-        sensitive = _order_sensitive_fraction(rows, indices, num_tokens)
+        inexact_bound = _possibly_inexact_fraction(rows, indices, num_tokens)
         former = _count_varying(_former_combine, rows, indices, num_tokens)
         fixed = _count_varying(
             lambda r, i, n: combine_routed_rows(r, i, n, TOP_K),
@@ -144,7 +146,7 @@ def main() -> None:
         )
         elements = num_tokens * rows.shape[-1]
         print(
-            f"[{name:24s}] order-sensitive elements {sensitive:.3e} of {elements}  |  "
+            f"[{name:24s}] elements whose sum can depend on order <= {inexact_bound:.3e} of {elements}  |  "
             f"former scatter_add varied fp32={former[0]} bf16={former[1]}  |  "
             f"combine_routed_rows varied fp32={fixed[0]} bf16={fixed[1]}"
         )

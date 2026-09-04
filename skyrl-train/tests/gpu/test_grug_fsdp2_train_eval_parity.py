@@ -94,8 +94,8 @@ def _write_checkpoint(path: Path, *, shape: dict, num_experts_per_tok: int = 4) 
         **shape,
     )
     torch.manual_seed(17)
-    # Saved in bf16, which is what the trainer computes in anyway; the 26-layer arm is 7 GB rather
-    # than 29 GB on disk and in each rank's host RAM at load.
+    # Saved in bf16, which is what the trainer loads anyway (model_wrapper.py requests bf16); the
+    # 26-layer arm is 15 GB rather than 29 GB on disk and in each rank's host RAM at load.
     model = GrugMoeForCausalLM(config).to(torch.bfloat16)
     model.save_pretrained(path, safe_serialization=True)
     tokenizer.save_pretrained(path)
