@@ -32,13 +32,16 @@ class _Coordinator:
 
 class _SessionCoordinator(_Coordinator):
     def __init__(self, name: str, calls: list[tuple[str, str]]):
+        self.eval_concurrency: list[int | None] = []
+
         async def run_shard(input_batch, _global_step):
             phase = input_batch["batch_metadata"].training_phase
             calls.append((name, phase))
             return _output(input_batch["trajectory_ids"])
 
-        async def start_eval_session(**_kwargs):
+        async def start_eval_session(*, n_concurrent_trials=None, **_kwargs):
             calls.append((name, "start_eval"))
+            self.eval_concurrency.append(n_concurrent_trials)
 
         async def stop_eval_session():
             calls.append((name, "stop_eval"))
@@ -170,6 +173,21 @@ async def test_dispatcher_isolates_eval_from_concurrent_training(harbor_runner_s
         ("train", "train"),
         ("eval", "stop_eval"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_preserves_global_eval_concurrency_when_training_is_sharded(harbor_runner_spec):
+    calls: list[tuple[str, str]] = []
+    eval_coordinator = _SessionCoordinator("eval", calls)
+    harbor_runner_spec.terminal_bench_config.harbor = {"n_concurrent_trials": 32}
+    dispatcher = _dispatcher(
+        [eval_coordinator, _SessionCoordinator("train-1", calls), _SessionCoordinator("train-2", calls)],
+        harbor_runner_spec,
+    )
+
+    await dispatcher.start_eval_session(run_name="run", eval_step=0)
+
+    assert eval_coordinator.eval_concurrency == [32]
 
 
 @pytest.mark.asyncio

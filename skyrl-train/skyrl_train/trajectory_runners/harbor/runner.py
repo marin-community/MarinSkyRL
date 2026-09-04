@@ -765,6 +765,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         run_name: str,
         eval_step: int,
         val_set_name: Optional[str] = None,
+        n_concurrent_trials: Optional[int] = None,
     ) -> None:
         """Start a fresh eval session with its own QueueOrchestrator.
 
@@ -776,6 +777,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             run_name: The job run name (from cfg.trainer.run_name).
             eval_step: The current global step (for unique naming).
             val_set_name: Optional name of the validation set being evaluated.
+            n_concurrent_trials: Optional eval-only concurrency override.
         """
         if self._eval_orchestrator_lock is None:
             self._eval_orchestrator_lock = asyncio.Lock()
@@ -812,15 +814,17 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             else:
                 self._eval_trials_dir = self.trials_dir
 
+            eval_concurrent_trials = self._n_concurrent_trials if n_concurrent_trials is None else n_concurrent_trials
             logger.info(
                 f"Starting eval session: {self._eval_session_name} "
-                f"(timeout={self._eval_timeout_override_sec}s, trials_dir={self._eval_trials_dir})"
+                f"(timeout={self._eval_timeout_override_sec}s, trials_dir={self._eval_trials_dir}, "
+                f"n_concurrent_trials={eval_concurrent_trials})"
             )
 
             # Create fresh orchestrator for eval with eval-specific timeout
             self._eval_orchestrator = QueueOrchestrator(
                 trial_configs=[],  # We submit dynamically via submit_batch()
-                n_concurrent_trials=self._n_concurrent_trials,
+                n_concurrent_trials=eval_concurrent_trials,
                 metrics={},  # SkyRL handles its own metrics
                 quiet=True,
                 retry_config=self._retry_config,
@@ -844,7 +848,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
 
             logger.info(
                 f"Eval session {self._eval_session_name} started with fresh QueueOrchestrator "
-                f"(n_concurrent_trials={self._n_concurrent_trials}, rollback_hook registered)"
+                f"(n_concurrent_trials={eval_concurrent_trials}, rollback_hook registered)"
             )
 
     async def stop_eval_session(self) -> None:
