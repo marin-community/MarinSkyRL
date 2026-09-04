@@ -17,14 +17,15 @@ Megatron's own docstring asserts "FSDP2 reports exactly zero here." At productio
 `use_grouped_mm` is necessary and sufficient to break it across nine cluster arms, reaching
 `log_ratio_abs_max` 1.697 -- a ratio of 5.46x against a clip bound of 0.2 (F25, F26).
 
-Why the shapes below, and why two of them. `grug_moe.py` combines the top-k expert outputs with
-`scatter_add` over indices that repeat each token once per expert, which is CUDA `atomicAdd` and
-documented non-deterministic; the eager path uses `index_add_` over unique indices in a fixed order.
+Why the shapes below. `grug_moe.py` used to combine the top-k expert outputs with `scatter_add` over
+indices that repeat each token once per expert, which is CUDA `atomicAdd` and documented
+non-deterministic; the eager path uses `index_add_` over unique indices in a fixed order, and
 Megatron hit the same structure at top-4 and fixed it by forcing a fixed-order reduce
-(`docs/grug-megatron-training.md`, F27). **Atomic contention scales with tokens per expert**, and an
-earlier offline probe of ours saw only ~106 routed rows per expert and came back bitwise clean. So
-the dense-expert shape is the load-bearing one: it holds Snowball's width at 32 experts precisely so
-each expert sees roughly what it sees at full scale.
+(`docs/grug-megatron-training.md`, F27). The grouped path now reduces each token's rows in a fixed
+order too (`combine_routed_rows`). The 32-expert arm holds Snowball's width with full-scale rows per
+expert; the 26-layer arm holds Snowball's depth at the PR488 sequence length, because a flipped last
+bit only becomes a wrong log-prob when a router downstream changes its mind, and the number of chances
+scales with tokens times layers.
 """
 
 from __future__ import annotations
@@ -74,6 +75,12 @@ SNOWBALL_LIKE_SHAPE = dict(
 # at full scale. This is the arm that reproduces production contention; 256 experts spreads the same
 # tokens so thinly that a real ordering bug can hide.
 SNOWBALL_LIKE_DENSE_EXPERTS_SHAPE = {**SNOWBALL_LIKE_SHAPE, "num_local_experts": 32}
+# Snowball's real depth. The combine's order only matters on the rare element whose top-4 addends
+# span more than 14 binades, and the routers downstream turn one such flip into a route change; the
+# number of chances scales with tokens x layers, and 4 layers x 2,700 tokens is about one fortieth
+# of what a production rank sees per step. 26 layers at the PR488 sequence length is the shape that
+# has a fair chance of catching it on two GPUs.
+SNOWBALL_DEPTH_SHAPE = {**SNOWBALL_LIKE_SHAPE, "num_hidden_layers": 26}
 
 
 def _write_checkpoint(path: Path, *, shape: dict, num_experts_per_tok: int = 4) -> None:
@@ -87,7 +94,9 @@ def _write_checkpoint(path: Path, *, shape: dict, num_experts_per_tok: int = 4) 
         **shape,
     )
     torch.manual_seed(17)
-    model = GrugMoeForCausalLM(config)
+    # Saved in bf16, which is what the trainer computes in anyway; the 26-layer arm is 7 GB rather
+    # than 29 GB on disk and in each rank's host RAM at load.
+    model = GrugMoeForCausalLM(config).to(torch.bfloat16)
     model.save_pretrained(path, safe_serialization=True)
     tokenizer.save_pretrained(path)
 
@@ -181,8 +190,9 @@ def _variable_length_batch(pad_token_id: int, *, prompt_length: int, response_le
     [
         (SNOWBALL_LIKE_SHAPE, 2400, 300),
         (SNOWBALL_LIKE_DENSE_EXPERTS_SHAPE, 2400, 300),
+        (SNOWBALL_DEPTH_SHAPE, 1024, 8192),
     ],
-    ids=["experts256", "experts32_full_scale_tokens_per_expert"],
+    ids=["experts256", "experts32_full_scale_tokens_per_expert", "depth26_pr488_tokens"],
 )
 def test_grug_fsdp2_train_forward_matches_eval_forward(
     tmp_path,
@@ -198,9 +208,9 @@ def test_grug_fsdp2_train_forward_matches_eval_forward(
     metric is the same one production publishes, reduced across ranks with max rather than mean --
     a mean over per-rank maxima diluted this 7-26x and is what hid F25 for the whole workstream.
 
-    🚨 The `grouped_mm` arms are expected to FAIL while F25 is open. That is the point: this gate did
-    not exist, so nothing failed when the invariant broke. Do NOT xfail them -- a green suite over a
-    broken invariant is the state we are trying to leave.
+    This gate did not exist when the invariant broke (F25), so nothing failed. Do NOT xfail a
+    `grouped_mm` arm that starts failing again -- a green suite over a broken invariant is the state
+    this file exists to prevent.
     """
     require_hoppers(POLICY_WORLD_SIZE)
     model_path = tmp_path / "model"
