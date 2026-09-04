@@ -5,40 +5,45 @@ from skyrl_train.inference_observability import FinelogInferenceMetricsSink, tra
 
 
 def test_vllm_stats_reach_finelog():
-    native = vllm.VLLMNativeStatsAccumulator((1, 10, 100), {"model_name": "m", "engine_index": "0"})
-    native.observe(
-        Record(
-            num_running_reqs=2,
-            num_waiting_reqs=3,
-            num_skipped_waiting_reqs=1,
-            kv_cache_usage=0.4,
-            prefix_cache_stats=Record(hits=5, queries=8),
-        ),
-        Record(
-            num_prompt_tokens=20,
-            num_generation_tokens=12,
-            num_preempted_reqs=1,
-            prompt_token_stats=Record(computed=7),
-            time_to_first_tokens_iter=[0.3],
-            finished_requests=[
-                Record(
-                    finish_reason="length",
-                    queued_time=0.1,
-                    prefill_time=0.2,
-                    decode_time=0.7,
-                    e2e_latency=1.0,
-                    num_generation_tokens=12,
-                    mean_time_per_output_token=0.07,
-                )
-            ],
-        ),
+    labels = {"model_name": "m", "engine": "0"}
+
+    def metric(name, value, **extra_labels):
+        return Record(name=f"vllm:{name}", labels={**labels, **extra_labels}, value=value)
+
+    native = vllm.snapshot_vllm_prometheus_metrics(
+        [
+            metric("num_requests_running", 2),
+            metric("num_requests_waiting_by_reason", 3, reason="capacity"),
+            metric("num_requests_waiting_by_reason", 1, reason="deferred"),
+            metric("kv_cache_usage_perc", 0.4),
+            metric("prompt_tokens", 20),
+            metric("generation_tokens", 12),
+            metric("prefix_cache_hits", 5),
+            metric("prefix_cache_queries", 8),
+            metric("num_preemptions", 1),
+            metric("request_success", 1, finished_reason="length"),
+            Record(
+                name="vllm:request_time_per_output_token_seconds",
+                labels=labels,
+                buckets={"0.01": 0, "0.1": 1, "+Inf": 1},
+                count=1,
+                sum=0.07,
+            ),
+            Record(name="vllm:generation_tokens", labels={**labels, "engine": "1"}, value=999),
+        ],
+        engine_index="0",
     )
     bridge = vllm.HTTPBridgeStatsAccumulator()
     bridge.observe("response_bytes", 100, attributes={"status": "2xx"})
-    stats = native.snapshot()
     interval = vllm.VLLMIntervalStats(finished_requests=1)
     engine = vllm.VLLMEngineStatsSnapshot(
-        "physical-a", 1.0, stats.current, stats.cumulative, interval, {}, stats.histograms
+        "physical-a",
+        1.0,
+        native.current,
+        native.cumulative,
+        interval,
+        {"model_name": "m", "engine_index": "0"},
+        native.histograms,
     )
     snapshot = vllm.InferenceStatsSnapshot((engine,), bridge.snapshot(vllm.IntervalReadMode.RESET))
 
@@ -51,8 +56,12 @@ def test_vllm_stats_reach_finelog():
 
     engine, http = batches
     values = {record.name: record.value for record in engine}
+    assert values["num_requests_running"] == 2
+    assert values["num_requests_waiting"] == 4
     assert values["generation_tokens_total"] == 12
-    assert any(r.name == "request_success_total" and r.value == 1 for r in engine)
+    assert values["prefix_cache_hits_total"] == 5
+    reasons = {r.attributes["finished_reason"]: r.value for r in engine if r.name == "request_success_total"}
+    assert reasons == {"stop": 0, "length": 1, "abort": 0, "error": 0, "repetition": 0}
     assert values["request_time_per_output_token_seconds_sum"] == 0.07
     assert all(record.attributes["engine"] == "physical-a" for record in engine)
     assert all("engine" not in record.attributes for record in http)

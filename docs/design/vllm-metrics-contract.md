@@ -20,12 +20,16 @@ step trackers and typed telemetry.
 `InferenceStatsCallback` owns inference metric collection and publication for a training run. No inference-engine
 class, stat logger, or background Prometheus collector publishes vLLM metrics directly.
 
-Each inference engine exposes one RPC that returns an immutable `VLLMEngineStatsSnapshot`. The engine's
-stat logger is the sole producer. It observes each vLLM scheduler and request-stat update once and maintains
-two views of that event stream:
+Each inference engine exposes one RPC that returns an immutable `VLLMEngineStatsSnapshot`. Two existing
+vLLM loggers provide separate views of the same event stream:
 
-- cumulative counters, histograms, and current gauges for typed telemetry;
-- an interval accumulator reset only by a step-boundary read, for exact step summaries.
+- vLLM's built-in `PrometheusStatLogger` owns cumulative counters, histograms, and current gauges;
+- `V1LoggingStatLoggerFixed` retains the legacy interval accumulator used by training-step summaries.
+
+The Ray actor reads the built-in metrics through vLLM's in-process `get_metrics_snapshot()` API and translates
+the selected native series to the wire type. It does not reimplement vLLM's counters or histogram buckets,
+and it does not need an HTTP metrics server. The actor attaches a globally unique physical engine ID while
+preserving vLLM's process-local `engine` label as `engine_index`.
 
 Periodic reads do not reset the interval accumulator. This lets the callback publish cumulative Finelog
 snapshots while generation is still running without changing the next training-step payload. A step-boundary
@@ -91,7 +95,8 @@ calling Rigging. It checks every publication result, logs any loss, and emits be
 `metric_publication_dropped_records` signals for `sample_limit` and `telemetry_loss`. A zero is evidence only
 when fresh; a positive value means the snapshot is incomplete; absent or stale evidence remains unknown.
 
-Both sinks consume `VLLMEngineStatsSnapshot`; neither reads vLLM internals or a Prometheus registry. A
+Both sinks consume `VLLMEngineStatsSnapshot`; neither reads vLLM internals or a Prometheus registry. The
+small actor-side adapter is the only registry reader. A
 failure in one sink does not suppress the other. Collection failures are reported by the callback and keep
 the last successful cumulative cursor; a failed periodic read cannot reset step statistics.
 
@@ -99,35 +104,21 @@ the last successful cumulative cursor; a failed periodic read cannot reset step 
 and cross-engine aggregation happen only in the callback, so the RPC layer cannot become a fourth metric
 owner.
 
-Remove `enable_ray_prometheus_stats`, `RayPrometheusStatLogger`, the engine-local Prometheus registry
-collector, and their configuration and tests. The normal vLLM Prometheus logger is also unnecessary for
-MarinSkyRL metrics and must not be installed as a second stat logger. Marin's standalone serving path may
-continue scraping `/metrics`; it is a different process boundary and does not participate in this training
-contract.
+Remove `enable_ray_prometheus_stats`, `RayPrometheusStatLogger`, and the old engine-local publisher. Keep the
+normal vLLM Prometheus logger as the native metric owner; the custom logger only retains interval summaries.
+Marin's standalone serving path may continue scraping `/metrics`; it is a different process boundary and
+does not participate in this training contract.
 
 ## Enforcement
 
-CPU tests exercise the public producer-to-consumer path:
-
-- feed scheduler and finished-request observations to the real stat logger, read a snapshot, and verify
-  current, cumulative, and interval semantics, including that periodic reads do not reset the interval;
-- pass snapshots from multiple fake engine RPCs through `InferenceStatsCallback` and verify the flat tracker
-  payload and typed recording sink from the same read;
-- require every snapshot field to have an explicit tracker, telemetry, or dual disposition and pin the
-  externally consumed metric names and labels;
-- verify a tracker failure does not suppress typed telemetry, and a typed-sink failure does not corrupt the
-  next step interval;
-- scan the vLLM inference package's imports and configuration schema to reject direct Rigging publishers,
-  Prometheus registry access, `PrometheusStatLogger`, `RayPrometheusStatLogger`, and
-  `enable_ray_prometheus_stats` outside the canonical snapshot producer and callback adapter.
-
-The architectural test is a dependency-boundary check, not a claim that tests can prevent deliberately
-obfuscated publication code. Repository review remains responsible for changes to the snapshot schema,
-callback, and sink protocol.
+One CPU sanity test sends representative built-in vLLM gauge, counter, labelled-counter, and histogram
+records through the actor-side translation and Finelog projection. It checks physical engine identity,
+native local index, finish-reason labels, histogram shape, HTTP bridge separation, and the legacy tracker
+projection. Repository review remains responsible for the ownership boundary.
 
 ## Rollout
 
-Implement this contract on #460 after this design is approved. Preserve the 27 existing `vllm/*` tracker
+Preserve the 27 existing `vllm/*` tracker
 names and the native Finelog names and labels consumed by Marin's vLLM dashboards. Remove the alternate
 exporters in the same PR so no release contains both mechanisms.
 
