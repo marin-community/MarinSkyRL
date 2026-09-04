@@ -624,11 +624,6 @@ def publish_driver_counters(counters: Mapping[str, float], *, step: int) -> None
         reason = unconfigured_telemetry_reason()
         if reason is not None:
             logger.warning("generate span tree will publish nothing: %s", reason)
-    # Settle whatever is already in flight BEFORE opening the window. The trainer publishes the
-    # step's phase rows one call earlier, so without this their rejections land inside our window and
-    # get reported as "the engine and environment tails are understated" -- telling an operator the
-    # tails are bad when the tails may be complete, and pointing them at the wrong producer.
-    telemetry.flush(TELEMETRY_FLUSH_TIMEOUT_SECONDS)
     before = telemetry.runtime_status()
     for name, value in counters.items():
         if name not in ROLLOUT_COUNTERS:
@@ -650,9 +645,17 @@ def publish_driver_counters(counters: Mapping[str, float], *, step: int) -> None
     settled = telemetry.flush(TELEMETRY_FLUSH_TIMEOUT_SECONDS)
     dropped = telemetry.runtime_status().lost_records - before.lost_records
     if dropped > 0:
+        # ⚠️ `lost_records` is a PROCESS-wide counter, so this window cannot separate our rejections
+        # from another producer's. The trainer publishes the step's phase rows one call earlier and
+        # their rejections can land here. An earlier version flushed first to clean the window, which
+        # bought precision for a second blocking 1 s flush per step on the critical path, by default
+        # -- and still lost the attribution whenever that flush timed out. Better to spend nothing
+        # and say only what the number supports: rows were lost around this publish, and the tails
+        # may be among them.
         logger.warning(
-            "rollout counters lost %d record(s) at step %d; the engine and environment tails are "
-            "understated and must not be quoted",
+            "%d telemetry record(s) were lost around the step %d rollout-counter publish. They may "
+            "be these counters or another producer's -- lost_records is process-wide. If they are "
+            "ours the engine and environment tails are understated, so confirm before quoting them",
             dropped,
             step,
         )

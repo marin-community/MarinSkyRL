@@ -55,6 +55,11 @@ microbenchmark of the context managers alone costs ~21 ms against a ~98 s phase.
 the bookkeeping, **not a measured end-to-end overhead**: no matched spans-on/spans-off pair has been
 run at the same SHA, and a single run cannot measure its own overhead.
 
+🚨 **The ~21 ms does not include publishing.** `publish_driver_counters` runs one blocking
+`telemetry.flush(1.0)` in the trainer's step epilogue, so a degraded endpoint costs up to **1 s per
+step** — about fifty times the bookkeeping bound, and the term that will dominate any A/B you run.
+The worker path pays the same 1 s cap on its own return.
+
 | span | contains | subtracted from the residual |
 |---|---|---|
 | `rollout_collect` | the fan-out over trajectories | yes |
@@ -119,9 +124,23 @@ from a fast one with three stragglers.
 **Absence is deliberate and is the honest signal.** A runner that has not bracketed its call sites
 publishes nothing at all rather than a residual equal to its parent, because a full residual reads
 as "generate is entirely unaccounted for" — a claim about the rollout when it is a fact about the
-instrument. A runner opts in with `generate_spans_instrumented = True` after bracketing its own
-waits; the flag is revoked automatically from a subclass that replaces `_run` without re-declaring
-it.
+instrument.
+
+**Opting in takes TWO certificates, and a runner needs both.** They cover different halves and
+neither implies the other:
+
+1. **The runner class** declares `generate_spans_instrumented = True` after bracketing its own
+   waits. It is revoked automatically from a subclass that overrides any of
+   `TrajectoryRunner.BRACKETED_METHODS` — `_run`, `agent_loop`, `collect_batched` — without
+   re-declaring it, because those are the bracketed loops.
+2. **The collector class** declares the same flag, and the runner reads the collector's own
+   `__dict__` so a subclass cannot inherit it. This half matters because the collector is
+   **injected**: `pipeline=...` is the supported extension point, and a caller-supplied collector
+   that brackets nothing is not covered by anything the runner class says about itself.
+
+⚠️ **If you inject a collector, declare the flag on it.** Following step 1 alone and supplying your
+own collector publishes nothing, silently — the runner is certified and the collector is not, so the
+conjunction is false. That is the honest outcome, but it is not obvious from step 1.
 
 ### Volume
 

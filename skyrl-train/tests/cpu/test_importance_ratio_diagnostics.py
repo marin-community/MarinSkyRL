@@ -55,6 +55,8 @@ def _reduce_one(key, this_rank, peers, ops_seen):
         mine = float(tensor.item())
         if op is torch.distributed.ReduceOp.MAX:
             tensor.fill_(max([mine, *peers]))
+        elif op is torch.distributed.ReduceOp.MIN:
+            tensor.fill_(min([mine, *peers]))
         else:
             # Every peer applies the same local scaling this rank did before contributing.
             scale = mine / this_rank if this_rank else 1.0
@@ -68,6 +70,55 @@ def _reduce_one(key, this_rank, peers, ops_seen):
         patch("skyrl_train.distributed.strategy.torch.cuda.current_device", return_value="cpu"),
     ):
         return strategy.all_reduce_status({key: this_rank})[key]
+
+
+def test_a_whole_status_dict_gives_every_key_its_own_op():
+    """The shape production actually uses: one dict, several keys, three different ops.
+
+    🚨 Every other test here reduces ONE key per call, so `all_reduce_status`'s grouping loop was
+    never exercised -- reducing every group with the first group's op left the entire 1,905-test
+    suite green. That would silently mean `log_ratio_abs_max` whenever an ordinary metric sorted
+    first, publishing 0.2375 for one rank at 19.0 among eighty, which is the exact number this
+    branch exists to stop being invisible.
+    """
+    ops_by_value: dict[float, object] = {}
+
+    class _Recording(_StubbedStrategy):
+        def all_reduce(self, data, op="mean"):
+            # Record the op each KEY was reduced with, not merely the ops seen.
+            for name in data:
+                ops_by_value[name] = op
+            return {name: value for name, value in data.items()}
+
+    status = {
+        "policy_loss": 1.0,  # mean, the default
+        "log_ratio_abs_max": 19.0,  # max
+        "log_ratio_diagnostics_failed": 1.0,  # max
+        "optimizer_step_succeeded": 0.0,  # min
+    }
+    _Recording(4).all_reduce_status(status)
+
+    assert ops_by_value == {
+        "policy_loss": "mean",
+        "log_ratio_abs_max": "max",
+        "log_ratio_diagnostics_failed": "max",
+        "optimizer_step_succeeded": "min",
+    }
+
+
+def test_a_min_valued_metric_reaches_the_real_reduce_op_min():
+    """Drives the real Strategy.all_reduce, so the op that reaches the collective is what is asserted.
+
+    The map-inspecting test next door cannot see this: dispatching SUM specifically for op == "min"
+    while leaving REDUCE_OPS["min"] == MIN passes it. optimizer_step_succeeded is a binary
+    did-every-rank-succeed flag, so one failing rank in four must publish 0 -- a mean publishes 0.75,
+    and a SUM publishes 3, which at 80 healthy ranks is 80.0 next to a threshold of 1.
+    """
+    ops: list = []
+    assert _reduce_one("optimizer_step_succeeded", 1.0, [1.0, 0.0, 1.0], ops) == 0.0, (
+        "one failing rank must survive the reduction; a mean publishes 0.75 and a sum publishes 3"
+    )
+    assert ops == [torch.distributed.ReduceOp.MIN], "the min key must reach ReduceOp.MIN"
 
 
 def test_a_max_valued_metric_reaches_the_real_reduce_op_max():

@@ -1,9 +1,8 @@
 import contextlib
 import os
 import socket
-from collections.abc import Mapping
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
