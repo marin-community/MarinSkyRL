@@ -2,17 +2,17 @@
 # The grouped-MoE combine gates, on two H100s. Runs INSIDE an Iris GPU task.
 #
 #   $IRIS --cluster marin job run --target-cluster <peer with room> \
-#     --job-name atqamar-fsdp2-parity --priority batch \
+#     --job-name <user>-fsdp2-parity --priority batch \
 #     --cpu 32 --memory 200GB --disk 400GB --gpu H100x2 --enable-extra-resources \
 #     --no-sync --timeout 5400 -- bash -c 'bash skyrl-train/ci/run_fsdp2_train_eval_parity.sh'
 #
 # Three stages, each reported with its own exit line so a failure in one cannot hide another:
 #   1. ci/probe_combine_order.py           -- op-level: does the combine's order matter, and does the
 #                                             former scatter_add vary it (one GPU, a minute).
-#   2. the one-GPU parity gates            -- Grug grouped_mm (G4a-1..6) and the Qwen grouped-GEMM swap,
-#                                             both of which now share the fixed-order combine.
+#   2. the one-GPU parity gates            -- the Grug grouped_mm gates and the Qwen grouped-GEMM swap's
+#                                             parity arms, both paths sharing the fixed-order combine.
 #   3. the FSDP2 train/eval parity gate    -- the real worker path on two GPUs, six arms including the
-#                                             26-layer PR488-length one.
+#                                             26-layer one at the production sequence length.
 set -uo pipefail
 REPOSITORY_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ENV_DIR="${ENV_DIR:-$REPOSITORY_ROOT/.iris-parity-env}"

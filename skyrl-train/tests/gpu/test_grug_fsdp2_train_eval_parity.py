@@ -4,8 +4,8 @@
 """The FSDP2 counterpart of Megatron's train/eval log-prob parity gate.
 
 Megatron has `test_grug_megatron_train_forward_matches_eval_forward`
-(`tests/gpu/test_grug_megatron.py`), which guards the invariant this file guards. **FSDP2 has never
-had an equivalent, and that is why F25 went unnoticed until a cluster run found it.**
+(`tests/gpu/test_grug_megatron.py`), which guards the invariant this file guards. FSDP2 never had an
+equivalent, which is why the grouped-path break below went unnoticed until a cluster run found it.
 
 The invariant. With `train_batch_size == policy_mini_batch_size` and `update_epochs_per_batch: 1`
 there is exactly ONE optimizer update per step, so the training forward and the old-log-prob forward
@@ -13,19 +13,19 @@ run on IDENTICAL weights. Every token's PPO ratio is then `exp(train_logprob - e
 must be exactly 1. It is a numerical identity, not a statistical property: it does not depend on the
 weights, the data, or the reward. Any drift is spurious clipping.
 
-Megatron's own docstring asserts "FSDP2 reports exactly zero here." At production scale it does not:
-`use_grouped_mm` is necessary and sufficient to break it across nine cluster arms, reaching
-`log_ratio_abs_max` 1.697 -- a ratio of 5.46x against a clip bound of 0.2 (F25, F26).
+Megatron's own docstring asserts "FSDP2 reports exactly zero here." At production scale it did not:
+`use_grouped_mm` was necessary and sufficient to break it across nine cluster arms, reaching
+`log_ratio_abs_max` 2.2 -- a ratio of 9x against a clip bound of 0.2.
 
 Why the shapes below. `grug_moe.py` used to combine the top-k expert outputs with `scatter_add` over
 indices that repeat each token once per expert, which is CUDA `atomicAdd` and documented
 non-deterministic; the eager path uses `index_add_` over unique indices in a fixed order, and
 Megatron hit the same structure at top-4 and fixed it by forcing a fixed-order reduce
-(`docs/grug-megatron-training.md`, F27). The grouped path now reduces each token's rows in a fixed
-order too (`combine_routed_rows`). The 32-expert arm holds Snowball's width with full-scale rows per
-expert; the 26-layer arm holds Snowball's depth at the PR488 sequence length, because a flipped last
-bit only becomes a wrong log-prob when a router downstream changes its mind, and the number of chances
-scales with tokens times layers.
+(`docs/grug-megatron-training.md`). The grouped path now reduces each token's rows in a fixed order
+too (`combine_routed_rows`). The 32-expert arm holds Snowball's width with full-scale rows per expert;
+the 26-layer arm holds Snowball's depth at the production sequence length (1024 + 8192), because a
+flipped last bit only becomes a wrong log-prob when a router downstream changes its mind, and the
+number of chances scales with tokens times layers.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 POLICY_WORLD_SIZE = 2
 # The batch is built with exactly this many rows and train_batch_size is set to match. They must
 # agree: the ratio diagnostics finalize on the LAST micro-step of the accumulation window
-# (`worker.py:1490`), so a batch wider than train_batch_size leaves that window open and the metric
+# (`worker.py:1455`), so a batch wider than train_batch_size leaves that window open and the metric
 # never appears -- which is how the first run of this test died on a bare KeyError.
 BATCH_ROWS = 4
 
@@ -78,8 +78,8 @@ SNOWBALL_LIKE_DENSE_EXPERTS_SHAPE = {**SNOWBALL_LIKE_SHAPE, "num_local_experts":
 # Snowball's real depth. The combine's order only matters on the rare element whose top-4 addends
 # span more than 14 binades, and the routers downstream turn one such flip into a route change; the
 # number of chances scales with tokens x layers, and 4 layers x 2,700 tokens is about one fortieth
-# of what a production rank sees per step. 26 layers at the PR488 sequence length is the shape that
-# has a fair chance of catching it on two GPUs.
+# of what a production rank sees per step. 26 layers at the production sequence length is the shape
+# that has a fair chance of catching it on two GPUs.
 SNOWBALL_DEPTH_SHAPE = {**SNOWBALL_LIKE_SHAPE, "num_hidden_layers": 26}
 
 
@@ -106,7 +106,7 @@ def _config(model_path: str, *, use_grouped_mm: bool):
     cfg.trainer.policy.model.path = model_path
     cfg.trainer.critic.model.path = ""
     cfg.trainer.strategy = "fsdp2"
-    # flash-attention is exonerated by the 2x2 (F26); leave it on so the arm matches production.
+    # flash-attention is exonerated by the nine-arm 2x2; leave it on so the arm matches production.
     cfg.trainer.flash_attn = True
     cfg.trainer.attn_backend = "auto"
     cfg.trainer.gradient_checkpointing = True
@@ -118,7 +118,7 @@ def _config(model_path: str, *, use_grouped_mm: bool):
     cfg.trainer.policy_mini_batch_size = BATCH_ROWS
     # 🚨 n_samples_per_prompt MULTIPLIES the per-rank mini-batch:
     #   policy_mini_batch_size_per_gpu = policy_mini_batch_size * n_samples_per_prompt // dp_size
-    # (`worker.py:1093`), and accumulation_steps is that divided by the micro size. The base config
+    # (`worker.py:1069`), and accumulation_steps is that divided by the micro size. The base config
     # ships 5, which made the window 10 micro-steps wide while each rank held only 2 rows -- so
     # `(local_step + 1) % accumulation_steps == 0` never fired, the ratio diagnostics never
     # finalized, and every arm reported no metric at all. The batch here is a fixed set of rows,
@@ -192,7 +192,7 @@ def _variable_length_batch(pad_token_id: int, *, prompt_length: int, response_le
         (SNOWBALL_LIKE_DENSE_EXPERTS_SHAPE, 2400, 300),
         (SNOWBALL_DEPTH_SHAPE, 1024, 8192),
     ],
-    ids=["experts256", "experts32_full_scale_tokens_per_expert", "depth26_pr488_tokens"],
+    ids=["experts256", "experts32_full_scale_tokens_per_expert", "depth26_production_tokens"],
 )
 def test_grug_fsdp2_train_forward_matches_eval_forward(
     tmp_path,
@@ -206,9 +206,9 @@ def test_grug_fsdp2_train_forward_matches_eval_forward(
     Feed the eval forward's own output back as ``action_log_probs`` and take one step: the ratio the
     trainer computes is then exactly the train/eval drift, and `log_ratio_abs_max` reports it. The
     metric is the same one production publishes, reduced across ranks with max rather than mean --
-    a mean over per-rank maxima diluted this 7-26x and is what hid F25 for the whole workstream.
+    a mean over per-rank maxima dilutes it 7-26x at 16-80 ranks.
 
-    This gate did not exist when the invariant broke (F25), so nothing failed. Do NOT xfail a
+    This gate did not exist when the invariant broke, so nothing failed. Do NOT xfail a
     `grouped_mm` arm that starts failing again -- a green suite over a broken invariant is the state
     this file exists to prevent.
     """
@@ -259,7 +259,7 @@ def test_grug_fsdp2_train_forward_matches_eval_forward(
         )
         assert status["log_ratio_abs_max"] < TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE, (
             f"train/eval log-ratio {status['log_ratio_abs_max']} exceeds {TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE}; "
-            f"PPO is clipping on numerical noise (F25)"
+            f"PPO is clipping on numerical noise"
         )
     finally:
         ray.shutdown()
