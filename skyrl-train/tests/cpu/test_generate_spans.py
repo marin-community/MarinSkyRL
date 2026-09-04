@@ -84,6 +84,22 @@ EXPECTED_TOKENIZE_REGIONS = {
 # that passes.
 TOKENIZE_SCANNED_PACKAGES = ("trajectory_runners", "inference_engines")
 
+# 🚨 Every engine call the rollout awaits, and how many each module holds. The tokenize half of this
+# file has TWO guards -- every call inside a region, and a per-module region count -- and the engine
+# half had NONE, which is an asymmetry nothing motivated. Deleting all three brackets trips an
+# unrelated package-level canary; deleting any TWO was invisible, and the tree then publishes
+# rollout_engine_await_{seconds_sum,count,seconds_max} as a MEASURED 0.0 beside a healthy trajectory
+# count -- "the engines were never waited on", i.e. the driver is the entire cost, which is the
+# precise inversion this instrument exists to prevent.
+EXPECTED_ENGINE_WAIT_SITES = {"trajectory_runners.skyrl_gym": 2, "trajectory_runners.step_wise": 1}
+
+# Modules that call an engine client and are deliberately NOT counted above. Empty today, and the
+# near-miss is worth recording: `model_clients` DEFINES `generate` rather than awaiting one, so a
+# guard keyed on the method name alone would have fired on it and needed an exemption -- and an
+# exemption list is where the next leak hides. Keying on a RESOLVED receiver instead means the
+# client itself is simply not a caller, with nothing to exempt.
+ENGINE_WAIT_UNCOVERED_MODULES: dict[str, str] = {}
+
 # Rollout-path modules that tokenize and are deliberately NOT covered. Each needs a reason, because
 # the whole point of deriving the list is that adding one is a decision somebody writes down.
 TOKENIZE_UNCOVERED_MODULES = {
@@ -1440,6 +1456,98 @@ def test_publishing_no_counters_is_a_no_op(monkeypatch):
 
 
 # --- call-site coverage -------------------------------------------------------------------------
+
+
+def _engine_generate_calls(tree: ast.AST) -> list[ast.Call]:
+    """Awaited `<model client>.generate(...)` calls, by RESOLVED receiver.
+
+    ⚠️ Resolved, not spelled. `mc = self.model_client; await mc.generate(...)` defeats an
+    attribute-name match, and that is exactly how `model_clients` hid from the tokenizer walk until
+    round 11. Same alias-resolving shape as `_tokenizer_receivers`.
+    """
+    receivers = {"model_client", "self.model_client"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            value = node.value
+            bound = (isinstance(value, ast.Attribute) and "model_client" in value.attr) or (
+                isinstance(value, ast.Name) and value.id in receivers
+            )
+            if bound:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        receivers.add(target.id)
+                    elif isinstance(target, ast.Attribute):
+                        receivers.add(target.attr)
+
+    found: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr != "generate":
+            continue
+        owner = node.func.value
+        if (isinstance(owner, ast.Name) and owner.id in receivers) or (
+            isinstance(owner, ast.Attribute) and ("model_client" in owner.attr or owner.attr in receivers)
+        ):
+            found.append(node)
+    return found
+
+
+@pytest.mark.parametrize("module_name", sorted(EXPECTED_ENGINE_WAIT_SITES))
+def test_every_engine_call_is_inside_an_engine_wait(module_name):
+    """🚨 The counter half of the tree, guarded the way the tokenize half already was.
+
+    `mark_supported()` seeds the engine-await sum, count and max at 0.0, and `rollout_trajectory`'s
+    finally writes `_seconds_max = max(0.0, ...)` for every closed trajectory. So an unbracketed
+    engine call does not publish an absence -- it publishes a MEASURED ZERO next to a healthy
+    trajectory count, which reads as "the engines were never waited on".
+    """
+    tree = ast.parse(_module_source(module_name))
+    regions: list[range] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if (
+                isinstance(call, ast.Call)
+                and getattr(call.func, "id", None) == "rollout_wait"
+                and call.args
+                and getattr(call.args[0], "id", None) == "ROLLOUT_ENGINE_AWAIT"
+            ):
+                regions.append(range(node.lineno, node.end_lineno + 1))
+
+    assert len(regions) == EXPECTED_ENGINE_WAIT_SITES[module_name], (
+        f"{module_name} holds {len(regions)} engine-await regions, expected "
+        f"{EXPECTED_ENGINE_WAIT_SITES[module_name]}. Deleting one publishes a measured zero for the "
+        "engine wait; adding one deliberately means updating this count."
+    )
+    leaked = [
+        f"{module_name}:{node.lineno}"
+        for node in _engine_generate_calls(tree)
+        if not any(node.lineno in region for region in regions)
+    ]
+    assert not leaked, f"engine calls outside an engine-await region: {leaked}"
+
+
+def test_the_engine_wait_count_names_every_module_that_calls_an_engine():
+    """Derived, so the count dict above cannot go quietly out of date."""
+    import pathlib
+
+    import skyrl_train
+
+    root = pathlib.Path(skyrl_train.__file__).parent
+    found = {
+        str(path.relative_to(root).with_suffix("")).replace("/", ".")
+        for path in sorted((root / "trajectory_runners").rglob("*.py"))
+        if _engine_generate_calls(ast.parse(path.read_text()))
+    }
+    assert found, "the scan found no engine calls at all -- the call shape changed and this is inert"
+    declared = set(EXPECTED_ENGINE_WAIT_SITES) | set(ENGINE_WAIT_UNCOVERED_MODULES)
+    assert found == declared, (
+        f"undeclared modules call an engine: {sorted(found - declared)}; "
+        f"declared but no longer calling: {sorted(declared - found)}"
+    )
 
 
 def test_the_tokenize_walk_names_every_rollout_module_that_tokenizes():
