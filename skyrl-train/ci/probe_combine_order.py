@@ -8,7 +8,7 @@ For each row distribution it reports
      instance [2**24, 2**24, 1, 1] spans 24 binades and sums to 2**25 in every order);
   2. how many elements the former ``scatter_add`` combine (float32 atomics) changed across repeated
      launches under a contending stream, before and after the cast to bf16;
-  3. the same count for ``combine_routed_rows``, which must be zero.
+  3. the same count for ``combine_routed_rows``, which must be zero; the probe exits nonzero otherwise.
 
 The third distribution is the real thing: the routed rows a production-width Grug MoE block emits for
 random tokens, captured from ``grouped_expert_contributions``.
@@ -150,6 +150,8 @@ def main() -> None:
             f"former scatter_add varied fp32={former[0]} bf16={former[1]}  |  "
             f"combine_routed_rows varied fp32={fixed[0]} bf16={fixed[1]}"
         )
+        if fixed != (0, 0):
+            raise SystemExit(f"combine_routed_rows varied between launches on {name}: fp32={fixed[0]} bf16={fixed[1]}")
     print()
     print("READ IT LIKE THIS:")
     print("  former varied fp32 > 0   -> the shipped combine was nondeterministic on this device, this shape.")
