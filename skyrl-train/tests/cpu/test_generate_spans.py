@@ -1958,3 +1958,47 @@ def test_the_shipped_client_charges_its_templating_to_rollout_tokenize(monkeypat
     assert timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_sum"] == pytest.approx(15.0), (
         "the observed client wait changed, so something else ran inside it"
     )
+
+
+def test_the_trainer_hands_its_accumulator_to_the_runner(monkeypatch):
+    """🚨 The forwarding boundary, driven -- the one link a source search cannot hold.
+
+    The guard for this searched `trainer.py` for the text `phase_timings=phase_timings`. Passing
+    `phase_timings and None` keeps that text intact, hands the runner nothing, and training carries
+    on: every generate leaf, the residual, and every wait counter vanish together, with a green
+    suite and no warning. Absence is indistinguishable from an uninstrumented runner, which the tree
+    deliberately renders as silence.
+
+    So drive the real `RayPPOTrainer.generate` with a runner that measures a known cost, and assert
+    that cost arrives in the accumulator the trainer was given.
+    """
+    from skyrl_train.trainer import RayPPOTrainer
+
+    clock = {"now": 0.0}
+
+    class _Runner:
+        async def run(self, input_batch, phase_timings=None):
+            # A certified runner does exactly this, and does nothing when handed None.
+            if phase_timings is not None:
+                phase_timings.mark_supported()
+            with rollout_timings_scope(phase_timings):
+                with rollout_span("rollout_collect"):
+                    clock["now"] += 7.0
+            return {"response_ids": [[1]], "rollout_metrics": None}
+
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.trajectory_runner = _Runner()
+    trainer.global_step = 0
+    trainer.all_metrics = {}
+    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(step_wise_training=True))
+
+    monkeypatch.setattr(timing_module, "time", SimpleNamespace(perf_counter=lambda: clock["now"]))
+
+    timings = RolloutTimings()
+    asyncio.run(trainer.generate({"prompts": [[{"role": "user", "content": "hi"}]]}, phase_timings=timings))
+
+    assert timings.supported is True, "the trainer handed the runner no accumulator to mark"
+    assert timings.durations.get("rollout_collect") == pytest.approx(7.0), (
+        f"the runner measured {timings.durations.get('rollout_collect')} into the trainer's "
+        "accumulator; handing it None makes the whole generate tree disappear silently"
+    )
