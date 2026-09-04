@@ -301,11 +301,25 @@ def test_residual_is_signed_so_over_coverage_is_visible():
     returns exactly 0.0, which satisfies `<= 0.0` -- so the guard against the clamp was passed by
     the clamp. Pin the coverage so the expected residual is an exact number the clamp cannot produce.
     """
-    accumulator = _accumulator()
-    with accumulator.span("policy_final_barrier"):
-        pass
-    accumulator._totals["policy_final_barrier"] = 4.0
-    assert accumulator.totals(total_seconds=1.0)["policy_span_residual"] == pytest.approx(-3.0)
+    import skyrl_train.timing_observability as timing_module
+
+    # ⚠️ Drive the REAL context manager on a scripted clock. Writing `_totals` directly -- which an
+    # earlier version did -- proves the SUBTRACTION and nothing about the MEASUREMENT: making
+    # `span()` record `+ 0.0` for every region left that version passing, so the residual could
+    # read a decomposition that measured nothing and call it closed.
+    ticks = iter([100.0, 104.0])
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(timing_module, "time", SimpleNamespace(perf_counter=lambda: next(ticks)))
+        accumulator = _accumulator()
+        with accumulator.span("policy_final_barrier"):
+            pass
+    finally:
+        monkey.undo()
+
+    totals = accumulator.totals(total_seconds=1.0)
+    assert totals["policy_final_barrier"] == pytest.approx(4.0), "the real timer must have measured it"
+    assert totals["policy_span_residual"] == pytest.approx(-3.0)
 
 
 def test_record_zero_distinguishes_did_not_run_from_cost_nothing():
@@ -888,7 +902,13 @@ def test_unsynchronized_spans_do_not_ship_the_synchronized_clock_domain():
                 type("_H", (), {"record": lambda self, v, attributes: rows.append(attributes)})(),
             )
             timing_module.WorkerTimingSink(0, synchronize=synchronize).publish(
-                timing_module.phase_timing_observations({"policy_ppo_train": 9.0, "policy_backward": 4.0}),
+                # ⚠️ policy_training_step is the OTHER inclusive row, and it was covered only in
+                # the synchronized test. A mutation making it inclusive ONLY when synchronized --
+                # i.e. exclusive_launch on the mode production actually runs -- survived the suite,
+                # which would let a consumer sum an inclusive parent beside its own children.
+                timing_module.phase_timing_observations(
+                    {"policy_ppo_train": 9.0, "policy_training_step": 8.5, "policy_backward": 4.0}
+                ),
                 step=1,
             )
         finally:
@@ -897,8 +917,16 @@ def test_unsynchronized_spans_do_not_ship_the_synchronized_clock_domain():
 
     synced = _domains(True)
     launched = _domains(False)
-    assert synced == {"policy_ppo_train": "inclusive_wall", "policy_backward": "exclusive_wall"}
-    assert launched == {"policy_ppo_train": "inclusive_launch", "policy_backward": "exclusive_launch"}
+    assert synced == {
+        "policy_ppo_train": "inclusive_wall",
+        "policy_training_step": "inclusive_wall",
+        "policy_backward": "exclusive_wall",
+    }
+    assert launched == {
+        "policy_ppo_train": "inclusive_launch",
+        "policy_training_step": "inclusive_launch",
+        "policy_backward": "exclusive_launch",
+    }
     assert not set(synced.values()) & set(launched.values()), "the two modes must not share a label"
 
 
