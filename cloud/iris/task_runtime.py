@@ -186,26 +186,24 @@ def _log(msg: str) -> None:
     print(f"[task-runtime] {msg}", flush=True)
 
 
-def stage_train_data(train_data_json: str) -> None:
-    """Extract the HF task dataset(s) to this NODE's local task dir on EVERY node.
+def stage_task_data(data_json: str, *, role: str) -> None:
+    """Extract HF task datasets to this node's local task directory on every node.
 
     The controller runs on every node before Ray bootstrap; pods don't share a
     filesystem, so each pod fetches+extracts the parquet repo to the identical
     node-local path the rollout workers read. Idempotent (``on_exist=skip``).
     """
-    import json as _json
-
     try:
-        train_data = _json.loads(train_data_json)
+        data = json.loads(data_json)
     except (ValueError, TypeError):
-        train_data = [train_data_json] if train_data_json else []
-    if not train_data:
+        data = [data_json] if data_json else []
+    if not data:
         return
 
     # PYTHONPATH includes /app (launcher bootstrap), so cloud.iris is importable.
     from cloud.iris.rl_data import resolve_rl_train_data
 
-    _log(f"Staging train_data on this node (rank {_rank()}/{_num_tasks()}): {train_data}")
+    _log(f"Staging {role} data on this node (rank {_rank()}/{_num_tasks()}): {data}")
     # This HF *parquet* dataset is NOT pre-cached, so force-clear HF_HUB_OFFLINE /
     # TRANSFORMERS_OFFLINE for the extraction only (the ranks' env is untouched).
     # Without this the snapshot_download inside resolve_rl_train_data dies
@@ -214,12 +212,12 @@ def stage_train_data(train_data_json: str) -> None:
     for k in saved:
         os.environ.pop(k, None)
     try:
-        resolved = resolve_rl_train_data(train_data, on_exist="skip", verbose=True)
+        resolved = resolve_rl_train_data(data, on_exist="skip", verbose=True)
     finally:
         for k, v in saved.items():
             if v is not None:
                 os.environ[k] = v
-    _log(f"train_data staged to node-local paths: {resolved}")
+    _log(f"{role.capitalize()} data staged to node-local paths: {resolved}")
 
 
 def _warm_model_snapshot_hash(model_path: str) -> str:
@@ -2003,6 +2001,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "rollouts on a multi-node slice with no shared filesystem.",
     )
     parser.add_argument(
+        "--val-data",
+        default=os.environ.get("OT_AGENT_IRIS_VAL_DATA", ""),
+        help="JSON list of validation datasets to stage in node-local task storage on every node before Ray starts.",
+    )
+    parser.add_argument(
         "--data-sources-json",
         default="",
         help="Immutable object-store data locators to materialize before Ray starts.",
@@ -2103,11 +2106,13 @@ def main() -> None:
     debug_artifact_root = os.environ.get(DEBUG_ARTIFACT_DIR_ENV)
     if debug_artifact_root:
         ensure_debug_artifact_directories(debug_artifact_root)
-    # Stage the task dataset on THIS node before Ray bootstrap (head + every worker).
+    # Stage task datasets on THIS node before Ray bootstrap (head + every worker).
     # Without this, only rank-0 has the extracted tasks and the rollout workers die
-    # with FileNotFoundError on task.toml. See stage_train_data docstring.
+    # with FileNotFoundError on task.toml. See stage_task_data docstring.
     if args.train_data:
-        stage_train_data(args.train_data)
+        stage_task_data(args.train_data, role="training")
+    if args.val_data:
+        stage_task_data(args.val_data, role="validation")
     if args.data_sources_json:
         materialize_data_sources(args.data_sources_json)
     if args.model_source_uri:

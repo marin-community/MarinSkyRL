@@ -377,6 +377,23 @@ def test_task_command_forwards_driver_liveness_timeout(tmp_path):
     assert options["--driver-liveness-timeout"] == ["600"]
 
 
+def test_task_command_stages_training_and_validation_selectors_on_every_node(tmp_path):
+    train_selector = "fixture-org/tasks@immutable::train"
+    val_selector = "fixture-org/tasks@immutable::validation"
+    args = _args(
+        tmp_path,
+        "opencode",
+        ["--train-data", json.dumps([train_selector]), "--val-data", json.dumps([val_selector])],
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert options["--train-data"] == [json.dumps([train_selector])]
+    assert options["--val-data"] == [json.dumps([val_selector])]
+
+
 def test_normalize_rejects_negative_driver_liveness_timeout(tmp_path):
     args = _args(tmp_path, "opencode", ["--driver-liveness-timeout", "-1"])
 

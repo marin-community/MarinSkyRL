@@ -154,6 +154,7 @@ DAYTONA_RL_SNAPSHOT_QUOTA = 40
 HARBOR_SNAPSHOT_NAME_PREFIX = "harbor__"
 STALE_SNAPSHOT_MAX_AGE = datetime.timedelta(hours=2)
 AUTOMATIC_RESOURCE_REQUEST = "auto"
+EMPTY_JSON_LIST = "[]"
 MEMORY_RESOURCE = "memory"
 DISK_RESOURCE = "ephemeral-storage"
 # Leave the remainder of live allocatable RAM and disk to kubelet, daemonsets,
@@ -1350,7 +1351,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--train_data",
-        default="[]",
+        default=EMPTY_JSON_LIST,
         help="Training data paths as a JSON list (e.g., '[\"org/dataset\"]').",
     )
     parser.add_argument("--train-data", dest="train_data", help=argparse.SUPPRESS)
@@ -1367,7 +1368,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--val_data",
-        default="[]",
+        default=EMPTY_JSON_LIST,
         help="Validation data paths as a JSON list.",
     )
     parser.add_argument("--val-data", dest="val_data", help=argparse.SUPPRESS)
@@ -2090,9 +2091,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     train_cmd.extend(model_source_cli_args(args.model_source_uri, args.model_source_identity))
     if args.resolved_config_uri:
         train_cmd.extend(["--resolved-config-uri", args.resolved_config_uri])
-    if args.train_data and args.train_data != "[]":
+    if args.train_data and args.train_data != EMPTY_JSON_LIST:
         train_cmd.extend(["--train_data", args.train_data])
-    if args.val_data and args.val_data != "[]":
+    if args.val_data and args.val_data != EMPTY_JSON_LIST:
         train_cmd.extend(["--val_data", args.val_data])
     for override in args.skyrl_override or []:
         train_cmd.extend(["--skyrl_override", override])
@@ -2156,17 +2157,14 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--rendezvous-timeout", str(args.rendezvous_timeout)])
     if args.driver_liveness_timeout is not None:
         controller_cmd.extend(["--driver-liveness-timeout", str(args.driver_liveness_timeout)])
-    # Per-NODE task-dataset staging. training_driver.py's resolve_rl_train_data() extracts the
-    # HF task dataset to node-local task storage,
-    # but it runs ONLY on rank 0 (the head), so the Ray-scheduled rollout workers on
-    # ranks 1..N-1 find an empty tasks dir and every rollout dies with
-    # FileNotFoundError: .../task.toml -> reward always 0 (data-starved, doomed run).
-    # Fix: forward --train-data to the controller so it can run the SAME extraction
-    # on EVERY node before Ray starts, populating the identical node-local path on
-    # all pods. Idempotent (on_exist=skip) — rank 0's later training-driver re-resolve is a
-    # cheap no-op.
-    if args.train_data and args.train_data != "[]" and not args.data_sources_json:
+    # Per-node task-dataset staging. The training driver resolves these selectors only
+    # on rank 0, while Ray may schedule rollout and evaluation workers on any node.
+    # Forward both roles to the controller so every pod has identical task-local data.
+    # Object-store locators use the separate typed materialization path below.
+    if args.train_data and args.train_data != EMPTY_JSON_LIST and not args.data_sources_json:
         controller_cmd.extend(["--train-data", args.train_data])
+    if args.val_data and args.val_data != EMPTY_JSON_LIST and not args.data_sources_json:
+        controller_cmd.extend(["--val-data", args.val_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
     # The job name is sanitized, so the pod cannot recover the run id.
