@@ -101,18 +101,41 @@ def test_revision_resolution_uses_the_requested_revision(monkeypatch):
     assert calls == [("fixture-org/fixture-trove", "rev-1")]
 
 
-def test_resolved_config_records_canonical_train_data_sources(tmp_path):
-    destination = tmp_path / "resolved.json"
+def test_runner_resolves_and_records_training_and_validation_selectors(monkeypatch, tmp_path, parse_hydra_overrides):
+    resolved = {
+        "fixture-org/fixture-trove::train": rl_data.ResolvedRLData(
+            paths=("/tasks/train",),
+            sources=("fixture-org/fixture-trove@immutable-sha::train",),
+        ),
+        "fixture-org/fixture-trove::validation": rl_data.ResolvedRLData(
+            paths=("/tasks/validation",),
+            sources=("fixture-org/fixture-trove@immutable-sha::validation",),
+        ),
+    }
+
+    def resolve(values, *, kind):
+        assert kind == "parquet"
+        return resolved[values[0]]
+
+    monkeypatch.setattr("cloud.iris.training_driver.resolve_rl_train_data_with_sources", resolve)
     runner = LocalRLRunner(
         LocalRLConfig(
-            rl_config_path="config.yaml",
+            rl_config_path=str(Path(__file__).parents[1] / "configs" / "delphi_math_rl.yaml"),
             job_name="job",
             model_path="org/model",
-            resolved_config_uri=destination.as_uri(),
+            train_data=["fixture-org/fixture-trove::train"],
+            val_data=["fixture-org/fixture-trove::validation"],
+            experiments_dir=str(tmp_path / "experiments"),
+            resolved_config_uri=(tmp_path / "resolved.json").as_uri(),
+            dry_run=True,
         )
     )
-    runner._train_data_sources = ["fixture-org/fixture-trove@immutable-sha::a"]
 
-    runner._write_resolved_config("fully_async", ["data.train_data=[/tasks/a]"], Path("config.yaml"))
+    assert runner.run() == 0
 
-    assert json.loads(destination.read_text())["train_data_sources"] == ["fixture-org/fixture-trove@immutable-sha::a"]
+    recorded = json.loads((tmp_path / "resolved.json").read_text())
+    assert recorded["train_data_sources"] == ["fixture-org/fixture-trove@immutable-sha::train"]
+    assert recorded["val_data_sources"] == ["fixture-org/fixture-trove@immutable-sha::validation"]
+    hydra = parse_hydra_overrides(recorded["hydra_args"])
+    assert hydra["data.train_data"] == ["/tasks/train"]
+    assert hydra["data.val_data"] == ["/tasks/validation"]
