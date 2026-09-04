@@ -50,6 +50,18 @@ TIMING_PARENTS: dict[str, str | None] = {
     # (trainer.py:731) wraps both branches and is always published, so it is the deepest phase that
     # actually contains this one on every path. The driver's policy_train and
     # policy_critic_overlap_train are siblings of the worker tree, not its ancestors.
+    #
+    # ⚠️ The cost is real and it is not merely "one level of resolution". policy_train (driver,
+    # inclusive_wall) and policy_ppo_train (worker, inclusive_wall) are now SIBLINGS under one
+    # parent while the first contains the second, and that containment is no longer expressed
+    # anywhere a consumer can read -- it used to be the one relation the tree stated. The trade is
+    # accepted because the orphaning is silent and total while this is merely coarse, but it is a
+    # trade: the orphaning needs `critic_model is not None` AND `colocate_all` false, and
+    # colocate_all defaults true (ppo_base_config.yaml:55), so the loss lands on the DEFAULT path
+    # and the fix serves a non-default corner. The cheaper repair, if the resolution is ever
+    # wanted back: train_critic_and_policy already stamps data.metadata["global_step"]
+    # (trainer.py:1937), so stamping the enclosing phase NAME there would let the worker publish
+    # its true parent on every path instead of the deepest always-present one.
     "policy_ppo_train": "train_critic_and_policy",
     "policy_entry_barrier": "policy_ppo_train",
     # 🔻 policy_train, NOT policy_ppo_train. This is the cost of publishing the PREVIOUS step's

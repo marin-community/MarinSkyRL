@@ -82,7 +82,7 @@ def test_no_worker_reduces_a_status_dict_with_the_plain_mean():
     unnoticed when one appears.
     """
     import ast
-    import inspect
+    import pathlib
 
     import skyrl_train.workers.worker as worker_module
 
@@ -92,12 +92,21 @@ def test_no_worker_reduces_a_status_dict_with_the_plain_mean():
         # matched a positional Name accepted both.
         return any(isinstance(inner, ast.Name) and inner.id == "status" for inner in ast.walk(node))
 
+    # ⚠️ The WHOLE workers package, not `inspect.getsource(worker_module)`. This branch changed the
+    # same call in workers/megatron/megatron_worker.py, and a walk scoped to one file left that one
+    # revertible in silence. Scope the guard to every file the defect can live in, not to the file
+    # where it was first found.
+    workers = pathlib.Path(worker_module.__file__).parent
+    sources = sorted(workers.rglob("*.py"))
+    assert len(sources) > 1, "the walk must cover the whole workers package, not a single module"
+
     offenders: list[str] = []
-    for node in ast.walk(ast.parse(inspect.getsource(worker_module))):
-        if not isinstance(node, ast.Call) or getattr(node.func, "attr", None) != "all_reduce":
-            continue
-        if any(_mentions_status(arg) for arg in (*node.args, *(kw.value for kw in node.keywords))):
-            offenders.append(f"line {node.lineno}")
+    for path in sources:
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call) or getattr(node.func, "attr", None) != "all_reduce":
+                continue
+            if any(_mentions_status(arg) for arg in (*node.args, *(kw.value for kw in node.keywords))):
+                offenders.append(f"{path.relative_to(workers)}:{node.lineno}")
     assert not offenders, (
         f"all_reduce(status) at {offenders}: a status dict must go through all_reduce_status, or "
         "its specially-reduced keys silently take the default mean"

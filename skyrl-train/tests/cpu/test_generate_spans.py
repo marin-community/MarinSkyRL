@@ -20,6 +20,7 @@ import importlib
 import inspect
 import re
 import threading
+import time as time_module
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -475,6 +476,45 @@ def _block_until(entered, release):
     release.wait(5.0)
 
 
+def test_a_finish_stamp_that_lands_after_the_resume_read_cannot_report_a_negative_wait(monkeypatch):
+    """The clamp on `resumed` is load-bearing, and the read-once above it does NOT subsume it.
+
+    `marks = tuple(stamps)` fixes a torn len()/index read. It does not fix the ORDERING: `resumed`
+    is sampled at the top of the `finally`, and the pool thread can append its finish stamp in the
+    window before the tuple is taken -- reachable on the cancellation path, where the coroutine
+    resumes with CancelledError while `func` is still running. `marks[1]` is then LATER than
+    `resumed` and the subtraction is negative, which would publish a negative seconds value into
+    rollout_env_resume and drag every derived mean below the truth.
+
+    Scripting the clock reproduces that ordering deterministically: submitted 0.0, picked up 1.0,
+    finished 5.0, resumed read at 3.0.
+    """
+    scripted = [0.0, 1.0, 5.0, 3.0]
+    real = time_module.perf_counter
+
+    def _clock():
+        return scripted.pop(0) if scripted else real()
+
+    # ⚠️ Swap the module REFERENCE, not `timing_module.time.perf_counter`. `timing_observability`
+    # does a plain `import time`, so `timing_module.time` IS the stdlib module -- patching an
+    # attribute on it rewires perf_counter for the whole process, every library included, for the
+    # duration of this test. Scope it to the module under test instead.
+    monkeypatch.setattr(timing_module, "time", SimpleNamespace(perf_counter=_clock))
+
+    async def _drive():
+        timings = RolloutTimings()
+        with rollout_timings_scope(timings):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                await timed_env_call(pool, lambda: None)
+        return timings
+
+    timings = asyncio.run(_drive())
+    assert not scripted, "the scripted clock was not consumed -- the call shape changed"
+    resume = timings.counters[f"{ROLLOUT_ENV_RESUME}_seconds_sum"]
+    assert resume == 0.0, f"a finish stamp after the resume read published {resume}s of resume time"
+    assert all(value >= 0.0 for value in timings.counters.values()), timings.counters
+
+
 def test_a_cancelled_env_call_records_nothing_rather_than_inventing_a_queue():
     """A cancellation is not an environment call.
 
@@ -600,6 +640,48 @@ def test_a_supported_runner_seeds_explicit_zeros_for_every_leaf():
     assert set(timings.counters) == seeded
     assert set(timings.counters.values()) == {0.0}
     assert not any(name.endswith("_seconds_max") for name in timings.counters)
+
+
+def test_a_certified_runner_actually_publishes_a_populated_tree():
+    """🚨 The positive direction. Without it the whole feature is one deletable line.
+
+    `TrajectoryRunner.run` calls `phase_timings.mark_supported()` on a certified runner, and
+    everything downstream is gated on the flag it sets: `record_generate_spans` returns at its first
+    line, no leaf and no residual reach `all_timings`, and `publish_driver_counters` has nothing to
+    publish. Replacing that one call with `pass` left the entire suite green -- a default-on feature
+    publishing NOTHING, with the negative test (below) still passing because it asserts absence.
+
+    So drive a certified runner end to end and assert the tree came out populated.
+    """
+
+    class _Bracketed(TrajectoryRunner):
+        generate_spans_instrumented = True
+
+        async def _run(self, input_batch, disable_tqdm: bool = False):
+            with rollout_span("rollout_collect"):
+                with rollout_span("rollout_tokenize"):
+                    pass
+            with rollout_span("rollout_assemble"):
+                pass
+            with rollout_wait(ROLLOUT_ENGINE_AWAIT):
+                pass
+            return {}
+
+    timings = RolloutTimings()
+    asyncio.run(_Bracketed().run({}, phase_timings=timings))
+    assert timings.supported is True, "a certified runner must mark the accumulator supported"
+
+    all_timings: dict[str, float] = {}
+    counters: dict[str, float] = {}
+    record_generate_spans(timings, generate_seconds=10.0, all_timings=all_timings, counters=counters)
+
+    # Every declared leaf reaches the step's timings, and so does the residual that closes them.
+    for name in (*GENERATE_SPANS, *GENERATE_NESTED_SPANS):
+        assert name in all_timings, f"{name} never reached the published tree"
+    assert "generate_span_residual" in all_timings
+    covered = sum(all_timings[name] for name in GENERATE_SPANS)
+    assert all_timings["generate_span_residual"] == pytest.approx(10.0 - covered)
+    assert counters[f"{ROLLOUT_ENGINE_AWAIT}_count"] == 1.0, "the wait counters must publish too"
 
 
 def test_an_uninstrumented_runner_publishes_nothing_not_a_full_residual():
@@ -788,6 +870,31 @@ def test_unconfigured_telemetry_is_announced_once_rather_than_publishing_in_sile
     assert len([w for w in warned if "endpoint is unset" in w]) == 1, "once per process, not once per step"
 
 
+def test_the_unconfigured_detector_reads_the_runtime_rather_than_always_saying_yes(monkeypatch):
+    """🚨 The detector itself, not its callers.
+
+    Both call sites' tests monkeypatch `unconfigured_telemetry_reason` wholesale, so NOTHING
+    exercised the function: `if True or getattr(status, "configured", False)` left the whole suite
+    green. If the check inverts or the attribute name drifts, the branch's headline safety property
+    -- that an unconfigured runtime is announced rather than silently producing no rows while every
+    signal reads healthy -- stops holding, and that is a full multi-hour run spent to learn nothing.
+    """
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(timing_module.telemetry, "runtime_status", lambda: SimpleNamespace(configured=True))
+    assert timing_module.unconfigured_telemetry_reason() is None, "a configured runtime has no reason"
+
+    monkeypatch.setattr(timing_module.telemetry, "runtime_status", lambda: SimpleNamespace(configured=False))
+    reason = timing_module.unconfigured_telemetry_reason()
+    assert reason is not None and "not configured" in reason
+
+    # An old Rigging without the attribute must read as UNCONFIGURED, not as configured: the
+    # getattr default is what decides which way an unknown runtime falls, and falling the other way
+    # would suppress the warning on exactly the runtimes that need it.
+    monkeypatch.setattr(timing_module.telemetry, "runtime_status", lambda: SimpleNamespace())
+    assert timing_module.unconfigured_telemetry_reason() is not None
+
+
 def test_a_step_that_generates_twice_reuses_one_accumulator_without_double_counting():
     """Folding one accumulator twice must add only what is new -- on BOTH dicts.
 
@@ -923,14 +1030,17 @@ def test_an_unsettled_flush_is_reported_even_when_rows_were_also_lost(monkeypatc
     monkeypatch.setattr(
         timing_module.telemetry,
         "runtime_status",
-        lambda: SimpleNamespace(lost_records=2 if state["flushed"] else 0, rejected_records=0),
+        # Cumulative, and non-zero before this publish: the delta is 2, the absolute value is 9.
+        lambda: SimpleNamespace(lost_records=9 if state["flushed"] else 7, rejected_records=0),
     )
     monkeypatch.setattr(timing_module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
     monkeypatch.setattr(timing_module, "rollout_count", type("_H", (), {"record": lambda *a, **k: None})())
 
     publish_driver_counters({f"{ROLLOUT_ENGINE_AWAIT}_count": 1.0}, step=4)
 
-    assert [w for w in warned if "were lost" in w], "the loss must be reported"
+    assert [w for w in warned if "2 telemetry record(s) were lost" in w], (
+        "the DELTA must be reported, not the process-cumulative absolute value"
+    )
     assert [w for w in warned if "did not settle" in w], (
         "and so must the rows still in flight; under elif they were silent whenever anything was lost"
     )
