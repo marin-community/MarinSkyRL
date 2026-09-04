@@ -8,6 +8,14 @@ allowlist of its local Ray scheduler, logical CPU/GPU, placement-group and objec
 store snapshots. A rollout is one completed trajectory; a sample is one generated
 response segment, so step-wise training counts only terminal segments as
 rollouts. Export is inert without a telemetry endpoint, run id, and execution uid.
+
+⚠️ **With ONE deliberate exception.** `trainer.policy_train_spans` is opt-in, and enabling it on an
+unconfigured runtime **raises at actor construction** (`worker.py:381`) rather than running inertly.
+That is the point: on an unconfigured runtime `record()` is a no-op, `flush()` returns True and
+`lost_records` stays 0, so every signal reads healthy while the run produces no rows at all -- a full
+multi-hour run spent to learn nothing. Somebody who asked for the spans wants to know immediately.
+The always-on driver counters only WARN, once per process, because they are not something anyone
+opted into.
 `cloud/iris/telemetry_env.py` resolves them inside the Iris task, and the task
 runtime exports them before Ray starts so its actors inherit them.
 `SKYRL_EXECUTION_UID` can override the execution identity; otherwise each process
@@ -191,16 +199,26 @@ driver rows per step. Budget accordingly before enabling the policy tree on a lo
   under sequence, context, expert or Megatron tensor/pipeline parallelism the replicas hold the same
   tokens and the sum is multiplied by the replication factor. The `rank_` prefix is there to make
   that visible at the point of use.
-- `n_tokens_dp_gt_*pct` are reduced with a **mean**, so they are a per-rank average rather than a
-  global count. A sum would be worse: the reduction is over WORLD, and under sequence, context,
-  expert or Megatron tensor/pipeline parallelism the replicas hold the same tokens, so a sum
-  multiplies by the replication factor. A correct global count needs a data-parallel-group
-  reduction that `Strategy.all_reduce` cannot currently express.
+- `n_tokens_dp_gt_*pct` are reduced with a **mean ACROSS RANKS**, so they are a per-rank figure
+  rather than a global count. A sum across ranks would be worse: the reduction is over WORLD, and
+  under sequence, context, expert or Megatron tensor/pipeline parallelism the replicas hold the same
+  tokens, so a sum multiplies by the replication factor. A correct global count needs a
+  data-parallel-group reduction that `Strategy.all_reduce` cannot currently express.
+
+  ⚠️ **Across MINI-BATCHES they are SUMMED, and that changed.** One rank's optimizer windows hold
+  DIFFERENT tokens, so a mean there was a category error -- windows of 3 and 7 published 5.0 where
+  the rank's step total is 10. The published value is now **that rank's total for the whole step**,
+  which means it scales with `accumulation_steps`: at 32 micro-batches it is roughly 32x what the
+  old per-window mean reported. **A series that spans this change has a step discontinuity in it and
+  the two halves are not comparable.**
 - `log_ratio_abs_p99` is a mean of per-rank p99 *approximations*, which is not a global quantile.
   Treat it as monitoring colour rather than a gate. `log_ratio_abs_max` **is** reduced with a max
   and is gate-grade.
-- Allocator counters are scoped to one `ppo_train` call. Megatron overrides `ppo_train` and does not
-  publish them.
+- Allocator counters are scoped to one `ppo_train` call. ⚠️ The Megatron override does not publish
+  them **and that state is now unreachable**: `validate_cfg` rejects `policy_train_spans` with
+  `strategy=megatron` outright, because the override publishes no span tree at all, not merely no
+  allocator counters. This line is kept because it describes the code; the configuration it warns
+  about can no longer be submitted.
 - **The worker subtree hangs off `train_critic_and_policy`, not off the driver phase that ran.**
   With a critic configured and `colocate_all` off the trainer runs `ppo_train` under
   `Timer("policy_critic_overlap_train")` instead of `Timer("policy_train")` (`trainer.py:1964` vs
