@@ -12,6 +12,7 @@ reporting nothing.
 from __future__ import annotations
 
 import inspect
+import pathlib
 import sys
 import time
 from types import SimpleNamespace
@@ -35,10 +36,15 @@ def _stub_telemetry(monkeypatch, module, *, settled=True, lost_delta=0):
     from types import SimpleNamespace
 
     calls = {"flush": [], "status": 0}
+    # ⚠️ The baseline is NOT zero. `lost_records` is process-cumulative, so a stub starting at 0
+    # makes the absolute value and the delta numerically identical -- and `dropped =
+    # after.lost_records`, which re-warns about every earlier step's losses on every step for the
+    # rest of the run, passed every test in this file.
+    baseline = 7
 
     def _status():
         calls["status"] += 1
-        lost = lost_delta if calls["status"] > 1 else 0
+        lost = baseline + lost_delta if calls["status"] > 1 else baseline
         return SimpleNamespace(lost_records=lost, rejected_records=0)
 
     monkeypatch.setattr(module.telemetry, "flush", lambda timeout: calls["flush"].append(timeout) or settled)
@@ -140,7 +146,8 @@ def test_the_worker_reports_an_unsettled_flush_even_when_rows_were_also_lost(mon
     monkeypatch.setattr(
         module.telemetry,
         "runtime_status",
-        lambda: SimpleNamespace(lost_records=2 if state["flushed"] else 0, rejected_records=0),
+        # Cumulative, and non-zero before this publish: the delta is 2, the absolute value is 9.
+        lambda: SimpleNamespace(lost_records=9 if state["flushed"] else 7, rejected_records=0),
     )
     monkeypatch.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
     monkeypatch.setattr(module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
@@ -160,6 +167,11 @@ def test_the_parent_walk_skips_phases_that_were_not_recorded():
     nothing exercised the loop -- and this helper is exactly the mechanism that makes an absent
     driver phase survivable. `policy_train` is one such phase: the trainer runs
     `policy_critic_overlap_train` instead of it whenever a critic is configured.
+
+    ⚠️ Survivable *for driver rows only*, which is why this and the reparent above are not in
+    conflict. `WorkerTimingSink.publish` emits `TIMING_PARENTS.get(name)` verbatim and never walks,
+    so a worker row whose declared parent is absent is orphaned outright. The walk rescues the
+    driver half; only choosing an unconditional parent rescues the worker half.
     """
     from skyrl_train.timing_observability import declared_root, nearest_recorded_parent
 
@@ -186,13 +198,69 @@ def test_publish_cost_is_not_charged_to_a_parent_that_does_not_contain_it():
     assert "policy_span_publish" not in POLICY_TRAIN_SPANS, (
         "subtracting it makes the children over-cover the parent, invisibly to the residual"
     )
-    # No worker span may name a driver phase that a configuration can omit. policy_train and
-    # policy_critic_overlap_train are alternatives (trainer.py:1964 vs :1977), so neither is a safe
-    # parent; train_critic_and_policy (trainer.py:731) wraps both and is always published.
-    conditional = {"policy_train", "policy_critic_overlap_train"}
-    for name in (*POLICY_TRAIN_SPANS, "policy_ppo_train", "policy_span_publish", "policy_span_residual"):
-        assert TIMING_PARENTS[name] not in conditional, (
-            f"{name} would be orphaned whenever {TIMING_PARENTS[name]} is not the phase that ran"
+
+
+def _unconditional_driver_phases() -> set[str]:
+    """Phase names every trainer opens a Timer for on every path.
+
+    ⚠️ DERIVED, not hand-listed. The earlier version excluded a two-name literal
+    {policy_train, policy_critic_overlap_train} -- and was already incomplete: `run_training` is a
+    declared parent in TIMING_PARENTS but is timed ONLY in fully_async_trainer.py:851, so a worker
+    span parented there is orphaned on every sync-trainer step and the hand-list passed it. Reading
+    the trainers means the over-broad version is unrepresentable rather than merely tested against.
+
+    A name qualifies only if BOTH trainers open it and NEITHER does so under an `if`/`try`/`while`.
+    """
+    import ast
+
+    import skyrl_train.fully_async_trainer as fully_async_module
+    import skyrl_train.trainer as trainer_module
+
+    def _unconditional(module) -> set[str]:
+        found: set[str] = set()
+        conditional: set[str] = set()
+
+        def walk(node: ast.AST, under_branch: bool) -> None:
+            for field, value in ast.iter_fields(node):
+                for child in value if isinstance(value, list) else [value]:
+                    if not isinstance(child, ast.AST):
+                        continue
+                    branch = under_branch or (
+                        isinstance(node, (ast.If, ast.Try, ast.While))
+                        and field in ("body", "orelse", "handlers", "finalbody")
+                    )
+                    if isinstance(child, ast.Call) and getattr(child.func, "id", None) == "Timer" and child.args:
+                        name = child.args[0]
+                        if isinstance(name, ast.Constant) and isinstance(name.value, str):
+                            (conditional if branch else found).add(name.value)
+                    walk(child, branch)
+
+        walk(ast.parse(pathlib.Path(module.__file__).read_text()), False)
+        return found - conditional
+
+    sync = _unconditional(trainer_module)
+    fully_async = _unconditional(fully_async_module)
+    assert "train_critic_and_policy" in sync & fully_async, (
+        "the walk found nothing it should have -- the Timer call shape changed and this guard is inert"
+    )
+    return sync & fully_async
+
+
+def test_no_worker_span_names_a_driver_phase_that_a_path_can_omit():
+    """The worker sink emits `TIMING_PARENTS.get(name)` verbatim -- no walk-up rescues it.
+
+    So every worker span's declared parent must be a phase BOTH trainers open unconditionally, or
+    another worker span. `policy_train` and `policy_critic_overlap_train` are alternatives
+    (trainer.py:1964 vs :1977); `run_training` is absent from the sync trainer entirely. Naming any
+    of them makes the whole worker subtree claim a parent that is missing on that path, which is
+    false machine-readable hierarchy -- worse than a coarser true one.
+    """
+    published = {*POLICY_TRAIN_SPANS, "policy_ppo_train", "policy_span_publish", "policy_training_step"}
+    safe = _unconditional_driver_phases() | published
+    for name in (*published, "policy_span_residual"):
+        assert TIMING_PARENTS[name] in safe, (
+            f"{name} is parented to {TIMING_PARENTS[name]!r}, which at least one trainer never "
+            "records -- the row would be orphaned on that path"
         )
 
 
@@ -227,11 +295,17 @@ def test_residual_closes_the_decomposition():
 
 
 def test_residual_is_signed_so_over_coverage_is_visible():
-    """Clamping at zero would hide double-counting, which is what the residual exists to surface."""
+    """Clamping at zero would hide double-counting, which is what the residual exists to surface.
+
+    ⚠️ The assertion is on the NEGATIVE VALUE, not on `<= 0.0`. A `max(0.0, total - covered)` clamp
+    returns exactly 0.0, which satisfies `<= 0.0` -- so the guard against the clamp was passed by
+    the clamp. Pin the coverage so the expected residual is an exact number the clamp cannot produce.
+    """
     accumulator = _accumulator()
     with accumulator.span("policy_final_barrier"):
         pass
-    assert accumulator.totals(total_seconds=0.0)["policy_span_residual"] <= 0.0
+    accumulator._totals["policy_final_barrier"] = 4.0
+    assert accumulator.totals(total_seconds=1.0)["policy_span_residual"] == pytest.approx(-3.0)
 
 
 def test_record_zero_distinguishes_did_not_run_from_cost_nothing():
@@ -240,6 +314,41 @@ def test_record_zero_distinguishes_did_not_run_from_cost_nothing():
     assert "policy_entry_barrier" not in accumulator.totals()
     accumulator.record_zero("policy_entry_barrier")
     assert accumulator.totals()["policy_entry_barrier"] == 0.0
+
+
+def test_the_conditional_barrier_records_its_zero_at_the_CALL_SITE():
+    """The method having the behaviour is not the same claim as the call site using it.
+
+    `record_zero`'s own test exercises the accumulator. Replacing the one call in `ppo_train` with
+    `pass` left the whole suite green -- and the derived-span walk cannot see it, because that walk
+    only matches `with ... .span(...)` context expressions. On every run without R3-decentral
+    transport, which is everything but the 80B MoE path, `policy_entry_barrier` would then be ABSENT
+    rather than 0.0, and a consumer could not tell "the barrier cost nothing" from "the barrier was
+    not measured" -- the exact distinction the explicit zero exists to make.
+    """
+    import ast
+    import inspect
+
+    import skyrl_train.workers.worker as worker_module
+
+    recorded: set[str] = set()
+    for node in ast.walk(ast.parse(inspect.getsource(worker_module))):
+        if not isinstance(node, ast.Call) or getattr(node.func, "attr", None) != "record_zero":
+            continue
+        arg = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "name"), None)
+        assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
+            f"record_zero at line {node.lineno} is called with a non-literal name"
+        )
+        recorded.add(arg.value)
+
+    assert "policy_entry_barrier" in recorded, (
+        "the else branch of the R3-decentral barrier must record an explicit zero, or the span is "
+        "absent on every non-decentral run and absence reads as 'not measured'"
+    )
+    # And the zero must sit in a branch, not on the main path -- an unconditional record_zero would
+    # be overwritten by the span itself and prove nothing.
+    for name in recorded:
+        assert TIMING_PARENTS[name] == "policy_ppo_train", f"{name} is zeroed but is not a policy_train leaf"
 
 
 def test_disabled_accumulator_records_no_zeros_either():
@@ -269,7 +378,17 @@ def test_published_rows_carry_worker_role_rank_and_an_exclusive_clock_domain():
 
     sink = _Probe(rank=5)
     observations = phase_timing_observations(
-        {"policy_ppo_train": 9.0, "policy_forward": 6.0, "policy_final_barrier": 1.0}
+        {
+            "policy_ppo_train": 9.0,
+            # ⚠️ The OTHER inclusive row, and the one that was undefended: dropping it from the
+            # containment tuple shipped it as exclusive_wall with the whole suite green. A consumer
+            # following the docs then sums it alongside the four leaves it contains and reads ~2x
+            # the parent, with no residual signal -- policy_training_step is deliberately outside
+            # POLICY_TRAIN_SPANS, so the residual cannot see it.
+            "policy_training_step": 8.5,
+            "policy_forward": 6.0,
+            "policy_final_barrier": 1.0,
+        }
     )
     import skyrl_train.timing_observability as module
 
@@ -286,12 +405,13 @@ def test_published_rows_carry_worker_role_rank_and_an_exclusive_clock_domain():
         module.phase_duration = original
 
     by_phase = {attributes["phase"]: attributes for _, attributes in recorded}
-    assert set(by_phase) == {"policy_ppo_train", "policy_forward", "policy_final_barrier"}
+    assert set(by_phase) == {"policy_ppo_train", "policy_training_step", "policy_forward", "policy_final_barrier"}
     for attributes in by_phase.values():
         assert attributes["role"] == "worker"
         assert attributes["rank"] == "5"
         assert attributes["step"] == "7"
     assert by_phase["policy_ppo_train"]["clock_domain"] == "inclusive_wall"
+    assert by_phase["policy_training_step"]["clock_domain"] == "inclusive_wall"
     assert by_phase["policy_forward"]["clock_domain"] == "exclusive_wall"
     assert by_phase["policy_final_barrier"]["clock_domain"] == "exclusive_wall"
     # The parent is the declared one, not the nearest *recorded* one: the driver phase is never in
