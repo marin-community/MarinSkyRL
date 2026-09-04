@@ -30,11 +30,18 @@ TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log
 # WORLD, and under sequence, context, expert or Megatron tensor/pipeline parallelism the replicas
 # hold the SAME tokens, so a sum multiplies the count by the replication factor (16x at CP2xEP8).
 # A correct global count needs a reduction over the data-parallel group alone, which the current
-# primitive cannot express. Until it can, these stay a mean and are read as a per-rank average.
+# primitive cannot express. Until it can, these stay a mean ACROSS RANKS and are read as a per-rank
+# average. ⚠️ Across MINI-BATCHES they are summed -- see MINI_BATCH_REDUCTION_OPS. The replication
+# argument above does not apply there: one rank's optimizer windows hold different tokens, not the
+# same ones, so the published value is that rank's step TOTAL rather than its per-window average.
 #
 # `log_ratio_abs_p99` stays a mean because a max of per-rank p99 APPROXIMATIONS is not a quantile
 # either. It is monitoring-grade colour rather than a gate.
 MAX_REDUCED_METRIC_KEYS = ("log_ratio_abs_max", "log_ratio_diagnostics_failed")
+
+# Token COUNTS. Named once so the rank axis and the mini-batch axis refer to the same set rather
+# than two hand-lists that can drift.
+TOKEN_COUNT_METRIC_KEYS = ("n_tokens_dp_gt_1pct", "n_tokens_dp_gt_10pct", "n_tokens_dp_gt_50pct")
 
 # The op to apply per key, for both reduction axes: across ranks (Strategy.all_reduce_status) and
 # across a step's mini-batches (policy_training_metrics). Keeping one map is what stops the two
@@ -50,6 +57,21 @@ MIN_REDUCED_METRIC_KEYS = ("optimizer_step_succeeded",)
 STATUS_REDUCTION_OPS: dict[str, str] = {
     **{key: "max" for key in MAX_REDUCED_METRIC_KEYS},
     **{key: "min" for key in MIN_REDUCED_METRIC_KEYS},
+}
+
+# 🚨 The one place the two axes genuinely DISAGREE, so one map cannot serve both.
+#
+# The rank-axis reasoning above is right and unchanged: a WORLD sum multiplies these counts by the
+# replication factor, so across ranks they stay a mean. But that argument is about REPLICAS holding
+# the SAME tokens. Within ONE rank the optimizer windows hold DIFFERENT tokens, so a mean there is
+# a plain category error -- windows of 3 and 7 offending tokens published 5.0 where the rank's step
+# total is 10, and a 32-window step understated the count by ~32x.
+#
+# Anything not listed here uses STATUS_REDUCTION_OPS, so the two axes still cannot drift apart by
+# accident: disagreeing takes an explicit entry, with a reason.
+MINI_BATCH_REDUCTION_OPS: dict[str, str] = {
+    **STATUS_REDUCTION_OPS,
+    **{key: "sum" for key in TOKEN_COUNT_METRIC_KEYS},
 }
 
 

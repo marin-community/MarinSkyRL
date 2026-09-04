@@ -60,7 +60,7 @@ TIMING_PARENTS: dict[str, str | None] = {
     # colocate_all defaults true (ppo_base_config.yaml:55), so the loss lands on the DEFAULT path
     # and the fix serves a non-default corner. The cheaper repair, if the resolution is ever
     # wanted back: train_critic_and_policy already stamps data.metadata["global_step"]
-    # (trainer.py:1937), so stamping the enclosing phase NAME there would let the worker publish
+    # (trainer.py, the `global_step` stamp in `train_critic_and_policy`), so stamping the enclosing phase NAME there would let the worker publish
     # its true parent on every path instead of the deepest always-present one.
     "policy_ppo_train": "train_critic_and_policy",
     "policy_entry_barrier": "policy_ppo_train",
@@ -554,24 +554,40 @@ async def timed_env_call(executor, func, /, *args, **kwargs):
             stamps.append(time.perf_counter())
 
     submitted = time.perf_counter()
+    cancelled = False
     try:
         return await loop.run_in_executor(executor, _stamped)
+    except asyncio.CancelledError:
+        # 🚨 Cancellation is decided HERE, not inferred from the stamps. Counting the marks was not
+        # enough: the pool thread can finish -- appending BOTH stamps -- while the coroutine is
+        # resumed with CancelledError, so `len(marks) == 2` was true on a call that never returned a
+        # value to anyone. That published queue=1 exec=4 resume=0 await=5 count=1 for a cancelled
+        # call, which is the exact row the comment below promises does not exist.
+        cancelled = True
+        raise
     finally:
         resumed = time.perf_counter()
-        # Read the list ONCE. The pool thread can append between a len() and an index, and a stamp
-        # that arrives in that window would make resumed - stamps[1] negative.
+        # Read the list ONCE. The pool thread can append between a len() and an index.
         marks = tuple(stamps)
-        if len(marks) == 2:
+        # ⚠️ `not cancelled`, not a bare exception guard. A callee that completes by RAISING
+        # (a ValueError out of the environment) really did queue and really did execute, and its
+        # elapsed time belongs in the split. Only cancellation means no call happened.
+        if not cancelled and len(marks) == 2:
             _record_env_wait(
                 timings,
                 queued=marks[0] - submitted,
                 executed=marks[1] - marks[0],
-                resumed=max(0.0, resumed - marks[1]),
+                # No clamp. With cancellation excluded above, reaching here means `_stamped`
+                # returned, so marks[1] was appended BEFORE the await resumed and this difference
+                # cannot be negative. An earlier `max(0.0, ...)` here was defending against the
+                # cancellation race by flattening its symptom -- it turned a negative number into a
+                # plausible zero and left the bogus row in place.
+                resumed=resumed - marks[1],
             )
         # Otherwise the call never completed: the pool rejected it, the executor shut down, or the
-        # await was cancelled while func was still running. Record nothing. Attributing the wait to
-        # queueing would report a cancellation as executor undersizing, and counting it would
-        # inflate the denominator of every derived mean with a call that never happened.
+        # await was cancelled. Record nothing. Attributing the wait to queueing would report a
+        # cancellation as executor undersizing, and counting it would inflate the denominator of
+        # every derived mean with a call that never happened.
 
 
 def _record_env_wait(timings: RolloutTimings, *, queued: float, executed: float, resumed: float) -> None:

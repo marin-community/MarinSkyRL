@@ -1,3 +1,4 @@
+from skyrl_train.timing_observability import rollout_span
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -205,13 +206,22 @@ class InferenceEngineClient(InferenceEngineInterface):
         if (prompts is None and prompt_token_ids is None) or (prompts is not None and prompt_token_ids is not None):
             raise ValueError("Either `prompts` or `prompt_token_ids` must be provided, but not both.")
         if prompt_token_ids is None:
-            prompt_token_ids = self.tokenizer.apply_chat_template(
-                prompts,
-                add_generation_prompt=True,
-                add_special_tokens=False,
-                return_dict=True,
-                tokenize=True,
-            )["input_ids"]
+            # 🚨 This runs on the DRIVER'S EVENT-LOOP THREAD, synchronously, before any engine is
+            # touched -- and the callers that pass `prompts=` (skyrl_gym's collect_batched, and
+            # agent_loop under retokenize_chat_history) await this whole call inside
+            # rollout_wait(ROLLOUT_ENGINE_AWAIT). Unbracketed, a full-batch apply_chat_template was
+            # published as time spent waiting on the engines, which reads as "the engines are the
+            # bottleneck, the driver is idle" -- the exact inversion these instruments exist to
+            # answer. On a batched call there is ONE engine wait, so the sum IS the mean and the
+            # whole templating cost sits inside it.
+            with rollout_span("rollout_tokenize"):
+                prompt_token_ids = self.tokenizer.apply_chat_template(
+                    prompts,
+                    add_generation_prompt=True,
+                    add_special_tokens=False,
+                    return_dict=True,
+                    tokenize=True,
+                )["input_ids"]
 
         num_prompts = len(prompt_token_ids)
         num_inference_engines = len(self.engines)
@@ -416,7 +426,11 @@ class InferenceEngineClient(InferenceEngineInterface):
         if num_turns == 1:
             final_text_response = text_response
         else:
-            final_text_response = self.tokenizer.decode(accum_response_ids, skip_special_tokens=True)
+            # Also driver-thread tokenizer work inside the caller's engine wait, on the multi-turn
+            # continuation path. Found by widening the tokenizer walk past trajectory_runners/;
+            # detokenizing a whole accumulated response is not time the engines spent generating.
+            with rollout_span("rollout_tokenize"):
+                final_text_response = self.tokenizer.decode(accum_response_ids, skip_special_tokens=True)
 
         # Propagate prompt_logprobs from the last partial response (only meaningful
         # for teacher scoring where max_tokens=1 and num_turns=1).

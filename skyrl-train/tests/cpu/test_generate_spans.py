@@ -20,7 +20,6 @@ import importlib
 import inspect
 import re
 import threading
-import time as time_module
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -62,7 +61,46 @@ from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
 
 # Every tokenizer call the whole-trajectory and step-wise collectors make per step. __init__'s
 # base-conversation encode is excluded: it runs once at startup, not inside generate.
-EXPECTED_TOKENIZE_REGIONS = {"skyrl_gym": 7, "step_wise": 3}
+# ⚠️ Keys are module paths under `skyrl_train`, NOT bare names under `trajectory_runners`.
+#
+# The earlier form hardcoded the `trajectory_runners.` prefix, so the guard could not see a
+# tokenizer call anywhere else -- and there was one: InferenceEngineClient.generate templates on the
+# DRIVER thread whenever a caller passes `prompts=`, inside the rollout_wait that is supposed to be
+# engine time. Inserting `self.tokenizer.encode("leak")` there left the whole suite green.
+#
+# This is the same scope error that was fixed for the all_reduce(status) walk one commit earlier and
+# left standing here. Every one of these lists is a hypothesis about where the defect can live, so
+# adding a module is cheap and omitting one is how the guard goes quiet.
+EXPECTED_TOKENIZE_REGIONS = {
+    "trajectory_runners.skyrl_gym": 7,
+    "trajectory_runners.step_wise": 3,
+    "inference_engines.inference_engine_client": 2,
+}
+
+# The packages the rollout actually runs through. Scanning DIRECTORIES rather than enumerating
+# modules is what makes the too-narrow version unrepresentable: dropping a module from the dict above
+# used to just delete a parametrized case, and a test that does not run is indistinguishable from one
+# that passes.
+TOKENIZE_SCANNED_PACKAGES = ("trajectory_runners", "inference_engines")
+
+# Rollout-path modules that tokenize and are deliberately NOT covered. Each needs a reason, because
+# the whole point of deriving the list is that adding one is a decision somebody writes down.
+TOKENIZE_UNCOVERED_MODULES = {
+    # Uninstrumented runners. They have not bracketed their call sites at all, and
+    # `generate_spans_instrumented` is False for both, so they publish NOTHING rather than a seeded
+    # all-zero tree -- absence is the honest signal (see the uninstrumented-runner test below).
+    # Bracketing their tokenizer calls alone would be worse than leaving them: a lone leaf under a
+    # runner that publishes no parent.
+    "trajectory_runners.harbor.runner": "uninstrumented runner; publishes nothing by design",
+    "trajectory_runners.mini_swe.runner": "uninstrumented runner; publishes nothing by design",
+    # ⚠️ NOT AUDITED. These are alternative engine backends, not used by any run in this workstream,
+    # and their driver-thread encode/decode may carry the SAME defect that was just fixed in
+    # inference_engine_client -- tokenizer work inside the caller's rollout_wait, published as
+    # engine time. Stated as an open question rather than a clean bill of health; whoever ships
+    # either backend should audit them the same way.
+    "inference_engines.remote_inference_engine": "alternative backend, unaudited -- see note",
+    "inference_engines.sglang.sglang_engine": "alternative backend, unaudited -- see note",
+}
 
 # Tokenizer calls that are deliberately NOT inside a rollout_tokenize region, by the function that
 # holds them. Anything else is a leak, and the point of listing them is that adding one is a
@@ -117,7 +155,7 @@ class _InstrumentedRunner(TrajectoryRunner):
 
 def _tokenize_regions(module_name: str) -> list[str]:
     """The body of every ``with rollout_span("rollout_tokenize")`` block, as source text."""
-    module = importlib.import_module(f"skyrl_train.trajectory_runners.{module_name}")
+    module = importlib.import_module(f"skyrl_train.{module_name}")
 
     lines = inspect.getsource(module).splitlines()
     regions: list[str] = []
@@ -476,43 +514,70 @@ def _block_until(entered, release):
     release.wait(5.0)
 
 
-def test_a_finish_stamp_that_lands_after_the_resume_read_cannot_report_a_negative_wait(monkeypatch):
-    """The clamp on `resumed` is load-bearing, and the read-once above it does NOT subsume it.
+def test_a_cancellation_that_completes_its_executor_call_still_records_nothing():
+    """🚨 The real race, driven through a real cancellation -- not a clock made to run backwards.
 
-    `marks = tuple(stamps)` fixes a torn len()/index read. It does not fix the ORDERING: `resumed`
-    is sampled at the top of the `finally`, and the pool thread can append its finish stamp in the
-    window before the tuple is taken -- reachable on the cancellation path, where the coroutine
-    resumes with CancelledError while `func` is still running. `marks[1]` is then LATER than
-    `resumed` and the subtraction is negative, which would publish a negative seconds value into
-    rollout_env_resume and drag every derived mean below the truth.
+    Counting the stamps was never enough. The pool thread can FINISH -- appending both stamps --
+    while the coroutine is resumed with CancelledError, so `len(marks) == 2` held on a call that
+    returned a value to nobody, and the split published queue/exec/resume/await and a count of 1 for
+    it. An earlier version of this file drove a SUCCESSFUL call with a scripted clock instead, which
+    proved a clamp and left the bogus row untouched.
 
-    Scripting the clock reproduces that ordering deterministically: submitted 0.0, picked up 1.0,
-    finished 5.0, resumed read at 3.0.
+    The pool has one worker, so submitting a second job and blocking on it guarantees `_stamped` ran
+    to completion, including the finally that appends the second stamp. The loop thread never yields
+    in that window, so the wrapper future is still PENDING and cancel() takes.
     """
-    scripted = [0.0, 1.0, 5.0, 3.0]
-    real = time_module.perf_counter
 
-    def _clock():
-        return scripted.pop(0) if scripted else real()
+    started = threading.Event()
 
-    # ⚠️ Swap the module REFERENCE, not `timing_module.time.perf_counter`. `timing_observability`
-    # does a plain `import time`, so `timing_module.time` IS the stdlib module -- patching an
-    # attribute on it rewires perf_counter for the whole process, every library included, for the
-    # duration of this test. Scope it to the module under test instead.
-    monkeypatch.setattr(timing_module, "time", SimpleNamespace(perf_counter=_clock))
+    def _work():
+        started.set()
+        return "value nobody receives"
 
     async def _drive():
         timings = RolloutTimings()
         with rollout_timings_scope(timings):
             with ThreadPoolExecutor(max_workers=1) as pool:
-                await timed_env_call(pool, lambda: None)
+                task = asyncio.ensure_future(timed_env_call(pool, _work))
+                # ⚠️ ensure_future only SCHEDULES the coroutine. Without yielding here the task
+                # never reaches its await, nothing is submitted to the executor, and cancelling it
+                # proves nothing -- an earlier version of this test did exactly that and the
+                # revert-the-guard mutation survived it.
+                while not started.is_set():
+                    await asyncio.sleep(0)
+                # One worker, so this queues BEHIND _stamped and returning proves _stamped ran to
+                # completion -- including the finally that appends the second stamp. It blocks the
+                # loop thread, so the wrapper's result cannot be delivered while we hold it.
+                pool.submit(lambda: None).result(timeout=5.0)
+                assert task.cancel(), "the wrapper had already resumed; the race was not reproduced"
+                with pytest.raises(asyncio.CancelledError):
+                    await task
         return timings
 
     timings = asyncio.run(_drive())
-    assert not scripted, "the scripted clock was not consumed -- the call shape changed"
-    resume = timings.counters[f"{ROLLOUT_ENV_RESUME}_seconds_sum"]
-    assert resume == 0.0, f"a finish stamp after the resume read published {resume}s of resume time"
-    assert all(value >= 0.0 for value in timings.counters.values()), timings.counters
+    assert timings.counters == {}, f"a cancelled call recorded {timings.counters}"
+    assert timings.durations == {}, f"a cancelled call recorded {timings.durations}"
+
+
+def test_a_callee_that_raises_still_records_its_split():
+    """The other half of the same condition, and the reason it is `not cancelled` rather than a
+    bare except. An environment that fails after two seconds of real work queued and executed; its
+    time is a fact about the rollout, and dropping it would understate every derived mean."""
+
+    def _boom():
+        raise ValueError("the environment rejected the action")
+
+    async def _drive():
+        timings = RolloutTimings()
+        with rollout_timings_scope(timings):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                with pytest.raises(ValueError):
+                    await timed_env_call(pool, _boom)
+        return timings
+
+    timings = asyncio.run(_drive())
+    assert timings.counters[f"{ROLLOUT_ENV_AWAIT}_count"] == 1.0, "a failed call is still a call"
+    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] >= 0.0
 
 
 def test_a_cancelled_env_call_records_nothing_rather_than_inventing_a_queue():
@@ -1275,6 +1340,37 @@ def test_publishing_no_counters_is_a_no_op(monkeypatch):
 # --- call-site coverage -------------------------------------------------------------------------
 
 
+def test_the_tokenize_walk_names_every_rollout_module_that_tokenizes():
+    """🚨 The list of modules IS the hypothesis, so derive it rather than trusting it.
+
+    The walk used to hardcode the `trajectory_runners.` prefix, which is how a full-batch
+    `apply_chat_template` on the driver thread -- inside the caller's engine wait -- went unseen in
+    `inference_engine_client`. Adding that module fixed the instance. This fixes the SHAPE: dropping
+    a module from EXPECTED_TOKENIZE_REGIONS merely deleted a parametrized case and left the suite
+    green, so the too-narrow version was invisible.
+
+    Every module under the rollout's packages that calls a tokenizer must be either covered or
+    explicitly uncovered with a reason.
+    """
+    import pathlib
+
+    import skyrl_train
+
+    root = pathlib.Path(skyrl_train.__file__).parent
+    found: set[str] = set()
+    for package in TOKENIZE_SCANNED_PACKAGES:
+        for path in sorted((root / package).rglob("*.py")):
+            if "self.tokenizer." in path.read_text():
+                found.add(str(path.relative_to(root).with_suffix("")).replace("/", "."))
+
+    assert found, "the scan found no tokenizer calls at all -- the call shape changed and this is inert"
+    declared = set(EXPECTED_TOKENIZE_REGIONS) | set(TOKENIZE_UNCOVERED_MODULES)
+    assert found == declared, (
+        f"undeclared modules tokenize on the rollout path: {sorted(found - declared)}; "
+        f"declared but no longer tokenizing: {sorted(declared - found)}"
+    )
+
+
 @pytest.mark.parametrize("module_name", sorted(EXPECTED_TOKENIZE_REGIONS))
 def test_no_tokenize_region_contains_an_await(module_name):
     """Only a region that holds the event-loop thread throughout may be summed across coroutines.
@@ -1298,7 +1394,7 @@ def test_every_tokenizer_call_is_inside_a_tokenize_region(module_name):
     and the suite stays green. This walks the AST instead: every ``self.tokenizer.<anything>()`` call
     must fall inside the line range of a tokenize region, or be named in TOKENIZE_EXEMPT_FUNCTIONS.
     """
-    module = importlib.import_module(f"skyrl_train.trajectory_runners.{module_name}")
+    module = importlib.import_module(f"skyrl_train.{module_name}")
     source = inspect.getsource(module)
     tree = ast.parse(source)
 
@@ -1361,7 +1457,10 @@ TRAJECTORY_SCOPED_FUNCTIONS = {"agent_loop"}
 TAIL_FREE_FUNCTIONS = {"collect_batched"}
 
 
-@pytest.mark.parametrize("module_name", ["skyrl_gym", "step_wise"])
+# Deliberately the trajectory runners ONLY: a trajectory scope is a runner concept, and the engine
+# client has no trajectory to scope. Unlike EXPECTED_TOKENIZE_REGIONS, widening this list would be
+# wrong rather than merely cheap.
+@pytest.mark.parametrize("module_name", ["trajectory_runners.skyrl_gym", "trajectory_runners.step_wise"])
 def test_every_wait_site_is_inside_a_trajectory_scope(module_name):
     """🚨 The regression test for a max published smaller than its own mean.
 
@@ -1371,7 +1470,7 @@ def test_every_wait_site_is_inside_a_trajectory_scope(module_name):
     published as a MEASURED zero beside a non-zero mean. Counting decorators would not have caught
     it; this walks the call sites.
     """
-    module = importlib.import_module(f"skyrl_train.trajectory_runners.{module_name}")
+    module = importlib.import_module(f"skyrl_train.{module_name}")
     tree = ast.parse(inspect.getsource(module))
 
     scoped: set[int] = set()
