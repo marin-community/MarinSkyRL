@@ -154,6 +154,7 @@ DAYTONA_RL_SNAPSHOT_QUOTA = 40
 HARBOR_SNAPSHOT_NAME_PREFIX = "harbor__"
 STALE_SNAPSHOT_MAX_AGE = datetime.timedelta(hours=2)
 AUTOMATIC_RESOURCE_REQUEST = "auto"
+EMPTY_JSON_LIST = "[]"
 MEMORY_RESOURCE = "memory"
 DISK_RESOURCE = "ephemeral-storage"
 # Leave the remainder of live allocatable RAM and disk to kubelet, daemonsets,
@@ -1350,7 +1351,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--train_data",
-        default="[]",
+        default=EMPTY_JSON_LIST,
         help="Training data paths as a JSON list (e.g., '[\"org/dataset\"]').",
     )
     parser.add_argument("--train-data", dest="train_data", help=argparse.SUPPRESS)
@@ -1367,7 +1368,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--val_data",
-        default="[]",
+        default=EMPTY_JSON_LIST,
         help="Validation data paths as a JSON list.",
     )
     parser.add_argument("--val-data", dest="val_data", help=argparse.SUPPRESS)
@@ -2090,9 +2091,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     train_cmd.extend(model_source_cli_args(args.model_source_uri, args.model_source_identity))
     if args.resolved_config_uri:
         train_cmd.extend(["--resolved-config-uri", args.resolved_config_uri])
-    if args.train_data and args.train_data != "[]":
+    if args.train_data and args.train_data != EMPTY_JSON_LIST:
         train_cmd.extend(["--train_data", args.train_data])
-    if args.val_data and args.val_data != "[]":
+    if args.val_data and args.val_data != EMPTY_JSON_LIST:
         train_cmd.extend(["--val_data", args.val_data])
     for override in args.skyrl_override or []:
         train_cmd.extend(["--skyrl_override", override])
@@ -2160,9 +2161,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # on rank 0, while Ray may schedule rollout and evaluation workers on any node.
     # Forward both roles to the controller so every pod has identical task-local data.
     # Object-store locators use the separate typed materialization path below.
-    if args.train_data and args.train_data != "[]" and not args.data_sources_json:
+    if args.train_data and args.train_data != EMPTY_JSON_LIST and not args.data_sources_json:
         controller_cmd.extend(["--train-data", args.train_data])
-    if args.val_data and args.val_data != "[]" and not args.data_sources_json:
+    if args.val_data and args.val_data != EMPTY_JSON_LIST and not args.data_sources_json:
         controller_cmd.extend(["--val-data", args.val_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])

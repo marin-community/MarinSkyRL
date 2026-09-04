@@ -193,10 +193,8 @@ def stage_task_data(data_json: str, *, role: str) -> None:
     filesystem, so each pod fetches+extracts the parquet repo to the identical
     node-local path the rollout workers read. Idempotent (``on_exist=skip``).
     """
-    import json as _json
-
     try:
-        data = _json.loads(data_json)
+        data = json.loads(data_json)
     except (ValueError, TypeError):
         data = [data_json] if data_json else []
     if not data:
