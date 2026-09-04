@@ -568,18 +568,8 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
             )
 
 
-def validate_cfg(cfg: DictConfig):
-    resolve_dynamic_sampling_criteria(
-        cfg.trainer.algorithm.dynamic_sampling.informative_on,
-        float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
-    )
-    if (
-        cfg.trainer.algorithm.policy_loss_type == PolicyLossType.GSPO
-        and cfg.trainer.algorithm.loss_reduction != SEQUENCE_MEAN_LOSS_REDUCTION
-    ):
-        raise ValueError(
-            f"GSPO requires trainer.algorithm.loss_reduction=sequence_mean; got {cfg.trainer.algorithm.loss_reduction}"
-        )
+def _validate_spans_backend(cfg: DictConfig) -> None:
+    """Reject the one backend that accepts the spans flag and then publishes nothing."""
     # 🚨 Reject rather than silently measure nothing. `policy_train_spans` is a global trainer flag
     # and the docs carry no backend caveat, but MegatronPolicyWorkerBase overrides ppo_train and
     # never constructs a WorkerSpanAccumulator -- Megatron Core owns pipeline scheduling and
@@ -592,8 +582,24 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError(
             "trainer.policy_train_spans is not supported with trainer.strategy=megatron: the "
             "Megatron worker does not bracket its pipeline scheduler, so the run would publish no "
-            "policy_train spans at all. Use trainer.strategy=fsdp2, or leave policy_train_spans off."
+            "policy_train spans at all. Use fsdp, fsdp2 or deepspeed -- all three inherit the "
+            "instrumented PolicyWorkerBase.ppo_train -- or leave policy_train_spans off."
         )
+
+
+def validate_cfg(cfg: DictConfig):
+    resolve_dynamic_sampling_criteria(
+        cfg.trainer.algorithm.dynamic_sampling.informative_on,
+        float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
+    )
+    if (
+        cfg.trainer.algorithm.policy_loss_type == PolicyLossType.GSPO
+        and cfg.trainer.algorithm.loss_reduction != SEQUENCE_MEAN_LOSS_REDUCTION
+    ):
+        raise ValueError(
+            f"GSPO requires trainer.algorithm.loss_reduction=sequence_mean; got {cfg.trainer.algorithm.loss_reduction}"
+        )
+    _validate_spans_backend(cfg)
     runtime_values = {
         "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
         "trainer.distributed.worker_collective_timeout_seconds": cfg.trainer.distributed.worker_collective_timeout_seconds,

@@ -75,6 +75,14 @@ def _reduce_one(key, this_rank, peers, ops_seen):
 def test_no_worker_reduces_a_status_dict_with_the_plain_mean():
     """STATUS_REDUCTION_OPS is keyed by metric NAME, not by worker.
 
+    ⚠️ **This walk is the ONLY guard available for the Megatron site, and that is a constraint rather
+    than a choice.** `megatron_worker.py` imports `megatron.bridge` and `megatron.core` at module
+    scope, and megatron is not installed in the CPU environment -- so the behavioural harness that
+    covers `PolicyWorkerBase.ppo_train` (`_run_ppo_train`, in test_policy_train_spans.py) cannot be
+    built for `MegatronPolicyWorkerBase.ppo_train` here. The walk therefore has to be as strong as a
+    static check can be: it resolves ALIASES, because a bare identifier match let
+    `metrics = status; all_reduce(metrics)` through in two separate review rounds.
+
     A `all_reduce(status)` left anywhere means the first key that worker ever shares with the policy
     is silently meaned -- and the branch added AST walks for span names and for manual context
     managers, so leaving this one unguarded is inconsistent with its own convention. The critic path
@@ -86,11 +94,27 @@ def test_no_worker_reduces_a_status_dict_with_the_plain_mean():
 
     import skyrl_train.workers.worker as worker_module
 
-    def _mentions_status(node: ast.AST) -> bool:
-        # Any subexpression naming `status` counts: `all_reduce(dict(status))` and
-        # `all_reduce(data=status)` are the same defect as the bare name, and a walk that only
-        # matched a positional Name accepted both.
-        return any(isinstance(inner, ast.Name) and inner.id == "status" for inner in ast.walk(node))
+    def _status_aliases(tree: ast.AST) -> set[str]:
+        """Every identifier bound to the status dict, so a rename cannot walk past this.
+
+        ⚠️ `metrics = status; all_reduce(metrics)` preserves the defect exactly and changes only the
+        spelling, and a walk keyed on the identifier `status` accepted it -- verified surviving the
+        whole suite twice, in two separate review rounds.
+        """
+        names = {"status"}
+        for _ in range(3):  # a chain `a = status; b = a` needs one pass per link
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Assign):
+                    continue
+                value = node.value
+                if isinstance(value, ast.Name) and value.id in names:
+                    names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        return names
+
+    def _mentions_status(node: ast.AST, names: set[str]) -> bool:
+        # Any subexpression naming the dict counts: `all_reduce(dict(status))` and
+        # `all_reduce(data=status)` are the same defect as the bare name.
+        return any(isinstance(inner, ast.Name) and inner.id in names for inner in ast.walk(node))
 
     # ⚠️ The WHOLE workers package, not `inspect.getsource(worker_module)`. This branch changed the
     # same call in workers/megatron/megatron_worker.py, and a walk scoped to one file left that one
@@ -102,10 +126,12 @@ def test_no_worker_reduces_a_status_dict_with_the_plain_mean():
 
     offenders: list[str] = []
     for path in sources:
-        for node in ast.walk(ast.parse(path.read_text())):
+        tree = ast.parse(path.read_text())
+        names = _status_aliases(tree)
+        for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or getattr(node.func, "attr", None) != "all_reduce":
                 continue
-            if any(_mentions_status(arg) for arg in (*node.args, *(kw.value for kw in node.keywords))):
+            if any(_mentions_status(arg, names) for arg in (*node.args, *(kw.value for kw in node.keywords))):
                 offenders.append(f"{path.relative_to(workers)}:{node.lineno}")
     assert not offenders, (
         f"all_reduce(status) at {offenders}: a status dict must go through all_reduce_status, or "

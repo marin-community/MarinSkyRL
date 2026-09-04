@@ -282,9 +282,10 @@ trainer:
   # Decompose policy_train from inside the policy worker. Off by default: the spans are cheap but
   # policy_train_spans_synchronize is not -- it serialises CUDA to attribute time to the right span,
   # which is what you want when attributing and not what you want when measuring end-to-end.
-  # ⚠️ FSDP2 only. The Megatron worker overrides ppo_train and does not bracket Megatron Core's
-  # pipeline scheduler, so this flag would publish no spans there at all; validate_cfg rejects the
-  # combination rather than letting a run measure nothing.
+  # ⚠️ Every backend EXCEPT megatron. fsdp / fsdp2 / deepspeed all inherit the instrumented
+  # PolicyWorkerBase.ppo_train; only the Megatron worker overrides it, and it does not bracket
+  # Megatron Core's pipeline scheduler, so this flag would publish no spans there at all.
+  # validate_cfg rejects that one combination rather than letting a run measure nothing.
   policy_train_spans: false
   policy_train_spans_synchronize: true
 

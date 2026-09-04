@@ -34,10 +34,13 @@ automatic detector of that.
 
 ### `policy_train`, measured in the policy worker
 
-Enabled by `trainer.policy_train_spans` (default off). **FSDP2 only** — the Megatron worker
-overrides `ppo_train` and does not bracket Megatron Core's pipeline scheduler, so the flag would
-publish no spans at all there; `validate_cfg` rejects the combination rather than letting a run
-measure nothing. `trainer.policy_train_spans_synchronize`
+Enabled by `trainer.policy_train_spans` (default off). **Every backend EXCEPT Megatron** —
+`FSDPPolicyWorkerBase` and `DeepSpeedPolicyWorkerBase` both inherit the instrumented
+`PolicyWorkerBase.ppo_train`, so `fsdp`, `fsdp2` and `deepspeed` all publish the tree. Only the
+Megatron worker overrides `ppo_train`, and it does not bracket Megatron Core's pipeline scheduler, so
+the flag would publish no spans at all there; `validate_cfg` rejects that one combination rather than
+letting a run measure nothing. (An earlier version of this line said "FSDP2 only", which
+under-claimed: it would have sent a deepspeed user looking for a limitation that does not exist.) `trainer.policy_train_spans_synchronize`
 (default on) decides what the numbers mean, and it is not a free choice: CUDA kernels launch
 asynchronously, so without a device synchronise a span measures kernel *launch* time and charges a
 backward's real cost to whatever later call happens to block. With it, spans measure execution at
@@ -68,7 +71,7 @@ The worker path pays the same 1 s cap on its own return.
 | `rollout_collect` | the fan-out over trajectories | yes |
 | `rollout_assemble` | projecting results into a trainer batch | yes |
 | `rollout_finalize` | the shared output epilogue | yes |
-| `rollout_tokenize` | every tokenizer call — nested inside `rollout_collect` | **no** |
+| `rollout_tokenize` | tokenizer calls on the runner and engine-client rollout path -- **not** every tokenizer call in the tree: `trajectory_retention`'s response decode is attributed to `rollout_retain`, which encloses it — nested inside `rollout_collect` | **no** |
 | `rollout_retain` | trajectory retention — nested inside `rollout_finalize` | **no** |
 | `generate_span_residual` | `generate` minus the three above; signed | — |
 
@@ -92,19 +95,35 @@ it is handed in.
 | `rollout_*_seconds_max` | the longest single trajectory's cumulative wait |
 | `rollout_trajectory_count` | how many trajectory scopes closed — **the denominator the tail must be read against** |
 
-⚠️ **`rollout_engine_await` is not purely engine time on the `prompts=` call form.** Callers that pass
-text rather than token ids -- `collect_batched`, and `agent_loop` under `retokenize_chat_history` --
-await the whole `InferenceEngineClient.generate` inside the wait, and that call templates on the
-driver's event-loop thread before any engine is touched. That templating is now bracketed as
-`rollout_tokenize`, so it is **visible in the tree**, but it is **still inside the wait counter** --
-the bracket cannot narrow a region several frames up the stack. So on those paths the two overlap:
-subtract `rollout_tokenize` from `rollout_engine_await` before reading the latter as engine time, and
-do not sum them.
+🚨 **`rollout_engine_await` is OBSERVED MODEL-CLIENT LATENCY, not backend engine time, and the
+difference is NOT recoverable by arithmetic.** Read it as "how long the caller waited on the client",
+which is what it measures.
 
-The complete repair is to hoist the templating to the caller and pass `prompt_token_ids=`, which is a
-**behaviour** change rather than an instrumentation one -- `chat_template_kwargs` is documented as
-incompatible with `batched=True` precisely because the engine client owns templating there. It is
-deliberately left as follow-up work rather than smuggled into a telemetry change.
+Callers that pass text rather than token ids -- `collect_batched`, and `agent_loop` under
+`retokenize_chat_history` -- await the whole `InferenceEngineClient.generate` inside the wait, and
+that call templates on the driver's event-loop thread before any engine is touched. The templating is
+bracketed as `rollout_tokenize` so it is visible in the tree, but the bracket cannot narrow a region
+several frames up the stack, so it is still inside the wait.
+
+⚠️ **Do NOT subtract `rollout_tokenize` from `rollout_engine_await`.** An earlier version of this
+document said to, and that guidance was wrong -- worse than saying nothing, because it yields a
+confident wrong number. Two independent reasons:
+
+1. **`rollout_tokenize` aggregates tokenization from BOTH sides of the wait.** `collect_batched`
+   opens its own `rollout_tokenize` at `skyrl_gym.py:708`, *outside* the wait at `:639`. With engine
+   work 5.0, tokenization inside the wait 1.0 and outside it 2.0, the counter reads 6.0 and the span
+   reads 3.0, so the subtraction yields 3.0 where the answer is 5.0. It over-subtracts by exactly the
+   outside-wait portion, which no consumer can see.
+2. **Concurrency, which no per-call fix removes.** These waits are summed over up to 4,096
+   coroutines. One coroutine tokenizing synchronously on the event-loop thread lengthens every other
+   coroutine's *already-open* wait, so even a perfect per-call subtraction would not turn a sum of
+   coroutine wall times into backend time.
+
+**Separating backend time needs its own counter** wrapped immediately around the engine awaits, not a
+derivation from these two. That, and hoisting the templating to the caller (a **behaviour** change --
+`chat_template_kwargs` is documented as incompatible with `batched=True` precisely because the engine
+client owns templating there), are both named follow-up work rather than smuggled into a telemetry
+change.
 
 ⚠️ **`_count` and `_seconds_max` are different populations, and mixing them is the easy mistake.**
 `_count` counts timed *calls*, of which one trajectory makes several, so `sum / _count` is a mean
