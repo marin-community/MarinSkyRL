@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# The FSDP2 train/eval log-prob parity gate, on H100. Runs INSIDE an Iris GPU task.
+# The grouped-MoE combine gates, on two H100s. Runs INSIDE an Iris GPU task.
 #
-#   $IRIS --cluster marin job run --target-cluster cw-rno2a \
+#   $IRIS --cluster marin job run --target-cluster <peer with room> \
 #     --job-name atqamar-fsdp2-parity --priority batch \
 #     --cpu 32 --memory 200GB --disk 400GB --gpu H100x2 --enable-extra-resources \
-#     --no-sync --timeout 3600 -- bash -c 'bash skyrl-train/ci/run_fsdp2_train_eval_parity.sh'
+#     --no-sync --timeout 5400 -- bash -c 'bash skyrl-train/ci/run_fsdp2_train_eval_parity.sh'
 #
-# 🚨 The grouped_mm arms are EXPECTED TO FAIL while F25 is open -- that is the result we are here
-# for. So the pytest exit code is captured and reported rather than allowed to kill the script,
-# and every arm's numbers are printed.
+# Three stages, each reported with its own exit line so a failure in one cannot hide another:
+#   1. ci/probe_combine_order.py           -- op-level: does the combine's order matter, and does the
+#                                             former scatter_add vary it (one GPU, a minute).
+#   2. the one-GPU parity gates            -- Grug grouped_mm (G4a-1..6) and the Qwen grouped-GEMM swap,
+#                                             both of which now share the fixed-order combine.
+#   3. the FSDP2 train/eval parity gate    -- the real worker path on two GPUs, six arms including the
+#                                             26-layer PR488-length one.
 set -uo pipefail
 REPOSITORY_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ENV_DIR="${ENV_DIR:-$REPOSITORY_ROOT/.iris-parity-env}"
@@ -20,15 +24,20 @@ rm -rf skyrl-gym && cp -R ../skyrl-gym skyrl-gym
 export PYTHONPATH="$PWD/skyrl-gym:$PWD:$REPOSITORY_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
-# ⚠️ The frozen TRAINING environment ships no pytest, and a missing pytest exits fast in a way that
-# is indistinguishable from a pass from the outside. Install it INTO that env -- not a fresh one --
-# so the test imports the same torch and skyrl_train the trainer runs.
-# The frozen env is a uv venv with no pip ("No module named pip" -- cost one submit to find).
-# uv is on the base image, and --python targets THAT env rather than making a new one.
+# The frozen TRAINING environment ships no pytest and no pip; a missing pytest exits fast in a way that
+# is indistinguishable from a pass from the outside. Install it INTO that env with uv so the tests
+# import the same torch and skyrl_train the trainer runs.
 uv pip install --quiet --python "$PYTHON" pytest
 "$PYTHON" -c "import pytest, torch, ray; print(f'pytest {pytest.__version__} | torch {torch.__version__} | ray {ray.__version__}')"
 
-# ⚠️ No -x. There are four independent arms and -x would report the first failure while silently
-# running none of the others -- the whole 2x2 is the result.
+"$PYTHON" ci/probe_combine_order.py
+echo "::: COMBINE PROBE EXIT=$?"
+
+# No -x anywhere below: every arm is an independent result and -x would report the first failure while
+# silently running none of the others.
+"$PYTHON" -m pytest tests/gpu/gpu_ci/test_grug_grouped_mm_parity.py tests/gpu/gpu_ci/test_grouped_gemm_parity.py \
+  -q -rA -s -p no:cacheprovider
+echo "::: ONE-GPU PARITY EXIT=$?"
+
 "$PYTHON" -m pytest tests/gpu/test_grug_fsdp2_train_eval_parity.py -q -rA -s -p no:cacheprovider
 echo "::: FSDP2 PARITY EXIT=$?"
