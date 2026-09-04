@@ -23,6 +23,13 @@ cd "$REPOSITORY_ROOT/skyrl-train"
 rm -rf skyrl-gym && cp -R ../skyrl-gym skyrl-gym
 export PYTHONPATH="$PWD/skyrl-gym:$PWD:$REPOSITORY_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+# The FSDP2 gate skips every arm when it cannot see two GPUs, and an all-skip pytest exits 0. Refuse
+# here so the job cannot read succeeded having measured nothing.
+gpu_count="$(nvidia-smi -L | wc -l)"
+if [ "$gpu_count" -lt 2 ]; then
+  echo "::: NEED 2 GPUs, found $gpu_count"
+  exit 1
+fi
 
 # The frozen TRAINING environment ships no pytest and no pip; a missing pytest exits fast in a way that
 # is indistinguishable from a pass from the outside. Install it INTO that env with uv so the tests

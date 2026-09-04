@@ -548,7 +548,10 @@ class MoE(nn.Module):
             selected_experts_indices,
             self.reorderer,
         )
-        out = combine_routed_rows(routed_output, token_indices, x.shape[0], self.top_k)
+        # The routed rows are summed in float32 in a fixed order and rounded once; the shared expert
+        # is then added in the activation dtype, as the DeepEP branch does. The former scatter_add
+        # accumulated everything, shared expert included, in bf16 atomics.
+        out = combine_routed_rows(routed_output, token_indices, x.shape[0], self.top_k).to(x.dtype)
 
         if self.shared_expert is not None:
             shared_output = self.shared_expert(x)
@@ -556,7 +559,7 @@ class MoE(nn.Module):
                 shared_output = F.sigmoid(self.shared_expert_gate(x)) * shared_output
             out = out + shared_output
 
-        return out.to(x.dtype).reshape(bs, slen, dim)
+        return out.reshape(bs, slen, dim)
 
     def init_weights(self, init_std: float):
         self.experts.init_weights(init_std)
