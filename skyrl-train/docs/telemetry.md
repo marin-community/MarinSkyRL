@@ -10,7 +10,7 @@ response segment, so step-wise training counts only terminal segments as
 rollouts. Export is inert without a telemetry endpoint, run id, and execution uid.
 
 ⚠️ **With ONE deliberate exception.** `trainer.policy_train_spans` is opt-in, and enabling it on an
-unconfigured runtime **raises at actor construction** (`worker.py:381`) rather than running inertly.
+unconfigured runtime **raises at actor construction** (`worker.py`, `_require_configured_telemetry`) rather than running inertly.
 That is the point: on an unconfigured runtime `record()` is a no-op, `flush()` returns True and
 `lost_records` stays 0, so every signal reads healthy while the run produces no rows at all -- a full
 multi-hour run spent to learn nothing. Somebody who asked for the spans wants to know immediately.

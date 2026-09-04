@@ -1037,7 +1037,7 @@ def test_disabled_spans_publish_no_counters_even_when_some_are_gathered(monkeypa
 # conditional. Syntactic presence can never prove runtime containment, so drive the real method.
 
 
-def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=None):
+def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=None, windows=1):
     """Drive the REAL PolicyWorkerBase.ppo_train on CPU and return (output, published_spans)."""
     import torch
     from omegaconf import OmegaConf
@@ -1115,7 +1115,11 @@ def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=N
         "the real publisher was replaced; this harness must exercise it"
     )
 
-    batch_size, seq_len, actions = 2, 4, 2
+    # accumulation_steps is policy_mini_batch / micro_train_batch = 1 here, so every micro-batch IS
+    # an optimizer window and one row drives one window. That is what lets a caller give each window
+    # a DIFFERENT value and so prove the per-window reduction actually dispatches, rather than
+    # feeding values for which mean, max and min are observationally identical.
+    batch_size, seq_len, actions = max(2, windows), 4, 2
     data = TrainingInputBatch(
         {
             "sequences": torch.zeros(batch_size, seq_len, dtype=torch.long),
@@ -1386,3 +1390,181 @@ def test_the_R3_decentral_arm_actually_OPENS_the_barrier_span(monkeypatch):
         "unmeasured on the one path that actually has a barrier"
     )
     assert "policy_entry_barrier" in totals, "and it must still reach a published row"
+
+
+def test_the_step_status_is_reduced_ACROSS_optimizer_windows_not_averaged(monkeypatch):
+    """🚨 Divergent values per window, or the dispatch is unproven.
+
+    The harness fed every window the same numbers, so mean, max and min were observationally
+    identical and swapping `policy_training_metrics` for `mean_metrics` changed nothing the suite
+    could see. That swap makes one window's divergence average toward zero and turns a rank's step
+    total into a per-window mean -- the two defects the reduction map exists to prevent, at the axis
+    the map was extended to cover.
+    """
+    seen: list[dict[str, float]] = []
+
+    def _training_step(experience, global_step, local_step, accumulation_steps):
+        # Window 0 diverges; window 1 is clean. A mean over the two hides the first.
+        window = len(seen)
+        status = {
+            "policy_loss": 1.0,
+            "response_length": 2.0,
+            "policy_lr": 1e-6,
+            "policy_entropy": 0.5,
+            "policy_update_steps": 1.0,
+            "raw_grad_norm": 0.1,
+            "log_ratio_abs_max": 19.0 if window == 0 else 0.0,
+            "optimizer_step_succeeded": 0.0 if window == 0 else 1.0,
+            "n_tokens_dp_gt_1pct": 3.0 if window == 0 else 7.0,
+        }
+        seen.append(status)
+        return status
+
+    class _Strategy:
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            # Identity across ranks, so anything below is the MINI-BATCH axis alone.
+            return dict(status)
+
+    _, _, _ = _run_ppo_train(
+        monkeypatch, r3_decentral=False, strategy=_Strategy(), training_step=_training_step, windows=2
+    )
+    assert len(seen) == 2, f"expected two optimizer windows, drove {len(seen)}"
+
+
+def test_two_windows_publish_a_max_a_min_and_a_summed_count(monkeypatch):
+    """The assertions for the run above, on the returned status rather than on the call log."""
+    windows = iter(
+        [
+            {"log_ratio_abs_max": 19.0, "optimizer_step_succeeded": 0.0, "n_tokens_dp_gt_1pct": 3.0},
+            {"log_ratio_abs_max": 0.0, "optimizer_step_succeeded": 1.0, "n_tokens_dp_gt_1pct": 7.0},
+        ]
+    )
+
+    def _training_step(experience, global_step, local_step, accumulation_steps):
+        extra = next(windows)
+        return {
+            "policy_loss": 1.0,
+            "response_length": 2.0,
+            "policy_lr": 1e-6,
+            "policy_entropy": 0.5,
+            "policy_update_steps": 1.0,
+            "raw_grad_norm": 0.1,
+            **extra,
+        }
+
+    class _Strategy:
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            return dict(status)
+
+    output, _, _ = _run_ppo_train(
+        monkeypatch, r3_decentral=False, strategy=_Strategy(), training_step=_training_step, windows=2
+    )
+    status = output.metadata["train_status"]
+    assert status["log_ratio_abs_max"] == 19.0, "a max over windows, not a mean of 9.5"
+    assert status["optimizer_step_succeeded"] == 0.0, "a min over windows, not a mean of 0.5"
+    assert status["n_tokens_dp_gt_1pct"] == 10.0, "a rank's STEP total, not the per-window mean of 5"
+
+
+def test_the_residual_excludes_the_INCLUSIVE_span_pinned_to_an_independent_number(monkeypatch):
+    """🚨 Pinned, not re-derived. The other residual tests recompute `covered` with the same
+    comprehension production uses, so they cannot disagree with it -- adding `policy_training_step`
+    to that sum survived the suite. It is the one INCLUSIVE child of the worker tree, so counting it
+    beside the leaves it contains makes the residual roughly minus the whole decomposition: the
+    −1703 s shape this instrument exists to surface, published as if it were a measurement.
+    """
+    import skyrl_train.timing_observability as timing_module
+
+    # policy_forward 1.0 nested inside policy_training_step 5.0, against a 10.0 parent.
+    ticks = iter([100.0, 105.0, 200.0, 201.0])
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(timing_module, "time", SimpleNamespace(perf_counter=lambda: next(ticks)))
+        accumulator = _accumulator()
+        with accumulator.span("policy_training_step"):
+            pass
+        with accumulator.span("policy_forward"):
+            pass
+    finally:
+        monkey.undo()
+
+    totals = accumulator.totals(total_seconds=10.0)
+    assert totals["policy_training_step"] == pytest.approx(5.0)
+    assert totals["policy_forward"] == pytest.approx(1.0)
+    # 10.0 minus the LEAF only. Writing 9.0 rather than recomputing it is the whole point: a
+    # re-derivation would move with the defect.
+    assert totals["policy_span_residual"] == pytest.approx(9.0), (
+        "the residual counted the inclusive span beside the leaf it contains"
+    )
+
+
+def test_every_worker_label_is_pinned_to_the_region_it_names(monkeypatch):
+    """🚨 Order, for all of them. Round 10 pinned forward against backward and stopped there, so
+    `policy_metric_allreduce` still swapped freely with `policy_final_barrier`, and
+    `policy_optimizer_step` with `policy_entropy_allreduce`. A swap reports the optimizer step as a
+    small collective and the collective as the optimizer step, and a set-membership guard cannot see
+    it because a swap preserves a set.
+    """
+    opened: list[str] = []
+
+    class _Recording(WorkerSpanAccumulator):
+        def span(self, name, presync=True):
+            opened.append(name)
+            return super().span(name, presync=presync)
+
+    import skyrl_train.workers.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "WorkerSpanAccumulator", _Recording)
+
+    class _Strategy:
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            return dict(status)
+
+    _run_ppo_train(monkeypatch, r3_decentral=False, strategy=_Strategy())
+
+    # The order ppo_train itself opens them, outside training_step (which is stubbed here).
+    assert opened.index("policy_training_step") < opened.index("policy_metric_allreduce"), opened
+    assert opened.index("policy_metric_allreduce") < opened.index("policy_final_barrier"), (
+        f"opened {opened}: the per-micro-step collective must precede the closing barrier, and "
+        "swapping those two labels reports each as the other"
+    )
+
+
+def test_enabling_the_spans_on_an_unconfigured_runtime_FAILS_the_actor(monkeypatch):
+    """🚨 The R10 remedy itself, and it had no behavioural guard: `if reason is not None and False:`
+    survived the suite, because the only test asserted three source substrings.
+
+    This is the behaviour the documentation now advertises -- an opt-in flag fails fast where the
+    always-on counters only warn -- so if it silently stops raising, the docs become false and a
+    multi-hour run once again produces nothing while reading healthy.
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "unconfigured_telemetry_reason", lambda: None)
+    worker_module._require_configured_telemetry()  # configured: returns quietly
+
+    monkeypatch.setattr(worker_module, "unconfigured_telemetry_reason", lambda: "the endpoint is unset")
+    with pytest.raises(RuntimeError, match="policy_train_spans is enabled but the endpoint is unset"):
+        worker_module._require_configured_telemetry()
+
+    # And the call site, or the check has merely been relocated into a function nobody invokes.
+    # ⚠️ `Worker.__init__`, not `PolicyWorkerBase.__init__` -- the telemetry setup lives on the
+    # shared base so every worker role gets it, and asserting the wrong class would have passed for
+    # the wrong reason had the check ever moved.
+    assert "_require_configured_telemetry()" in inspect.getsource(worker_module.Worker.__init__), (
+        "the worker no longer calls the check, so a real run would not fail fast even though this test passes"
+    )
