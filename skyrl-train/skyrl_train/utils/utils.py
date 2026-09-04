@@ -576,6 +576,25 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
             )
 
 
+def _validate_spans_backend(cfg: DictConfig) -> None:
+    """Reject the one backend that accepts the spans flag and then publishes nothing."""
+    # 🚨 Reject rather than silently measure nothing. `policy_train_spans` is a global trainer flag
+    # and the docs carry no backend caveat, but MegatronPolicyWorkerBase overrides ppo_train and
+    # never constructs a WorkerSpanAccumulator -- Megatron Core owns pipeline scheduling and
+    # gradient accumulation, so the brackets have to go around ITS scheduler and nobody has written
+    # them. A Megatron run therefore accepted the flag, configured worker telemetry, trained
+    # normally, and published zero policy_ppo_train rows. Every health signal reads fine and the
+    # tree is simply absent, which is the "a full run spent to learn nothing" failure the R10 check
+    # exists to prevent one layer up.
+    if cfg.trainer.strategy == "megatron" and cfg.trainer.get("policy_train_spans", False):
+        raise ValueError(
+            "trainer.policy_train_spans is not supported with trainer.strategy=megatron: the "
+            "Megatron worker does not bracket its pipeline scheduler, so the run would publish no "
+            "policy_train spans at all. Use fsdp, fsdp2 or deepspeed -- all three inherit the "
+            "instrumented PolicyWorkerBase.ppo_train -- or leave policy_train_spans off."
+        )
+
+
 def validate_cfg(cfg: DictConfig):
     distillation_plan = compile_distillation_plan_from_config(cfg)
     validate_distillation_runtime_support(distillation_plan)
@@ -594,20 +613,7 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError(
             f"GSPO requires trainer.algorithm.loss_reduction=sequence_mean; got {cfg.trainer.algorithm.loss_reduction}"
         )
-    # 🚨 Reject rather than silently measure nothing. `policy_train_spans` is a global trainer flag
-    # and the docs carry no backend caveat, but MegatronPolicyWorkerBase overrides ppo_train and
-    # never constructs a WorkerSpanAccumulator -- Megatron Core owns pipeline scheduling and
-    # gradient accumulation, so the brackets have to go around ITS scheduler and nobody has written
-    # them. A Megatron run therefore accepted the flag, configured worker telemetry, trained
-    # normally, and published zero policy_ppo_train rows. Every health signal reads fine and the
-    # tree is simply absent, which is the "a full run spent to learn nothing" failure the R10 check
-    # exists to prevent one layer up.
-    if cfg.trainer.strategy == "megatron" and cfg.trainer.get("policy_train_spans", False):
-        raise ValueError(
-            "trainer.policy_train_spans is not supported with trainer.strategy=megatron: the "
-            "Megatron worker does not bracket its pipeline scheduler, so the run would publish no "
-            "policy_train spans at all. Use trainer.strategy=fsdp2, or leave policy_train_spans off."
-        )
+    _validate_spans_backend(cfg)
     runtime_values = {
         "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
         "trainer.distributed.worker_collective_timeout_seconds": cfg.trainer.distributed.worker_collective_timeout_seconds,

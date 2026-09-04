@@ -1089,15 +1089,27 @@ def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=N
     monkeypatch.setattr(torch.distributed, "barrier", lambda *a, **k: None)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
 
-    published: list[dict[str, float]] = []
-    real_publish = worker_module._publish_policy_spans
+    # 🚨 Stub only the EXTERNAL boundary -- the histogram, the flush, the runtime status. The real
+    # `_publish_policy_spans` and `publish_worker_spans` run, so the conversion from accumulator
+    # totals to emitted rows is exercised. Patching either publisher and capturing `spans.totals()`
+    # instead -- which an earlier version did -- reproduces the blind spot it was meant to close: a
+    # filter dropping `policy_entry_barrier` on its way to the sink left the private capture still
+    # showing the row while production emitted none.
+    rows: list[dict[str, str]] = []
 
-    def _capture(spans, *, total_seconds, step, rank, previous_publish=None, counters=None):
-        published.append(dict(spans.totals(total_seconds=total_seconds)))
-        return 0.0
+    class _Histogram:
+        def record(self, value, attributes):
+            rows.append({**attributes, "value": value})
 
-    monkeypatch.setattr(worker_module, "_publish_policy_spans", _capture)
-    assert real_publish is not _capture, "the capture did not replace anything"
+    monkeypatch.setattr(timing_module, "phase_duration", _Histogram())
+    monkeypatch.setattr(timing_module, "rollout_count", _Histogram())
+    monkeypatch.setattr(timing_module.telemetry, "flush", lambda timeout: True)
+    monkeypatch.setattr(
+        timing_module.telemetry, "runtime_status", lambda: SimpleNamespace(lost_records=0, rejected_records=0)
+    )
+    assert worker_module._publish_policy_spans.__module__ == worker_module.__name__, (
+        "the real publisher was replaced; this harness must exercise it"
+    )
 
     batch_size, seq_len, actions = 2, 4, 2
     data = TrainingInputBatch(
@@ -1118,9 +1130,10 @@ def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=N
         data["rollout_routed_experts"] = torch.zeros(batch_size, 1)
 
     output = worker.ppo_train(data)
-    assert published, "ppo_train published no spans at all"
-    del timing_module
-    return output, published[0]
+    assert rows, "ppo_train emitted no telemetry rows at all"
+    # Keyed by phase, from the rows that actually reached the histogram.
+    emitted = {row["phase"]: row for row in rows if "phase" in row}
+    return output, {name: row["value"] for name, row in emitted.items()}, emitted
 
 
 def test_the_barrier_publishes_an_explicit_zero_on_every_NON_decentral_step(monkeypatch):
@@ -1140,11 +1153,15 @@ def test_the_barrier_publishes_an_explicit_zero_on_every_NON_decentral_step(monk
         def all_reduce_status(self, status):
             return dict(status)
 
-    _, totals = _run_ppo_train(monkeypatch, r3_decentral=False, strategy=_Strategy())
-    assert "policy_entry_barrier" in totals, "the explicit zero never reached the published totals"
+    _, totals, emitted = _run_ppo_train(monkeypatch, r3_decentral=False, strategy=_Strategy())
+    assert "policy_entry_barrier" in totals, "the explicit zero never reached an EMITTED row"
     assert totals["policy_entry_barrier"] == 0.0, (
         f"published {totals['policy_entry_barrier']}; a non-decentral step does not run the barrier"
     )
+    # Exactly one row, carrying the attributes a consumer joins on.
+    assert sum(1 for row in emitted.values() if row["phase"] == "policy_entry_barrier") == 1
+    row = emitted["policy_entry_barrier"]
+    assert row["role"] == "worker" and row["parent"] == "policy_ppo_train" and row["step"] == "0"
 
 
 def test_the_status_dict_keeps_its_per_key_ops_through_the_real_ppo_train(monkeypatch):
@@ -1181,7 +1198,7 @@ def test_the_status_dict_keeps_its_per_key_ops_through_the_real_ppo_train(monkey
             peers = {"log_ratio_abs_max": PEER, "optimizer_step_succeeded": 0.0}
             return {name: (value + peers.get(name, value)) / 2 for name, value in data.items()}
 
-    output, _ = _run_ppo_train(monkeypatch, r3_decentral=False, strategy=_Strategy())
+    output, _, _ = _run_ppo_train(monkeypatch, r3_decentral=False, strategy=_Strategy())
     status = output.metadata["train_status"]
 
     assert status["log_ratio_abs_max"] == PEER, (
@@ -1201,10 +1218,16 @@ def test_a_mislabelled_driver_parent_fails_LOUDLY_rather_than_orphaning_worker_r
     expression never runs, so `Timer(...) if False else Timer("unrelated", ...)` passes it. The
     reported consequence was that production would publish worker rows naming a missing parent.
 
-    It would not. BOTH trainers read that exact key straight back off `all_timings`, and
-    `all_timings` is a plain `dict` rather than a `defaultdict` -- so a mislabelled Timer raises
-    KeyError on the first training step of the run, before any worker row is published. Loud, not
-    silent.
+    It would not go unnoticed. BOTH trainers read that exact key straight back off `all_timings`,
+    and `all_timings` is a plain `dict` rather than a `defaultdict` -- so a mislabelled Timer raises
+    KeyError on the first training step. Loud, not silent.
+
+    ⚠️ **"Loud" is not "pre-emptive", and an earlier version of this docstring said it was.** The
+    worker rows are published from inside `ppo_train`, which runs INSIDE
+    `Timer("train_critic_and_policy")` (`trainer.py:731-733`), while the read-back is at `:735` --
+    after the `with` block closes. So step 1's rows DO go out naming a parent that will never be
+    recorded, and then the run dies. The damage is bounded to one step and impossible to miss, which
+    is why this is still the right trade against a heavyweight trainer harness; it is not zero.
 
     That read-back is load-bearing and nothing else records it. A `defaultdict` here, or dropping
     the `train_duration` line, would convert a crash into exactly the silent orphaning the walk is
@@ -1230,3 +1253,92 @@ def test_a_mislabelled_driver_parent_fails_LOUDLY_rather_than_orphaning_worker_r
             f"{module.__name__} no longer reads the training phase back; without that read the "
             "derived parent walk is the only guard, and it cannot see a dead conditional"
         )
+
+
+def test_megatron_plus_policy_train_spans_is_REJECTED_and_the_other_backends_are_not():
+    """🚨 The rejection had no test at all: `if False and ...` in front of it survived the suite.
+
+    That mutation restores exactly the expensive failure it was added to prevent -- a Megatron run
+    accepts the flag, configures worker telemetry, trains normally, and publishes no worker tree,
+    with every health signal reading fine.
+
+    The three accept-cases are not padding. An earlier version of the docs said "FSDP2 only", which
+    under-claimed: `FSDPPolicyWorkerBase` and `DeepSpeedPolicyWorkerBase` both inherit the
+    instrumented `PolicyWorkerBase.ppo_train`, so all three publish the tree and rejecting any of
+    them would be a regression.
+    """
+    import pytest as _pytest
+    from omegaconf import OmegaConf
+
+    from skyrl_train.utils.utils import _validate_spans_backend, validate_cfg
+
+    def _cfg(strategy: str, spans: bool):
+        # Only the fields validate_cfg's spans check reads; the rest of validate_cfg is exercised by
+        # its own tests, and building a whole valid config here would test hydra, not this branch.
+        return OmegaConf.create({"trainer": {"strategy": strategy, "policy_train_spans": spans}})
+
+    with _pytest.raises(ValueError, match="policy_train_spans is not supported"):
+        _validate_spans_backend(_cfg("megatron", True))
+
+    # Megatron WITHOUT spans is fine, and so is every other backend WITH them.
+    _validate_spans_backend(_cfg("megatron", False))
+    for strategy in ("fsdp", "fsdp2", "deepspeed"):
+        _validate_spans_backend(_cfg(strategy, True))
+
+    # And the check lives in validate_cfg, not only in the helper.
+    import inspect
+
+    assert "_validate_spans_backend" in inspect.getsource(validate_cfg), (
+        "validate_cfg no longer calls the backend check, so nothing rejects the combination on a "
+        "real run even though this test passes"
+    )
+
+
+def test_the_training_step_leaves_open_in_the_order_they_actually_run(monkeypatch):
+    """🚨 The worker tree's headline decomposition, driven through the real `training_step`.
+
+    Swapping the `policy_forward` and `policy_backward` labels left the whole suite green. The only
+    guard builds a SET of the names opened, and a swap preserves a set — so `policy_backward` 23.5 s
+    against `policy_forward` 21.2 s could have been reported the other way round with nothing to
+    catch it. That is the exact mislabel closed on the GENERATE side in `d4e60350` and left open
+    here, one file over.
+
+    ⚠️ Assert ORDER, not durations. On CPU all four regions are sub-millisecond, so a duration
+    assertion would be a coin flip. Order is what a swap breaks and what the clock cannot muddy.
+
+    ⚠️ And `training_step` reads its accumulator off `self` (`worker.py:1344`), falling back to a
+    DISABLED one when absent -- which is why `test_tis_diagnostics_backends.py` drives the real
+    method and still records nothing. A live accumulator has to be attached, or this test measures
+    the fallback.
+    """
+
+    from skyrl_train.workers.worker import PolicyWorkerBase
+
+    opened: list[str] = []
+
+    class _Recording(WorkerSpanAccumulator):
+        def span(self, name, presync=True):
+            opened.append(name)
+            return super().span(name, presync=presync)
+
+    # Reuse the TIS harness's fakes: it is the one place that already drives the real training_step.
+    from tests.cpu.test_tis_diagnostics_backends import _fsdp_training_step_status
+
+    spans = _Recording(enabled=True, synchronize=False)
+    original = PolicyWorkerBase.training_step
+
+    def _with_spans(self, *args, **kwargs):
+        self._policy_spans = spans
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(PolicyWorkerBase, "training_step", _with_spans)
+    _fsdp_training_step_status(use_tis=False, monkeypatch=monkeypatch)
+
+    assert opened, "no span opened -- training_step fell back to the disabled accumulator again"
+    # accumulation_steps=2 with local_step=0 skips the optimizer branch, so those two are absent by
+    # construction; the two that always run must appear, and in this order.
+    assert "policy_forward" in opened and "policy_backward" in opened, opened
+    assert opened.index("policy_forward") < opened.index("policy_backward"), (
+        f"opened {opened}: forward must open before backward, and a swapped pair is exactly the "
+        "mislabel a set-membership guard cannot see"
+    )

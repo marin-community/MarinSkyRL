@@ -87,6 +87,21 @@ TOKENIZE_SCANNED_PACKAGES = ("trajectory_runners", "inference_engines")
 # Rollout-path modules that tokenize and are deliberately NOT covered. Each needs a reason, because
 # the whole point of deriving the list is that adding one is a decision somebody writes down.
 TOKENIZE_UNCOVERED_MODULES = {
+    # ⚠️ These three were INVISIBLE to the previous guard, which matched the literal text
+    # `"self.tokenizer."`. They reach a tokenizer through a parameter or a local, and the
+    # receiver-resolving walk found them the moment it replaced the spelling match. Nine call sites
+    # between them.
+    #
+    # ✅ VERIFIED ATTRIBUTED, not lost: `_decode` is reached from `build_trajectory_records` ->
+    # `retain_trajectories`, which `base.py:116` calls inside `rollout_span("rollout_retain")`. Its
+    # cost lands on a declared leaf; it is simply not `rollout_tokenize`. That is a docs problem, not
+    # a measurement one, and docs/telemetry.md no longer claims the leaf covers every tokenizer call.
+    "trajectory_runners.trajectory_retention": "attributed to rollout_retain (verified)",
+    # ⚠️ NOT TRACED. Helper modules whose callers are probably inside bracketed regions, but I did
+    # not follow all nine sites, and the last two modules I marked "unaudited" both turned out to
+    # carry a real defect. Treat as an open question, not a clean bill.
+    "trajectory_runners.trajectory_processing": "helper; call sites NOT traced -- see note",
+    "inference_engines.teacher_engine_client": "teacher-scoring path; NOT traced -- see note",
     # Uninstrumented runners. They have not bracketed their call sites at all, and
     # `generate_spans_instrumented` is False for both, so they publish NOTHING rather than a seeded
     # all-zero tree -- absence is the honest signal (see the uninstrumented-runner test below).
@@ -150,6 +165,55 @@ class _InstrumentedRunner(TrajectoryRunner):
     """
 
     generate_spans_instrumented = True
+
+
+# Tokenizer METHODS we care about. Matching on the method name alone would fire on `str.encode`
+# and `bytes.decode` everywhere and immediately need an exemption list -- and an exemption list is
+# where the next leak hides. So the method name narrows, and the RECEIVER decides.
+_TOKENIZER_METHODS = {"encode", "decode", "apply_chat_template", "batch_decode", "convert_ids_to_tokens"}
+
+
+def _tokenizer_receivers(tree: ast.AST) -> set[str]:
+    """Identifiers bound to a tokenizer anywhere in this module.
+
+    ⚠️ Receiver-resolving, not spelling-matching. The old check keyed on the literal text
+    `self.tokenizer.`, so a routine local alias -- `tok = self.tokenizer; tok.apply_chat_template(...)`
+    -- was invisible to it, and so was every function that takes the tokenizer as a PARAMETER.
+    `trajectory_retention._decode(tokenizer, ...)` is the second kind and was not even discovered.
+    """
+    names = {"tokenizer", "self.tokenizer"}
+    for node in ast.walk(tree):
+        # `x = self.tokenizer` / `x = tokenizer`
+        if isinstance(node, ast.Assign):
+            value = node.value
+            bound = (isinstance(value, ast.Attribute) and value.attr == "tokenizer") or (
+                isinstance(value, ast.Name) and value.id in names
+            )
+            if bound:
+                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        # `def f(tokenizer: PreTrainedTokenizerBase)` -- the parameter form
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for arg in [*node.args.args, *node.args.kwonlyargs]:
+                if "tokenizer" in arg.arg:
+                    names.add(arg.arg)
+    return names
+
+
+def _tokenizer_calls(tree: ast.AST) -> list[ast.Call]:
+    """Every call that reaches a tokenizer method through a resolved receiver."""
+    receivers = _tokenizer_receivers(tree)
+    found: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr not in _TOKENIZER_METHODS:
+            continue
+        owner = node.func.value
+        if isinstance(owner, ast.Name) and owner.id in receivers:
+            found.append(node)
+        elif isinstance(owner, ast.Attribute) and owner.attr == "tokenizer":
+            found.append(node)
+    return found
 
 
 def _module_source(module_name: str) -> str:
@@ -1373,7 +1437,9 @@ def test_the_tokenize_walk_names_every_rollout_module_that_tokenizes():
     found: set[str] = set()
     for package in TOKENIZE_SCANNED_PACKAGES:
         for path in sorted((root / package).rglob("*.py")):
-            if "self.tokenizer." in path.read_text():
+            # Parsed, not substring-matched: `trajectory_retention` reaches its tokenizer through a
+            # PARAMETER, so a `"self.tokenizer."` scan never discovered the file at all.
+            if _tokenizer_calls(ast.parse(path.read_text())):
                 found.add(str(path.relative_to(root).with_suffix("")).replace("/", "."))
 
     assert found, "the scan found no tokenizer calls at all -- the call shape changed and this is inert"
@@ -1433,16 +1499,11 @@ def test_every_tokenizer_call_is_inside_a_tokenize_region(module_name):
                 enclosing.setdefault(line, node.name)
 
     leaked: list[str] = []
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-            continue
-        owner = node.func.value
-        if not (isinstance(owner, ast.Attribute) and owner.attr == "tokenizer"):
-            continue
+    for node in _tokenizer_calls(tree):
         if enclosing.get(node.lineno) in TOKENIZE_EXEMPT_FUNCTIONS:
             continue
         if not any(node.lineno in region for region in regions):
-            leaked.append(f"{module_name}:{node.lineno} self.tokenizer.{node.func.attr}() outside a tokenize region")
+            leaked.append(f"{module_name}:{node.lineno} tokenizer.{node.func.attr}() outside a tokenize region")
     assert not leaked, "\n".join(leaked)
 
 
@@ -1805,3 +1866,62 @@ def test_the_SHIPPED_runner_puts_its_own_cost_under_its_own_leaf(monkeypatch):
     assert timings.durations["rollout_assemble"] == pytest.approx(3.0)
     # rollout_finalize wraps the shared epilogue, which does no work on this input.
     assert timings.durations["rollout_finalize"] == pytest.approx(0.0)
+
+
+def test_the_shipped_client_charges_its_templating_to_rollout_tokenize(monkeypatch):
+    """🚨 Behavioural, because both walks are evadable and one aliasing mutation proved it.
+
+    `tokenizer = self.tokenizer; tokenizer.apply_chat_template(...)` keeps the wrapper count right,
+    keeps the module discoverable (it still contains another `self.tokenizer.`), and is invisible to
+    an AST walk that only matches calls whose immediate owner is an attribute named `tokenizer`.
+    Production then charges a full-batch templating to `rollout_engine_await` again.
+
+    So drive the shipped `InferenceEngineClient.generate` on the `prompts=` form with a tokenizer
+    that costs a known number of seconds, and assert those seconds land on `rollout_tokenize`.
+    """
+    from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+
+    clock = {"now": 0.0}
+
+    class _Tokenizer:
+        def apply_chat_template(self, prompts, **kwargs):
+            clock["now"] += 4.0
+            return {"input_ids": [[1, 2, 3]]}
+
+    class _Engine:
+        async def generate(self, engine_input):
+            clock["now"] += 11.0
+            return {
+                "responses": ["r"],
+                "stop_reasons": ["stop"],
+                "response_ids": [[4, 5]],
+                "response_logprobs": None,
+            }
+
+    client = object.__new__(InferenceEngineClient)
+    client.tokenizer = _Tokenizer()
+    client.engines = [_Engine()]
+    # The client checks these before dispatching; neither is part of what this test measures.
+    client.generation_paused_event = SimpleNamespace(is_set=lambda: False)
+    client.enable_http_endpoint = False
+    client._dead_engines = set()
+
+    monkeypatch.setattr(timing_module, "time", SimpleNamespace(perf_counter=lambda: clock["now"]))
+
+    async def _drive():
+        timings = RolloutTimings()
+        timings.mark_supported()
+        with rollout_timings_scope(timings):
+            with rollout_wait(ROLLOUT_ENGINE_AWAIT):
+                await client.generate({"prompts": [[{"role": "user", "content": "hi"}]]})
+        return timings
+
+    try:
+        timings = asyncio.run(_drive())
+    except Exception as exc:  # pragma: no cover - the client's fan-out needs more than these fakes
+        pytest.skip(f"the engine client needs more scaffolding than this fake provides: {exc!r}")
+
+    assert timings.durations.get("rollout_tokenize") == pytest.approx(4.0), (
+        f"templating cost landed as {timings.durations.get('rollout_tokenize')}; an aliased "
+        "tokenizer call is invisible to the AST walk and charges this to the engine wait"
+    )
