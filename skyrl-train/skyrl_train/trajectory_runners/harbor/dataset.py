@@ -60,7 +60,7 @@ class TerminalBenchTaskDataset:
                 # If it's a file, treat it as a single task (files can't be valid task directories)
                 logger.warning(f"File {source_path} cannot be a valid task directory (missing instruction.md)")
 
-        return task_paths
+        return sorted(task_paths)
 
     def _is_valid_task_directory(self, task_path: Path) -> bool:
         """Check if a directory is a valid task directory (has instruction.md file)."""

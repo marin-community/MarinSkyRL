@@ -14,20 +14,38 @@ from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import (
     RolloutCoordinatorRPCTimeoutError,
     RolloutDispatcher,
 )
-from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.trajectory_runners.types import BatchMetadata, TrainingPhase, TrajectoryID
 
 
 class _RemoteMethod:
     def __init__(self, call: Callable[..., Awaitable[dict]]):
         self._call = call
 
-    def remote(self, *args):
-        return self._call(*args)
+    def remote(self, *args, **kwargs):
+        return self._call(*args, **kwargs)
 
 
 class _Coordinator:
     def __init__(self, call: Callable[..., Awaitable[dict]]):
         self.run_shard = _RemoteMethod(call)
+
+
+class _SessionCoordinator(_Coordinator):
+    def __init__(self, name: str, calls: list[tuple[str, str]]):
+        async def run_shard(input_batch, _global_step):
+            phase = input_batch["batch_metadata"].training_phase
+            calls.append((name, phase))
+            return _output(input_batch["trajectory_ids"])
+
+        async def start_eval_session(**_kwargs):
+            calls.append((name, "start_eval"))
+
+        async def stop_eval_session():
+            calls.append((name, "stop_eval"))
+
+        super().__init__(run_shard)
+        self.start_eval_session = _RemoteMethod(start_eval_session)
+        self.stop_eval_session = _RemoteMethod(stop_eval_session)
 
 
 @ray.remote
@@ -43,14 +61,14 @@ class _BlockingCoordinator:
         await self._started.wait()
 
 
-def _request(ids: list[TrajectoryID]) -> dict:
+def _request(ids: list[TrajectoryID], phase: TrainingPhase | None = None) -> dict:
     return {
         "prompts": [f"prompt-{trajectory_id.to_string()}" for trajectory_id in ids],
         "env_classes": ["terminal" for _ in ids],
         "env_extras": [{} for _ in ids],
         "sampling_params": {},
         "trajectory_ids": ids,
-        "batch_metadata": None,
+        "batch_metadata": BatchMetadata(global_step=1, training_phase=phase) if phase is not None else None,
     }
 
 
@@ -131,6 +149,27 @@ async def test_dispatcher_partitions_complete_groups_and_restores_request_order(
     assert calls == [["a_0", "a_1"], ["b_0", "b_1"]]
     assert result["trajectory_ids"] == ids
     assert result["response_ids"] == [[0], [100], [1], [101]]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_isolates_eval_from_concurrent_training(harbor_runner_spec):
+    calls: list[tuple[str, str]] = []
+    dispatcher = _dispatcher(
+        [_SessionCoordinator("eval", calls), _SessionCoordinator("train", calls)],
+        harbor_runner_spec,
+    )
+
+    await dispatcher.start_eval_session(run_name="run", eval_step=0)
+    await dispatcher.run(_request([TrajectoryID("heldout", 0)], "eval"))
+    await dispatcher.run(_request([TrajectoryID("training", 0)], "train"))
+    await dispatcher.stop_eval_session()
+
+    assert calls == [
+        ("eval", "start_eval"),
+        ("eval", "eval"),
+        ("train", "train"),
+        ("eval", "stop_eval"),
+    ]
 
 
 @pytest.mark.asyncio
