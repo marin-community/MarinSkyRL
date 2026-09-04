@@ -108,6 +108,20 @@ TOKENIZE_UNCOVERED_MODULES = {
     # Bracketing their tokenizer calls alone would be worse than leaving them: a lone leaf under a
     # runner that publishes no parent.
     "trajectory_runners.harbor.runner": "uninstrumented runner; publishes nothing by design",
+    # ⚠️ Found only once the walk resolved ATTRIBUTE-bound receivers: it holds `self._tokenizer` and
+    # re-encodes every response in the batch on the driver event-loop thread, inside the caller's
+    # rollout_wait -- byte-for-byte the defect bracketed in remote_inference_engine.
+    #
+    # ✅ VERIFIED INERT TODAY, not assumed: `OpenAIHTTPModelClient` is constructed only at
+    # `entrypoints/fully_async.py:49`, and the fully-async generate loop deliberately passes NO
+    # phase_timings (`fully_async_trainer.py:1126` says why -- 768 concurrent run() calls cannot be
+    # summed into one accumulator). With no accumulator in scope every span there is a no-op, so
+    # nothing wrong is published. Bracketing it would add a leaf under a runner that publishes no
+    # parent, which is worse than leaving it.
+    #
+    # ⚠️ **This stops being inert the moment the fully-async path gains per-call accumulators.**
+    # Whoever does that must bracket this call site in the same change.
+    "trajectory_runners.model_clients": "fully-async only; no accumulator in scope (verified inert)",
     "trajectory_runners.mini_swe.runner": "uninstrumented runner; publishes nothing by design",
     # ⚠️ Both alternative backends were audited after the fact and BOTH carried the defect, so they
     # are covered above rather than exempted. remote_inference_engine re-encodes every generated
@@ -183,14 +197,22 @@ def _tokenizer_receivers(tree: ast.AST) -> set[str]:
     """
     names = {"tokenizer", "self.tokenizer"}
     for node in ast.walk(tree):
-        # `x = self.tokenizer` / `x = tokenizer`
+        # `x = self.tokenizer` / `x = tokenizer` / `self._tok = tokenizer`
         if isinstance(node, ast.Assign):
             value = node.value
-            bound = (isinstance(value, ast.Attribute) and value.attr == "tokenizer") or (
+            bound = (isinstance(value, ast.Attribute) and "tokenizer" in value.attr) or (
                 isinstance(value, ast.Name) and value.id in names
             )
             if bound:
-                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+                    elif isinstance(target, ast.Attribute):
+                        # ⚠️ Attribute targets too. `self._tokenizer = tokenizer` is the ordinary
+                        # way to hold one, and a Name-only walk could not see the field it created
+                        # -- which is how model_clients stayed undiscovered while re-encoding every
+                        # response in the batch on the driver thread.
+                        names.add(target.attr)
         # `def f(tokenizer: PreTrainedTokenizerBase)` -- the parameter form
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for arg in [*node.args.args, *node.args.kwonlyargs]:
@@ -211,7 +233,10 @@ def _tokenizer_calls(tree: ast.AST) -> list[ast.Call]:
         owner = node.func.value
         if isinstance(owner, ast.Name) and owner.id in receivers:
             found.append(node)
-        elif isinstance(owner, ast.Attribute) and owner.attr == "tokenizer":
+        elif isinstance(owner, ast.Attribute) and ("tokenizer" in owner.attr or owner.attr in receivers):
+            # `"tokenizer" in owner.attr` rather than equality: `self._tokenizer` is the same thing
+            # spelled differently. The _TOKENIZER_METHODS narrowing above is what keeps this from
+            # firing on `str.encode`, so widening the receiver here is safe.
             found.append(node)
     return found
 
@@ -1916,12 +1941,20 @@ def test_the_shipped_client_charges_its_templating_to_rollout_tokenize(monkeypat
                 await client.generate({"prompts": [[{"role": "user", "content": "hi"}]]})
         return timings
 
-    try:
-        timings = asyncio.run(_drive())
-    except Exception as exc:  # pragma: no cover - the client's fan-out needs more than these fakes
-        pytest.skip(f"the engine client needs more scaffolding than this fake provides: {exc!r}")
+    # ⚠️ NO try/skip here, deliberately. An earlier version wrapped this in a catch-all that skipped
+    # on any exception, so a harness broken by an unrelated change would silently retire the ONLY
+    # behavioural guard on this path -- and a test that does not run is indistinguishable from one
+    # that passes. If the client needs more scaffolding, this must fail and say so.
+    timings = asyncio.run(_drive())
 
     assert timings.durations.get("rollout_tokenize") == pytest.approx(4.0), (
         f"templating cost landed as {timings.durations.get('rollout_tokenize')}; an aliased "
         "tokenizer call is invisible to the AST walk and charges this to the engine wait"
+    )
+    # 🚨 Bound the WAIT as well as the leaf, which is what closes the CLASS rather than a spelling.
+    # The wait is 4.0 of templating plus 11.0 of engine; any additional tokenizer call inside it --
+    # aliased, bound-method, attribute-held, however spelled -- moves this number, whether or not a
+    # source walk can see how it was written.
+    assert timings.counters[f"{ROLLOUT_ENGINE_AWAIT}_seconds_sum"] == pytest.approx(15.0), (
+        "the observed client wait changed, so something else ran inside it"
     )

@@ -377,9 +377,7 @@ class Worker(DistributedTorchRayActor):
             # handlers, so durability comes from the flush after each step's publish -- see
             # publish_worker_spans -- and not from here.
             atexit.register(self._policy_span_telemetry.close)
-            reason = unconfigured_telemetry_reason()
-            if reason is not None:
-                raise RuntimeError(f"policy_train_spans is enabled but {reason}")
+            _require_configured_telemetry()
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
 
     def init_model(self, *args, **kwargs):
@@ -972,6 +970,21 @@ class PPORayActorGroup:
                 ray.kill(actor, no_restart=no_restart)
             except Exception:
                 pass  # Actor may already be dead
+
+
+def _require_configured_telemetry() -> None:
+    """Fail the actor rather than run a job that measures nothing.
+
+    `policy_train_spans` is opt-in, and on a runtime without an endpoint `record()` is a no-op,
+    `flush()` returns True and `lost_records` stays 0 -- every signal reads healthy while the run
+    produces no rows at all. Somebody who asked for the spans wants to know now, not after paying
+    for the run. Lifted out of `__init__` so it can be driven directly; the call is asserted too,
+    because moving a check into a testable helper and leaving the call site unguarded just relocates
+    the hole.
+    """
+    reason = unconfigured_telemetry_reason()
+    if reason is not None:
+        raise RuntimeError(f"policy_train_spans is enabled but {reason}")
 
 
 def _publish_policy_spans(

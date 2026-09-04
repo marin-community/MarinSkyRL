@@ -13,6 +13,7 @@ preserve a max.
 
 from unittest.mock import patch
 
+
 import pytest
 import torch
 
@@ -107,14 +108,29 @@ def test_no_worker_reduces_a_status_dict_with_the_plain_mean():
                 if not isinstance(node, ast.Assign):
                     continue
                 value = node.value
-                if isinstance(value, ast.Name) and value.id in names:
-                    names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+                bound = (isinstance(value, ast.Name) and value.id in names) or (
+                    isinstance(value, ast.Attribute) and value.attr in names
+                )
+                if not bound:
+                    continue
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+                    elif isinstance(target, ast.Attribute):
+                        # ⚠️ Attribute targets too. `self._pending = status;
+                        # all_reduce(self._pending)` is the same defect held in a field, and a
+                        # Name-only walk let it through on the critic path.
+                        names.add(target.attr)
         return names
 
     def _mentions_status(node: ast.AST, names: set[str]) -> bool:
         # Any subexpression naming the dict counts: `all_reduce(dict(status))` and
         # `all_reduce(data=status)` are the same defect as the bare name.
-        return any(isinstance(inner, ast.Name) and inner.id in names for inner in ast.walk(node))
+        return any(
+            (isinstance(inner, ast.Name) and inner.id in names)
+            or (isinstance(inner, ast.Attribute) and inner.attr in names)
+            for inner in ast.walk(node)
+        )
 
     # ⚠️ The WHOLE workers package, not `inspect.getsource(worker_module)`. This branch changed the
     # same call in workers/megatron/megatron_worker.py, and a walk scoped to one file left that one
@@ -373,3 +389,238 @@ def test_every_specially_reduced_key_is_declared_once():
     # Deliberately absent, because neither available op is right for them.
     assert "log_ratio_abs_p99" not in STATUS_REDUCTION_OPS
     assert "n_tokens_dp_gt_1pct" not in STATUS_REDUCTION_OPS
+
+
+def _training_input_batch(batch: int, seq: int, actions: int):
+    """The tensors TrainingBatchIterator reads to build one Experience."""
+    import torch
+
+    from skyrl_train.training_batch import TrainingInputBatch
+
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.zeros(batch, seq, dtype=torch.long),
+            "action_log_probs": torch.zeros(batch, actions),
+            "base_action_log_probs": torch.zeros(batch, actions),
+            "values": torch.zeros(batch, actions),
+            "returns": torch.zeros(batch, actions),
+            "advantages": torch.zeros(batch, actions),
+            "attention_mask": torch.ones(batch, seq, dtype=torch.long),
+            "loss_mask": torch.ones(batch, actions),
+            "response_mask": torch.ones(batch, actions),
+        }
+    )
+    data.metadata = {"global_step": 0, "response_length": actions}
+    return data
+
+
+def _megatron_worker_module():
+    """Import the Megatron worker on CPU, extending the house stub rather than replacing it.
+
+    ⚠️ An earlier docstring in this file asserted a behavioural test here was IMPOSSIBLE, because
+    `megatron_worker` imports `megatron.bridge` and `megatron.core` at module scope and megatron is
+    not installed on CPU. **That was wrong**, and two reviewers said so. The imports only need to
+    resolve; nothing in `ppo_train` calls into megatron, because the pipeline scheduler is reached
+    through `self.model`. Asserting an impossibility is how a guard stays lexical forever.
+
+    ⚠️ And it must EXTEND `tests.cpu.util.stub_megatron_modules`, not install a rival mechanism.
+    A first version fabricated its own `megatron.*` via a meta-path finder, which worked alone and
+    failed whenever `test_tis_diagnostics_backends` had already installed the house stub -- the
+    module object was then present but not a package, so `megatron.bridge` could not resolve. An
+    order-dependent test is worse than no test: it passes in isolation and blames the wrong change.
+    """
+    import importlib.abc
+    import importlib.machinery
+    import sys
+    import types
+
+    from tests.cpu.util import stub_megatron_modules
+
+    stub_megatron_modules()
+
+    class _Meta(type):
+        # Class-level attribute access, which instance __getattr__ does not cover. Megatron's
+        # bridges are used as decorators off the CLASS (`MegatronModelBridge.register_bridge`).
+        def __getattr__(cls, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return _Perm
+
+    class _Perm(metaclass=_Meta):
+        """Stands in for a megatron symbol: callable, subclassable, decorator-friendly.
+
+        A real class rather than a MagicMock, because `@dataclass` on a subclass needs a genuine
+        `__mro__` and a mock has none.
+        """
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __call__(self, *args, **kwargs):
+            return _Perm
+
+        def __getattr__(self, name):
+            return _Perm
+
+    class _PermModule(types.ModuleType):
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            setattr(self, name, _Perm)
+            return _Perm
+
+    # The house stub installs plain ModuleType objects with no __path__, so a dotted import beneath
+    # them fails with "is not a package". Make every already-installed megatron module a package and
+    # give it the permissive attribute behaviour megatron_worker needs.
+    for name, module in list(sys.modules.items()):
+        if name.split(".")[0] in ("megatron", "transformer_engine") and isinstance(module, types.ModuleType):
+            if not hasattr(module, "__path__"):
+                module.__path__ = []
+            if type(module) is types.ModuleType:
+                module.__class__ = _PermModule
+
+    # Everything else beneath those roots is fabricated on demand. Scoped to the two roots, defers
+    # to whatever the house stub already installed, and removed again below -- a finder left on
+    # sys.meta_path would stub megatron for every later test in the session.
+    class _Finder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname in sys.modules:
+                return None
+            if fullname.split(".")[0] not in ("megatron", "transformer_engine"):
+                return None
+            return importlib.machinery.ModuleSpec(fullname, _Loader(), is_package=True)
+
+    class _Loader(importlib.abc.Loader):
+        def create_module(self, spec):
+            module = _PermModule(spec.name)
+            module.__path__ = []
+            return module
+
+        def exec_module(self, module):
+            pass
+
+    # Link every parent to its child BEFORE anything reads an attribute. _PermModule caches what
+    # __getattr__ returns, so one early `megatron.core` lookup would pin the placeholder class in
+    # place of the real stub module and `import megatron.core.parallel_state` would then fail.
+    def _link() -> None:
+        for name in sorted(sys.modules):
+            if name.split(".")[0] not in ("megatron", "transformer_engine") or "." not in name:
+                continue
+            parent, _, child = name.rpartition(".")
+            if parent in sys.modules:
+                setattr(sys.modules[parent], child, sys.modules[name])
+
+    _link()
+
+    finder = _Finder()
+    sys.meta_path.insert(0, finder)
+    try:
+        import skyrl_train.workers.megatron.megatron_worker as module
+
+        _link()
+    finally:
+        sys.meta_path.remove(finder)
+
+    return module
+
+
+def test_the_MEGATRON_worker_keeps_its_per_key_ops_through_its_own_ppo_train(monkeypatch):
+    """🚨 The Megatron reduction site, driven -- not read.
+
+    Its `all_reduce_status` call was guarded only by a source walk, and two review rounds each
+    walked past it: first with a bare alias, then with `status.copy()`. On eighty ranks that path
+    turns one rank's `log_ratio_abs_max` of 19.0 into 0.2375 and a failed optimizer step into 0.9875,
+    which is the exact failure the reduction map exists to prevent.
+    """
+    import torch
+    from omegaconf import OmegaConf
+
+    module = _megatron_worker_module()
+    worker = object.__new__(module.MegatronPolicyWorkerBase)
+
+    peer = {"log_ratio_abs_max": 19.0, "optimizer_step_succeeded": 0.0}
+
+    class _Strategy:
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            from skyrl_train.utils.importance_ratio_diagnostics import STATUS_REDUCTION_OPS
+
+            out = {}
+            for name, value in status.items():
+                other = peer.get(name, value)
+                op = STATUS_REDUCTION_OPS.get(name)
+                out[name] = (
+                    max(value, other) if op == "max" else min(value, other) if op == "min" else (value + other) / 2
+                )
+            return out
+
+        def all_reduce(self, data, op="mean"):
+            return {name: (value + peer.get(name, value)) / 2 for name, value in data.items()}
+
+        def optimizer_step(self, *a, **k):
+            return 0.1
+
+    class _Model:
+        def train(self):
+            pass
+
+        def forward_backward_mini_batch(self, micro_batches, **kwargs):
+            return [
+                {
+                    "policy_loss": 1.0,
+                    "policy_entropy": 0.5,
+                    # popped when use_kl_loss is false; present because the real metrics carry it
+                    "policy_kl": 0.0,
+                    "log_ratio_abs_max": 0.5,
+                    "optimizer_step_succeeded": 1.0,
+                }
+                for _ in micro_batches
+            ]
+
+    worker.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "micro_train_batch_size_per_gpu": 1,
+                "update_epochs_per_batch": 1,
+                "algorithm": {"use_kl_loss": False},
+                "policy": {"megatron_config": {"check_train_eval_parity": False}},
+            },
+            "generator": {"sampling_params": {"temperature": 1.0}},
+        }
+    )
+    worker.strategy = _Strategy()
+    worker.model = _Model()
+    worker.actor_module = []
+
+    class _Optimizer:
+        param_groups = [{"lr": 1e-6}]
+
+        def zero_grad(self, *a, **k):
+            pass
+
+    worker.optimizer = _Optimizer()
+    worker.scheduler = None
+    worker.profiler = None
+    worker.empty_cuda_cache = False
+    worker.policy_mini_batch_size_per_gpu = 1
+    worker._rank = 0
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
+    # ppo_train closes with a WORLD barrier; there is no process group in a CPU test.
+    monkeypatch.setattr(torch.distributed, "barrier", lambda *a, **k: None)
+
+    batch, seq, actions = 1, 4, 2
+    data = _training_input_batch(batch, seq, actions)
+    try:
+        output = worker.ppo_train(data)
+    except Exception as exc:  # noqa: BLE001 - reported, never skipped
+        pytest.fail(f"the Megatron worker needs more scaffolding than this fake provides: {exc!r}")
+
+    status = output.metadata["train_status"]
+    assert status["log_ratio_abs_max"] == 19.0, (
+        f"published {status['log_ratio_abs_max']}: the peer rank's divergence was averaged away, "
+        "which is what the plain reducer does and what the status reducer exists to prevent"
+    )
+    assert status["optimizer_step_succeeded"] == 0.0, "a rank that skipped its step must publish 0"
