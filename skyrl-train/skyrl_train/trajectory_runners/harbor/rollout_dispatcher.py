@@ -256,9 +256,10 @@ class RolloutDispatcher:
         self._actor_pending_rpcs = [0 for _ in range(self._num_coordinators)]
         self._actor_last_progress: list[float | None] = [None for _ in range(self._num_coordinators)]
         self._rr = itertools.cycle(range(self._num_coordinators))
+        self._routing_condition = asyncio.Condition()
         self._pg = None
-        # When an eval session is active, run() is pinned to shard 0 (the
-        # only coordinator with the eval orchestrator). See start_eval_session.
+        # Eval reserves shard 0. Training continues on the other shards while
+        # evaluation uses shard 0's dedicated orchestrator.
         self._eval_session_active = False
 
         _log().info(
@@ -389,17 +390,25 @@ class RolloutDispatcher:
         return result
 
     async def _run_group(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
-        if self._eval_session_active:
-            coordinator_index = 0
-            actor = self._actors[0]
-        else:
-            coordinator_index = next(self._rr)
+        metadata = input_batch.get("batch_metadata")
+        training_phase = metadata.training_phase if metadata is not None else "train"
+        async with self._routing_condition:
+            while training_phase == "train" and self._eval_session_active and self._num_coordinators == 1:
+                await self._routing_condition.wait()
+            if training_phase == "eval":
+                if not self._eval_session_active:
+                    raise RuntimeError("evaluation request received without an active eval session")
+                coordinator_index = 0
+            else:
+                coordinator_index = next(self._rr)
+                while self._eval_session_active and coordinator_index == 0:
+                    coordinator_index = next(self._rr)
             actor = self._actors[coordinator_index]
+            loop = asyncio.get_running_loop()
+            if self._actor_pending_rpcs[coordinator_index] == 0:
+                self._actor_last_progress[coordinator_index] = loop.time()
+            self._actor_pending_rpcs[coordinator_index] += 1
         global_step = self._current_global_step()
-        loop = asyncio.get_running_loop()
-        if self._actor_pending_rpcs[coordinator_index] == 0:
-            self._actor_last_progress[coordinator_index] = loop.time()
-        self._actor_pending_rpcs[coordinator_index] += 1
         try:
             rpc = actor.run_shard.remote(input_batch, global_step)
             rpc_future = asyncio.ensure_future(rpc)
@@ -432,9 +441,11 @@ class RolloutDispatcher:
                 self._actor_last_progress[coordinator_index] = loop.time()
                 return output
         finally:
-            self._actor_pending_rpcs[coordinator_index] -= 1
-            if self._actor_pending_rpcs[coordinator_index] == 0:
-                self._actor_last_progress[coordinator_index] = None
+            async with self._routing_condition:
+                self._actor_pending_rpcs[coordinator_index] -= 1
+                if self._actor_pending_rpcs[coordinator_index] == 0:
+                    self._actor_last_progress[coordinator_index] = None
+                self._routing_condition.notify_all()
 
     @staticmethod
     def _select_request_rows(input_batch: TrajectoryRequestBatch, indices: list[int]) -> TrajectoryRequestBatch:
@@ -484,19 +495,34 @@ class RolloutDispatcher:
         self._actors = []
 
     # ---- Eval session passthrough ----
-    # Eval routes through a SINGLE coordinator (shard 0) to keep eval-session
-    # orchestrator lifecycle simple and correct. Eval is gated off in production
-    # (eval_interval is effectively infinite), so this path is rarely exercised
-    # under fan-out; routing to one coordinator avoids fanning eval-session
-    # state across K orchestrators.
+    # Eval reserves shard 0 and waits for its prior training work to drain before
+    # replacing that runner's active orchestrator. Other shards keep serving
+    # asynchronous training requests during evaluation.
     async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
-        if self._actors:
+        if not self._actors:
+            return
+        async with self._routing_condition:
+            if self._eval_session_active:
+                raise RuntimeError("an eval session is already active")
+            self._eval_session_active = True
+            while self._actor_pending_rpcs[0] > 0:
+                await self._routing_condition.wait()
+        try:
             await self._actors[0].start_eval_session.remote(
                 run_name=run_name, eval_step=eval_step, val_set_name=val_set_name
             )
-            self._eval_session_active = True
+        except BaseException:
+            async with self._routing_condition:
+                self._eval_session_active = False
+                self._routing_condition.notify_all()
+            raise
 
     async def stop_eval_session(self) -> None:
-        if self._actors:
+        if not self._actors:
+            return
+        try:
             await self._actors[0].stop_eval_session.remote()
-            self._eval_session_active = False
+        finally:
+            async with self._routing_condition:
+                self._eval_session_active = False
+                self._routing_condition.notify_all()
