@@ -284,16 +284,39 @@ def test_disabled_accumulator_records_nothing_and_costs_nothing():
     assert accumulator.totals(total_seconds=1.0) == {}
 
 
-def test_spans_accumulate_across_micro_steps():
+def test_spans_accumulate_across_micro_steps(monkeypatch):
+    """🚨 The word in the name is ACCUMULATE, and nothing tested it.
+
+    The old version drove three iterations on the real clock and asserted the key set plus
+    `value >= 0.0` -- both of which hold whether `span()` sums or ASSIGNS. That leaves the core
+    arithmetic of the whole worker tree unguarded: at E6 geometry, with 64 micro-steps per step, an
+    assign publishes the LAST micro-step instead of the sum, so `policy_forward` reads ~1 s against
+    a 200 s parent and the residual reports that policy_train is 99.5% unaccounted for. That is the
+    -1703 s incident this file is built around, sign-flipped.
+
+    A fake clock and an equality. Three zero-length spans would satisfy `>= 0.0` too.
+    """
+    import skyrl_train.timing_observability as timing_module
+
+    # forward: 5 + 3 + 1 = 9. metric_allreduce: 2 + 4 + 6 = 12.
+    ticks = iter([100, 105, 200, 202, 300, 303, 400, 404, 500, 501, 600, 606])
+    monkeypatch.setattr(timing_module, "time", SimpleNamespace(perf_counter=lambda: next(ticks)))
+
     accumulator = _accumulator()
     for _ in range(3):
         with accumulator.span("policy_forward"):
             pass
         with accumulator.span("policy_metric_allreduce"):
             pass
+
+    assert not list(ticks), "the scripted clock was not fully consumed; the span shape changed"
     totals = accumulator.totals()
     assert set(totals) == {"policy_forward", "policy_metric_allreduce"}
-    assert all(value >= 0.0 for value in totals.values())
+    assert totals["policy_forward"] == pytest.approx(9.0), (
+        f"policy_forward is {totals['policy_forward']}; an accumulator that ASSIGNS publishes the "
+        "last micro-step (1.0) and reports the rest of the phase as unaccounted for"
+    )
+    assert totals["policy_metric_allreduce"] == pytest.approx(12.0)
 
 
 def test_residual_closes_the_decomposition():
