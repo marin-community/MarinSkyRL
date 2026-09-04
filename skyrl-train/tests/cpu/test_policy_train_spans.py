@@ -644,11 +644,13 @@ def test_worker_init_configures_telemetry_for_the_worker_role():
 def test_ppo_train_wires_the_span_layer():
     """The wiring itself, which no behavioural test can reach.
 
-    ``ppo_train`` needs a live torch.distributed rendezvous and a Ray actor, so the seam it calls is
-    tested directly (above) while its *use* is asserted structurally. Weak, but it catches the
-    regressions that leave a green suite: timing that starts after the entry barrier, a publish that
-    never carries the previous cost forward, or a return value that is dropped so every step reports
-    a publish cost of zero.
+    ⚠️ This docstring used to claim ``ppo_train`` "needs a live torch.distributed rendezvous and a
+    Ray actor", which is why everything here is a source assertion. **That was wrong**, and
+    ``_run_ppo_train`` below disproves it: ``object.__new__`` plus a fake strategy, a stubbed
+    ``training_step`` and four ``torch.distributed`` stubs runs all 249 lines on CPU. Anything here
+    that CAN move to that harness should; what remains are orderings inside the function body that a
+    behavioural test cannot observe -- which clock is taken before which barrier, and what is carried
+    forward between steps.
     """
 
     import skyrl_train.workers.worker as worker_module
@@ -1065,7 +1067,9 @@ def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=N
         }
     )
     worker._rank = 0
-    worker._world_size = 1
+    # ⚠️ world_size > 1 on the decentral arm, or the barrier branch is unreachable and the parameter
+    # is decorative: `worker.py:1148` needs r3-decentral AND world_size > 1 AND is_initialized.
+    worker._world_size = 2 if r3_decentral else 1
     worker.policy_mini_batch_size_per_gpu = 1
     worker.record_memory = False
     worker._grug_query_bias_window = None
@@ -1087,7 +1091,7 @@ def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=N
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
     monkeypatch.setattr(torch.distributed, "barrier", lambda *a, **k: None)
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: r3_decentral)
 
     # 🚨 Stub only the EXTERNAL boundary -- the histogram, the flush, the runtime status. The real
     # `_publish_policy_spans` and `publish_worker_spans` run, so the conversion from accumulator
@@ -1342,3 +1346,43 @@ def test_the_training_step_leaves_open_in_the_order_they_actually_run(monkeypatc
         f"opened {opened}: forward must open before backward, and a swapped pair is exactly the "
         "mislabel a set-membership guard cannot see"
     )
+
+
+def test_the_R3_decentral_arm_actually_OPENS_the_barrier_span(monkeypatch):
+    """The other half of the conditional, and the reason `r3_decentral=True` is not decorative.
+
+    `record_zero` says "this region did not run". Nothing asserted the region DOES run when it
+    should, so a barrier that silently stopped being measured on the 80B MoE path -- the only path
+    that has one, and the path whose 12-minute arrival spread the barrier exists to absorb -- would
+    look exactly like the non-decentral case: a 0.0 row, published, plausible.
+
+    ⚠️ Assert the span OPENED, not its duration. The barrier is stubbed out here, so its wall is ~0
+    on CPU and indistinguishable from the explicit zero it must be distinguished from.
+    """
+    opened: list[str] = []
+
+    class _Recording(WorkerSpanAccumulator):
+        def span(self, name, presync=True):
+            opened.append(name)
+            return super().span(name, presync=presync)
+
+    import skyrl_train.workers.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "WorkerSpanAccumulator", _Recording)
+
+    class _Strategy:
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            return dict(status)
+
+    _, totals, _ = _run_ppo_train(monkeypatch, r3_decentral=True, strategy=_Strategy())
+
+    assert "policy_entry_barrier" in opened, (
+        f"the decentral arm opened {opened}; the barrier region was never entered, so its cost is "
+        "unmeasured on the one path that actually has a barrier"
+    )
+    assert "policy_entry_barrier" in totals, "and it must still reach a published row"
