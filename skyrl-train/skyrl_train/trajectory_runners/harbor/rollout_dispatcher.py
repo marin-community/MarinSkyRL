@@ -354,6 +354,8 @@ class RolloutDispatcher:
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Run complete reward groups concurrently and restore input row order."""
         del disable_tqdm
+        metadata = input_batch.get("batch_metadata")
+        training_phase = metadata.training_phase if metadata is not None else "train"
         trajectory_ids = input_batch.get("trajectory_ids")
         if not trajectory_ids or len(trajectory_ids) != len(input_batch["prompts"]):
             raise ValueError("process-isolated trajectory execution requires one trajectory ID per request row")
@@ -375,7 +377,9 @@ class RolloutDispatcher:
         else:
             result = concatenate_trajectory_batches(
                 outputs,
-                require_rollout_logprobs=rollout_logprobs_enabled(self._spec.config.trainer.algorithm),
+                require_rollout_logprobs=(
+                    training_phase == "train" and rollout_logprobs_enabled(self._spec.config.trainer.algorithm)
+                ),
                 tis_lcs_alert_threshold=float(self._spec.config.trainer.algorithm.tis_lcs_alert_threshold),
             )
             actual_steps = [output.get("actual_global_step") for output in outputs]
