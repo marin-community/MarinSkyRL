@@ -31,6 +31,7 @@ from skyrl_train.models.grug_moe import (
     GrugMoeForCausalLM,
     enable_grug_grouped_mm,
 )
+from skyrl_train.models.layers.moe_routing import TokenReorderer, combine_routed_rows
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="grouped_mm requires CUDA")
 
@@ -153,3 +154,27 @@ def test_g4a_5_grouped_forward_is_deterministic():
         a = _forward(m, ids)
         b = _forward(m, ids)
     assert torch.equal(a, b), "grouped forward is not repeatable on identical inputs"
+
+
+def test_g4a_6_combine_is_repeatable_under_contention():
+    """The float32 combine must be bit-identical across launches while other kernels contend for SMs.
+
+    Production shape (top-4 of 256 experts, hidden 2560) with heavy-tailed rows, so thousands of the
+    per-token sums are order-sensitive. The former ``scatter_add`` combine reduced with atomics and
+    let block scheduling pick the order; this is the test that did not exist when that shipped.
+    """
+    torch.manual_seed(5)
+    num_tokens, top_k, num_experts, hidden = 8192, 4, 256, 2560
+    selected = torch.rand(num_tokens, num_experts, device="cuda").topk(top_k).indices
+    routing = TokenReorderer(num_experts, top_k)(torch.ones(num_tokens, top_k, device="cuda"), selected)
+    scale = torch.exp(2.0 * torch.randn(num_tokens * top_k, hidden, device="cuda"))
+    rows = (torch.randn(num_tokens * top_k, hidden, device="cuda") * scale).to(torch.bfloat16)
+
+    first = combine_routed_rows(rows, routing.token_indices, num_tokens, top_k)
+    side = torch.cuda.Stream()
+    contender = torch.randn(4096, 4096, device="cuda", dtype=torch.bfloat16)
+    for _ in range(20):
+        with torch.cuda.stream(side):
+            contender = (contender @ contender).clamp_(-1, 1)
+        again = combine_routed_rows(rows, routing.token_indices, num_tokens, top_k)
+        assert torch.equal(again, first), "the combine changed between launches"

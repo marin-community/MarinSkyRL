@@ -16,8 +16,10 @@ from skyrl_train.models.grug_moe import (
     GrugMoeForCausalLM,
     GrugMoeRouter,
     GrugMoeSparseMoeBlock,
+    _GrugGroupedExpertExecution,
     enable_grug_grouped_mm,
 )
+from skyrl_train.models.layers.moe_routing import run_experts_for_loop
 from skyrl_train.models.grug_query_bias import (
     GrugLossFreeBiasAccumulator,
     GrugQueryBiasAccumulator,
@@ -126,12 +128,12 @@ def test_bfloat16_sparse_moe_forward_uses_float32_accumulation():
             block.experts.down_proj.weight[1:, 0, 0] = 1.0 / 2048.0
         return block
 
-    def run(*, reference: bool):
+    def run(*, mode: str):
         block = new_block()
         hidden = torch.zeros((16, config.hidden_size), dtype=torch.bfloat16)
         hidden[:, 0] = 1.0
         hidden.requires_grad_(True)
-        if reference:
+        if mode == "reference":
             _, selected_experts, combine_weights = block.router(hidden)
             output = torch.zeros_like(hidden, dtype=torch.float32)
             for slot in range(selected_experts.shape[-1]):
@@ -142,8 +144,26 @@ def test_bfloat16_sparse_moe_forward_uses_float32_accumulation():
                 contribution = expert_output * combine_weights[:, slot].to(expert_output.dtype).unsqueeze(-1)
                 output = output + contribution.float()
             output = output.to(hidden.dtype)
-        else:
+        elif mode == "eager":
             output = block(hidden)
+        elif mode == "grouped":
+            # The grouped execution with its CUDA-only kernel swapped for the repo's EP=1 parity
+            # oracle, so the routing bookkeeping and the fixed-order combine run on CPU.
+            def for_loop_experts(routed_input, num_tokens_per_expert):
+                return run_experts_for_loop(
+                    block.experts.gate_proj.weight,
+                    block.experts.down_proj.weight,
+                    block.experts.up_proj.weight,
+                    routed_input,
+                    num_tokens_per_expert,
+                )
+
+            _, selected_experts, combine_weights = block.router(hidden)
+            output = _GrugGroupedExpertExecution().run(
+                for_loop_experts, block.reorderer, hidden, selected_experts, combine_weights
+            )
+        else:
+            raise ValueError(mode)
         loss = output.float().square().mean()
         gradients = torch.autograd.grad(
             loss,
@@ -157,11 +177,12 @@ def test_bfloat16_sparse_moe_forward_uses_float32_accumulation():
         )
         return output, gradients
 
-    reference_output, reference_gradients = run(reference=True)
-    output, gradients = run(reference=False)
-    torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
-    for gradient, reference_gradient in zip(gradients, reference_gradients):
-        torch.testing.assert_close(gradient, reference_gradient, rtol=0, atol=0)
+    reference_output, reference_gradients = run(mode="reference")
+    for mode in ("eager", "grouped"):
+        output, gradients = run(mode=mode)
+        torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
+        for gradient, reference_gradient in zip(gradients, reference_gradients):
+            torch.testing.assert_close(gradient, reference_gradient, rtol=0, atol=0)
 
 
 def test_gradient_checkpointing_preserves_logits_and_gradients():

@@ -58,6 +58,7 @@ from skyrl_train.models.ep_gradient import ExpertGradientAveraging
 from skyrl_train.models.router_instrumentation import NativeRouterObserverEmitter, emit_router_forward
 from skyrl_train.models.layers.moe_routing import (
     TokenReorderer,
+    combine_routed_rows,
     grouped_expert_contributions,
     run_experts_for_loop,
 )
@@ -445,7 +446,7 @@ class MoE(nn.Module):
         all_to_all, runs the LOCAL experts, then combines back (which unpermutes →
         token i returns to row i, preserving router replay; scope §3). Chunked to
         overlap dispatch of chunk k+1 with the compute of chunk k. The combine
-        already unpermutes, so NO scatter_add here (unlike the torch path).
+        already unpermutes, so no token combine here (unlike the torch path).
         """
         from skyrl_train.distributed.deepep import (
             combine_tokens,
@@ -536,28 +537,26 @@ class MoE(nn.Module):
 
         if self.ep_comm_backend == "deepep":
             # DeepEP drives dispatch→local-experts→combine; combine already
-            # unpermutes (token i → row i), so no reorderer/scatter_add here.
+            # unpermutes (token i → row i), so no reorderer or token combine here.
             routed_output = self._run_deepep_routed_experts(x, selected_experts_indices, top_scores)
             return routed_output.reshape(bs, slen, dim)
 
-        routed_indices, routed_output = grouped_expert_contributions(
+        token_indices, routed_output = grouped_expert_contributions(
             self.experts,
             x,
             top_scores,
             selected_experts_indices,
             self.reorderer,
         )
+        out = combine_routed_rows(routed_output, token_indices, x.shape[0], self.top_k)
 
         if self.shared_expert is not None:
-            out = self.shared_expert(x)
+            shared_output = self.shared_expert(x)
             if self.shared_expert_gate is not None:
-                out = F.sigmoid(self.shared_expert_gate(x)) * out
-        else:
-            out = torch.zeros_like(x)
+                shared_output = F.sigmoid(self.shared_expert_gate(x)) * shared_output
+            out = out + shared_output
 
-        out = out.scatter_add(dim=0, index=routed_indices, src=routed_output)
-        out = out.reshape(bs, slen, dim)
-        return out
+        return out.to(x.dtype).reshape(bs, slen, dim)
 
     def init_weights(self, init_std: float):
         self.experts.init_weights(init_std)
