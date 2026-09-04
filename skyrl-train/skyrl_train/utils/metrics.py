@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 
-from skyrl_train.utils.importance_ratio_diagnostics import STATUS_REDUCTION_OPS
+from skyrl_train.utils.importance_ratio_diagnostics import MINI_BATCH_REDUCTION_OPS
 
 
 def mean_metrics(metrics: Mapping[str, Sequence[float]]) -> dict[str, float]:
@@ -25,21 +25,25 @@ def policy_training_metrics(
 
     This is the SECOND reduction axis. Reducing correctly across ranks and then averaging the result
     back down over mini-batches is the same category error one level lower: at n mini-batches per
-    step a max becomes mean-of-n-maxima, and a "did any rank fail" flag becomes 1/n. The op map is
-    shared with Strategy.all_reduce_status so the two axes cannot drift apart.
+    step a max becomes mean-of-n-maxima, and a "did any rank fail" flag becomes 1/n.
+
+    The map is MINI_BATCH_REDUCTION_OPS, which is STATUS_REDUCTION_OPS plus the entries where the two
+    axes genuinely disagree, so drift still takes an explicit decision. Today that is the token
+    counts: across ranks a mean (replicas hold the same tokens, so a sum multiplies by the
+    replication factor), across mini-batches a sum (windows hold different tokens).
 
     The learning rate is the third case: neither a mean nor a specially-reduced key, but the LATEST
     value, because a schedule that moved during the step is described by where it ended rather than
     by the average of where it was.
     """
     scalars = {name: values for name, values in metrics.items() if name != "response_length"}
-    status = mean_metrics({name: v for name, v in scalars.items() if name not in STATUS_REDUCTION_OPS})
+    status = mean_metrics({name: v for name, v in scalars.items() if name not in MINI_BATCH_REDUCTION_OPS})
     # Explicit dispatch. The earlier form was `max(values) if op == "max" else sum(values)`, which
     # silently SUMMED any op it did not know -- so adding a new op to the map would have published a
     # sum of flags and looked like a number. An unknown op must fail loudly instead.
     reducers = {"max": max, "min": min, "sum": sum}
     for name, values in scalars.items():
-        op = STATUS_REDUCTION_OPS.get(name)
+        op = MINI_BATCH_REDUCTION_OPS.get(name)
         if op is None:
             continue
         if not values:

@@ -276,14 +276,49 @@ def test_the_mini_batch_axis_refuses_an_op_it_cannot_perform():
     """
     from skyrl_train.utils import metrics as metrics_module
 
-    original = dict(metrics_module.STATUS_REDUCTION_OPS)
-    metrics_module.STATUS_REDUCTION_OPS["made_up_key"] = "median"
+    original = dict(metrics_module.MINI_BATCH_REDUCTION_OPS)
+    metrics_module.MINI_BATCH_REDUCTION_OPS["made_up_key"] = "median"
     try:
         with pytest.raises(ValueError, match="unknown reduction op"):
             policy_training_metrics({"made_up_key": [1.0, 2.0]}, policy_update_steps=1.0)
     finally:
-        metrics_module.STATUS_REDUCTION_OPS.clear()
-        metrics_module.STATUS_REDUCTION_OPS.update(original)
+        metrics_module.MINI_BATCH_REDUCTION_OPS.clear()
+        metrics_module.MINI_BATCH_REDUCTION_OPS.update(original)
+
+
+def test_a_ranks_token_counts_are_SUMMED_across_its_optimizer_windows():
+    """🚨 The two reduction axes disagree here, and one map could not express it.
+
+    Across RANKS these stay a mean: replicas under sequence/context/expert/tensor parallelism hold
+    the SAME tokens, so a WORLD sum multiplies the count by the replication factor (16x at CP2xEP8).
+    Across MINI-BATCHES the opposite holds -- one rank's optimizer windows hold DIFFERENT tokens --
+    so a mean is a category error. Windows of 3 and 7 offending tokens published 5.0 where the
+    rank's step total is 10; on a 32-window step that understates the count by roughly 32x.
+    """
+    from skyrl_train.utils.importance_ratio_diagnostics import (
+        MINI_BATCH_REDUCTION_OPS,
+        STATUS_REDUCTION_OPS,
+        TOKEN_COUNT_METRIC_KEYS,
+    )
+
+    status = policy_training_metrics(
+        {key: [3.0, 7.0] for key in TOKEN_COUNT_METRIC_KEYS},
+        policy_update_steps=2.0,
+    )
+    for key in TOKEN_COUNT_METRIC_KEYS:
+        assert status[key] == 10.0, f"{key} published {status[key]}, the mean, not the step total"
+
+    # And the rank axis is deliberately NOT changed: a sum there would multiply replicated tokens.
+    for key in TOKEN_COUNT_METRIC_KEYS:
+        assert key not in STATUS_REDUCTION_OPS, (
+            f"{key} must stay mean-reduced across ranks; a WORLD sum multiplies by the replication "
+            "factor, which is why the two axes need separate maps"
+        )
+        assert MINI_BATCH_REDUCTION_OPS[key] == "sum"
+
+    # Everything else still agrees across the two axes, so drift takes an explicit decision.
+    shared = {k: v for k, v in MINI_BATCH_REDUCTION_OPS.items() if k not in TOKEN_COUNT_METRIC_KEYS}
+    assert shared == STATUS_REDUCTION_OPS
 
 
 def test_the_specially_reduced_path_rejects_a_non_numeric_value():

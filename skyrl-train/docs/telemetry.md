@@ -34,7 +34,10 @@ automatic detector of that.
 
 ### `policy_train`, measured in the policy worker
 
-Enabled by `trainer.policy_train_spans` (default off). `trainer.policy_train_spans_synchronize`
+Enabled by `trainer.policy_train_spans` (default off). **FSDP2 only** — the Megatron worker
+overrides `ppo_train` and does not bracket Megatron Core's pipeline scheduler, so the flag would
+publish no spans at all there; `validate_cfg` rejects the combination rather than letting a run
+measure nothing. `trainer.policy_train_spans_synchronize`
 (default on) decides what the numbers mean, and it is not a free choice: CUDA kernels launch
 asynchronously, so without a device synchronise a span measures kernel *launch* time and charges a
 backward's real cost to whatever later call happens to block. With it, spans measure execution at
@@ -88,6 +91,20 @@ it is handed in.
 | `rollout_env_resume_seconds_sum` | the environment returning until the coroutine resumes — a direct read of **event-loop backlog** |
 | `rollout_*_seconds_max` | the longest single trajectory's cumulative wait |
 | `rollout_trajectory_count` | how many trajectory scopes closed — **the denominator the tail must be read against** |
+
+⚠️ **`rollout_engine_await` is not purely engine time on the `prompts=` call form.** Callers that pass
+text rather than token ids -- `collect_batched`, and `agent_loop` under `retokenize_chat_history` --
+await the whole `InferenceEngineClient.generate` inside the wait, and that call templates on the
+driver's event-loop thread before any engine is touched. That templating is now bracketed as
+`rollout_tokenize`, so it is **visible in the tree**, but it is **still inside the wait counter** --
+the bracket cannot narrow a region several frames up the stack. So on those paths the two overlap:
+subtract `rollout_tokenize` from `rollout_engine_await` before reading the latter as engine time, and
+do not sum them.
+
+The complete repair is to hoist the templating to the caller and pass `prompt_token_ids=`, which is a
+**behaviour** change rather than an instrumentation one -- `chat_template_kwargs` is documented as
+incompatible with `batched=True` precisely because the engine client owns templating there. It is
+deliberately left as follow-up work rather than smuggled into a telemetry change.
 
 ⚠️ **`_count` and `_seconds_max` are different populations, and mixing them is the easy mistake.**
 `_count` counts timed *calls*, of which one trajectory makes several, so `sum / _count` is a mean
@@ -171,5 +188,13 @@ driver rows per step. Budget accordingly before enabling the policy tree on a lo
   `:1977`), so neither of those is a safe parent -- naming one would orphan the whole subtree on the
   other path. `train_critic_and_policy` (`trainer.py:731`) wraps both branches and is always
   published, so worker rows name it and the two driver phases are their siblings rather than their
-  ancestors. The cost is one level of resolution on the common path; the alternative was a hierarchy
-  that is false whenever a critic is configured.
+  ancestors.
+
+  ⚠️ **The cost is real, and it is not merely "one level of resolution."** The driver's `policy_train`
+  and the worker's `policy_ppo_train` are now siblings under one parent **while the first contains
+  the second**, and nothing in the data expresses that containment any more -- it used to be the one
+  relation the tree stated. **So do not subtract one from the other, and do not sum them.** The
+  orphaning this avoids needs `critic_model is not None` **and** `colocate_all` false, and
+  `colocate_all` defaults **true** (`ppo_base_config.yaml:55`) -- so the trade buys a non-default
+  corner at a cost paid on the default path. It is taken because the orphaning is silent and total
+  while this is merely coarse.
