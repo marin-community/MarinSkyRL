@@ -1,4 +1,5 @@
 import aiohttp
+from skyrl_train.timing_observability import rollout_span
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -223,7 +224,12 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 # TODO(Charlie): this is not token-in-token-out because vLLM does not support
                 # returning token IDs via HTTP requests. Fix after this vLLM PR is merged:
                 # https://github.com/vllm-project/vllm/pull/22587
-                output_ids.append(self.tokenizer.encode(text, add_special_tokens=False))
+                # 🚨 Driver event-loop thread, inside the `generate` the caller awaits under
+                # rollout_wait(ROLLOUT_ENGINE_AWAIT) -- so re-encoding EVERY generated response in
+                # the batch was published as time the engines spent generating. ⚠️ Passing
+                # `prompt_token_ids=` does not avoid this: it is the RESPONSE side.
+                with rollout_span("rollout_tokenize"):
+                    output_ids.append(self.tokenizer.encode(text, add_special_tokens=False))
         elif self.engine_backend == "sglang":
             # since prompt_token_ids is a list of lists, response is a list of dicts
             for output in response:
@@ -231,7 +237,10 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 output_ids.append(cur_output_ids)
                 # SGLang only returns tokens not text when skip_tokenizer_init is True, so
                 # we manually decode it.
-                outputs.append(self.tokenizer.decode(cur_output_ids, skip_special_tokens=True))
+                # Same shape as the vllm branch above: driver-thread detokenization inside the
+                # caller's engine wait.
+                with rollout_span("rollout_tokenize"):
+                    outputs.append(self.tokenizer.decode(cur_output_ids, skip_special_tokens=True))
                 finish_reasons.append(output["meta_info"]["finish_reason"]["type"])
         else:
             raise ValueError(f"Invalid engine backend: {self.engine_backend}")

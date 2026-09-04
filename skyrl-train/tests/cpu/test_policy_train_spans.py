@@ -210,6 +210,18 @@ def _unconditional_driver_phases() -> set[str]:
     the trainers means the over-broad version is unrepresentable rather than merely tested against.
 
     A name qualifies only if BOTH trainers open it and NEITHER does so under an `if`/`try`/`while`.
+
+    ⚠️ **What this does NOT prove.** It is lexical. It does not see `ast.For` (a loop body can run
+    zero times), it cannot tell that a `Timer` inside a conditionally-CALLED function is
+    conditional, and a dead conditional expression -- `Timer(...) if False else Timer("x", ...)` --
+    passes it. Adding more node types does not fix the class; syntax cannot prove runtime
+    containment. It is kept as defence in depth, and the thing that actually makes a mislabelled
+    parent survivable is the read-back asserted in
+    `test_a_mislabelled_driver_parent_fails_LOUDLY_rather_than_orphaning_worker_rows`.
+
+    ⚠️ Do NOT add `ast.For` to the branch tuple to "tighten" this: every phase in `_train_loop` sits
+    under the epoch and dataloader loops, so the intersection would lose `train_critic_and_policy`
+    and the inertness canary below would fire.
     """
     import ast
 
@@ -1180,3 +1192,41 @@ def test_the_status_dict_keeps_its_per_key_ops_through_the_real_ppo_train(monkey
         "a rank that skipped its optimizer step must publish 0, not 79/80 rounded to 1"
     )
     assert status["policy_loss"] == pytest.approx(1.0), "an ordinary metric still means"
+
+
+def test_a_mislabelled_driver_parent_fails_LOUDLY_rather_than_orphaning_worker_rows():
+    """Why the derived AST walk being weak is tolerable, written down so nobody removes the reason.
+
+    `_unconditional_driver_phases` is lexical: it cannot see that a `Timer` in a dead conditional
+    expression never runs, so `Timer(...) if False else Timer("unrelated", ...)` passes it. The
+    reported consequence was that production would publish worker rows naming a missing parent.
+
+    It would not. BOTH trainers read that exact key straight back off `all_timings`, and
+    `all_timings` is a plain `dict` rather than a `defaultdict` -- so a mislabelled Timer raises
+    KeyError on the first training step of the run, before any worker row is published. Loud, not
+    silent.
+
+    That read-back is load-bearing and nothing else records it. A `defaultdict` here, or dropping
+    the `train_duration` line, would convert a crash into exactly the silent orphaning the walk is
+    too weak to catch.
+    """
+    import inspect
+
+    import skyrl_train.fully_async_trainer as fully_async_module
+    import skyrl_train.trainer as trainer_module
+    from skyrl_train.trainer import RayPPOTrainer
+
+    # A plain dict: a missing key raises. `collections.defaultdict(float)` would return 0.0 and
+    # publish a step that took no time, which is the failure mode this is guarding.
+    init = inspect.getsource(RayPPOTrainer.__init__)
+    assert "self.all_timings = {}" in init, (
+        "all_timings is no longer a plain dict literal; a defaultdict would turn a mislabelled "
+        "Timer from a crash into a silent zero"
+    )
+
+    for module in (trainer_module, fully_async_module):
+        source = inspect.getsource(module)
+        assert 'self.all_timings["train_critic_and_policy"]' in source, (
+            f"{module.__name__} no longer reads the training phase back; without that read the "
+            "derived parent walk is the only guard, and it cannot see a dead conditional"
+        )

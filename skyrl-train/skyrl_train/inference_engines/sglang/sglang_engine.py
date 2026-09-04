@@ -24,6 +24,7 @@ from sglang.srt.managers.tokenizer_manager import (
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
 )
+from skyrl_train.timing_observability import rollout_span
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -376,7 +377,11 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
         for output in outputs:
             response_ids.append(output["output_ids"])
-            responses.append(self.tokenizer.decode(output["output_ids"], skip_special_tokens=True))
+            # Bracketed for the same reason as the remote backend's two sites. On the local
+            # (Ray-actor) path ROLLOUT_TIMINGS is unset and rollout_span is a no-op, so this costs
+            # nothing there and attributes correctly wherever the scope IS set.
+            with rollout_span("rollout_tokenize"):
+                responses.append(self.tokenizer.decode(output["output_ids"], skip_special_tokens=True))
             stop_reasons.append(output["meta_info"]["finish_reason"]["type"])
 
         return InferenceEngineOutput(

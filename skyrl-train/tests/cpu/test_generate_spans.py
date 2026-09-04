@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import importlib
 import inspect
 import re
 import threading
@@ -75,6 +74,8 @@ EXPECTED_TOKENIZE_REGIONS = {
     "trajectory_runners.skyrl_gym": 7,
     "trajectory_runners.step_wise": 3,
     "inference_engines.inference_engine_client": 2,
+    "inference_engines.remote_inference_engine": 2,
+    "inference_engines.sglang.sglang_engine": 1,
 }
 
 # The packages the rollout actually runs through. Scanning DIRECTORIES rather than enumerating
@@ -93,13 +94,11 @@ TOKENIZE_UNCOVERED_MODULES = {
     # runner that publishes no parent.
     "trajectory_runners.harbor.runner": "uninstrumented runner; publishes nothing by design",
     "trajectory_runners.mini_swe.runner": "uninstrumented runner; publishes nothing by design",
-    # ⚠️ NOT AUDITED. These are alternative engine backends, not used by any run in this workstream,
-    # and their driver-thread encode/decode may carry the SAME defect that was just fixed in
-    # inference_engine_client -- tokenizer work inside the caller's rollout_wait, published as
-    # engine time. Stated as an open question rather than a clean bill of health; whoever ships
-    # either backend should audit them the same way.
-    "inference_engines.remote_inference_engine": "alternative backend, unaudited -- see note",
-    "inference_engines.sglang.sglang_engine": "alternative backend, unaudited -- see note",
+    # ⚠️ Both alternative backends were audited after the fact and BOTH carried the defect, so they
+    # are covered above rather than exempted. remote_inference_engine re-encodes every generated
+    # response in the batch on the driver thread (its own comment explains why: vLLM cannot return
+    # token IDs over HTTP), and sglang detokenizes there too. Passing `prompt_token_ids=` does not
+    # protect against either -- they are on the RESPONSE side.
 }
 
 # Tokenizer calls that are deliberately NOT inside a rollout_tokenize region, by the function that
@@ -153,11 +152,25 @@ class _InstrumentedRunner(TrajectoryRunner):
     generate_spans_instrumented = True
 
 
+def _module_source(module_name: str) -> str:
+    """Read a module's source from DISK, never by importing it.
+
+    `importlib.import_module` pulled in the real backend package, and `sglang` is not installed in
+    the CPU environment -- so covering that module by import turned its guard into a collection
+    error. These walks only ever needed the text.
+    """
+    import pathlib
+
+    import skyrl_train
+
+    path = pathlib.Path(skyrl_train.__file__).parent / (module_name.replace(".", "/") + ".py")
+    assert path.exists(), f"{module_name} does not resolve to a file at {path}"
+    return path.read_text()
+
+
 def _tokenize_regions(module_name: str) -> list[str]:
     """The body of every ``with rollout_span("rollout_tokenize")`` block, as source text."""
-    module = importlib.import_module(f"skyrl_train.{module_name}")
-
-    lines = inspect.getsource(module).splitlines()
+    lines = _module_source(module_name).splitlines()
     regions: list[str] = []
     for index, line in enumerate(lines):
         if 'rollout_span("rollout_tokenize")' not in line:
@@ -1394,8 +1407,7 @@ def test_every_tokenizer_call_is_inside_a_tokenize_region(module_name):
     and the suite stays green. This walks the AST instead: every ``self.tokenizer.<anything>()`` call
     must fall inside the line range of a tokenize region, or be named in TOKENIZE_EXEMPT_FUNCTIONS.
     """
-    module = importlib.import_module(f"skyrl_train.{module_name}")
-    source = inspect.getsource(module)
+    source = _module_source(module_name)
     tree = ast.parse(source)
 
     regions: list[range] = []
@@ -1470,8 +1482,7 @@ def test_every_wait_site_is_inside_a_trajectory_scope(module_name):
     published as a MEASURED zero beside a non-zero mean. Counting decorators would not have caught
     it; this walks the call sites.
     """
-    module = importlib.import_module(f"skyrl_train.{module_name}")
-    tree = ast.parse(inspect.getsource(module))
+    tree = ast.parse(_module_source(module_name))
 
     scoped: set[int] = set()
     holder: dict[int, str] = {}
@@ -1745,3 +1756,52 @@ def test_the_trainer_wires_the_generate_span_layer():
 
     # The counters ride their own publisher, next to the phase publish rather than inside it.
     assert "publish_driver_counters(self.all_rollout_counters" in source
+
+
+def test_the_SHIPPED_runner_puts_its_own_cost_under_its_own_leaf(monkeypatch):
+    """🚨 The shipped brackets, not a private stand-in.
+
+    The positive tree test above drives a `_Bracketed` runner defined in this file, so relabelling
+    the REAL `rollout_span("rollout_collect")` in skyrl_gym.py to `rollout_finalize` left the whole
+    suite green -- `mark_supported()` seeds every declared leaf at 0.0, so `rollout_collect` was
+    still PRESENT, still a key, just permanently zero while collection time piled into the wrong
+    leaf. Asserting a key exists is not asserting it measured anything.
+
+    `_run` takes its collector and its projection as injected seams, so the shipped method runs here
+    with fakes that cost a known, DISTINCT number of seconds each.
+    """
+    from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
+
+    clock = {"now": 0.0}
+
+    class _Collector:
+        async def collect(self, input_batch, disable_tqdm=False):
+            clock["now"] += 2.0
+            return {"rows": []}
+
+    class _Projection:
+        def project(self, outputs, input_batch):
+            clock["now"] += 3.0
+            return {"response_ids": [], "loss_masks": [], "rollout_metrics": None, "rewards": []}
+
+    runner = object.__new__(SkyRLGymTrajectoryRunner)
+    runner.collector = _Collector()
+    runner.projection = _Projection()
+    runner.trajectory_sink = None
+    runner.trajectory_runner_cfg = {}
+
+    monkeypatch.setattr(timing_module, "time", SimpleNamespace(perf_counter=lambda: clock["now"]))
+
+    timings = RolloutTimings()
+    asyncio.run(runner.run({}, phase_timings=timings))
+
+    assert timings.supported is True, "the shipped runner is certified and must mark the accumulator"
+    # ⚠️ The exact seconds, not mere presence. Every declared leaf is seeded at 0.0, so a relabelled
+    # bracket leaves this key in place reading zero -- which is what let the mutation survive.
+    assert timings.durations["rollout_collect"] == pytest.approx(2.0), (
+        f"collection cost landed as {timings.durations.get('rollout_collect')}; a relabelled bracket "
+        "leaves the seeded 0.0 here and moves the real seconds to another leaf"
+    )
+    assert timings.durations["rollout_assemble"] == pytest.approx(3.0)
+    # rollout_finalize wraps the shared epilogue, which does no work on this input.
+    assert timings.durations["rollout_finalize"] == pytest.approx(0.0)
