@@ -905,7 +905,7 @@ def test_an_unsettled_flush_is_reported_even_when_rows_were_also_lost(monkeypatc
 
     Under `elif`, a degraded endpoint that rejected two rows and still held forty at the one-second
     cap reported only the two -- and an operator reasonably read the other forty as delivered. The
-    branch was also dead to the suite: deleting it entirely left the full 1,907 tests green.
+    branch was also dead to the suite: deleting it entirely left the whole suite green.
     """
     from types import SimpleNamespace
 
@@ -970,6 +970,12 @@ def test_a_loss_warning_does_not_claim_more_than_lost_records_can_support(monkey
     assert timeouts == [timing_module.TELEMETRY_FLUSH_TIMEOUT_SECONDS], (
         "the driver's flush must use the documented cap; raising it to 60 s was green, and this runs "
         "in the step epilogue on the default path"
+    )
+    # Pin the CONSTANT too, not only that the call uses it. Comparing the call to the same constant
+    # passes for any value, including 0.0 -- which turns the flush into a no-op and makes every loss
+    # invisible -- and 60.0, which is what the doc says it is not.
+    assert timing_module.TELEMETRY_FLUSH_TIMEOUT_SECONDS == 1.0, (
+        "docs/telemetry.md quotes a one-second cap and derives the per-step cost from it"
     )
     losses = [w for w in warned if "record(s) were lost" in w]
     assert losses, "a loss inside the window must still be reported"
