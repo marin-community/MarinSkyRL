@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from omegaconf import OmegaConf
 
-from skyrl_train import rollout_observability
+from skyrl_train import rollout_observability, telemetry as training_telemetry
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
 from skyrl_train.dynamic_sampling import GroupSelectionResult
 from skyrl_train.fully_async_trainer import (
@@ -29,6 +29,9 @@ class RecordingInstrument:
         self.records.append((value, attributes))
 
     def record(self, value: float, *, attributes: dict[str, str]) -> None:
+        self.records.append((value, attributes))
+
+    def set(self, value: float, *, attributes: dict[str, str]) -> None:
         self.records.append((value, attributes))
 
 
@@ -75,6 +78,30 @@ def trainer_shell(*, global_step: int = 0, published_policy_version: int = 0) ->
 
     trainer._drain_policy_event_loops = drain
     return trainer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drained", [False, True])
+async def test_shutdown_reports_actual_completed_buffer_depth(monkeypatch, drained):
+    depth, capacity = RecordingInstrument(), RecordingInstrument()
+    monkeypatch.setattr(training_telemetry, "rollout_queue_depth", depth)
+    monkeypatch.setattr(training_telemetry, "rollout_capacity", capacity)
+    trainer = trainer_shell()
+    queue = asyncio.Queue(maxsize=4)
+    queue.put_nowait(object())
+    trainer._generation_queues = _GenerationQueues(queue, asyncio.Queue(), asyncio.Condition())
+    training_telemetry.record_rollout_buffer(1, 4)
+    if drained:
+        queue.get_nowait()
+
+    async def release_resources():
+        pass
+
+    trainer._teardown = release_resources
+    await trainer.shutdown()
+
+    assert depth.records[-1][0] == (0 if drained else 1)
+    assert capacity.records[-1][0] == 4
 
 
 @pytest.mark.asyncio

@@ -669,6 +669,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             queues = getattr(self, "_generation_queues", None)
             if queues is not None:
                 snapshot = queues.snapshot()
+                record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize)
                 for group in [*snapshot.completed_groups, *snapshot.admitted_groups]:
                     self._record_group_terminal(group, "shutdown_pending")
             await super().shutdown()
@@ -1055,6 +1056,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # Drain any generation outputs that arrived after the training loop
             # stopped consuming (race between producer enqueue and consumer exit).
             drained_groups = _drain_queue(generation_queues.completed)
+            record_rollout_buffer(generation_queues.completed.qsize(), generation_queues.completed.maxsize)
             for group in drained_groups:
                 self._record_group_terminal(group, "epoch_discarded")
             n_drained = len(drained_groups)
