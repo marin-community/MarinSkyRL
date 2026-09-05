@@ -62,6 +62,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from cloud.iris.env_vars import CAPTURE_INFERENCE_TIMINGS_ENV
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
@@ -1769,7 +1770,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         result = await self.llm.add_lora(lora_request)
         return result
 
-    async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
+    async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams, timing=None):
         """Collect outputs for a single prompt."""
         # Check if LoRA is enabled and create LoRA request
         final_output = None
@@ -1784,6 +1785,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path"
                 )
 
+        if timing is not None:
+            timing.update(
+                request_id=request_id,
+                engine_id=self._stats_engine_id,
+                submitted_at=time.time(),
+                first_token_at=None,
+            )
         async for request_output in self.llm.generate(
             prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
             sampling_params=sampling_params,
@@ -1791,6 +1799,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             lora_request=lora_request,
         ):
             final_output = request_output
+            if timing is not None and timing["first_token_at"] is None:
+                if any(output.token_ids for output in request_output.outputs):
+                    timing["first_token_at"] = time.time()
+
+        if timing is not None:
+            timing["completed_at"] = time.time()
 
         return final_output
 
@@ -1814,12 +1828,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         tasks = []
         request_ids: list[str] = []
+        timings = [] if os.environ.get(CAPTURE_INFERENCE_TIMINGS_ENV) == "1" else None
         for prompt in prompt_token_ids:
             # Schedule the collection of outputs for each prompt.
             # Avoid duplicate request_ids
             request_id = str(uuid4().hex)
             request_ids.append(request_id)
-            task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params))
+            timing = {} if timings is not None else None
+            if timings is not None:
+                timings.append([timing])
+            task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params, timing))
             tasks.append(task)
         try:
             outputs = await asyncio.gather(*tasks)
@@ -1845,7 +1863,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
             raise
 
-        return self._postprocess_outputs(outputs)
+        result = self._postprocess_outputs(outputs)
+        if timings is not None:
+            result["request_timings"] = timings
+        return result
+
+    async def start_profile(self, profile_prefix: str | None = None):
+        """Start the configured native vLLM profiler on every participating rank."""
+        await self.llm.start_profile(profile_prefix=profile_prefix)
+
+    async def stop_profile(self):
+        await self.llm.stop_profile()
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
