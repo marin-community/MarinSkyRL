@@ -19,7 +19,12 @@ from loguru import logger
 from uuid import uuid4
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.types import VerifierTestCollection
-from skyrl_train.trajectory_runners.projections import attach_terminal_classifications, project_loss_mask
+from skyrl_train.trajectory_runners.projections import (
+    attach_terminal_classifications,
+    is_length_stopped,
+    mask_length_stops,
+    project_loss_mask,
+)
 from skyrl_train.metric_names import (
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
     TIS_ALIGNMENT_ALERT_METRIC,
@@ -578,6 +583,16 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # to keep memory flat; long-tail trials past the window fall back to the
         # earliest retained step (conservative — biases staleness slightly higher).
         self._step_time_history: Deque[Tuple[int, float]] = deque(maxlen=512)
+
+    def _project_loss_masks(self, outputs) -> List[List[int]]:
+        """Trainer loss masks for a batch: the disposition mask, then (generator.mask_length_stops)
+        zeroed for length-stopped samples. The harbor runner builds its own batch, so this is the
+        harbor-side counterpart of projections._loss_masks (apply_overlong_filtering is not applied
+        here: it keys on the tokenizer eos id, which multi-turn chat templates never place last)."""
+        loss_masks = [project_loss_mask(output, list(output.evidence.response_token_ids)) for output in outputs]
+        if bool(self.trajectory_runner_cfg.get("mask_length_stops", False)):
+            loss_masks = mask_length_stops(loss_masks, outputs)
+        return loss_masks
 
     def _record_step_time(self) -> None:
         """Append (global_step, now) to the step-time history if the step has advanced."""
@@ -1198,6 +1213,11 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             rollout_metrics["generate/truncated_fraction"] = (
                 num_truncated / num_successful if num_successful > 0 else 0.0
             )
+            num_length_stopped = sum(1 for o in successful_outputs if is_length_stopped(o))
+            rollout_metrics["generate/length_stopped"] = num_length_stopped
+            rollout_metrics["generate/length_stop_masked"] = (
+                num_length_stopped if bool(self.trajectory_runner_cfg.get("mask_length_stops", False)) else 0
+            )
             rollout_metrics["generate/truncation_penalty_applied"] = sum(
                 1 for o in successful_outputs if o.truncation_penalized
             )
@@ -1437,9 +1457,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "response_ids": [list(output.evidence.response_token_ids) for output in all_outputs],
             "rewards": [output.reward_result.optimization_reward for output in all_outputs],
             "unshaped_rewards": [float(output.reward_result.unshaped_reward or 0.0) for output in all_outputs],
-            "loss_masks": [
-                project_loss_mask(output, list(output.evidence.response_token_ids)) for output in all_outputs
-            ],
+            "loss_masks": self._project_loss_masks(all_outputs),
             "stop_reasons": [output.evidence.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs_list,
