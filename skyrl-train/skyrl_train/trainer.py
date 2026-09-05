@@ -98,7 +98,15 @@ from skyrl_train.callbacks import (
     DefaultCallbackHandler,
     RefModelUpdateCallback,
 )
-from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
+from skyrl_train.telemetry import (
+    critical_phase,
+    record_generated_work,
+    record_policy_step,
+    record_training_metrics,
+    record_consumed_work,
+    record_event,
+)
+from skyrl_train.rollout_observability import observe_rollout_call
 from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
@@ -119,6 +127,8 @@ _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
 
 class RayPPOTrainer:
+    _training_metrics_enabled = False
+
     def __init__(
         self,
         cfg: DictConfig,
@@ -132,6 +142,7 @@ class RayPPOTrainer:
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
         self.cfg = cfg
+        self._training_metrics_enabled = bool(cfg.trainer.get("training_metrics", False))
         self.group_advantage_invariant = GroupAdvantageInvariant.from_config(
             cfg.trainer.algorithm.resolved_group_advantage
         )
@@ -515,6 +526,12 @@ class RayPPOTrainer:
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
 
     def _log_weight_update_completed(self, *, reason: str, duration_seconds: float) -> None:
+        if self._training_metrics_enabled:
+            record_event(
+                "policy_weights_published",
+                {"completed_update": self.global_step, "finished": time.perf_counter(), "duration": duration_seconds},
+                attributes={"role": "trainer", "step": str(self.global_step), "reason": reason},
+            )
         logger.info(
             "Policy weights updated: step={} reason={} duration_seconds={:.3f}",
             getattr(self, "global_step", None),
@@ -529,6 +546,13 @@ class RayPPOTrainer:
         training_input: TrainingInputBatch,
         duration_seconds: float,
     ) -> None:
+        if self._training_metrics_enabled:
+            record_consumed_work(
+                sequences=len(training_input["sequences"]),
+                response_tokens=int(training_input["response_mask"].sum().item()),
+                loss_tokens=int(training_input["loss_mask"].sum().item()),
+                step=self.global_step,
+            )
         logger.info(
             "Optimizer step completed: step={} epoch={} sequences={} duration_seconds={:.3f}",
             self.global_step,
@@ -1364,7 +1388,12 @@ class RayPPOTrainer:
             self.global_step,
             len(input_batch["prompts"]),
         )
-        trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
+        with observe_rollout_call(
+            step=self.global_step, mode="sync", enabled=self.cfg.trainer.get("generate_spans", False)
+        ) as observation:
+            trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
+            if observation is not None:
+                observation.response_tokens = sum(len(ids) for ids in trajectory_batch["response_ids"])
         # add rollout metrics to self.all_metrics
         if trajectory_batch["rollout_metrics"] is not None:
             self.all_metrics.update(trajectory_batch["rollout_metrics"])
@@ -1453,6 +1482,13 @@ class RayPPOTrainer:
             f"reward/avg_pass_at_{n_samples_per_prompt}": pass_at_n,
             "reward/avg_raw_reward": mean_reward,
         }
+        grouped_rewards = defaultdict(list)
+        for uid, reward in zip(uids_for_metrics, step_rewards):
+            grouped_rewards[uid].append(float(np.sum(reward)))
+        if grouped_rewards:
+            reward_metrics["reward/informative_group_fraction"] = sum(
+                max(values) > min(values) for values in grouped_rewards.values()
+            ) / len(grouped_rewards)
         self.all_metrics.update(reward_metrics)
         logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
 
@@ -2409,7 +2445,10 @@ class RayPPOTrainer:
                 return str(v)
 
         try:
-            serialised = json.dumps({k: _coerce(v) for k, v in payload.items()}, sort_keys=True)
+            values = {k: _coerce(v) for k, v in payload.items()}
+            if self._training_metrics_enabled:
+                record_training_metrics(values, step=step, kind=kind)
+            serialised = json.dumps(values, sort_keys=True)
         except Exception as e:
             serialised = f'{{"_serialize_error": "{e}"}}'
         logger.info(f"WANDB_MIRROR kind={kind} step={step} metrics={serialised}")

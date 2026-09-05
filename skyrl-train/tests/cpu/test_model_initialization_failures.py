@@ -86,7 +86,7 @@ async def test_training_failure_log_record_does_not_contain_exception_object():
     trainer.global_step = 12
     trainer.trajectory_runner = SimpleNamespace(startup=AsyncMock())
     trainer._train_loop = AsyncMock(side_effect=_UnpickleableError("GPU worker ran out of memory"))
-    trainer._cancel_trajectory_tasks = Mock()
+    trainer._cancel_trajectory_tasks = AsyncMock()
     trainer._teardown = AsyncMock()
     messages = []
     sink_id = logger.add(messages.append, level="ERROR")

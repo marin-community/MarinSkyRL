@@ -80,6 +80,8 @@ async def test_fully_async_step_finishes_policy_drain_before_forward():
     events = []
 
     class TrainingStep:
+        _async_observations_enabled = False
+
         def __init__(self):
             self.cfg = OmegaConf.create(
                 {

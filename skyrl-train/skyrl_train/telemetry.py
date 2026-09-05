@@ -1,4 +1,5 @@
 import contextlib
+import math
 import os
 import socket
 import time
@@ -11,12 +12,14 @@ from loguru import logger
 
 try:
     from rigging import telemetry
+    from rigging.telemetry.serialization import EventBody
 except ImportError as error:
     # An installed rigging without the telemetry submodule raises ImportError, not
     # ModuleNotFoundError; the name check still keeps a failure inside rigging visible.
     if error.name != "rigging":
         raise
     from skyrl_train import inert_telemetry as telemetry
+    from skyrl_train.inert_telemetry import EventBody
 
 
 # A process that forwards a foreign system's metrics publishes under that system's name; this one
@@ -41,6 +44,45 @@ policy_step = telemetry.gauge("policy_step", unit="{step}")
 rollout_queue_depth = telemetry.gauge("rollout_queue_depth", unit="{item}")
 rollout_capacity = telemetry.gauge("rollout_capacity", unit="{item}")
 rollout_staleness = telemetry.histogram("rollout_staleness_steps", unit="{step}")
+training_metric = telemetry.histogram("training_metric_value")
+nonfinite_training_metric = telemetry.counter("training_nonfinite_values", unit="{value}")
+
+
+def record_event(
+    name: str,
+    fields: dict[str, str | int | float | bool | None],
+    *,
+    attributes: dict[str, str] | None = None,
+) -> None:
+    """Enqueue a flat event, omitting unavailable values instead of inventing them."""
+    telemetry.event(
+        name, EventBody({key: value for key, value in fields.items() if value is not None}), attributes=attributes
+    )
+
+
+def record_consumed_work(*, sequences: int, response_tokens: int, loss_tokens: int, step: int) -> None:
+    """Record useful work after an optimizer step completes successfully."""
+    attributes = {"role": TRAINER_ROLE, "step": str(step)}
+    for kind, count in (
+        ("consumed_sample", sequences),
+        ("consumed_response_token", response_tokens),
+        ("consumed_loss_token", loss_tokens),
+    ):
+        work_completed.add(count, attributes={**attributes, "work_kind": kind})
+
+
+def record_training_metrics(metrics: dict, *, step: int, kind: str) -> None:
+    """Mirror the selected trainer scalar families without changing their values."""
+    for name, value in metrics.items():
+        if not name.startswith(("policy/", "reward/", "loss/", "async/", "generate/", "generator/", "val/", "env/")):
+            continue
+        if not isinstance(value, (int, float)):
+            continue
+        attributes = {"metric": name, "step": str(step), "role": TRAINER_ROLE, "phase": kind}
+        if math.isfinite(value):
+            training_metric.record(float(value), attributes=attributes)
+        else:
+            nonfinite_training_metric.add(1, attributes=attributes)
 
 
 class _BackgroundCollector(Protocol):
@@ -284,7 +326,7 @@ class ProcessTelemetry:
         )
         self._configured = telemetry.runtime_status().configured
         if self._configured:
-            telemetry.event("lifecycle", {"state": "started"}, attributes={"role": self._role})
+            record_event("lifecycle", {"state": "started"}, attributes={"role": self._role})
         return self
 
     def collector_or_inert(self, collector: _BackgroundCollector) -> _BackgroundCollector:
@@ -294,7 +336,7 @@ class ProcessTelemetry:
         del exc, traceback
         if self._configured:
             export = telemetry.runtime_status()
-            telemetry.event(
+            record_event(
                 "terminal",
                 {
                     "status": "completed" if exc_type is None else "failed",

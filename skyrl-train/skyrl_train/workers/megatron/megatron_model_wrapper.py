@@ -16,6 +16,11 @@ from skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
+from skyrl_train.megatron_timing import (
+    FORWARD_BACKWARD_SCHEDULER,
+    PIPELINE_METRIC_BROADCAST,
+    MegatronTrainTimings,
+)
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
 
@@ -248,6 +253,7 @@ class MegatronModelWrapper:
         seq_len: int,
         micro_batch_size: int,
         temperature: float = 1.0,
+        timings: MegatronTrainTimings | None = None,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -333,20 +339,22 @@ class MegatronModelWrapper:
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
-        metrics_list = forward_backward_func(
-            forward_step_func=forward_step,
-            data_iterator=batch_generator,
-            model=self.actor_module,
-            num_microbatches=len(micro_batches),
-            seq_length=seq_len,
-            micro_batch_size=micro_batch_size,
-            forward_only=False,
-        )
+        timing = timings or MegatronTrainTimings(enabled=False)
+        with timing.span(FORWARD_BACKWARD_SCHEDULER):
+            metrics_list = forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=batch_generator,
+                model=self.actor_module,
+                num_microbatches=len(micro_batches),
+                seq_length=seq_len,
+                micro_batch_size=micro_batch_size,
+                forward_only=False,
+            )
 
         # broadcast metrics to all pp ranks
         if not mpu.is_pipeline_last_stage(ignore_virtual=True):
             metrics_list = [None] * len(micro_batches)
-        with torch.no_grad():
+        with timing.span(PIPELINE_METRIC_BROADCAST), torch.no_grad():
             torch.distributed.broadcast_object_list(
                 metrics_list,
                 src=mpu.get_pipeline_model_parallel_last_rank(),

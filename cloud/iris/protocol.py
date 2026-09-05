@@ -103,6 +103,11 @@ class IrisLaunchOptions:
     max_retries: int
     job_name: str
     wandb_entity: str | None
+    timeout_seconds: int = 0
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be nonnegative (0 disables the job deadline)")
 
 
 @dataclass(frozen=True)

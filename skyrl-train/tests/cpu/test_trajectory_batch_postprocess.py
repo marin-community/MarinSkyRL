@@ -105,6 +105,23 @@ def test_response_level_rewards():
     assert result["rewards"] == [[0.0, 1.0], [0.0, 0.0, 0.5]]
 
 
+def test_informative_fraction_counts_prompt_groups_with_reward_variation():
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.cfg = create_config(6)
+    trainer.cfg.generator.n_samples_per_prompt = 2
+    trainer.all_metrics = {}
+    trajectory_batch: TrajectoryBatch = {
+        "prompt_token_ids": [[1]] * 6,
+        "response_ids": [[2]] * 6,
+        "rewards": [0.0, 1.0, 0.0, 0.0, 1.0, 1.0],
+        "loss_masks": [[1]] * 6,
+        "stop_reasons": ["stop"] * 6,
+        "rollout_metrics": None,
+    }
+    trainer.postprocess_trajectory_batch(trajectory_batch, ["fail", "pass", "mixed", "fail", "pass", "mixed"])
+    assert trainer.all_metrics["reward/informative_group_fraction"] == pytest.approx(1 / 3)
+
+
 def test_token_level_rewards():
     """Test postprocess_trajectory_batch with token-level rewards (List[List[float]])."""
 

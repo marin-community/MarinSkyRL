@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import contextlib
 import logging
 import os
@@ -66,6 +67,7 @@ from skyrl_train.models.grug_query_bias import (
 )
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.batch_invariant import enable_trainer_batch_invariance
+from skyrl_train.telemetry import WORKER_ROLE, process_telemetry
 from skyrl_train.utils.utils import (
     configure_ray_worker_logging,
     get_tcp_url,
@@ -353,6 +355,10 @@ class Worker(DistributedTorchRayActor):
     def __init__(self, cfg: DictConfig, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
+        if cfg.trainer.get("policy_train_spans", False):
+            self._telemetry = process_telemetry(WORKER_ROLE)
+            self._telemetry.__enter__()
+            atexit.register(self._telemetry.__exit__, None, None, None)
         configure_progress(cfg.trainer.progress)
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
 

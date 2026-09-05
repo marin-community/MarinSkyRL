@@ -2,11 +2,14 @@
 uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/test_skyrl_gym_runner_chat_templating.py
 """
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
-from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
+from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from omegaconf import OmegaConf
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
@@ -15,6 +18,8 @@ from transformers import AutoTokenizer
 from skyrl_gym.envs import register
 from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template, normalize_token_ids
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints.fully_async import AsyncPPOExp
+from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.trajectory_runners.trajectory_processing import CUSTOM_CHAT_TEMPLATES
 from pathlib import Path
 from tests.cpu.trajectory_runners.chat_templating_test_constants import (
@@ -24,6 +29,164 @@ from tests.cpu.trajectory_runners.chat_templating_test_constants import (
     QWEN3_WITHOUT_THINKING_EXPECTED_STR,
     get_expected_chat_history,
 )
+
+
+@pytest.fixture(scope="module")
+def qwen_math_tokenizer():
+    return AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B", revision="c1899de")
+
+
+def _async_math_runner(tokenizer, engine):
+    cfg = get_default_config()
+    cfg.generator.batched = False
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.enable_http_endpoint = False
+    cfg.generator.chat_template.name_or_path = None
+    cfg.generator.chat_template_kwargs = {"enable_thinking": False}
+    cfg.generator.sampling_params.logprobs = 0
+    cfg.generator.sampling_params.max_generate_length = 64
+    cfg.generator.max_input_length = 256
+    cfg.generator.max_turns = 1
+    cfg.generator.apply_overlong_filtering = True
+    cfg.environment.skyrl_gym.max_env_workers = 0
+    experiment = object.__new__(AsyncPPOExp)
+    return experiment.get_trajectory_runner(cfg, tokenizer, engine)
+
+
+def _math_request():
+    return {
+        "prompts": [[{"role": "user", "content": "What is 2 + 2? End with #### and the answer."}]] * 2,
+        "env_extras": [{"reward_spec": {"ground_truth": "4"}} for _ in range(2)],
+        "env_classes": ["gsm8k", "gsm8k"],
+        "trajectory_ids": [TrajectoryID(instance_id="math", repetition_id=index) for index in range(2)],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["stop", "length"])
+async def test_async_math_entrypoint_preserves_behavior_tokens_and_reward_contract(qwen_math_tokenizer, stop_reason):
+    tokenizer = qwen_math_tokenizer
+    request = _math_request()
+    responses = ["2 + 2 = 4. #### 4", "2 + 2 = 4."]
+    generated_ids = [tokenizer.encode(text, add_special_tokens=False) for text in responses]
+    if stop_reason == "stop":
+        generated_ids = [ids + [tokenizer.eos_token_id] for ids in generated_ids]
+    behavior_logprobs = [[-0.01 * (index + 1) for index in range(len(ids))] for ids in generated_ids]
+    expected_prompt = tokenizer.apply_chat_template(
+        request["prompts"][0], tokenize=True, return_dict=True, add_generation_prompt=True, enable_thinking=False
+    )["input_ids"]
+
+    async def generate(engine_input):
+        assert engine_input["prompt_token_ids"] == [expected_prompt]
+        sample_index = int(engine_input["session_ids"][0].rsplit("_", 1)[1])
+        return {
+            "responses": [responses[sample_index]],
+            "response_ids": [generated_ids[sample_index].copy()],
+            "response_logprobs": [behavior_logprobs[sample_index].copy()],
+            "stop_reasons": [stop_reason],
+        }
+
+    runner = _async_math_runner(tokenizer, SimpleNamespace(generate=generate))
+    batch = await runner.run(request, disable_tqdm=True)
+
+    assert batch["prompt_token_ids"] == [expected_prompt, expected_prompt]
+    assert batch["response_ids"] == generated_ids
+    assert batch["rollout_logprobs"] == behavior_logprobs
+    assert batch["rewards"] == [
+        [0.0] * (len(generated_ids[0]) - 1) + [1.0],
+        [0.0] * len(generated_ids[1]),
+    ]
+    assert batch["trajectory_ids"] == request["trajectory_ids"]
+    assert batch["stop_reasons"] == [stop_reason, stop_reason]
+    assert batch["loss_masks"] == [[int(stop_reason == "stop")] * len(ids) for ids in generated_ids]
+    assert batch["rollout_metrics"]["generate/token_provenance/reconstructed_fraction"] == 0.0
+    admission = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        max_staleness_steps=0,
+        rollout_logprobs_required=True,
+    ).evaluate(SimpleNamespace(trajectory_batch=batch, earliest_model_step=0), global_step=0)
+    if stop_reason == "stop":
+        assert admission.accepted
+    else:
+        assert admission.rejections == (AdmissionRejection.FULLY_MASKED,)
+
+
+@pytest.mark.asyncio
+async def test_async_math_submission_version_survives_weight_publication(qwen_math_tokenizer):
+    tokenizer = qwen_math_tokenizer
+    all_submitted = asyncio.Event()
+    finish_generation = asyncio.Event()
+    published_version = 3
+    pending = 0
+    response_ids = tokenizer.encode("#### 4", add_special_tokens=False) + [tokenizer.eos_token_id]
+
+    async def generate(engine_input):
+        nonlocal pending
+        pending += 1
+        if pending == 2:
+            all_submitted.set()
+        await finish_generation.wait()
+        return {
+            "responses": ["#### 4"],
+            "response_ids": [response_ids.copy()],
+            "response_logprobs": [[-0.1] * len(response_ids)],
+            "stop_reasons": ["stop"],
+        }
+
+    runner = _async_math_runner(tokenizer, SimpleNamespace(generate=generate))
+    runner.global_step_fn = lambda: published_version
+    task = asyncio.create_task(runner.run(_math_request(), disable_tqdm=True))
+    try:
+        await asyncio.wait_for(all_submitted.wait(), timeout=5)
+        published_version = 4
+        finish_generation.set()
+        batch = await asyncio.wait_for(task, timeout=5)
+    finally:
+        finish_generation.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert batch["actual_global_step"] == 3
+    assert batch["rollout_logprobs"] == [[-0.1] * len(response_ids)] * 2
+    admission = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        max_staleness_steps=0,
+        rollout_logprobs_required=True,
+    ).evaluate(
+        SimpleNamespace(trajectory_batch=batch, earliest_model_step=batch["actual_global_step"]),
+        global_step=published_version,
+    )
+    assert admission.rejections == (AdmissionRejection.STALE,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_response", ["empty", "misaligned"])
+async def test_async_math_invalid_behavior_evidence_cannot_train(qwen_math_tokenizer, invalid_response):
+    tokenizer = qwen_math_tokenizer
+    response_ids = [] if invalid_response == "empty" else tokenizer.encode("#### 4", add_special_tokens=False)
+
+    async def generate(engine_input):
+        return {
+            "responses": ["" if invalid_response == "empty" else "#### 4"],
+            "response_ids": [response_ids.copy()],
+            "response_logprobs": [[]],
+            "stop_reasons": ["length"],
+        }
+
+    runner = _async_math_runner(tokenizer, SimpleNamespace(generate=generate))
+    if invalid_response == "misaligned":
+        request = {key: values[:1] for key, values in _math_request().items()}
+        with pytest.raises(ValueError, match="do not align with response token IDs"):
+            await runner.run(request, disable_tqdm=True)
+        return
+
+    batch = await runner.run(_math_request(), disable_tqdm=True)
+    admission = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        max_staleness_steps=0,
+        rollout_logprobs_required=True,
+    ).evaluate(SimpleNamespace(trajectory_batch=batch, earliest_model_step=0), global_step=0)
+    assert admission.rejections == (AdmissionRejection.FULLY_MASKED,)
 
 
 # Setup for formatting tests

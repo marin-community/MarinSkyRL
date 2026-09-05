@@ -37,6 +37,10 @@ checkpoint_export:
 
 trainer:
   debug_mode: "off"
+  policy_train_spans: false
+  generate_spans: false
+  async_spans: false
+  training_metrics: false
   collective_phase_diagnostics: false
   distributed:
     placement_group_timeout_seconds: 180

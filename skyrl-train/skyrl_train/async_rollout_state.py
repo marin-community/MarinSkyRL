@@ -14,6 +14,11 @@ class GeneratedOutputGroup:
     uid: str
     earliest_model_step: int
     source_prompts: List[dict]
+    # Process-local observations deliberately omitted from checkpoint serialization.
+    completed_at: float | None = None
+    telemetry_attempt_id: str | None = None
+    admitted_at: float | None = None
+    telemetry_finished: bool = False
 
 
 @dataclass

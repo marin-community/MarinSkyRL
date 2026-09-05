@@ -214,6 +214,9 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--wandb-entity", default=None)
     build_parser.add_argument("--priority", default=None)
     build_parser.add_argument("--max-retries", type=int, default=None)
+    build_parser.add_argument(
+        "--timeout-seconds", type=int, default=None, help="Job deadline in seconds (0 disables it)."
+    )
     build_parser.add_argument("--seed", type=int, default=None)
     build_parser.add_argument("--run-prefix", required=True, help="Canonical output root (e.g. s3://bucket/run-id).")
     build_parser.add_argument("--overrides", default=None, help="JSON list of Hydra ++ override strings.")
@@ -234,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
             "wandb_entity",
             "priority",
             "max_retries",
+            "timeout_seconds",
             "seed",
             "attempt_id",
         )

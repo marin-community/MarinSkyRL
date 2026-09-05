@@ -39,6 +39,13 @@ from skyrl_train.training_batch import (
     TrainingOutputBatch,
     gradient_accumulation_steps,
 )
+from skyrl_train.megatron_timing import (
+    FINAL_BARRIER,
+    OPTIMIZER_STEP,
+    WORLD_METRIC_REDUCTION,
+    MegatronTrainTimings,
+    publish_megatron_train_timings,
+)
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -589,6 +596,25 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     # are shared with the ordinary worker through backend-neutral utilities.
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
+        timing = MegatronTrainTimings(
+            enabled=bool(OmegaConf.select(self.cfg, "trainer.policy_train_spans", default=False))
+        )
+        outcome = "failure"
+        try:
+            output = self._ppo_train_with_timings(train_data, timing)
+            outcome = "success"
+            return output
+        finally:
+            observations = timing.finish()
+            if observations:
+                publish_megatron_train_timings(
+                    observations,
+                    step=int(train_data.metadata["global_step"]),
+                    rank=torch.distributed.get_rank(),
+                    outcome=outcome,
+                )
+
+    def _ppo_train_with_timings(self, train_data, timing: MegatronTrainTimings) -> "TrainingOutputBatch":
         dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
 
         micro_batches_per_mini_batch = gradient_accumulation_steps(
@@ -651,12 +677,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         seq_len=seq_len,
                         micro_batch_size=micro_bsz,
                         temperature=self.cfg.generator.sampling_params.temperature,
+                        timings=timing,
                     )
 
                     if self.empty_cuda_cache:
                         torch.cuda.empty_cache()
 
-                    grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+                    with timing.span(OPTIMIZER_STEP):
+                        grad_norm = self.strategy.optimizer_step(
+                            self.optimizer, self.model, self.scheduler, name="actor"
+                        )
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch
@@ -673,7 +703,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # attach response_length
                         status["response_length"] = micro_buffer[i].num_actions
 
-                        status = self.strategy.all_reduce(status)
+                        with timing.span(WORLD_METRIC_REDUCTION):
+                            status = self.strategy.all_reduce(status)
                         status_list.append(status)
                         for k, v in status.items():
                             all_metrics[k].append(v)
@@ -686,7 +717,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # drop any trailing micros that don't fill a mini-batch (keep behavior consistent)
             micro_buffer = []
 
-        torch.distributed.barrier()
+        with timing.span(FINAL_BARRIER):
+            torch.distributed.barrier()
         if self.profiler is not None:
             self.profiler.stop_and_save()
             self.profiler.stop_trace()

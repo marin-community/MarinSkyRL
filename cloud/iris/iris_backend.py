@@ -332,6 +332,8 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         execution.priority,
         "--max-retries",
         str(execution.max_retries),
+        "--timeout",
+        str(execution.timeout_seconds),
         "--job-name",
         execution.job_name,
         "--rendezvous-dir",

@@ -20,6 +20,7 @@ from skyrl_train.trajectory_runners.types import (
 )
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_trajectory_rewards
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
+from skyrl_train.rollout_observability import rollout_phase
 
 
 class TrajectoryRunner(ABC):
@@ -54,14 +55,16 @@ class TrajectoryRunner(ABC):
             if len(trajectory_ids) != len(output["response_ids"]):
                 raise ValueError("trajectory runner output rows must align with request trajectory IDs")
             output["trajectory_ids"] = list(trajectory_ids)
-        return await self._finalize_output(input_batch, output)
+        with rollout_phase("finalize"):
+            return await self._finalize_output(input_batch, output)
 
     async def _finalize_output(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> TrajectoryBatch:
         """Apply runner-independent shaping, metrics, and retention."""
         shape_trajectory_rewards(output, self.trajectory_runner_cfg.get("trajectory_reward_shaping"))
         self._add_alignment_metrics(output)
         if self.trajectory_sink is not None:
-            await retain_trajectories(self.trajectory_sink, input_batch, output)
+            with rollout_phase("retain"):
+                await retain_trajectories(self.trajectory_sink, input_batch, output)
         return output
 
     def set_trajectory_sink(self, sink: TrajectorySink) -> None:

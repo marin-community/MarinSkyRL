@@ -110,6 +110,29 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     return data
 
 
+def _megatron_forward(actor_group, batch: TrainingInputBatch) -> torch.Tensor:
+    per_rank = ray.get(actor_group.async_run_ray_method("mesh", "forward", data=batch))
+    return concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, per_rank)["output"]
+
+
+def _behavior_clip_reference(
+    action_log_probs: torch.Tensor,
+    rollout_logprobs: torch.Tensor,
+    advantages: torch.Tensor,
+    loss_mask: torch.Tensor,
+    *,
+    eps_clip_low: float,
+    eps_clip_high: float,
+    clip_ratio_c: float,
+) -> float:
+    ratio = torch.exp(action_log_probs - rollout_logprobs)
+    clipped_ratio = ratio.clamp(1.0 - eps_clip_low, 1.0 + eps_clip_high)
+    loss = torch.maximum(-advantages * ratio, -advantages * clipped_ratio)
+    dual_clip = torch.sign(advantages) * clip_ratio_c * advantages
+    loss = torch.where(advantages < 0, torch.minimum(loss, dual_clip), loss)
+    return ((loss * loss_mask).sum() / loss_mask.sum()).item()
+
+
 @pytest.mark.parametrize(
     ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp"),
     [(True, 4, 2, 2, 1, None), (False, 2, 2, 1, 1, None)],
@@ -411,6 +434,85 @@ async def test_megatron_train(
                 continue
             assert isinstance(result[k], (int, float)), f"{k} should be an int or float"
             assert abs(result[k] - results_megatron[i][k]) < 1.5e-1, f"diff in {k} is too large!"
+
+
+@pytest.mark.asyncio
+async def test_megatron_behavior_clip_and_timing_have_matching_updates(ray_init_fixture):
+    """Behavior probabilities drive the dense-Qwen update, and timing is numerically inert."""
+
+    def actor_config(*, policy_train_spans: bool) -> DictConfig:
+        cfg = get_test_actor_config()
+        cfg.trainer.strategy = "megatron"
+        cfg.trainer.policy_train_spans = policy_train_spans
+        cfg.trainer.placement.colocate_all = False
+        cfg.trainer.placement.policy_num_gpus_per_node = 4
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.use_sample_packing = False
+        cfg.trainer.train_batch_size = 4
+        cfg.trainer.policy_mini_batch_size = 4
+        cfg.trainer.micro_train_batch_size_per_gpu = 1
+        cfg.trainer.micro_forward_batch_size_per_gpu = 1
+        cfg.trainer.algorithm.policy_loss_type = "behavior_clip"
+        cfg.trainer.algorithm.use_kl_loss = False
+        cfg.generator.n_samples_per_prompt = 1
+        cfg.generator.sampling_params.logprobs = 0
+        validate_cfg(cfg)
+        return cfg
+
+    configs = [actor_config(policy_train_spans=enabled) for enabled in (False, True)]
+    actor_groups = [
+        init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+        for cfg in configs
+    ]
+    batches = [get_test_training_batch(batch_size=4) for _ in actor_groups]
+
+    before = [_megatron_forward(actor_group, batch) for actor_group, batch in zip(actor_groups, batches, strict=True)]
+    torch.testing.assert_close(before[0], before[1], atol=1.0e-4, rtol=1.0e-4)
+
+    offset = torch.tensor([0.45, -0.45], dtype=before[0].dtype).repeat(5).expand_as(before[0])
+    rollout_logprobs = before[0] + offset
+    advantages = torch.tensor([0.75, -0.5], dtype=before[0].dtype).repeat(5).expand_as(before[0])
+    loss_mask = torch.ones_like(before[0])
+    expected_policy_loss = _behavior_clip_reference(
+        before[0],
+        rollout_logprobs,
+        advantages,
+        loss_mask,
+        eps_clip_low=float(configs[0].trainer.algorithm.eps_clip_low),
+        eps_clip_high=float(configs[0].trainer.algorithm.eps_clip_high),
+        clip_ratio_c=float(configs[0].trainer.algorithm.clip_ratio_c),
+    )
+
+    for batch in batches:
+        batch["action_log_probs"] = before[0].clone()
+        batch["rollout_logprobs"] = rollout_logprobs.clone()
+        batch["advantages"] = advantages.clone()
+        batch["loss_mask"] = loss_mask.clone()
+        batch.metadata["global_step"] = 3
+
+    per_rank_results = [
+        ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", batch))
+        for actor_group, batch in zip(actor_groups, batches, strict=True)
+    ]
+    statuses = [[result.metadata["train_status"] for result in results] for results in per_rank_results]
+
+    assert all(len(results) == 4 for results in per_rank_results)
+    for rank_status in statuses[0]:
+        assert rank_status["policy_loss"] == pytest.approx(expected_policy_loss, abs=5.0e-3)
+    for disabled_status, enabled_status in zip(statuses[0], statuses[1], strict=True):
+        assert enabled_status["policy_loss"] == pytest.approx(disabled_status["policy_loss"], abs=1.0e-6)
+        assert enabled_status["raw_grad_norm"] == pytest.approx(disabled_status["raw_grad_norm"], abs=1.0e-6)
+
+    after = [_megatron_forward(actor_group, batch) for actor_group, batch in zip(actor_groups, batches, strict=True)]
+    assert not torch.equal(before[0], after[0])
+    torch.testing.assert_close(after[0], after[1], atol=1.0e-4, rtol=1.0e-4)
 
 
 @pytest.mark.asyncio

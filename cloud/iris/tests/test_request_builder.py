@@ -7,6 +7,7 @@ profile must follow the trainer strategy, and the result must round-trip through
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from pathlib import Path
 
@@ -14,6 +15,8 @@ import pytest
 import yaml
 
 from cloud.iris.protocol import job_spec
+from cloud.iris import job
+from cloud.iris.iris_backend import create_parser, job_launch_argv
 from cloud.iris.request_builder import (
     _ROLE_PLAN_PATHS,
     build_job_spec,
@@ -353,6 +356,60 @@ def test_runtime_identity_is_portable_across_target_clusters(tmp_path):
 def test_wandb_entity_is_forwarded_to_execution_options(tmp_path):
     spec = _build_basic_spec(tmp_path, wandb_entity="marin-community")
     assert spec.execution.wandb_entity == "marin-community"
+
+
+@pytest.mark.parametrize("timeout_seconds", [0, 1800])
+def test_job_timeout_survives_request_roundtrip_and_backend_adapter(tmp_path, timeout_seconds):
+    spec = _build_basic_spec(tmp_path, timeout_seconds=timeout_seconds)
+    restored = job_spec(json.loads(json.dumps(asdict(spec))))
+
+    args = create_parser().parse_args(job_launch_argv(restored, "config.yaml"))
+
+    assert args.timeout == timeout_seconds
+
+
+def test_request_rejects_negative_job_deadline(tmp_path):
+    payload = asdict(_build_basic_spec(tmp_path))
+    payload["execution"]["timeout_seconds"] = -1
+
+    with pytest.raises(ValueError, match="timeout_seconds must be nonnegative"):
+        job_spec(payload)
+
+
+@pytest.mark.parametrize("timeout_seconds", [None, 1800, -1])
+def test_build_request_cli_preserves_or_rejects_job_deadline(tmp_path, capsys, timeout_seconds):
+    config_path = _write_config(tmp_path, _make_config())
+    arguments = {
+        "config": str(config_path),
+        "run-id": "bounded-smoke",
+        "model-uri": "s3://bucket/model",
+        "model-identity": "model@revision",
+        "model-local-path": "/tmp/model",
+        "tokenizer-uri": "Qwen/Qwen3-0.6B",
+        "tokenizer-revision": "c1899de",
+        "train-data": "[]",
+        "cluster": "cw-rno2a",
+        "cluster-config": "/tmp/cluster.yaml",
+        "cpu": "48",
+        "memory": "700GB",
+        "disk": "4TB",
+        "run-prefix": "s3://bucket/bounded-smoke",
+    }
+    if timeout_seconds is not None:
+        arguments["timeout-seconds"] = str(timeout_seconds)
+    argv = ["iris", "build-request"]
+    for key, value in arguments.items():
+        argv.extend([f"--{key}", value])
+
+    if timeout_seconds == -1:
+        with pytest.raises(ValueError, match="timeout_seconds must be nonnegative"):
+            job.main(argv)
+        return
+
+    assert job.main(argv) == 0
+    restored = job_spec(json.loads(capsys.readouterr().out))
+    args = create_parser().parse_args(job_launch_argv(restored, "config.yaml"))
+    assert args.timeout == (timeout_seconds or 0)
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ High-level notes:
 import asyncio
 import collections
 import os
-import sys
+import time
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
@@ -45,6 +45,13 @@ from skyrl_train.telemetry import (
     record_policy_step,
     record_rollout_buffer,
     record_rollout_staleness,
+    record_event,
+)
+from skyrl_train.rollout_observability import (
+    async_wait,
+    observe_rollout_call,
+    record_group_outcome,
+    monitor_event_loop_lag,
 )
 from skyrl_train.timing_observability import publish_step_timings
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
@@ -84,6 +91,7 @@ class _GenerationQueues:
     active_producers: int = 0
     admitted_groups: List[GeneratedOutputGroup] = field(default_factory=list)
     admitted_groups_consumed: bool = False
+    producer_failure: Exception | None = None
 
     async def mark_producer_finished(self) -> None:
         """Wake admission when a generation worker permanently exits."""
@@ -434,10 +442,14 @@ class _AsyncDataloader:
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
+    _async_observations_enabled = False
+
     def __init__(self, *args, **kwargs):
         # Extract cfg before base init so we can initialize async-specific knobs used by our overrides.
         cfg = kwargs.get("cfg", args[0] if len(args) > 0 else None)
         assert cfg is not None, "cfg must be provided to FullyAsyncRayPPOTrainer"
+        self._async_observations_enabled = bool(cfg.trainer.get("async_spans", False))
+        self._published_policy_version = 0
 
         # Initialize async-specific knobs
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
@@ -565,7 +577,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Account for fully async mini-batch accumulation."""
         return self.num_steps_per_epoch
 
-    def _cancel_trajectory_tasks(self) -> None:
+    async def _cancel_trajectory_tasks(self) -> None:
         """Cancel any active generation tasks left over from an abnormal exit.
 
         Normally the per-epoch epilogue cancels these, but if an exception
@@ -579,6 +591,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             logger.warning(f"Cancelling {n_running} orphaned generation tasks from abnormal train loop exit")
             for t in tasks:
                 t.cancel()
+        # Producers must finish their cancellation handlers before the buffer is
+        # snapshotted and runner resources are closed.
+        await asyncio.gather(*tasks, return_exceptions=True)
         self._active_trajectory_tasks = []
 
     def _restore_buffer_from_checkpoint(self, queues: _GenerationQueues, checkpoint_path: str) -> None:
@@ -597,6 +612,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.async_train_dataloader.reserve_pending_uids(buffer_state.pending_uids())
         for item in buffer_state.completed_groups:
             queues.completed.put_nowait(item)
+        if self._async_observations_enabled:
+            for item in [*buffer_state.completed_groups, *buffer_state.admitted_groups]:
+                record_group_outcome(
+                    outcome="restored",
+                    step=self.global_step,
+                    tokens=sum(len(ids) for ids in item.trajectory_batch["response_ids"]),
+                )
         for prompts in buffer_state.retry_prompts:
             queues.retries.put_nowait(prompts)
         queues.record_admitted(buffer_state.admitted_groups)
@@ -643,6 +665,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         try:
             await self._flush_generation_buffer_on_shutdown()
         finally:
+            queues = getattr(self, "_generation_queues", None)
+            if queues is not None:
+                snapshot = queues.snapshot()
+                for group in [*snapshot.completed_groups, *snapshot.admitted_groups]:
+                    self._record_group_terminal(group, "shutdown_pending")
             await super().shutdown()
 
     async def train(self):
@@ -650,7 +677,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         Main fully async training loop for PPO
         """
         self.global_step = 0
-
+        loop_monitor = (
+            asyncio.create_task(monitor_event_loop_lag(step_fn=lambda: self.global_step))
+            if self._async_observations_enabled
+            else None
+        )
         try:
             await self._startup_trajectory_runner()
             await self._train_loop()
@@ -660,8 +691,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         finally:
             # Cancel any orphaned generation tasks that survived an early exit
             # (the per-epoch epilogue only runs on normal loop completion).
-            self._cancel_trajectory_tasks()
-
+            await self._cancel_trajectory_tasks()
+            if loop_monitor is not None:
+                loop_monitor.cancel()
+                await asyncio.gather(loop_monitor, return_exceptions=True)
             await self.shutdown()
 
     async def _train_loop(self):
@@ -716,7 +749,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # Drain the policy workers' event loops to a hard sync point so every FSDP
             # shard rank is free before the step-1 forward is dispatched (the MoE-RL
             # async-dispatch wedge fix). See _drain_policy_event_loops.
-            await self._drain_policy_event_loops()
+            with Timer("policy_startup_drain", self.all_startup_timings):
+                await self._drain_policy_event_loops()
         self._log_weight_update_completed(
             reason="initial",
             duration_seconds=weight_update_timer.duration,
@@ -767,6 +801,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 condition=asyncio.Condition(),
                 active_producers=self.num_parallel_generation_workers,
             )
+            self._generation_queues = generation_queues
 
             self._buffer_checkpoint_callback.bind_queues(generation_queues)
 
@@ -780,7 +815,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             # Provide the runner with a live reference to global_step so it can
             # capture the step at first vLLM inference (for accurate staleness tracking).
-            self.trajectory_runner.global_step_fn = lambda: self.global_step
+            # Group admission/checkpoints use one-based target steps; publication
+            # versions count completed updates from zero. Keep that conversion at
+            # this boundary instead of relabeling in-flight requests on completion.
+            self.trajectory_runner.global_step_fn = lambda: self._published_policy_version + 1
 
             # Maintain self.num_parallel_generation_workers concurrent group-generation workers.
             # Stored on self so the finally block in train() can cancel them on abnormal exit.
@@ -805,6 +843,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
                             generation_queues,
                         )
+                    if self._async_observations_enabled:
+                        for group in cur_generation_group_mini_batch:
+                            group.admitted_at = time.perf_counter()
 
                     # 2. Post-process the complete generated mini-batch and convert it to training format.
                     with Timer("convert_to_training_input", self.all_timings):
@@ -858,6 +899,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     )
                     await self.data_tracker.mark_consumed([g.uid for g in cur_generation_group_mini_batch])
                     generation_queues.mark_admitted_consumed()
+                    for group in cur_generation_group_mini_batch:
+                        self._record_group_terminal(group, "consumed")
 
                     # 4. After training: sync weights to the inference engines.
                     #    The inference engines are a SHARED HTTP backend that every
@@ -875,14 +918,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     #    fully_async, which never drains trial orchestration. This
                     #    block is now byte-identical for fan-out ON and OFF.
                     with Timer("sync_weights", self.all_timings) as weight_update_timer:
-                        await self.inference_engine_client.pause_generation()
+                        with Timer("weight_pause", self.all_timings):
+                            await self.inference_engine_client.pause_generation()
                         await self.async_sync_policy_weights_to_inference_engines()
                         # Drain the policy workers' event loops to a hard sync point so
                         # every FSDP shard rank is free before the NEXT step's forward is
                         # dispatched (the MoE-RL async-dispatch wedge fix). See
                         # _drain_policy_event_loops.
-                        await self._drain_policy_event_loops()
-                        await self.inference_engine_client.resume_generation()
+                        with Timer("policy_post_sync_drain", self.all_timings):
+                            await self._drain_policy_event_loops()
+                        with Timer("weight_resume", self.all_timings):
+                            await self.inference_engine_client.resume_generation()
                     self._log_weight_update_completed(
                         reason="training_step",
                         duration_seconds=weight_update_timer.duration,
@@ -1008,7 +1054,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             # Drain any generation outputs that arrived after the training loop
             # stopped consuming (race between producer enqueue and consumer exit).
-            n_drained = len(_drain_queue(generation_queues.completed))
+            drained_groups = _drain_queue(generation_queues.completed)
+            for group in drained_groups:
+                self._record_group_terminal(group, "epoch_discarded")
+            n_drained = len(drained_groups)
             assert generation_queues.retries.empty(), (
                 f"Epoch ended with {generation_queues.retries.qsize()} stale-group retries still pending"
             )
@@ -1073,7 +1122,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # on every rank, changes no tensor values (correctness-neutral), strict no-op
         # for single-rank / uninitialized runs. Idempotent with the L739 drain (a
         # second pass-through barrier on an already-free loop is a cheap no-op).
-        await self._drain_policy_event_loops()
+        with Timer("policy_pre_train_drain", self.all_timings):
+            await self._drain_policy_event_loops()
         # inference and calculate values, log probs, rewards, kl divergence
         with Timer("fwd_logprobs_values_reward", self.all_timings):
             training_input = await asyncio.to_thread(self.fwd_logprobs_values_reward, training_input)
@@ -1095,17 +1145,35 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # train policy/critic model
         with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step", self.global_step):
-            status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
+            started = time.perf_counter()
+            outcome = "failure"
+            try:
+                status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
+                outcome = "success"
+            finally:
+                if self._async_observations_enabled:
+                    record_event(
+                        "policy_training_interval",
+                        {"started": started, "finished": time.perf_counter()},
+                        attributes={"role": "trainer", "step": str(self.global_step), "outcome": outcome},
+                    )
 
         return status
 
     async def _run_generate_for_a_group_loop(self, queues: _GenerationQueues):
         """Generate dataset rows or retries and route only fresh groups to the completed queue."""
+        completed_group = None
+        group_enqueued = False
+        slot_acquired = False
         try:
             while True:
                 slot_acquired = False
-                rand_prompts = await self._next_generation_prompts(queues)
-                await self._staleness_manager.acquire_submission_slot()
+                completed_group = None
+                group_enqueued = False
+                with async_wait("prompt", step=self.global_step, enabled=self._async_observations_enabled):
+                    rand_prompts = await self._next_generation_prompts(queues)
+                with async_wait("slot", step=self.global_step, enabled=self._async_observations_enabled):
+                    await self._staleness_manager.acquire_submission_slot()
                 slot_acquired = True
                 assert len(rand_prompts) == 1
                 trajectory_request, uids = prepare_trajectory_request(
@@ -1123,9 +1191,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 global_step_at_start = self.global_step
 
                 # Disable each runner's progress bar so concurrent workers do not flood the console.
-                cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
-                    trajectory_request, disable_tqdm=True
-                )
+                with observe_rollout_call(
+                    step=global_step_at_start, mode="async", enabled=self._async_observations_enabled
+                ) as observation:
+                    cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
+                        trajectory_request, disable_tqdm=True
+                    )
+                    if observation is not None:
+                        observation.response_tokens = sum(len(ids) for ids in cur_trajectory_batch["response_ids"])
                 actual_step = cur_trajectory_batch.get("actual_global_step")
                 staleness_step = actual_step if actual_step is not None else global_step_at_start
 
@@ -1139,9 +1212,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     uid=uids[0],
                     earliest_model_step=staleness_step,
                     source_prompts=rand_prompts,
+                    completed_at=time.perf_counter() if observation is not None else None,
+                    telemetry_attempt_id=observation.call_id if observation is not None else None,
                 )
-                freshness = await self._enqueue_if_fresh(queues, completed_group)
+                with async_wait("enqueue", step=self.global_step, enabled=self._async_observations_enabled):
+                    freshness = await self._enqueue_if_fresh(queues, completed_group)
                 if freshness is _GroupFreshness.STALE:
+                    self._record_group_terminal(completed_group, "stale_enqueue")
                     await self._staleness_manager.cancel_submission_slot()
                     slot_acquired = False
                     self._record_admission_scan(
@@ -1149,10 +1226,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         inspected_count=1,
                     )
                     continue
+                group_enqueued = True
                 record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize)
-                await self._staleness_manager.on_rollout_accepted()
+                # Once visible to the consumer, this group owns an accepted slot.
+                # Finish that accounting even if shutdown cancels the producer.
+                acceptance = asyncio.create_task(self._staleness_manager.on_rollout_accepted())
+                try:
+                    await asyncio.shield(acceptance)
+                except asyncio.CancelledError:
+                    await acceptance
+                    slot_acquired = False
+                    raise
                 slot_acquired = False  # Slot properly released; safe for next iteration
         except asyncio.CancelledError:
+            if completed_group is not None and not group_enqueued:
+                self._record_group_terminal(completed_group, "cancelled_before_enqueue")
             # If a slot was acquired but generation was cancelled before
             # on_rollout_accepted() ran, undo the slot acquisition so that
             # validate_state_at_epoch_end() sees running == 0 and
@@ -1168,10 +1256,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             logger.info("Trajectory worker exiting: collection stalled (dataset exhausted, no retries)")
             return
         except Exception as e:
+            if completed_group is not None and not group_enqueued:
+                self._record_group_terminal(completed_group, "failed_before_enqueue")
             log_exception_as_text("Trajectory worker failed", e)
+            queues.producer_failure = e
             if slot_acquired:
                 await self._staleness_manager.cancel_submission_slot()
-            sys.exit(1)
+            raise
         finally:
             await queues.mark_producer_finished()
 
@@ -1223,10 +1314,29 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # policy_train->sync_weights transition). Symmetric to the POST-broadcast drain at
         # the call sites + the ppo_train entry barrier (worker.py); reuses the proven
         # async-loop-safe barrier_all (WORLD PG >> the 600s submesh default).
-        await self._drain_policy_event_loops()
-        return await self.policy_model.async_run_method(
-            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+        with Timer("policy_pre_sync_drain", self.all_timings):
+            await self._drain_policy_event_loops()
+        with Timer("weight_broadcast", self.all_timings):
+            result = await self.policy_model.async_run_method(
+                "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+            )
+        # Advance only after a successful publication. The initial call runs at
+        # step zero (or the resumed completed step), before producers are started.
+        self._published_policy_version = self.global_step
+        return result
+
+    def _record_group_terminal(self, group: GeneratedOutputGroup, outcome: str) -> None:
+        if not self._async_observations_enabled or group.telemetry_finished:
+            return
+        record_group_outcome(
+            outcome=outcome,
+            tokens=sum(len(ids) for ids in group.trajectory_batch["response_ids"]),
+            step=self.global_step,
+            completed_at=group.completed_at,
+            admitted_at=group.admitted_at,
+            attempt_id=group.telemetry_attempt_id,
         )
+        group.telemetry_finished = True
 
     async def _drain_policy_event_loops(self):
         """Drain barrier before each forward (the MoE-RL async-dispatch wedge fix, 2026-06-29).
@@ -1416,6 +1526,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 admitted_groups.append(group)
             else:
                 discarded_reasons[selection_result.value] += 1
+                self._record_group_terminal(group, f"dynamic_{selection_result.value}")
 
         return _CandidateSelection(
             admitted_groups=admitted_groups,
@@ -1443,7 +1554,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         while True:
             async with queues.condition:
+                if queues.producer_failure is not None:
+                    raise GenerationStalledError("A rollout producer failed") from queues.producer_failure
                 while len(accepted_groups) < self.mini_batch_size and queues.completed.empty():
+                    if queues.producer_failure is not None:
+                        raise GenerationStalledError("A rollout producer failed") from queues.producer_failure
                     if queues.active_producers == 0:
                         raise GenerationStalledError(
                             "Generation exhausted its dataset before assembling a complete training batch: "
@@ -1479,6 +1594,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     queues.retries.put_nowait(group.source_prompts)
                     assert decision.primary_rejection is not None
                     rejection_counts_since_admission[decision.primary_rejection.value] += 1
+                    self._record_group_terminal(group, decision.primary_rejection.value)
+                for group, decision in partition.discarded_groups:
+                    self._record_group_terminal(group, "duplicate")
 
                 selection = self._select_dynamic_sampling_candidates(
                     partition.accepted_groups,
@@ -1492,6 +1610,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 for group in selection.surplus_groups:
                     queues.completed.put_nowait(group)
+                record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize)
 
                 if selection.admitted_groups:
                     last_admitted_progress = loop.time()

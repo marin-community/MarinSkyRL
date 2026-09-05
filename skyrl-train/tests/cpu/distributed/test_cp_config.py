@@ -58,6 +58,10 @@ DEBUG_MODE_TRAINER_FIELDS = {
     "debug_mode": "off",
 }
 RUNTIME_CONFIG_TRAINER_FIELDS = {
+    "policy_train_spans": False,
+    "generate_spans": False,
+    "async_spans": False,
+    "training_metrics": False,
     "collective_phase_diagnostics": False,
     "offload_optimizer_during_rollouts": False,
     "distributed": {
