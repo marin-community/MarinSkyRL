@@ -24,6 +24,7 @@ VLLM_HISTOGRAM_UNITS = {
     "request_decode_time_seconds": "s",
     "e2e_request_latency_seconds": "s",
     "time_to_first_token_seconds": "s",
+    "inter_token_latency_seconds": "s",
     "request_generation_tokens": "{token}",
     "iteration_tokens_total": "{token}",
     "request_time_per_output_token_seconds": "s",

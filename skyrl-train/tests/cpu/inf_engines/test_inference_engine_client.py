@@ -352,6 +352,7 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
                 "responses": responses,
                 "response_ids": response_ids,
                 "stop_reasons": stop_reasons,
+                "request_timings": [[{"request_id": str(ids[0]), "engine_id": "engine"}] for ids in prompt_token_ids],
             }
 
     # Minimal config, do not spin up HTTP endpoint
@@ -398,6 +399,7 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
         assert out["responses"][i] == expected_texts[i]
         assert out["response_ids"][i] == [i, i]
         assert out["stop_reasons"][i] == "stop"
+        assert out["request_timings"][i][0]["request_id"] == str(i)
 
 
 # -----------------------------
@@ -814,7 +816,9 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
             self.calls.append(deepcopy(input_batch))
             idx = len(self.calls) - 1
             assert idx < len(self.responses), f"Unexpected extra call {idx}"
-            return deepcopy(self.responses[idx])
+            output = deepcopy(self.responses[idx])
+            output["request_timings"] = [[{"request_id": str(idx), "engine_id": "engine"}]]
+            return output
 
     engines = [MockEngine()]
     cfg = _make_min_cfg()
@@ -858,6 +862,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
     expected_final_text_response = tokenizer.decode(expected_final_response_ids, skip_special_tokens=True)
     assert out["responses"] == [expected_final_text_response]
     assert out["response_ids"] == [expected_final_response_ids]
+    assert [attempt["request_id"] for attempt in out["request_timings"][0]] == ["0", "1", "2"]
     assert out["stop_reasons"] == ["stop"]
     assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
 

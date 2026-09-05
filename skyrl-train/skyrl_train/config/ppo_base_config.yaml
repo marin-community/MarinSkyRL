@@ -358,6 +358,8 @@ generator:
   enforce_eager: true
   fully_sharded_loras: false
   inference_stats_interval: 1
+  # Compact actor-side request timings; opt in for inference benchmarks.
+  capture_request_timings: false
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]
