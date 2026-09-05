@@ -99,6 +99,7 @@ from skyrl_train.callbacks import (
     RefModelUpdateCallback,
 )
 from skyrl_train.telemetry import (
+    TRAINER_ROLE,
     critical_phase,
     record_generated_work,
     record_policy_step,
@@ -530,7 +531,7 @@ class RayPPOTrainer:
             record_event(
                 "policy_weights_published",
                 {"completed_update": self.global_step, "finished": time.perf_counter(), "duration": duration_seconds},
-                attributes={"role": "trainer", "step": str(self.global_step), "reason": reason},
+                attributes={"role": TRAINER_ROLE, "step": str(self.global_step), "reason": reason},
             )
         logger.info(
             "Policy weights updated: step={} reason={} duration_seconds={:.3f}",
@@ -2444,14 +2445,15 @@ class RayPPOTrainer:
             except Exception:
                 return str(v)
 
+        values = {}
         try:
             values = {k: _coerce(v) for k, v in payload.items()}
-            if self._training_metrics_enabled:
-                record_training_metrics(values, step=step, kind=kind)
             serialised = json.dumps(values, sort_keys=True)
         except Exception as e:
             serialised = f'{{"_serialize_error": "{e}"}}'
         logger.info(f"WANDB_MIRROR kind={kind} step={step} metrics={serialised}")
+        if self._training_metrics_enabled:
+            record_training_metrics(values, step=step, kind=kind)
 
     def update_ref_with_policy(self):
         """

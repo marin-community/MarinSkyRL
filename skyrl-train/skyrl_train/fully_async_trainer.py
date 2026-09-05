@@ -40,6 +40,7 @@ from enum import Enum, auto
 from omegaconf import OmegaConf
 from skyrl_train.callbacks import TrainerState
 from skyrl_train.telemetry import (
+    TRAINER_ROLE,
     critical_phase,
     record_generated_work,
     record_policy_step,
@@ -813,8 +814,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 )
                 self._pending_buffer_restore_path = None
 
-            # Provide the runner with a live reference to global_step so it can
-            # capture the step at first vLLM inference (for accurate staleness tracking).
+            # Sample the last published version before inference submission.
             # Group admission/checkpoints use one-based target steps; publication
             # versions count completed updates from zero. Keep that conversion at
             # this boundary instead of relabeling in-flight requests on completion.
@@ -1155,7 +1155,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     record_event(
                         "policy_training_interval",
                         {"started": started, "finished": time.perf_counter()},
-                        attributes={"role": "trainer", "step": str(self.global_step), "outcome": outcome},
+                        attributes={"role": TRAINER_ROLE, "step": str(self.global_step), "outcome": outcome},
                     )
 
         return status
