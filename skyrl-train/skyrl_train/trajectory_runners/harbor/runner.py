@@ -233,6 +233,10 @@ class TerminalBenchAgentOutput:
     # True when the truncation penalty was applied (stop_reason=="length" +
     # original_reward==0 + truncation_penalty>0). Counted into rollout_metrics.
     truncation_penalized: bool = False
+    # True when any assistant turn hit sampling_params.max_generate_length (the
+    # per-turn output cap), independent of the penalty. generator.mask_length_stops
+    # zeroes the loss mask of such samples (projections._loss_masks).
+    turn_truncated: bool = False
     error_treatment: str | None = None
 
 
@@ -2308,5 +2312,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             alignment_stats=alignment_stats,
             response_span_tags=response_span_tags,
             truncation_penalized=truncation_penalized,
+            turn_truncated=bool(turn_truncated),
             error_treatment=None if terminal_error_treatment is None else terminal_error_treatment.value,
         )

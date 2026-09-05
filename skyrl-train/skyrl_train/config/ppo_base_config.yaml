@@ -466,6 +466,10 @@ generator:
     inference_backend: ${generator.backend}
 
   apply_overlong_filtering: false
+  # Zero the loss mask of samples the trajectory runner marked as length-stopped (any turn hit
+  # sampling_params.max_generate_length, or terminal stop_reason == "length"). Overlong filtering
+  # for multi-turn chat templates whose turns do not end in the tokenizer eos id; harbor runner only.
+  mask_length_stops: false
 
   rope_scaling: ${trainer.rope_scaling}
   rope_theta: ${trainer.rope_theta}

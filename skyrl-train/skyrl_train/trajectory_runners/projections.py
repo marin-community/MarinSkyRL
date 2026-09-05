@@ -174,8 +174,36 @@ def _logprobs_requested(request: TrajectoryRequestBatch, runner_cfg: DictConfig)
 def _loss_masks(outputs, responses, runner_cfg: DictConfig, tokenizer):
     loss_masks = [project_loss_mask(output, response) for output, response in zip(outputs, responses)]
     if runner_cfg.apply_overlong_filtering:
-        return apply_overlong_filtering(loss_masks, responses, tokenizer.eos_token_id)
+        loss_masks = apply_overlong_filtering(loss_masks, responses, tokenizer.eos_token_id)
+    if bool(runner_cfg.get("mask_length_stops", False)):
+        loss_masks = mask_length_stops(loss_masks, outputs)
     return loss_masks
+
+
+def is_length_stopped(output) -> bool:
+    """True when the interaction ran into an output cap: any turn hit the per-turn
+    max_generate_length (harbor runner `turn_truncated`) or the terminal stop reason is
+    "length"."""
+    if bool(getattr(output, "turn_truncated", False)):
+        return True
+    evidence = getattr(output, "evidence", None)
+    return getattr(evidence, "stop_reason", None) == "length"
+
+
+def mask_length_stops(loss_masks: Sequence[Sequence[int]], outputs) -> list[list[int]]:
+    """DAPO overlong filtering keyed on the runner's recorded stop signals.
+
+    `apply_overlong_filtering` tests for the tokenizer eos id as the last response token,
+    which multi-turn chat templates never place there (Llama-3 turns end in <|eot_id|>,
+    the tokenizer eos is <|end_of_text|>), so on those models it silences every sample.
+    This variant zeroes the loss mask of samples the runner marked as length-stopped and
+    leaves everything else untouched. Rewards are unchanged, so the samples still enter
+    the group baseline.
+    """
+    return [
+        [0] * len(mask) if is_length_stopped(output) else list(mask)
+        for mask, output in zip(loss_masks, outputs)
+    ]
 
 
 def project_loss_mask(output: TrainableInteraction, response: Sequence[int]) -> list[int]:
