@@ -90,6 +90,8 @@ class Tracking:
                     x_label=f"node-{current_node_ip}",
                 ),
             )
+            run.define_metric("global_step")
+            run.define_metric("*", step_metric="global_step")
             run_id = run.id
             self.logger["wandb"] = run
             self._prepare_worker_nodes_systems_logging_wandb(
@@ -180,7 +182,8 @@ class Tracking:
     def log(self, data, step, commit=False):
         for logger_name, logger_instance in self.logger.items():
             if logger_name == "wandb":
-                logger_instance.log(data=data, step=step, commit=commit)
+                # Shared mode ignores W&B's step argument; retain the optimizer step as an explicit axis.
+                logger_instance.log(data={**data, "global_step": step}, commit=commit)
             else:
                 logger_instance.log(data=data, step=step)
 

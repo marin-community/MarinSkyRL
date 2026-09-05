@@ -1,10 +1,43 @@
 import io
+from unittest.mock import Mock
 
 import pytest
+import wandb
 from loguru import logger
+from omegaconf import OmegaConf
 
 from ci.marin_nightly.gate import StepMetrics, parse_metrics
 from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.utils.tracking import Tracking
+
+
+def test_shared_wandb_history_retains_optimizer_steps(monkeypatch, tmp_path):
+    # Exercise the real shared-mode SDK, replacing only its service transport and Ray discovery.
+    run = wandb.sdk.wandb_run.Run(settings=wandb.Settings(mode="shared", run_id="test", root_dir=str(tmp_path)))
+    transport = Mock()
+    run._interface = transport
+    monkeypatch.setattr(wandb, "init", lambda **_kwargs: run)
+    monkeypatch.setattr("ray.is_initialized", lambda: False)
+    tracker = Tracking("test", "test", backends="wandb", config=OmegaConf.create({}))
+    payload = {"reward/mean": 0.25}
+    try:
+        tracker.log({"eval/all/avg_score": 0.1}, step=0, commit=True)
+        tracker.log(payload, step=1, commit=True)
+        tracker.log({"reward/mean": 0.5}, step=2, commit=True)
+        tracker.log({"eval/all/avg_score": 0.3}, step=2, commit=True)
+        history = transport.publish_partial_history.call_args_list
+        assert [call.args[1] for call in history] == [
+            {"eval/all/avg_score": 0.1, "global_step": 0},
+            {"reward/mean": 0.25, "global_step": 1},
+            {"reward/mean": 0.5, "global_step": 2},
+            {"eval/all/avg_score": 0.3, "global_step": 2},
+        ]
+        assert all(call.kwargs["flush"] is True and call.kwargs["step"] is None for call in history)
+        definitions = [call.args[0] for call in transport._publish_metric.call_args_list]
+        assert any(metric.glob_name == "*" and metric.step_metric == "global_step" for metric in definitions)
+        assert payload == {"reward/mean": 0.25}
+    finally:
+        tracker.logger.clear()
 
 
 @pytest.fixture

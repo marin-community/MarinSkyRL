@@ -309,6 +309,8 @@ def test_training_metrics_preserve_selected_values_and_count_nonfinite_values(re
             "generate/avg_num_tokens": 512.0,
             "generate/tis/exact_match_fraction": 1.0,
             "val/accuracy": 0.75,
+            "eval/all/avg_score": 0.625,
+            "eval/all/pass_at_N": 0.875,
             "policy/loss": float("nan"),
             "policy/grad_norm": float("inf"),
             "policy/details": [1, 2],
@@ -327,6 +329,8 @@ def test_training_metrics_preserve_selected_values_and_count_nonfinite_values(re
         "generate/avg_num_tokens": 512.0,
         "generate/tis/exact_match_fraction": 1.0,
         "val/accuracy": 0.75,
+        "eval/all/avg_score": 0.625,
+        "eval/all/pass_at_N": 0.875,
     }
     assert {
         row["attributes"]["metric"]: row["value"]
