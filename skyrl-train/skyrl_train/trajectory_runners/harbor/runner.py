@@ -1213,6 +1213,16 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             rollout_metrics["generate/truncated_fraction"] = (
                 num_truncated / num_successful if num_successful > 0 else 0.0
             )
+            # Reward decomposition (2026-09-05 data/env audit): mean reward = f * q with f the share
+            # of rollouts that declared task_complete and q = P(reward | declared). Every band arm
+            # raised f 3-5x while q fell by a third; gate on q, not on mean reward.
+            declared = [o for o in successful_outputs if o.evidence.stop_reason == "task_complete"]
+            rollout_metrics["generate/declared_done_fraction"] = (
+                len(declared) / num_successful if num_successful > 0 else 0.0
+            )
+            rollout_metrics["generate/reward_given_done"] = (
+                sum(float(o.reward_result.unshaped_reward or 0.0) for o in declared) / len(declared) if declared else 0.0
+            )
             num_length_stopped = sum(1 for o in successful_outputs if is_length_stopped(o))
             rollout_metrics["generate/length_stopped"] = num_length_stopped
             rollout_metrics["generate/length_stop_masked"] = (

@@ -354,6 +354,11 @@ class _AsyncDataloader:
     ):
         self._train_dataloader = train_dataloader
         self._train_dataloader_initial_state = train_dataloader.state_dict()
+        # Per-epoch reseed base (2026-09-05): restoring the initial state at every epoch end
+        # replayed the epoch-0 permutation forever, so with drop_last + the effective-length cap
+        # the same tail rows were never sampled in any epoch (993-task band -> 960 tasks).
+        _gen = getattr(train_dataloader, "generator", None)
+        self._initial_seed = int(_gen.initial_seed()) if _gen is not None else None
         self._sample_with_replacement = dynamic_sampling_type is DynamicSamplingType.FILTER
         self._effective_dataloader_length = (
             len(self._train_dataloader)
@@ -387,15 +392,24 @@ class _AsyncDataloader:
         self._exhausted = False
         self._eligible_rows_returned_in_pass = 0
 
-    async def reset_at_epoch_end(self) -> None:
+    async def reset_at_epoch_end(self, next_epoch: int | None = None) -> None:
         """Reset dataloader iterator for the next epoch.
 
         Note: epoch-scoped UID clearing is handled by DataTrackingCallback.on_epoch_end_async,
         which fires AFTER any checkpoint save — eliminating the race condition where UIDs
         were cleared before the checkpoint captured them.
+
+        The next epoch draws a NEW permutation: the loader's generator is reseeded with
+        ``initial_seed + next_epoch`` (deterministic, resume-safe) instead of restoring the
+        epoch-0 dataloader state, which replayed the same permutation every epoch. When
+        ``next_epoch`` is None (or the loader has no generator) the old behaviour is kept.
         """
         async with self._lock:
-            self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)  # reset to initial state
+            gen = getattr(self._train_dataloader, "generator", None)
+            if next_epoch is not None and gen is not None and self._initial_seed is not None:
+                gen.manual_seed(self._initial_seed + int(next_epoch))
+            else:
+                self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)  # reset to initial state
             self._iter = enumerate(self._train_dataloader)
             self._pending_uids.clear()
             self._exhausted = False
@@ -1037,7 +1051,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 if n_accepted_surplus > 0:
                     self._staleness_manager._stat.accepted -= n_accepted_surplus
                     self._staleness_manager._stat.submitted -= n_accepted_surplus
-            await self.async_train_dataloader.reset_at_epoch_end()
+            await self.async_train_dataloader.reset_at_epoch_end(next_epoch=epoch + 1)
             await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
 
             if self.global_step > self.total_training_steps:
