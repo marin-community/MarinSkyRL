@@ -91,8 +91,6 @@ def approx_kl(
 
 
 @torch.no_grad()
-
-@torch.no_grad()
 def compute_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
@@ -102,6 +100,8 @@ def compute_approx_kl(
     """Metrics-only approximate KL (no gradient). For the KL loss use ``approx_kl``."""
     return approx_kl(log_probs, log_probs_base, loss_mask=loss_mask, kl_estimator_type=kl_estimator_type)
 
+
+@torch.no_grad()
 def normalize_advantages_dict(data: TrainingInputBatch) -> TrainingInputBatch:
     """Normalizes the advantages in the data batch.
 

@@ -33,21 +33,19 @@ def test_compute_approx_kl_is_metrics_only():
 
 
 def test_policy_loss_kl_term_has_gradient():
-    from skyrl_train.utils import policy_losses
+    from skyrl_train.utils.policy_losses import _compute_policy_auxiliary_terms
 
-    fn = getattr(policy_losses, "compute_policy_auxiliary_terms", None) or getattr(policy_losses, "policy_auxiliary_terms", None)
-    if fn is None:  # locate the function that builds PolicyAuxiliaryTerms
-        import inspect
-
-        for name, obj in vars(policy_losses).items():
-            if inspect.isfunction(obj) and "PolicyAuxiliaryTerms" in (inspect.getsource(obj) if obj.__module__ == policy_losses.__name__ else ""):
-                if "use_kl_loss" in inspect.getsource(obj):
-                    fn = obj
-                    break
-    assert fn is not None
-    cfg = OmegaConf.create({"use_kl_loss": True, "kl_loss_coef": 0.1, "kl_estimator_type": "k3", "use_entropy_loss": False, "entropy_loss_coef": 0.0})
+    cfg = OmegaConf.create(
+        {"use_kl_loss": True, "kl_loss_coef": 0.1, "kl_estimator_type": "k3", "use_entropy_loss": False, "entropy_loss_coef": 0.0}
+    )
     logp = torch.randn(2, 6, requires_grad=True)
     base = torch.randn(2, 6)
-    terms = fn(logp, base, torch.zeros(2, 6), torch.ones(2, 6), cfg)
+    terms = _compute_policy_auxiliary_terms(
+        action_log_probs=logp,
+        base_action_log_probs=base,
+        token_entropy=torch.zeros(2, 6),
+        loss_mask=torch.ones(2, 6),
+        config=cfg,
+    )
     terms.loss.backward()
     assert logp.grad is not None and float(logp.grad.abs().sum()) > 0.0
