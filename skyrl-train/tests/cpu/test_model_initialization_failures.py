@@ -7,8 +7,52 @@ from loguru import logger
 from ray.exceptions import GetTimeoutError
 
 import skyrl_train.trainer as trainer_module
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints.fully_async import AsyncPPOExp
+from skyrl_train.entrypoints.main_base import BasePPOExp
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.utils.tracking import Tracking
+
+
+@pytest.mark.parametrize("experiment_type", [BasePPOExp, AsyncPPOExp])
+@pytest.mark.parametrize("failure", [None, "setup", "train"])
+def test_experiment_finishes_tracking_before_return(experiment_type, failure, monkeypatch):
+    monkeypatch.delenv("SKYRL_TELEMETRY_ENDPOINT", raising=False)
+    finished = []
+
+    class WandbService:
+        def finish(self, exit_code):
+            finished.append(exit_code)
+
+    tracker = object.__new__(Tracking)
+    tracker.logger = {"wandb": WandbService()}
+
+    async def train():
+        if failure == "train":
+            raise RuntimeError("training failed")
+
+    async def shutdown():
+        pass
+
+    class Experiment(experiment_type):
+        def _setup_trainer(self):
+            # CPU workload at the model/Ray boundary; retain the real experiment lifecycle.
+            self.tracker = tracker
+            if failure == "setup":
+                raise RuntimeError("setup failed")
+            return SimpleNamespace(train=train, shutdown=shutdown)
+
+    experiment = object.__new__(Experiment)
+    experiment.cfg = get_default_config()
+    if failure is None:
+        experiment.run()
+    else:
+        with pytest.raises(RuntimeError, match="failed"):
+            experiment.run()
+    assert finished == [0 if failure is None else 1]
+    tracker.finish()
+    assert finished == [0 if failure is None else 1]
 
 
 class _UnpickleableError(RuntimeError):

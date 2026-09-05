@@ -520,6 +520,7 @@ class BasePPOExp:
         # NOTE (sumanthrh): Instantiate tracker before trainer init.
         # We have custom validation before this step to give better error messages.
         tracker = self.get_tracker()
+        self.tracker = tracker
 
         tokenizer = self.tokenizer
         inference_engine_client = self.create_inference_engine_client()
@@ -585,10 +586,13 @@ class BasePPOExp:
         asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
         trainer = None
+        self.tracker = None
+        exit_code = 1
         try:
             trainer = self._setup_trainer()
             # Start the training loop
             asyncio.run(trainer.train())
+            exit_code = 0
         finally:
             # Clean up any resources that were created, even if _setup_trainer()
             # or train() failed.  When the skyrl_entrypoint actor dies (e.g. SIGABRT)
@@ -602,6 +606,13 @@ class BasePPOExp:
                     asyncio.run(trainer.shutdown())
                 except Exception as e:
                     logger.warning(f"Error shutting down trainer: {e}")
+            if self.tracker is not None:
+                try:
+                    self.tracker.finish(exit_code=exit_code)
+                except Exception:
+                    if exit_code == 0:
+                        raise
+                    logger.exception("Tracker cleanup failed while handling a training failure")
 
 
 @ray.remote(num_cpus=1, max_retries=0)

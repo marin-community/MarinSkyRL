@@ -187,20 +187,22 @@ class Tracking:
             else:
                 logger_instance.log(data=data, step=step)
 
+    def finish(self, exit_code=0):
+        """Flush and finish active trackers once, including the shared W&B primary."""
+        for name, backend in list(self.logger.items()):
+            if name == "wandb":
+                backend.finish(exit_code=exit_code)
+            elif name in ("swanlab", "tensorboard", "mlflow"):
+                backend.finish()
+            del self.logger[name]
+
     def __del__(self):
         # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
         # This is because wandb often errors out with a BrokenPipeError when closing.
         # https://github.com/wandb/wandb/issues/6449
         # TODO (sumanthrh): Check if this is really needed. Trackers like wandb will automatically finish at program exit.
         try:
-            if "wandb" in self.logger:
-                self.logger["wandb"].finish(exit_code=0)
-            if "swanlab" in self.logger:
-                self.logger["swanlab"].finish()
-            if "tensorboard" in self.logger:
-                self.logger["tensorboard"].finish()
-            if "mlflow" in self.logger:
-                self.logger["mlflow"].finish()
+            self.finish()
         except Exception as e:
             logger.warning(f"Attempted to finish tracking but got error {e}")
 

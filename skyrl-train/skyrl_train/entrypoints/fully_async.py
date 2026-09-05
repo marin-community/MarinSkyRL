@@ -1,7 +1,5 @@
 """Fully asynchronous training with the direct SkyRL-Gym trajectory runner."""
 
-import asyncio
-
 import hydra
 from omegaconf import DictConfig
 import ray
@@ -32,11 +30,6 @@ class AsyncPPOExp(BasePPOExp):
             trajectory_runner=trajectory_runner,
             colocate_pg=colocate_pg,
         )
-
-    def run(self):
-        trainer = self._setup_trainer()
-        # Start the async training loop
-        asyncio.run(trainer.train())
 
 
 @ray.remote(num_cpus=1, max_retries=0)
