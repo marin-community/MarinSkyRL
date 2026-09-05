@@ -42,6 +42,51 @@ group_tokens = telemetry.counter("rollout_group_tokens", unit="{token}")
 event_loop_lag = telemetry.histogram("event_loop_lag_seconds", unit="s")
 
 
+def async_step_metrics(
+    *,
+    core_seconds: float,
+    cycle_seconds: float,
+    buffer_wait_seconds: float,
+    training_seconds: float,
+    sync_seconds: float,
+    consumed_loss_tokens: int,
+    consumed_response_tokens: int,
+    policy_gpus: int,
+    inference_gpus: int,
+) -> dict[str, float]:
+    """Summarize driver walls and useful work; GPU denominators are configured roles.
+
+    Core excludes callbacks, checkpoint and evaluation. Cycle includes them up to
+    metric publication; neither includes startup, inter-epoch cleanup or final
+    export. These rates are not whole-job billed efficiency or GPU utilization.
+    """
+    metrics = {
+        "core_seconds": core_seconds,
+        "cycle_seconds": cycle_seconds,
+        "outside_core_seconds": cycle_seconds - core_seconds,
+        "configured_policy_gpus": float(policy_gpus),
+        "configured_inference_gpus": float(inference_gpus),
+        "consumed_loss_tokens": float(consumed_loss_tokens),
+        "consumed_response_tokens": float(consumed_response_tokens),
+    }
+    if core_seconds > 0:
+        metrics.update(
+            buffer_wait_fraction=buffer_wait_seconds / core_seconds,
+            training_fraction=training_seconds / core_seconds,
+            weight_sync_fraction=sync_seconds / core_seconds,
+            consumed_loss_tokens_per_core_second=consumed_loss_tokens / core_seconds,
+        )
+    if cycle_seconds > 0:
+        metrics["consumed_loss_tokens_per_cycle_second"] = consumed_loss_tokens / cycle_seconds
+        if policy_gpus > 0:
+            metrics["loss_tokens_per_configured_policy_gpu_second"] = consumed_loss_tokens / cycle_seconds / policy_gpus
+        if inference_gpus > 0:
+            metrics["response_tokens_per_configured_inference_gpu_second"] = (
+                consumed_response_tokens / cycle_seconds / inference_gpus
+            )
+    return {f"async/performance/{name}": value for name, value in metrics.items()}
+
+
 async def monitor_event_loop_lag(
     *,
     step_fn: Callable[[], int],

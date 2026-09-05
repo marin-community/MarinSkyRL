@@ -88,6 +88,7 @@ from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
 )
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.utils.importance_ratio_diagnostics import behavior_drift_metrics
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks import (
@@ -1839,6 +1840,17 @@ class RayPPOTrainer:
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
+
+        if self._training_metrics_enabled:
+            self.all_metrics.update(
+                behavior_drift_metrics(
+                    action_log_probs,
+                    training_input["rollout_logprobs"],
+                    training_input["loss_mask"],
+                    eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                    eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
+                )
+            )
 
         if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
             # calculates the difference in probs between inference and trainer components

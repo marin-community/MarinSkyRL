@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Optional
 
 import torch
@@ -21,6 +22,59 @@ LOG_RATIO_BASE_METRIC_KEYS = (
     "log_ratio_abs_p99",
     "log_ratio_diagnostics_failed",
 )
+
+
+def behavior_drift_metrics(
+    learner_logprobs: torch.Tensor,
+    rollout_logprobs: torch.Tensor | None,
+    loss_mask: torch.Tensor,
+    *,
+    eps_clip_low: float,
+    eps_clip_high: float,
+) -> dict[str, float]:
+    """Measure pre-update learner minus reported behavior logprobs on the full batch.
+
+    Mask before arithmetic; pool selected tokens rather than averaging rank or
+    sequence means. Raw generator logprobs need not describe processed sampling,
+    so these are model-likelihood diagnostics, not KL or trajectory IS estimates.
+    ESS describes token-weight concentration, not independent usable samples.
+    Missing/empty populations omit undefined statistics and retain coverage counts.
+    """
+    selected = loss_mask > 0
+    count = int(selected.sum().item())
+    metrics = {
+        "selected_tokens": float(count),
+        "finite_tokens": 0.0,
+        "missing_behavior": float(rollout_logprobs is None),
+    }
+    if rollout_logprobs is not None and count:
+        learner = learner_logprobs.detach()[selected].double()
+        behavior = rollout_logprobs.detach()[selected].double()
+        finite = torch.isfinite(learner) & torch.isfinite(behavior)
+        delta = learner[finite] - behavior[finite]
+        metrics["finite_tokens"] = float(delta.numel())
+        metrics["finite_fraction"] = delta.numel() / count
+        if delta.numel():
+            absolute = delta.abs()
+            quantiles = torch.quantile(absolute, absolute.new_tensor([0.5, 0.95, 0.99]))
+            # Shift, never clamp: a severe outlier must still reduce concentration.
+            weights = (delta - delta.max()).exp()
+            lower = math.log1p(-eps_clip_low) if eps_clip_low < 1 else -math.inf
+            metrics.update(
+                log_ratio_mean=delta.mean().item(),
+                abs_log_ratio_mean=absolute.mean().item(),
+                abs_log_ratio_p50=quantiles[0].item(),
+                abs_log_ratio_p95=quantiles[1].item(),
+                abs_log_ratio_p99=quantiles[2].item(),
+                abs_log_ratio_max=absolute.max().item(),
+                log_mean_ratio=(delta.logsumexp(0) - math.log(delta.numel())).item(),
+                lower_clip_pressure=(delta < lower).double().mean().item(),
+                upper_clip_pressure=(delta > math.log1p(eps_clip_high)).double().mean().item(),
+                token_weight_ess_fraction=(weights.sum().square() / (delta.numel() * weights.square().sum())).item(),
+            )
+    elif count:
+        metrics["finite_fraction"] = 0.0
+    return {f"policy/behavior_drift/{name}": value for name, value in metrics.items()}
 
 
 def _log_ratio_position_metric_keys(n_position_buckets: int) -> tuple[str, ...]:

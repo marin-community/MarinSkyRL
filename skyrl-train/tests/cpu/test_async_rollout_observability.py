@@ -21,6 +21,27 @@ from skyrl_train.group_admission import AdmissionDecision
 from skyrl_train.trainer import ResumeMode
 
 
+def test_step_performance_distinguishes_core_work_from_callback_cost():
+    metrics = rollout_observability.async_step_metrics(
+        core_seconds=10,
+        cycle_seconds=25,
+        buffer_wait_seconds=2,
+        training_seconds=5,
+        sync_seconds=1,
+        consumed_loss_tokens=1000,
+        consumed_response_tokens=1200,
+        policy_gpus=8,
+        inference_gpus=4,
+    )
+    prefix = "async/performance/"
+    assert metrics[prefix + "outside_core_seconds"] == 15
+    assert metrics[prefix + "buffer_wait_fraction"] == 0.2
+    assert metrics[prefix + "consumed_loss_tokens_per_core_second"] == 100
+    assert metrics[prefix + "consumed_loss_tokens_per_cycle_second"] == 40
+    assert metrics[prefix + "loss_tokens_per_configured_policy_gpu_second"] == 5
+    assert metrics[prefix + "response_tokens_per_configured_inference_gpu_second"] == 12
+
+
 class RecordingInstrument:
     def __init__(self) -> None:
         self.records: list[tuple[float, dict[str, str]]] = []

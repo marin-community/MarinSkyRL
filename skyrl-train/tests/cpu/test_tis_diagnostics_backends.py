@@ -12,12 +12,14 @@ megatron is genuinely absent, so a real-megatron env is left untouched.
 
 import pytest
 import torch
+import math
 from omegaconf import OmegaConf
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
     TIS_DIAG_KEYS,
     LogRatioMonitor,
     compute_tis_diagnostics,
+    behavior_drift_metrics,
 )
 from skyrl_train.utils.policy_losses import POLICY_CLIP_METRIC_KEYS, ppo_policy_loss
 from tests.cpu.util import stub_megatron_modules
@@ -32,6 +34,52 @@ BATCH_SIZE = 2
 SEQ_LEN = 6
 NUM_ACTIONS = 4
 CAP = 2.0
+
+
+def test_behavior_drift_pools_tokens_and_keeps_ratio_direction():
+    # Three tokens in unequal-length rows: ratios 1, 2, 4. A row mean is wrong.
+    learner = torch.tensor([[-4.0, -4.0 + math.log(2)], [-4.0 + math.log(4), float("nan")]], dtype=torch.float64)
+    behavior = torch.full_like(learner, -4.0)
+    mask = torch.tensor([[1, 1], [1, 0]])
+    metrics = behavior_drift_metrics(learner, behavior, mask, eps_clip_low=0.2, eps_clip_high=0.2)
+    prefix = "policy/behavior_drift/"
+    assert metrics[prefix + "selected_tokens"] == metrics[prefix + "finite_tokens"] == 3
+    assert metrics[prefix + "log_ratio_mean"] == pytest.approx(math.log(2))
+    assert metrics[prefix + "log_mean_ratio"] == pytest.approx(math.log(7 / 3))
+    assert metrics[prefix + "token_weight_ess_fraction"] == pytest.approx(7 / 9)
+    assert metrics[prefix + "upper_clip_pressure"] == pytest.approx(2 / 3)
+    assert metrics[prefix + "lower_clip_pressure"] == 0
+    reverse = behavior_drift_metrics(behavior, learner, mask, eps_clip_low=0.2, eps_clip_high=0.2)
+    assert reverse[prefix + "log_ratio_mean"] == pytest.approx(-math.log(2))
+    assert reverse[prefix + "lower_clip_pressure"] == pytest.approx(2 / 3)
+
+
+@pytest.mark.parametrize("behavior", [None, torch.tensor([[float("inf"), float("nan")]])])
+def test_behavior_drift_missing_or_nonfinite_reports_coverage_without_fake_statistics(behavior):
+    metrics = behavior_drift_metrics(torch.zeros(1, 2), behavior, torch.ones(1, 2), eps_clip_low=0.2, eps_clip_high=0.2)
+    assert metrics["policy/behavior_drift/selected_tokens"] == 2
+    assert metrics["policy/behavior_drift/finite_fraction"] == 0
+    assert "policy/behavior_drift/token_weight_ess_fraction" not in metrics
+
+
+def test_behavior_drift_preserves_extreme_tails_and_empty_selection():
+    learner = torch.tensor([[-1000.0, 0.0, float("nan")]])
+    behavior = torch.tensor([[0.0, -1000.0, 0.0]])
+    metrics = behavior_drift_metrics(learner, behavior, torch.ones(1, 3), eps_clip_low=0.2, eps_clip_high=0.2)
+    assert metrics["policy/behavior_drift/finite_fraction"] == pytest.approx(2 / 3)
+    assert metrics["policy/behavior_drift/abs_log_ratio_p99"] == 1000
+    assert metrics["policy/behavior_drift/token_weight_ess_fraction"] == 0.5
+    empty = behavior_drift_metrics(learner, behavior, torch.zeros(1, 3), eps_clip_low=0.2, eps_clip_high=0.2)
+    assert empty["policy/behavior_drift/selected_tokens"] == 0
+    assert "policy/behavior_drift/abs_log_ratio_mean" not in empty
+
+
+def test_behavior_drift_concentration_does_not_hide_uniform_shift():
+    metrics = behavior_drift_metrics(
+        torch.full((1, 3), -5.0), torch.zeros(1, 3), torch.ones(1, 3), eps_clip_low=0.2, eps_clip_high=0.2
+    )
+    assert metrics["policy/behavior_drift/token_weight_ess_fraction"] == 1
+    assert metrics["policy/behavior_drift/log_ratio_mean"] == -5
 
 
 def _algorithm_cfg(use_tis: bool, policy_loss_type: str = "regular") -> OmegaConf:
@@ -191,7 +239,8 @@ def test_fsdp_behavior_clip_keeps_rollout_divergence_diagnostics(monkeypatch):
         monkeypatch=monkeypatch,
     )
 
-    for key in TIS_DIAG_KEYS:
+    assert "tis/imp_ratio_capped_fraction" not in status
+    for key in ("tis/imp_ratio_mean", "tis/log_ratio_abs_mean"):
         assert status[key] == pytest.approx(expected[key])
 
 

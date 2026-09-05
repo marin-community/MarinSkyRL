@@ -199,6 +199,10 @@ def _policy_objective_metrics(
                 cap=config.tis_imp_ratio_cap,
             )
         )
+        if not config.use_tis:
+            # The disabled cap sentinel is not an applied correction threshold.
+            # Config is identical on every rank, preserving collective keysets.
+            del metrics["tis/imp_ratio_capped_fraction"]
     return metrics
 
 
