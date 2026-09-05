@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 DIAG_METRIC_PREFIX = "diag"
 
 TRUNCATED_STOP_REASON = "length"
+DECLARED_DONE_STOP_REASON = "task_complete"  # harbor Terminus-2: the agent declared the task complete
 
 
 def scalar_reward(reward: Union[float, List[float]]) -> float:
@@ -46,6 +47,7 @@ def compute_group_diagnostics(
     response_lengths: Sequence[int],
     stop_reasons: Optional[Sequence[Optional[str]]],
     n_samples_per_prompt: int,
+    loss_masks: Optional[Sequence[Sequence[int]]] = None,
 ) -> Dict[str, float]:
     """Compute per-group GRPO learnability diagnostics plus a few batch tail statistics.
 
@@ -127,6 +129,22 @@ def compute_group_diagnostics(
         metrics[f"{p}/truncated_fraction"] = sum(1 for s in stop_reasons if s == TRUNCATED_STOP_REASON) / len(
             stop_reasons
         )
+        # Reward decomposition (2026-09-05): mean success = f * q with f the share of
+        # trajectories that declared task_complete and q the success rate among them. On the
+        # Snowball band arms f rose 3-5x while q fell by a third; mean reward hid it.
+        declared = [i for i, s in enumerate(stop_reasons) if s == DECLARED_DONE_STOP_REASON]
+        metrics[f"{p}/declared_done_fraction"] = len(declared) / len(stop_reasons)
+        metrics[f"{p}/reward_given_done"] = (
+            sum(1 for i in declared if successes[i]) / len(declared) if declared else 0.0
+        )
+        if loss_masks is not None:
+            # generator.mask_length_stops: length-stopped samples whose loss mask was zeroed.
+            masked = sum(
+                1
+                for s, m in zip(stop_reasons, loss_masks)
+                if s == TRUNCATED_STOP_REASON and not any(m)
+            )
+            metrics[f"{p}/length_stop_masked_fraction"] = masked / len(stop_reasons)
     else:
         metrics[f"{p}/truncated_fraction"] = 0.0
 

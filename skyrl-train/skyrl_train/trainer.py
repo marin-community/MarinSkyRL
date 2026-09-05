@@ -1505,6 +1505,7 @@ class RayPPOTrainer:
                         response_lengths=[len(r) for r in trajectory_batch_for_metrics["response_ids"]],
                         stop_reasons=stop_reasons,
                         n_samples_per_prompt=n_samples_per_prompt,
+                        loss_masks=trajectory_batch_for_metrics.get("loss_masks"),
                     )
                 )
             if dump_train_rollouts:
