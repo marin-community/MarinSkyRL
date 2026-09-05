@@ -238,8 +238,13 @@ async def run_environment(executor: Executor | None, func: Callable, *args, **kw
 
 
 def record_group_outcome(
-    *, outcome: str, tokens: int, step: int, completed_at: float | None = None,
-    attempt_id: str | None = None, admitted_at: float | None = None,
+    *,
+    outcome: str,
+    tokens: int,
+    step: int,
+    completed_at: float | None = None,
+    attempt_id: str | None = None,
+    admitted_at: float | None = None,
 ) -> None:
     attributes = {"role": TRAINER_ROLE, "step": str(step), "outcome": outcome}
     group_count.add(1, attributes=attributes)

@@ -62,7 +62,16 @@ class Instrument:
 @pytest.fixture
 def records(monkeypatch):
     sink = Records()
-    for name in ("phase_duration", "wait_seconds", "wait_count", "call_count", "buffer_dwell", "group_count", "group_tokens", "event_loop_lag"):
+    for name in (
+        "phase_duration",
+        "wait_seconds",
+        "wait_count",
+        "call_count",
+        "buffer_dwell",
+        "group_count",
+        "group_tokens",
+        "event_loop_lag",
+    ):
         monkeypatch.setattr(rollout, name, Instrument(name, sink))
     for name in ("training_metric", "nonfinite_training_metric", "work_completed"):
         monkeypatch.setattr(training_telemetry, name, Instrument(name, sink))
@@ -105,10 +114,16 @@ async def test_overlapping_rollout_calls_keep_independent_walls_and_identity(rec
 
     calls = {event["attributes"]["step"]: event for event in records.events}
     assert {key: value for key, value in calls["0"]["body"].items() if key.startswith("duration_")} == {
-        "duration_rollout_call": 5.0, "duration_collect": 4.0, "duration_assemble": 1.0, "duration_rollout_call_residual": 0.0
+        "duration_rollout_call": 5.0,
+        "duration_collect": 4.0,
+        "duration_assemble": 1.0,
+        "duration_rollout_call_residual": 0.0,
     }
     assert {key: value for key, value in calls["1"]["body"].items() if key.startswith("duration_")} == {
-        "duration_rollout_call": 9.0, "duration_collect": 7.0, "duration_finalize": 2.0, "duration_rollout_call_residual": 0.0
+        "duration_rollout_call": 9.0,
+        "duration_collect": 7.0,
+        "duration_finalize": 2.0,
+        "duration_rollout_call_residual": 0.0,
     }
     assert calls["0"]["body"]["call_id"] != calls["1"]["body"]["call_id"]
     assert records.select("wait_seconds", wait="engine_await", stat="sum", step="0") == [4.0]
@@ -303,7 +318,9 @@ def test_training_metrics_preserve_selected_values_and_count_nonfinite_values(re
         kind="train",
     )
 
-    assert {row["attributes"]["metric"]: row["value"] for row in records.metrics if row["name"] == "training_metric"} == {
+    assert {
+        row["attributes"]["metric"]: row["value"] for row in records.metrics if row["name"] == "training_metric"
+    } == {
         "policy/entropy": 1.25,
         "reward/mean": -0.5,
         "async/staleness_max": 2.0,
@@ -311,9 +328,11 @@ def test_training_metrics_preserve_selected_values_and_count_nonfinite_values(re
         "generate/tis/exact_match_fraction": 1.0,
         "val/accuracy": 0.75,
     }
-    assert {row["attributes"]["metric"]: row["value"] for row in records.metrics if row["name"] == "nonfinite_training_metric"} == {
-        "policy/loss": 1, "policy/grad_norm": 1
-    }
+    assert {
+        row["attributes"]["metric"]: row["value"]
+        for row in records.metrics
+        if row["name"] == "nonfinite_training_metric"
+    } == {"policy/loss": 1, "policy/grad_norm": 1}
     assert all(row["attributes"]["step"] == "8" and row["attributes"]["phase"] == "train" for row in records.metrics)
 
 
@@ -439,7 +458,11 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
     calls = [row for row in delivered if row["name"] == "rollout_call" and row["kind"] == "event"]
     assert {row["attributes"]["step"] for row in calls} == {"1", "2"}
     assert len(calls) == 2
-    root_spans = [row for row in delivered if row["name"] == "phase_duration_seconds" and row["attributes"]["phase"] in {"step", "rollout_call"}]
+    root_spans = [
+        row
+        for row in delivered
+        if row["name"] == "phase_duration_seconds" and row["attributes"]["phase"] in {"step", "rollout_call"}
+    ]
     assert len(root_spans) == 3
     assert all("parent" not in row["attributes"] for row in root_spans)
     assert any(row["name"] == "rollout_group_outcome" and row["body"]["call_id"] == "group-1" for row in delivered)
