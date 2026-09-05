@@ -15,12 +15,10 @@ import sys
 import time
 from pathlib import Path
 
+import ray
 from hydra import compose, initialize_config_dir
 from loguru import logger
 from omegaconf import OmegaConf
-import ray
-from transformers import AutoTokenizer
-
 from skyrl_train.entrypoints.main_base import config_dir, create_ray_wrapped_inference_engines_from_config
 from skyrl_train.inference_benchmark import BenchmarkRequest, InferenceBenchmark, json_value
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -28,6 +26,7 @@ from skyrl_train.inference_engines.utils import get_vllm_sampling_params, hash_w
 from skyrl_train.inference_observability import configured_inference_sinks
 from skyrl_train.telemetry import DRIVER_ROLE, TelemetryConfig, process_telemetry
 from skyrl_train.utils.utils import initialize_ray
+from transformers import AutoTokenizer
 
 
 def build_config(model: Path, nodes: int, profiles: Path):
@@ -49,28 +48,52 @@ def build_config(model: Path, nodes: int, profiles: Path):
     cfg.trainer.placement.ref_num_gpus_per_node = 8
     cfg.trainer.distributed.placement_group_timeout_seconds = 600
     values = {
-        "backend": "vllm", "model_dtype": "bfloat16", "vllm_attention_backend": "FLASH_ATTN",
-        "weight_sync_backend": "nccl", "num_inference_engines": nodes,
-        "inference_engine_tensor_parallel_size": 1, "inference_engine_pipeline_parallel_size": 1,
-        "inference_engine_data_parallel_size": 8, "inference_engine_expert_parallel_size": 8,
-        "inference_engine_decode_context_parallel_size": 1, "inference_engine_mp_backend": False,
-        "async_engine": True, "vllm_v1_disable_multiproc": True, "enable_prefix_caching": True,
-        "enforce_eager": False, "gpu_memory_utilization": 0.75, "max_num_batched_tokens": 8192,
-        "max_num_seqs": 1024, "engine_init_timeout_seconds": 2400, "enable_http_endpoint": False,
+        "backend": "vllm",
+        "model_dtype": "bfloat16",
+        "vllm_attention_backend": "FLASH_ATTN",
+        "weight_sync_backend": "nccl",
+        "num_inference_engines": nodes,
+        "inference_engine_tensor_parallel_size": 1,
+        "inference_engine_pipeline_parallel_size": 1,
+        "inference_engine_data_parallel_size": 8,
+        "inference_engine_expert_parallel_size": 8,
+        "inference_engine_decode_context_parallel_size": 1,
+        "inference_engine_mp_backend": False,
+        "async_engine": True,
+        "vllm_v1_disable_multiproc": True,
+        "enable_prefix_caching": True,
+        "enforce_eager": False,
+        "gpu_memory_utilization": 0.75,
+        "max_num_batched_tokens": 8192,
+        "max_num_seqs": 1024,
+        "engine_init_timeout_seconds": 2400,
+        "enable_http_endpoint": False,
         "capture_request_timings": True,
     }
     for key, value in values.items():
         cfg.generator[key] = value
     cfg.generator.sampling_params = {
-        "max_generate_length": 8192, "repetition_penalty": 1.0, "temperature": 1.0,
-        "top_p": 1.0, "min_p": 0.0, "top_k": -1, "logprobs": None, "stop": None,
+        "max_generate_length": 8192,
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "min_p": 0.0,
+        "top_k": -1,
+        "logprobs": None,
+        "stop": None,
     }
     cfg.generator.engine_init_kwargs = {
-        "max_model_len": 9216, "served_model_name": "snowball-grug-67b-a2b-sft-s2-thinking-step630",
-        "all2all_backend": "allgather_reducescatter", "cudagraph_metrics": True,
-        "profiler_config": {"profiler": "torch", "torch_profiler_dir": str(profiles),
-                            "torch_profiler_with_stack": False, "torch_profiler_record_shapes": False,
-                            "ignore_frontend": True},
+        "max_model_len": 9216,
+        "served_model_name": "snowball-grug-67b-a2b-sft-s2-thinking-step630",
+        "all2all_backend": "allgather_reducescatter",
+        "cudagraph_metrics": True,
+        "profiler_config": {
+            "profiler": "torch",
+            "torch_profiler_dir": str(profiles),
+            "torch_profiler_with_stack": False,
+            "torch_profiler_record_shapes": False,
+            "ignore_frontend": True,
+        },
     }
     return cfg
 
@@ -86,10 +109,15 @@ def requests_for(corpus, waves: list[int], nodes: int):
                 # to its eight ranks. Hash modulo eight then gives the same rank.
                 if nodes == 1 and hash_with_sha256(session_id) % 32 >= 8:
                     continue
-                requests.append(BenchmarkRequest(
-                    f"{occurrence}:{wave_index}:{session_id}", uid, repetition, session_id,
-                    row["prompt_token_ids"],
-                ))
+                requests.append(
+                    BenchmarkRequest(
+                        f"{occurrence}:{wave_index}:{session_id}",
+                        uid,
+                        repetition,
+                        session_id,
+                        row["prompt_token_ids"],
+                    )
+                )
     return requests
 
 
@@ -98,8 +126,9 @@ async def profile_windows(benchmark, engines, windows):
     for window in windows:
         await asyncio.sleep(max(0, window["after_seconds"] - (time.perf_counter() - started)))
         benchmark.record("profile_start", name=window["name"], engines=len(engines))
-        await asyncio.gather(*(engine.inference_engine_actor.start_profile.remote(window["name"])
-                               for engine in engines))
+        await asyncio.gather(
+            *(engine.inference_engine_actor.start_profile.remote(window["name"]) for engine in engines)
+        )
         try:
             await asyncio.sleep(window["seconds"])
         finally:
@@ -116,13 +145,17 @@ async def serve(args):
     cfg = build_config(args.model, args.nodes, profiles)
     OmegaConf.save(cfg, args.output / "effective-config.yaml")
     provenance = {
-        "started_at": time.time(), "msrl_sha": args.source_sha,
+        "started_at": time.time(),
+        "msrl_sha": args.source_sha,
         "vllm_distribution": importlib.metadata.version("vllm"),
         "torch_distribution": importlib.metadata.version("torch"),
         "corpus_sha256": hashlib.sha256(args.corpus.read_bytes()).hexdigest(),
-        "nodes": args.nodes, "config": OmegaConf.to_container(cfg, resolve=True),
-        "source_files": {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-                         for path in [Path(__file__), Path(__file__).parents[2] / "uv.lock"]},
+        "nodes": args.nodes,
+        "config": OmegaConf.to_container(cfg, resolve=True),
+        "source_files": {
+            str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in [Path(__file__), Path(__file__).parents[2] / "uv.lock"]
+        },
     }
     # A release suffix has a version segment, a source segment and a CUDA segment.
     # The runtime __version__ legitimately omits the last segment.
@@ -162,9 +195,13 @@ async def serve(args):
                     requests = requests_for(corpus, command["waves"], args.nodes)
                     profiler = asyncio.create_task(profile_windows(benchmark, engines, command.get("profiles", [])))
                     try:
-                        result = await benchmark.run(name, requests, concurrency=command["concurrency"],
-                                                     mode=command["mode"],
-                                                     sampling_params=get_vllm_sampling_params(cfg.generator.sampling_params))
+                        result = await benchmark.run(
+                            name,
+                            requests,
+                            concurrency=command["concurrency"],
+                            mode=command["mode"],
+                            sampling_params=get_vllm_sampling_params(cfg.generator.sampling_params),
+                        )
                         await profiler
                     finally:
                         if not profiler.done():
@@ -173,8 +210,12 @@ async def serve(args):
                     result["command"] = command
                     (args.output / f"{name}.json").write_text(json.dumps(json_value(result)) + "\n")
                     path.with_suffix(".running").rename(path.with_suffix(".done"))
-                    print(json.dumps({"completed": name, "seconds": result["seconds"],
-                                      "requests": len(result["requests"])}), flush=True)
+                    print(
+                        json.dumps(
+                            {"completed": name, "seconds": result["seconds"], "requests": len(result["requests"])}
+                        ),
+                        flush=True,
+                    )
     finally:
         await asyncio.gather(*(engine.teardown() for engine in engines), return_exceptions=True)
         ray.shutdown()

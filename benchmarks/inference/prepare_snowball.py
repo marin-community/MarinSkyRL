@@ -12,11 +12,11 @@ from pathlib import Path
 import fsspec
 import skyrl_gym
 from omegaconf import DictConfig
+from skyrl_train.dataset.dataset import PromptDataset
+from skyrl_train.inference_engines.utils import hash_with_sha256
 from transformers import AutoTokenizer
 
 from cloud.iris.task_runtime import materialize_model_export
-from skyrl_train.dataset.dataset import PromptDataset
-from skyrl_train.inference_engines.utils import hash_with_sha256
 
 MODEL_URI = "s3://marin-us-east-02a/marin/exports/grug/june-67b-a2b-sft-s2-thinking/step-630/hf-bf16-vllm/"
 POOL_URI = "s3://marin-us-east-02a/marin/documents/curriculum-rl-pool/2026.09.02.1/train.parquet"
@@ -52,24 +52,47 @@ def main():
             prompt, env_class, extras, uid = dataset[index]
             env = skyrl_gym.make(env_class, env_config=DictConfig({}), extras=extras)
             history, _ = env.init(prompt)
-            tokens = tokenizer.apply_chat_template(history, add_generation_prompt=True, tokenize=True,
-                                                   return_dict=False)
+            tokens = tokenizer.apply_chat_template(
+                history, add_generation_prompt=True, tokenize=True, return_dict=False
+            )
             if len(tokens) > 1024:
                 raise ValueError(f"Templated row {uid} exceeds the production prompt budget")
-            prompts.append({"group_id": uid, "prompt_token_ids": tokens, "env_class": env_class,
-                            "extra_info": extras.get("extra_info", {})})
+            prompts.append(
+                {
+                    "group_id": uid,
+                    "prompt_token_ids": tokens,
+                    "env_class": env_class,
+                    "extra_info": extras.get("extra_info", {}),
+                }
+            )
         accepted.append(prompts)
-    corpus = {"model_uri": MODEL_URI, "pool_uri": POOL_URI,
-              "pool_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-              "filtered_pool_rows": len(dataset), "selection_seed": 17,
-              "candidate_batches": candidate_count, "selection": "uniform 64 rows; node-zero hash count equals 128",
-              "samples_per_prompt": 8, "production_dp_engines": 32, "waves": accepted}
+    corpus = {
+        "model_uri": MODEL_URI,
+        "pool_uri": POOL_URI,
+        "pool_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "filtered_pool_rows": len(dataset),
+        "selection_seed": 17,
+        "candidate_batches": candidate_count,
+        "selection": "uniform 64 rows; node-zero hash count equals 128",
+        "samples_per_prompt": 8,
+        "production_dp_engines": 32,
+        "waves": accepted,
+    }
     payload = json.dumps(corpus, sort_keys=True, separators=(",", ":"))
     (args.output / "corpus.json").write_text(payload + "\n")
-    print(json.dumps({"corpus_sha256": hashlib.sha256((payload + "\n").encode()).hexdigest(),
-                      "waves": len(accepted), "candidate_batches": candidate_count,
-                      "pool_rows": len(dataset),
-                      "env_counts": Counter(row["env_class"] for wave in accepted for row in wave)}, sort_keys=True), flush=True)
+    print(
+        json.dumps(
+            {
+                "corpus_sha256": hashlib.sha256((payload + "\n").encode()).hexdigest(),
+                "waves": len(accepted),
+                "candidate_batches": candidate_count,
+                "pool_rows": len(dataset),
+                "env_counts": Counter(row["env_class"] for wave in accepted for row in wave),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
