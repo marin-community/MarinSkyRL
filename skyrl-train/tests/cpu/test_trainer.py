@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 
 from skyrl_train.distributed.dispatch import MeshRank
-from skyrl_train.group_admission import GroupAdvantageInvariant
+from skyrl_train.group_admission import GroupAdvantageInvariant, TrainingGroupInvariantError
 from skyrl_train.sync_group_admission import InsufficientEligibleGroupsError
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import RayPPOTrainer
@@ -75,6 +75,75 @@ def test_sync_group_admission_exhaustion_raises_typed_error():
 
     with pytest.raises(InsufficientEligibleGroupsError):
         trainer.handle_group_admission(fully_masked, ["masked", "masked"])
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("logprobs", [None, [[-0.5], [None]], [[-0.5], [-0.25]]])
+def test_regular_tis_admission_requires_native_active_logprobs_only_when_strict(strict, logprobs):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "train_batch_size": 1,
+                "algorithm": {
+                    "policy_loss_type": "regular",
+                    "use_tis": True,
+                    "require_rollout_logprobs": strict,
+                    "tis_lcs_alert_threshold": 0.005,
+                    "group_admission": {"max_sample_batches": 1},
+                },
+            }
+        }
+    )
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=2)
+    trainer.group_admission_state = None
+    trainer.all_metrics = {}
+    batch = {
+        "prompt_token_ids": [[1], [1]],
+        "response_ids": [[2], [3]],
+        "rewards": [0.0, 1.0],
+        "loss_masks": [[1], [1]],
+        "rollout_logprobs": logprobs,
+        "rollout_metrics": {},
+    }
+    if strict and (logprobs is None or logprobs[1][0] is None):
+        with pytest.raises(TrainingGroupInvariantError, match="missing_rollout_logprobs"):
+            trainer.handle_group_admission(batch, ["group", "group"])
+    else:
+        result = trainer.handle_group_admission(batch, ["group", "group"])
+        assert not result.keep_sampling
+        assert result.trajectory_batch["rollout_logprobs"] == logprobs
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("has_logprobs", [False, True])
+def test_regular_tis_training_conversion_preserves_fallback_unless_strict(
+    dummy_config, dummy_tokenizer, strict, has_logprobs
+):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    OmegaConf.update(trainer.cfg, "trainer.algorithm.require_rollout_logprobs", strict, force_add=True)
+    trainer.cfg.trainer.algorithm.use_tis = True
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = dummy_tokenizer
+    trainer.pad_batch = lambda batch: batch
+    batch = {
+        "prompt_token_ids": [[1]],
+        "response_ids": [[2, 3]],
+        "rewards": [[0.0, 1.0]],
+        "loss_masks": [[1, 1]],
+        "rollout_logprobs": [[-0.5, -0.25]] if has_logprobs else None,
+    }
+    if strict and not has_logprobs:
+        with pytest.raises(ValueError, match="rollout_logprobs are required"):
+            trainer.convert_to_training_input(batch, ["group"])
+    else:
+        converted = trainer.convert_to_training_input(batch, ["group"])
+        if has_logprobs:
+            torch.testing.assert_close(converted["rollout_logprobs"], torch.tensor([[-0.5, -0.25]]))
+        else:
+            assert converted["rollout_logprobs"] is None
+        assert trainer._tis_batch_skipped_no_logprobs == (0.0 if has_logprobs else 1.0)
 
 
 _TEST_PROGRESS_CONFIG = {
@@ -183,8 +252,9 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     assert trainer.inference_engine_client.wake_tags == [["weights"], ["kv_cache"]]
 
 
-def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed():
+def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(dummy_config):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
@@ -213,8 +283,9 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
     assert saved_steps == [6]
 
 
-def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
+def test_intermediate_checkpoint_does_not_suppress_non_storage_failure(dummy_config):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0

@@ -88,7 +88,7 @@ from skyrl_train.utils.utils import (
     policy_per_gpu_bundles_enabled,
     policy_force_cvd_mask_enabled,
 )
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.utils.algorithm_registry import rollout_logprobs_required
 from skyrl_train.utils.importance_ratio_diagnostics import behavior_drift_metrics
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
@@ -1277,9 +1277,9 @@ class RayPPOTrainer:
             response_span_tags,
             num_experts,
         )
-        behavior_logprobs_required = policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type)
+        behavior_logprobs_required = rollout_logprobs_required(self.cfg.trainer.algorithm)
         if behavior_logprobs_required and rollout_logprobs_tensor is None:
-            raise ValueError("rollout_logprobs are required for behavior_clip policy loss")
+            raise ValueError("rollout_logprobs are required by the configured algorithm")
 
         # sanity check for tis
         #
@@ -2128,9 +2128,7 @@ class RayPPOTrainer:
             trajectory_batch,
             uids,
             invariant=self.group_advantage_invariant,
-            rollout_logprobs_required=policy_loss_requires_rollout_logprobs(
-                self.cfg.trainer.algorithm.policy_loss_type
-            ),
+            rollout_logprobs_required=rollout_logprobs_required(self.cfg.trainer.algorithm),
             target_batch_size=int(self.cfg.trainer.train_batch_size),
             tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
             state=self.group_admission_state,

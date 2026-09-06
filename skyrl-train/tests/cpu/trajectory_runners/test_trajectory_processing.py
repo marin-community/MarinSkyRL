@@ -3,6 +3,7 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 """
 
 import pytest
+from omegaconf import OmegaConf
 from types import SimpleNamespace
 
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -16,6 +17,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_generation_prompt_ids,
 )
 from transformers import AutoTokenizer
+from skyrl_train.utils.algorithm_registry import rollout_logprobs_required
 
 
 def test_minimum_captured_global_step_uses_oldest_sample_in_group():
@@ -1008,7 +1010,8 @@ def test_required_rollout_logprobs_reject_partial_generation_batch():
         )
 
 
-def test_required_rollout_logprobs_allow_fully_excluded_generation_batch():
+@pytest.mark.parametrize("policy_loss_type,strict", [("behavior_clip", False), ("regular", True)])
+def test_required_rollout_logprobs_allow_fully_excluded_generation_batch(policy_loss_type, strict):
     trainable = {**_generated_group(2, 0), "rollout_logprobs": [[-0.1, -0.2], [-0.3, -0.4]]}
     excluded = {
         **_generated_group(2, 2),
@@ -1018,7 +1021,14 @@ def test_required_rollout_logprobs_allow_fully_excluded_generation_batch():
 
     merged = concatenate_trajectory_batches(
         [trainable, excluded],
-        require_rollout_logprobs=True,
+        require_rollout_logprobs=rollout_logprobs_required(
+            OmegaConf.create(
+                {
+                    "policy_loss_type": policy_loss_type,
+                    "require_rollout_logprobs": strict,
+                }
+            )
+        ),
         tis_lcs_alert_threshold=0.005,
     )
 
@@ -1026,7 +1036,8 @@ def test_required_rollout_logprobs_allow_fully_excluded_generation_batch():
     assert merged["exclude_from_baseline"] == [False, False, True, True]
 
 
-def test_required_rollout_logprobs_reject_fully_masked_baseline_contributor():
+@pytest.mark.parametrize("policy_loss_type,strict", [("behavior_clip", False), ("regular", True)])
+def test_required_rollout_logprobs_reject_fully_masked_baseline_contributor(policy_loss_type, strict):
     masked_baseline_contributor = {
         **_generated_group(2, 0),
         "loss_masks": [[0, 0], [0, 0]],
@@ -1036,6 +1047,13 @@ def test_required_rollout_logprobs_reject_fully_masked_baseline_contributor():
     with pytest.raises(ValueError, match="rollout_logprobs are required"):
         concatenate_trajectory_batches(
             [masked_baseline_contributor],
-            require_rollout_logprobs=True,
+            require_rollout_logprobs=rollout_logprobs_required(
+                OmegaConf.create(
+                    {
+                        "policy_loss_type": policy_loss_type,
+                        "require_rollout_logprobs": strict,
+                    }
+                )
+            ),
             tis_lcs_alert_threshold=0.005,
         )

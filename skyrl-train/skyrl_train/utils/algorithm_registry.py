@@ -98,9 +98,16 @@ def policy_loss_requires_rollout_logprobs(policy_loss_type: str) -> bool:
     return policy_loss_type == PolicyLossType.BEHAVIOR_CLIP
 
 
+def rollout_logprobs_required(algorithm_config: DictConfig) -> bool:
+    """Require native behavior probabilities for the objective or an explicit strict run."""
+    return bool(algorithm_config.get("require_rollout_logprobs", False)) or policy_loss_requires_rollout_logprobs(
+        algorithm_config.policy_loss_type
+    )
+
+
 def rollout_logprobs_enabled(algorithm_config: DictConfig) -> bool:
     """Return whether training consumes rollout logprobs for loss or diagnostics."""
-    return bool(algorithm_config.use_tis) or policy_loss_requires_rollout_logprobs(algorithm_config.policy_loss_type)
+    return bool(algorithm_config.use_tis) or rollout_logprobs_required(algorithm_config)
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):

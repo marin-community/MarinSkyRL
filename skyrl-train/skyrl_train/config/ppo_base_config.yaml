@@ -216,6 +216,9 @@ trainer:
     clip_ratio_c: 3.0
     tis_imp_ratio_cap: -1.0
     use_tis: false
+    # Fail closed on missing behavior probabilities instead of degrading TIS for a batch.
+    # behavior_clip always requires these probabilities, independently of this flag.
+    require_rollout_logprobs: false
     tito_full: null
     tis_splice: true
     tis_lcs_alert_threshold: 0.005

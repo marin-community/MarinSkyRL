@@ -147,6 +147,7 @@ def test_retryable_infrastructure_classification_is_not_implicitly_excluded():
     [
         {"use_tis": True, "policy_loss_type": "regular"},
         {"use_tis": False, "policy_loss_type": "behavior_clip"},
+        {"use_tis": False, "policy_loss_type": "regular", "require_rollout_logprobs": True},
     ],
 )
 def test_behavior_referenced_passthrough_without_logprobs_gets_named_error(algorithm_config):

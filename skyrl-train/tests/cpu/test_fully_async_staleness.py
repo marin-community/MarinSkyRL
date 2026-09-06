@@ -3,6 +3,7 @@ import collections
 
 import pytest
 import torch
+from omegaconf import OmegaConf
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from skyrl_train.fully_async_trainer import (
@@ -17,6 +18,31 @@ from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPoli
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_strict_tis_async_conversion_rejects_missing_group_before_training(partial):
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "algorithm": {
+                    "policy_loss_type": "regular",
+                    "use_tis": True,
+                    "require_rollout_logprobs": True,
+                    "tis_lcs_alert_threshold": 0.005,
+                }
+            }
+        }
+    )
+    trainer.global_step = 10
+    trainer.max_staleness_steps = 2
+    trainer.mini_batch_size = 2
+    groups = [_generated_group("a", 10), _generated_group("b", 10)]
+    if partial:
+        groups[0].trajectory_batch["rollout_logprobs"] = [[-0.5], [-0.25]]
+    with pytest.raises(ValueError, match="rollout_logprobs are required for every generated group"):
+        trainer.convert_generation_group_mini_batch_to_training_input(groups)
 
 
 def _generated_group(

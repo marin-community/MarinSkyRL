@@ -67,7 +67,7 @@ from skyrl_train.dynamic_sampling import (
     resolve_dynamic_sampling_criteria,
 )
 from skyrl_train.group_admission import AdmissionDecision, AdmissionRejection, GroupAdmissionPolicy
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.utils.algorithm_registry import rollout_logprobs_required
 from skyrl_train.utils.utils import validate_fully_async_cfg
 
 
@@ -537,9 +537,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._group_admission_policy = GroupAdmissionPolicy(
             self.group_advantage_invariant,
             max_staleness_steps=self.max_staleness_steps,
-            rollout_logprobs_required=policy_loss_requires_rollout_logprobs(
-                self.cfg.trainer.algorithm.policy_loss_type
-            ),
+            rollout_logprobs_required=rollout_logprobs_required(self.cfg.trainer.algorithm),
         )
         # Some async-specific validations
         assert self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size, (
@@ -1793,7 +1791,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         trajectory_batch = concatenate_trajectory_batches(
             trajectory_batches,
-            require_rollout_logprobs=policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type),
+            require_rollout_logprobs=rollout_logprobs_required(self.cfg.trainer.algorithm),
             tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
         assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
