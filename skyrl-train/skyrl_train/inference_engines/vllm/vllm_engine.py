@@ -9,8 +9,11 @@ import ray
 import torch
 import asyncio
 import vllm
+from dataclasses import asdict
 from types import SimpleNamespace
 from vllm import SamplingParams
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group
+from skyrl_train.inference_engines.placement import inference_worker_placement
 from vllm.inputs import TokensPrompt
 
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
@@ -917,6 +920,19 @@ class WorkerWrap:
         import socket
 
         return socket.gethostname()
+
+    def report_device_placement(self):
+        dp = get_dp_group()
+        ep = get_ep_group() if self.model_config.is_moe else None
+        placement = inference_worker_placement(
+            dp_rank=dp.rank_in_group,
+            dp_world_size=dp.world_size,
+            ep_rank=ep.rank_in_group if ep is not None else 0,
+            ep_world_size=ep.world_size if ep is not None else 1,
+        )
+        # Primitive fields survive vLLM's msgpack utility RPC without custom
+        # type reconstruction or changes to its serialization settings.
+        return asdict(placement)
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
@@ -1927,6 +1943,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """TEST-ONLY (disaggregation proof): hostname of every engine TP/EP worker."""
         engine = self._get_engine()
         return await engine.collective_rpc("report_host")
+
+    async def report_engine_placement(self):
+        """Read actual worker GPUs and communicator ranks through the SkyRL extension."""
+        return await self._get_engine().collective_rpc("report_device_placement")
 
     async def begin_weight_reload(self):
         """#1685 fix: open the layerwise-reload bracket on every engine worker so the

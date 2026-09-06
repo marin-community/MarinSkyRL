@@ -111,6 +111,7 @@ from marinskyrl.resource_locator import (
     model_source_for_path,
 )
 from marinskyrl.runtime_options import GDNBackend, R3Transport
+from marinskyrl.inference_placement import validate_node_local_config
 from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
@@ -384,12 +385,12 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
     }
     for key, value in completion.items():
         argv.extend(["--skyrl-override", format_hydra_arg(f"trainer.completion.{key}", value, prefix="++")])
-    _validate_training_completion(spec, completion)
+    _validate_training_completion(spec, completion, role_overrides=role_overrides)
     return argv
 
 
-def _validate_training_completion(spec: SkyRLJobSpec, completion: dict[str, str]) -> None:
-    """Validate saving policy before GPU admission, with Hydra override semantics."""
+def _validate_training_completion(spec: SkyRLJobSpec, completion: dict[str, str], *, role_overrides: list[str]) -> None:
+    """Validate saving and opted-in placement before GPU admission, with effective overrides."""
     from hydra.core.override_parser.overrides_parser import OverridesParser
     from omegaconf import OmegaConf
 
@@ -401,14 +402,18 @@ def _validate_training_completion(spec: SkyRLJobSpec, completion: dict[str, str]
     base = OmegaConf.load(base_path)
     source = OmegaConf.create(yaml.safe_load(spec.request.config_yaml) or {})
     cfg = OmegaConf.merge(base, source)
-    for override in OverridesParser.create().parse_overrides(list(spec.request.overrides)):
-        if not override.key_or_group.startswith("trainer."):
+    for override in OverridesParser.create().parse_overrides([*role_overrides, *spec.request.overrides]):
+        if override.key_or_group != "generator" and not override.key_or_group.startswith(("trainer.", "generator.")):
             continue
         if override.is_delete():
-            raise ValueError("Deleting trainer configuration is unsupported by typed training requests")
+            if override.key_or_group.startswith("trainer."):
+                raise ValueError("Deleting trainer configuration is unsupported by typed training requests")
+            OmegaConf.update(cfg, override.key_or_group, None, merge=False, force_add=True)
+            continue
         OmegaConf.update(cfg, override.key_or_group, override.value(), merge=False, force_add=True)
     cfg.trainer.completion = completion
     validate_completion_config(cfg)
+    validate_node_local_config(cfg, gpus_per_node=spec.request.topology.gpus_per_node)
 
 
 class IrisBackend:

@@ -32,6 +32,7 @@ from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, EnvVarManager, EnvVarSc
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.runtime_options import GDNBackend, R3Transport
+from marinskyrl.inference_placement import validate_node_local_config
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, sync_registries
@@ -816,6 +817,7 @@ def validate_cfg(cfg: DictConfig):
         )
 
     # Validate placement
+    validate_node_local_config(cfg)
     if cfg.trainer.placement.colocate_all:
         tp_pp_size = (
             cfg.generator.inference_engine_tensor_parallel_size * cfg.generator.inference_engine_pipeline_parallel_size

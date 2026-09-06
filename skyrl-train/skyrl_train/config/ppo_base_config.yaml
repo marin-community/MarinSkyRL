@@ -355,6 +355,9 @@ generator:
   inference_engine_data_parallel_size: 1
   inference_engine_decode_context_parallel_size: 1
   inference_engine_mp_backend: false
+  # Opt-in: keep each outer DP/EP replica on one node and verify physical GPUs.
+  # Currently requires non-colocated async vLLM, TP=PP=1, and EP=DP.
+  inference_engine_node_local: false
   n_samples_per_prompt: 5
   async_engine: true
   batched: false

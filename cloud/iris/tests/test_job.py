@@ -437,6 +437,37 @@ def test_launcher_argv_forwards_detached_submission(tmp_path: Path) -> None:
     assert args.no_wait
 
 
+@pytest.mark.parametrize("node_local", [False, True])
+def test_launcher_checks_node_local_replica_size_against_declared_node_capacity(tmp_path: Path, node_local) -> None:
+    spec = _spec(tmp_path)
+    request = replace(
+        spec.request,
+        topology=replace(spec.request.topology, gpus_per_node=8),
+        overrides=(
+            *spec.request.overrides,
+            "++trainer.placement.colocate_all=false",
+            "++generator.async_engine=true",
+            "++generator.inference_engine_data_parallel_size=16",
+            "++generator.inference_engine_expert_parallel_size=16",
+            f"++generator.inference_engine_node_local={str(node_local).lower()}",
+        ),
+    )
+    spec = replace(spec, request=request)
+    if node_local:
+        with pytest.raises(ValueError, match="needs 16 GPUs but a node provides 8"):
+            job_launch_argv(spec, "/tmp/config.yaml")
+    else:
+        args = create_parser().parse_args(job_launch_argv(spec, "/tmp/config.yaml"))
+        assert args.gpus_per_node == 8
+
+
+def test_launcher_rejects_deleted_generator_with_explicit_validation_error(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    spec = replace(spec, request=replace(spec.request, overrides=(*spec.request.overrides, "~generator")))
+    with pytest.raises(ValueError, match="generator configuration must be a mapping"):
+        job_launch_argv(spec, "/tmp/config.yaml")
+
+
 def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) -> None:
     envelope = _spec(tmp_path)
     locator = DataLocator(

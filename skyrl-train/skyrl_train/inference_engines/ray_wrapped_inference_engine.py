@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Collection
+from dataclasses import asdict
 import os
 from typing import Any, Dict, List
 
@@ -7,7 +8,7 @@ import ray
 from loguru import logger
 from packaging import version
 from ray.actor import ActorHandle
-from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
+from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group, remove_placement_group
 from transformers import AutoConfig, PretrainedConfig
 
 from skyrl_train.inference_engines.base import (
@@ -28,6 +29,9 @@ from skyrl_train.utils import (
 from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
 from skyrl_train.inference_engines.placement import colocated_engine_bundle_layout
+from skyrl_train.inference_engines.placement import node_local_bundle_nodes, verified_inference_replica_placements
+from skyrl_train.telemetry import record_event
+from marinskyrl.inference_placement import validate_node_local_inference
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +275,7 @@ def create_ray_wrapped_inference_engines(
     max_logprobs: int = 1,
     mp_backend: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
+    node_local: bool = False,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -286,6 +291,35 @@ def create_ray_wrapped_inference_engines(
         non-colocated engines (each engine owns its own GPUs); colocated/hybrid engines
         still require the ray backend for shared-GPU resource management.
     """
+    validate_node_local_inference(
+        enabled=node_local,
+        backend=backend,
+        async_engine=async_engine,
+        colocate_all=shared_pg is not None or inference_engine_enable_sleep,
+        tensor_parallel_size=tensor_parallel_size,
+        pipeline_parallel_size=pipeline_parallel_size,
+        data_parallel_size=data_parallel_size,
+        expert_parallel_size=expert_parallel_size,
+        num_inference_engines=num_inference_engines,
+    )
+    node_hosts = {}
+    node_gpu_capacities = {}
+    if node_local:
+        live_nodes = [node for node in ray.nodes() if node["Alive"]]
+        node_hosts = {node["NodeID"]: node["NodeManagerHostname"] for node in live_nodes}
+        node_gpu_capacities = {node["NodeID"]: int(node["Resources"].get("GPU", 0)) for node in live_nodes}
+        validate_node_local_inference(
+            enabled=True,
+            backend=backend,
+            async_engine=async_engine,
+            colocate_all=False,
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
+            expert_parallel_size=expert_parallel_size,
+            num_inference_engines=num_inference_engines,
+            gpus_per_node=max(node_gpu_capacities.values(), default=0),
+        )
     if backend == "vllm":
         import vllm
         from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
@@ -410,7 +444,9 @@ def create_ray_wrapped_inference_engines(
     # mechanism (main_base.get_policy_pg), which claims the policy's whole nodes BEFORE
     # these engine PGs are created.
     per_engine_pgs: list = []
-    use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
+    # Opted-in DP replicas share the node guarantee; legacy DP/EP shapes keep
+    # their existing packing, including groups larger than one physical node.
+    use_per_engine_strict_pack = node_local or use_per_engine_strict_pack_pg(
         use_hybrid_engine=use_hybrid_engine,
         use_mp_backend=use_mp_backend,
         tensor_parallel_size=tensor_parallel_size,
@@ -434,10 +470,8 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
         elif use_per_engine_strict_pack:
-            # ray/uni backend, multi-GPU engines (TP*PP > 1): one STRICT_PACK PG per
-            # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
-            # guaranteed co-located on a single node (no cross-node TP all-reduce in
-            # decode). #232 fix.
+            # Each TP/PP engine or opted-in DP/EP replica owns a STRICT_PACK
+            # group so all its GPU bundles are guaranteed to share one node.
             for _ in range(num_inference_engines):
                 pg = placement_group(
                     [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
@@ -459,6 +493,16 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
 
+    replica_nodes = []
+    if node_local:
+        try:
+            replica_nodes = node_local_bundle_nodes(
+                per_engine_pgs, data_parallel_size=data_parallel_size, node_gpu_capacities=node_gpu_capacities
+            )
+        except Exception:
+            for pg in per_engine_pgs:
+                remove_placement_group(pg)
+            raise
     allocated_rendezvous_ports: set[int] = set()
     for i in range(num_inference_engines):
         # Per-engine STRICT_PACK PGs (ray/uni, multi-GPU engines) are engine-LOCAL: each
@@ -725,7 +769,9 @@ def create_ray_wrapped_inference_engines(
     # read-only probe (returns hostnames), no side effects. vLLM-only (collective_rpc);
     # the colocated sleep barrier still covers the sglang/colocated paths unchanged.
     startup_refs = []
-    if not inference_engine_enable_sleep and backend == "vllm":
+    if node_local:
+        startup_refs = [engine.inference_engine_actor.report_engine_placement.remote() for engine in engines]
+    elif not inference_engine_enable_sleep and backend == "vllm":
         startup_refs = [engine.inference_engine_actor.report_engine_hosts.remote() for engine in engines]
 
     if inference_engine_enable_sleep:
@@ -740,29 +786,55 @@ def create_ray_wrapped_inference_engines(
         startup_refs = sleep_refs
 
     if startup_refs:
-        wait_for_inference_engine_startup(
-            startup_refs,
-            [engine.inference_engine_actor for engine in engines],
-            timeout_seconds=engine_init_timeout_seconds,
-        )
+        try:
+            startup_results = wait_for_inference_engine_startup(
+                startup_refs,
+                [engine.inference_engine_actor for engine in engines],
+                timeout_seconds=engine_init_timeout_seconds,
+            )
+        except Exception:
+            if node_local:
+                for pg in per_engine_pgs:
+                    remove_placement_group(pg)
+            raise
+        if node_local:
+            try:
+                placements = verified_inference_replica_placements(
+                    startup_results,
+                    replica_nodes=replica_nodes,
+                    node_hosts=node_hosts,
+                    relative_rank_offsets=weight_sync_relative_rank_offsets,
+                    data_parallel_size=data_parallel_size,
+                    expert_parallel_size=expert_parallel_size,
+                )
+            except Exception:
+                for actor in inference_engine_actors:
+                    ray.kill(actor)
+                for pg in per_engine_pgs:
+                    remove_placement_group(pg)
+                raise
+            for row in placements:
+                fields = {**asdict(row.worker), **asdict(row)}
+                del fields["worker"]
+                record_event("inference_replica_topology", fields, attributes={"role": "inference", "verified": "true"})
+                logger.info("Verified inference replica placement: {}", fields)
 
     return engines
 
 
 def wait_for_inference_engine_startup(
     startup_refs: list[ray.ObjectRef], actor_handles: list[ActorHandle], *, timeout_seconds: float
-) -> None:
+) -> list[Any]:
     """Wait for every engine readiness reference or terminate the actor gang."""
 
     _, pending = ray.wait(startup_refs, num_returns=len(startup_refs), timeout=timeout_seconds, fetch_local=False)
     if not pending:
         try:
-            ray.get(startup_refs)
+            return ray.get(startup_refs)
         except Exception:
             for actor in actor_handles:
                 ray.kill(actor)
             raise
-        return
 
     pending_set = set(pending)
     pending_indices = [index for index, ref in enumerate(startup_refs) if ref in pending_set]
