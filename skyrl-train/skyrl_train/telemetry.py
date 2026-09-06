@@ -75,7 +75,7 @@ def record_training_metrics(metrics: Mapping[str, object], *, step: int, kind: s
     """Mirror the selected trainer scalar families without changing their values."""
     for name, value in metrics.items():
         if not name.startswith(
-            ("policy/", "reward/", "loss/", "async/", "generate/", "generator/", "val/", "eval/", "env/")
+            ("policy/", "reward/", "loss/", "async/", "consumed/", "generate/", "generator/", "val/", "eval/", "env/")
         ):
             continue
         if not isinstance(value, (int, float)):

@@ -465,6 +465,14 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
         assert await asyncio.wait_for(produce_next(), timeout=1) == "next rollout completed"
         publish_step_timings({"step": 5.0, "policy_train": 2.0}, step=2)
         rollout.record_group_outcome(outcome="consumed", tokens=20, step=2, attempt_id="group-1")
+        training_telemetry.record_training_metrics(
+            {
+                **rollout.consumed_stop_metrics(["length", "stop", "length", "stop"], 4),
+                "unselected/value": 99.0,
+            },
+            step=2,
+            kind="train",
+        )
         assert exporter.runtime_status().queued_records > 0
         acknowledge.set()
         assert await asyncio.to_thread(flush, timeout=2)
@@ -484,6 +492,21 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
     assert len(root_spans) == 3
     assert all("parent" not in row["attributes"] for row in root_spans)
     assert any(row["name"] == "rollout_group_outcome" and row["body"]["call_id"] == "group-1" for row in delivered)
+    consumed = [row for row in delivered if row["name"] == "training_metric_value"]
+    assert {row["attributes"]["metric"]: row["value"] for row in consumed} == {
+        "consumed/sequences": 4,
+        "consumed/length_stop_count": 2,
+        "consumed/known_stop_count": 4,
+        "consumed/unknown_stop_count": 0,
+        "consumed/stop_reason_coverage": 1,
+        "consumed/length_stop_fraction": 0.5,
+    }
+    assert all(
+        row["attributes"]["step"] == "2"
+        and row["attributes"]["phase"] == "train"
+        and row["attributes"]["role"] == "trainer"
+        for row in consumed
+    )
     terminal = next(row for row in delivered if row["name"] == "terminal")
     assert terminal["body"]["status"] == "completed"
     assert terminal["body"]["export_lost_records"] == 0
