@@ -569,8 +569,24 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
             )
 
 
+def validate_fully_async_cfg(cfg: DictConfig) -> None:
+    """Reject publication schedules that cannot generate an eligible next batch."""
+    interval = cfg.trainer.fully_async.weight_sync_interval
+    max_age = cfg.trainer.fully_async.max_staleness_steps
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval <= 0:
+        raise ValueError("trainer.fully_async.weight_sync_interval must be a positive integer")
+    if not isinstance(max_age, int) or isinstance(max_age, bool) or max_age < 0:
+        raise ValueError("trainer.fully_async.max_staleness_steps must be a non-negative integer")
+    if interval > max_age + 1:
+        raise ValueError(
+            "trainer.fully_async.weight_sync_interval must be <= max_staleness_steps + 1; "
+            "otherwise the installed weights become too old to assemble the next training batch"
+        )
+
+
 def validate_cfg(cfg: DictConfig):
     validate_completion_config(cfg)
+    validate_fully_async_cfg(cfg)
     resolve_dynamic_sampling_criteria(
         cfg.trainer.algorithm.dynamic_sampling.informative_on,
         float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),

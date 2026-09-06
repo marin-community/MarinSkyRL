@@ -50,6 +50,7 @@ from skyrl_train.telemetry import (
     record_event,
 )
 from skyrl_train.rollout_observability import (
+    async_phase_window,
     async_step_metrics,
     async_wait,
     observe_rollout_call,
@@ -67,6 +68,7 @@ from skyrl_train.dynamic_sampling import (
 )
 from skyrl_train.group_admission import AdmissionDecision, AdmissionRejection, GroupAdmissionPolicy
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.utils.utils import validate_fully_async_cfg
 
 
 _QueueItem = TypeVar("_QueueItem")
@@ -453,6 +455,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert cfg is not None, "cfg must be provided to FullyAsyncRayPPOTrainer"
         if cfg.trainer.offload_optimizer_during_rollouts:
             raise ValueError("Fully async training requires trainer.offload_optimizer_during_rollouts=false")
+        validate_fully_async_cfg(cfg)
         self._async_observations_enabled = bool(cfg.trainer.get("async_spans", False))
         self._published_policy_version = 0
 
@@ -460,6 +463,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
+        self.weight_sync_interval = cfg.trainer.fully_async.weight_sync_interval
         self.admission_stall_timeout = int(cfg.trainer.fully_async.admission_stall_timeout)
         if self.admission_stall_timeout <= 0:
             raise ValueError("trainer.fully_async.admission_stall_timeout must be positive")
@@ -797,6 +801,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     "responses_per_prompt": generator.n_samples_per_prompt,
                     "producers": self.num_parallel_generation_workers,
                     "max_staleness_steps": self.cfg.trainer.fully_async.max_staleness_steps,
+                    "weight_sync_interval": self.weight_sync_interval,
                     "max_steps": self.total_training_steps,
                     "steps_per_epoch": self.num_steps_per_epoch,
                     "eval_interval": self.cfg.trainer.eval_interval,
@@ -886,6 +891,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     with (
                         Timer("wait_for_generation_buffer", self.all_timings) as rollout_wait_timer,
                         critical_phase("rollout_or_inference_wait", self.global_step),
+                        async_phase_window(
+                            "rollout_wait", step=self.global_step, enabled=self._training_metrics_enabled
+                        ),
                     ):
                         cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
                             generation_queues,
@@ -936,7 +944,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         )
 
                     # 3. Run training and record consumed UIDs in the tracker.
-                    with Timer("run_training", self.all_timings):
+                    with (
+                        Timer("run_training", self.all_timings),
+                        async_phase_window("training", step=self.global_step, enabled=self._training_metrics_enabled),
+                    ):
                         status = await self._run_training(training_input)
                     train_duration = self.all_timings["train_critic_and_policy"]
                     self._log_optimizer_step_completed(
@@ -949,37 +960,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     for group in cur_generation_group_mini_batch:
                         self._record_group_terminal(group, "consumed")
 
-                    # 4. After training: sync weights to the inference engines.
-                    #    The inference engines are a SHARED HTTP backend that every
-                    #    RolloutCoordinator calls, so the STOCK engine-level
-                    #    pause/sync/resume below (fast NCCL broadcast with the
-                    #    engines briefly quiesced) already propagates fresh weights
-                    #    to every coordinator's subsequent requests. We deliberately
-                    #    do NOT barrier-pause/drain the RolloutCoordinators at the
-                    #    trial level: a coordinator-level drain is unnecessary for
-                    #    correctness and defeats async overlap (the hard-drain stalled
-                    #    the step boundary indefinitely when long-running trials never
-                    #    drained). Rollouts in flight across the weight swap simply
-                    #    return as STALE and are bounded by the dispatcher's existing
-                    #    max_staleness_steps accounting — exactly like stock
-                    #    fully_async, which never drains trial orchestration. This
-                    #    block is now byte-identical for fan-out ON and OFF.
-                    with Timer("sync_weights", self.all_timings) as weight_update_timer:
-                        with Timer("weight_pause", self.all_timings):
-                            await self.inference_engine_client.pause_generation()
-                        await self.async_sync_policy_weights_to_inference_engines()
-                        # Drain the policy workers' event loops to a hard sync point so
-                        # every FSDP shard rank is free before the NEXT step's forward is
-                        # dispatched (the MoE-RL async-dispatch wedge fix). See
-                        # _drain_policy_event_loops.
-                        with Timer("policy_post_sync_drain", self.all_timings):
-                            await self._drain_policy_event_loops()
-                        with Timer("weight_resume", self.all_timings):
-                            await self.inference_engine_client.resume_generation()
-                    self._log_weight_update_completed(
-                        reason="training_step",
-                        duration_seconds=weight_update_timer.duration,
-                    )
+                    # Scheduled publications stay on the global update grid, including after resume.
+                    # The terminal update is also published when it falls between scheduled updates.
+                    self.all_timings["sync_weights"] = 0.0
+                    if self.global_step % self.weight_sync_interval == 0:
+                        await self._publish_policy_weights(reason="training_step", timing_name="sync_weights")
+                    elif self.global_step == self.total_training_steps:
+                        await self._publish_policy_weights(reason="final", timing_name="sync_weights")
 
                 # 5. Log status and update metrics
                 core_finished_unix_ms = time.time_ns() // 1_000_000
@@ -1102,6 +1089,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             # 12. Per-epoch epilogue.
             # Call on_epoch_end callbacks
+            training_stopped = self._control.should_training_stop
             epoch_state = self._create_trainer_state(epoch=epoch)
             self._control.reset()
             self._control = await self.callback_handler.call_event_async(
@@ -1160,7 +1148,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             if self.global_step > self.total_training_steps:
                 break
 
-            if self._control.should_training_stop:
+            if training_stopped or self._control.should_training_stop:
                 logger.info("Training stopped early by callback at epoch end")
                 break
 
@@ -1265,6 +1253,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # Capture a fallback global step before collection. Runners that
                 # record sampled-token steps replace it with actual_global_step below.
                 global_step_at_start = self.global_step
+                installed_step_at_start = self._published_policy_version + 1
 
                 # Disable each runner's progress bar so concurrent workers do not flood the console.
                 with observe_rollout_call(
@@ -1276,7 +1265,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     if observation is not None:
                         observation.response_tokens = sum(len(ids) for ids in cur_trajectory_batch["response_ids"])
                 actual_step = cur_trajectory_batch.get("actual_global_step")
-                staleness_step = actual_step if actual_step is not None else global_step_at_start
+                staleness_step = actual_step if actual_step is not None else installed_step_at_start
 
                 record_generated_work(
                     cur_trajectory_batch["response_ids"],
@@ -1378,6 +1367,37 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             queues.completed.put_nowait(group)
             queues.condition.notify_all()
             return freshness
+
+    async def _publish_policy_weights(self, *, reason: str, timing_name: str) -> None:
+        """Install the completed learner update without draining whole rollout groups."""
+        if self._published_policy_version == self.global_step:
+            return
+        with (
+            Timer(timing_name, self.all_timings) as weight_update_timer,
+            async_phase_window("publication", step=self.global_step, enabled=self._training_metrics_enabled),
+        ):
+            with Timer("weight_pause", self.all_timings):
+                await self.inference_engine_client.pause_generation()
+            await self.async_sync_policy_weights_to_inference_engines()
+            # Keep the post-broadcast rank drain before resuming generation or dispatching a forward.
+            with Timer("policy_post_sync_drain", self.all_timings):
+                await self._drain_policy_event_loops()
+            with Timer("weight_resume", self.all_timings):
+                await self.inference_engine_client.resume_generation()
+        self._log_weight_update_completed(reason=reason, duration_seconds=weight_update_timer.duration)
+
+    async def eval(self) -> dict[str, float]:
+        # Evaluation can be requested off the publication grid by any callback.
+        # Its publication is outside the core training window and has a separate timing.
+        await self._publish_policy_weights(reason="evaluation", timing_name="eval_weight_sync")
+        return await super().eval()
+
+    async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
+        # The training loop has already incremented global_step. Early termination can
+        # occur between scheduled publications, so restore the completed identity first.
+        self.global_step = completed_step
+        await self._publish_policy_weights(reason="final", timing_name="final_weight_sync")
+        await super()._finalize_training(completed_step=completed_step, epoch=epoch)
 
     async def async_sync_policy_weights_to_inference_engines(self):
         # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the

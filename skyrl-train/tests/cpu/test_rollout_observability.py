@@ -98,6 +98,34 @@ def records(monkeypatch):
     return sink
 
 
+@pytest.mark.parametrize("failure", [False, True])
+def test_phase_window_preserves_independent_wall_clock_and_failure(records, monkeypatch, failure):
+    monotonic = ManualClock(10)
+    unix_ns = ManualClock(1_000_000_000)
+    monkeypatch.setattr(rollout.time, "perf_counter", monotonic)
+    monkeypatch.setattr(rollout.time, "time_ns", unix_ns)
+
+    def execute():
+        with rollout.async_phase_window("training", step=7, enabled=True):
+            monotonic.advance(2)
+            # A clock adjustment remains visible instead of being confused with
+            # an actual negative training duration in snapshot alignment.
+            unix_ns.advance(-100_000_000)
+            if failure:
+                raise RuntimeError("training failed")
+
+    if failure:
+        with pytest.raises(RuntimeError, match="training failed"):
+            execute()
+    else:
+        execute()
+    event = records.events[-1]
+    assert event["name"] == "async_phase_window"
+    assert event["body"] == {"started_unix_ms": 1000, "finished_unix_ms": 900, "duration_seconds": 2}
+    assert event["attributes"]["outcome"] == ("failure" if failure else "success")
+    assert event["attributes"]["step"] == "7"
+
+
 @pytest.mark.asyncio
 async def test_overlapping_rollout_calls_keep_independent_walls_and_identity(records):
     clock = ManualClock()

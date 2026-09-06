@@ -127,6 +127,8 @@ def bare_trainer(cfg, cls=RayPPOTrainer):
     trainer = object.__new__(cls)
     trainer.cfg = cfg
     trainer.global_step = 7
+    # Completion starts after the final learner weights have been installed.
+    trainer._published_policy_version = 7
     trainer.total_training_steps = 7
     trainer.num_steps_per_epoch = 7
     trainer.train_dataloader = Dataloader([None] * 7)
@@ -250,6 +252,7 @@ def test_final_evaluation_deduplicates_only_successful_same_step(tmp_path, cls, 
     asyncio.run(trainer._finalize_training(completed_step=7, epoch=0))
     asyncio.run(trainer._finalize_training(completed_step=7, epoch=0))
     assert runner.steps == ([7, 7] if fail_once else [7])
+    trainer._published_policy_version = 8
     asyncio.run(trainer._finalize_training(completed_step=8, epoch=0))
     assert runner.steps[-1] == 8
 

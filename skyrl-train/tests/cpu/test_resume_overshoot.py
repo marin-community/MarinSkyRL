@@ -58,6 +58,8 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     trainer = cls.__new__(cls)
     trainer._last_saved_step = None
     trainer.global_step = global_step
+    # These finalization tests start with the completed checkpoint already installed.
+    trainer._published_policy_version = min(global_step, total_training_steps)
     trainer.total_training_steps = total_training_steps
     trainer.colocate_all = colocate_all
     trainer.num_steps_per_epoch = max(total_training_steps, 1)

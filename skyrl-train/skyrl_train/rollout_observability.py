@@ -42,6 +42,36 @@ group_tokens = telemetry.counter("rollout_group_tokens", unit="{token}")
 event_loop_lag = telemetry.histogram("event_loop_lag_seconds", unit="s")
 
 
+@contextlib.contextmanager
+def async_phase_window(phase: str, *, step: int, enabled: bool) -> Iterator[None]:
+    """Locate a driver phase beside sampled engine counters without polling engines.
+
+    Unix timestamps support joins with imported metric snapshots. The monotonic
+    duration detects clock adjustments; this window is not a GPU execution span.
+    """
+    if not enabled:
+        yield
+        return
+    started_unix_ms = time.time_ns() // 1_000_000
+    started = time.perf_counter()
+    outcome = "success"
+    try:
+        yield
+    except BaseException:
+        outcome = "failure"
+        raise
+    finally:
+        record_event(
+            "async_phase_window",
+            {
+                "started_unix_ms": started_unix_ms,
+                "finished_unix_ms": time.time_ns() // 1_000_000,
+                "duration_seconds": time.perf_counter() - started,
+            },
+            attributes={"phase": phase, "step": str(step), "role": TRAINER_ROLE, "outcome": outcome},
+        )
+
+
 def consumed_stop_metrics(stop_reasons: Sequence[str | None] | None, sequence_count: int) -> dict[str, float]:
     """Count length stops on admitted sequences, before padding or worker sharding.
 

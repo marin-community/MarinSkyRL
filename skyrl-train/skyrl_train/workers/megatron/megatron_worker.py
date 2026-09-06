@@ -46,6 +46,7 @@ from skyrl_train.megatron_timing import (
     MegatronTrainTimings,
     publish_megatron_train_timings,
 )
+from skyrl_train.learner_memory import LearnerMemory
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -437,6 +438,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
         self._warned_exact_unit_policy_ratio = False
+        self._memory = LearnerMemory(
+            enabled=bool(OmegaConf.select(self.cfg, "trainer.policy_train_spans", default=False)), rank=self._rank
+        )
+        # A checkpoint can be restored after init_model, so the initial version is
+        # unknown until this worker has completed an update with explicit metadata.
+        self._completed_update: int | None = None
+
+    def forward(self, data):
+        with self._memory.span(
+            "learner_logprob_forward", step=data.metadata.get("global_step"), step_kind="target_update"
+        ):
+            return super().forward(data)
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self.strategy.offload_to_cpu(
@@ -579,6 +592,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
+        self._memory.snapshot("model_ready")
 
     def init_model_for_export(self, model_path: str) -> None:
         """Initialize Megatron model structure without optimizer or training state."""
@@ -601,18 +615,25 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         outcome = "failure"
         try:
-            output = self._ppo_train_with_timings(train_data, timing)
+            with self._memory.span(
+                "ppo_forward_backward_update", step=int(train_data.metadata["global_step"]), step_kind="target_update"
+            ):
+                output = self._ppo_train_with_timings(train_data, timing)
+            self._completed_update = int(train_data.metadata["global_step"])
             outcome = "success"
             return output
         finally:
-            observations = timing.finish()
-            if observations:
-                publish_megatron_train_timings(
-                    observations,
-                    step=int(train_data.metadata["global_step"]),
-                    rank=torch.distributed.get_rank(),
-                    outcome=outcome,
-                )
+            try:
+                observations = timing.finish()
+                if observations:
+                    publish_megatron_train_timings(
+                        observations,
+                        step=int(train_data.metadata["global_step"]),
+                        rank=torch.distributed.get_rank(),
+                        outcome=outcome,
+                    )
+            except Exception as error:
+                logger.warning("Could not publish Megatron policy timings: {}", error)
 
     def _ppo_train_with_timings(self, train_data, timing: MegatronTrainTimings) -> "TrainingOutputBatch":
         dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
@@ -737,6 +758,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         return output
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
+        # Enclose extraction as well as transfer: gathering/conversion can peak
+        # before the first tensor reaches the publication communicator.
+        with self._memory.span("weight_publication", step=self._completed_update, step_kind="completed_update"):
+            return await self._broadcast_to_inference_engines(inference_engine_client)
+
+    async def _broadcast_to_inference_engines(self, inference_engine_client):
         from torch.multiprocessing.reductions import reduce_tensor
 
         use_prefix_cache = self.cfg.generator.enable_prefix_caching

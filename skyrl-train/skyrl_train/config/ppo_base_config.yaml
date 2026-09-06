@@ -271,6 +271,8 @@ trainer:
 
   fully_async:
     max_staleness_steps: 4
+    # Completed learner updates between publications; requires at least interval - 1 allowed age.
+    weight_sync_interval: 1
 
     num_parallel_generation_workers: 768
     admission_stall_timeout: 21600
