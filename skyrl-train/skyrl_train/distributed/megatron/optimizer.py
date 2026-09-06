@@ -18,12 +18,27 @@
 # limitations under the License.
 
 import torch
-from megatron.core.optimizer import OptimizerConfig
-from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
-from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+
+from skyrl_train.utils.utils import str_to_torch_dtype
 
 
-def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
+OPTIMIZER_DTYPES = {
+    "params_dtype": {torch.float32, torch.float16, torch.bfloat16},
+    "main_params_dtype": {torch.float32, torch.float16},
+    # This worker uses ordinary MCore DDP, whose buffers follow
+    # ddp_config.grad_reduce_in_fp32; main_grads_dtype does not change them.
+    "main_grads_dtype": {torch.float32},
+    "exp_avg_dtype": {torch.float32, torch.float16, torch.bfloat16, torch.uint8},
+    "exp_avg_sq_dtype": {torch.float32, torch.float16, torch.bfloat16, torch.uint8},
+}
+
+
+def megatron_optimizer_kwargs(optim_config: dict, optimizer_config_kwargs: dict) -> dict:
+    """Normalize declared wire dtypes before constructing the pinned native config.
+
+    The native defaults remain implicit. TE 2.11 supports FP32/FP16 masters and
+    FP32/FP16/BF16/uint8 moment storage; runtime qualification is still required.
+    """
     # megatron-core only recognizes 'adam' / 'sgd' as standard optimizers (anything
     # else routes to `_get_megatron_emerging_optimizer`, which raises
     # `ValueError: Unsupported emerging optimizer: AdamW`). megatron's 'adam' IS
@@ -45,17 +60,54 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
 
     optim_args.update(optimizer_config_kwargs)
 
-    config = OptimizerConfig(**optim_args)
-    return config
+    for name, supported in OPTIMIZER_DTYPES.items():
+        if name not in optim_args:
+            continue
+        value = optim_args[name]
+        dtype = str_to_torch_dtype(value) if isinstance(value, str) else value
+        if not isinstance(dtype, torch.dtype) or dtype not in supported:
+            if name == "main_grads_dtype":
+                raise ValueError(
+                    "main_grads_dtype must be float32 here; actual gradients follow DDP grad_reduce_in_fp32"
+                )
+            raise ValueError(f"Unsupported {name}={value!r} for pinned Megatron/TE optimizer")
+        optim_args[name] = dtype
+
+    state_names = ("main_params_dtype", "main_grads_dtype", "exp_avg_dtype", "exp_avg_sq_dtype")
+    lower_precision_state = any(optim_args.get(name, torch.float32) != torch.float32 for name in state_names)
+    precision_aware = optim_args.get("use_precision_aware_optimizer", False)
+    if lower_precision_state and not precision_aware:
+        raise ValueError("Non-FP32 optimizer state requires use_precision_aware_optimizer=true")
+    if precision_aware:
+        if optim_args["optimizer"] != "adam" or not optim_args["use_distributed_optimizer"]:
+            raise ValueError("Precision-aware state requires distributed Adam")
+        if optim_args.get("main_params_dtype", torch.float32) != torch.float32 and optim_args.get(
+            "store_param_remainders", True
+        ):
+            raise ValueError("Parameter remainders require FP32 master weights")
+        if optim_args.get("optimizer_cuda_graph", False) and (
+            lower_precision_state or optim_args.get("store_param_remainders", True)
+        ):
+            raise ValueError("Optimizer CUDA graphs require FP32 state and store_param_remainders=false")
+    return optim_args
+
+
+def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict):
+    # Megatron is optional in the CPU profile; argument validation is CPU-safe.
+    from megatron.core.optimizer import OptimizerConfig
+
+    return OptimizerConfig(**megatron_optimizer_kwargs(optim_config, optimizer_config_kwargs))
 
 
 def get_megatron_optimizer(
     model,
-    config: OptimizerConfig,
+    config,
     no_weight_decay_cond=None,
     scale_lr_cond=None,
     lr_mult=1.0,
 ):
+    from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
+
     # megatron-core 0.18.x removed the per-param-group knobs
     # (no_weight_decay_cond / scale_lr_cond / lr_mult) from get_megatron_optimizer
     # and replaced them with a `config_overrides` mapping; forwarding the old kwargs
@@ -85,6 +137,8 @@ def get_megatron_optimizer_param_scheduler(
     """
     Get the optimizer parameter scheduler for Megatron.
     """
+    from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+
     # TODO: support other schedulers for Megatron
     if config.get("scheduler", "constant_with_warmup") != "constant_with_warmup":
         raise ValueError("Only constant_with_warmup scheduler is supported for Megatron")
