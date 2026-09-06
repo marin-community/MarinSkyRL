@@ -9,12 +9,14 @@ import hydra
 from omegaconf import DictConfig
 import torch
 import asyncio
+import os
 from copy import deepcopy
 from datetime import timedelta
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
 from megatron.core.transformer.transformer_config import TransformerConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from huggingface_hub import snapshot_download
 from omegaconf import OmegaConf
 from tests.gpu.utils import (
     init_worker_with_type,
@@ -32,6 +34,8 @@ from skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.policy_losses import POLICY_CLIP_METRIC_KEYS
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
+from tests.tis_reference import regular_tis_scalar_reference, regular_tis_reference_policy_loss
 from skyrl_train.distributed.megatron.megatron_utils import (
     load_megatron_grads_to_gpu,
     offload_megatron_grads_to_cpu,
@@ -39,6 +43,7 @@ from skyrl_train.distributed.megatron.megatron_utils import (
 
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
+QWEN_MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
 # TODO (erictang000): we would prefer to use this smaller MoE model for testing, but seeing incorrect logprobs when using EP > 1
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
@@ -129,7 +134,7 @@ def get_test_actor_config(model_name=MODEL_NAME) -> DictConfig:
     return cfg
 
 
-def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
+def get_test_training_batch(batch_size=4, *, model_name=MODEL_NAME) -> TrainingInputBatch:
     """
     Returns a test training batch with padded seqs and attention masks
 
@@ -139,7 +144,7 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     """
     assert batch_size % 4 == 0, "batch size must be divisible by 4"
     num_repeats = batch_size // 4
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
     sentences = [
         "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
@@ -510,13 +515,26 @@ async def test_megatron_train(
 
 
 @pytest.mark.asyncio
-async def test_megatron_behavior_clip_and_timing_have_matching_updates(ray_init_fixture):
-    """Behavior probabilities drive the dense-Qwen update, and timing is numerically inert."""
+@pytest.mark.parametrize("objective", ["behavior_clip", "regular_tis"])
+async def test_megatron_behavior_clip_and_timing_have_matching_updates(ray_init_fixture, request, objective):
+    """Compare real Qwen updates: timing parity or independent cap-2 TIS gradients.
 
-    def actor_config(*, policy_train_spans: bool) -> DictConfig:
-        cfg = get_test_actor_config()
+    Needs eight GPUs (two TP2/PP1/DP2 groups). For regional runs, stage the pinned
+    HF mirror once on the node and set MARINSKYRL_TEST_QWEN_MODEL_PATH to that local
+    directory. Both model weights and tokenizer use this same snapshot.
+    """
+    model_path = os.environ.get("MARINSKYRL_TEST_QWEN_MODEL_PATH") or snapshot_download(
+        MODEL_NAME, revision=QWEN_MODEL_REVISION
+    )
+    reference_name = "test_regular_tis_cap2_reference"
+    if objective == "regular_tis":
+        PolicyLossRegistry.register(reference_name, regular_tis_reference_policy_loss)
+        request.addfinalizer(lambda: PolicyLossRegistry.unregister(reference_name))
+
+    def actor_config(*, comparison: bool) -> DictConfig:
+        cfg = get_test_actor_config(model_name=model_path)
         cfg.trainer.strategy = "megatron"
-        cfg.trainer.policy_train_spans = policy_train_spans
+        cfg.trainer.policy_train_spans = comparison and objective == "behavior_clip"
         cfg.trainer.placement.colocate_all = False
         cfg.trainer.placement.policy_num_gpus_per_node = 4
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
@@ -526,14 +544,19 @@ async def test_megatron_behavior_clip_and_timing_have_matching_updates(ray_init_
         cfg.trainer.policy_mini_batch_size = 4
         cfg.trainer.micro_train_batch_size_per_gpu = 1
         cfg.trainer.micro_forward_batch_size_per_gpu = 1
-        cfg.trainer.algorithm.policy_loss_type = "behavior_clip"
+        cfg.trainer.algorithm.policy_loss_type = (
+            "behavior_clip" if objective == "behavior_clip" else (reference_name if comparison else "regular")
+        )
+        cfg.trainer.algorithm.use_tis = objective == "regular_tis" and not comparison
+        cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
+        cfg.trainer.algorithm.require_rollout_logprobs = True
         cfg.trainer.algorithm.use_kl_loss = False
         cfg.generator.n_samples_per_prompt = 1
         cfg.generator.sampling_params.logprobs = 0
         validate_cfg(cfg)
         return cfg
 
-    configs = [actor_config(policy_train_spans=enabled) for enabled in (False, True)]
+    configs = [actor_config(comparison=enabled) for enabled in (False, True)]
     actor_groups = [
         init_worker_with_type(
             "policy",
@@ -544,27 +567,56 @@ async def test_megatron_behavior_clip_and_timing_have_matching_updates(ray_init_
         )
         for cfg in configs
     ]
-    batches = [get_test_training_batch(batch_size=4) for _ in actor_groups]
+    batches = [get_test_training_batch(batch_size=4, model_name=model_path) for _ in actor_groups]
 
     before = [_megatron_forward(actor_group, batch) for actor_group, batch in zip(actor_groups, batches, strict=True)]
     torch.testing.assert_close(before[0], before[1], atol=1.0e-4, rtol=1.0e-4)
 
-    offset = torch.tensor([0.45, -0.45], dtype=before[0].dtype).repeat(5).expand_as(before[0])
-    rollout_logprobs = before[0] + offset
-    advantages = torch.tensor([0.75, -0.5], dtype=before[0].dtype).repeat(5).expand_as(before[0])
+    old_logprobs = before[0].clone()
     loss_mask = torch.ones_like(before[0])
-    expected_policy_loss = _behavior_clip_reference(
-        before[0],
-        rollout_logprobs,
-        advantages,
-        loss_mask,
-        eps_clip_low=float(configs[0].trainer.algorithm.eps_clip_low),
-        eps_clip_high=float(configs[0].trainer.algorithm.eps_clip_high),
-        clip_ratio_c=float(configs[0].trainer.algorithm.clip_ratio_c),
-    )
+    if objective == "behavior_clip":
+        offset = torch.tensor([0.45, -0.45], dtype=before[0].dtype).repeat(5).expand_as(before[0])
+        rollout_logprobs = before[0] + offset
+        advantages = torch.tensor([0.75, -0.5], dtype=before[0].dtype).repeat(5).expand_as(before[0])
+        expected_policy_loss = _behavior_clip_reference(
+            before[0],
+            rollout_logprobs,
+            advantages,
+            loss_mask,
+            eps_clip_low=float(configs[0].trainer.algorithm.eps_clip_low),
+            eps_clip_high=float(configs[0].trainer.algorithm.eps_clip_high),
+            clip_ratio_c=float(configs[0].trainer.algorithm.clip_ratio_c),
+        )
+    else:
+        ratios = torch.tensor([1.0, 1.4, 0.6, 1.4, 0.6, 1.1, 0.9, 1.0, 1.3, 0.7], dtype=before[0].dtype)
+        weights = torch.tensor([0.5, 3.0, 4.0, 1.5, 0.25, 3.0, 1.5, 4.0, 0.5, 3.0], dtype=before[0].dtype)
+        old_logprobs = before[0] - ratios.log()
+        rollout_logprobs = old_logprobs - weights.log()
+        advantages = torch.tensor(
+            [1.0, 2.0, -1.0, -2.0, 1.0, -2.0, 0.0, 3.0, 1.0, -1.0], dtype=before[0].dtype
+        ).expand_as(before[0])
+        loss_mask[1, 6:] = loss_mask[2, 4:] = loss_mask[3, 8:] = 0
+        # micro_train=1: each row has its own token denominator, then the
+        # scheduler/DP reduction averages the four microbatch means equally.
+        expected_policy_loss = (
+            sum(
+                regular_tis_scalar_reference(
+                    before[0][row : row + 1],
+                    old_logprobs[row : row + 1],
+                    rollout_logprobs[row : row + 1],
+                    advantages[row : row + 1],
+                    loss_mask[row : row + 1],
+                    low=float(configs[0].trainer.algorithm.eps_clip_low),
+                    high=float(configs[0].trainer.algorithm.eps_clip_high),
+                    cap=float(configs[0].trainer.algorithm.tis_imp_ratio_cap),
+                )[0]
+                for row in range(4)
+            )
+            / 4
+        )
 
     for batch in batches:
-        batch["action_log_probs"] = before[0].clone()
+        batch["action_log_probs"] = old_logprobs.clone()
         batch["rollout_logprobs"] = rollout_logprobs.clone()
         batch["advantages"] = advantages.clone()
         batch["loss_mask"] = loss_mask.clone()
@@ -579,9 +631,13 @@ async def test_megatron_behavior_clip_and_timing_have_matching_updates(ray_init_
     assert all(len(results) == 4 for results in per_rank_results)
     for rank_status in statuses[0]:
         assert rank_status["policy_loss"] == pytest.approx(expected_policy_loss, abs=5.0e-3)
+        if objective == "regular_tis":
+            assert rank_status["tis/imp_ratio_capped_fraction"] == pytest.approx(0.5)
     for disabled_status, enabled_status in zip(statuses[0], statuses[1], strict=True):
         assert enabled_status["policy_loss"] == pytest.approx(disabled_status["policy_loss"], abs=1.0e-6)
         assert enabled_status["raw_grad_norm"] == pytest.approx(disabled_status["raw_grad_norm"], abs=1.0e-6)
+        assert torch.isfinite(torch.tensor(disabled_status["raw_grad_norm"]))
+        assert disabled_status["raw_grad_norm"] > 0
 
     after = [_megatron_forward(actor_group, batch) for actor_group, batch in zip(actor_groups, batches, strict=True)]
     assert not torch.equal(before[0], after[0])

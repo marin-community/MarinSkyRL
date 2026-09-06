@@ -9,7 +9,8 @@ import pytest
 from omegaconf import OmegaConf
 from skyrl_train.utils.loss_reduction import compute_global_loss_denom, count_nonzero_advantage_seqs, reduce_loss
 from skyrl_train.utils.policy_math import compute_approx_kl
-from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
+from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective, ppo_policy_loss
+from tests.tis_reference import regular_tis_scalar_reference, regular_tis_reference_policy_loss
 from skyrl_train.utils.advantage_estimators import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
@@ -176,6 +177,19 @@ def test_compute_grpo_outcome_advantage_norm_std_false():
     assert adv.shape == token_level_rewards.shape
     assert torch.allclose(adv, ret), "Advantages and returns should be equal with GRPO"
     assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+
+
+def test_regular_tis_gate_uses_fixed_four_response_grpo_advantages():
+    rewards = torch.tensor([[0.0], [0.0], [1.0], [1.0], [1.0], [1.0], [1.0], [1.0]])
+    mask = torch.ones_like(rewards)
+    advantages, returns = compute_grpo_outcome_advantage(
+        rewards, mask, np.array(["mixed"] * 4 + ["uniform"] * 4), grpo_norm_by_std=True
+    )
+    magnitude = 0.5 / (math.sqrt(1 / 3) + 1e-6)  # sample standard deviation, four complete responses
+    expected = torch.tensor([-magnitude, -magnitude, magnitude, magnitude, 0, 0, 0, 0]).unsqueeze(-1)
+    torch.testing.assert_close(advantages, expected)
+    torch.testing.assert_close(returns, expected)
+    assert not advantages.requires_grad
 
 
 def test_compute_gae_advantage_return(advantage_test_data):
@@ -383,6 +397,127 @@ def _mask_sum_policy_loss(
 ):
     del old_log_probs, advantages, config, rollout_logprobs, global_loss_denom
     return (log_probs * loss_mask).sum(), {}
+
+
+@pytest.mark.parametrize("scaling", [LossScaling.CALLER, LossScaling.MEGATRON_PIPELINE])
+@pytest.mark.parametrize("policy_loss_fn", [ppo_policy_loss, regular_tis_reference_policy_loss])
+def test_regular_tis_cap2_objective_matches_independent_scalar_and_gradient(scaling, policy_loss_fn):
+    config = OmegaConf.create(
+        {
+            "policy_loss_type": "regular",
+            "use_tis": True,
+            "tis_imp_ratio_cap": 2.0,
+            "eps_clip_low": 0.2,
+            "eps_clip_high": 0.2,
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "think_token_weight": 1.0,
+            "use_entropy_loss": False,
+            "entropy_loss_coef": 0.0,
+            "use_kl_loss": False,
+            "kl_loss_coef": 0.0,
+            "kl_estimator_type": "k1",
+        }
+    )
+    ratios = torch.tensor([[1.0, 1.4, 0.6, 1.4], [0.6, 1.1, 0.9, 1.0]], dtype=torch.float64)
+    weights = torch.tensor([[0.5, 3.0, 4.0, 1.5], [0.25, 3.0, 1.5, 4.0]], dtype=torch.float64)
+    old = torch.full_like(ratios, -4.0)
+    behavior = old - weights.log()
+    current = (old + ratios.log()).requires_grad_()
+    advantages = torch.tensor([[1.0, 2.0, -1.0, -2.0], [1.0, -2.0, 0.0, 3.0]], dtype=torch.float64)
+    masks = torch.tensor([[1, 1, 1, 1], [1, 1, 0, 0]], dtype=torch.float64)
+    expected_values, expected_gradients = [], []
+    # Each row is a distinct microbatch. Their token denominators are 4 and 2;
+    # Megatron averages these means, not the six-token pooled numerator.
+    for row in range(2):
+        value, gradient = regular_tis_scalar_reference(
+            current[row : row + 1],
+            old[row : row + 1],
+            behavior[row : row + 1],
+            advantages[row : row + 1],
+            masks[row : row + 1],
+        )
+        expected_values.append(value)
+        expected_gradients.append(gradient / 2)
+        objective = compute_policy_objective(
+            action_log_probs=current[row : row + 1],
+            old_action_log_probs=old[row : row + 1],
+            base_action_log_probs=None,
+            advantages=advantages[row : row + 1],
+            loss_mask=masks[row : row + 1],
+            rollout_logprobs=behavior[row : row + 1],
+            response_span_tags=None,
+            token_entropy=torch.zeros_like(masks[row : row + 1]),
+            config=config,
+            policy_loss_fn=policy_loss_fn,
+            accumulation_steps=2,
+            scaling=scaling,
+        )
+        assert objective.policy_loss.item() == pytest.approx(value, abs=1e-6)
+        optimization_loss = objective.optimization_loss
+        if scaling is LossScaling.MEGATRON_PIPELINE:
+            optimization_loss = optimization_loss / 2
+        optimization_loss.backward()
+    torch.testing.assert_close(current.grad, torch.cat(expected_gradients), rtol=2e-6, atol=1e-7)
+    assert torch.isfinite(current.grad).all()
+    assert current.grad[0, 1] == current.grad[0, 2] == 0  # positive upper / negative lower clipping
+    assert current.grad[1, 1] > 0  # capped TIS still supplies the negative-advantage gradient
+    assert torch.count_nonzero(current.grad[masks == 0]) == 0
+    pooled_value, _ = regular_tis_scalar_reference(current, old, behavior, advantages, masks)
+    assert sum(expected_values) / 2 != pytest.approx(pooled_value)
+
+
+@pytest.mark.usefixtures("ray_module")
+def test_regular_tis_reference_reaches_separate_policy_process():
+    """Resolve the driver-registered oracle through the actual worker registry path."""
+    import os
+    import ray
+
+    @ray.remote
+    class PolicyProcess:
+        def evaluate(self, name):
+            from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
+
+            # A worker receives only the config name, not the driver's local registry.
+            assert name not in PolicyLossRegistry._functions
+            loss_fn = PolicyLossRegistry.get(name)
+            current = torch.tensor([[-4.0]], requires_grad=True)
+            config = OmegaConf.create(
+                dict(loss_reduction="token_mean", eps_clip_low=0.17, eps_clip_high=0.28, tis_imp_ratio_cap=2.0)
+            )
+            loss, _ = loss_fn(
+                current,
+                current.detach(),
+                torch.ones_like(current),
+                config,
+                loss_mask=torch.ones_like(current),
+                rollout_logprobs=current.detach() - math.log(4.0),
+            )
+            loss.backward()
+            return os.getpid(), loss.item(), current.grad.item()
+
+    name = "test_regular_tis_cap2_reference_cross_process"
+    actor = PolicyProcess.remote()
+    try:
+        PolicyLossRegistry.register(name, regular_tis_reference_policy_loss)
+        pid, loss, gradient = ray.get(actor.evaluate.remote(name))
+        assert pid != os.getpid()
+        assert loss == pytest.approx(-2.0)
+        assert gradient == pytest.approx(-2.0)
+    finally:
+        PolicyLossRegistry.unregister(name)
+        ray.kill(actor)
+
+
+def test_regular_tis_cap2_oracle_has_hand_calculated_scale_and_gradient():
+    current = torch.tensor([[math.log(1.0)]], requires_grad=True)
+    old = torch.zeros_like(current)
+    behavior = torch.tensor([[-math.log(4.0)]])
+    value, gradient = regular_tis_scalar_reference(
+        current, old, behavior, torch.ones_like(current), torch.ones_like(current)
+    )
+    assert value == -2.0
+    assert gradient.item() == -2.0
 
 
 @pytest.mark.parametrize("loss_reduction", ["token_mean", "seq_mean_token_sum_norm_global"])
