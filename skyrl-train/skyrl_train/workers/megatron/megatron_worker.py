@@ -9,6 +9,7 @@ import asyncio
 import importlib.util
 import os
 from enum import StrEnum
+from functools import partial
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from loguru import logger
@@ -47,6 +48,7 @@ from skyrl_train.megatron_timing import (
     publish_megatron_train_timings,
 )
 from skyrl_train.learner_memory import LearnerMemory
+from skyrl_train.optimizer_state_metrics import OptimizerStateObserver
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -445,6 +447,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # A checkpoint can be restored after init_model, so the initial version is
         # unknown until this worker has completed an update with explicit metadata.
         self._completed_update: int | None = None
+        self._optimizer_state_observer = OptimizerStateObserver(
+            enabled=self.cfg.trainer.optimizer_state_metrics, rank=self._rank
+        )
 
     def forward(self, data):
         with self._memory.span(
@@ -707,7 +712,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
                     with timing.span(OPTIMIZER_STEP):
                         grad_norm = self.strategy.optimizer_step(
-                            self.optimizer, self.model, self.scheduler, name="actor"
+                            self.optimizer,
+                            self.model,
+                            self.scheduler,
+                            name="actor",
+                            after_step=(
+                                partial(
+                                    self._optimizer_state_observer.after_step,
+                                    model_chunks=self.actor_module,
+                                    optimizer=self.optimizer,
+                                    step=int(train_data.metadata["global_step"]),
+                                    minibatch=policy_update_steps + 1,
+                                )
+                                if self._optimizer_state_observer.enabled
+                                else None
+                            ),
                         )
 
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across

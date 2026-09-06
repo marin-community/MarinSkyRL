@@ -42,6 +42,8 @@ trainer:
   generate_spans: false
   async_spans: false
   training_metrics: false
+  # One aggregate Megatron Adam inventory after a successful update; requires policy_train_spans for phase peaks.
+  optimizer_state_metrics: false
   # Observe converted wire bits; supported for non-colocated, unfused Megatron broadcast.
   weight_change_probe: false
   collective_phase_diagnostics: false

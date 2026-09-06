@@ -1,6 +1,7 @@
 import os
 import random
 import tempfile
+from collections.abc import Callable
 from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
@@ -152,10 +153,13 @@ class MegatronStrategy(DistributedStrategy):
         model,
         scheduler,
         name="model",
+        after_step: Callable[[bool], None] | None = None,
         **kwargs,
     ) -> Optional[Float[torch.Tensor, "1"]]:
         """Perform optimizer step"""
-        _, grad_norm, _ = optimizer.step()
+        successful, grad_norm, _ = optimizer.step()
+        if after_step is not None:
+            after_step(successful)
         scheduler.step(1)
         optimizer.zero_grad()
         return grad_norm

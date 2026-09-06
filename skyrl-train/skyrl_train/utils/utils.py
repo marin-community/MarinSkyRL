@@ -588,6 +588,12 @@ def validate_fully_async_cfg(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    if type(cfg.trainer.optimizer_state_metrics) is not bool:
+        raise ValueError("trainer.optimizer_state_metrics must be a boolean")
+    if cfg.trainer.optimizer_state_metrics and (
+        cfg.trainer.strategy != "megatron" or not cfg.trainer.policy_train_spans
+    ):
+        raise ValueError("optimizer_state_metrics requires Megatron and policy_train_spans for phase memory peaks")
     validate_epoch_seeded_shuffle(cfg)
     validate_weight_change_probe_config(cfg)
     repeats = cfg.trainer.initial_eval_repeat_count

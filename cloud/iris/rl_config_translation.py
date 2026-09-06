@@ -778,6 +778,7 @@ _OPTIONAL_HYDRA_PATTERNS = {
     ".hf_hub_",
     ".enable_db_registration",
     ".optimizer_kwargs",
+    ".optimizer_config_kwargs",
     ".rope_scaling",
     ".wrap_policy",
     ".transformer_config_kwargs",
@@ -982,7 +983,7 @@ def build_skyrl_hydra_args(
     # Build args for each section. Keys under these patterns may not exist in
     # SkyRL's base config, so use the ++ prefix (add-or-override):
     #   engine_init_kwargs, hf_hub_*, enable_db_registration, optimizer_kwargs,
-    #   rope_scaling, wrap_policy, transformer_config_kwargs.
+    #   optimizer_config_kwargs, rope_scaling, wrap_policy, transformer_config_kwargs.
     # transformer_config_kwargs is a passthrough to Megatron's TransformerConfig
     # (megatron_worker setattr's each subkey), so it may carry keys NOT declared in the
     # base preset (e.g. gradient_accumulation_fusion). On megatron-bridge 0.5.0 (#33/#34)
