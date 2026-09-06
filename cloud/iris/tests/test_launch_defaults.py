@@ -737,7 +737,8 @@ def test_parser_defers_runtime_identity_to_resolution_and_keeps_recovery_retries
     assert args.disk == "auto"
 
 
-def test_launch_applies_failure_retry_budget_to_tasks_and_job(tmp_path, monkeypatch):
+@pytest.mark.parametrize("retry_budget", [0, 3])
+def test_launch_applies_retry_budget_to_failures_preemptions_and_job(tmp_path, monkeypatch, retry_budget):
     args = _args(
         tmp_path,
         "opencode",
@@ -751,7 +752,7 @@ def test_launch_applies_failure_retry_budget_to_tasks_and_job(tmp_path, monkeypa
             "--cpu",
             "4",
             "--max-retries",
-            "3",
+            str(retry_budget),
             "--no-wait",
         ],
     )
@@ -778,8 +779,9 @@ def test_launch_applies_failure_retry_budget_to_tasks_and_job(tmp_path, monkeypa
     outcome = iris_backend.launch(args, expected_launcher_commit=args.runtime_commit)
 
     assert outcome.job_id == "retry-budget-job"
-    assert submitted["max_retries_failure"] == 3
-    assert submitted["max_task_failures"] == 3
+    assert submitted["max_retries_failure"] == retry_budget
+    assert submitted["max_retries_preemption"] == retry_budget
+    assert submitted["max_task_failures"] == retry_budget
 
 
 def test_direct_launcher_exports_terminal_policy_after_training(monkeypatch):
