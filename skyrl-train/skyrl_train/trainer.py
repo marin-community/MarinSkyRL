@@ -194,7 +194,7 @@ class RayPPOTrainer:
         if max_steps is not None and max_steps > 0:
             self.total_training_steps = min(self.total_training_steps, max_steps)
 
-    def _create_trainer_state(self, epoch: int) -> TrainerState:
+    def _create_trainer_state(self, epoch: int, *, active_step_duration: float | None = None) -> TrainerState:
         """
         Create a TrainerState object for the current training state.
 
@@ -207,6 +207,9 @@ class RayPPOTrainer:
             TrainerState object with current training state
         """
         num_steps_per_epoch = self._num_steps_per_epoch()
+        timings = dict(self.all_timings)
+        if active_step_duration is not None:
+            timings["step"] = active_step_duration
         return TrainerState(
             global_step=self.global_step,
             epoch=epoch,
@@ -215,7 +218,7 @@ class RayPPOTrainer:
             is_last_step=(self.global_step == self.total_training_steps),
             is_epoch_end=(self.global_step % num_steps_per_epoch == 0) if num_steps_per_epoch > 0 else False,
             metrics=dict(self.all_metrics),
-            timings=dict(self.all_timings),
+            timings=timings,
         )
 
     def _num_steps_per_epoch(self) -> int:
@@ -491,6 +494,28 @@ class RayPPOTrainer:
 
         await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
 
+    async def _run_step_end_callbacks(self, state: TrainerState) -> None:
+        """Run callback-requested work that belongs to the current training step."""
+        self._control.reset()
+        self._control = await self.callback_handler.call_event_async("on_step_end", state, self._control, trainer=self)
+
+        if self._control.should_save:
+            await self._save_intermediate_checkpoint(state)
+            self._control.should_save = False
+
+        if self._control.should_save_hf_model:
+            await asyncio.to_thread(self.handle_hf_export)
+            self._control.should_save_hf_model = False
+
+        if self._control.should_evaluate and self.eval_dataset is not None:
+            with Timer("eval", self.all_timings):
+                eval_metrics = await self.eval()
+                self.all_metrics.update(eval_metrics)
+            await self.callback_handler.call_event_async(
+                "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
+            )
+            self._control.should_evaluate = False
+
     async def _sync_weights_and_restore_rollout_residency(self) -> None:
         await self.inference_engine_client.wake_up(tags=["weights"])
         with Timer("sync_weights", self.all_timings):
@@ -722,65 +747,25 @@ class RayPPOTrainer:
                     # 5. sync weights to inference engines (must happen before callbacks)
                     await self._sync_policy_for_rollouts(reason="training_step")
 
-                # 6. Log status and update metrics
-                logger.info(status)
-                self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+                    # 6. Run callback-requested work before closing the inclusive step timer.
+                    logger.info(status)
+                    self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+                    step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
+                    await self._run_step_end_callbacks(step_state)
 
-                # 7. Create trainer state and call on_step_end callbacks
-                is_epoch_end = iter == len(self.train_dataloader) - 1
-                is_last_step = self.global_step == self.total_training_steps
-                step_state = TrainerState(
-                    global_step=self.global_step,
-                    epoch=epoch,
-                    total_steps=self.total_training_steps,
-                    num_steps_per_epoch=len(self.train_dataloader),
-                    is_last_step=is_last_step,
-                    is_epoch_end=is_epoch_end,
-                    metrics=dict(self.all_metrics),
-                    timings=dict(self.all_timings),
-                )
+                    # Handle ref model update at epoch end (via RefModelUpdateCallback).
+                    ref_callback = self._get_ref_update_callback()
+                    if (
+                        step_state.is_epoch_end
+                        and not step_state.is_last_step
+                        and self.ref_model is not None
+                        and ref_callback is not None
+                        and ref_callback.should_update_ref
+                    ):
+                        with Timer("update_ref_with_policy", self.all_timings):
+                            self.update_ref_with_policy()
 
-                self._control.reset()
-                self._control = await self.callback_handler.call_event_async(
-                    "on_step_end", step_state, self._control, trainer=self
-                )
-
-                # 8. Handle callback control signals
-
-                # Handle checkpoint saving
-                if self._control.should_save:
-                    await self._save_intermediate_checkpoint(step_state)
-                    self._control.should_save = False
-
-                # Handle HF model saving
-                if self._control.should_save_hf_model:
-                    self.handle_hf_export()
-                    self._control.should_save_hf_model = False
-
-                # Handle evaluation
-                if self._control.should_evaluate and self.eval_dataset is not None:
-                    with Timer("eval", self.all_timings):
-                        eval_metrics = await self.eval()
-                        self.all_metrics.update(eval_metrics)
-                    # Call on_evaluate callbacks
-                    await self.callback_handler.call_event_async(
-                        "on_evaluate", step_state, self._control, metrics=eval_metrics, trainer=self
-                    )
-                    self._control.should_evaluate = False
-
-                # Handle ref model update at epoch end (via RefModelUpdateCallback)
-                ref_callback = self._get_ref_update_callback()
-                if (
-                    is_epoch_end
-                    and not is_last_step
-                    and self.ref_model is not None
-                    and ref_callback is not None
-                    and ref_callback.should_update_ref
-                ):
-                    with Timer("update_ref_with_policy", self.all_timings):
-                        self.update_ref_with_policy()
-
-                # 9. Log metrics
+                # 7. Log metrics
                 if self._control.should_log:
                     log_payload = {
                         **self.all_metrics,
@@ -803,7 +788,7 @@ class RayPPOTrainer:
                 publish_step_timings(self.all_timings, self.global_step)
                 self.all_timings = {}
 
-                # 10. Update progress bar and global step
+                # 8. Update progress bar and global step
                 pbar.update(1)
                 last_completed_step = self.global_step
                 record_policy_step(self.global_step)
@@ -811,7 +796,7 @@ class RayPPOTrainer:
 
                 del training_input, trajectory_batch
 
-                # 11. Check for max_steps
+                # 9. Check for max_steps
                 if self.global_step > self.total_training_steps:
                     logger.info(f"Reached max training steps ({self.total_training_steps})")
                     break

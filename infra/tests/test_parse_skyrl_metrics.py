@@ -338,15 +338,17 @@ def test_asynchronous_tree_attributes_optimizer_work_to_the_training_span():
     assert span_named(spans, "run_training").within == "step"
 
 
-def test_work_between_steps_reports_no_share_of_the_step():
+def test_post_step_work_reports_its_share_of_the_step():
     spans = parse_skyrl_metrics.summarize_timing_spans(
         timing_frame(step=100.0, generate=90.0, save_checkpoints=45.0, eval=20.0)
     )
 
     for name in ("save_checkpoints", "eval"):
         span = span_named(spans, name)
-        assert span.within is None
-        assert span.share_of_within is None
+        assert span.within == "step"
+
+    assert span_named(spans, "save_checkpoints").share_of_within == pytest.approx(0.45)
+    assert span_named(spans, "eval").share_of_within == pytest.approx(0.2)
 
 
 def test_undeclared_span_is_reported_without_a_share():
@@ -358,16 +360,15 @@ def test_undeclared_span_is_reported_without_a_share():
     assert span.mean_seconds == pytest.approx(25.0)
 
 
-def test_unattributed_span_covers_the_step_time_no_child_claims():
+def test_overlap_reports_when_children_exceed_the_step():
     spans = parse_skyrl_metrics.summarize_timing_spans(
         timing_frame(step=100.0, generate=60.0, sync_weights=10.0, save_checkpoints=45.0)
     )
 
-    unattributed = span_named(spans, "unattributed")
-    assert unattributed.within == "step"
-    # The 45 s checkpoint save is outside the step and must not shrink the remainder.
-    assert unattributed.mean_seconds == pytest.approx(30.0)
-    assert unattributed.share_of_within == pytest.approx(0.3)
+    overlap = span_named(spans, "overlap")
+    assert overlap.within == "step"
+    assert overlap.mean_seconds == pytest.approx(15.0)
+    assert overlap.share_of_within is None
 
 
 def test_a_span_that_skips_a_step_still_leaves_the_children_summing_to_the_step():
@@ -570,10 +571,9 @@ def test_report_publishes_the_trial_phase_breakdown(tmp_path, monkeypatch):
     assert "| environment_setup | 100.0 | 100.0 | 100.0 | 50.0% | 1 |" in report
     assert "| unattributed | — | — | 10.0 | 5.0% | — |" in report
     assert "| policy_train | `train_critic_and_policy` | 28.0 | 93.3% | 1 |" in report
-    # Charging every span to the step summed these five to 183% of a 100 s step.
-    assert "| unattributed | `step` | 10.0 | 10.0% | 1 |" in report
-    assert "| save_checkpoints | outside `step` | 45.0 | — | 1 |" in report
-    assert "| eval | outside `step` | 20.0 | — | 1 |" in report
+    assert "| overlap | `step` | 55.0 | — | 1 |" in report
+    assert "| save_checkpoints | `step` | 45.0 | 45.0% | 1 |" in report
+    assert "| eval | `step` | 20.0 | 20.0% | 1 |" in report
 
 
 def test_checkpoint_selection_calculates_trailing_five_ema():

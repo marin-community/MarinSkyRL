@@ -27,12 +27,12 @@ TIMING_PARENTS: dict[str, str | None] = {
     "offload_policy_model_to_cpu": "step",
     "dump_data_batch": "run_training",
     "init_weight_sync_state": None,
-    "save_checkpoints": None,
+    "save_checkpoints": "step",
     "cleanup_old_checkpoints": "save_checkpoints",
-    "save_hf_model": None,
-    "queue_hf_export": None,
-    "eval": None,
-    "update_ref_with_policy": None,
+    "save_hf_model": "step",
+    "queue_hf_export": "step",
+    "eval": "step",
+    "update_ref_with_policy": "step",
 }
 
 
