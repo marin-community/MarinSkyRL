@@ -70,6 +70,7 @@ from skyrl_train.sync_group_admission import (
     admit_or_collect_replacements,
 )
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
+from marinskyrl.training_completion import CompletionMode, completion_mode
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import (
@@ -130,6 +131,7 @@ _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
 class RayPPOTrainer:
     _training_metrics_enabled = False
+    _last_successful_eval_step: int | None = None
 
     def __init__(
         self,
@@ -270,6 +272,7 @@ class RayPPOTrainer:
                 tokenizer=self.tokenizer,
                 trajectory_sink=self.trajectory_sink,
             )
+        self._last_successful_eval_step = self.global_step
         return eval_metrics
 
     # ------------------------------------------------------------------
@@ -445,7 +448,11 @@ class RayPPOTrainer:
         )
 
         try:
-            if self._control.should_evaluate and self.eval_dataset is not None:
+            if (
+                self._control.should_evaluate
+                and self.eval_dataset is not None
+                and self._last_successful_eval_step != self.global_step
+            ):
                 with Timer("eval", self.all_timings):
                     eval_metrics = await self.eval()
                     self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
@@ -460,12 +467,14 @@ class RayPPOTrainer:
                 self.policy_model.backload_to_gpu()
 
             # The interval save may have just written this same step; do not write it twice.
-            if self._control.should_save and self._last_saved_step != self.global_step:
+            mode = completion_mode(self.cfg)
+            should_save = self._control.should_save or mode == CompletionMode.CHECKPOINT
+            if mode != CompletionMode.METRICS and should_save and self._last_saved_step != self.global_step:
                 with Timer("save_checkpoints", self.all_timings):
                     await asyncio.to_thread(self.save_checkpoints)
                     logger.info("Saved final checkpoint.")
                 await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
-            if self._control.should_save_hf_model:
+            if mode is None and self._control.should_save_hf_model:
                 await asyncio.to_thread(self.handle_hf_export)
 
     async def _save_checkpoints_with_residency(self) -> None:
@@ -490,6 +499,8 @@ class RayPPOTrainer:
 
     async def _save_intermediate_checkpoint(self, state: TrainerState) -> None:
         """Save one requested step checkpoint without terminating training on storage failure."""
+        if completion_mode(self.cfg) == CompletionMode.METRICS:
+            return
         try:
             with Timer("save_checkpoints", self.all_timings):
                 await self._save_checkpoints_with_residency()
@@ -2174,6 +2185,8 @@ class RayPPOTrainer:
 
         If colocate_all is True, assumes that the policy model is currently on GPU.
         """
+        if completion_mode(self.cfg) == CompletionMode.METRICS:
+            return
         # Create global step folder structure
         global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         policy_save_dir = os.path.join(global_step_folder, POLICY_CHECKPOINT_SUBDIRECTORY)
@@ -2398,6 +2411,8 @@ class RayPPOTrainer:
 
     def handle_hf_export(self) -> None:
         """Persist a request for out-of-band policy checkpoint conversion."""
+        if completion_mode(self.cfg) is not None:
+            return
         with Timer("queue_hf_export", self.all_timings):
             self._handle_hf_export()
 

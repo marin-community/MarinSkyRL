@@ -33,11 +33,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from cloud.iris.model_paths import model_source_cli_args
-from cloud.iris.rl_config_translation import format_hydra_arg
-from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, policy_export_path
-from marinskyrl.resource_locator import ModelLocatorError
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_EXPORT_TIMEOUT,
     DEFAULT_HF_HUB_REVISION,
@@ -46,6 +41,12 @@ from skyrl_train.hf_export_schema import (
     HFExportStatus,
     HFUploadMode,
 )
+
+from cloud.iris.model_paths import model_source_cli_args
+from cloud.iris.rl_config_translation import format_hydra_arg
+from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, policy_export_path
+from marinskyrl.resource_locator import ModelLocatorError
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -84,6 +85,9 @@ class ExportJobSpec:
     memory: str | None = None
     disk: str | None = None
     storage_user: str | None = None
+    receipt_uri: str | None = None
+    request_fingerprint: str | None = None
+    attempt_id: str | None = None
 
 
 def build_command(spec: ExportJobSpec) -> list[str]:
@@ -99,6 +103,19 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         format_hydra_arg("checkpoint_export.hf_hub_revision", request.hf_hub_revision, prefix="++"),
         format_hydra_arg("checkpoint_export.hf_upload_mode", request.hf_upload_mode, prefix="++"),
     ]
+    receipt_values = (spec.receipt_uri, spec.request_fingerprint, spec.attempt_id)
+    if any(value is not None for value in receipt_values) and not all(
+        isinstance(value, str) and value.strip() for value in receipt_values
+    ):
+        raise ValueError("Export completion receipt URI, request fingerprint, and attempt ID must be provided together")
+    if spec.receipt_uri is not None:
+        overrides.extend(
+            [
+                format_hydra_arg("checkpoint_export.completion_receipt_uri", spec.receipt_uri, prefix="++"),
+                format_hydra_arg("checkpoint_export.request_fingerprint", spec.request_fingerprint, prefix="++"),
+                format_hydra_arg("checkpoint_export.attempt_id", spec.attempt_id, prefix="++"),
+            ]
+        )
 
     cmd = [
         sys.executable,
@@ -165,6 +182,9 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--memory")
     ap.add_argument("--disk")
     ap.add_argument("--storage-user")
+    ap.add_argument("--export-receipt-uri")
+    ap.add_argument("--export-request-fingerprint")
+    ap.add_argument("--export-attempt-id")
     ap.add_argument("--num-nodes", type=int)
     ap.add_argument("--gpus-per-node", type=int)
     ap.add_argument("--priority", default="batch")
@@ -237,6 +257,9 @@ def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_w
         memory=args.memory,
         disk=args.disk,
         storage_user=args.storage_user,
+        receipt_uri=args.export_receipt_uri,
+        request_fingerprint=args.export_request_fingerprint,
+        attempt_id=args.export_attempt_id,
     )
 
 

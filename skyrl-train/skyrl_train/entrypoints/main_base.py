@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from marinskyrl.training_completion import completion_mode
+
 from ray.util.placement_group import placement_group, PlacementGroup
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from ray.remote_function import RemoteFunction
@@ -585,9 +587,12 @@ class BasePPOExp:
         # See agent_logs/2026-05-29_skyrl_uvloop_integration_and_robustness_research.md
         asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
+        from skyrl_train.training_completion import write_training_receipt  # noqa: PLC0415 - optional Torch runtime
+
         trainer = None
         self.tracker = None
         exit_code = 1
+        shutdown_error = None
         try:
             trainer = self._setup_trainer()
             # Start the training loop
@@ -605,6 +610,9 @@ class BasePPOExp:
                     # failures around the event-loop boundary.
                     asyncio.run(trainer.shutdown())
                 except Exception as e:
+                    if completion_mode(self.cfg) is not None:
+                        shutdown_error = e
+                        exit_code = 1
                     logger.warning(f"Error shutting down trainer: {e}")
             if self.tracker is not None:
                 try:
@@ -613,6 +621,10 @@ class BasePPOExp:
                     if exit_code == 0:
                         raise
                     logger.exception("Tracker cleanup failed while handling a training failure")
+
+        if shutdown_error is not None:
+            raise shutdown_error
+        write_training_receipt(self.cfg, trainer)
 
 
 @ray.remote(num_cpus=1, max_retries=0)

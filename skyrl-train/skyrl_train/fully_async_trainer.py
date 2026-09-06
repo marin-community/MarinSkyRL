@@ -33,6 +33,7 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedR
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass, field
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
+from marinskyrl.training_completion import CompletionMode, completion_mode
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Tuple, TypeVar
@@ -647,6 +648,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Attach volatile buffer state to the immediately preceding model checkpoint."""
         callback = getattr(self, "_buffer_checkpoint_callback", None)
         if callback is None or not callback.has_bound_queues():
+            return
+        if completion_mode(self.cfg) == CompletionMode.METRICS:
             return
         target_step = self.global_step - 1
         latest_step = await asyncio.to_thread(self._latest_checkpoint_step)

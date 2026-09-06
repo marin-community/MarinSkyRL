@@ -17,6 +17,7 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from marinskyrl.training_completion import validate_completion_config
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.callbacks.types import (
@@ -569,6 +570,7 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    validate_completion_config(cfg)
     resolve_dynamic_sampling_criteria(
         cfg.trainer.algorithm.dynamic_sampling.informative_on,
         float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),

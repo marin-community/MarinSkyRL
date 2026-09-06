@@ -283,6 +283,8 @@ trainer:
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
   ckpt_interval: 5
+  # Launcher-provided attempt identity and receipt destination; null keeps standalone behavior.
+  completion: null
   hf_save_interval: ${trainer.ckpt_interval}
   hf_upload_mode: latest
   export_path: "${oc.env:HOME}/exports"

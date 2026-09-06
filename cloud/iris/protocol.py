@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+import posixpath
+from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
 
 from cloud.iris.runtime_environment import RuntimeProfile
+from marinskyrl.training_completion import CompletionMode, NativeCheckpoint
+
+PROTOCOL_VERSION = 2
 
 
 class AttemptState(StrEnum):
@@ -88,6 +94,8 @@ class SkyRLLaunchRequest:
     output: SkyRLOutputPaths
     seed: int
     overrides: tuple[str, ...]
+    completion_mode: CompletionMode = CompletionMode.CHECKPOINT
+    checkpoint_retention_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +122,36 @@ class IrisLaunchOptions:
 class SkyRLJobSpec:
     request: SkyRLLaunchRequest
     execution: IrisLaunchOptions
+    schema_version: int = PROTOCOL_VERSION
+
+
+@dataclass(frozen=True)
+class SkyRLTrainingResult:
+    global_step: int
+    receipt_uri: str
+    resolved_config_uri: str
+    checkpoint: NativeCheckpoint | None
+
+
+@dataclass(frozen=True)
+class SkyRLExportPaths:
+    export_root: str
+    attempts_root: str
+    terminal_manifest_uri: str
+
+
+@dataclass(frozen=True)
+class SkyRLExportRequest:
+    training_manifest_uri: str
+    attempt_id: str
+    output: SkyRLExportPaths
+
+
+@dataclass(frozen=True)
+class SkyRLExportSpec:
+    request: SkyRLExportRequest
+    execution: IrisLaunchOptions
+    schema_version: int = PROTOCOL_VERSION
 
 
 @dataclass(frozen=True)
@@ -134,12 +172,58 @@ class SkyRLLaunchResponse:
     iris_job_id: str | None
     iris_job_state: str | None
     runtime: RuntimeIdentity
+    training: SkyRLTrainingResult | None
+    failure: str | None
+
+
+@dataclass(frozen=True)
+class SkyRLExportResponse:
+    run_id: str
+    attempt_id: str
+    state: AttemptState
+    runtime: RuntimeIdentity
+    training_iris_job_id: str | None
     model: SkyRLModel | None
     failure: str | None
+    reused_export: bool = False
+
+
+def training_receipt_uri(request: SkyRLLaunchRequest) -> str:
+    return posixpath.join(
+        posixpath.dirname(request.output.terminal_manifest_uri), "receipts", f"{request.attempt_id}.json"
+    )
+
+
+def training_request_fingerprint(request: SkyRLLaunchRequest) -> str:
+    payload = {
+        "schema_version": PROTOCOL_VERSION,
+        "request": asdict(request),
+        "receipt_uri": training_receipt_uri(request),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _validate_protocol(value: dict[str, Any]) -> None:
+    if value.get("schema_version") != PROTOCOL_VERSION:
+        raise ValueError(f"MarinSkyRL protocol schema_version must be {PROTOCOL_VERSION}")
+
+
+def export_spec(value: dict[str, Any]) -> SkyRLExportSpec:
+    _validate_protocol(value)
+    request = value["request"]
+    return SkyRLExportSpec(
+        request=SkyRLExportRequest(
+            training_manifest_uri=request["training_manifest_uri"],
+            attempt_id=request["attempt_id"],
+            output=SkyRLExportPaths(**request["output"]),
+        ),
+        execution=IrisLaunchOptions(**value["execution"]),
+    )
 
 
 def job_spec(value: dict[str, Any]) -> SkyRLJobSpec:
     """Parse one JSON-compatible job specification."""
+    _validate_protocol(value)
     request = value["request"]
     return SkyRLJobSpec(
         request=SkyRLLaunchRequest(
@@ -162,6 +246,8 @@ def job_spec(value: dict[str, Any]) -> SkyRLJobSpec:
             output=SkyRLOutputPaths(**request["output"]),
             seed=int(request["seed"]),
             overrides=tuple(request.get("overrides", ())),
+            completion_mode=CompletionMode(request["completion_mode"]),
+            checkpoint_retention_days=request["checkpoint_retention_days"],
         ),
         execution=IrisLaunchOptions(**value["execution"]),
     )

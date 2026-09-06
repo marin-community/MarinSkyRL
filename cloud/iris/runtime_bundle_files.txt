@@ -18,6 +18,8 @@ cloud/iris/task_runtime.py
 cloud/iris/telemetry_env.py
 cloud/iris/training_driver.py
 marinskyrl/__init__.py
+marinskyrl/training_completion.py
+marinskyrl/export_completion.py
 marinskyrl/checkpoint_paths.py
 marinskyrl/hf_model.py
 marinskyrl/resource_locator.py

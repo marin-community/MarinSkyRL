@@ -25,6 +25,7 @@ import os
 from typing import Any, Dict, List, Optional, Type
 
 from loguru import logger
+from marinskyrl.training_completion import validate_completion_config
 from omegaconf import DictConfig
 import torch
 
@@ -714,6 +715,7 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
     Returns:
         List of configured callbacks
     """
+    validate_completion_config(cfg)
     # Check for new-style explicit callback configuration
     if has_explicit_callbacks(cfg):
         logger.info("Using explicit callback configuration from YAML")

@@ -5,8 +5,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import posixpath
-import subprocess
 import sys
 import tempfile
 from dataclasses import asdict
@@ -17,11 +15,9 @@ from iris.client.client import JobFailedError
 
 from cloud.iris.artifacts import (
     fs_and_path,
-    relative_object_key,
-    terminal_checkpoint_step,
 )
-from marinskyrl.checkpoint_paths import policy_export_path
-from marinskyrl.hf_model import validate_portable_hf_model_files
+from marinskyrl.training_completion import CompletionMode
+from cloud.iris.training_result import read_training_result
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome
 from cloud.iris.protocol import (
@@ -30,7 +26,8 @@ from cloud.iris.protocol import (
     SkyRLJobSpec,
     SkyRLLaunchResponse,
     SkyRLLaunchRequest,
-    SkyRLModel,
+    SkyRLTrainingResult,
+    export_spec,
     job_spec,
 )
 from cloud.iris.request_builder import build_job_spec
@@ -49,38 +46,18 @@ class JobBackend(Protocol):
         mode: LaunchMode = LaunchMode.WAIT,
     ) -> IrisLaunchOutcome: ...
 
-    def export_terminal_policy(self, spec: SkyRLJobSpec, config_path: str) -> None: ...
-
 
 def _write_json(uri: str, value: dict[str, Any]) -> None:
-    filesystem, path = fs_and_path(uri)
-    parent = posixpath.dirname(path)
-    if parent:
-        filesystem.makedirs(parent, exist_ok=True)
-    with filesystem.open(path, "w") as destination:
-        json.dump(value, destination, sort_keys=True)
+    from skyrl_train.io.io import write_bytes_atomic
+
+    _, path = fs_and_path(uri)
+    destination = path if uri.startswith("file://") else uri
+    write_bytes_atomic(destination, json.dumps(value, sort_keys=True).encode())
 
 
 def _path_exists(uri: str) -> bool:
     filesystem, path = fs_and_path(uri)
     return filesystem.exists(path)
-
-
-def _policy_export(request: SkyRLLaunchRequest) -> SkyRLModel:
-    global_step = terminal_checkpoint_step(request.output.checkpoint_root)
-    policy_uri = policy_export_path(request.output.export_root, global_step)
-    filesystem, policy_path = fs_and_path(policy_uri)
-    files = sorted(path for path in filesystem.find(policy_path) if not filesystem.isdir(path))
-    names = {relative_object_key(policy_path, path) for path in files}
-    validate_portable_hf_model_files(names, policy_uri)
-    return SkyRLModel(
-        policy_export_uri=policy_uri,
-        global_step=global_step,
-        tokenizer_uri=request.model.tokenizer_uri,
-        tokenizer_revision=request.model.tokenizer_revision,
-        checkpoint_root=request.output.checkpoint_root,
-        terminal_manifest_uri=request.output.terminal_manifest_uri,
-    )
 
 
 def _attempt_uri(request: SkyRLLaunchRequest) -> str:
@@ -89,6 +66,7 @@ def _attempt_uri(request: SkyRLLaunchRequest) -> str:
 
 def _manifest_payload(spec: SkyRLJobSpec, response: SkyRLLaunchResponse) -> dict[str, Any]:
     return {
+        "schema_version": spec.schema_version,
         "request": asdict(spec.request),
         "execution": asdict(spec.execution),
         "response": asdict(response),
@@ -100,7 +78,7 @@ def _launch_response(
     state: AttemptState,
     *,
     outcome: IrisLaunchOutcome | None = None,
-    model: SkyRLModel | None = None,
+    training: SkyRLTrainingResult | None = None,
     failure: str | None = None,
 ) -> SkyRLLaunchResponse:
     return SkyRLLaunchResponse(
@@ -110,7 +88,7 @@ def _launch_response(
         iris_job_id=outcome.job_id if outcome else None,
         iris_job_state=outcome.job_state if outcome else None,
         runtime=spec.request.runtime,
-        model=model,
+        training=training,
         failure=failure,
     )
 
@@ -155,22 +133,11 @@ def execute_job(
             return _record_failed_attempt(spec, outcome, f"Iris job reached {outcome.job_state}")
         if mode is LaunchMode.DETACH:
             return _launch_response(spec, AttemptState.SUBMITTED, outcome=outcome)
-        try:
-            active_backend.export_terminal_policy(spec, config_file.name)
-        except (OSError, subprocess.CalledProcessError, ValueError) as error:
-            return _record_failed_attempt(spec, outcome, f"Terminal policy export failed: {error}")
-
     try:
-        model = _policy_export(request)
-    except ValueError as error:
-        return _record_failed_attempt(spec, outcome, str(error))
-    if not _path_exists(request.output.resolved_config_uri):
-        return _record_failed_attempt(
-            spec,
-            outcome,
-            f"Successful Iris job did not persist resolved config: {request.output.resolved_config_uri}",
-        )
-    response = _launch_response(spec, AttemptState.SUCCEEDED, outcome=outcome, model=model)
+        training = read_training_result(request)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return _record_failed_attempt(spec, outcome, f"Invalid training result: {error}")
+    response = _launch_response(spec, AttemptState.SUCCEEDED, outcome=outcome, training=training)
     payload = _manifest_payload(spec, response)
     _write_json(_attempt_uri(request), payload)
     _write_json(request.output.terminal_manifest_uri, payload)
@@ -188,6 +155,10 @@ def create_parser() -> argparse.ArgumentParser:
     launch_mode = launch_parser.add_mutually_exclusive_group()
     launch_mode.add_argument("--dry-run", action="store_true")
     launch_mode.add_argument("--no-wait", action="store_true", help="Submit and return without following job logs.")
+
+    export_parser = iris_commands.add_parser("export", help="Export a successful native checkpoint without retraining.")
+    export_parser.add_argument("--request", required=True)
+    export_parser.add_argument("--dry-run", action="store_true")
 
     build_parser = iris_commands.add_parser("build-request", help="Build a SkyRLJobSpec JSON from an RL YAML config.")
     build_parser.add_argument("--config", required=True, help="Path to the RL YAML config.")
@@ -221,6 +192,10 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--run-prefix", required=True, help="Canonical output root (e.g. s3://bucket/run-id).")
     build_parser.add_argument("--overrides", default=None, help="JSON list of Hydra ++ override strings.")
     build_parser.add_argument("--attempt-id", default=None)
+    build_parser.add_argument(
+        "--completion-mode", choices=[mode.value for mode in CompletionMode], default="checkpoint"
+    )
+    build_parser.add_argument("--checkpoint-retention-days", type=int, default=None)
     build_parser.add_argument("--out", default=None, help="Write JSON to this path; stdout if omitted.")
 
     return parser
@@ -240,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
             "timeout_seconds",
             "seed",
             "attempt_id",
+            "completion_mode",
+            "checkpoint_retention_days",
         )
         build_kwargs = {k: getattr(args, k) for k in optional_fields if getattr(args, k) is not None}
         if args.overrides is not None:
@@ -270,6 +247,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             sys.stdout.write(payload + "\n")
         return 0
+
+    if args.action == "export":
+        from cloud.iris.export_job import execute_export
+
+        with open(args.request) as source:
+            spec = export_spec(json.load(source))
+        with contextlib.redirect_stdout(sys.stderr):
+            response = execute_export(spec, mode=LaunchMode.PREPARE if args.dry_run else LaunchMode.WAIT)
+        json.dump(asdict(response), sys.stdout, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0 if response.state in (AttemptState.PREPARED, AttemptState.SUCCEEDED) else 1
 
     with open(args.request) as source:
         spec = job_spec(json.load(source))

@@ -26,6 +26,7 @@ from cloud.iris.protocol import (
 )
 from cloud.iris.runtime_bundle import LauncherSource, resolve_launcher_source
 from cloud.iris.runtime_environment import RuntimeProfile, runtime_profile_for_strategy
+from marinskyrl.training_completion import CompletionMode
 
 # Dotted YAML path -> SkyRLRolePlan field name.  These become ``++`` Hydra overrides
 # inside ``job_launch_argv``, so a transcription error would silently change the
@@ -138,6 +139,8 @@ def build_job_spec(
     overrides: list[str] | None = None,
     attempt_id: str = "attempt-1",
     launcher_source: LauncherSource | None = None,
+    completion_mode: CompletionMode = CompletionMode.CHECKPOINT,
+    checkpoint_retention_days: int | None = None,
 ) -> SkyRLJobSpec:
     """Build a complete :class:`SkyRLJobSpec` from experiment inputs + RL config.
 
@@ -192,6 +195,8 @@ def build_job_spec(
             output=derive_output_paths(run_prefix),
             seed=seed,
             overrides=tuple(overrides or []),
+            completion_mode=CompletionMode(completion_mode),
+            checkpoint_retention_days=checkpoint_retention_days,
         ),
         execution=IrisLaunchOptions(
             cluster=cluster,

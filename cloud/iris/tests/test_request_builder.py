@@ -49,6 +49,7 @@ def _make_config(
 ) -> dict:
     config: dict = {
         "trainer": {
+            "hf_save_interval": -1,
             "placement": {
                 "colocate_all": colocate_all,
                 "policy_num_nodes": policy_num_nodes,

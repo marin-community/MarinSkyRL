@@ -101,7 +101,6 @@ from cloud.iris.storage_policy import (
 from cloud.iris.terminal_policy import (
     TerminalPolicyExport,
     policy_export_geometry,
-    storage_user_from_resource_path,
     submit_terminal_policy_export,
 )
 from marinskyrl.resource_locator import (
@@ -121,7 +120,14 @@ from cloud.iris.rl_config_translation import (
 )
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
-from cloud.iris.protocol import DataLocator, LaunchMode, SkyRLJobSpec
+from cloud.iris.protocol import (
+    DataLocator,
+    LaunchMode,
+    SkyRLJobSpec,
+    training_receipt_uri,
+    training_request_fingerprint,
+)
+from marinskyrl.training_completion import validate_completion_config
 from cloud.iris.env_vars import DistributedDebugMode, EnvVarManager, EnvVarScope, wandb_launch_environment
 from cloud.iris.runtime_environment import (
     CHECKPOINT_EXPORT_ENTRYPOINT,
@@ -365,8 +371,44 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
     if mode is LaunchMode.DETACH:
         argv.append("--no-wait")
     for override in request.overrides:
+        key = override.lstrip("+~").split("=", 1)[0]
+        if key == "trainer" or key == "trainer.completion" or key.startswith("trainer.completion."):
+            raise ValueError("trainer.completion metadata is owned by the launch protocol")
         argv.extend(["--skyrl-override", override])
+    completion = {
+        "mode": request.completion_mode.value,
+        "run_id": request.run_id,
+        "attempt_id": request.attempt_id,
+        "request_fingerprint": training_request_fingerprint(request),
+        "receipt_uri": training_receipt_uri(request),
+    }
+    for key, value in completion.items():
+        argv.extend(["--skyrl-override", format_hydra_arg(f"trainer.completion.{key}", value, prefix="++")])
+    _validate_training_completion(spec, completion)
     return argv
+
+
+def _validate_training_completion(spec: SkyRLJobSpec, completion: dict[str, str]) -> None:
+    """Validate saving policy before GPU admission, with Hydra override semantics."""
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+    from omegaconf import OmegaConf
+
+    base_path = PROJECT_ROOT / "skyrl-train/skyrl_train/config/ppo_base_config.yaml"
+    if not base_path.is_file():
+        from importlib.resources import files
+
+        base_path = files("skyrl_train").joinpath("config/ppo_base_config.yaml")
+    base = OmegaConf.load(base_path)
+    source = OmegaConf.create(yaml.safe_load(spec.request.config_yaml) or {})
+    cfg = OmegaConf.merge(base, source)
+    for override in OverridesParser.create().parse_overrides(list(spec.request.overrides)):
+        if not override.key_or_group.startswith("trainer."):
+            continue
+        if override.is_delete():
+            raise ValueError("Deleting trainer configuration is unsupported by typed training requests")
+        OmegaConf.update(cfg, override.key_or_group, override.value(), merge=False, force_add=True)
+    cfg.trainer.completion = completion
+    validate_completion_config(cfg)
 
 
 class IrisBackend:
@@ -381,33 +423,6 @@ class IrisBackend:
         args = resolved_launch_args(job_launch_argv(spec, config_path, mode=mode))
         with contextlib.redirect_stdout(sys.stderr):
             return launch(args, spec.request.runtime.commit)
-
-    def export_terminal_policy(self, spec: SkyRLJobSpec, config_path: str) -> None:
-        """Run and verify the export requested by the terminal checkpoint."""
-        request = spec.request
-        execution = spec.execution
-        submit_terminal_policy_export(
-            TerminalPolicyExport(
-                checkpoint_root=request.output.checkpoint_root,
-                export_root=request.output.export_root,
-                config_path=config_path,
-                model_path=request.model.local_path,
-                model_source_uri=request.model.uri,
-                model_source_identity=request.model.identity,
-                policy_num_nodes=request.topology.role_plan.policy_num_nodes,
-                policy_num_gpus_per_node=request.topology.role_plan.policy_num_gpus_per_node,
-                cluster=execution.cluster,
-                priority=execution.priority,
-                job_name=execution.job_name,
-                cluster_config=execution.cluster_config,
-                target_cluster=execution.target_cluster,
-                parent_cluster_config=execution.parent_cluster_config,
-                cpu=execution.cpu,
-                memory=execution.memory,
-                disk=execution.disk,
-                storage_user=storage_user_from_resource_path(request.output.checkpoint_root),
-            )
-        )
 
 
 def _pod_resource_request_gib(pod: dict[str, Any], resource: str) -> float:

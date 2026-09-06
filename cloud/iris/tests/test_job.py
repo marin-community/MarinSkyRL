@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -12,6 +13,8 @@ import pytest
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from marinskyrl.training_completion import CompletionMode, NativeCheckpoint, CheckpointFile, TrainingReceipt  # noqa: E402
 
 from cloud.iris import job, runtime_environment  # noqa: E402
 from cloud.iris import runtime_bundle  # noqa: E402
@@ -29,6 +32,8 @@ from cloud.iris.protocol import (  # noqa: E402
     SkyRLOutputPaths,
     SkyRLRolePlan,
     SkyRLTopology,
+    training_receipt_uri,
+    training_request_fingerprint,
 )
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
 from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
@@ -155,7 +160,7 @@ scale_groups:
     return config
 
 
-def _spec(tmp_path: Path) -> SkyRLJobSpec:
+def _spec(tmp_path: Path, runtime_commit: str | None = None) -> SkyRLJobSpec:
     output = tmp_path / "output"
     return SkyRLJobSpec(
         request=SkyRLLaunchRequest(
@@ -163,7 +168,7 @@ def _spec(tmp_path: Path) -> SkyRLJobSpec:
             attempt_id="attempt-1",
             config_yaml="trainer:\n  strategy: fsdp2\n  placement:\n    colocate_all: true\n",
             runtime=RuntimeIdentity(
-                commit=_git_commit(_REPOSITORY_ROOT),
+                commit=runtime_commit or _git_commit(_REPOSITORY_ROOT),
                 profile=RuntimeProfile.FSDP,
             ),
             model=ModelLocator(
@@ -206,7 +211,7 @@ def _spec(tmp_path: Path) -> SkyRLJobSpec:
                 terminal_manifest_uri=(output / "terminal.json").as_uri(),
             ),
             seed=7,
-            overrides=("++trainer.max_steps=8",),
+            overrides=("++trainer.max_steps=8", "++trainer.hf_save_interval=-1"),
         ),
         execution=IrisLaunchOptions(
             cluster="cw-us-east-08a",
@@ -224,14 +229,43 @@ def _spec(tmp_path: Path) -> SkyRLJobSpec:
     )
 
 
+def _write_resolved_training_config(envelope: SkyRLJobSpec) -> None:
+    argv = job_launch_argv(envelope, "config.yaml")
+    hydra_args = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--skyrl-override"]
+    job._write_json(
+        envelope.request.output.resolved_config_uri,
+        {
+            "entrypoint": "skyrl_train.entrypoints.main_base",
+            "hydra_args": hydra_args,
+        },
+    )
+
+
 def _write_terminal_training_outputs(envelope: SkyRLJobSpec) -> None:
     output = Path(envelope.request.output.checkpoint_root.removeprefix("file://"))
     output.mkdir(parents=True)
     (output / "latest_ckpt_global_step.txt").write_text("8")
-    _write_policy_export(envelope.request.output.export_root)
-    resolved = Path(envelope.request.output.resolved_config_uri.removeprefix("file://"))
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    resolved.write_text('{"entrypoint":"skyrl_train.entrypoints.main_base","hydra_args":[]}')
+    checkpoint = output / "global_step_8"
+    (checkpoint / "policy").mkdir(parents=True)
+    (checkpoint / "policy" / "model.pt").write_bytes(b"policy weights")
+    (checkpoint / "trainer_state.pt").write_bytes(b"trainer state")
+    (checkpoint / "data.pt").write_bytes(b"data state")
+    inventory = tuple(
+        CheckpointFile(str(path.relative_to(checkpoint)), path.stat().st_size)
+        for path in sorted(checkpoint.rglob("*"))
+        if path.is_file()
+    )
+    native = NativeCheckpoint(checkpoint.as_uri(), 8, hashlib.sha256(b"trainer state").hexdigest(), inventory)
+    receipt = TrainingReceipt(
+        envelope.request.run_id,
+        envelope.request.attempt_id,
+        training_request_fingerprint(envelope.request),
+        CompletionMode.CHECKPOINT,
+        8,
+        native,
+    )
+    job._write_json(training_receipt_uri(envelope.request), receipt.to_dict())
+    _write_resolved_training_config(envelope)
 
 
 def _write_policy_export(export_root: str) -> None:
@@ -242,15 +276,8 @@ def _write_policy_export(export_root: str) -> None:
     (export / "tokenizer.json").write_text("{}")
 
 
-@dataclass(frozen=True)
-class CompletingExportBackend(FakeLaunchBackend):
-    def export_terminal_policy(self, spec: SkyRLJobSpec, config_path: str) -> None:
-        self.validate(spec, config_path)
-        _write_policy_export(spec.request.output.export_root)
-
-
-def test_execute_job_commits_validated_terminal_model(tmp_path: Path) -> None:
-    envelope = _spec(tmp_path)
+def test_execute_job_commits_validated_training_result(tmp_path: Path, runtime_checkout) -> None:
+    envelope = _spec(tmp_path, runtime_checkout[1])
     _write_terminal_training_outputs(envelope)
     backend = FakeLaunchBackend(
         IrisLaunchOutcome(
@@ -263,40 +290,74 @@ def test_execute_job_commits_validated_terminal_model(tmp_path: Path) -> None:
     response = execute_job(envelope, backend=backend)
 
     assert response.state == AttemptState.SUCCEEDED
-    assert response.model is not None
-    assert response.model.global_step == 8
+    assert response.training is not None
+    assert response.training.global_step == 8
     terminal = json.loads(Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).read_text())
-    assert terminal["response"] == asdict(response)
+    assert terminal["response"] == json.loads(json.dumps(asdict(response)))
     assert terminal["request"]["runtime"] == asdict(envelope.request.runtime)
     attempt = Path(envelope.request.output.attempts_root.removeprefix("file://")) / "attempt-1.json"
     assert json.loads(attempt.read_text()) == terminal
 
 
-def test_execute_job_exports_terminal_checkpoint_before_committing_model(tmp_path: Path) -> None:
-    envelope = _spec(tmp_path)
-    checkpoint = Path(envelope.request.output.checkpoint_root.removeprefix("file://"))
-    checkpoint.mkdir(parents=True)
-    (checkpoint / "latest_ckpt_global_step.txt").write_text("8")
-    resolved = Path(envelope.request.output.resolved_config_uri.removeprefix("file://"))
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    resolved.write_text('{"entrypoint":"skyrl_train.entrypoints.main_base","hydra_args":[]}')
-    backend = CompletingExportBackend(
-        IrisLaunchOutcome(
-            job_id="01KTEST",
-            job_state="succeeded",
-            exit_code=0,
-        )
+def test_execute_job_metrics_completion_requires_no_checkpoint_or_export(tmp_path: Path, runtime_checkout) -> None:
+    envelope = _spec(tmp_path, runtime_checkout[1])
+    envelope = replace(
+        envelope,
+        request=replace(
+            envelope.request,
+            completion_mode=CompletionMode.METRICS,
+            overrides=("++trainer.hf_save_interval=-1", "++trainer.ckpt_interval=-1"),
+        ),
     )
-
-    response = execute_job(envelope, backend=backend)
-
+    _write_resolved_training_config(envelope)
+    receipt = TrainingReceipt(
+        envelope.request.run_id,
+        envelope.request.attempt_id,
+        training_request_fingerprint(envelope.request),
+        CompletionMode.METRICS,
+        8,
+    )
+    job._write_json(training_receipt_uri(envelope.request), receipt.to_dict())
+    response = execute_job(envelope, backend=FakeLaunchBackend(IrisLaunchOutcome("job", "succeeded", 0)))
     assert response.state == AttemptState.SUCCEEDED
-    assert response.model is not None
-    assert response.model.policy_export_uri.endswith("/global_step_8/policy")
+    assert response.training.global_step == 8
+    assert response.training.checkpoint is None
+    assert not Path(envelope.request.output.checkpoint_root.removeprefix("file://")).exists()
+    assert not Path(envelope.request.output.export_root.removeprefix("file://")).exists()
 
 
-def test_execute_job_detaches_without_validating_terminal_artifacts(tmp_path: Path) -> None:
-    envelope = _spec(tmp_path)
+@pytest.mark.parametrize(
+    "damage", ["missing_receipt", "wrong_attempt", "changed_state", "missing_policy", "wrong_config"]
+)
+def test_execute_job_rejects_incomplete_or_foreign_training_result(
+    tmp_path: Path, damage: str, runtime_checkout
+) -> None:
+    envelope = _spec(tmp_path, runtime_checkout[1])
+    _write_terminal_training_outputs(envelope)
+    receipt_path = Path(training_receipt_uri(envelope.request).removeprefix("file://"))
+    checkpoint = Path(envelope.request.output.checkpoint_root.removeprefix("file://")) / "global_step_8"
+    if damage == "missing_receipt":
+        receipt_path.unlink()
+    elif damage == "wrong_attempt":
+        receipt = json.loads(receipt_path.read_text())
+        receipt["attempt_id"] = "another-attempt"
+        receipt_path.write_text(json.dumps(receipt))
+    elif damage == "changed_state":
+        (checkpoint / "trainer_state.pt").write_bytes(b"changed state")
+    elif damage == "missing_policy":
+        (checkpoint / "policy/model.pt").unlink()
+    else:
+        job._write_json(
+            envelope.request.output.resolved_config_uri,
+            {"entrypoint": "skyrl_train.entrypoints.main_base", "hydra_args": []},
+        )
+    response = execute_job(envelope, backend=FakeLaunchBackend(IrisLaunchOutcome("job", "succeeded", 0)))
+    assert response.state == AttemptState.FAILED
+    assert not Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).exists()
+
+
+def test_execute_job_detaches_without_validating_terminal_artifacts(tmp_path: Path, runtime_checkout) -> None:
+    envelope = _spec(tmp_path, runtime_checkout[1])
     backend = FakeLaunchBackend(
         IrisLaunchOutcome(
             job_id="/power/iceball-test",
@@ -310,7 +371,7 @@ def test_execute_job_detaches_without_validating_terminal_artifacts(tmp_path: Pa
 
     assert response.state == AttemptState.SUBMITTED
     assert response.iris_job_id == "/power/iceball-test"
-    assert response.model is None
+    assert response.training is None
     assert not Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).exists()
     assert not Path(envelope.request.output.attempts_root.removeprefix("file://")).exists()
 
@@ -388,8 +449,8 @@ def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) 
         job_launch_argv(envelope, "config.yaml")
 
 
-def test_execute_job_failure_records_attempt_without_terminal_model(tmp_path: Path) -> None:
-    envelope = _spec(tmp_path)
+def test_execute_job_failure_records_attempt_without_terminal_model(tmp_path: Path, runtime_checkout) -> None:
+    envelope = _spec(tmp_path, runtime_checkout[1])
     backend = FakeLaunchBackend(
         IrisLaunchOutcome(
             job_id="01KFAILED",
@@ -401,14 +462,14 @@ def test_execute_job_failure_records_attempt_without_terminal_model(tmp_path: Pa
     response = execute_job(envelope, backend=backend)
 
     assert response.state == AttemptState.FAILED
-    assert response.model is None
+    assert response.training is None
     assert not Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).exists()
     attempt = Path(envelope.request.output.attempts_root.removeprefix("file://")) / "attempt-1.json"
     assert json.loads(attempt.read_text())["response"]["iris_job_state"] == "failed"
 
 
-def test_execute_job_serializes_iris_job_failure(tmp_path: Path) -> None:
-    envelope = _spec(tmp_path)
+def test_execute_job_serializes_iris_job_failure(tmp_path: Path, runtime_checkout) -> None:
+    envelope = _spec(tmp_path, runtime_checkout[1])
     status = job_status_from_proto(
         job_pb2.JobStatus(job_id="/power/iceball-test", state=job_pb2.JOB_STATE_KILLED, error="Terminated by user")
     )
@@ -424,8 +485,8 @@ def test_execute_job_serializes_iris_job_failure(tmp_path: Path) -> None:
     assert json.loads(attempt.read_text())["response"] == asdict(response)
 
 
-def test_execute_job_rejects_overwriting_terminal_manifest(tmp_path: Path) -> None:
-    envelope = _spec(tmp_path)
+def test_execute_job_rejects_overwriting_terminal_manifest(tmp_path: Path, runtime_checkout) -> None:
+    envelope = _spec(tmp_path, runtime_checkout[1])
     terminal = Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://"))
     terminal.parent.mkdir(parents=True)
     terminal.write_text("{}")
@@ -594,7 +655,7 @@ def test_cli_reports_launch_state_as_json(
             iris_job_id=iris_job_id,
             iris_job_state=iris_job_state,
             runtime=envelope.request.runtime,
-            model=None,
+            training=None,
             failure=None,
         )
 
@@ -609,7 +670,7 @@ def test_cli_reports_launch_state_as_json(
         "failure": None,
         "iris_job_id": iris_job_id,
         "iris_job_state": iris_job_state,
-        "model": None,
+        "training": None,
         "run_id": "iceball-test",
         "runtime": {"commit": envelope.request.runtime.commit, "profile": "fsdp"},
         "state": state,

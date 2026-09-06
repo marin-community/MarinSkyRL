@@ -5,16 +5,14 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 from urllib.parse import urlparse
 
-from cloud.iris.artifacts import fs_and_path, terminal_checkpoint_step
+from cloud.iris.artifacts import terminal_checkpoint_step
 from cloud.iris.model_paths import model_source_cli_args
 from cloud.iris.paths import PROJECT_ROOT
 from cloud.iris.storage_policy import hydra_override_value
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, HF_EXPORT_REQUEST_FILENAME
-from marinskyrl.resource_locator import join_resource_path
 
 
 @dataclass(frozen=True)
@@ -39,6 +37,11 @@ class TerminalPolicyExport:
     memory: str | None = None
     disk: str | None = None
     storage_user: str | None = None
+    global_step: int | None = None
+    receipt_uri: str | None = None
+    request_fingerprint: str | None = None
+    attempt_id: str | None = None
+    timeout_seconds: int | None = None
 
 
 def storage_user_from_resource_path(path: str) -> str | None:
@@ -80,9 +83,10 @@ def _resolved_config_path(config_path: str) -> str:
 
 
 def submit_terminal_policy_export(spec: TerminalPolicyExport) -> None:
-    """Submit and verify conversion of the latest committed checkpoint."""
-    global_step = terminal_checkpoint_step(spec.checkpoint_root)
-    checkpoint_path = join_resource_path(spec.checkpoint_root, f"{GLOBAL_STEP_PREFIX}{global_step}")
+    """Submit and verify conversion of one checkpoint, defaulting to the legacy latest marker."""
+    global_step = spec.global_step
+    if global_step is None:
+        global_step = terminal_checkpoint_step(spec.checkpoint_root)
     command = [
         sys.executable,
         "-m",
@@ -110,28 +114,43 @@ def submit_terminal_policy_export(spec: TerminalPolicyExport) -> None:
         command.extend(["--disk", spec.disk])
     if spec.storage_user:
         command.extend(["--storage-user", spec.storage_user])
-    export_request_uri = join_resource_path(checkpoint_path, HF_EXPORT_REQUEST_FILENAME)
-    export_filesystem, export_request_path = fs_and_path(export_request_uri)
-    if export_filesystem.exists(export_request_path):
-        command.extend(["--request", checkpoint_path])
-    else:
+    if spec.timeout_seconds is not None and spec.timeout_seconds > 0:
+        command.extend(["--timeout", str(spec.timeout_seconds)])
+    command.extend(
+        [
+            "--ckpt_path",
+            spec.checkpoint_root,
+            "--step",
+            str(global_step),
+            "--model_path",
+            spec.model_path,
+            "--num-nodes",
+            str(spec.policy_num_nodes),
+            "--gpus-per-node",
+            str(spec.policy_num_gpus_per_node),
+            "--export_path",
+            spec.export_root,
+        ]
+    )
+    command.extend(model_source_cli_args(spec.model_source_uri, spec.model_source_identity))
+    receipt_values = (spec.receipt_uri, spec.request_fingerprint, spec.attempt_id)
+    if any(value is not None for value in receipt_values) and not all(
+        isinstance(value, str) and value.strip() for value in receipt_values
+    ):
+        raise ValueError("Export completion receipt URI, request fingerprint, and attempt ID must be provided together")
+    if spec.receipt_uri is not None:
+        assert spec.request_fingerprint is not None
+        assert spec.attempt_id is not None
         command.extend(
             [
-                "--ckpt_path",
-                spec.checkpoint_root,
-                "--step",
-                str(global_step),
-                "--model_path",
-                spec.model_path,
-                "--num-nodes",
-                str(spec.policy_num_nodes),
-                "--gpus-per-node",
-                str(spec.policy_num_gpus_per_node),
-                "--export_path",
-                spec.export_root,
+                "--export-receipt-uri",
+                spec.receipt_uri,
+                "--export-request-fingerprint",
+                spec.request_fingerprint,
+                "--export-attempt-id",
+                spec.attempt_id,
             ]
         )
-        command.extend(model_source_cli_args(spec.model_source_uri, spec.model_source_identity))
     # The launcher's stdout carries only the terminal JSON response; the export
     # subprocess inherits raw fd 1, so route its console output to stderr.
     exit_code = subprocess.call(command, cwd=str(PROJECT_ROOT), stdout=sys.stderr)

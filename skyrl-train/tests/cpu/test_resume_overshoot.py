@@ -26,6 +26,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from omegaconf import OmegaConf
 
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
@@ -66,8 +67,7 @@ def _make_bare_trainer(cls, global_step: int, total_training_steps: int, colocat
     trainer.eval_dataset = object()
 
     # epochs is read from cfg in _handle_resume_at_max_steps
-    cfg = MagicMock()
-    cfg.trainer.epochs = 1
+    cfg = OmegaConf.create({"trainer": {"epochs": 1}})
     trainer.cfg = cfg
 
     # _create_trainer_state for the base trainer reads len(self.train_dataloader);

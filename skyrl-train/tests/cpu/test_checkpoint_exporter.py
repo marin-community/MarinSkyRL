@@ -1,13 +1,23 @@
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 import torch
-
-from skyrl_train.checkpoint_exporter import CheckpointExportPlan, CheckpointExporter, RayPolicyExportWorkers
+from omegaconf import OmegaConf
+from skyrl_train.checkpoint_exporter import (
+    CheckpointExporter,
+    CheckpointExportPlan,
+    CheckpointExportResult,
+    RayPolicyExportWorkers,
+)
+from skyrl_train.entrypoints import checkpoint_export
+from skyrl_train.entrypoints.checkpoint_export import _completion_metadata, _write_completion_receipt
 from skyrl_train.hf_export_schema import HFUploadMode
 from skyrl_train.hf_model_io import verify_hf_model_export
 from skyrl_train.hf_publisher import HuggingFacePublisher
+
+from marinskyrl.export_completion import verify_export_receipt
 
 
 class FakePolicyExportWorkers:
@@ -109,6 +119,78 @@ def test_checkpoint_exporter_converts_only_the_policy_model(tmp_path):
     assert workers.export_path == result.export_path
     assert workers.tokenizer is tokenizer
     assert workers.closed
+
+
+def test_checkpoint_entrypoint_records_receipt_for_complete_export(tmp_path: Path) -> None:
+    export_path = tmp_path / "policy"
+    export_path.mkdir()
+    (export_path / "config.json").write_text("{}")
+    (export_path / "tokenizer.json").write_text("{}")
+    (export_path / "model.safetensors").write_bytes(b"weights")
+    receipt_path = tmp_path / "receipts" / "attempt-2.json"
+    cfg = OmegaConf.create(
+        {
+            "checkpoint_export": {
+                "completion_receipt_uri": str(receipt_path),
+                "request_fingerprint": "request-2",
+                "attempt_id": "attempt-2",
+            }
+        }
+    )
+    metadata = _completion_metadata(cfg)
+    assert metadata is not None
+
+    _write_completion_receipt(metadata, CheckpointExportResult(step=9, export_path=str(export_path)))
+
+    assert verify_export_receipt(str(receipt_path), "request-2", str(export_path), 9).attempt_id == "attempt-2"
+
+
+def test_checkpoint_entrypoint_rejects_partial_receipt_metadata() -> None:
+    cfg = OmegaConf.create(
+        {"checkpoint_export": {"completion_receipt_uri": "s3://bucket/receipt.json", "attempt_id": "attempt-1"}}
+    )
+
+    with pytest.raises(ValueError, match="provided together"):
+        _completion_metadata(cfg)
+
+
+def test_checkpoint_entrypoint_writes_receipt_after_ray_shutdown(monkeypatch) -> None:
+    events = []
+    cfg = OmegaConf.create(
+        {
+            "checkpoint_export": {
+                "completion_receipt_uri": "receipt.json",
+                "request_fingerprint": "request-2",
+                "attempt_id": "attempt-2",
+            }
+        }
+    )
+    result = CheckpointExportResult(step=9, export_path="policy")
+
+    @dataclass(frozen=True)
+    class RemoteExport:
+        def remote(self, remote_cfg):
+            assert remote_cfg is cfg
+            return "result-ref"
+
+    monkeypatch.setattr(checkpoint_export, "initialize_ray", lambda _cfg: events.append("initialize"))
+    monkeypatch.setattr(checkpoint_export, "run_checkpoint_export", RemoteExport())
+    monkeypatch.setattr(checkpoint_export.ray, "get", lambda ref: result if ref == "result-ref" else None)
+    monkeypatch.setattr(checkpoint_export.ray, "shutdown", lambda: events.append("shutdown"))
+    monkeypatch.setattr(checkpoint_export.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(
+        checkpoint_export,
+        "_write_completion_receipt",
+        lambda metadata, completed: events.append(("receipt", metadata, completed)),
+    )
+
+    checkpoint_export.main.__wrapped__(cfg)
+
+    assert events == [
+        "initialize",
+        "shutdown",
+        ("receipt", ("receipt.json", "request-2", "attempt-2"), result),
+    ]
 
 
 def test_checkpoint_exporter_rejects_a_mismatched_checkpoint_marker(tmp_path):

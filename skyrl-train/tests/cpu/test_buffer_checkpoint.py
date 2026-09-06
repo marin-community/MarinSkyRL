@@ -8,6 +8,7 @@ import os
 import tempfile
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
@@ -79,7 +80,7 @@ def _make_shutdown_trainer(tmp_path, *, global_step: int, uid: str, consumed: bo
     callback = BufferCheckpointCallback()
     callback.bind_queues(queues)
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
-    trainer.cfg = _FakeTrainer(str(tmp_path), asyncio.Queue()).cfg
+    trainer.cfg = OmegaConf.create({"trainer": {"ckpt_path": str(tmp_path)}})
     trainer.global_step = global_step
     trainer._buffer_checkpoint_callback = callback
     trainer._shutdown_complete = False
