@@ -1,10 +1,10 @@
 import torch
 from skyrl_train.utils.progress import tqdm
 from typing import Any, Dict, List, Protocol
-from pathlib import Path
 from loguru import logger
 from collections import defaultdict
 from dataclasses import dataclass
+from marinskyrl.resource_locator import join_resource_path
 
 from skyrl_train.utils import Timer
 
@@ -177,13 +177,11 @@ def _dump_eval_results(
     if not cfg.trainer.dump_eval_results:
         return
     with Timer("dump_eval_results"):
-        # TODO(Ben): route eval dumps through skyrl_train.io when evaluation exports support cloud paths.
-        data_save_dir = (
-            Path(cfg.trainer.export_path)
-            / "dumped_evals"
-            / ("eval_only" if global_step is None else f"global_step_{global_step}_evals")
+        data_save_dir = join_resource_path(
+            cfg.trainer.export_path,
+            "dumped_evals",
+            "eval_only" if global_step is None else f"global_step_{global_step}_evals",
         )
-        data_save_dir.mkdir(parents=True, exist_ok=True)
         dump_per_dataset_eval_results(
             data_save_dir,
             tokenizer,

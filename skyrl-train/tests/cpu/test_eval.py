@@ -3,11 +3,14 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/test_eval.py
 """
 
 from unittest.mock import MagicMock
+import json
 
 import pytest
+from fsspec.implementations.memory import MemoryFileSystem
 from omegaconf import OmegaConf
 
 from skyrl_train.evaluate import evaluate
+from skyrl_train.io import io
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
 from tests.cpu.util import example_dummy_config
 
@@ -39,7 +42,11 @@ class DummyRunner(TrajectoryRunner):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
+@pytest.mark.parametrize("storage", ["disabled", "local", "s3", "gs", "unwritable"])
+@pytest.mark.parametrize("global_step", [None, 0, 5])
+async def test_evaluate_computes_expected_metrics_and_persists_results(
+    dummy_config, tmp_path, monkeypatch, storage, global_step
+):
     cfg = dummy_config
     cfg.generator.backend = "vllm"
     cfg.generator.eval_sampling_params = OmegaConf.create(
@@ -54,9 +61,23 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         }
     )
     cfg.generator.eval_n_samples_per_prompt = 1
+    cfg.generator.trajectory_retention.enabled = False
     cfg.environment = OmegaConf.create({"env_class": "gsm8k"})
-    cfg.trainer.dump_eval_results = False
-    cfg.trainer.export_path = str(tmp_path)
+    cfg.trainer.dump_eval_results = storage != "disabled"
+    scheme = "s3" if storage == "unwritable" else storage
+    cfg.trainer.export_path = (
+        f"{scheme}://eval-bucket/{tmp_path.name}/exports" if scheme in ("s3", "gs") else str(tmp_path / "exports")
+    )
+    cloud = MemoryFileSystem()
+    if scheme in ("s3", "gs"):
+        monkeypatch.setattr(io, "_get_filesystem", lambda _path: cloud)
+    if storage == "unwritable":
+
+        def reject_write(*args, **kwargs):
+            raise PermissionError("evaluation output denied")
+
+        monkeypatch.setattr(cloud, "open", reject_write)
+    monkeypatch.chdir(tmp_path)
 
     prompts_batch = [
         {
@@ -85,15 +106,21 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     runner = DummyRunner(trajectory_batch)
 
     tokenizer = MagicMock()
-    tokenizer.decode.side_effect = lambda tokens: "decoded"
+    tokenizer.decode.side_effect = lambda tokens: f"decoded π {tokens[0]}"
 
-    metrics = await evaluate(
+    evaluation = evaluate(
         eval_dataloader=eval_dataloader,
         trajectory_runner=runner,
         cfg=cfg,
-        global_step=5,
+        global_step=global_step,
         tokenizer=tokenizer,
     )
+    if storage == "unwritable":
+        with pytest.raises(PermissionError, match="evaluation output denied"):
+            await evaluation
+        assert not cloud.exists(cfg.trainer.export_path)
+        return
+    metrics = await evaluation
 
     expected_metrics = {
         "eval/dataset_a/avg_score": 1.0,
@@ -113,3 +140,28 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     assert seen_batch["env_classes"] == ["gsm8k", "custom_env"]
     assert seen_batch["env_extras"] == [prompt["env_extras"] for prompt in prompts_batch]
     assert seen_batch["batch_metadata"].training_phase == "eval"
+
+    if storage == "disabled":
+        assert not (tmp_path / "exports").exists()
+        return
+    suffix = "eval_only" if global_step is None else f"global_step_{global_step}_evals"
+    dump_root = f"{cfg.trainer.export_path}/dumped_evals/{suffix}"
+    for i, dataset in enumerate(("a", "b")):
+        with io.open_file(f"{dump_root}/dataset_{dataset}.jsonl", "r") as source:
+            rows = [json.loads(line) for line in source]
+        assert rows == [
+            {
+                "input_prompt": f"decoded π {101 + i}",
+                "output_response": f"decoded π {201 + i}",
+                "score": 1.0 - i,
+                "stop_reason": "stop",
+                "env_class": ["gsm8k", "custom_env"][i],
+                "env_extras": {"data_source": f"dataset/{dataset}"},
+                "data_source": f"dataset/{dataset}",
+            }
+        ]
+    with io.open_file(f"{dump_root}/aggregated_results.jsonl", "r") as source:
+        assert json.load(source) == expected_metrics
+    if storage in ("s3", "gs"):
+        assert len(cloud.find(cfg.trainer.export_path)) == 3
+        assert not (tmp_path / f"{storage}:").exists()
