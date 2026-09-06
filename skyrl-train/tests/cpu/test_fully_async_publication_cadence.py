@@ -93,6 +93,7 @@ class Runner:
         self.report_step = report_step
         self.global_step_fn = None
         self.evaluations = []
+        self.generations = []
 
     def set_trajectory_sink(self, sink):
         self.sink = sink
@@ -110,6 +111,8 @@ class Runner:
         ids = request["trajectory_ids"]
         if request["batch_metadata"].training_phase == "eval":
             self.evaluations.append((request["batch_metadata"].global_step, version))
+        else:
+            self.generations.append((ids[0].instance_id, version))
         batch = {
             "prompt_token_ids": [[1] for _ in ids],
             "response_ids": [[10 + version] for _ in ids],
@@ -153,10 +156,14 @@ class DriverWithCpuLearner(FullyAsyncRayPPOTrainer):
     def save_checkpoints(self):
         checkpoint = Path(self.cfg.trainer.ckpt_path) / f"global_step_{self.global_step}"
         checkpoint.mkdir(parents=True, exist_ok=True)
-        (checkpoint / "learner.json").write_text(json.dumps({
-            "completed_update": self.policy_model.completed_update,
-            "installed_update": self.inference_engine_client.installed_update,
-        }))
+        (checkpoint / "learner.json").write_text(
+            json.dumps(
+                {
+                    "completed_update": self.policy_model.completed_update,
+                    "installed_update": self.inference_engine_client.installed_update,
+                }
+            )
+        )
         self._last_saved_step = self.global_step
 
     def load_checkpoints(self):
@@ -174,7 +181,20 @@ class DriverWithCpuLearner(FullyAsyncRayPPOTrainer):
         return {"learner/update": self.policy_model.completed_update}
 
 
-def make_driver(*, interval=2, age=1, steps=5, eval_steps=100, report_step=True, stop_step=None, save_step=None):
+def make_driver(
+    *,
+    interval=2,
+    age=1,
+    steps=5,
+    eval_steps=100,
+    report_step=True,
+    stop_step=None,
+    save_step=None,
+    epochs=1,
+    steps_per_epoch=None,
+    runner_type=Runner,
+    dynamic_sampling_type=None,
+):
     cfg = get_default_config()
     updates = {
         "trainer.fully_async.weight_sync_interval": interval,
@@ -186,12 +206,13 @@ def make_driver(*, interval=2, age=1, steps=5, eval_steps=100, report_step=True,
         "trainer.policy_mini_batch_size": 2,
         "trainer.eval_batch_size": 1,
         "trainer.max_steps": steps,
-        "trainer.epochs": 1,
+        "trainer.epochs": epochs,
         "trainer.resume_mode": None,
         "trainer.placement.colocate_all": False,
         "trainer.training_metrics": True,
         "trainer.dump_eval_results": False,
         "trainer.algorithm.use_tis": False,
+        "trainer.algorithm.dynamic_sampling.type": dynamic_sampling_type,
         "trainer.algorithm.policy_loss_type": "behavior_clip",
         "generator.enable_http_endpoint": True,
         "generator.async_engine": True,
@@ -204,12 +225,12 @@ def make_driver(*, interval=2, age=1, steps=5, eval_steps=100, report_step=True,
     for path, value in updates.items():
         OmegaConf.update(cfg, path, value, force_add=True)
     engine = InferenceService()
-    runner = Runner(engine, report_step=report_step)
+    runner = runner_type(engine, report_step=report_step)
     trainer = DriverWithCpuLearner(
         cfg=cfg,
         tracker=Tracker(),
         tokenizer=Tokenizer(),
-        train_dataset=PromptRows(2 * steps),
+        train_dataset=PromptRows(2 * (steps_per_epoch or steps)),
         eval_dataset=PromptRows(1),
         inference_engine_client=engine,
         trajectory_runner=runner,
@@ -221,8 +242,12 @@ def make_driver(*, interval=2, age=1, steps=5, eval_steps=100, report_step=True,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("report_step", [True, False])
-@pytest.mark.parametrize("interval,age,publications", [(None, 0, [0, 1, 2, 3, 4, 5]), (1, 1, [0, 1, 2, 3, 4, 5]), (2, 1, [0, 2, 4, 5])])
-async def test_cadence_consumes_bounded_age_batches_and_evaluates_final_weights(interval, age, publications, report_step):
+@pytest.mark.parametrize(
+    "interval,age,publications", [(None, 0, [0, 1, 2, 3, 4, 5]), (1, 1, [0, 1, 2, 3, 4, 5]), (2, 1, [0, 2, 4, 5])]
+)
+async def test_cadence_consumes_bounded_age_batches_and_evaluates_final_weights(
+    interval, age, publications, report_step
+):
     trainer = make_driver(interval=interval, age=age, report_step=report_step)
     await asyncio.wait_for(trainer._train_loop(), timeout=10)
 
@@ -232,7 +257,11 @@ async def test_cadence_consumes_bounded_age_batches_and_evaluates_final_weights(
     assert [step for step, _ in trainer.policy_model.consumed] == [1, 2, 3, 4, 5]
     for step, versions in trainer.policy_model.consumed:
         assert all(0 <= step - 1 - version <= age for version in versions)
-        logged = next(metrics for row_step, metrics in trainer.tracker.rows if row_step == step and "trainer/global_step" in metrics)
+        logged = next(
+            metrics
+            for row_step, metrics in trainer.tracker.rows
+            if row_step == step and "trainer/global_step" in metrics
+        )
         assert logged["async/staleness_max"] == max(step - 1 - version for version in versions)
         if step not in publications:
             assert logged["timing/sync_weights"] == 0
@@ -319,3 +348,81 @@ async def test_failed_publication_stops_before_evaluating_uninstalled_update():
         for task in trainer._active_trajectory_tasks:
             task.cancel()
         await asyncio.gather(*trainer._active_trajectory_tasks, return_exceptions=True)
+
+
+class DelayedFirstRunner(Runner):
+    def __init__(self, engine, *, report_step):
+        super().__init__(engine, report_step=report_step)
+        self.release = asyncio.Event()
+        self.delayed_uid = None
+
+    async def run(self, request, **kwargs):
+        batch = await super().run(request, **kwargs)
+        if request["batch_metadata"].training_phase == "train" and self.delayed_uid is None:
+            self.delayed_uid = request["trajectory_ids"][0].instance_id
+            await self.release.wait()
+        return batch
+
+
+class ReleaseDelayedGroup(TrainerCallback):
+    def __init__(self, runner):
+        self.runner = runner
+
+    def on_step_end(self, state, control, **kwargs):
+        if state.global_step == 3:
+            self.runner.release.set()
+        return control
+
+
+class UniformFirstRunner(Runner):
+    async def run(self, request, **kwargs):
+        batch = await super().run(request, **kwargs)
+        if request["batch_metadata"].training_phase == "train" and len(self.generations) == 1:
+            batch["rewards"] = [0.0] * len(batch["rewards"])
+            batch["unshaped_rewards"] = list(batch["rewards"])
+        return batch
+
+
+@pytest.mark.asyncio
+async def test_publication_ceiling_avoids_third_cohorts_without_changing_the_age_budget():
+    trainer = make_driver()
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    versions = [version for _, version in trainer.trajectory_runner.generations]
+    assert versions.count(0) == 4
+    assert versions.count(2) == 4
+    assert trainer.data_tracker.total_samples_consumed == 10
+    assert trainer.inference_engine_client.publications == [0, 2, 4, 5]
+
+
+@pytest.mark.asyncio
+async def test_slow_crossing_group_is_retried_and_consumed_without_capacity_deadlock():
+    trainer = make_driver(age=2, runner_type=DelayedFirstRunner)
+    runner = trainer.trajectory_runner
+    trainer.callback_handler.add_callback(ReleaseDelayedGroup(runner))
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    versions = [version for uid, version in runner.generations if uid == runner.delayed_uid]
+    assert versions[0] == 0
+    assert any(version >= 2 for version in versions[1:])
+    assert trainer.data_tracker.total_samples_consumed == 10
+    assert sum(metrics.get("async/rejected_count/stale", 0) for _, metrics in trainer.tracker.rows) >= 1
+    for step, versions in trainer.policy_model.consumed:
+        assert all(0 <= step - 1 - version <= 2 for version in versions)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_filter_releases_publication_capacity_for_fresh_candidates():
+    trainer = make_driver(runner_type=UniformFirstRunner, dynamic_sampling_type="filter")
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert trainer.data_tracker.total_samples_consumed == 10
+    assert sum(metrics.get("async/dynamic_sampling/discarded_count", 0) for _, metrics in trainer.tracker.rows) >= 1
+    assert trainer.trajectory_runner.evaluations == [(0, 0), (5, 5)]
+
+
+@pytest.mark.asyncio
+async def test_publication_capacity_survives_an_odd_epoch_boundary():
+    trainer = make_driver(steps=6, epochs=2, steps_per_epoch=3)
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert trainer.inference_engine_client.publications == [0, 2, 4, 6]
+    assert trainer.data_tracker.total_samples_consumed == 12
+    assert [step for step, _ in trainer.policy_model.consumed] == [1, 2, 3, 4, 5, 6]
+    assert trainer.trajectory_runner.evaluations == [(0, 0), (6, 6)]

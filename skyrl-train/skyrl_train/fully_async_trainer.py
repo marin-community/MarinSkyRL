@@ -264,6 +264,7 @@ class _AsyncStalenessManager:
         # The current version that is being worked on, i.e. FullyAsyncRayPPOTrainer.global_step.
         # `self._current_global_step - 1` is the number of steps the model has finished training.
         self._current_global_step = 1
+        self._published_policy_version = 0
 
     def load_state_from_checkpoint(self, global_step: int) -> None:
         """
@@ -301,7 +302,14 @@ class _AsyncStalenessManager:
     def _compute_capacity_unlocked(self) -> int:
         # NOTE(Charlie): do not need a self._current_global_step + 1 here unlike AReal because our
         # `_current_global_step` is "the version being worked on", not already finished steps.
-        consumer_capacity = (self.max_staleness_steps + self._current_global_step) * self.mini_batch_size
+        # An installed update p can supply batches only through target step p + age + 1.
+        # Advancing the learner without publishing must not release work for a later,
+        # already ineligible batch. Accepted includes consumed work across all epochs;
+        # rejected attempts are subtracted before their replacements reserve capacity.
+        eligible_through_step = self._published_policy_version + self.max_staleness_steps + 1
+        consumer_capacity = (
+            min(self.max_staleness_steps + self._current_global_step, eligible_through_step) * self.mini_batch_size
+        )
         producer_staleness_capacity = consumer_capacity - (self._stat.accepted + self._stat.running)
         producer_concurrency_capacity = self.max_concurrent_generation_groups - self._stat.running
         return min(producer_concurrency_capacity, producer_staleness_capacity)
@@ -342,6 +350,12 @@ class _AsyncStalenessManager:
         # Called when current_global_step changes (e.g., after a training step)
         async with self._cond:
             self._current_global_step = int(new_global_step)
+            self._cond.notify_all()
+
+    async def notify_policy_weights_published(self, completed_step: int) -> None:
+        """Release submissions made eligible by a successfully installed learner update."""
+        async with self._cond:
+            self._published_policy_version = int(completed_step)
             self._cond.notify_all()
 
 
@@ -1419,6 +1433,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Advance only after a successful publication. The initial call runs at
         # step zero (or the resumed completed step), before producers are started.
         self._published_policy_version = self.global_step
+        await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
         return result
 
     def _record_group_terminal(self, group: GeneratedOutputGroup, outcome: str) -> None:

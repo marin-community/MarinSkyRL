@@ -182,11 +182,114 @@ async def test_staleness_manager_blocks_work_beyond_capacity_until_training_adva
     done, _ = await asyncio.wait({next_submission}, timeout=0)
     assert next_submission not in done
 
+    await manager.notify_policy_weights_published(completed_step=1)
     await manager.notify_capacity_change(new_global_step=2)
     await asyncio.wait_for(next_submission, timeout=1)
 
     await manager.on_rollout_accepted()
     await manager.on_rollout_accepted()
+
+
+@pytest.mark.asyncio
+async def test_unpublished_update_cannot_admit_a_third_cohort():
+    manager = _AsyncStalenessManager(
+        max_concurrent_generation_groups=4,
+        mini_batch_size=2,
+        max_staleness_steps=1,
+    )
+    for _ in range(4):
+        await manager.acquire_submission_slot()
+        await manager.on_rollout_accepted()
+
+    await manager.notify_capacity_change(new_global_step=2)
+    third_cohort = asyncio.create_task(manager.acquire_submission_slot())
+    try:
+        done, _ = await asyncio.wait({third_cohort}, timeout=0)
+        assert not done, "weights from update zero cannot supply a third eligible batch"
+        await manager.notify_policy_weights_published(completed_step=2)
+        await asyncio.wait_for(third_cohort, timeout=1)
+        await manager.on_rollout_accepted()
+    finally:
+        third_cohort.cancel()
+        await asyncio.gather(third_cohort, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_age", [0, 1, 3])
+async def test_cadence_one_releases_exactly_one_batch_per_completed_update(max_age):
+    manager = _AsyncStalenessManager(
+        max_concurrent_generation_groups=16, mini_batch_size=2, max_staleness_steps=max_age
+    )
+    for _ in range((max_age + 1) * 2):
+        await manager.acquire_submission_slot()
+        await manager.on_rollout_accepted()
+
+    pending = None
+    try:
+        for completed_step in range(1, 4):
+            pending = asyncio.create_task(manager.acquire_submission_slot())
+            done, _ = await asyncio.wait({pending}, timeout=0)
+            assert not done
+            await manager.notify_policy_weights_published(completed_step)
+            done, _ = await asyncio.wait({pending}, timeout=0)
+            assert not done, "publishing alone must preserve the cadence-one learner capacity"
+            await manager.notify_capacity_change(new_global_step=completed_step + 1)
+            await asyncio.wait_for(pending, timeout=1)
+            await manager.on_rollout_accepted()
+            await asyncio.wait_for(manager.acquire_submission_slot(), timeout=1)
+            await manager.on_rollout_accepted()
+        pending = asyncio.create_task(manager.acquire_submission_slot())
+        done, _ = await asyncio.wait({pending}, timeout=0)
+        assert not done
+    finally:
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accepted_before_rejection", [False, True])
+async def test_stale_attempt_releases_capacity_for_replacement_after_publication(accepted_before_rejection):
+    manager = _AsyncStalenessManager(max_concurrent_generation_groups=3, mini_batch_size=1, max_staleness_steps=1)
+    await manager.acquire_submission_slot()
+    await manager.on_rollout_accepted()
+    await manager.acquire_submission_slot()  # A slow update-zero rollout remains in flight.
+    await manager.notify_capacity_change(new_global_step=2)
+    await manager.notify_policy_weights_published(completed_step=1)  # Off-grid evaluation.
+    await manager.acquire_submission_slot()
+    await manager.on_rollout_accepted()  # Fresh work supplies the second training batch.
+    await manager.notify_capacity_change(new_global_step=3)
+
+    replacement = asyncio.create_task(manager.acquire_submission_slot())
+    try:
+        done, _ = await asyncio.wait({replacement}, timeout=0)
+        assert not done
+        if accepted_before_rejection:
+            await manager.on_rollout_accepted()
+            await manager.on_rollouts_discarded(1)
+        else:
+            await manager.cancel_submission_slot()
+        await asyncio.wait_for(replacement, timeout=1)
+        await manager.on_rollout_accepted()
+    finally:
+        replacement.cancel()
+        await asyncio.gather(replacement, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_resumed_capacity_waits_for_checkpoint_weights_to_be_installed():
+    manager = _AsyncStalenessManager(max_concurrent_generation_groups=4, mini_batch_size=2, max_staleness_steps=1)
+    manager.load_state_from_checkpoint(global_step=5)
+    pending = asyncio.create_task(manager.acquire_submission_slot())
+    try:
+        done, _ = await asyncio.wait({pending}, timeout=0)
+        assert not done
+        await manager.notify_policy_weights_published(completed_step=4)
+        await asyncio.wait_for(pending, timeout=1)
+        await manager.on_rollout_accepted()
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
 
 
 @pytest.mark.asyncio

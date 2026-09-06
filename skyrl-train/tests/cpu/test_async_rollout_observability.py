@@ -88,6 +88,9 @@ def trainer_shell(*, global_step: int = 0, published_policy_version: int = 0) ->
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.global_step = global_step
     trainer._published_policy_version = published_policy_version
+    trainer._staleness_manager = _AsyncStalenessManager(
+        max_concurrent_generation_groups=1, mini_batch_size=1, max_staleness_steps=0
+    )
     trainer.all_timings = {}
     trainer.all_startup_timings = {}
     trainer.admission_stall_timeout = 10
