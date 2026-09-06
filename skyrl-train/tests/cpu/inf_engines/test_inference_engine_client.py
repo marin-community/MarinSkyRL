@@ -1003,6 +1003,80 @@ class _MockWeightSyncEngine:
         self.scheduler_paused = False
 
 
+class _PausedGenerateEngine(_MockWeightSyncEngine):
+    def __init__(self):
+        super().__init__()
+        self.requests = []
+
+    async def generate(self, request):
+        assert not self.scheduler_paused, "request reached the paused engine"
+        self.requests.append(deepcopy(request))
+        return InferenceEngineOutput(
+            responses=["answer"],
+            response_ids=[[21, 22, 23]],
+            stop_reasons=["stop"],
+            response_logprobs=[[-0.1, -0.2, -0.3]],
+        )
+
+
+@pytest.mark.asyncio
+async def test_incoming_single_prompt_waits_for_resume_and_preserves_tokens(monkeypatch):
+    engine = _PausedGenerateEngine()
+    client = InferenceEngineClient([engine], tokenizer=object(), full_config=_make_min_cfg())
+    monkeypatch.setattr(
+        "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
+    )
+    await client.pause_generation()
+
+    waiting, release_wait = asyncio.Event(), asyncio.Event()
+
+    async def controlled_wait(_delay):
+        waiting.set()
+        await release_wait.wait()
+
+    # Control the polling clock boundary; no wall-clock delay determines readiness.
+    monkeypatch.setattr("skyrl_train.inference_engines.inference_engine_client.asyncio.sleep", controlled_wait)
+    request = InferenceEngineInput(
+        prompt_token_ids=[[1, 2, 3]], sampling_params={"max_tokens": 5, "temperature": 0}, session_ids=["prompt-0"]
+    )
+    generation = asyncio.create_task(client.generate(request))
+    waiter = asyncio.create_task(waiting.wait())
+    try:
+        done, _ = await asyncio.wait([generation, waiter], timeout=5, return_when=asyncio.FIRST_COMPLETED)
+        if generation in done:
+            await generation  # Surface a premature rejection rather than waiting for a timeout.
+        assert waiter in done
+        assert not generation.done()
+        assert engine.requests == []
+
+        await client.resume_generation()
+        release_wait.set()
+        output = await asyncio.wait_for(generation, timeout=5)
+        assert engine.requests == [
+            {"prompt_token_ids": [[1, 2, 3]], "sampling_params": {"max_tokens": 5, "temperature": 0}}
+        ]
+        assert output["response_ids"] == [[21, 22, 23]]
+        assert output["response_logprobs"] == [[-0.1, -0.2, -0.3]]
+        assert output["responses"] == ["answer"]
+        assert output["stop_reasons"] == ["stop"]
+    finally:
+        release_wait.set()
+        for task in (generation, waiter):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(generation, waiter, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_incoming_batch_remains_rejected_while_paused():
+    engine = _PausedGenerateEngine()
+    client = InferenceEngineClient([engine], tokenizer=object(), full_config=_make_min_cfg())
+    client.generation_paused_event.set()
+    with pytest.raises(RuntimeError, match="pause_generation is unsupported"):
+        await client.generate(InferenceEngineInput(prompt_token_ids=[[1], [2]], sampling_params={"max_tokens": 5}))
+    assert engine.requests == []
+
+
 @pytest.mark.asyncio
 async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes(monkeypatch):
     engine = _MockWeightSyncEngine()

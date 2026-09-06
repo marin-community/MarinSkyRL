@@ -194,8 +194,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         return await asyncio.gather(*awaitables)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        if self.generation_paused_event.is_set():
-            raise RuntimeError("pause_generation is unsupported for InferenceEngineClient.generate().")
         # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
@@ -851,7 +849,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         Pauses generation for all engines, intended for in-flight weight updates and partial rollouts.
 
-        Currently only supported for `/chat/completions` and not `/completions` or `generate()`.
+        Supported for `/chat/completions` and single-prompt `generate()` calls.
+        Batched `generate()` and `/completions` remain unsupported.
 
         Both in-flight and incoming requests will be blocked until `resume_generation` is called.
         1. Set the paused event to avoid new requests from being submitted while aborting requests.

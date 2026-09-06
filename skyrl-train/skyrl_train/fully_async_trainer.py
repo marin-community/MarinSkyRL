@@ -777,6 +777,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             with Timer("policy_startup_drain", self.all_startup_timings):
                 await self._drain_policy_event_loops()
+        # Startup publication runs before producers exist and does not pause inference.
+        await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
         self._log_weight_update_completed(
             reason="initial",
             duration_seconds=weight_update_timer.duration,
@@ -1398,6 +1400,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._drain_policy_event_loops()
             with Timer("weight_resume", self.all_timings):
                 await self.inference_engine_client.resume_generation()
+            # New requests are rejected while inference is paused. Release newly
+            # eligible producer slots only after the post-broadcast drain and resume.
+            await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
         self._log_weight_update_completed(reason=reason, duration_seconds=weight_update_timer.duration)
 
     async def eval(self) -> dict[str, float]:
@@ -1433,7 +1438,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Advance only after a successful publication. The initial call runs at
         # step zero (or the resumed completed step), before producers are started.
         self._published_policy_version = self.global_step
-        await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
         return result
 
     def _record_group_terminal(self, group: GeneratedOutputGroup, outcome: str) -> None:

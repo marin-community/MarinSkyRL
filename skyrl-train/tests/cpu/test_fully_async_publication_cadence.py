@@ -82,7 +82,14 @@ class LearnerService:
 
     def async_run_ray_method(self, _dispatch, method):
         assert method == "barrier_all"
-        return []
+
+        async def remote_barrier():
+            # Remote barriers yield to producers while weight publication is paused.
+            completed = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(completed.set_result, None)
+            await completed
+
+        return [remote_barrier()]
 
 
 class Runner:
@@ -105,7 +112,10 @@ class Runner:
         pass
 
     async def run(self, request, **kwargs):
-        await self.engine.ready.wait()
+        # The direct inference client rejects a new generate() call while paused;
+        # it only waits for resume after a request has already entered its retry loop.
+        if not self.engine.ready.is_set():
+            raise RuntimeError("pause_generation is unsupported for InferenceEngineClient.generate().")
         version = self.engine.installed_update
         assert version is not None
         ids = request["trajectory_ids"]
