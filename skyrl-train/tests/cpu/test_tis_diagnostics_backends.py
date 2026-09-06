@@ -45,6 +45,7 @@ def test_behavior_drift_pools_tokens_and_keeps_ratio_direction():
     prefix = "policy/behavior_drift/"
     assert metrics[prefix + "selected_tokens"] == metrics[prefix + "finite_tokens"] == 3
     assert metrics[prefix + "log_ratio_mean"] == pytest.approx(math.log(2))
+    assert metrics[prefix + "mean_squared_log_ratio"] == pytest.approx(5 * math.log(2) ** 2 / 3)
     assert metrics[prefix + "log_mean_ratio"] == pytest.approx(math.log(7 / 3))
     assert metrics[prefix + "token_weight_ess_fraction"] == pytest.approx(7 / 9)
     assert metrics[prefix + "upper_clip_pressure"] == pytest.approx(2 / 3)
@@ -68,6 +69,7 @@ def test_behavior_drift_preserves_extreme_tails_and_empty_selection():
     metrics = behavior_drift_metrics(learner, behavior, torch.ones(1, 3), eps_clip_low=0.2, eps_clip_high=0.2)
     assert metrics["policy/behavior_drift/finite_fraction"] == pytest.approx(2 / 3)
     assert metrics["policy/behavior_drift/abs_log_ratio_p99"] == 1000
+    assert metrics["policy/behavior_drift/mean_squared_log_ratio"] == 1000000
     assert metrics["policy/behavior_drift/token_weight_ess_fraction"] == 0.5
     empty = behavior_drift_metrics(learner, behavior, torch.zeros(1, 3), eps_clip_low=0.2, eps_clip_high=0.2)
     assert empty["policy/behavior_drift/selected_tokens"] == 0
@@ -80,6 +82,7 @@ def test_behavior_drift_concentration_does_not_hide_uniform_shift():
     )
     assert metrics["policy/behavior_drift/token_weight_ess_fraction"] == 1
     assert metrics["policy/behavior_drift/log_ratio_mean"] == -5
+    assert metrics["policy/behavior_drift/mean_squared_log_ratio"] == 25
 
 
 def _algorithm_cfg(use_tis: bool, policy_loss_type: str = "regular") -> OmegaConf:

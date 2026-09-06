@@ -62,6 +62,7 @@ def behavior_drift_metrics(
             lower = math.log1p(-eps_clip_low) if eps_clip_low < 1 else -math.inf
             metrics.update(
                 log_ratio_mean=delta.mean().item(),
+                mean_squared_log_ratio=delta.square().mean().item(),
                 abs_log_ratio_mean=absolute.mean().item(),
                 abs_log_ratio_p50=quantiles[0].item(),
                 abs_log_ratio_p95=quantiles[1].item(),
