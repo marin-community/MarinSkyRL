@@ -17,12 +17,14 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+import hydra
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from cloud.iris import iris_backend  # noqa: E402
+from cloud.iris import artifacts, iris_backend, task_runtime  # noqa: E402
+from cloud.iris.export_hf_checkpoint import ExportJobSpec, build_command as build_export_command  # noqa: E402
 from cloud.iris.env_vars import grug_gpu_gate_environment, wandb_launch_environment  # noqa: E402
 from cloud.iris.iris_backend import (  # noqa: E402
     _ambient_in_cluster_client,
@@ -36,12 +38,15 @@ from cloud.iris.iris_backend import (  # noqa: E402
     resolve_node_resource_requests,
     resolve_launch_defaults,
 )
-from cloud.iris.runtime_environment import RuntimeProfile  # noqa: E402
+from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT, RuntimeProfile  # noqa: E402
 from cloud.iris.rl_config_translation import (  # noqa: E402
     RL_CONFIG_TASK_DIR,
     materialize_rl_config,
 )
 from cloud.iris.task_runtime import stage_model  # noqa: E402
+from fsspec.implementations.memory import MemoryFileSystem  # noqa: E402
+from skyrl_train.io import io  # noqa: E402
+from skyrl_train.hf_export_schema import HFExportRequest  # noqa: E402
 
 
 def _cluster_config(
@@ -847,6 +852,108 @@ def _strategy_args(tmp_path: Path, strategy: str, extra: list[str] | None = None
         "2",
     ]
     return create_parser().parse_args(args + (extra or []))
+
+
+def test_megatron_export_stages_one_checkpoint_for_eight_local_readers(tmp_path, monkeypatch, parse_hydra_overrides):
+    source_uri = "s3://checkpoint-fixture/run/global_step_2/"
+    source_root = "/checkpoint-fixture/run/global_step_2"
+    source_files = {
+        "trainer_state.pt": b"completed step marker",
+        "policy/.metadata": b"checkpoint metadata",
+        "policy/__0_0.distcp": b"weights and optimizer",
+    }
+    filesystem = MemoryFileSystem()
+    for name, payload in source_files.items():
+        filesystem.pipe(f"{source_root}/{name}", payload)
+    downloaded_paths = []
+    original_get_file = filesystem.get_file
+
+    def download(source, destination, **kwargs):
+        downloaded_paths.append(source)
+        return original_get_file(source, destination, **kwargs)
+
+    monkeypatch.setattr(filesystem, "get_file", download)
+    monkeypatch.setattr(artifacts, "fs_and_path", lambda uri: (filesystem, source_root))
+    monkeypatch.setattr(task_runtime, "fs_and_path", lambda uri: (filesystem, source_root))
+    monkeypatch.setattr(iris_backend, "CHECKPOINT_STAGING_ROOT", str(tmp_path / "node-checkpoints"))
+    request = HFExportRequest(
+        step=2,
+        checkpoint_base_path="s3://checkpoint-fixture/run",
+        checkpoint_path=source_uri,
+        export_path="s3://checkpoint-fixture/exports",
+        model_path="Qwen/Model-30B",
+        num_nodes=2,
+        gpus_per_node=8,
+    )
+    command = build_export_command(
+        ExportJobSpec(
+            request=request,
+            rl_config=str(_strategy_config(tmp_path, "megatron")),
+            cluster="cw-rno2a",
+            priority="batch",
+            job_name="checkpoint-staging",
+            timeout=7200,
+            no_wait=False,
+            cluster_config=str(_cluster_config(tmp_path)),
+        )
+    )
+    args = create_parser().parse_args(command[3:])
+    normalize(args)
+    resolve_launch_defaults(args)
+    options = _shell_options(build_task_command(args)[-1])
+    overrides = parse_hydra_overrides(options["--skyrl_override"])
+    local_path = options["--checkpoint-local-path"][0]
+    with hydra.initialize_config_dir(config_dir=str(_REPO_ROOT / "skyrl-train/skyrl_train/config"), version_base=None):
+        cfg = hydra.compose(config_name="ppo_base_config", overrides=options["--skyrl_override"])
+
+    task_runtime.materialize_checkpoint(options["--checkpoint-source-uri"][0], local_path)
+    # The actual local-read helper used by every Megatron rank must now bypass
+    # remote staging; all eight readers see exactly one node-local checkpoint.
+    for _ in range(8):
+        with io.local_read_dir(cfg.checkpoint_export.checkpoint_path) as read_dir:
+            assert Path(read_dir, "policy/__0_0.distcp").read_bytes() == source_files["policy/__0_0.distcp"]
+            assert read_dir == local_path
+
+    assert sorted(downloaded_paths) == sorted(f"{source_root}/{name}" for name in source_files)
+    assert sum(filesystem.size(path) for path in downloaded_paths) == sum(map(len, source_files.values()))
+    assert len(list((tmp_path / "node-checkpoints").iterdir())) == 1
+    assert overrides["checkpoint_export.source_checkpoint_path"] == source_uri
+    assert overrides["checkpoint_export.export_root"] == "s3://checkpoint-fixture/exports"
+    assert cfg.checkpoint_export.source_checkpoint_path == request.checkpoint_path
+    assert cfg.checkpoint_export.export_root == request.export_path
+    assert request.checkpoint_path == source_uri
+    args.skyrl_override.append(f"++checkpoint_export.checkpoint_path={source_uri.rstrip('/')}")
+    normalized_options = _shell_options(build_task_command(args)[-1])
+    assert normalized_options["--checkpoint-local-path"] == [local_path]
+    task_runtime.materialize_checkpoint(normalized_options["--checkpoint-source-uri"][0], local_path)
+    assert sorted(downloaded_paths) == sorted(f"{source_root}/{name}" for name in source_files)
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "strategy", "checkpoint_path"),
+    [
+        (CHECKPOINT_EXPORT_ENTRYPOINT, "megatron", "/checkpoint/global_step_2"),
+        (CHECKPOINT_EXPORT_ENTRYPOINT, "fsdp2", "s3://checkpoint-fixture/global_step_2"),
+        ("fully_async", "megatron", "s3://checkpoint-fixture/global_step_2"),
+    ],
+)
+def test_checkpoint_staging_does_not_change_other_execution_paths(
+    tmp_path, parse_hydra_overrides, entrypoint, strategy, checkpoint_path
+):
+    args = _strategy_args(
+        tmp_path,
+        strategy,
+        ["--entrypoint", entrypoint, "--skyrl_override", f"++checkpoint_export.checkpoint_path={checkpoint_path}"],
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+    options = _shell_options(build_task_command(args)[-1])
+    overrides = parse_hydra_overrides(options["--skyrl_override"])
+
+    assert "--checkpoint-source-uri" not in options
+    assert "--checkpoint-local-path" not in options
+    assert overrides["checkpoint_export.checkpoint_path"] == checkpoint_path
+    assert "checkpoint_export.source_checkpoint_path" not in overrides
 
 
 def test_megatron_config_selects_the_megatron_profile(tmp_path, monkeypatch):

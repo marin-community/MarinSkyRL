@@ -138,6 +138,7 @@ from cloud.iris.runtime_environment import (
 DEFAULT_CLUSTER = "cw-us-east-02a"
 DEFAULT_GPU_VARIANT = "H100"
 DEFAULT_GPUS_PER_NODE = 8  # gd-8xh100ib-i128 = 8x H100-80GB + IB
+CHECKPOINT_STAGING_ROOT = "/tmp/marinskyrl-checkpoints"
 MAX_DEFAULT_CPU_PER_NODE = 48.0
 DAYTONA_RL_SECRET_PROJECT = "hai-gcp-models"
 DAYTONA_RL_SECRET_NAME = "DAYTONA_RL_API_KEY"
@@ -2173,6 +2174,23 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if args.run_id:
         controller_cmd.extend(["--run-id", args.run_id])
     controller_cmd.extend(_model_bootstrap_args(args))
+    if checkpoint_export and _rl_training_strategy(args) == "megatron":
+        checkpoint_path = hydra_override_value(args.skyrl_override or [], "checkpoint_export.checkpoint_path")
+        if checkpoint_path is None:
+            checkpoint_path = _load_rl_config_yaml(args.rl_config).get("checkpoint_export", {}).get("checkpoint_path")
+        if checkpoint_path and is_cloud_uri(checkpoint_path):
+            checkpoint_identity = hashlib.sha256(checkpoint_path.rstrip("/").encode()).hexdigest()
+            local_checkpoint_path = str(Path(CHECKPOINT_STAGING_ROOT) / checkpoint_identity)
+            controller_cmd.extend(
+                ["--checkpoint-source-uri", checkpoint_path, "--checkpoint-local-path", local_checkpoint_path]
+            )
+            # Only the runtime read path changes. The request and export destination
+            # retain their durable cloud URIs, including explicit source provenance.
+            for key, value in (
+                ("checkpoint_export.source_checkpoint_path", checkpoint_path),
+                ("checkpoint_export.checkpoint_path", local_checkpoint_path),
+            ):
+                train_cmd.extend(["--skyrl_override", format_hydra_arg(key, value, prefix="++")])
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
 

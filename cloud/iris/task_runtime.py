@@ -43,6 +43,7 @@ import time
 import uuid
 from typing import Protocol
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
+from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from cloud.iris.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
@@ -65,6 +66,7 @@ from cloud.iris.ray_storage import (
     validate_ray_spill_dir,
 )
 from cloud.iris.runtime_bundle import validate_bundled_runtime
+from skyrl_train.hf_export_schema import TRAINER_STATE_FILENAME
 
 try:
     from skyrl_train.ray_metrics import ray_metrics_telemetry
@@ -457,6 +459,33 @@ def materialize_model_export(source_uri: str, local_path: str, source_identity: 
     _log(
         f"Model export staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
         f"({len(artifact.files)} files, identity={source.identity})"
+    )
+
+
+def validate_checkpoint_files(files: set[str], uri: str) -> None:
+    """Require the completed-step marker and policy checkpoint files."""
+    if TRAINER_STATE_FILENAME not in files or not any(
+        path.startswith(f"{POLICY_CHECKPOINT_SUBDIRECTORY}/") for path in files
+    ):
+        raise ValueError(f"Checkpoint must contain trainer state and policy shards: {uri}")
+
+
+def materialize_checkpoint(source_uri: str, local_path: str) -> None:
+    """Stage a completed checkpoint once on this node before its Ray actors start."""
+    source_uri = source_uri.rstrip("/")
+    filesystem, root = fs_and_path(source_uri)
+    marker = f"{root.rstrip('/')}/{TRAINER_STATE_FILENAME}"
+    if not filesystem.exists(marker):
+        raise ValueError(f"Completed checkpoint marker not found: {source_uri}/{TRAINER_STATE_FILENAME}")
+
+    started = time.monotonic()
+    _log(f"Staging checkpoint on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path}")
+    source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_uri)
+    artifact = materialize(source, validate=validate_checkpoint_files)
+    _log(
+        f"Checkpoint staged on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
+        f"(objects={len(artifact.files)}, bytes={sum(entry.size for entry in artifact.files)}, "
+        f"elapsed_seconds={time.monotonic() - started:.3f})"
     )
 
 
@@ -2040,6 +2069,8 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         default="",
         help="Object-store HF export to materialize on every node before Ray starts.",
     )
+    parser.add_argument("--checkpoint-source-uri", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--checkpoint-local-path", default="", help=argparse.SUPPRESS)
     parser.add_argument(
         "--model-local-path",
         default="",
@@ -2088,6 +2119,10 @@ def _print_env_snapshot() -> None:
 def main() -> None:
     validate_bundled_runtime()
     args, train_argv = parse_args()
+    if args.checkpoint_source_uri:
+        if not args.checkpoint_local_path:
+            raise ValueError("--checkpoint-source-uri requires --checkpoint-local-path")
+        materialize_checkpoint(args.checkpoint_source_uri, args.checkpoint_local_path)
     _print_env_snapshot()
     # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO workers)
     # BEFORE any `ray start`, on head + every worker — CoreWeave R2 rejects path-style.
