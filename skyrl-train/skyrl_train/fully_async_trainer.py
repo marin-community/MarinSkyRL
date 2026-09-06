@@ -843,7 +843,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Handle pre-training evaluation if requested by callbacks
         if self._control.should_evaluate and self.eval_dataset is not None:
             with Timer("eval", self.all_timings):
-                eval_metrics = await self.eval()
+                eval_metrics = await self._eval_before_training()
                 self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
                 self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
             self._control.should_evaluate = False
@@ -1403,11 +1403,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
         self._log_weight_update_completed(reason=reason, duration_seconds=weight_update_timer.duration)
 
-    async def eval(self) -> dict[str, float]:
+    async def eval(self, *, dump_namespace: str | None = None) -> dict[str, float]:
         # Evaluation can be requested off the publication grid by any callback.
         # Its publication is outside the core training window and has a separate timing.
         await self._publish_policy_weights(reason="evaluation", timing_name="eval_weight_sync")
-        return await super().eval()
+        return await super().eval(dump_namespace=dump_namespace)
 
     async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
         # The training loop has already incremented global_step. Early termination can
@@ -1430,9 +1430,23 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with Timer("policy_pre_sync_drain", self.all_timings):
             await self._drain_policy_event_loops()
         with Timer("weight_broadcast", self.all_timings):
-            result = await self.policy_model.async_run_method(
-                "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
-            )
+            publication = self._weight_change_probe_publication()
+            if publication is None:
+                result = await self.policy_model.async_run_method(
+                    "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+                )
+            else:
+                result = await self.policy_model.async_run_method(
+                    "pass_through",
+                    "broadcast_to_inference_engines",
+                    self.inference_engine_client,
+                    publication=publication,
+                )
+                started = time.perf_counter()
+                await self.policy_model.async_run_method(
+                    "pass_through", "finish_weight_change_probe", publication["publication_id"]
+                )
+                self._weight_change_probe_committed(publication, time.perf_counter() - started)
         # Advance only after a successful publication. The initial call runs at
         # step zero (or the resumed completed step), before producers are started.
         self._published_policy_version = self.global_step

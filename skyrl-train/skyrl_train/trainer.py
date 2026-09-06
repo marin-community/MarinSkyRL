@@ -89,6 +89,7 @@ from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
 )
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_required
+from skyrl_train.weight_change_probe import validate_weight_change_probe_config
 from skyrl_train.utils.importance_ratio_diagnostics import behavior_drift_metrics
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
@@ -244,7 +245,7 @@ class RayPPOTrainer:
         return None
 
     @torch.no_grad()
-    async def eval(self) -> Dict[str, float]:
+    async def eval(self, *, dump_namespace: str | None = None) -> Dict[str, float]:
         """
         Run generation and scoring on the evaluation dataset.
 
@@ -262,6 +263,7 @@ class RayPPOTrainer:
                 global_step=self.global_step,
                 tokenizer=self.tokenizer,
                 trajectory_sink=self.trajectory_sink,
+                dump_namespace=dump_namespace,
             )
         else:
             eval_metrics = await evaluate(
@@ -271,9 +273,28 @@ class RayPPOTrainer:
                 global_step=self.global_step,
                 tokenizer=self.tokenizer,
                 trajectory_sink=self.trajectory_sink,
+                dump_namespace=dump_namespace,
             )
         self._last_successful_eval_step = self.global_step
         return eval_metrics
+
+    async def _eval_before_training(self) -> Dict[str, float]:
+        """Evaluate sequentially before optimizer work or rollout producers begin.
+
+        Repeated passes keep distinct metrics, logged together at the completed step.
+        The caller has already installed those weights; evaluation does not update them.
+        """
+        repeats = self.cfg.trainer.initial_eval_repeat_count
+        if repeats == 1:
+            return await self.eval()
+        combined_metrics = {}
+        for pass_index in range(repeats):
+            namespace = f"startup_pass_{pass_index}"
+            metrics = await self.eval(dump_namespace=namespace)
+            combined_metrics.update(
+                {f"eval/{namespace}/{key.removeprefix('eval/')}": value for key, value in metrics.items()}
+            )
+        return combined_metrics
 
     # ------------------------------------------------------------------
     # Teardown helpers
@@ -633,7 +654,7 @@ class RayPPOTrainer:
         # Handle pre-training evaluation if requested by callbacks
         if self._control.should_evaluate and self.eval_dataset is not None:
             with Timer("eval", self.all_timings):
-                eval_metrics = await self.eval()
+                eval_metrics = await self._eval_before_training()
                 self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
                 self.tracker.log(eval_metrics, step=self.global_step, commit=True)
             self._control.should_evaluate = False
@@ -1966,8 +1987,43 @@ class RayPPOTrainer:
         return data
 
     def sync_policy_weights_to_inference_engines(self) -> List[ObjectRef]:
-        return self.policy_model.async_run_ray_method(
-            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+        publication = self._weight_change_probe_publication()
+        if publication is None:
+            return self.policy_model.async_run_ray_method(
+                "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+            )
+        refs = self.policy_model.async_run_ray_method(
+            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client, publication=publication
+        )
+        ray.get(refs)
+        started = time.perf_counter()
+        ray.get(
+            self.policy_model.async_run_ray_method(
+                "pass_through", "finish_weight_change_probe", publication["publication_id"]
+            )
+        )
+        self._weight_change_probe_committed(publication, time.perf_counter() - started)
+        return []
+
+    def _weight_change_probe_publication(self) -> dict[str, str | int | None] | None:
+        if not validate_weight_change_probe_config(self.cfg):
+            return None
+        target = self.global_step
+        base = getattr(self, "_wire_probe_published_update", None)
+        if not isinstance(target, int) or target < 0 or (base is not None and target < base):
+            raise ValueError("wire probe requires monotonically ordered completed update identities")
+        attempt = getattr(self, "_wire_probe_publication_attempt", 0) + 1
+        self._wire_probe_publication_attempt = attempt
+        return {"publication_id": f"{base}:{target}:{attempt}", "base_update": base, "target_update": target}
+
+    def _weight_change_probe_committed(self, publication: dict, acknowledgment_seconds: float) -> None:
+        self._wire_probe_published_update = publication["target_update"]
+        record_event(
+            "weight_change_probe_ack",
+            {
+                **publication,
+                "acknowledgment_seconds": acknowledgment_seconds,
+            },
         )
 
     def train_critic_and_policy(self, data: TrainingInputBatch):

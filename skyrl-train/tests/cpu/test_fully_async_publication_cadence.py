@@ -7,11 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
+from hydra import compose, initialize_config_dir
 
 from skyrl_train.callbacks import TrainerCallback
 from skyrl_train.callbacks.builtin import EvaluationCallback
-from skyrl_train.config.utils import get_default_config
+from skyrl_train.config.utils import CONFIG_DIR, DEFAULT_CONFIG_NAME, get_default_config
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.utils import validate_cfg
 
@@ -204,6 +206,7 @@ def make_driver(
     steps_per_epoch=None,
     runner_type=Runner,
     dynamic_sampling_type=None,
+    driver_type=DriverWithCpuLearner,
 ):
     cfg = get_default_config()
     updates = {
@@ -236,7 +239,7 @@ def make_driver(
         OmegaConf.update(cfg, path, value, force_add=True)
     engine = InferenceService()
     runner = runner_type(engine, report_step=report_step)
-    trainer = DriverWithCpuLearner(
+    trainer = driver_type(
         cfg=cfg,
         tracker=Tracker(),
         tokenizer=Tokenizer(),
@@ -436,3 +439,132 @@ async def test_publication_capacity_survives_an_odd_epoch_boundary():
     assert trainer.data_tracker.total_samples_consumed == 12
     assert [step for step, _ in trainer.policy_model.consumed] == [1, 2, 3, 4, 5, 6]
     assert trainer.trajectory_runner.evaluations == [(0, 0), (6, 6)]
+
+
+class SyncStartupDriver(RayPPOTrainer):
+    def init_weight_sync_state(self):
+        pass
+
+
+class StartupLearnerService(LearnerService):
+    def async_run_ray_method(self, dispatch, method, *args):
+        if method == "broadcast_to_inference_engines":
+            (engine,) = args
+            engine.installed_update = self.completed_update
+            engine.publications.append(self.completed_update)
+            return []
+        return super().async_run_ray_method(dispatch, method)
+
+
+class FrozenEvaluationRunner(Runner):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.observed_publications = []
+        self.fail_pass = None
+
+    async def run(self, request, **kwargs):
+        if request["batch_metadata"].training_phase == "eval" and request["batch_metadata"].global_step == 0:
+            self.observed_publications.append(list(self.engine.publications))
+            if len(self.observed_publications) == self.fail_pass:
+                raise RuntimeError("frozen evaluation failed")
+        return await super().run(request, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("driver_type", [SyncStartupDriver, DriverWithCpuLearner])
+@pytest.mark.parametrize("step_wise", [False, True])
+@pytest.mark.parametrize("repeats", [1, 3])
+async def test_startup_repeats_preserve_frozen_weights_and_unique_dumps(
+    tmp_path, monkeypatch, driver_type, step_wise, repeats
+):
+    trainer = make_driver(driver_type=driver_type, runner_type=FrozenEvaluationRunner)
+    trainer.policy_model = StartupLearnerService()
+    # Exercise the real startup and finalization sequence without subsequent optimizer work.
+    trainer.cfg.trainer.epochs = 0
+    trainer.cfg.trainer.initial_eval_repeat_count = repeats
+    trainer.cfg.trainer.dump_eval_results = True
+    trainer.cfg.trainer.step_wise_training = step_wise
+    trainer.cfg.trainer.export_path = str(tmp_path)
+    monkeypatch.setattr("skyrl_train.trainer.ray.get", lambda refs: refs)
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert trainer.inference_engine_client.publications == [0]
+    assert trainer.trajectory_runner.evaluations == [(0, 0)] * repeats
+    assert trainer.trajectory_runner.observed_publications == [[0]] * repeats
+    assert trainer.policy_model.completed_update == 0
+    assert trainer.policy_model.consumed == []
+    rows = [
+        metrics for step, metrics in trainer.tracker.rows if step == 0 and any(k.startswith("eval/") for k in metrics)
+    ]
+    assert len(rows) == 1
+    root = tmp_path / "dumped_evals" / "global_step_0_evals"
+    if repeats == 1:
+        assert rows[0]["eval/all/avg_score"] == 0.0
+        assert json.loads((root / "unknown.jsonl").read_text())["uid"] == "0"
+        assert len(list(root.rglob("aggregated_results.jsonl"))) == 1
+    else:
+        assert all(key.startswith("eval/startup_pass_") for key in rows[0])
+        for pass_index in range(repeats):
+            namespace = f"startup_pass_{pass_index}"
+            assert rows[0][f"eval/{namespace}/all/avg_score"] == 0.0
+            row = json.loads((root / namespace / "unknown.jsonl").read_text())
+            assert row["uid"] == "0"
+            assert row["response_ids"] == [10]
+        assert len(list(root.rglob("aggregated_results.jsonl"))) == repeats
+
+
+@pytest.mark.asyncio
+async def test_async_optimizer_starts_only_after_all_startup_passes(tmp_path):
+    trainer = make_driver(steps=2, runner_type=FrozenEvaluationRunner)
+    trainer.cfg.trainer.initial_eval_repeat_count = 3
+    trainer.cfg.trainer.dump_eval_results = True
+    trainer.cfg.trainer.export_path = str(tmp_path)
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert trainer.trajectory_runner.evaluations == [(0, 0)] * 3 + [(2, 2)]
+    assert trainer.trajectory_runner.observed_publications == [[0]] * 3
+    assert trainer.inference_engine_client.publications == [0, 2]
+    assert [step for step, _ in trainer.policy_model.consumed] == [1, 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("driver_type", [SyncStartupDriver, DriverWithCpuLearner])
+async def test_startup_repeat_failure_prevents_training(tmp_path, monkeypatch, driver_type):
+    trainer = make_driver(driver_type=driver_type, runner_type=FrozenEvaluationRunner)
+    trainer.policy_model = StartupLearnerService()
+    trainer.cfg.trainer.initial_eval_repeat_count = 3
+    trainer.cfg.trainer.dump_eval_results = True
+    trainer.cfg.trainer.export_path = str(tmp_path)
+    trainer.trajectory_runner.fail_pass = 2
+    monkeypatch.setattr("skyrl_train.trainer.ray.get", lambda refs: refs)
+    with pytest.raises(RuntimeError, match="frozen evaluation failed"):
+        await trainer._train_loop()
+    assert trainer.inference_engine_client.publications == [0]
+    assert trainer.policy_model.completed_update == 0
+    assert trainer.trajectory_runner.generations == []
+    assert len(list(tmp_path.rglob("aggregated_results.jsonl"))) == 1
+    assert not any(key.startswith("eval/") for _, metrics in trainer.tracker.rows for key in metrics)
+
+
+@pytest.mark.parametrize("override", ["0", "-1", "1.5", "true", "null"])
+def test_initial_eval_rejects_invalid_repeat_recipe_override(override):
+    with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
+        cfg = compose(config_name=DEFAULT_CONFIG_NAME, overrides=[f"trainer.initial_eval_repeat_count={override}"])
+    with pytest.raises(ValueError, match="initial_eval_repeat_count"):
+        validate_cfg(cfg)
+
+
+@pytest.mark.parametrize("disabled", ["eval_before_train=false", "eval_interval=0", "dump_eval_results=false"])
+def test_initial_eval_repeat_recipe_requires_evaluation_and_dumps(disabled):
+    with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
+        cfg = compose(
+            config_name=DEFAULT_CONFIG_NAME, overrides=["trainer.initial_eval_repeat_count=3", f"trainer.{disabled}"]
+        )
+    with pytest.raises(ValueError, match="initial_eval_repeat_count"):
+        validate_cfg(cfg)
+
+
+@pytest.mark.parametrize("overrides,expected", [([], 1), (["trainer.initial_eval_repeat_count=3"], 3)])
+def test_initial_eval_recipe_composes_and_validates(overrides, expected):
+    with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
+        cfg = compose(config_name=DEFAULT_CONFIG_NAME, overrides=overrides)
+    validate_cfg(cfg)
+    assert cfg.trainer.initial_eval_repeat_count == expected

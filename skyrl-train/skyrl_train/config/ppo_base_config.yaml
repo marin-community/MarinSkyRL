@@ -41,6 +41,8 @@ trainer:
   generate_spans: false
   async_spans: false
   training_metrics: false
+  # Observe converted wire bits; supported for non-colocated, unfused Megatron broadcast.
+  weight_change_probe: false
   collective_phase_diagnostics: false
   distributed:
     placement_group_timeout_seconds: 180
@@ -311,6 +313,9 @@ trainer:
   offload_optimizer_during_rollouts: false
   eval_batch_size: 1024
   eval_before_train: true
+  # Sequential frozen-weight startup passes. >1 requires eval/dumps enabled;
+  # each pass uses startup_pass_<index> dump paths and eval metric namespaces.
+  initial_eval_repeat_count: 1
   eval_interval: 5
   preflight_gate:
     enabled: false

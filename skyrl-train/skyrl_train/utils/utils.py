@@ -31,6 +31,7 @@ from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, EnvVarManager, EnvVarScope, write_process_manifest
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
+from skyrl_train.weight_change_probe import validate_weight_change_probe_config
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 from marinskyrl.inference_placement import validate_node_local_config
 
@@ -586,6 +587,17 @@ def validate_fully_async_cfg(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    validate_weight_change_probe_config(cfg)
+    repeats = cfg.trainer.initial_eval_repeat_count
+    if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
+        raise ValueError("trainer.initial_eval_repeat_count must be a positive integer")
+    if repeats > 1 and (
+        not cfg.trainer.eval_before_train or cfg.trainer.eval_interval <= 0 or not cfg.trainer.dump_eval_results
+    ):
+        raise ValueError(
+            "trainer.initial_eval_repeat_count > 1 requires eval_before_train=true, eval_interval>0, "
+            "and dump_eval_results=true"
+        )
     validate_completion_config(cfg)
     validate_fully_async_cfg(cfg)
     resolve_dynamic_sampling_criteria(

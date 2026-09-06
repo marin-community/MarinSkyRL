@@ -58,6 +58,7 @@ from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode, weight_sync_dtype
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
+from skyrl_train.weight_change_probe import WirePublicationObserver
 
 
 class _MegatronInitMode(StrEnum):
@@ -757,13 +758,35 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         output.metadata = {"train_status": status_mean}
         return output
 
-    async def broadcast_to_inference_engines(self, inference_engine_client):
+    async def broadcast_to_inference_engines(self, inference_engine_client, *, publication=None):
         # Enclose extraction as well as transfer: gathering/conversion can peak
         # before the first tensor reaches the publication communicator.
-        with self._memory.span("weight_publication", step=self._completed_update, step_kind="completed_update"):
-            return await self._broadcast_to_inference_engines(inference_engine_client)
+        probe = None
+        if publication is not None:
+            if self.use_cuda_ipc:
+                raise ValueError("wire probe does not support CUDA IPC publication")
+            if torch.distributed.get_rank() == 0:
+                if not hasattr(self, "_wire_publication_observer"):
+                    self._wire_publication_observer = WirePublicationObserver(seed=int(self.cfg.trainer.seed))
+                probe = self._wire_publication_observer
+                probe.begin(**publication)
+        try:
+            with self._memory.span("weight_publication", step=self._completed_update, step_kind="completed_update"):
+                result = await self._broadcast_to_inference_engines(inference_engine_client, probe=probe)
+        except BaseException:
+            if probe is not None:
+                probe.finish(publication_id=publication["publication_id"], success=False)
+            raise
+        if probe is not None:
+            probe.staging_complete()
+        return result
 
-    async def _broadcast_to_inference_engines(self, inference_engine_client):
+    def finish_weight_change_probe(self, publication_id: str):
+        """The driver calls this only after every publication RPC succeeded."""
+        if torch.distributed.get_rank() == 0:
+            self._wire_publication_observer.finish(publication_id=publication_id, success=True)
+
+    async def _broadcast_to_inference_engines(self, inference_engine_client, *, probe=None):
         from torch.multiprocessing.reductions import reduce_tensor
 
         use_prefix_cache = self.cfg.generator.enable_prefix_caching
@@ -800,6 +823,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 assert len(chunk) == 1
                 name = chunk.names[0]
                 tensor = chunk.tensors[0]
+
+                if probe is not None:
+                    probe.capture(name, tensor)
 
                 if torch.distributed.get_rank() == 0:
                     update_weight_task = asyncio.create_task(
