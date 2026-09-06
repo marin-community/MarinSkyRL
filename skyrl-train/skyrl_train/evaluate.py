@@ -23,6 +23,7 @@ from skyrl_train.trajectory_runners.base import (
 from skyrl_train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
+    evaluation_response_metrics,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -164,6 +165,7 @@ def _calculate_eval_metrics(
             f"eval/all/pass_at_{samples_per_prompt}": overall_pass_at_n,
         }
     )
+    metrics.update({f"eval/all/{key}": value for key, value in evaluation_response_metrics(batch).items()})
     return metrics
 
 

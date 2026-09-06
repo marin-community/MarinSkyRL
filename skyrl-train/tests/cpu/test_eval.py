@@ -43,6 +43,66 @@ class DummyRunner(TrajectoryRunner):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("token_rewards", [False, True])
+@pytest.mark.parametrize("missing_stop", [False, True])
+async def test_evaluation_separates_rewarded_truncation_from_completed_stops(
+    dummy_config, tmp_path, token_rewards, missing_stop
+):
+    cfg = dummy_config
+    cfg.generator.eval_n_samples_per_prompt = 1
+    cfg.generator.trajectory_retention.enabled = False
+    cfg.trainer.dump_eval_results = True
+    cfg.trainer.export_path = str(tmp_path)
+    loader = DummyStatefulDataLoader(
+        [
+            [
+                {
+                    "prompt": [{"role": "user", "content": str(i)}],
+                    "uid": str(i),
+                    "env_class": "gsm8k",
+                    "env_extras": {"data_source": "math"},
+                }
+                for i in range(4)
+            ]
+        ]
+    )
+    responses = [[2, 3, 4, 5], [2, 9], [7], [2, 3, 9]]
+    rewards = [1.0, 1.0, 0.0, 0.5]
+    batch = {
+        "prompt_token_ids": [[1]] * 4,
+        "response_ids": responses,
+        "rewards": [[0.0] * (len(ids) - 1) + [reward] for ids, reward in zip(responses, rewards)]
+        if token_rewards
+        else rewards,
+        "loss_masks": [[1] * len(ids) for ids in responses],
+        "stop_reasons": [None if missing_stop else "length", "stop", "abort", "eos"],
+        "rollout_logprobs": None,
+    }
+    tokenizer = MagicMock()
+    tokenizer.decode.return_value = "#### 42 repeated after answer"
+    metrics = await evaluate(loader, DummyRunner(batch), cfg, 5, tokenizer)
+    for source in ("all", "math"):
+        prefix = f"eval/{source}/"
+        assert metrics[prefix + "avg_score"] == 0.625
+        assert metrics[prefix + "response_tokens"] == 10
+        assert metrics[prefix + "response_tokens_mean"] == 2.5
+        assert metrics[prefix + "response_tokens_max"] == 4
+        assert metrics[prefix + "stop_reason_coverage"] == (0.75 if missing_stop else 1)
+        if missing_stop:
+            assert prefix + "length_stop_fraction" not in metrics
+            assert prefix + "completed_stop_fraction" not in metrics
+            assert prefix + "length_stop_score_contribution" not in metrics
+            assert prefix + "completed_stop_score_contribution" not in metrics
+        else:
+            assert metrics[prefix + "length_stop_fraction"] == 0.25
+            assert metrics[prefix + "completed_stop_fraction"] == 0.5
+            assert metrics[prefix + "length_stop_score_contribution"] == 0.25
+            assert metrics[prefix + "completed_stop_score_contribution"] == 0.375
+    persisted = json.loads((tmp_path / "dumped_evals/global_step_5_evals/aggregated_results.jsonl").read_text())
+    assert persisted == metrics
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("storage", ["disabled", "local", "s3", "gs", "unwritable"])
 @pytest.mark.parametrize("global_step", [None, 0, 5])
 @pytest.mark.parametrize("dump_namespace", [None, "frozen-pass-0"])
@@ -175,7 +235,7 @@ async def test_evaluate_computes_expected_metrics_and_persists_results(
             }
         ]
     with io.open_file(f"{dump_root}/aggregated_results.jsonl", "r") as source:
-        assert json.load(source) == expected_metrics
+        assert json.load(source) == metrics
     if storage in ("s3", "gs"):
         assert len(cloud.find(cfg.trainer.export_path)) == 3
         assert not (tmp_path / f"{storage}:").exists()
