@@ -232,6 +232,8 @@ def dump_per_dataset_eval_results(
 
     These tokens may include runner-appended EOS; they are not raw engine outputs.
     Token hashes use SHA-256 over compact ASCII JSON arrays, preserving token order.
+    generator_engine_index refers to the dispatcher's engine list, not a physical
+    GPU; null covers unsupported transports, unknown identity, or mixed engines.
     """
     if len(uids) != len(trajectory_batch["response_ids"]):
         raise ValueError("evaluation dump UIDs must align with trajectory rows")
@@ -261,6 +263,7 @@ def dump_per_dataset_eval_results(
                     "uid": uids[i],
                     "row_ordinal": i,
                     "token_provenance": "finalized_trajectory",
+                    "generator_engine_index": trajectory_batch.get("generator_engine_indices", [None] * len(uids))[i],
                     "prompt_token_ids": trajectory_batch["prompt_token_ids"][i],
                     "response_ids": trajectory_batch["response_ids"][i],
                     "prompt_token_ids_sha256": _token_ids_sha256(trajectory_batch["prompt_token_ids"][i]),

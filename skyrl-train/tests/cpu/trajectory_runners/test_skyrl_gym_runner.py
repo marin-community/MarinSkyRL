@@ -337,8 +337,9 @@ async def test_generate_non_batched_preserves_rollout_logprobs(
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
+@pytest.mark.parametrize("engine_indices,expected_index", [([4, 4], 4), ([4, 7], None), ([None, 4], None)])
 async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
-    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg, engine_indices, expected_index
 ):
     generator_cfg.batched = False
     generator_cfg.sampling_params.logprobs = 0
@@ -355,12 +356,14 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     mock_llm.generate.side_effect = [
         {
             "responses": ["first"],
+            "generator_engine_indices": [engine_indices[0]],
             "stop_reasons": ["stop"],
             "response_ids": [[10, 4]],
             "response_logprobs": [[-0.1, -0.2]],
         },
         {
             "responses": ["second"],
+            "generator_engine_indices": [engine_indices[1]],
             "stop_reasons": ["stop"],
             "response_ids": [[20, 4]],
             "response_logprobs": [[-0.3, -0.4]],
@@ -385,6 +388,8 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     assert output["response_ids"] == [[10, 4, *MOCK_TOKENIZER_ENCODED_IDS, 20, 4]]
     assert output["loss_masks"] == [[1, 1, 0, 0, 0, 0, 1, 1]]
     assert output["rollout_logprobs"] == [[-0.1, -0.2, 0.0, 0.0, 0.0, 0.0, -0.3, -0.4]]
+
+    assert output["generator_engine_indices"] == [expected_index]
 
 
 @pytest.mark.asyncio

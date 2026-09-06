@@ -7,7 +7,8 @@ from skyrl_train.trajectory_runners.model_clients import DirectModelClient, Open
 
 
 @pytest.mark.asyncio
-async def test_direct_model_client_preserves_engine_tokens():
+@pytest.mark.parametrize("engine_indices", [None, [7]])
+async def test_direct_model_client_preserves_engine_tokens(engine_indices):
     engine_output = {
         "responses": ["answer"],
         "response_ids": [[3, 4]],
@@ -15,6 +16,8 @@ async def test_direct_model_client_preserves_engine_tokens():
         "response_logprobs": [[-0.1, -0.2]],
         "prompt_logprobs": None,
     }
+    if engine_indices is not None:
+        engine_output["generator_engine_indices"] = engine_indices
     engine = AsyncMock()
     engine.generate.return_value = engine_output
 

@@ -84,6 +84,7 @@ class WholeTrajectoryProjection:
             rewards=rewards,
             loss_masks=loss_masks,
             stop_reasons=[output.evidence.stop_reason for output in outputs],
+            generator_engine_indices=[output.generator_engine_index for output in outputs],
             rollout_metrics=rollout_metrics,
             rollout_logprobs=rollout_logprobs,
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],

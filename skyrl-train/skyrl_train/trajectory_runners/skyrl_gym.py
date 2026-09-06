@@ -303,6 +303,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # Conservative lower bound on the versions used by this trajectory.
         captured_global_step: Optional[int] = None
         token_provenance = TokenProvenance.ENGINE
+        generator_engine_indices: set[int | None] = set()
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -323,6 +324,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 captured_global_step = global_step_fn()
             with rollout_wait("model_client_await"):
                 engine_output = await self.model_client.generate(engine_input)
+            generator_engine_indices.add(engine_output.get("generator_engine_indices", [None])[0])
             if engine_output["token_provenance"] == TokenProvenance.RECONSTRUCTED:
                 token_provenance = TokenProvenance.RECONSTRUCTED
             output = engine_output["responses"][0]
@@ -522,6 +524,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             loss_mask=loss_mask,
             env_metrics=env_metrics,
             captured_global_step=captured_global_step,
+            generator_engine_index=next(iter(generator_engine_indices)) if len(generator_engine_indices) == 1 else None,
             token_provenance=token_provenance,
         )
 
@@ -649,6 +652,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             "rewards": rewards,
             "loss_masks": loss_masks,
             "stop_reasons": stop_reasons,
+            "generator_engine_indices": engine_output.get("generator_engine_indices", [None] * len(responses)),
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": truncated_logprobs,
             "exclude_from_baseline": exclude_from_baseline,

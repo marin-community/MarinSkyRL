@@ -159,6 +159,7 @@ async def test_evaluate_computes_expected_metrics_and_persists_results(
                 "uid": f"uid-{i + 1}",
                 "row_ordinal": i,
                 "token_provenance": "finalized_trajectory",
+                "generator_engine_index": None,
                 "prompt_token_ids": [101 + i],
                 "response_ids": [201 + i],
                 "prompt_token_ids_sha256": hashlib.sha256(f"[{101 + i}]".encode()).hexdigest(),

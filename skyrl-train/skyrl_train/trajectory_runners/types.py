@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
 
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.inference_engines.base import ConversationType
@@ -30,6 +30,8 @@ class AgentLoopOutput:
     captured_global_step: Optional[int] = None
     token_provenance: TokenProvenance = TokenProvenance.ENGINE
     error_treatment: Optional[str] = None
+    # Dispatcher index; None covers unknown transport identity or mixed engines.
+    generator_engine_index: int | None = None
 
 
 @dataclass
@@ -100,6 +102,7 @@ class TrajectoryBatch(TypedDict):
     verifier_tests: Optional[List[Optional[VerifierTestCollection]]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
+    generator_engine_indices: NotRequired[List[int | None]]
     exception_types: Optional[List[Optional[str]]]
     error_treatments: Optional[List[Optional[str]]]
     rollout_metrics: Optional[Dict[str, Any]]

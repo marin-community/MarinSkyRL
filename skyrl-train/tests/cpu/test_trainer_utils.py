@@ -311,6 +311,7 @@ def test_dump_per_dataset_eval_results_preserves_rows_and_unknown_source(tmp_pat
                 "uid": ["uid-c", "uid-a", "uid-b"][i],
                 "row_ordinal": i,
                 "token_provenance": "finalized_trajectory",
+                "generator_engine_index": None,
                 "prompt_token_ids": trajectory_batches["prompt_token_ids"][i],
                 "response_ids": trajectory_batches["response_ids"][i],
                 "prompt_token_ids_sha256": hashlib.sha256([b"[1,2]", b"[3,4]", b"[5,6]"][i]).hexdigest(),

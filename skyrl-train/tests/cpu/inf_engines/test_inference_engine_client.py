@@ -7,6 +7,7 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/inf_engines/test_infe
 """
 
 from http import HTTPStatus
+from ray.exceptions import ActorDiedError
 import socket
 from unittest.mock import patch
 
@@ -964,7 +965,7 @@ async def test_generate_retry_no_gen_finish():
     assert first_call["sampling_params"]["max_tokens"] == 16
     assert second_call["sampling_params"]["max_tokens"] == 16
 
-    assert out == {**engines[0].responses[1], "prompt_logprobs": None}
+    assert out == {**engines[0].responses[1], "prompt_logprobs": None, "generator_engine_indices": [0]}
 
 
 # -------------------------------------------
@@ -1148,3 +1149,37 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
     chunks = await asyncio.wait_for(task, timeout=5)
     assert engines[0].entered.is_set()
     assert any("[DONE]" in c for c in chunks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("fail_first_engine", [False, True])
+async def test_generate_reports_actual_dispatch_after_failover_in_response_order(batched, fail_first_engine):
+    class Engine:
+        def __init__(self, index):
+            self.index = index
+            self.received = []
+
+        async def generate(self, request):
+            self.received.extend(ids[0] for ids in request["prompt_token_ids"])
+            if self.index == 0 and fail_first_engine:
+                raise ActorDiedError()
+            return {
+                "responses": [str(self.index)] * len(request["prompt_token_ids"]),
+                "response_ids": [[self.index, ids[0]] for ids in request["prompt_token_ids"]],
+                "stop_reasons": ["stop"] * len(request["prompt_token_ids"]),
+            }
+
+    engines = [Engine(0), Engine(1)]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+    # A/C route to engine 1 and B routes to 0; interleaving exercises reconstruction order.
+    sessions = ["A", "B", "A", "C"] if batched else ["B"]
+    output = await client.generate(
+        {"prompt_token_ids": [[i] for i in range(len(sessions))], "session_ids": sessions, "sampling_params": {}}
+    )
+    expected = ([1, 0, 1, 1] if batched else [0]) if not fail_first_engine else [1] * len(sessions)
+    assert output["generator_engine_indices"] == expected
+    assert output["response_ids"] == [[engine_index, i] for i, engine_index in enumerate(expected)]
+    assert engines[0].received == ([1] if batched else [0])
+    for i, engine_index in enumerate(output["generator_engine_indices"]):
+        assert i in engines[engine_index].received

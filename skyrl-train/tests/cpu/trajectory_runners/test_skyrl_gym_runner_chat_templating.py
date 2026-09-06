@@ -3,12 +3,15 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 """
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
+from skyrl_train.evaluate import evaluate
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from omegaconf import OmegaConf
 
@@ -573,3 +576,62 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
         last_token_id_false = out_false["response_ids"][0][-1]
         assert last_token_id_true == tokenizer.eos_token_id
         assert last_token_id_false == tokenizer.encode(mock_text, add_special_tokens=False)[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batched", [False, True])
+async def test_actual_dispatch_identity_survives_gym_finalization_and_eval_dump(qwen_math_tokenizer, tmp_path, batched):
+    tokenizer = qwen_math_tokenizer
+    cfg = get_default_config()
+    cfg.generator.batched = batched
+    cfg.generator.enable_http_endpoint = False
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.chat_template_kwargs = {} if batched else {"enable_thinking": False}
+    cfg.generator.chat_template.name_or_path = None
+    cfg.generator.max_turns = 1
+    cfg.generator.max_input_length = 1024
+    cfg.generator.sampling_params.logprobs = None
+    cfg.generator.eval_n_samples_per_prompt = 1
+    cfg.generator.trajectory_retention.enabled = False
+    cfg.environment.skyrl_gym.max_env_workers = 0
+    cfg.trainer.dump_eval_results = True
+    cfg.trainer.export_path = str(tmp_path)
+
+    class Engine:
+        def __init__(self, index):
+            self.index = index
+            self.prompts = []
+
+        async def generate(self, request):
+            self.prompts.extend(request["prompt_token_ids"])
+            text = f"engine {self.index}: #### 4"
+            return {
+                "responses": [text] * len(request["prompt_token_ids"]),
+                "response_ids": [tokenizer.encode(text, add_special_tokens=False) for _ in request["prompt_token_ids"]],
+                "stop_reasons": ["stop"] * len(request["prompt_token_ids"]),
+            }
+
+    engines = [Engine(0), Engine(1)]
+    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
+    runner = SkyRLGymTrajectoryRunner(cfg.generator, cfg.environment.skyrl_gym, client, tokenizer)
+    uids = ["question-c", "question-a", "question-b"]
+    prompts = [
+        {
+            "prompt": [{"role": "user", "content": f"{uid}: What is 2 + 2?"}],
+            "env_class": "gsm8k",
+            "env_extras": {"reward_spec": {"ground_truth": "4"}, "data_source": "heldout"},
+            "uid": uid,
+        }
+        for uid in uids
+    ]
+    metrics = await evaluate([prompts], runner, cfg, 0, tokenizer, dump_namespace="identity-pass")
+    assert metrics["eval/all/avg_score"] == 1.0
+    path = tmp_path / "dumped_evals" / "global_step_0_evals" / "identity-pass" / "heldout.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [row["uid"] for row in rows] == uids
+    assert [row["row_ordinal"] for row in rows] == [0, 1, 2]
+    for row in rows:
+        actual_engine = int(row["output_response"].split(":", 1)[0].removeprefix("engine "))
+        assert row["generator_engine_index"] == actual_engine
+        assert row["prompt_token_ids"] in engines[actual_engine].prompts
+        assert row["token_provenance"] == "finalized_trajectory"
