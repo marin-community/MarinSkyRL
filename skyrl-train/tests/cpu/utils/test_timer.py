@@ -64,6 +64,16 @@ def test_repeated_blocks_accumulate_under_one_key(monkeypatch):
     assert timings == {"generate": 5.0}
 
 
+def test_elapsed_reports_an_active_timer_without_ending_it(monkeypatch):
+    monkeypatch.setattr(timer_module, "time", FakeClock(10.0, 12.0, 15.0))
+
+    with Timer("generate") as timer:
+        assert timer.elapsed == 2.0
+
+    assert timer.duration == 5.0
+    assert timer.elapsed == 5.0
+
+
 def test_failed_block_is_not_logged_as_finished(monkeypatch):
     records = []
     monkeypatch.setattr(timer_module, "time", FakeClock(10.0, 12.0))

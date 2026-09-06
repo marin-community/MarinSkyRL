@@ -38,7 +38,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Tuple, TypeVar
 from enum import Enum, auto
 from omegaconf import OmegaConf
-from skyrl_train.callbacks import TrainerState
 from skyrl_train.telemetry import (
     critical_phase,
     record_generated_work,
@@ -888,52 +887,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         duration_seconds=weight_update_timer.duration,
                     )
 
-                # 5. Log status and update metrics
-                logger.info(status)
-                self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+                    # 5. Run callback-requested work before closing the inclusive step timer.
+                    logger.info(status)
+                    self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+                    step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
+                    await self._run_step_end_callbacks(step_state)
 
-                # 6. Create trainer state and call on_step_end callbacks
-                is_epoch_end = _ == (1 + epoch) * self.num_steps_per_epoch
-                is_last_step = self.global_step == self.total_training_steps
-                step_state = TrainerState(
-                    global_step=self.global_step,
-                    epoch=epoch,
-                    total_steps=self.total_training_steps,
-                    num_steps_per_epoch=self.num_steps_per_epoch,
-                    is_last_step=is_last_step,
-                    is_epoch_end=is_epoch_end,
-                    metrics=dict(self.all_metrics),
-                    timings=dict(self.all_timings),
-                )
-
-                self._control.reset()
-                self._control = await self.callback_handler.call_event_async(
-                    "on_step_end", step_state, self._control, trainer=self
-                )
-
-                # 7. Handle callback control signals
-
-                # Handle checkpoint saving
-                if self._control.should_save:
-                    await self._save_intermediate_checkpoint(step_state)
-                    self._control.should_save = False
-
-                # Handle HF model saving
-                if self._control.should_save_hf_model:
-                    await asyncio.to_thread(self.handle_hf_export)
-                    self._control.should_save_hf_model = False
-
-                # Handle evaluation
-                if self._control.should_evaluate and self.eval_dataset is not None:
-                    with Timer("eval", self.all_timings):
-                        eval_metrics = await self.eval()
-                        self.all_metrics.update(eval_metrics)
-                    await self.callback_handler.call_event_async(
-                        "on_evaluate", step_state, self._control, metrics=eval_metrics, trainer=self
-                    )
-                    self._control.should_evaluate = False
-
-                # 8. Log metrics
+                # 6. Log metrics
                 if self._control.should_log:
                     log_payload = {
                         **self.all_metrics,
@@ -966,20 +926,20 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.global_step += 1
                 generation_queues.clear_admitted()
 
-                # 9. Notify generation workers that the capacity has increased, unblocking them.
+                # 7. Notify generation workers that the capacity has increased, unblocking them.
                 await self._staleness_manager.notify_capacity_change(self.global_step)
 
-                # 10. Check for max_steps
+                # 8. Check for max_steps
                 if self.global_step > self.total_training_steps:
                     logger.info(f"Reached max training steps ({self.total_training_steps})")
                     break
 
-                # 11. Check for early stopping
+                # 9. Check for early stopping
                 if self._control.should_training_stop:
                     logger.info("Training stopped early by callback")
                     break
 
-            # 12. Per-epoch epilogue.
+            # 10. Per-epoch epilogue.
             # Call on_epoch_end callbacks
             epoch_state = self._create_trainer_state(epoch=epoch)
             self._control.reset()

@@ -269,6 +269,13 @@ class Timer:
             raise RuntimeError("Timer duration is only available after its context exits")
         return self._duration
 
+    @property
+    def elapsed(self) -> float:
+        """Return the elapsed duration without ending an active timer."""
+        if self._duration is not None:
+            return self._duration
+        return time.monotonic() - self.start_time
+
     def __enter__(self):
         self.start_time = time.monotonic()
         if self.log_events:
