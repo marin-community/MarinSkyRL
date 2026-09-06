@@ -33,6 +33,7 @@ from skyrl_train.checkpoint_listing import extract_step_from_path, list_checkpoi
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler
+from skyrl_train.data_order import EpochSeededSampler, epoch_seeded_shuffle_enabled, validate_epoch_seeded_shuffle
 from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -546,6 +547,10 @@ def build_dataloader(
     seeded_generator.manual_seed(cfg.trainer.seed)
 
     sampler = None
+    if is_train and epoch_seeded_shuffle_enabled(cfg):
+        validate_epoch_seeded_shuffle(cfg)
+        sampler = EpochSeededSampler(dataset, seed=cfg.trainer.seed, prompts_per_step=cfg.trainer.train_batch_size)
+        logger.info("Epoch-seeded source-order contract: {}", sampler.contract)
     if is_train and cfg.data.sampling.kind is not None:
         if is_fully_async:
             raise ValueError("data.sampling.kind is not supported with fully async training")
@@ -568,7 +573,7 @@ def build_dataloader(
         # Curriculum sampling stays single-process: worker prefetch would draw several
         # batches of indices ahead of the per-step weight updates.
         # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if (sampler is not None or cfg.generator.enable_http_endpoint) else 8,
+        num_workers=0 if (isinstance(sampler, CurriculumSampler) or cfg.generator.enable_http_endpoint) else 8,
         drop_last=True if is_train else False,
         generator=seeded_generator,
     )

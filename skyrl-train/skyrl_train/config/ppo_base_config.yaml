@@ -7,6 +7,7 @@ defaults:
   - skyrl_gym_config: default
 
 data:
+  epoch_seeded_shuffle: false # shared seed+epoch prompt order with a validated checkpoint contract
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
   sampling:

@@ -33,6 +33,12 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedR
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass, field
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
+from skyrl_train.data_order import (
+    EpochSeededSampler,
+    epoch_seeded_shuffle_enabled,
+    normalize_async_source_epoch,
+    set_source_epoch,
+)
 from marinskyrl.training_completion import CompletionMode, completion_mode
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -380,6 +386,9 @@ class _AsyncDataloader:
         dynamic_sampling_type: DynamicSamplingType | None = None,
     ):
         self._train_dataloader = train_dataloader
+        self._epoch_seeded = isinstance(train_dataloader, StatefulDataLoader) and isinstance(
+            train_dataloader.sampler, EpochSeededSampler
+        )
         self._train_dataloader_initial_state = train_dataloader.state_dict()
         self._sample_with_replacement = dynamic_sampling_type is DynamicSamplingType.FILTER
         self._effective_dataloader_length = (
@@ -407,6 +416,8 @@ class _AsyncDataloader:
         get_next_non_consumed_data() can skip already-consumed items.
         """
         # Reset in case the dataloader loaded the state from the checkpoint, which we do not want.
+        if self._epoch_seeded:
+            set_source_epoch(self._train_dataloader, self._data_tracker.current_epoch)
         self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)
         # Re-create the iterator so get_next_non_consumed_data() starts from
         # the beginning of the dataset (not the exhausted iterator from __init__).
@@ -422,6 +433,8 @@ class _AsyncDataloader:
         were cleared before the checkpoint captured them.
         """
         async with self._lock:
+            if self._epoch_seeded:
+                set_source_epoch(self._train_dataloader, self._data_tracker.current_epoch)
             self._train_dataloader.load_state_dict(self._train_dataloader_initial_state)  # reset to initial state
             self._iter = enumerate(self._train_dataloader)
             self._pending_uids.clear()
@@ -737,6 +750,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # Load data consumption state into the tracker
                     loaded = DataTrackingCallback.load_from_checkpoint(checkpoint_path, self.data_tracker)
                     if not loaded:
+                        if epoch_seeded_shuffle_enabled(self.cfg):
+                            raise ValueError("Epoch-seeded resume requires data consumption checkpoint state")
                         logger.warning(
                             "No data consumption state found in checkpoint — "
                             "resume may re-train on already-consumed data"
@@ -744,6 +759,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                     # Store checkpoint path for buffer restore after queue creation
                     self._pending_buffer_restore_path = checkpoint_path
+
+                    if epoch_seeded_shuffle_enabled(self.cfg):
+                        buffer_state = BufferCheckpointCallback.load_buffer_state(checkpoint_path)
+                        if await normalize_async_source_epoch(
+                            self.train_dataloader, self.data_tracker, self.global_step, buffer_state.pending_uids()
+                        ):
+                            # No cross-epoch generation: these buffers belong to the
+                            # completed epoch, even when saved before its cleanup.
+                            self._pending_buffer_restore_path = None
 
                     # Reset dataloader iteration for skip-on-resume
                     self.async_train_dataloader.load_state_from_checkpoint()

@@ -10,6 +10,7 @@ import ray
 import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from skyrl_train.data_order import validate_epoch_seeded_shuffle
 from ray.util.placement_group import (
     placement_group,
     PlacementGroupSchedulingStrategy,
@@ -587,6 +588,7 @@ def validate_fully_async_cfg(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    validate_epoch_seeded_shuffle(cfg)
     validate_weight_change_probe_config(cfg)
     repeats = cfg.trainer.initial_eval_repeat_count
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:

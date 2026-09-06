@@ -41,6 +41,12 @@ from skyrl_train.dataset.preprocess import (
 )
 from skyrl_train.utils import trainer_utils
 from skyrl_train.io import io
+from skyrl_train.data_order import (
+    epoch_seeded_shuffle_enabled,
+    set_source_epoch,
+    source_order_checkpoint,
+    validate_source_order_checkpoint,
+)
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
 from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
@@ -665,6 +671,8 @@ class RayPPOTrainer:
         last_completed_step = self.global_step
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
+            if epoch_seeded_shuffle_enabled(self.cfg):
+                set_source_epoch(self.train_dataloader, epoch)
             for iter, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings) as step_timer:
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
@@ -2285,6 +2293,8 @@ class RayPPOTrainer:
                 torch.save(dataloader_state_dict, f)
             logger.info(f"Saved dataloader state to {dataloader_save_path}")
         except Exception as e:
+            if epoch_seeded_shuffle_enabled(self.cfg):
+                raise
             logger.warning(f"Failed to save dataloader state: {e}")
 
         # Save additional trainer state
@@ -2292,6 +2302,8 @@ class RayPPOTrainer:
             "global_step": self.global_step,
             "config": self.cfg,
         }
+        if epoch_seeded_shuffle_enabled(self.cfg):
+            trainer_state["source_order"] = source_order_checkpoint(self.train_dataloader, self.global_step)
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
         with io.open_file(trainer_state_path, "wb") as f:
             torch.save(trainer_state, f)
@@ -2419,10 +2431,23 @@ class RayPPOTrainer:
         saved_global_step = trainer_state.get("global_step", global_step)
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
+            if epoch_seeded_shuffle_enabled(self.cfg):
+                raise ValueError("Checkpoint step differs from the source-order checkpoint path")
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
 
+        source_order_boundary = False
+        if epoch_seeded_shuffle_enabled(self.cfg) or trainer_state.get("source_order") is not None:
+            source_order_boundary = validate_source_order_checkpoint(
+                self.train_dataloader, trainer_state.get("source_order"), global_step
+            )
+
         # 2. Load dataloader state if available
-        if io.exists(dataloader_state_path):
+        if epoch_seeded_shuffle_enabled(self.cfg):
+            with io.open_file(dataloader_state_path, "rb") as f:
+                dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
+            if not source_order_boundary:
+                self.train_dataloader.load_state_dict(dataloader_state)
+        elif io.exists(dataloader_state_path):
             try:
                 with io.open_file(dataloader_state_path, "rb") as f:
                     dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
