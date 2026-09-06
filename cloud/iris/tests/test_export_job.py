@@ -13,8 +13,11 @@ from cloud.iris.job import _write_json, execute_job
 from cloud.iris.iris_backend import IrisLaunchOutcome
 from cloud.iris.protocol import AttemptState, SkyRLExportSpec, SkyRLExportRequest, SkyRLExportPaths
 from cloud.iris.tests.test_job import (
-    FakeLaunchBackend, _spec, _write_terminal_training_outputs, _write_policy_export,
-    runtime_checkout,  # noqa: F401 - pytest fixture
+    FakeLaunchBackend,
+    _spec,
+    _write_terminal_training_outputs,
+    _write_policy_export,
+    runtime_checkout as runtime_checkout,  # pytest fixture re-export
 )
 from marinskyrl.export_completion import ExportReceipt
 
@@ -28,26 +31,38 @@ class ConversionService:
         self.submissions.append(request)
         assert request.global_step == 8
         _write_policy_export(request.export_root)
-        _write_json(request.receipt_uri, ExportReceipt(
-            request.request_fingerprint, request.attempt_id,
-            f"{request.export_root}/global_step_8/policy", 8,
-        ).to_dict())
+        _write_json(
+            request.receipt_uri,
+            ExportReceipt(
+                request.request_fingerprint,
+                request.attempt_id,
+                f"{request.export_root}/global_step_8/policy",
+                8,
+            ).to_dict(),
+        )
         if self.fail_after_write:
             raise subprocess.CalledProcessError(1, ["iris-export"])
 
 
 @pytest.fixture
-def completed_training(tmp_path, runtime_checkout):
+def completed_training(tmp_path, runtime_checkout):  # noqa: F811 - pytest injects the imported fixture
     training = _spec(tmp_path, runtime_checkout[1])
     _write_terminal_training_outputs(training)
     result = execute_job(training, backend=FakeLaunchBackend(IrisLaunchOutcome("training-job", "succeeded", 0)))
     assert result.state == AttemptState.SUCCEEDED
     export_root = tmp_path / "model"
-    export = SkyRLExportSpec(SkyRLExportRequest(
-        training.request.output.terminal_manifest_uri, "export-1", SkyRLExportPaths(
-            str(export_root / "exports"), str(export_root / "attempts"), str(export_root / "terminal.json"),
+    export = SkyRLExportSpec(
+        SkyRLExportRequest(
+            training.request.output.terminal_manifest_uri,
+            "export-1",
+            SkyRLExportPaths(
+                str(export_root / "exports"),
+                str(export_root / "attempts"),
+                str(export_root / "terminal.json"),
+            ),
         ),
-    ), training.execution)
+        training.execution,
+    )
     return training, export
 
 
@@ -60,7 +75,10 @@ def test_export_uses_recorded_checkpoint_even_when_latest_advances(completed_tra
     assert result.state == AttemptState.SUCCEEDED
     assert result.model.global_step == 8
     assert result.training_iris_job_id == "training-job"
-    assert json.loads(Path(export.request.output.terminal_manifest_uri).read_text())["response"]["model"]["global_step"] == 8
+    assert (
+        json.loads(Path(export.request.output.terminal_manifest_uri).read_text())["response"]["model"]["global_step"]
+        == 8
+    )
 
 
 def test_export_failure_keeps_training_success_and_retry_reuses_verified_files(completed_training):

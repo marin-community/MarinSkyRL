@@ -97,9 +97,11 @@ def _record_failed_attempt(
     spec: SkyRLJobSpec,
     outcome: IrisLaunchOutcome,
     failure: str,
+    *,
+    training: SkyRLTrainingResult | None = None,
 ) -> SkyRLLaunchResponse:
     request = spec.request
-    response = _launch_response(spec, AttemptState.FAILED, outcome=outcome, failure=failure)
+    response = _launch_response(spec, AttemptState.FAILED, outcome=outcome, failure=failure, training=training)
     _write_json(_attempt_uri(request), _manifest_payload(spec, response))
     return response
 
@@ -129,14 +131,18 @@ def execute_job(
             job_state = error.status.state.value
             outcome = IrisLaunchOutcome(job_id=str(error.job_id), job_state=job_state, exit_code=1)
 
-        if outcome.exit_code != 0:
-            return _record_failed_attempt(spec, outcome, f"Iris job reached {outcome.job_state}")
-        if mode is LaunchMode.DETACH:
+        if mode is LaunchMode.DETACH and outcome.exit_code == 0:
             return _launch_response(spec, AttemptState.SUBMITTED, outcome=outcome)
+    failure = f"Iris job reached {outcome.job_state}" if outcome.exit_code != 0 else None
     try:
         training = read_training_result(request)
     except (OSError, ValueError, KeyError, TypeError) as error:
-        return _record_failed_attempt(spec, outcome, f"Invalid training result: {error}")
+        invalid_result = f"Invalid training result: {error}"
+        return _record_failed_attempt(spec, outcome, f"{failure}; {invalid_result}" if failure else invalid_result)
+    if failure:
+        # A receipt proves training work, even if Iris loses the pod's completion
+        # status. Retain that evidence without publishing a successful attempt.
+        return _record_failed_attempt(spec, outcome, failure, training=training)
     response = _launch_response(spec, AttemptState.SUCCEEDED, outcome=outcome, training=training)
     payload = _manifest_payload(spec, response)
     _write_json(_attempt_uri(request), payload)

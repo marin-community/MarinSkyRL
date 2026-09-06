@@ -329,8 +329,9 @@ def test_execute_job_metrics_completion_requires_no_checkpoint_or_export(tmp_pat
 @pytest.mark.parametrize(
     "damage", ["missing_receipt", "wrong_attempt", "changed_state", "missing_policy", "wrong_config"]
 )
+@pytest.mark.parametrize("iris_state,exit_code", [("succeeded", 0), ("worker_failed", 1)])
 def test_execute_job_rejects_incomplete_or_foreign_training_result(
-    tmp_path: Path, damage: str, runtime_checkout
+    tmp_path: Path, damage: str, iris_state: str, exit_code: int, runtime_checkout
 ) -> None:
     envelope = _spec(tmp_path, runtime_checkout[1])
     _write_terminal_training_outputs(envelope)
@@ -351,8 +352,12 @@ def test_execute_job_rejects_incomplete_or_foreign_training_result(
             envelope.request.output.resolved_config_uri,
             {"entrypoint": "skyrl_train.entrypoints.main_base", "hydra_args": []},
         )
-    response = execute_job(envelope, backend=FakeLaunchBackend(IrisLaunchOutcome("job", "succeeded", 0)))
+    response = execute_job(envelope, backend=FakeLaunchBackend(IrisLaunchOutcome("job", iris_state, exit_code)))
     assert response.state == AttemptState.FAILED
+    assert response.training is None
+    assert "Invalid training result" in response.failure
+    if exit_code:
+        assert "Iris job reached worker_failed" in response.failure
     assert not Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).exists()
 
 
@@ -468,6 +473,61 @@ def test_execute_job_failure_records_attempt_without_terminal_model(tmp_path: Pa
     assert json.loads(attempt.read_text())["response"]["iris_job_state"] == "failed"
 
 
+@pytest.mark.parametrize("completion_mode", [CompletionMode.METRICS, CompletionMode.CHECKPOINT])
+@pytest.mark.parametrize("raises_job_error", [False, True])
+def test_cli_preserves_verified_training_on_iris_failure(
+    tmp_path: Path, runtime_checkout, monkeypatch, capsys, completion_mode: CompletionMode, raises_job_error: bool
+) -> None:
+    envelope = _spec(tmp_path, runtime_checkout[1])
+    if completion_mode is CompletionMode.CHECKPOINT:
+        _write_terminal_training_outputs(envelope)
+    else:
+        envelope = replace(
+            envelope,
+            request=replace(
+                envelope.request,
+                completion_mode=completion_mode,
+                overrides=("++trainer.hf_save_interval=-1", "++trainer.ckpt_interval=-1"),
+            ),
+        )
+        _write_resolved_training_config(envelope)
+        receipt = TrainingReceipt(
+            envelope.request.run_id,
+            envelope.request.attempt_id,
+            training_request_fingerprint(envelope.request),
+            completion_mode,
+            8,
+        )
+        job._write_json(training_receipt_uri(envelope.request), receipt.to_dict())
+    job_id = "/power/iceball-test"
+    if raises_job_error:
+        status = job_status_from_proto(
+            job_pb2.JobStatus(job_id=job_id, state=job_pb2.JOB_STATE_WORKER_FAILED, error="PodDeleted")
+        )
+        backend = FailedLaunchBackend(JobFailedError(JobName.from_string(job_id), status))
+    else:
+        backend = FakeLaunchBackend(IrisLaunchOutcome(job_id, "worker_failed", 1))
+    monkeypatch.setattr(job, "IrisBackend", lambda: backend)
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(asdict(envelope)))
+
+    exit_code = job.main(["iris", "launch", "--request", str(request_path)])
+
+    response = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert response["state"] == "failed"
+    assert response["iris_job_state"] == "worker_failed"
+    assert response["iris_job_id"] == job_id
+    assert response["failure"] == "Iris job reached worker_failed"
+    assert response["training"]["global_step"] == 8
+    assert response["training"]["receipt_uri"] == training_receipt_uri(envelope.request)
+    assert (response["training"]["checkpoint"] is None) == (completion_mode is CompletionMode.METRICS)
+    attempt = Path(envelope.request.output.attempts_root.removeprefix("file://")) / "attempt-1.json"
+    assert json.loads(attempt.read_text())["response"] == response
+    assert not Path(envelope.request.output.terminal_manifest_uri.removeprefix("file://")).exists()
+    assert not Path(envelope.request.output.export_root.removeprefix("file://")).exists()
+
+
 def test_execute_job_serializes_iris_job_failure(tmp_path: Path, runtime_checkout) -> None:
     envelope = _spec(tmp_path, runtime_checkout[1])
     status = job_status_from_proto(
@@ -480,7 +540,7 @@ def test_execute_job_serializes_iris_job_failure(tmp_path: Path, runtime_checkou
     assert response.state == AttemptState.FAILED
     assert response.iris_job_id == "/power/iceball-test"
     assert response.iris_job_state == "killed"
-    assert response.failure == "Iris job reached killed"
+    assert response.failure.startswith("Iris job reached killed; Invalid training result:")
     attempt = Path(envelope.request.output.attempts_root.removeprefix("file://")) / "attempt-1.json"
     assert json.loads(attempt.read_text())["response"] == asdict(response)
 

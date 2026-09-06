@@ -24,7 +24,11 @@ from cloud.iris.protocol import (
     job_spec,
 )
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
-from cloud.iris.terminal_policy import TerminalPolicyExport, storage_user_from_resource_path, submit_terminal_policy_export
+from cloud.iris.terminal_policy import (
+    TerminalPolicyExport,
+    storage_user_from_resource_path,
+    submit_terminal_policy_export,
+)
 from cloud.iris.training_result import read_json, read_training_result, validate_native_checkpoint
 from marinskyrl.checkpoint_paths import policy_export_path
 from marinskyrl.export_completion import verify_export_receipt
@@ -73,7 +77,10 @@ def execute_export(
     manifest = read_json(request.training_manifest_uri)
     source = job_spec(manifest)
     source_response = manifest["response"]
-    if source_response["state"] != AttemptState.SUCCEEDED or source.request.completion_mode != CompletionMode.CHECKPOINT:
+    if (
+        source_response["state"] != AttemptState.SUCCEEDED
+        or source.request.completion_mode != CompletionMode.CHECKPOINT
+    ):
         raise ValueError("Export requires a successful checkpoint training manifest")
     if request.training_manifest_uri != source.request.output.terminal_manifest_uri:
         raise ValueError("Training manifest URI differs from the recorded training destination")
@@ -86,14 +93,16 @@ def execute_export(
     resolved = read_json(training.resolved_config_uri)
     export_config = _export_config(source, resolved)
     export_path = policy_export_path(request.output.export_root, checkpoint.global_step)
-    fingerprint = _digest({
-        "schema_version": spec.schema_version,
-        "training_manifest": manifest,
-        "resolved_config": resolved,
-        "checkpoint": checkpoint.to_dict(),
-        "export_path": export_path,
-        "runtime": asdict(source.request.runtime),
-    })
+    fingerprint = _digest(
+        {
+            "schema_version": spec.schema_version,
+            "training_manifest": manifest,
+            "resolved_config": resolved,
+            "checkpoint": checkpoint.to_dict(),
+            "export_path": export_path,
+            "runtime": asdict(source.request.runtime),
+        }
+    )
     receipt_uri = posixpath.join(request.output.export_root, "receipts", f"{fingerprint}.json")
     execution = spec.execution
     response_fields = dict(
@@ -110,48 +119,62 @@ def execute_export(
         else:
             validate_native_checkpoint(checkpoint)
         if mode is LaunchMode.PREPARE:
-            return SkyRLExportResponse(**response_fields, state=AttemptState.PREPARED, model=None, failure=None,
-                                       reused_export=reused)
+            return SkyRLExportResponse(
+                **response_fields, state=AttemptState.PREPARED, model=None, failure=None, reused_export=reused
+            )
         if not reused:
             with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8") as config_file:
                 config_file.write(export_config)
                 config_file.flush()
-                (backend or IrisExportBackend()).export(TerminalPolicyExport(
-                    checkpoint_root=source.request.output.checkpoint_root,
-                    global_step=checkpoint.global_step,
-                    export_root=request.output.export_root,
-                    config_path=config_file.name,
-                    model_path=source.request.model.local_path,
-                    model_source_uri=source.request.model.uri,
-                    model_source_identity=source.request.model.identity,
-                    policy_num_nodes=source.request.topology.role_plan.policy_num_nodes,
-                    policy_num_gpus_per_node=source.request.topology.role_plan.policy_num_gpus_per_node,
-                    cluster=execution.cluster,
-                    priority=execution.priority,
-                    job_name=execution.job_name,
-                    cluster_config=execution.cluster_config,
-                    target_cluster=execution.target_cluster,
-                    parent_cluster_config=execution.parent_cluster_config,
-                    cpu=execution.cpu, memory=execution.memory, disk=execution.disk,
-                    storage_user=storage_user_from_resource_path(source.request.output.checkpoint_root),
-                    receipt_uri=receipt_uri, request_fingerprint=fingerprint, attempt_id=request.attempt_id,
-                    timeout_seconds=execution.timeout_seconds or None,
-                ))
+                (backend or IrisExportBackend()).export(
+                    TerminalPolicyExport(
+                        checkpoint_root=source.request.output.checkpoint_root,
+                        global_step=checkpoint.global_step,
+                        export_root=request.output.export_root,
+                        config_path=config_file.name,
+                        model_path=source.request.model.local_path,
+                        model_source_uri=source.request.model.uri,
+                        model_source_identity=source.request.model.identity,
+                        policy_num_nodes=source.request.topology.role_plan.policy_num_nodes,
+                        policy_num_gpus_per_node=source.request.topology.role_plan.policy_num_gpus_per_node,
+                        cluster=execution.cluster,
+                        priority=execution.priority,
+                        job_name=execution.job_name,
+                        cluster_config=execution.cluster_config,
+                        target_cluster=execution.target_cluster,
+                        parent_cluster_config=execution.parent_cluster_config,
+                        cpu=execution.cpu,
+                        memory=execution.memory,
+                        disk=execution.disk,
+                        storage_user=storage_user_from_resource_path(source.request.output.checkpoint_root),
+                        receipt_uri=receipt_uri,
+                        request_fingerprint=fingerprint,
+                        attempt_id=request.attempt_id,
+                        timeout_seconds=execution.timeout_seconds or None,
+                    )
+                )
             verify_export_receipt(receipt_uri, fingerprint, export_path, checkpoint.global_step)
         model = SkyRLModel(
-            policy_export_uri=export_path, global_step=checkpoint.global_step,
+            policy_export_uri=export_path,
+            global_step=checkpoint.global_step,
             tokenizer_uri=source.request.model.tokenizer_uri,
             tokenizer_revision=source.request.model.tokenizer_revision,
             checkpoint_root=source.request.output.checkpoint_root,
             terminal_manifest_uri=request.output.terminal_manifest_uri,
         )
-        response = SkyRLExportResponse(**response_fields, state=AttemptState.SUCCEEDED, model=model,
-                                       failure=None, reused_export=reused)
+        response = SkyRLExportResponse(
+            **response_fields, state=AttemptState.SUCCEEDED, model=model, failure=None, reused_export=reused
+        )
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         response = SkyRLExportResponse(**response_fields, state=AttemptState.FAILED, model=None, failure=str(error))
-    payload = {"schema_version": spec.schema_version, "request": asdict(request),
-               "execution": asdict(execution), "response": asdict(response),
-               "training_manifest_sha256": _digest(manifest), "export_receipt_uri": receipt_uri}
+    payload = {
+        "schema_version": spec.schema_version,
+        "request": asdict(request),
+        "execution": asdict(execution),
+        "response": asdict(response),
+        "training_manifest_sha256": _digest(manifest),
+        "export_receipt_uri": receipt_uri,
+    }
     _write_json(posixpath.join(request.output.attempts_root, f"{request.attempt_id}.json"), payload)
     if response.state is AttemptState.SUCCEEDED:
         _write_json(request.output.terminal_manifest_uri, payload)

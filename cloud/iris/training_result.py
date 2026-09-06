@@ -10,7 +10,12 @@ from typing import Any
 from hydra.core.override_parser.overrides_parser import OverridesParser
 
 from cloud.iris.artifacts import fs_and_path, terminal_checkpoint_step
-from cloud.iris.protocol import SkyRLLaunchRequest, SkyRLTrainingResult, training_receipt_uri, training_request_fingerprint
+from cloud.iris.protocol import (
+    SkyRLLaunchRequest,
+    SkyRLTrainingResult,
+    training_receipt_uri,
+    training_request_fingerprint,
+)
 from marinskyrl.training_completion import CompletionMode, NativeCheckpoint, TrainingReceipt
 
 
@@ -41,7 +46,9 @@ def validate_native_checkpoint(checkpoint: NativeCheckpoint) -> None:
         raise ValueError("Checkpoint trainer state differs from its completion receipt")
 
 
-def read_training_result(request: SkyRLLaunchRequest, *, check_latest: bool = True, check_files: bool = True) -> SkyRLTrainingResult:
+def read_training_result(
+    request: SkyRLLaunchRequest, *, check_latest: bool = True, check_files: bool = True
+) -> SkyRLTrainingResult:
     receipt_uri = training_receipt_uri(request)
     receipt = TrainingReceipt.from_dict(read_json(receipt_uri))
     expected = (request.run_id, request.attempt_id, training_request_fingerprint(request), request.completion_mode)
@@ -70,7 +77,11 @@ def read_training_result(request: SkyRLLaunchRequest, *, check_latest: bool = Tr
     if request.completion_mode is CompletionMode.CHECKPOINT:
         checkpoint = receipt.checkpoint
         expected_path = posixpath.join(request.output.checkpoint_root.rstrip("/"), f"global_step_{receipt.global_step}")
-        if checkpoint is None or checkpoint.global_step != receipt.global_step or checkpoint.checkpoint_path != expected_path:
+        if (
+            checkpoint is None
+            or checkpoint.global_step != receipt.global_step
+            or checkpoint.checkpoint_path != expected_path
+        ):
             raise ValueError("Training receipt has no checkpoint at the completed optimizer step")
         if check_files:
             validate_native_checkpoint(checkpoint)
