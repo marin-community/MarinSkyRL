@@ -747,6 +747,36 @@ def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_t
     )
 
 
+def test_consumed_stop_metrics_survive_padding_and_publish_after_update(dummy_config, dummy_tokenizer, monkeypatch):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = dummy_tokenizer
+    trainer._training_metrics_enabled = True
+    trainer.policy_model = SimpleNamespace(actor_infos=[SimpleNamespace(rank=SimpleNamespace(dp_size=4))])
+    trainer.critic_model = trainer.ref_model = None
+    trainer.global_step = 1
+    trainer.all_metrics = {}
+    trajectory_batch = {
+        "prompt_token_ids": [[1], [2], [3]],
+        "response_ids": [[4, 5], [6], [7]],
+        "rewards": [[0.0, 1.0], [0.0], [0.0]],
+        "loss_masks": [[1, 1], [1], [1]],
+        "rollout_logprobs": None,
+        "stop_reasons": ["length", "stop", "tool_calls"],
+    }
+    batch = trainer.convert_to_training_input(trajectory_batch, ["a", "b", "c"])
+    assert batch.batch_size == 4
+    assert trainer.all_metrics == {}
+    # Replace only the telemetry sink. Conversion and DP padding remain real.
+    monkeypatch.setattr(trainer_module, "record_consumed_work", lambda **_kwargs: None)
+    trainer._log_optimizer_step_completed(epoch=0, training_input=batch, duration_seconds=1.0)
+    assert trainer.all_metrics["consumed/sequences"] == 3
+    assert trainer.all_metrics["consumed/length_stop_count"] == 1
+    assert trainer.all_metrics["consumed/length_stop_fraction"] == pytest.approx(1 / 3)
+    assert trainer.all_metrics["consumed/stop_reason_coverage"] == 1
+
+
 def test_normalize_mini_batch_size():
     """Test the _normalize_mini_batch_size method with various configurations."""
 

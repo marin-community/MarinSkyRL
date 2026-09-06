@@ -17,6 +17,20 @@ from skyrl_train import telemetry as training_telemetry
 from skyrl_train.timing_observability import publish_step_timings
 
 
+@pytest.mark.parametrize("reasons", [["length", "stop", None], None])
+def test_consumed_stop_fraction_is_absent_without_complete_coverage(reasons):
+    metrics = rollout.consumed_stop_metrics(reasons, 3)
+    assert "consumed/length_stop_fraction" not in metrics
+    assert metrics["consumed/known_stop_count"] + metrics["consumed/unknown_stop_count"] == 3
+    assert metrics["consumed/stop_reason_coverage"] == (0 if reasons is None else pytest.approx(2 / 3))
+
+
+def test_consumed_stop_metrics_reject_misaligned_reasons():
+    with pytest.raises(ValueError, match="align"):
+        rollout.consumed_stop_metrics(["length"], 2)
+    assert "consumed/length_stop_fraction" not in rollout.consumed_stop_metrics([], 0)
+
+
 @dataclass
 class ManualClock:
     value: float = 0.0

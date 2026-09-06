@@ -10,7 +10,7 @@ import contextlib
 import json
 import math
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from concurrent.futures import Executor
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -40,6 +40,30 @@ buffer_dwell = telemetry.histogram("rollout_buffer_dwell_seconds", unit="s")
 group_count = telemetry.counter("rollout_group_count", unit="{group}")
 group_tokens = telemetry.counter("rollout_group_tokens", unit="{token}")
 event_loop_lag = telemetry.histogram("event_loop_lag_seconds", unit="s")
+
+
+def consumed_stop_metrics(stop_reasons: Sequence[str | None] | None, sequence_count: int) -> dict[str, float]:
+    """Count length stops on admitted sequences, before padding or worker sharding.
+
+    A length stop can come from engine or runner budget exhaustion; it does not
+    establish answer incompleteness. Omit the fraction without complete coverage.
+    """
+    if sequence_count < 0 or (stop_reasons is not None and len(stop_reasons) != sequence_count):
+        raise ValueError("Stop reasons must align with the admitted response sequences")
+    reasons = [None] * sequence_count if stop_reasons is None else stop_reasons
+    known = sum(reason is not None and reason != "" for reason in reasons)
+    length_stops = sum(reason == "length" for reason in reasons)
+    metrics = {
+        "sequences": float(sequence_count),
+        "length_stop_count": float(length_stops),
+        "known_stop_count": float(known),
+        "unknown_stop_count": float(sequence_count - known),
+    }
+    if sequence_count:
+        metrics["stop_reason_coverage"] = known / sequence_count
+        if known == sequence_count:
+            metrics["length_stop_fraction"] = length_stops / sequence_count
+    return {f"consumed/{name}": value for name, value in metrics.items()}
 
 
 def async_step_metrics(

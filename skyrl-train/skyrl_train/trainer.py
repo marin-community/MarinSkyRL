@@ -108,7 +108,7 @@ from skyrl_train.telemetry import (
     record_consumed_work,
     record_event,
 )
-from skyrl_train.rollout_observability import observe_rollout_call
+from skyrl_train.rollout_observability import consumed_stop_metrics, observe_rollout_call
 from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
@@ -549,6 +549,7 @@ class RayPPOTrainer:
         duration_seconds: float,
     ) -> None:
         if self._training_metrics_enabled:
+            self.all_metrics.update(training_input.metadata["consumed_stop_metrics"])
             record_consumed_work(
                 sequences=len(training_input["sequences"]),
                 response_tokens=int(training_input["response_mask"].sum().item()),
@@ -1340,6 +1341,10 @@ class RayPPOTrainer:
         if loop_advantages_tensor is not None:
             training_input["loop_advantages"] = loop_advantages_tensor
         training_input.metadata = {"uids": uids}
+        if self._training_metrics_enabled:
+            training_input.metadata["consumed_stop_metrics"] = consumed_stop_metrics(
+                trajectory_batch.get("stop_reasons"), len(response_ids)
+            )
         # For RLOO-N: pass through exclude_from_baseline flags if present
         if trajectory_batch.get("exclude_from_baseline") is not None:
             training_input.metadata["exclude_from_baseline"] = np.array(
