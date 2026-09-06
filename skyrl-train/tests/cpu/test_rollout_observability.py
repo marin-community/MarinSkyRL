@@ -496,6 +496,8 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
         training_telemetry.record_training_metrics(
             {
                 **rollout.consumed_stop_metrics(["length", "stop", "length", "stop"], 4),
+                "tis/batch_skipped_no_logprobs": 1.0,
+                "tis/skipped_fraction": 0.25,
                 "unselected/value": 99.0,
             },
             step=2,
@@ -520,20 +522,22 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
     assert len(root_spans) == 3
     assert all("parent" not in row["attributes"] for row in root_spans)
     assert any(row["name"] == "rollout_group_outcome" and row["body"]["call_id"] == "group-1" for row in delivered)
-    consumed = [row for row in delivered if row["name"] == "training_metric_value"]
-    assert {row["attributes"]["metric"]: row["value"] for row in consumed} == {
+    metrics = [row for row in delivered if row["name"] == "training_metric_value"]
+    assert {row["attributes"]["metric"]: row["value"] for row in metrics} == {
         "consumed/sequences": 4,
         "consumed/length_stop_count": 2,
         "consumed/known_stop_count": 4,
         "consumed/unknown_stop_count": 0,
         "consumed/stop_reason_coverage": 1,
         "consumed/length_stop_fraction": 0.5,
+        "tis/batch_skipped_no_logprobs": 1.0,
+        "tis/skipped_fraction": 0.25,
     }
     assert all(
         row["attributes"]["step"] == "2"
         and row["attributes"]["phase"] == "train"
         and row["attributes"]["role"] == "trainer"
-        for row in consumed
+        for row in metrics
     )
     terminal = next(row for row in delivered if row["name"] == "terminal")
     assert terminal["body"]["status"] == "completed"
