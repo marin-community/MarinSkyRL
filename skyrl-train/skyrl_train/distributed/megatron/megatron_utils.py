@@ -111,12 +111,7 @@ def freeze_moe_router(model):
 def offload_megatron_grads_to_cpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
-                    if buffer.grad_data.storage().size() > 0:
-                        buffer.grad_data_size = buffer.grad_data.storage().size()
-                        buffer.grad_data.storage().resize_(0)
+            model_chunk.offload_grad_buffers()
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
@@ -130,11 +125,10 @@ def offload_megatron_grads_to_cpu(models):
 def load_megatron_grads_to_gpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
-                    buffer.grad_data.storage().resize_(buffer.grad_data_size)
-                    buffer.grad_data.zero_()
+            # Native restore is a no-op when gradients are already resident. The
+            # saved size starts at zero, so resizing unconditionally frees live
+            # storage while its nonempty tensor views still exist.
+            model_chunk.restore_grad_buffers()
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():

@@ -9,6 +9,12 @@ from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 
 
 class AsyncPPOExp(BasePPOExp):
+    def __init__(self, cfg: DictConfig):
+        # Reject before BasePPOExp creates tokenizer, datasets, or placement groups.
+        if cfg.trainer.offload_optimizer_during_rollouts:
+            raise ValueError("Fully async training requires trainer.offload_optimizer_during_rollouts=false")
+        super().__init__(cfg)
+
     def get_trainer(
         self,
         cfg,

@@ -9,6 +9,11 @@ import hydra
 from omegaconf import DictConfig
 import torch
 import asyncio
+from copy import deepcopy
+from datetime import timedelta
+from megatron.core import parallel_state
+from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
+from megatron.core.transformer.transformer_config import TransformerConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from omegaconf import OmegaConf
 from tests.gpu.utils import (
@@ -27,6 +32,10 @@ from skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.policy_losses import POLICY_CLIP_METRIC_KEYS
+from skyrl_train.distributed.megatron.megatron_utils import (
+    load_megatron_grads_to_gpu,
+    offload_megatron_grads_to_cpu,
+)
 
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -34,6 +43,70 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
+
+
+def test_megatron_gradient_restore_preserves_resident_and_reallocated_gradients(tmp_path):
+    """One GPU, no model download: restore is safe before offload and across repeated cycles."""
+    torch.cuda.set_device(0)
+    torch.distributed.init_process_group(
+        backend="nccl",
+        init_method=(tmp_path / "gradient-rendezvous").as_uri(),
+        rank=0,
+        world_size=1,
+        timeout=timedelta(seconds=60),
+    )
+    try:
+        parallel_state.initialize_model_parallel()
+        module = torch.nn.Sequential(
+            torch.nn.Linear(4, 4, bias=False),
+            torch.nn.Linear(4, 2, bias=False),
+        ).to(device="cuda", dtype=torch.bfloat16)
+        # Exercise both the dense and expert buffer collections without requiring
+        # a multi-GPU MoE model; world-size-one expert reduction is still real DDP.
+        module[1].weight.allreduce = False
+        reference = deepcopy(module)
+        model = DistributedDataParallel(
+            config=TransformerConfig(
+                num_layers=1,
+                hidden_size=4,
+                num_attention_heads=1,
+                bf16=True,
+                params_dtype=torch.bfloat16,
+                gradient_accumulation_fusion=False,
+            ),
+            ddp_config=DistributedDataParallelConfig(
+                use_distributed_optimizer=True,
+                grad_reduce_in_fp32=True,
+            ),
+            module=module,
+        )
+        inputs = torch.arange(8, device="cuda", dtype=torch.bfloat16).reshape(2, 4) / 8
+        reference(inputs).float().sum().backward()
+
+        # The first call precedes any offload, exactly the failed Snowball path.
+        load_megatron_grads_to_gpu([model])
+        for _ in range(3):
+            model.zero_grad_buffer()
+            model(inputs).float().sum().backward()
+            model.finish_grad_sync()
+            for actual, expected in zip(module.parameters(), reference.parameters(), strict=True):
+                torch.testing.assert_close(actual.main_grad, expected.grad.float(), rtol=0, atol=0)
+
+            # A second restore must preserve gradients that have already been
+            # computed, rather than zeroing or freeing their underlying storage.
+            load_megatron_grads_to_gpu([model])
+            for actual, expected in zip(module.parameters(), reference.parameters(), strict=True):
+                torch.testing.assert_close(actual.main_grad, expected.grad.float(), rtol=0, atol=0)
+
+            offload_megatron_grads_to_cpu([model])
+            offload_megatron_grads_to_cpu([model])
+            load_megatron_grads_to_gpu([model])
+            load_megatron_grads_to_gpu([model])
+            for parameter in module.parameters():
+                torch.testing.assert_close(parameter.main_grad, torch.zeros_like(parameter.main_grad), rtol=0, atol=0)
+    finally:
+        parallel_state.destroy_model_parallel()
+        torch.distributed.destroy_process_group()
 
 
 def get_test_actor_config(model_name=MODEL_NAME) -> DictConfig:

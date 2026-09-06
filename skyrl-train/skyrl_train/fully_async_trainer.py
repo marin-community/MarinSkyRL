@@ -450,6 +450,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Extract cfg before base init so we can initialize async-specific knobs used by our overrides.
         cfg = kwargs.get("cfg", args[0] if len(args) > 0 else None)
         assert cfg is not None, "cfg must be provided to FullyAsyncRayPPOTrainer"
+        if cfg.trainer.offload_optimizer_during_rollouts:
+            raise ValueError("Fully async training requires trainer.offload_optimizer_during_rollouts=false")
         self._async_observations_enabled = bool(cfg.trainer.get("async_spans", False))
         self._published_policy_version = 0
 

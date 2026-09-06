@@ -10,6 +10,9 @@ import asyncio
 import collections
 
 import pytest
+from omegaconf import OmegaConf
+
+from skyrl_train.entrypoints.fully_async import AsyncPPOExp
 
 from skyrl_train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
@@ -146,3 +149,12 @@ async def test_get_admitted_batch_returns_complete_group_set():
 
     batch = await trainer._get_admitted_generation_group_mini_batch(queues)
     assert len(batch) == 2
+
+
+@pytest.mark.parametrize("constructor", [AsyncPPOExp, FullyAsyncRayPPOTrainer])
+def test_async_rejects_optimizer_offload_before_initializing_resources(constructor):
+    # This setting restored never-offloaded Megatron buffers and crashed update 1.
+    # Other model/data fields are deliberately absent: rejection must precede setup.
+    cfg = OmegaConf.create({"trainer": {"offload_optimizer_during_rollouts": True}})
+    with pytest.raises(ValueError, match="offload_optimizer_during_rollouts=false"):
+        constructor(cfg=cfg)
