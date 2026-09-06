@@ -1,3 +1,4 @@
+import re
 import torch
 from skyrl_train.utils.progress import tqdm
 from typing import Any, Dict, List, Protocol
@@ -166,6 +167,13 @@ def _calculate_eval_metrics(
     return metrics
 
 
+def _validate_dump_namespace(dump_namespace: str | None) -> None:
+    if dump_namespace is not None and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", dump_namespace) is None:
+        raise ValueError(
+            "dump_namespace must be a safe path component of 1–128 characters starting with an alphanumeric"
+        )
+
+
 def _dump_eval_results(
     cfg: DictConfig,
     global_step: int | None,
@@ -173,7 +181,9 @@ def _dump_eval_results(
     rollouts: _EvaluationRollouts,
     data_sources: List[str | None],
     metrics: Dict[str, float],
+    dump_namespace: str | None = None,
 ) -> None:
+    _validate_dump_namespace(dump_namespace)
     if not cfg.trainer.dump_eval_results:
         return
     with Timer("dump_eval_results"):
@@ -182,6 +192,8 @@ def _dump_eval_results(
             "dumped_evals",
             "eval_only" if global_step is None else f"global_step_{global_step}_evals",
         )
+        if dump_namespace is not None:
+            data_save_dir = join_resource_path(data_save_dir, dump_namespace)
         dump_per_dataset_eval_results(
             data_save_dir,
             tokenizer,
@@ -190,6 +202,7 @@ def _dump_eval_results(
             rollouts.env_classes,
             rollouts.env_extras,
             metrics,
+            rollouts.uids,
         )
 
 
@@ -202,6 +215,7 @@ async def evaluate(
     tokenizer: AutoTokenizer,
     val_set_name: str | None = None,
     trajectory_sink: TrajectorySink | None = None,
+    dump_namespace: str | None = None,
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories.
 
@@ -215,10 +229,13 @@ async def evaluate(
         val_set_name (str | None): optional name of the validation set being evaluated,
             used for unique orchestrator naming
         trajectory_sink (TrajectorySink | None): trainer-owned retention sink; a standalone evaluation builds one from cfg
+        dump_namespace (str | None): optional single directory component beneath the step's dump path.
+            Use a distinct value for each repeated evaluation pass to preserve every dump.
 
     Returns:
         Dict[str, float]: evaluation metrics
     """
+    _validate_dump_namespace(dump_namespace)
     owns_sink = trajectory_sink is None
     active_sink = trajectory_sink or make_trajectory_sink(cfg.generator, tokenizer)
     try:
@@ -242,7 +259,7 @@ async def evaluate(
             concat_data_sources,
             cfg.generator.eval_n_samples_per_prompt,
         )
-        _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics)
+        _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics, dump_namespace)
 
         return eval_metrics
     finally:
@@ -259,6 +276,7 @@ async def evaluate_step_wise(
     tokenizer: AutoTokenizer,
     trajectory_sink: TrajectorySink,
     val_set_name: str | None = None,
+    dump_namespace: str | None = None,
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories for step-wise training.
 
@@ -274,10 +292,12 @@ async def evaluate_step_wise(
         val_set_name (str | None): optional name of the validation set being evaluated,
             used for unique orchestrator naming
         trajectory_sink (TrajectorySink): trainer-owned retention sink
+        dump_namespace (str | None): optional single directory component beneath the step's dump path
 
     Returns:
         Dict[str, float]: evaluation metrics
     """
+    _validate_dump_namespace(dump_namespace)
     accumulator = _StepWiseAccumulator([], [], [])
     rollouts = await _collect_evaluation_rollouts(
         eval_dataloader, trajectory_runner, cfg, global_step, trajectory_sink, val_set_name, accumulator
@@ -307,6 +327,6 @@ async def evaluate_step_wise(
         data_sources_last_step,
         cfg.generator.eval_n_samples_per_prompt,
     )
-    _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics)
+    _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics, dump_namespace)
 
     return eval_metrics

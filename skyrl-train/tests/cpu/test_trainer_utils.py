@@ -29,6 +29,7 @@ import re
 
 from unittest.mock import Mock, patch
 import json
+import hashlib
 from tests.cpu.util import example_dummy_config
 
 BasicType = Union[int, float, str, bool, type(None)]
@@ -294,12 +295,27 @@ def test_dump_per_dataset_eval_results_preserves_rows_and_unknown_source(tmp_pat
     eval_metrics = {"eval/dataset1/avg_score": 0.8, "eval/unknown/avg_score": 0.6}
 
     dump_per_dataset_eval_results(
-        str(tmp_path), mock_tokenizer, trajectory_batches, data_sources, all_envs, env_extras, eval_metrics
+        str(tmp_path),
+        mock_tokenizer,
+        trajectory_batches,
+        data_sources,
+        all_envs,
+        env_extras,
+        eval_metrics,
+        ["uid-c", "uid-a", "uid-b"],
     )
     for source, indices in (("dataset1", [0, 2]), ("unknown", [1])):
         rows = [json.loads(line) for line in (tmp_path / f"{source}.jsonl").read_text().splitlines()]
         assert rows == [
             {
+                "uid": ["uid-c", "uid-a", "uid-b"][i],
+                "row_ordinal": i,
+                "token_provenance": "finalized_trajectory",
+                "prompt_token_ids": trajectory_batches["prompt_token_ids"][i],
+                "response_ids": trajectory_batches["response_ids"][i],
+                "prompt_token_ids_sha256": hashlib.sha256([b"[1,2]", b"[3,4]", b"[5,6]"][i]).hexdigest(),
+                "response_ids_sha256": hashlib.sha256([b"[10,11]", b"[12,13]", b"[14,15]"][i]).hexdigest(),
+                "response_length": 2,
                 "input_prompt": f"decoded_{trajectory_batches['prompt_token_ids'][i]}",
                 "output_response": f"decoded_{trajectory_batches['response_ids'][i]}",
                 "score": trajectory_batches["rewards"][i],

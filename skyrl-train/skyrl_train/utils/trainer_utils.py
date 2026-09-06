@@ -9,6 +9,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import os
 from loguru import logger
 import json
+import hashlib
 import torch
 import numpy as np
 from collections import defaultdict
@@ -212,6 +213,11 @@ def calculate_per_dataset_metrics(
     return eval_metrics
 
 
+def _token_ids_sha256(token_ids: List[int]) -> str:
+    """Hash the ordered integer array encoded as compact ASCII JSON (no spaces)."""
+    return hashlib.sha256(json.dumps(token_ids, separators=(",", ":")).encode("ascii")).hexdigest()
+
+
 def dump_per_dataset_eval_results(
     dump_dir_path: str,
     tokenizer: AutoTokenizer,
@@ -220,8 +226,15 @@ def dump_per_dataset_eval_results(
     concat_all_envs: List[str],
     concat_env_extras: List[Dict[str, Any]],
     eval_metrics: Dict[str, float],
+    uids: List[str],
 ):
-    """Dump evaluation results per dataset and overall aggregated results."""
+    """Dump rows with finalized trajectory tokens and the original evaluation order.
+
+    These tokens may include runner-appended EOS; they are not raw engine outputs.
+    Token hashes use SHA-256 over compact ASCII JSON arrays, preserving token order.
+    """
+    if len(uids) != len(trajectory_batch["response_ids"]):
+        raise ValueError("evaluation dump UIDs must align with trajectory rows")
     io.makedirs(dump_dir_path, exist_ok=True)
 
     # Prepare common data
@@ -245,6 +258,14 @@ def dump_per_dataset_eval_results(
         with io.open_file(filename, "w") as f:
             for i in indices:
                 entry = {
+                    "uid": uids[i],
+                    "row_ordinal": i,
+                    "token_provenance": "finalized_trajectory",
+                    "prompt_token_ids": trajectory_batch["prompt_token_ids"][i],
+                    "response_ids": trajectory_batch["response_ids"][i],
+                    "prompt_token_ids_sha256": _token_ids_sha256(trajectory_batch["prompt_token_ids"][i]),
+                    "response_ids_sha256": _token_ids_sha256(trajectory_batch["response_ids"][i]),
+                    "response_length": len(trajectory_batch["response_ids"][i]),
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
                     "score": trajectory_batch["rewards"][i],
