@@ -7,6 +7,7 @@ from omegaconf import OmegaConf
 
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.learner_memory import LearnerMemory
 from skyrl_train.workers import worker as worker_module
 from skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase
 from skyrl_train.workers.worker import DistributedTorchRayActor, PolicyWorkerBase, Worker
@@ -181,7 +182,9 @@ def test_decentralized_router_replay_training_enters_barrier_before_training(mon
     worker._rank = 0
     worker._world_size = 2
     worker.cfg = OmegaConf.create({"generator": {"r3_transport": "decentral"}})
+    worker._memory = LearnerMemory(enabled=False, rank=0)
     training_input = TrainingInputBatch({"rollout_routed_experts": torch.zeros((1, 1, 1, 1), dtype=torch.int16)})
+    training_input.metadata = {"global_step": 0}
 
     with pytest.raises(EntryBarrierReached):
         worker.ppo_train(training_input)

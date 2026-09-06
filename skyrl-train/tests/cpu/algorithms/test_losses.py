@@ -882,3 +882,41 @@ def test_tis_graceful_degrade_on_none_logprobs():
         rollout_logprobs=rollout_logprobs,
     )
     assert not torch.allclose(loss_tis, loss_off), "TIS ratio should be applied when rollout_logprobs is present"
+
+
+@pytest.mark.parametrize(
+    "objective,use_tis,token_losses,token_gradients,clip_fraction",
+    [
+        ("regular", False, [-1, -1, -1, -1, 1, 1, 1, 1], [-1, -1, -1, -1, 1, 1, 1, 1], 0),
+        ("regular", True, [-0.5, -1, -1.5, -2, 0.5, 1, 1.5, 2], [-0.5, -1, -1.5, -2, 0.5, 1, 1.5, 2], 0),
+        ("behavior_clip", False, [-0.5, -1, -1.2, -1.2, 0.8, 1, 1.5, 3], [-0.5, -1, 0, 0, 0, 1, 1.5, 0], 3 / 8),
+    ],
+)
+@pytest.mark.parametrize("masked_tail", [False, True])
+def test_one_update_objectives_have_distinct_analytic_gradients(
+    objective, use_tis, token_losses, token_gradients, clip_fraction, masked_tail
+):
+    # One update: current == proximal old, but behavior ratios span 0.5 to 4.
+    # Hand-derived rows cover both advantage signs, PPO clipping and the dual cap.
+    current = torch.full((2, 4), -4.0, dtype=torch.float64, requires_grad=True)
+    old = current.detach().clone()
+    behavior = old - torch.tensor([[0.5, 1, 1.5, 4]] * 2, dtype=torch.float64).log()
+    advantage = torch.tensor([[1.0] * 4, [-1.0] * 4], dtype=torch.float64)
+    mask = torch.ones_like(old)
+    if masked_tail:
+        mask[:, -1] = 0
+    config = _clipping_config(objective, eps_clip_low=0.2, eps_clip_high=0.2)
+    config.update(loss_reduction="token_mean", use_tis=use_tis, tis_imp_ratio_cap=2.0)
+    loss, metrics = PolicyLossRegistry.get(objective)(
+        current, old, advantage, config, loss_mask=mask, rollout_logprobs=behavior
+    )
+    loss.backward()
+    expected_tokens = torch.tensor(token_losses, dtype=torch.float64).reshape(2, 4)
+    expected_gradient = torch.tensor(token_gradients, dtype=torch.float64).reshape(2, 4)
+    torch.testing.assert_close(loss, (expected_tokens * mask).sum() / mask.sum(), atol=1e-7, rtol=1e-7)
+    torch.testing.assert_close(current.grad, expected_gradient * mask / mask.sum(), atol=1e-7, rtol=1e-7)
+    expected_clip = (2 / 6 if masked_tail else clip_fraction) if objective == "behavior_clip" else 0
+    assert metrics["ppo_clip_ratio"] == pytest.approx(expected_clip)
+    if objective == "regular":
+        assert metrics["ppo_ratio_exact_unit_fraction"] == 1
+        assert current.grad.abs().sum() > 0  # Unit ratios do not imply zero gradients.

@@ -2,13 +2,19 @@
 
 import asyncio
 from dataclasses import dataclass
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
+import torch
+from omegaconf import OmegaConf
 from rigging.telemetry import serialization
 
 from skyrl_train import learner_memory
 from skyrl_train import telemetry as training_telemetry
+from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.weight_sync import WeightChunk
+from skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase
 
 
 @dataclass
@@ -59,6 +65,9 @@ class FakeCuda:
         assert device == 2
         # Other processes and CUDA allocations account for device usage too.
         return 2000, 4096
+
+    def empty_cache(self):
+        pass
 
 
 @pytest.fixture
@@ -155,11 +164,49 @@ def test_overlapping_collectors_and_snapshots_do_not_destroy_enclosing_peak(obse
         inner.snapshot("model_ready")
         with inner.span("learner_logprob_forward", step=4, step_kind="target_update"):
             cuda.use_memory(200, 300)
-    assert events[-1]["body"]["peak_allocated_bytes"] == 800
+    assert "peak_allocated_bytes" not in events[-1]["body"]
+    assert "peak_reserved_bytes" not in events[-1]["body"]
+    assert events[-1]["attributes"]["scope_overlap"] == "true"
     assert [row["attributes"]["boundary"] for row in events] == ["enter", "snapshot", "exit"]
     with inner.span("weight_publication", step=4, step_kind="completed_update"):
         cuda.use_memory(300, 350)
     assert events[-1]["body"]["peak_allocated_bytes"] == 300
+
+
+def test_overlap_holds_reset_ownership_until_the_last_concurrent_scope_exits(observations):
+    cuda, events = observations
+    outer = learner_memory.LearnerMemory(enabled=True, rank=3, backend="fsdp2")
+    inner = learner_memory.LearnerMemory(enabled=True, rank=3, backend="fsdp2")
+    entered, release = Event(), Event()
+
+    def concurrent_forward():
+        with inner.span("learner_logprob_forward", step=4, step_kind="target_update"):
+            cuda.use_memory(900, 950)
+            entered.set()
+            assert release.wait(timeout=10)
+
+    with outer.span("weight_publication", step=3, step_kind="completed_update"):
+        thread = Thread(target=concurrent_forward)
+        thread.start()
+        assert entered.wait(timeout=10)
+    try:
+        # The publication owner is gone, but its competing forward still runs.
+        # A third phase cannot reset that forward's allocator interval.
+        with outer.span("ppo_forward_backward_update", step=4, step_kind="target_update"):
+            cuda.use_memory(100, 160)
+        assert [row["attributes"]["boundary"] for row in events] == ["enter", "exit"]
+        assert events[-1]["attributes"]["scope_overlap"] == "true"
+        assert "peak_allocated_bytes" not in events[-1]["body"]
+        assert cuda.peak_allocated == 900
+    finally:
+        release.set()
+        thread.join(timeout=10)
+    assert not thread.is_alive()
+    with outer.span("ppo_forward_backward_update", step=5, step_kind="target_update"):
+        cuda.use_memory(300, 350)
+    assert events[-1]["body"]["peak_allocated_bytes"] == 300
+    assert "scope_overlap" not in events[-1]["attributes"]
+    assert all(row["attributes"]["backend"] == "fsdp2" for row in events)
 
 
 @pytest.mark.parametrize(
@@ -237,3 +284,119 @@ def test_unsupported_allocator_omits_misleading_peak_statistics(observations):
         trained.append(True)
     assert trained == [True]
     assert events == []
+
+
+@pytest.mark.parametrize("fail_publication", [False, True])
+def test_fsdp_ppo_and_publication_measure_extraction_peak_and_keep_update_identity(
+    observations, monkeypatch, fail_publication
+):
+    cuda, events = observations
+    sent = []
+    publication_error = RuntimeError("receiver rejected update")
+
+    class CpuPolicy(FSDPPolicyWorkerBase):
+        # Replace only the CUDA compute boundary; exercise the real PPO loop,
+        # accumulation, status aggregation and FSDP publication path below.
+        def training_step(self, experience, global_step, local_step, accumulation_steps):
+            cuda.use_memory(600, 700)
+            if (local_step + 1) % accumulation_steps == 0:
+                self.model.model.add_(1)
+            cuda.use_memory(150, 200)
+            return {"policy_loss": 0.5, "response_length": 1, "policy_lr": 1e-6, "policy_entropy": 0.0}
+
+    worker = object.__new__(CpuPolicy)
+    worker.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "strategy": "fsdp2",
+                "micro_train_batch_size_per_gpu": 1,
+                "update_epochs_per_batch": 1,
+                "algorithm": {},
+                "policy": {"grug_query_bias_update_mode": "frozen", "optimizer_config": {"max_grad_norm": 1.0}},
+            },
+            "generator": {
+                "r3_transport": "driver",
+                "enable_prefix_caching": False,
+                "model_dtype": "float32",
+                "fuse_weights": False,
+            },
+        }
+    )
+    worker._rank = 0
+    worker._is_lora = False
+    worker._completed_update = None
+    worker._memory = learner_memory.LearnerMemory(enabled=True, rank=0, backend="fsdp2")
+    worker.policy_mini_batch_size_per_gpu = 2
+    worker.model = SimpleNamespace(model=torch.ones(3))
+    worker.strategy = SimpleNamespace(is_rank_0=lambda: False, all_reduce=lambda status: status)
+    worker.use_cuda_ipc = False
+    worker._model_update_group = object()
+
+    class Extractor:
+        def extract_weights(self, dtype):
+            # Gathering/conversion peaks before the communicator sees a tensor.
+            cuda.use_memory(900, 1000)
+            tensor = worker.model.model.to(dtype).clone()
+            yield WeightChunk(names=["weight"], dtypes=["float32"], shapes=[list(tensor.shape)], tensors=[tensor])
+            cuda.use_memory(150, 200)
+
+    class Receiver:
+        async def begin_weight_reload(self):
+            pass
+
+        async def update_named_weights(self, request):
+            assert request["names"] == ["weight"]
+            if fail_publication:
+                raise publication_error
+
+        async def finish_weight_reload(self):
+            pass
+
+    def broadcast(tensor, src, group):
+        assert src == 0 and group is worker._model_update_group
+        sent.append(tensor.clone())
+        cuda.use_memory(400, 500)
+
+    worker.weight_extractor = Extractor()
+    monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.ones(2, 2, dtype=torch.long),
+            "attention_mask": torch.ones(2, 2),
+            **{
+                key: torch.ones(2, 1)
+                for key in (
+                    "action_log_probs",
+                    "base_action_log_probs",
+                    "values",
+                    "returns",
+                    "advantages",
+                    "loss_mask",
+                    "response_mask",
+                )
+            },
+            "rollout_logprobs": None,
+        }
+    )
+    batch.metadata = {"global_step": 7, "response_length": 1}
+    result = worker.ppo_train(batch)
+    assert result.metadata["train_status"]["policy_update_steps"] == 1
+    if fail_publication:
+        with pytest.raises(RuntimeError) as caught:
+            asyncio.run(worker.broadcast_to_inference_engines(Receiver()))
+        assert caught.value is publication_error
+    else:
+        asyncio.run(worker.broadcast_to_inference_engines(Receiver()))
+    torch.testing.assert_close(sent[0], torch.full((3,), 2.0), rtol=0, atol=0)
+    ppo_enter, ppo_exit, publication_enter, publication_exit = events
+    assert ppo_enter["attributes"]["step_kind"] == "target_update"
+    assert ppo_exit["body"]["peak_allocated_bytes"] == 600
+    assert ppo_exit["body"]["allocated_bytes"] == publication_enter["body"]["allocated_bytes"] == 150
+    assert publication_exit["attributes"]["phase"] == "weight_publication"
+    assert publication_exit["attributes"]["step_kind"] == "completed_update"
+    assert publication_exit["attributes"]["step"] == "7"
+    assert publication_exit["attributes"]["outcome"] == ("failure" if fail_publication else "success")
+    assert publication_exit["body"]["peak_allocated_bytes"] == 900
+    assert all(row["attributes"]["backend"] == "fsdp2" for row in events)

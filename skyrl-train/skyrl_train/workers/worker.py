@@ -31,6 +31,7 @@ from skyrl_train.config.query_bias import (
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
 from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from skyrl_train.io import io
+from skyrl_train.learner_memory import LearnerMemory
 from skyrl_train.utils.numa import physical_gpu_id_for_worker, set_numa_affinity_for_gpu
 from skyrl_train.utils.policy_math import masked_mean
 from skyrl_train.distributed.dispatch import ActorInfo, Dispatch, DispatchRegistry, DispatchSettings, MeshRank
@@ -965,6 +966,14 @@ class PolicyWorkerBase(Worker):
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         self._grug_query_bias_window: GrugQueryBiasWindow | None = None
+        self._memory = LearnerMemory(
+            enabled=bool(self.cfg.trainer.get("policy_train_spans", False)),
+            rank=self._rank,
+            backend=str(self.cfg.trainer.get("strategy", "unknown")),
+        )
+        # A restored checkpoint has no known publication version until an
+        # update with explicit metadata successfully completes on this worker.
+        self._completed_update: int | None = None
 
     def _normalize_mini_batch_size(self):
         """
@@ -986,6 +995,13 @@ class PolicyWorkerBase(Worker):
         return causal_lm if isinstance(causal_lm, GrugMoeForCausalLM) else None
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
+        step = int(train_data.metadata["global_step"])
+        with self._memory.span("ppo_forward_backward_update", step=step, step_kind="target_update"):
+            output = self._ppo_train_impl(train_data)
+        self._completed_update = step
+        return output
+
+    def _ppo_train_impl(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         # ── Co-arrival drain before the first training FSDP unshard (80B gs1 SIGABRT #1-6) ──
         # Under fully_async + SKYRL_R3_DECENTRAL, `ppo_train` is dispatched STAGGERED
         # per-dp-group: MeshDispatch relocates each dp-group's multi-GB `rollout_routed_experts`
