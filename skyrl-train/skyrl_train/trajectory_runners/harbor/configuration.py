@@ -25,6 +25,7 @@ Agent name is now read from the harbor config section (defaults to "terminus-2")
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Set
 
@@ -873,6 +874,7 @@ class HarborConfigBuilder:
         api_base: str,
         session_id: str,
         timeout_override_sec: Optional[int] = None,
+        sampling_params: Optional[Mapping[str, Any]] = None,
     ) -> TrialConfig:
         """
         Build a complete TrialConfig for a Harbor trial.
@@ -886,6 +888,7 @@ class HarborConfigBuilder:
             timeout_override_sec: Optional timeout override in seconds.
                 If provided, overrides the default override_timeout_sec from config.
                 Useful for eval runs that may need different timeouts.
+            sampling_params: Trainer sampling defaults; explicit Harbor agent kwargs take precedence.
 
         Returns:
             Configured TrialConfig ready for Trial execution.
@@ -905,6 +908,20 @@ class HarborConfigBuilder:
                 "model_info": self._model_info,
             }
         )
+
+        if sampling_params is not None:
+            if sampling_params.get("temperature") is not None:
+                agent_kwargs.setdefault("temperature", float(sampling_params["temperature"]))
+            call_kwargs = dict(agent_kwargs.get("llm_call_kwargs") or {})
+            if sampling_params.get("top_p") is not None:
+                call_kwargs.setdefault("top_p", float(sampling_params["top_p"]))
+            if sampling_params.get("top_k") is not None:
+                # Terminus merges agent-level extra_body over this nested body.
+                extra_body = dict(call_kwargs.get("extra_body") or {})
+                extra_body.setdefault("top_k", int(sampling_params["top_k"]))
+                call_kwargs["extra_body"] = extra_body
+            if call_kwargs:
+                agent_kwargs["llm_call_kwargs"] = call_kwargs
 
         # Inject PRM turn_callback if configured
         if self._turn_callback is not None:

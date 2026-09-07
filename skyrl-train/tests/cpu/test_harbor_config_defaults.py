@@ -107,13 +107,14 @@ def test_agent_timeout_resolution_supports_nested_and_legacy_layouts(cfg):
     assert HarborConfigBuilder(OmegaConf.create(cfg)).get_agent_timeout_seconds() == 123
 
 
-def _trial_config(harbor_cfg: dict):
+def _trial_config(harbor_cfg: dict, sampling_params=None):
     return HarborConfigBuilder(OmegaConf.create({"harbor": harbor_cfg})).build_trial_config(
         task_path="/tmp/task",
         trials_dir="/tmp/trials",
         model_name="hosted_vllm/model",
         api_base="http://localhost:8000/v1",
         session_id="session",
+        sampling_params=sampling_params,
     )
 
 
@@ -133,3 +134,31 @@ def test_daytona_ttl_reaches_harbor_environment_config():
 
     assert trial_config.environment.kwargs["ttl_minutes"] == 90
     assert "ttl_minutes" in get_exposed_harbor_fields()["environment"]
+
+
+@pytest.mark.parametrize("temperature,top_p,top_k", [(0.7, 0.82, 17), (0.0, 1.0, -1)])
+def test_trainer_sampling_settings_reach_trial_agent(temperature, top_p, top_k):
+    kwargs = _trial_config({}, dict(temperature=temperature, top_p=top_p, top_k=top_k)).agent.kwargs
+
+    assert kwargs["temperature"] == temperature
+    assert kwargs["llm_call_kwargs"] == {"top_p": top_p, "extra_body": {"top_k": top_k}}
+
+
+@pytest.mark.parametrize("sampling_params", [None, {}, {"temperature": None, "top_p": None, "top_k": None}])
+def test_omitted_sampling_settings_preserve_agent_defaults(sampling_params):
+    kwargs = _trial_config({}, sampling_params).agent.kwargs
+
+    assert "temperature" not in kwargs
+    assert "llm_call_kwargs" not in kwargs
+
+
+def test_explicit_agent_sampling_overrides_preserve_nested_kwargs():
+    harbor_cfg = {
+        "llm_call_kwargs": {"temperature": 0.0, "top_p": 0.9, "extra_body": {"top_k": 5, "min_p": 0.1}},
+        "extra_body": {"top_k": 7, "chat_template_kwargs": {"enable_thinking": True}},
+    }
+    kwargs = _trial_config(harbor_cfg, {"temperature": 0.7, "top_p": 0.82, "top_k": 17}).agent.kwargs
+
+    assert kwargs["temperature"] == 0.7
+    assert kwargs["llm_call_kwargs"] == harbor_cfg["llm_call_kwargs"]
+    assert kwargs["extra_body"] == harbor_cfg["extra_body"]

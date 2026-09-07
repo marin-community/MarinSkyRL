@@ -114,6 +114,7 @@ class MockStreamingBackend:
     model_name = "test-model"
 
     def __init__(self, chunks=None, non_stream_response=None):
+        self.received_request = None
         self._chunks = chunks or [
             # First chunk: role + prompt_token_ids (vLLM shape)
             'data: {"id":"c1","model":"test-model","object":"chat.completion.chunk",'
@@ -133,9 +134,11 @@ class MockStreamingBackend:
         }
 
     async def chat_completion(self, request_payload):
+        self.received_request = request_payload["json"]
         return self._non_stream_response
 
     async def chat_completion_stream(self, request_payload):
+        self.received_request = request_payload["json"]
         # Apply the same enrichment the real vLLM engine applies per-chunk
         for chunk in self._chunks:
             yield ensure_token_ids_in_sse_chunk(chunk)
@@ -430,3 +433,20 @@ class TestSafeSSEStream:
         )
         body = resp.text
         assert body.count("[DONE]") == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_requests_preserve_sampling_settings(app_with_mock_backend, stream):
+    client, backend = app_with_mock_backend
+    payload = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "temperature": 0.7,
+        "top_p": 0.82,
+        "top_k": 17,
+        "stream": stream,
+    }
+    response = client.post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 200
+    assert backend.received_request == payload

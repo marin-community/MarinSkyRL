@@ -994,6 +994,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 api_base=self._agent_api_base,
                 session_id=session_id,
                 timeout_override_sec=timeout_override,
+                sampling_params=self.trajectory_runner_cfg.sampling_params,
             )
             trial_configs.append(trial_config)
             trajectory_ids.append(trajectory_id)
