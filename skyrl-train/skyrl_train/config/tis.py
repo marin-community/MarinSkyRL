@@ -7,6 +7,8 @@ from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
+MIN_NON_GREEDY_TEMPERATURE = 1e-5
+
 TIS_WARNING_KEY = "warn_on_tis_sampling"
 TIS_ENGINE_OPTIONS = {"logprobs_mode": "processed_logprobs", "generation_config": "vllm"}
 
@@ -38,8 +40,8 @@ def warn_if_tis_sampling_mismatch(params: Mapping[str, Any]) -> None:
     """Warn about sampling outside the validated temperature-only TIS recipe."""
     mismatches = []
     temperature = float(params.get("temperature", 1.0))
-    if not math.isfinite(temperature) or temperature < 1e-5:
-        mismatches.append("temperature must be finite and >= 1e-5 for non-greedy sampling")
+    if not math.isfinite(temperature) or temperature < MIN_NON_GREEDY_TEMPERATURE:
+        mismatches.append(f"temperature must be finite and >= {MIN_NON_GREEDY_TEMPERATURE:g} for non-greedy sampling")
     for key, neutral in TIS_NEUTRAL_SAMPLING.items():
         value = params.get(key)
         if value is not None and value != neutral:

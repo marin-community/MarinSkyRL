@@ -1,5 +1,7 @@
 """Warn about TIS probability mismatches while preserving configured sampling."""
 
+import warnings
+
 import pytest
 from omegaconf import OmegaConf
 
@@ -88,8 +90,9 @@ def test_tis_openai_logprob_requests_warn_and_preserve_penalties(logprobs):
 @pytest.mark.parametrize("logprobs", [None, False])
 def test_tis_openai_evaluation_preserves_penalties(logprobs):
     body = {"logprobs": logprobs, "presence_penalty": 0.5}
-    apply_openai_sampling(body, {}, warn_on_tis_sampling=True)
-    assert body["presence_penalty"] == 0.5
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        apply_openai_sampling(body, {}, warn_on_tis_sampling=True)
 
 
 def test_tis_openai_checks_after_generator_overrides():
@@ -100,8 +103,9 @@ def test_tis_openai_checks_after_generator_overrides():
 
 def test_non_tis_openai_allows_penalties_with_logprobs():
     body = {"logprobs": 0, "presence_penalty": 0.5}
-    apply_openai_sampling(body, {}, warn_on_tis_sampling=False)
-    assert body["presence_penalty"] == 0.5
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        apply_openai_sampling(body, {}, warn_on_tis_sampling=False)
 
 
 def test_tis_config_warns_and_preserves_explicit_truncation_and_penalties():

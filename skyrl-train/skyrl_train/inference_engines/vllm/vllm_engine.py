@@ -1079,12 +1079,8 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
                 "Please set `generator.async_engine=true` in your config."
             )
-        # Strip OpenAI-serving-only kwargs (e.g. openai_sampling_params, tool
-        # parser) that the config layer injects for all engines. The sync
-        # vllm.LLM/EngineArgs path does not accept these — only the async
-        # OpenAI server consumes them. Mirror the async engine's pop so the
-        # sync engine (async_engine=false, used by the batched OPD path) does
-        # not pass them through to EngineArgs and raise TypeError.
+        # Remove wrapper options before constructing vLLM EngineArgs. Both sync
+        # and async wrappers consume sampling overrides and the TIS warning flag.
         openai_kwargs = pop_openai_kwargs(kwargs)
         self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
         self._warn_on_tis_sampling = openai_kwargs.pop(TIS_WARNING_KEY, False)
