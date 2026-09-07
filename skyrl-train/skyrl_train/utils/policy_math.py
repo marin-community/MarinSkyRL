@@ -45,7 +45,7 @@ def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: Optiona
     return (tensor * mask).sum(axis=dim) / mask.sum(axis=dim).clamp(min=1.0)
 
 
-def approx_kl(
+def differentiable_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
     loss_mask: Optional[torch.Tensor] = None,
@@ -93,9 +93,9 @@ def compute_approx_kl(
 ) -> torch.Tensor:
     """Compute approximate KL without gradients for metrics and reward shaping.
 
-    Use ``approx_kl`` for a differentiable KL regularization loss.
+    Use ``differentiable_approx_kl`` for a differentiable KL regularization loss.
     """
-    return approx_kl(log_probs, log_probs_base, loss_mask=loss_mask, kl_estimator_type=kl_estimator_type)
+    return differentiable_approx_kl(log_probs, log_probs_base, loss_mask=loss_mask, kl_estimator_type=kl_estimator_type)
 
 
 @torch.no_grad()
