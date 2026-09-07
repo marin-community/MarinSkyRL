@@ -38,16 +38,19 @@ def model_and_engine(tmp_path_factory):
     configure_tis_sampling(generator)
     options = OmegaConf.to_container(generator.engine_init_kwargs)
     pop_openai_kwargs(options)
-    engine = LLM(
-        model=str(path),
-        skip_tokenizer_init=True,
-        dtype="float32",
-        enforce_eager=True,
-        max_model_len=32,
-        gpu_memory_utilization=0.2,
-        **options,
-    )
-    return model, engine
+    # CUDA may already be initialized by the test process; workers must start fresh.
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        engine = LLM(
+            model=str(path),
+            skip_tokenizer_init=True,
+            dtype="float32",
+            enforce_eager=True,
+            max_model_len=32,
+            gpu_memory_utilization=0.2,
+            **options,
+        )
+        yield model, engine
 
 
 @pytest.mark.parametrize("temperature", [0.7, 1.2])
