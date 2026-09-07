@@ -14,7 +14,7 @@ from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
-from skyrl_train.config.tis import validate_tis_sampling
+from skyrl_train.config.tis import TIS_ENFORCEMENT_KEY, validate_tis_sampling
 
 # vLLM 0.16+ reorganized entrypoints into sub-packages.
 # Try new paths first, fall back to old paths for backwards compatibility.
@@ -69,6 +69,7 @@ from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vll
 from skyrl_train.models.grug_moe import is_grug_router_bias
 from skyrl_train.inference_engines.vllm.utils import (
     pop_openai_kwargs,
+    apply_openai_sampling,
     ensure_token_ids_in_sse_chunk,
     PrefixCacheHitRateAccumulator,
 )
@@ -1086,7 +1087,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         # not pass them through to EngineArgs and raise TypeError.
         openai_kwargs = pop_openai_kwargs(kwargs)
         self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
-        self._enforce_tis_sampling = openai_kwargs.pop("enforce_tis_sampling", False)
+        self._enforce_tis_sampling = openai_kwargs.pop(TIS_ENFORCEMENT_KEY, False)
         return vllm.LLM(*args, **kwargs)
 
     async def initialize_worker_numa_affinity(self):
@@ -1509,7 +1510,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         openai_kwargs = pop_openai_kwargs(kwargs)
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
-        self._enforce_tis_sampling = openai_kwargs.pop("enforce_tis_sampling", False)
+        self._enforce_tis_sampling = openai_kwargs.pop(TIS_ENFORCEMENT_KEY, False)
         if self._openai_sampling_params:
             logger.warning(
                 f"OpenAI API sampling params overridden: "
@@ -1972,17 +1973,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Apply configured sampling params from generator config.
         # Harbor requests may include their own sampling params; we override
         # with the SkyRL generator config so rollout exploration is consistent.
-        sp = getattr(self, "_openai_sampling_params", {})
-        body.update(
-            {
-                "temperature": sp.get("temperature", 1.0),
-                "top_p": sp.get("top_p", 1.0),
-                "top_k": sp.get("top_k", -1),
-                "min_p": sp.get("min_p", 0.0),
-            }
-        )
-        if self._enforce_tis_sampling and body.get("logprobs") is not None and body.get("logprobs") is not False:
-            validate_tis_sampling(body)
+        apply_openai_sampling(body, self._openai_sampling_params, self._enforce_tis_sampling)
 
         # 1. Build request
         try:
@@ -2073,17 +2064,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
 
-        sp = getattr(self, "_openai_sampling_params", {})
-        body.update(
-            {
-                "temperature": sp.get("temperature", 1.0),
-                "top_p": sp.get("top_p", 1.0),
-                "top_k": sp.get("top_k", -1),
-                "min_p": sp.get("min_p", 0.0),
-            }
-        )
-        if self._enforce_tis_sampling and body.get("logprobs") is not None and body.get("logprobs") is not False:
-            validate_tis_sampling(body)
+        apply_openai_sampling(body, self._openai_sampling_params, self._enforce_tis_sampling)
         body["stream"] = True
         body["return_token_ids"] = True  # force vLLM to emit per-chunk token_ids
 

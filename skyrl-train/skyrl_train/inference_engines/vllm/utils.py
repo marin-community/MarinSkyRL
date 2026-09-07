@@ -1,6 +1,8 @@
 import json
 from typing import Any, Dict, Protocol
 
+from skyrl_train.config.tis import TIS_ENFORCEMENT_KEY, validate_tis_sampling
+
 
 class PrefixCacheStatsLike(Protocol):
     """The token counters vLLM's `PrefixCacheStats` carries for one scheduler iteration."""
@@ -51,7 +53,7 @@ class PrefixCacheHitRateAccumulator:
 
 def pop_openai_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Normalize & remove OpenAI-serving-only kwargs from engine_kwargs.
+    Remove SkyRL serving options before passing engine_kwargs to vLLM.
     """
     openai_kwargs: Dict[str, Any] = {}
 
@@ -68,8 +70,8 @@ def pop_openai_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     if openai_sampling is not None:
         openai_kwargs["openai_sampling_params"] = openai_sampling
 
-    if "enforce_tis_sampling" in engine_kwargs:
-        openai_kwargs["enforce_tis_sampling"] = engine_kwargs.pop("enforce_tis_sampling")
+    if TIS_ENFORCEMENT_KEY in engine_kwargs:
+        openai_kwargs[TIS_ENFORCEMENT_KEY] = engine_kwargs.pop(TIS_ENFORCEMENT_KEY)
 
     return openai_kwargs
 
@@ -110,3 +112,19 @@ def ensure_token_ids_in_sse_chunk(sse_chunk: str) -> str:
     except (json.JSONDecodeError, IndexError, KeyError):
         pass
     return sse_chunk
+
+
+def apply_openai_sampling(body: Dict[str, Any], sampling_params: Dict[str, Any], enforce_tis_sampling: bool) -> None:
+    """Apply generator sampling overrides and validate TIS logprob requests."""
+    body.update(
+        {
+            "temperature": sampling_params.get("temperature", 1.0),
+            "top_p": sampling_params.get("top_p", 1.0),
+            "top_k": sampling_params.get("top_k", -1),
+            "min_p": sampling_params.get("min_p", 0.0),
+        }
+    )
+    # Completion logprobs=0 requests sampled-token probabilities; False disables chat logprobs.
+    logprobs = body.get("logprobs")
+    if enforce_tis_sampling and logprobs is not None and logprobs is not False:
+        validate_tis_sampling(body)

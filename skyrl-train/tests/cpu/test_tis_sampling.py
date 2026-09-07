@@ -3,9 +3,9 @@
 import pytest
 from omegaconf import OmegaConf
 
-from skyrl_train.config.tis import configure_tis_logprobs, validate_tis_sampling
+from skyrl_train.config.tis import configure_tis_sampling, validate_tis_sampling
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
-from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
+from skyrl_train.inference_engines.vllm.utils import apply_openai_sampling, pop_openai_kwargs
 
 
 @pytest.mark.parametrize("temperature", [0.7, 1.0, 1.2])
@@ -23,7 +23,7 @@ def test_tis_config_reaches_engine_and_sampling_options(temperature):
             "engine_init_kwargs": {},
         }
     )
-    configure_tis_logprobs(generator)
+    configure_tis_sampling(generator)
     sampling = get_vllm_sampling_params(generator.sampling_params)
     options = OmegaConf.to_container(generator.engine_init_kwargs)
     serving = pop_openai_kwargs(options)
@@ -72,4 +72,30 @@ def test_tis_rejects_distributions_the_trainer_does_not_reproduce(settings):
 def test_tis_rejects_conflicting_engine_options(options):
     generator = OmegaConf.create({"sampling_params": {"temperature": 1.2}, "engine_init_kwargs": options})
     with pytest.raises(ValueError, match="TIS"):
-        configure_tis_logprobs(generator)
+        configure_tis_sampling(generator)
+
+
+@pytest.mark.parametrize("logprobs", [0, 1, True])
+def test_tis_openai_logprob_requests_reject_penalties(logprobs):
+    body = {"logprobs": logprobs, "presence_penalty": 0.5}
+    with pytest.raises(ValueError, match="TIS"):
+        apply_openai_sampling(body, {}, enforce_tis_sampling=True)
+
+
+@pytest.mark.parametrize("logprobs", [None, False])
+def test_tis_openai_evaluation_preserves_penalties(logprobs):
+    body = {"logprobs": logprobs, "presence_penalty": 0.5}
+    apply_openai_sampling(body, {}, enforce_tis_sampling=True)
+    assert body["presence_penalty"] == 0.5
+
+
+def test_tis_openai_validates_after_generator_overrides():
+    body = {"logprobs": 0, "temperature": 0.0, "top_p": 0.5, "top_k": 10, "min_p": 0.1}
+    apply_openai_sampling(body, {"temperature": 0.7}, enforce_tis_sampling=True)
+    assert body == {"logprobs": 0, "temperature": 0.7, "top_p": 1.0, "top_k": -1, "min_p": 0.0}
+
+
+def test_non_tis_openai_allows_penalties_with_logprobs():
+    body = {"logprobs": 0, "presence_penalty": 0.5}
+    apply_openai_sampling(body, {}, enforce_tis_sampling=False)
+    assert body["presence_penalty"] == 0.5

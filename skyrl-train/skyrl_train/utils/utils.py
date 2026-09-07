@@ -19,7 +19,7 @@ from ray.util.placement_group import (
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
-from skyrl_train.config.tis import configure_tis_logprobs
+from skyrl_train.config.tis import configure_tis_sampling
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
@@ -758,7 +758,7 @@ def validate_cfg(cfg: DictConfig):
 
         if cfg.generator.backend == "sglang":
             raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
-        configure_tis_logprobs(cfg.generator)
+        configure_tis_sampling(cfg.generator)
         assert cfg.trainer.algorithm.policy_loss_type in [
             "regular",
             "dual_clip",
