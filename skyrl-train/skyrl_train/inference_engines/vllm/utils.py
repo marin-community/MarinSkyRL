@@ -68,6 +68,9 @@ def pop_openai_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     if openai_sampling is not None:
         openai_kwargs["openai_sampling_params"] = openai_sampling
 
+    if "enforce_tis_sampling" in engine_kwargs:
+        openai_kwargs["enforce_tis_sampling"] = engine_kwargs.pop("enforce_tis_sampling")
+
     return openai_kwargs
 
 

@@ -14,6 +14,7 @@ from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+from skyrl_train.config.tis import validate_tis_sampling
 
 # vLLM 0.16+ reorganized entrypoints into sub-packages.
 # Try new paths first, fall back to old paths for backwards compatibility.
@@ -967,6 +968,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
+        if self._enforce_tis_sampling and request_sampling_params is not None:
+            if request_sampling_params.get("logprobs") is not None:
+                validate_tis_sampling(request_sampling_params)
 
         assert prompts is None and prompt_token_ids is not None, (
             "VLLMInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
@@ -1082,6 +1086,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         # not pass them through to EngineArgs and raise TypeError.
         openai_kwargs = pop_openai_kwargs(kwargs)
         self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
+        self._enforce_tis_sampling = openai_kwargs.pop("enforce_tis_sampling", False)
         return vllm.LLM(*args, **kwargs)
 
     async def initialize_worker_numa_affinity(self):
@@ -1504,6 +1509,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         openai_kwargs = pop_openai_kwargs(kwargs)
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
+        self._enforce_tis_sampling = openai_kwargs.pop("enforce_tis_sampling", False)
         if self._openai_sampling_params:
             logger.warning(
                 f"OpenAI API sampling params overridden: "
@@ -1975,6 +1981,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "min_p": sp.get("min_p", 0.0),
             }
         )
+        if self._enforce_tis_sampling and body.get("logprobs") is not None and body.get("logprobs") is not False:
+            validate_tis_sampling(body)
 
         # 1. Build request
         try:
@@ -2074,6 +2082,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "min_p": sp.get("min_p", 0.0),
             }
         )
+        if self._enforce_tis_sampling and body.get("logprobs") is not None and body.get("logprobs") is not False:
+            validate_tis_sampling(body)
         body["stream"] = True
         body["return_token_ids"] = True  # force vLLM to emit per-chunk token_ids
 
