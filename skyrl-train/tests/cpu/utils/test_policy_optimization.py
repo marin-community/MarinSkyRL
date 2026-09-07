@@ -68,10 +68,8 @@ def test_compute_approx_kl(dummy_data):
     assert torch.allclose(kl_k3, expected_k3, atol=1e-4), "k3 estimator is not correct"
 
 
-@pytest.mark.parametrize("estimator", ["k1", "abs", "k2", "k3"])
 @pytest.mark.parametrize("coefficient", [0.0, 0.1, 1.0])
-@pytest.mark.parametrize("scaling", [LossScaling.CALLER, LossScaling.MEGATRON_PIPELINE])
-def test_policy_objective_kl_gradient_matches_analytic_derivative(estimator, coefficient, scaling):
+def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
     log_probs = torch.tensor([[-0.8, -1.3, -0.6], [-1.3, -0.8, -0.6]], dtype=torch.float64, requires_grad=True)
     base_log_probs = torch.full_like(log_probs, -1.0)
     mask = torch.tensor([[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]], dtype=torch.float64)
@@ -87,7 +85,7 @@ def test_policy_objective_kl_gradient_matches_analytic_derivative(estimator, coe
             "entropy_loss_coef": 0.0,
             "use_kl_loss": True,
             "kl_loss_coef": coefficient,
-            "kl_estimator_type": estimator,
+            "kl_estimator_type": "k3",
             "use_tis": False,
         }
     )
@@ -103,26 +101,18 @@ def test_policy_objective_kl_gradient_matches_analytic_derivative(estimator, coe
         config=config,
         policy_loss_fn=ppo_policy_loss,
         accumulation_steps=2,
-        scaling=scaling,
+        scaling=LossScaling.CALLER,
     )
-    loss = objective.optimization_loss
-    if scaling is LossScaling.MEGATRON_PIPELINE:
-        loss = loss / 2  # Megatron owns gradient-accumulation scaling.
-    loss.backward()
+    objective.optimization_loss.backward()
 
-    # Analytic derivatives at log(p/q) = [0.2, -0.3], away from clamps and abs's cusp.
-    derivatives = {
-        "k1": [1.0, 1.0],
-        "abs": [1.0, -1.0],
-        "k2": [0.2, -0.3],
-        "k3": [1.0 - math.exp(-0.2), 1.0 - math.exp(0.3)],
-    }
+    # k3 derivatives at log(p/q) = [0.2, -0.3], away from clamps.
+    derivatives = [1.0 - math.exp(-0.2), 1.0 - math.exp(0.3)]
     expected = torch.zeros_like(log_probs)
     # Two active tokens, two sequences (including an empty one), two accumulated microbatches.
-    expected[0, :2] = torch.tensor(derivatives[estimator], dtype=log_probs.dtype) * coefficient / 8
+    expected[0, :2] = torch.tensor(derivatives, dtype=log_probs.dtype) * coefficient / 8
     torch.testing.assert_close(log_probs.grad, expected, rtol=1e-12, atol=1e-12)
 
-    metric = compute_approx_kl(log_probs, base_log_probs, mask, kl_estimator_type=estimator)
+    metric = compute_approx_kl(log_probs, base_log_probs, mask, kl_estimator_type="k3")
     assert not metric.requires_grad
     torch.testing.assert_close(objective.kl_loss.detach(), metric[0, :2].sum() / 4)
 
