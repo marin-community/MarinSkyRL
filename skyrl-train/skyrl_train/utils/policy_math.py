@@ -45,15 +45,14 @@ def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: Optiona
     return (tensor * mask).sum(axis=dim) / mask.sum(axis=dim).clamp(min=1.0)
 
 
-@torch.no_grad()
-def compute_approx_kl(
+def approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
     loss_mask: Optional[torch.Tensor] = None,
     kl_estimator_type: str = "k3",
 ) -> torch.Tensor:
     """
-    Compute the approximate KL divergence between two distributions.
+    Compute differentiable per-token approximate KL divergence.
     Schulman blog: http://joschu.net/blog/kl-approx.html
 
     Args:
@@ -83,6 +82,20 @@ def compute_approx_kl(
     if loss_mask is not None:
         kld = kld * loss_mask
     return kld
+
+
+@torch.no_grad()
+def compute_approx_kl(
+    log_probs: torch.Tensor,
+    log_probs_base: torch.Tensor,
+    loss_mask: Optional[torch.Tensor] = None,
+    kl_estimator_type: str = "k3",
+) -> torch.Tensor:
+    """Compute approximate KL without gradients for metrics and reward shaping.
+
+    Use ``approx_kl`` for a differentiable KL regularization loss.
+    """
+    return approx_kl(log_probs, log_probs_base, loss_mask=loss_mask, kl_estimator_type=kl_estimator_type)
 
 
 @torch.no_grad()

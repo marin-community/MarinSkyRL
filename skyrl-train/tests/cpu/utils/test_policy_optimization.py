@@ -9,7 +9,7 @@ import pytest
 from omegaconf import OmegaConf
 from skyrl_train.utils.loss_reduction import compute_global_loss_denom, count_nonzero_advantage_seqs, reduce_loss
 from skyrl_train.utils.policy_math import compute_approx_kl
-from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
+from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective, ppo_policy_loss
 from skyrl_train.utils.advantage_estimators import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
@@ -66,6 +66,65 @@ def test_compute_approx_kl(dummy_data):
     log_ratio = log_probs - log_probs_base
     expected_k3 = (torch.exp(-log_ratio) - 1 + log_ratio) * mask
     assert torch.allclose(kl_k3, expected_k3, atol=1e-4), "k3 estimator is not correct"
+
+
+@pytest.mark.parametrize("estimator", ["k1", "abs", "k2", "k3"])
+@pytest.mark.parametrize("coefficient", [0.0, 0.1, 1.0])
+@pytest.mark.parametrize("scaling", [LossScaling.CALLER, LossScaling.MEGATRON_PIPELINE])
+def test_policy_objective_kl_gradient_matches_analytic_derivative(estimator, coefficient, scaling):
+    log_probs = torch.tensor([[-0.8, -1.3, -0.6], [-1.3, -0.8, -0.6]], dtype=torch.float64, requires_grad=True)
+    base_log_probs = torch.full_like(log_probs, -1.0)
+    mask = torch.tensor([[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]], dtype=torch.float64)
+    config = OmegaConf.create(
+        {
+            "policy_loss_type": "regular",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 3,
+            "eps_clip_low": 0.2,
+            "eps_clip_high": 0.2,
+            "think_token_weight": 1.0,
+            "use_entropy_loss": False,
+            "entropy_loss_coef": 0.0,
+            "use_kl_loss": True,
+            "kl_loss_coef": coefficient,
+            "kl_estimator_type": estimator,
+            "use_tis": False,
+        }
+    )
+    objective = compute_policy_objective(
+        action_log_probs=log_probs,
+        old_action_log_probs=log_probs.detach(),
+        base_action_log_probs=base_log_probs,
+        advantages=torch.zeros_like(log_probs),  # Isolate KL in the real PPO objective.
+        loss_mask=mask,
+        rollout_logprobs=None,
+        response_span_tags=None,
+        token_entropy=torch.zeros_like(log_probs),
+        config=config,
+        policy_loss_fn=ppo_policy_loss,
+        accumulation_steps=2,
+        scaling=scaling,
+    )
+    loss = objective.optimization_loss
+    if scaling is LossScaling.MEGATRON_PIPELINE:
+        loss = loss / 2  # Megatron owns gradient-accumulation scaling.
+    loss.backward()
+
+    # Analytic derivatives at log(p/q) = [0.2, -0.3], away from clamps and abs's cusp.
+    derivatives = {
+        "k1": [1.0, 1.0],
+        "abs": [1.0, -1.0],
+        "k2": [0.2, -0.3],
+        "k3": [1.0 - math.exp(-0.2), 1.0 - math.exp(0.3)],
+    }
+    expected = torch.zeros_like(log_probs)
+    # Two active tokens, two sequences (including an empty one), two accumulated microbatches.
+    expected[0, :2] = torch.tensor(derivatives[estimator], dtype=log_probs.dtype) * coefficient / 8
+    torch.testing.assert_close(log_probs.grad, expected, rtol=1e-12, atol=1e-12)
+
+    metric = compute_approx_kl(log_probs, base_log_probs, mask, kl_estimator_type=estimator)
+    assert not metric.requires_grad
+    torch.testing.assert_close(objective.kl_loss.detach(), metric[0, :2].sum() / 4)
 
 
 def test_compute_reinforce_plus_plus_outcome_advantage_returns_and_masking():
