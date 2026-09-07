@@ -1,9 +1,9 @@
-"""Reject TIS recipes whose serving probabilities differ from the trainer."""
+"""Warn about TIS probability mismatches while preserving configured sampling."""
 
 import pytest
 from omegaconf import OmegaConf
 
-from skyrl_train.config.tis import configure_tis_sampling, validate_tis_sampling
+from skyrl_train.config.tis import configure_tis_sampling, warn_if_tis_sampling_mismatch
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.inference_engines.vllm.utils import apply_openai_sampling, pop_openai_kwargs
 
@@ -29,7 +29,7 @@ def test_tis_config_reaches_engine_and_sampling_options(temperature):
     serving = pop_openai_kwargs(options)
 
     assert options == {"logprobs_mode": "processed_logprobs", "generation_config": "vllm"}
-    assert serving == {"enforce_tis_sampling": True}
+    assert serving == {"warn_on_tis_sampling": True}
     assert sampling["temperature"] == temperature
     assert sampling["min_tokens"] == 0
     assert sampling["top_p"] == 1.0 and sampling["top_k"] == -1
@@ -55,9 +55,9 @@ def test_tis_config_reaches_engine_and_sampling_options(temperature):
         {"tool_choice": "required"},
     ],
 )
-def test_tis_rejects_distributions_the_trainer_does_not_reproduce(settings):
-    with pytest.raises(ValueError, match="TIS"):
-        validate_tis_sampling(settings)
+def test_tis_warns_about_unvalidated_sampling(settings):
+    with pytest.warns(UserWarning, match="TIS"):
+        warn_if_tis_sampling_mismatch(settings)
 
 
 @pytest.mark.parametrize(
@@ -69,33 +69,49 @@ def test_tis_rejects_distributions_the_trainer_does_not_reproduce(settings):
         {"logits_processors": ["custom.Processor"]},
     ],
 )
-def test_tis_rejects_conflicting_engine_options(options):
+def test_tis_warns_and_preserves_conflicting_engine_options(options):
     generator = OmegaConf.create({"sampling_params": {"temperature": 1.2}, "engine_init_kwargs": options})
-    with pytest.raises(ValueError, match="TIS"):
+    with pytest.warns(UserWarning, match="TIS"):
         configure_tis_sampling(generator)
+    for key, value in options.items():
+        assert generator.engine_init_kwargs[key] == value
 
 
 @pytest.mark.parametrize("logprobs", [0, 1, True])
-def test_tis_openai_logprob_requests_reject_penalties(logprobs):
+def test_tis_openai_logprob_requests_warn_and_preserve_penalties(logprobs):
     body = {"logprobs": logprobs, "presence_penalty": 0.5}
-    with pytest.raises(ValueError, match="TIS"):
-        apply_openai_sampling(body, {}, enforce_tis_sampling=True)
+    with pytest.warns(UserWarning, match="TIS"):
+        apply_openai_sampling(body, {}, warn_on_tis_sampling=True)
+    assert body["presence_penalty"] == 0.5
 
 
 @pytest.mark.parametrize("logprobs", [None, False])
 def test_tis_openai_evaluation_preserves_penalties(logprobs):
     body = {"logprobs": logprobs, "presence_penalty": 0.5}
-    apply_openai_sampling(body, {}, enforce_tis_sampling=True)
+    apply_openai_sampling(body, {}, warn_on_tis_sampling=True)
     assert body["presence_penalty"] == 0.5
 
 
-def test_tis_openai_validates_after_generator_overrides():
+def test_tis_openai_checks_after_generator_overrides():
     body = {"logprobs": 0, "temperature": 0.0, "top_p": 0.5, "top_k": 10, "min_p": 0.1}
-    apply_openai_sampling(body, {"temperature": 0.7}, enforce_tis_sampling=True)
+    apply_openai_sampling(body, {"temperature": 0.7}, warn_on_tis_sampling=True)
     assert body == {"logprobs": 0, "temperature": 0.7, "top_p": 1.0, "top_k": -1, "min_p": 0.0}
 
 
 def test_non_tis_openai_allows_penalties_with_logprobs():
     body = {"logprobs": 0, "presence_penalty": 0.5}
-    apply_openai_sampling(body, {}, enforce_tis_sampling=False)
+    apply_openai_sampling(body, {}, warn_on_tis_sampling=False)
     assert body["presence_penalty"] == 0.5
+
+
+def test_tis_config_warns_and_preserves_explicit_truncation_and_penalties():
+    sampling = {"temperature": 0.7, "top_p": 0.95, "top_k": 20, "repetition_penalty": 1.1, "min_tokens": 1}
+    generator = OmegaConf.create(
+        {"sampling_params": sampling | {"max_generate_length": 8, "logprobs": 0}, "engine_init_kwargs": {}}
+    )
+    with pytest.warns(UserWarning, match="TIS"):
+        configure_tis_sampling(generator)
+    resolved = get_vllm_sampling_params(generator.sampling_params)
+    for key, value in sampling.items():
+        assert resolved[key] == value
+    assert generator.engine_init_kwargs.logprobs_mode == "processed_logprobs"
