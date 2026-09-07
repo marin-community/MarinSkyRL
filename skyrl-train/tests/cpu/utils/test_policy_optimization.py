@@ -948,6 +948,12 @@ def test_tis_diagnostics_on_policy_is_exact():
         "tis/imp_ratio_mean": 1.0,
         "tis/imp_ratio_capped_fraction": 0.0,
         "tis/log_ratio_abs_mean": 0.0,
+        "tis/log_ratio_abs_gt_0.05": 0.0,
+        "tis/log_ratio_abs_gt_0.1": 0.0,
+        "tis/log_ratio_abs_gt_0.2": 0.0,
+        "tis/log_ratio_abs_gt_0.3": 0.0,
+        "tis/log_ratio_gt_0.2": 0.0,
+        "tis/log_ratio_lt_-0.2": 0.0,
     }
 
 
@@ -966,6 +972,26 @@ def test_tis_diagnostics_hand_computed_masked_means():
     # Only the ratio-2 token exceeds cap=1.5.
     assert out["tis/imp_ratio_capped_fraction"] == pytest.approx(0.5)
     assert out["tis/log_ratio_abs_mean"] == pytest.approx(log2)
+    # Both valid tokens sit at |log r| = log 2 = 0.693: beyond every tail threshold; one each side.
+    for t in ("0.05", "0.1", "0.2", "0.3"):
+        assert out[f"tis/log_ratio_abs_gt_{t}"] == pytest.approx(1.0)
+    assert out["tis/log_ratio_gt_0.2"] == pytest.approx(0.5)
+    assert out["tis/log_ratio_lt_-0.2"] == pytest.approx(0.5)
+
+
+def test_tis_diagnostics_tail_fractions_size_a_behavior_clip_band():
+    """The tail fractions are the share of tokens a symmetric behavior-clip band of that
+    width would clamp: deltas 0.02, 0.08, 0.15, 0.25 against thresholds .05/.1/.2/.3."""
+    old_lp = torch.tensor([[0.02, 0.08, -0.15, 0.25]])
+    rollout_lp = torch.zeros_like(old_lp)
+    mask = torch.ones_like(old_lp)
+    out = compute_tis_diagnostics(old_lp, rollout_lp, mask, cap=2.0)
+    assert out["tis/log_ratio_abs_gt_0.05"] == pytest.approx(0.75)
+    assert out["tis/log_ratio_abs_gt_0.1"] == pytest.approx(0.5)
+    assert out["tis/log_ratio_abs_gt_0.2"] == pytest.approx(0.25)
+    assert out["tis/log_ratio_abs_gt_0.3"] == pytest.approx(0.0)
+    assert out["tis/log_ratio_gt_0.2"] == pytest.approx(0.25)
+    assert out["tis/log_ratio_lt_-0.2"] == pytest.approx(0.0)
 
 
 def test_tis_diagnostics_clamps_ratio_but_not_log_ratio():
@@ -985,11 +1011,7 @@ def test_tis_diagnostics_none_rollout_keyset_identical_fallback():
     mask = torch.ones_like(old_lp)
     out = compute_tis_diagnostics(old_lp, None, mask, cap=2.0)
     assert tuple(out.keys()) == TIS_DIAG_KEYS
-    assert out == {
-        "tis/imp_ratio_mean": 1.0,
-        "tis/imp_ratio_capped_fraction": 0.0,
-        "tis/log_ratio_abs_mean": 0.0,
-    }
+    assert out == {**dict.fromkeys(TIS_DIAG_KEYS, 0.0), "tis/imp_ratio_mean": 1.0}
 
 
 def test_tis_diagnostics_all_masked_batch_emits_zeros_not_nan():

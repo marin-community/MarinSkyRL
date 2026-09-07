@@ -11,7 +11,20 @@ from loguru import logger
 from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
 
 
-TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log_ratio_abs_mean")
+# Thresholds (in |log ratio|) at which the rollout-vs-trainer mismatch is counted, so a
+# behavior-clip band can be sized from the measured tail: a token with |log r| > eps
+# is exactly a token that ``behavior_clip`` with eps_clip_low = eps_clip_high = eps
+# would clamp. Mask-weighted fractions, fixed keys (the per-key all_reduce needs
+# identical keysets on every rank).
+TIS_LOG_RATIO_TAIL_THRESHOLDS = (0.05, 0.1, 0.2, 0.3)
+TIS_DIAG_KEYS = (
+    "tis/imp_ratio_mean",
+    "tis/imp_ratio_capped_fraction",
+    "tis/log_ratio_abs_mean",
+    *(f"tis/log_ratio_abs_gt_{t:g}" for t in TIS_LOG_RATIO_TAIL_THRESHOLDS),
+    "tis/log_ratio_gt_0.2",
+    "tis/log_ratio_lt_-0.2",
+)
 LOG_RATIO_BASE_METRIC_KEYS = (
     "log_ratio_abs_mean",
     "log_ratio_abs_max",
@@ -95,17 +108,21 @@ def compute_tis_diagnostics(
     """
     if rollout_action_logprobs is None:
         # Preserve identical rank keysets when the generator omits rollout logprobs.
-        values = (1.0, 0.0, 0.0)
+        values = (1.0, 0.0, 0.0) + (0.0,) * (len(TIS_DIAG_KEYS) - 3)
         return dict(zip(TIS_DIAG_KEYS, values, strict=True))
     with torch.no_grad():
         cap = float(cap)
         delta = (old_action_log_probs - rollout_action_logprobs).float()
         imp = safe_exp_delta(delta)
         m = loss_mask.float()
+        abs_delta = delta.abs()
         values = (
             masked_mean(imp, m).item(),  # imp_ratio_mean
             masked_mean((imp > cap).float(), m).item(),  # imp_ratio_capped_fraction
-            masked_mean(delta.abs(), m).item(),  # log_ratio_abs_mean
+            masked_mean(abs_delta, m).item(),  # log_ratio_abs_mean
+            *(masked_mean((abs_delta > t).float(), m).item() for t in TIS_LOG_RATIO_TAIL_THRESHOLDS),
+            masked_mean((delta > 0.2).float(), m).item(),  # log_ratio_gt_0.2 (trainer more likely)
+            masked_mean((delta < -0.2).float(), m).item(),  # log_ratio_lt_-0.2 (rollout more likely)
         )
         return dict(zip(TIS_DIAG_KEYS, values, strict=True))
 
