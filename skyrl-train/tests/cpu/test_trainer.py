@@ -867,6 +867,7 @@ def test_rollout_age_survives_driver_padding_and_experience_slicing(dummy_config
         "rollout_logprobs": None,
         "stop_reasons": ["stop", "stop", "stop"],
     }
+    trainer.global_step = 1
     batch = trainer.convert_to_training_input(trajectories, ["a", "b", "c"], rollout_age=[0, 3, 9])
     assert batch["rollout_age"].tolist() == [0, 3, 9, 0]
     assert batch["loss_mask"][-1].sum() == 0
@@ -1590,3 +1591,36 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     # Pass: ref disabled -> requirement reduces to policy_dp. With policy_dp=2, tbs=2 is valid.
     cfg = create_config(train_batch_size=2, policy_dp=2, ref_dp=3, include_ref=False)
     validate_batch_sizes(cfg)
+
+
+def test_consumed_age_uses_real_masks_and_excludes_dp_padding(dummy_config, dummy_tokenizer, monkeypatch):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = dummy_tokenizer
+    trainer._training_metrics_enabled = True
+    trainer.policy_model = SimpleNamespace(actor_infos=[SimpleNamespace(rank=SimpleNamespace(dp_size=4))])
+    trainer.critic_model = trainer.ref_model = None
+    trainer.global_step = 1
+    trainer.all_metrics = {}
+    trajectories = {
+        "prompt_token_ids": [[1], [2], [3]],
+        "response_ids": [[4, 5, dummy_tokenizer.eos_token_id], [6], [7, 8]],
+        "rewards": [[0.0, 0.0, 1.0], [0.0], [0.0, 0.0]],
+        "loss_masks": [[1, 0, 1], [1], [1, 0]],
+        "rollout_logprobs": None,
+        "stop_reasons": ["stop", "tool_calls", "length"],
+    }
+    events, consumed = [], []
+    monkeypatch.setattr(trainer_module, "record_event", lambda name, body, **kwargs: events.append((name, body)))
+    monkeypatch.setattr(trainer_module, "record_consumed_work", lambda **kwargs: consumed.append(kwargs))
+    batch = trainer.convert_to_training_input(trajectories, ["a", "b", "c"], rollout_age=[0, 1, 2])
+    assert batch.batch_size == 4 and batch.metadata["pad_size"] == 1
+    expected = batch["response_mask"][:3].sum(-1).tolist()
+    assert expected == [3, 1, 2]
+    assert [body["response_tokens"] for name, body in events if name == "consumed_age"] == expected
+    assert batch["response_mask"].sum().item() > sum(expected)
+    trainer._log_optimizer_step_completed(epoch=0, training_input=batch, uids=["a", "b", "c"], duration_seconds=1.0)
+    assert consumed[0]["sequences"] == 3
+    assert consumed[0]["response_tokens"] == sum(expected)
+    assert consumed[0]["loss_tokens"] == 4

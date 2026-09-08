@@ -44,6 +44,7 @@ from skyrl_train.distributed.utils import init_custom_process_group, init_worker
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.gradient_direction import GradientDirectionTracker, gradient_direction_summary
+from skyrl_train.utils.type_c_staleness import optimizer_success_counts
 from skyrl_train.utils.importance_ratio_diagnostics import (
     gather_ratio_tensor,
     sum_ratio_tensor,
@@ -1196,6 +1197,7 @@ class PolicyWorkerBase(Worker):
         status_mean["update_age_mean"] = sum(row["update_age"] for row in status_by_update) / len(status_by_update)
         status_mean["update_age_max"] = max(row["update_age"] for row in status_by_update)
         status_mean.update(gradient_direction_summary(status_by_update))
+        status_mean.update(optimizer_success_counts(status_by_update))
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
@@ -1247,7 +1249,6 @@ class PolicyWorkerBase(Worker):
         rollout_routed_experts = experience.rollout_routed_experts
         response_span_tags = experience.response_span_tags
 
-        grug_causal_lm = self._grug_causal_lm()
         grug_query_bias_window = self._grug_query_bias_window
         grug_capture_started = bool(
             grug_query_bias_window
@@ -1362,7 +1363,7 @@ class PolicyWorkerBase(Worker):
             )
             grad_metrics = self.strategy.last_grad_metrics if grad_observer is not None else {}
             optimizer_step_succeeded = (
-                bool(self.strategy.last_optimizer_step_succeeded) if grug_causal_lm is not None else True
+                bool(self.strategy.last_optimizer_step_succeeded) if self.cfg.trainer.strategy != "deepspeed" else None
             )
             if grad_norm is not None:
                 grad_norm = grad_norm.detach().cpu().item()
@@ -1430,7 +1431,7 @@ class PolicyWorkerBase(Worker):
 
         if grad_norm is not None:
             status["raw_grad_norm"] = grad_norm
-        if grug_causal_lm is not None and (local_step + 1) % accumulation_steps == 0:
+        if (local_step + 1) % accumulation_steps == 0 and optimizer_step_succeeded is not None:
             status["optimizer_step_succeeded"] = float(optimizer_step_succeeded)
 
         for k, v in experience.info.items():
