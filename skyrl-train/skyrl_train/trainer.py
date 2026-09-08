@@ -252,7 +252,7 @@ class RayPPOTrainer:
         return None
 
     @torch.no_grad()
-    async def eval(self, *, dump_namespace: str | None = None) -> Dict[str, float]:
+    async def eval(self, *, dump_namespace: str | None = None, eval_step: int | None = None) -> Dict[str, float]:
         """
         Run generation and scoring on the evaluation dataset.
 
@@ -262,12 +262,13 @@ class RayPPOTrainer:
         Returns:
             A dictionary of evaluation metrics.
         """
+        requested_step = self.global_step if eval_step is None else eval_step
         if self.cfg.trainer.step_wise_training:
             eval_metrics = await evaluate_step_wise(
                 eval_dataloader=self.eval_dataloader,
                 trajectory_runner=self.trajectory_runner,
                 cfg=self.cfg,
-                global_step=self.global_step,
+                global_step=requested_step,
                 tokenizer=self.tokenizer,
                 trajectory_sink=self.trajectory_sink,
                 dump_namespace=dump_namespace,
@@ -277,12 +278,12 @@ class RayPPOTrainer:
                 eval_dataloader=self.eval_dataloader,
                 trajectory_runner=self.trajectory_runner,
                 cfg=self.cfg,
-                global_step=self.global_step,
+                global_step=requested_step,
                 tokenizer=self.tokenizer,
                 trajectory_sink=self.trajectory_sink,
                 dump_namespace=dump_namespace,
             )
-        self._last_successful_eval_step = self.global_step
+        self._last_successful_eval_step = requested_step
         return eval_metrics
 
     async def _eval_before_training(self) -> Dict[str, float]:

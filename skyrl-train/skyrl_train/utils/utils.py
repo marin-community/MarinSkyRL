@@ -574,6 +574,15 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 def validate_fully_async_cfg(cfg: DictConfig) -> None:
     """Reject publication schedules that cannot generate an eligible next batch."""
+    eval_options = cfg.trainer.fully_async
+    if type(eval_options.get("eval_on_installed_weights", False)) is not bool:
+        raise ValueError("trainer.fully_async.eval_on_installed_weights must be a boolean")
+    if eval_options.get("eval_mode", "blocking") not in ("blocking", "background"):
+        raise ValueError("trainer.fully_async.eval_mode must be blocking or background")
+    if eval_options.get("eval_mode", "blocking") == "background" and not eval_options.get(
+        "eval_on_installed_weights", False
+    ):
+        raise ValueError("Background evaluation requires eval_on_installed_weights=true")
     interval = cfg.trainer.fully_async.weight_sync_interval
     max_age = cfg.trainer.fully_async.max_staleness_steps
     if not isinstance(interval, int) or isinstance(interval, bool) or interval <= 0:

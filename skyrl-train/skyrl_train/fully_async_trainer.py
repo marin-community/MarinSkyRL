@@ -487,6 +487,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         validate_fully_async_cfg(cfg)
         self._async_observations_enabled = bool(cfg.trainer.get("async_spans", False))
         self._published_policy_version = 0
+        self._background_eval_tasks = []
+        self._background_eval_lock = asyncio.Lock()
+        self._weight_sync_owner = None
 
         # Initialize async-specific knobs
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
@@ -716,6 +719,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         Main fully async training loop for PPO
         """
         self.global_step = 0
+        self._weight_sync_owner = asyncio.current_task()
         loop_monitor = (
             asyncio.create_task(monitor_event_loop_lag(step_fn=lambda: self.global_step))
             if self._async_observations_enabled
@@ -731,6 +735,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # Cancel any orphaned generation tasks that survived an early exit
             # (the per-epoch epilogue only runs on normal loop completion).
             await self._cancel_trajectory_tasks()
+            for task, _ in self._background_eval_tasks:
+                task.cancel()
+            await asyncio.gather(*(task for task, _ in self._background_eval_tasks), return_exceptions=True)
+            self._background_eval_tasks.clear()
             if loop_monitor is not None:
                 loop_monitor.cancel()
                 await asyncio.gather(loop_monitor, return_exceptions=True)
@@ -740,6 +748,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         Internal training loop, separated for proper trajectory-runner lifecycle management.
         """
+        self._weight_sync_owner = asyncio.current_task()
+        if self.cfg.trainer.fully_async.get("eval_mode", "blocking") == "background":
+            self._validate_background_eval_runner()
         # Load checkpoint state if resumption is enabled.
         # Data consumption state is loaded via DataTrackingCallback.load_from_checkpoint()
         # into self.data_tracker, which the async dataloader reads for skip-on-resume.
@@ -1051,14 +1062,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     await asyncio.to_thread(self.handle_hf_export)
                     self._control.should_save_hf_model = False
 
-                # Handle evaluation
+                # Deliver completed background evaluations only from the driver, so callbacks
+                # and the shared control object never race an optimizer-step callback.
+                await self._drain_background_evaluations()
                 if self._control.should_evaluate and self.eval_dataset is not None:
-                    with Timer("eval", self.all_timings):
-                        eval_metrics = await self.eval()
-                        self.all_metrics.update(eval_metrics)
-                    await self.callback_handler.call_event_async(
-                        "on_evaluate", step_state, self._control, metrics=eval_metrics, trainer=self
-                    )
+                    if self.cfg.trainer.fully_async.get("eval_mode", "blocking") == "background":
+                        self._schedule_background_evaluation(step_state)
+                    else:
+                        with Timer("eval", self.all_timings):
+                            eval_metrics = await self.eval()
+                            self.all_metrics.update(eval_metrics)
+                        await self.callback_handler.call_event_async(
+                            "on_evaluate", step_state, self._control, metrics=eval_metrics, trainer=self
+                        )
                     self._control.should_evaluate = False
 
                 # 8. Log metrics
@@ -1411,6 +1427,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _publish_policy_weights(self, *, reason: str, timing_name: str) -> None:
         """Install the completed learner update without draining whole rollout groups."""
+        owner = getattr(self, "_weight_sync_owner", None)
+        if owner is not None and asyncio.current_task() is not owner:
+            raise RuntimeError("Weight sync is restricted to the training driver task")
         if self._published_policy_version == self.global_step:
             return
         trace_publication = self.cfg.generator.publication_stage_timing
@@ -1466,15 +1485,88 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
 
     async def eval(self, *, dump_namespace: str | None = None) -> dict[str, float]:
-        # Evaluation can be requested off the publication grid by any callback.
-        # Its publication is outside the core training window and has a separate timing.
-        await self._publish_policy_weights(reason="evaluation", timing_name="eval_weight_sync")
-        return await super().eval(dump_namespace=dump_namespace)
+        requested_step = self.global_step
+        installed = self.cfg.trainer.fully_async.get("eval_on_installed_weights", False)
+        if not installed:
+            await self._publish_policy_weights(reason="evaluation", timing_name="eval_weight_sync")
+        version = self._published_policy_version
+        metrics = await super().eval(dump_namespace=dump_namespace, eval_step=requested_step)
+        if installed:
+            metrics.update({"eval/policy_version": version, "eval/policy_version_lag": requested_step - version})
+        return metrics
+
+    def _validate_background_eval_runner(self) -> None:
+        # Only this stock pipeline has been checked for request-local collector/projection
+        # state and no eval-session mutation. Custom pipelines require their own audit.
+        from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner, WholeTrajectoryCollector
+        from skyrl_train.trajectory_runners.projections import WholeTrajectoryProjection
+        from skyrl_train.trajectory_runners.model_clients import DirectModelClient
+
+        runner = self.trajectory_runner
+        if (
+            type(runner) is not SkyRLGymTrajectoryRunner
+            or type(runner.collector) is not WholeTrajectoryCollector
+            or type(runner.projection) is not WholeTrajectoryProjection
+            or type(runner.model_client) is not DirectModelClient
+            or self.cfg.trainer.step_wise_training
+            or runner.trajectory_sink is not self.trajectory_sink
+        ):
+            raise ValueError(
+                "Background evaluation requires the stock whole-trajectory skyrl_gym runner and shared sink"
+            )
+
+    def _schedule_background_evaluation(self, step_state) -> None:
+        self._validate_background_eval_runner()
+        requested_step = step_state.global_step
+        requested_version = self._published_policy_version
+        task = asyncio.create_task(self._background_evaluate(requested_step, requested_version))
+        self._background_eval_tasks.append((task, step_state))
+
+    async def _background_evaluate(self, requested_step: int, requested_version: int) -> dict[str, float]:
+        # Version min/max are conservative request-to-completion bounds, not a claim
+        # that each intermediate version generated tokens. Queued tasks also record the
+        # actual start version; these progress evaluations are not quality endpoints.
+        # Serialize eval consumers of the stateful eval dataloader. Training has a distinct
+        # loader; its trajectories share only the locked trainer-owned retention sink.
+        async with self._background_eval_lock:
+            started = time.perf_counter()
+            start_version = self._published_policy_version
+            metrics = await super().eval(eval_step=requested_step)
+            metrics.update(
+                {
+                    "eval/requested_at_step": requested_step,
+                    "eval/measured_at_step": self.global_step,
+                    "eval/policy_version": start_version,
+                    "eval/policy_version_requested": requested_version,
+                    "eval/policy_version_start": start_version,
+                    "eval/policy_version_completed": self._published_policy_version,
+                    "eval/policy_version_lag": requested_step - requested_version,
+                    "eval/policy_version_min": requested_version,
+                    "eval/policy_version_max": self._published_policy_version,
+                    "eval/background_seconds": time.perf_counter() - started,
+                }
+            )
+            return metrics
+
+    async def _drain_background_evaluations(self, *, wait: bool = False) -> None:
+        while self._background_eval_tasks:
+            task, requested_state = self._background_eval_tasks[0]
+            if not wait and not task.done():
+                break
+            metrics = await task
+            self._background_eval_tasks.pop(0)
+            self.all_metrics.update(metrics)
+            # A queued evaluation can finish after later training steps have been logged.
+            # Log at the current driver boundary; requested_step remains in metrics/dump.
+            self._log_metrics_stdout(metrics, step=self.global_step, kind="eval")
+            self.tracker.log(metrics, step=self.global_step, commit=False)
+            await self.callback_handler.call_event_async(
+                "on_evaluate", requested_state, self._control, metrics=metrics, trainer=self
+            )
 
     async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
-        # The training loop has already incremented global_step. Early termination can
-        # occur between scheduled publications, so restore the completed identity first.
         self.global_step = completed_step
+        await self._drain_background_evaluations(wait=True)
         await self._publish_policy_weights(reason="final", timing_name="final_weight_sync")
         await super()._finalize_training(completed_step=completed_step, epoch=epoch)
 
