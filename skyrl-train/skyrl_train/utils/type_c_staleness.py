@@ -41,3 +41,11 @@ def consumed_update_age_counts(
                 }
             )
     return results
+
+
+def optimizer_success_counts(updates: list[dict[str, float]]) -> dict[str, float]:
+    """Count updates whose reduced native optimizer-success flag is exactly true."""
+    flags = [row.get("optimizer_step_succeeded") for row in updates]
+    if not flags or any(flag not in (0.0, 1.0) for flag in flags):
+        return {"policy_successful_update_steps_valid": 0.0}
+    return {"policy_successful_update_steps": float(sum(flags)), "policy_successful_update_steps_valid": 1.0}

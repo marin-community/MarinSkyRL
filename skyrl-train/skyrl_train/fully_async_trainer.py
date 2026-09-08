@@ -1958,20 +1958,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
         self.all_metrics.update(trajectory_batch["rollout_metrics"])
 
-        if self._training_metrics_enabled:
-            for group, age in zip(cur_generation_group_mini_batch, stalenesses):
-                responses = group.trajectory_batch["response_ids"]
-                record_event(
-                    "consumed_age",
-                    {
-                        "age": age,
-                        "groups": 1,
-                        "sequences": len(responses),
-                        "response_tokens": sum(len(response) for response in responses),
-                    },
-                    attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
-                )
-
         # Log staleness statistics for this step
         self.all_metrics.update(
             {

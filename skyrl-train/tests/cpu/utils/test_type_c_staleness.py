@@ -8,8 +8,6 @@ from rigging.telemetry.serialization import EventBody, event_fields
 
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
-from tests.cpu.test_fully_async_staleness import _generated_group
 import torch
 
 from skyrl_train.training_batch import TrainingInputBatch, TrainingBatchIterator
@@ -68,34 +66,3 @@ def test_sync_driver_receipts_preserve_source_order_and_serialize(monkeypatch):
     assert events[-1][0] == "consumed_source_order"
     assert events[-1][1]["prompt_offset"] == 8
     assert json.loads(events[-1][1]["uids_json"]) == uids[::2]
-
-
-def test_async_driver_counts_accepted_group_tokens_before_padding(monkeypatch):
-    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
-    trainer.cfg = get_default_config()
-    trainer.global_step = 10
-    trainer.max_staleness_steps = 2
-    trainer.mini_batch_size = 2
-    trainer.all_metrics = {}
-    trainer._training_metrics_enabled = True
-    groups = [_generated_group("a", 10), _generated_group("b", 8)]
-    events = []
-
-    class BeforePostprocess(Exception):
-        pass
-
-    def stop_after_telemetry(*args):
-        raise BeforePostprocess
-
-    trainer.postprocess_trajectory_batch = stop_after_telemetry
-    monkeypatch.setattr(
-        "skyrl_train.fully_async_trainer.record_event", lambda name, body, **kw: events.append((name, body))
-    )
-    with pytest.raises(BeforePostprocess):
-        trainer.convert_generation_group_mini_batch_to_training_input(groups)
-    assert events == [
-        ("consumed_age", {"age": 0, "groups": 1, "sequences": 2, "response_tokens": 2}),
-        ("consumed_age", {"age": 2, "groups": 1, "sequences": 2, "response_tokens": 2}),
-    ]
-    for _, body in events:
-        assert event_fields(EventBody(body), budget=100_000) == body

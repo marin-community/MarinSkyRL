@@ -51,6 +51,7 @@ from skyrl_train.learner_memory import LearnerMemory
 from skyrl_train.optimizer_state_metrics import OptimizerStateObserver
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
 from skyrl_train.utils.gradient_direction import gradient_direction_summary
+from skyrl_train.utils.type_c_staleness import optimizer_success_counts
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
@@ -747,6 +748,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             status["raw_grad_norm"] = grad_norm
                         if i == len(metrics_list) - 1:
                             status.update(self.strategy.last_grad_metrics)
+                            status["optimizer_step_succeeded"] = float(self.strategy.last_optimizer_step_succeeded)
 
                         # attach response_length
                         status["response_length"] = micro_buffer[i].num_actions
@@ -778,6 +780,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         status_mean["update_age_mean"] = sum(row["update_age"] for row in status_by_update) / len(status_by_update)
         status_mean["update_age_max"] = max(row["update_age"] for row in status_by_update)
         status_mean.update(gradient_direction_summary(status_by_update))
+        status_mean.update(optimizer_success_counts(status_by_update))
         if status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0 and not self._warned_exact_unit_policy_ratio:
             logger.warning(
                 "Megatron's recomputed old log probabilities exactly match the training forward for every policy "
