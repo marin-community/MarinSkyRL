@@ -13,7 +13,7 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/test_engine_placement
 """
 
 import pytest
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from types import SimpleNamespace
 import sys
 import msgpack
@@ -41,6 +41,23 @@ def inference_scheduler(monkeypatch):
 
     groups, actors, events, killed, removed = [], [], [], [], []
     diagnostic_changes = {}
+    initializing = set()
+    startup = {"max_concurrent": 0, "fail_actor": None}
+
+    @dataclass(frozen=True)
+    class ReadyHosts:
+        actor_index: int
+        host: str
+
+    def get(ref, **kwargs):
+        if isinstance(ref, list):
+            return [get(item) for item in ref]
+        if isinstance(ref, ReadyHosts):
+            if ref.actor_index == startup["fail_actor"]:
+                raise RuntimeError("Engine constructor failed")
+            initializing.discard(ref.actor_index)
+            return [ref.host]
+        return ref
 
     def placement_group(bundles, strategy):
         index = len(groups)
@@ -57,6 +74,9 @@ def inference_scheduler(monkeypatch):
         @staticmethod
         def options(**options):
             def remote(**kwargs):
+                actor_index = len(actors)
+                initializing.add(actor_index)
+                startup["max_concurrent"] = max(startup["max_concurrent"], len(initializing))
                 schedule = options["scheduling_strategy"]
                 index = schedule.placement_group_bundle_index
                 node = schedule.placement_group.nodes[index]
@@ -72,7 +92,7 @@ def inference_scheduler(monkeypatch):
                     report_engine_placement=SimpleNamespace(
                         remote=lambda: msgpack.unpackb(msgpack.packb([asdict(report)]), raw=False)
                     ),
-                    report_engine_hosts=SimpleNamespace(remote=lambda: [report.host]),
+                    report_engine_hosts=SimpleNamespace(remote=lambda: ReadyHosts(actor_index, report.host)),
                 )
                 actors.append(actor)
                 return actor
@@ -96,7 +116,7 @@ def inference_scheduler(monkeypatch):
     monkeypatch.setattr(
         "skyrl_train.inference_engines.placement.placement_group_table", lambda pg: {"bundles_to_node_id": pg.nodes}
     )
-    monkeypatch.setattr(factory.ray, "get", lambda ref, **kw: ref)
+    monkeypatch.setattr(factory.ray, "get", get)
     monkeypatch.setattr(factory.ray, "wait", lambda refs, **kw: (refs, []))
     monkeypatch.setattr(factory.ray, "kill", killed.append)
     monkeypatch.setattr(
@@ -139,7 +159,33 @@ def inference_scheduler(monkeypatch):
         killed=killed,
         removed=removed,
         diagnostic_changes=diagnostic_changes,
+        startup=startup,
     )
+
+
+@pytest.mark.parametrize("serial,expected_concurrency", [(True, 1), (False, 8)])
+def test_independent_engine_startup_waits_for_actual_ready_rpc(inference_scheduler, serial, expected_concurrency):
+    scheduler = inference_scheduler
+    engines = scheduler.launch(num_inference_engines=8, serial_engine_startup=serial)
+    assert len(engines) == 8
+    assert scheduler.startup["max_concurrent"] == expected_concurrency
+    assert scheduler.killed == []
+
+
+def test_serial_engine_failure_stops_later_initialization_and_cleans_started_actors(inference_scheduler):
+    scheduler = inference_scheduler
+    scheduler.startup["fail_actor"] = 1
+    with pytest.raises(RuntimeError, match="Engine constructor failed"):
+        scheduler.launch(num_inference_engines=8, serial_engine_startup=True)
+    assert len(scheduler.actors) == 2
+    assert scheduler.killed == scheduler.actors
+
+
+def test_serial_startup_rejects_dependent_dp_ranks_before_allocating(inference_scheduler):
+    scheduler = inference_scheduler
+    with pytest.raises(ValueError, match="independent vLLM"):
+        scheduler.launch(data_parallel_size=8, expert_parallel_size=8, serial_engine_startup=True)
+    assert scheduler.groups == scheduler.actors == []
 
 
 def test_node_local_factory_allocates_two_ep8_replicas_and_publishes_verified_topology(inference_scheduler):
