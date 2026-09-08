@@ -1,6 +1,8 @@
 import asyncio
+import tempfile
 
 import pytest
+import ray
 
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 
@@ -82,3 +84,57 @@ async def test_abandoned_chat_stream_cancels_ray_actor_task(record_ray_cancellat
     with pytest.raises(asyncio.CancelledError):
         await request
     assert reference.cancelled
+
+
+@ray.remote(num_cpus=0)
+class PendingGenerationActor:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.active = False
+
+    async def generate(self, input_batch):
+        self.active = True
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.active = False
+            self.cancelled.set()
+            raise
+
+    async def wait_started(self):
+        await self.started.wait()
+        return self.active
+
+    async def wait_cancelled(self):
+        await self.cancelled.wait()
+        return self.active
+
+
+@pytest.fixture
+def local_ray():
+    assert not ray.is_initialized(), "Cancellation test must own its local Ray runtime"
+    with tempfile.TemporaryDirectory(prefix="ray-cancel-") as runtime_dir:
+        ray.init(address="local", num_cpus=2, include_dashboard=False, _temp_dir=runtime_dir)
+        try:
+            yield
+        finally:
+            ray.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_token_generation_stops_actual_ray_actor(local_ray):
+    actor = PendingGenerationActor.remote()
+    engine = RayWrappedInferenceEngine(actor)
+    try:
+        request = asyncio.create_task(engine.generate({"prompt_token_ids": [[1, 2, 3]]}))
+        assert await asyncio.wait_for(actor.wait_started.remote(), timeout=15)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        # Remote readiness and cancellation acknowledgements prove the boundary,
+        # without assuming that cancellation of a local ObjectRef cancels its actor.
+        assert not await asyncio.wait_for(actor.wait_cancelled.remote(), timeout=2)
+    finally:
+        ray.kill(actor)
