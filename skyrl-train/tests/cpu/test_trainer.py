@@ -320,7 +320,7 @@ def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypat
     trainer.policy_model = _CapturingPolicyGroup()
 
     status = TrainingOutputBatch()
-    status.metadata = {"train_status": {}}
+    status.metadata = {"train_status": {"policy_update_steps": 1}}
     monkeypatch.setattr(trainer_module, "collect_actor_results", lambda *args, **kwargs: [status])
     monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
 
@@ -484,6 +484,9 @@ class _CpuPolicyStrategy:
 
 
 def _enable_cpu_policy_training(worker: PolicyWorkerBase, causal_lm: GrugMoeForCausalLM) -> None:
+    # This adapter has no distributed gradient-observer hook. The real FSDP
+    # hook and DTensor ownership are covered in test_gradient_observer_hooks.
+    worker.cfg.trainer.algorithm.grad_cosine.enabled = False
     worker.model = HFModelWrapper(causal_lm, bf16=False, training_strategy="fsdp2")
     worker.strategy = _CpuPolicyStrategy()
     worker.optimizer = torch.optim.AdamW(worker.model.parameters(), lr=1e-4)
