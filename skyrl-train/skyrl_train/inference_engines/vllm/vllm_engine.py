@@ -2337,8 +2337,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # AsyncLLM.abort(), it cannot report success merely because the frontend
         # output_processor already removed the request IDs.
         if self._publication_requests is not None:
+            # vLLM keys frontend states by randomized internal IDs. The ledger
+            # tracks the external ID supplied to generate(), including zero-token
+            # requests. Read its explicit mapping before the first await.
+            native_states = engine.output_processor.request_states
+            if any(internal_id != state.request_id for internal_id, state in native_states.items()):
+                raise ValueError("native frontend key disagrees with RequestState.request_id")
+            bindings = {internal_id: state.external_req_id for internal_id, state in native_states.items()}
             self._publication_requests.begin_pause(
-                frontend_ids=list(engine.output_processor.request_states), monotonic_time=time.monotonic()
+                frontend_ids=list(bindings.values()),
+                monotonic_time=time.monotonic(),
+                frontend_internal_to_external=bindings,
             )
         await engine.pause_generation(mode="abort", clear_cache=True)
         logger.info(f"pause_generation() finished, aborted {outstanding_requests} requests and paused EngineCore")
