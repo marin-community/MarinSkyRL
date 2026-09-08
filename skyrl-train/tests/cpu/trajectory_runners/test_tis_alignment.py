@@ -18,6 +18,7 @@ from transformers import AutoTokenizer
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.trajectory_runners.trajectory_processing import (
     AlignmentStats,
+    TitoFullDeclineReason,
     align_logprobs_by_token_ids,
     align_logprobs_with_lcs,
     extract_logprobs_from_rollout_details,
@@ -187,7 +188,7 @@ def test_tito_assembly_declines_on_inconsistent_stream(monkeypatch):
         eos_token_id = 999
 
     # prompt[1] does NOT start with prompt[0] + completion[0] -> invariant fails.
-    out = _assemble_response_ids_tito_full(
+    output, decline_reason = _assemble_response_ids_tito_full(
         messages=[
             {"role": "assistant", "content": "a"},
             {"role": "user", "content": "b"},
@@ -203,7 +204,8 @@ def test_tito_assembly_declines_on_inconsistent_stream(monkeypatch):
         custom_chat_template=None,
         chat_template_kwargs=None,
     )
-    assert out is None
+    assert output is None
+    assert decline_reason is TitoFullDeclineReason.PREFIX_MISMATCH
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +329,47 @@ def test_valid_multi_turn_full_tito_preserves_all_training_logprobs():
     )
     assert stats.n_exact == sum(map(len, completions))
     assert stats.n_unaligned == 0
+    assert stats.n_tito_full_attempts == 1
+    assert stats.n_tito_full_successes == 1
+    assert not stats.tito_full_declines
+
+
+def test_context_mismatch_decline_masks_exact_completion_ids():
+    """A context mismatch must not hide behind exact completion-id alignment."""
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    messages = [
+        {"role": "assistant", "content": "First answer."},
+        {"role": "user", "content": "A tool returned more evidence."},
+        {"role": "assistant", "content": "Revised answer."},
+    ]
+    completions = [
+        _generated_ids(tokenizer, "First answer."),
+        _generated_ids(tokenizer, "Revised answer."),
+    ]
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+    behavior_logprobs = [[-0.1] * len(completions[0]), [-0.2] * len(completions[1])]
+    stats = AlignmentStats()
+
+    _, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
+        messages,
+        tokenizer,
+        assistant_logprobs=behavior_logprobs,
+        assistant_token_ids=completions,
+        assistant_prompt_token_ids=[
+            [700, 701] + generation_prompt_ids,
+            [999] + generation_prompt_ids,
+        ],
+        rollout_logprobs_required=True,
+        alignment_stats=stats,
+    )
+
+    metrics = stats.as_metrics(lcs_alert_threshold=0.005)
+    assert not any(loss_mask)
+    assert stats.n_exact == sum(map(len, completions))
+    assert stats.tito_full_declines == {TitoFullDeclineReason.PREFIX_MISMATCH: 1}
+    assert metrics["tis/tito_full/success_fraction"] == 0.0
+    assert metrics["tis/tito_full/decline/prefix_mismatch"] == 1.0
+    assert metrics["tis/alignment_alert"] == 1.0
 
 
 @pytest.mark.parametrize("truncate_logprobs", [False, True])
