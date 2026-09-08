@@ -397,6 +397,7 @@ generator:
   inference_stats_interval: 1
   inference_stats_poll_seconds: 5.0
   publication_stage_timing: false
+  publication_pause_timeout_seconds: 30.0
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]

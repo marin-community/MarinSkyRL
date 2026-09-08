@@ -1,3 +1,4 @@
+from skyrl_train.weight_sync.publication_version import PublicationVersionHistory
 import json
 import os
 import threading
@@ -1549,6 +1550,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def _create_engine(self, *args, **kwargs):
         self._publication_output_probe = None
+        self._publication_versions = PublicationVersionHistory()
         openai_kwargs = pop_openai_kwargs(kwargs)
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
@@ -1917,7 +1919,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
             raise
 
-        return self._postprocess_outputs(outputs)
+        result = self._postprocess_outputs(outputs)
+        result["policy_versions_at_first_token"] = [
+            self._publication_versions.at_first_token(
+                output.metrics.first_token_ts if output.metrics is not None else None
+            )
+            for output in outputs
+        ]
+        return result
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
@@ -2265,6 +2274,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             histograms=native.histograms,
         )
 
+    async def is_paused(self) -> bool:
+        return await self._get_engine().is_paused()
+
     async def pause_generation(self) -> None:
         """Abort outstanding requests and hold the EngineCore scheduler idle for weight reload."""
         engine = self._get_engine()
@@ -2277,8 +2289,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         await engine.pause_generation(mode="abort", clear_cache=True)
         logger.info(f"pause_generation() finished, aborted {outstanding_requests} requests and paused EngineCore")
 
-    async def resume_generation(self) -> None:
-        """Release the EngineCore scheduler after the weight reload completes."""
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        """Release the scheduler with an engine-local boundary for the installed version."""
+        if policy_version is not None:
+            state = await self.read_publication_request_state()
+            assert state["paused"] and state["shared_time_and_uts_namespaces"]
+            # Capture before releasing the scheduler: tokens can arrive while its RPC returns.
+            self._publication_versions.record_resume(state["observed_monotonic"], policy_version)
         await self._get_engine().resume_generation()
         logger.info("resume_generation() finished, EngineCore scheduler released")
 
