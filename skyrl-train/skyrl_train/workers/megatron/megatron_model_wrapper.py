@@ -22,7 +22,7 @@ from skyrl_train.megatron_timing import (
     MegatronTrainTimings,
 )
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
-from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor, gather_ratio_tensor
+from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor, gather_ratio_tensor, sum_ratio_tensor
 
 from skyrl_train.distributed.megatron.megatron_utils import (
     compact_left_padded_tokens,
@@ -315,6 +315,8 @@ class MegatronModelWrapper:
                 log_ratio_monitor = LogRatioMonitor(
                     action_log_probs.device,
                     position_window=self.cfg.trainer.algorithm.get("ratio_diagnostics", {}).get("position_window", 256),
+                    eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                    eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
                 )
             log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
             completed_microbatches += 1
@@ -334,7 +336,12 @@ class MegatronModelWrapper:
                     if torch.distributed.is_initialized()
                     else None
                 )
-                metrics.update(log_ratio_monitor.metrics(gather_fn=partial(gather_ratio_tensor, group=group)))
+                metrics.update(
+                    log_ratio_monitor.metrics(
+                        gather_fn=partial(gather_ratio_tensor, group=group),
+                        sum_reduce_fn=partial(sum_ratio_tensor, group=group),
+                    )
+                )
             return objective.optimization_loss, metrics
 
         def forward_step(batch_iter, model):
