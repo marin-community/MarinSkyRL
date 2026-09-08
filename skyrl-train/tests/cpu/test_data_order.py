@@ -14,6 +14,7 @@ from omegaconf import OmegaConf
 
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.data_order import (
+    consumed_uid_digest,
     normalize_async_source_epoch,
     set_source_epoch,
     source_order_checkpoint,
@@ -430,3 +431,52 @@ def test_worker_override_invalidates_source_order_resume():
     current = build_dataloader(cfg, Rows(), is_train=True)
     with pytest.raises(ValueError, match="source-order contract"):
         validate_source_order_checkpoint(current, saved, completed_step=0)
+
+
+def test_consumed_uid_digest_ignores_row_order_and_detects_changed_prompt_set():
+    first = consumed_uid_digest(["a", "b", "a"])
+    assert first == consumed_uid_digest(["b", "a"])
+    assert first != consumed_uid_digest(["a", "c"])
+    assert int(float(first)) == first
+
+
+class PromptSetRecordingRunner(Runner):
+    async def run(self, request, **kwargs):
+        if not hasattr(self, "generated_sets"):
+            self.generated_sets = {}
+        if request["batch_metadata"].training_phase == "train":
+            self.generated_sets.setdefault(self.engine.installed_update, set()).update(
+                item.instance_id for item in request["trajectory_ids"]
+            )
+        return await super().run(request, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_sync_and_async_c1a0_consume_identical_uid_sets_per_step(monkeypatch):
+    asynchronous = make_driver(
+        interval=1, age=0, steps=8, driver_type=SourceOrderDriver, runner_type=PromptSetRecordingRunner
+    )
+    synchronous = make_driver(
+        interval=1, age=0, steps=8, driver_type=SyncSourceOrderDriver, runner_type=PromptSetRecordingRunner
+    )
+    synchronous.policy_model = StartupLearnerService()
+    monkeypatch.setattr("skyrl_train.trainer.ray.get", lambda refs: refs)
+    await asyncio.wait_for(synchronous._train_loop(), timeout=10)
+    await asyncio.wait_for(asynchronous._train_loop(), timeout=10)
+
+    def digests(trainer):
+        return [
+            (step, row["consumed/uid_digest_u52"])
+            for step, row in trainer.tracker.rows
+            if "consumed/uid_digest_u52" in row
+        ]
+
+    sync_digests, async_digests = digests(synchronous), digests(asynchronous)
+    assert [step for step, _ in sync_digests] == list(range(1, 9))
+    assert sync_digests == async_digests
+
+    assert synchronous.trajectory_runner.generated_sets == asynchronous.trajectory_runner.generated_sets
+    assert all(len(uids) == 2 for uids in synchronous.trajectory_runner.generated_sets.values())
+    for trainer, key in ((synchronous, "sync/admission/rejected_count"), (asynchronous, "async/rejected_count")):
+        rejected = [row[key] for _, row in trainer.tracker.rows if key in row]
+        assert len(rejected) == 8 and max(rejected) == 0
