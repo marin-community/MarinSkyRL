@@ -213,8 +213,8 @@ def _behavior_clip_reference(
 
 @pytest.mark.parametrize(
     ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp"),
-    [(True, 4, 2, 2, 1, None), (False, 2, 2, 1, 1, None)],
-    ids=["colocate_all", "non_colocated"],
+    [(True, 4, 2, 2, 1, None), (False, 2, 2, 1, 1, None), (False, 1, 1, 1, 1, 1)],
+    ids=["colocate_all", "non_colocated", "publication_stages_two_gpu"],
 )
 def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp):
     """
@@ -224,6 +224,7 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
         cfg = get_test_actor_config(model_name=MODEL_NAME)
         cfg.trainer.placement.colocate_all = colocate_all
         cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.publication_stage_timing = not colocate_all and inference_tp == 1
         cfg.trainer.strategy = "megatron"
         cfg.generator.backend = "vllm"
         cfg.generator.inference_engine_tensor_parallel_size = inference_tp
@@ -263,6 +264,25 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
         # ~75 seconds on 8xH100 for Qwen3-30B-A3B
         with Timer("sync_weights"):
             ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+
+        if cfg.generator.publication_stage_timing:
+            receipts = ray.get(policy.async_run_ray_method("pass_through", "read_publication_timing"))
+            receipt = receipts[0]
+            expected = {"export", "nccl_send", "rpc_wait", "barrier", "reload_finalize"}
+            assert expected <= receipt["trainer"][0]["stages"].keys()
+            assert {"recv", "load", "finalize"} <= receipt["receiver"][0][0]["stages"].keys()
+            for role, workers in (
+                ("trainer", receipt["trainer"]),
+                ("inference", [worker for engine in receipt["receiver"] for worker in engine]),
+            ):
+                for worker in workers:
+                    for stage, values in worker["stages"].items():
+                        assert values["wall_seconds"] >= 0 and values["gpu_ms"] >= 0
+                        assert values["calls"] > 0
+                        print(
+                            f"publication_stage role={role} stage={stage} rank={worker['rank']} "
+                            f"wall_s={values['wall_seconds']} gpu_ms={values['gpu_ms']}"
+                        )
 
         policy.offload_to_cpu()
         asyncio.run(client.wake_up(tags=["kv_cache"]))

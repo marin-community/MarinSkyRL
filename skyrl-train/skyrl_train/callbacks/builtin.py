@@ -789,6 +789,7 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
         callbacks.append(
             InferenceStatsCallback(
                 log_every_steps=inference_stats_interval,
+                poll_interval_seconds=cfg.generator.inference_stats_poll_seconds,
                 log_to_console=True,
                 log_to_tracker=True,
             )
