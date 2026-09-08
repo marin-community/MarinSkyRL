@@ -8,6 +8,7 @@ import socket
 import pytest
 
 from tests.gpu.diagnostics.weight_sync_env_probe import MARKER, PAYLOAD_BYTES, run_case
+from tests.gpu.diagnostics import weight_sync_env_probe as probe
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
@@ -77,3 +78,63 @@ print("TCP_RENDEZVOUS_PASS", rank, flush=True)
     else:
         assert receipt["returncode"] != 0
         assert "DistNetworkError" in receipt["worker_output"]
+
+
+def test_actual_concatenated_stdout_records_are_all_parsed(tmp_path):
+    events = [{"stage": "completed", "rank": rank} for rank in (0, 1)]
+    # Two real children write complete event objects without newlines into one pipe.
+    code = "import subprocess,sys\nchildren=[]\n"
+    for event in events:
+        child = f"import os; os.write(1,{(MARKER + json.dumps(event)).encode()!r})"
+        code += f"children.append(subprocess.Popen([sys.executable,'-c',{child!r}]))\n"
+    code += "assert all(child.wait()==0 for child in children)\n"
+    receipt = run_case("baseline", tmp_path / "joined", command=[sys.executable, "-c", code])
+    assert {e["rank"] for e in receipt["events"]} == {0, 1}
+    assert receipt["parse_errors"] == []
+    assert not receipt["passed"]  # Completion lines alone never certify payloads.
+
+
+def test_raw_receipt_survives_unexpected_parser_failure(tmp_path, monkeypatch):
+    def fail_parse(*args):
+        raise ValueError("injected parser failure")
+
+    monkeypatch.setattr(probe, "audit_output", fail_parse)
+    receipt = run_case("baseline", tmp_path / "case", command=[sys.executable, "-c", "print('unparsed raw evidence')"])
+    assert receipt["passed"] is False and receipt["reaped"]
+    assert receipt["audit_error"] == "ValueError: injected parser failure"
+    raw = json.loads((tmp_path / "case" / "raw-receipt.json").read_text())
+    assert raw["worker_output"] == "unparsed raw evidence\n"
+    assert json.loads((tmp_path / "case" / "receipt.json").read_text()) == receipt
+
+
+def test_malformed_event_fails_closed_without_throwing():
+    receipt = probe.audit_output(MARKER + '{"stage":bad json}\n', 0)
+    assert not receipt["passed"] and receipt["parse_errors"]
+
+
+def test_parent_owns_store_listener_throughout_child_start_window():
+    with probe.held_rendezvous_store() as port:
+        with socket.socket() as contender:
+            with pytest.raises(OSError):
+                contender.bind(("127.0.0.1", port))
+
+
+def test_full_three_case_owned_store_orchestration_on_cpu(tmp_path):
+    receipts = probe.run_comparison(tmp_path / "comparison", backend="gloo")
+    assert [receipt["case"] for receipt in receipts] == list(probe.CASES)
+    assert all(receipt["passed"] and receipt["reaped"] for receipt in receipts)
+    for receipt in receipts:
+        assert receipt["backend"] == "gloo"
+        assert set(receipt["rank_streams"]) == {"rank-0.jsonl", "rank-1.jsonl"}
+        assert len([e for e in receipt["events"] if e["stage"] == "broadcast_end"]) == 6
+        assert (tmp_path / "comparison" / receipt["case"] / "raw-receipt.json").exists()
+
+
+def test_case_setup_error_does_not_drop_later_receipts(tmp_path, monkeypatch):
+    def setup_failure(case, *args, **kwargs):
+        raise RuntimeError("injected setup error " + case)
+
+    monkeypatch.setattr(probe, "run_case", setup_failure)
+    receipts = probe.run_comparison(tmp_path)
+    assert [r["case"] for r in receipts] == list(probe.CASES)
+    assert all(not r["passed"] and r["orchestration_error"] for r in receipts)
