@@ -116,6 +116,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         "expert_parallel_size": cfg.generator.inference_engine_expert_parallel_size,
         "data_parallel_size": cfg.generator.inference_engine_data_parallel_size,
         "node_local": cfg.generator.get("inference_engine_node_local", False),
+        "serial_engine_startup": cfg.generator.get("inference_engine_serial_startup", False),
         # vLLM Decode Context Parallel (DCP). Default 1 (disabled) -> forwarded as the
         # signature default and (per ray_wrapped_inference_engine) NOT passed to the vLLM
         # engine, so flag-off engine init is byte-identical to today (G1). When > 1 it is
