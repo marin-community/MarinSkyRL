@@ -14,24 +14,28 @@ from skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase
 from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
 
 
-def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch):
+@pytest.mark.parametrize("position_window", [256, 128])
+def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch, position_window):
     class CpuPolicy(FSDPPolicyWorkerBase):
         def training_step(self, experience, global_step, local_step, accumulation_steps):
             assert experience.rollout_age is not None
             if (local_step + 1) % accumulation_steps == 0:
                 self.update_count += 1
-            monitor = LogRatioMonitor(torch.device("cpu"))
+            monitor = LogRatioMonitor(torch.device("cpu"), position_window=position_window)
             monitor.add(torch.ones(1, 600), torch.zeros(1, 600), torch.ones(1, 600))
             return {
                 **monitor.metrics(),
                 "log_ratio_abs_mean": float(self.update_count),
                 "policy_loss": 0.5,
+                "raw_grad_norm": float(self.update_count + 10),
+                "ppo_clip_ratio": self.update_count / 10,
                 "response_length": 1,
                 "policy_lr": 1e-6,
                 "policy_entropy": 0.0,
             }
 
     cfg = get_default_config()
+    cfg.trainer.algorithm.ratio_diagnostics.position_window = position_window
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.update_epochs_per_batch = 2
     cfg.trainer.policy.grug_query_bias_update_mode = "frozen"
@@ -91,7 +95,11 @@ def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch):
     def validated_event(*args, **kwargs):
         fields = {key: value for key, value in args[1].items() if value is not None}
         assert event_fields(EventBody(fields), budget=100_000) == fields
-        assert len(fields) <= 30
+        assert len(fields) <= 32
+        assert fields["raw_grad_norm"] == updates[fields["update_index"]]["raw_grad_norm"]
+        assert fields["ppo_clip_ratio"] == updates[fields["update_index"]]["ppo_clip_ratio"]
+        assert fields[f"stale/pos_first{position_window}/selected_tokens"] > 0
+        assert fields[f"stale/pos_last{position_window}/selected_tokens"] > 0
         events.append((args, kwargs))
 
     monkeypatch.setattr("skyrl_train.trainer.record_event", validated_event)

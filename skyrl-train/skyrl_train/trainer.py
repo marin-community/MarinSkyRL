@@ -2135,6 +2135,7 @@ class RayPPOTrainer:
 
         policy_status = policy_statuses[0].metadata["train_status"]
         if self._training_metrics_enabled:
+            window = OmegaConf.select(self.cfg, "trainer.algorithm.ratio_diagnostics.position_window", default=256)
             maximum = OmegaConf.select(self.cfg, "trainer.algorithm.ratio_diagnostics.by_update_max", default=16)
             if type(maximum) is not int or not 0 <= maximum <= 16:
                 raise ValueError("ratio_diagnostics.by_update_max must be an integer in [0,16]")
@@ -2147,7 +2148,11 @@ class RayPPOTrainer:
                         # EventBody accepts at most 64 fields. Full worker status
                         # remains in by_update scalars; this event carries the
                         # bounded ratio family and optimizer identity only.
-                        **{key: value for key, value in status.items() if key in ("update_index", "update_age")},
+                        **{
+                            key: value
+                            for key, value in status.items()
+                            if key in ("update_index", "update_age", "raw_grad_norm", "ppo_clip_ratio")
+                        },
                         **{
                             f"stale/{key}": status[f"stale/{key}"]
                             for key in (
@@ -2169,7 +2174,7 @@ class RayPPOTrainer:
                                 "p999_valid",
                                 *(
                                     f"pos_{position}/{metric}"
-                                    for position in ("first256", "last256", "middle")
+                                    for position in (f"first{window}", f"last{window}", "middle")
                                     for metric in ("selected_tokens", "abs_log_ratio_mean", "frac_outside_0.5_2")
                                 ),
                             )
