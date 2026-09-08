@@ -82,18 +82,18 @@ from skyrl_train.trajectory_runners.harbor.identity_aware_reward import (
 )
 from skyrl_train.trajectory_runners.harbor.truncation_penalty import apply_truncation_penalty, detect_turn_truncation
 
-# Incremental, trial-indexed reader for the shared opencode literal log.
+# Incremental, trial-indexed reader for the shared CLI-agent literal log.
 from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogStore
 
 # Maximum restart attempts for orchestrator recovery
 MAX_ORCHESTRATOR_RESTART_ATTEMPTS = 3
 
 
-def _select_opencode_literal_chain(entries: List[Dict[str, Any]], trial_id: str) -> List[Dict[str, Any]]:
-    """Return the final continuous agent-call chain for one opencode trial.
+def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str) -> List[Dict[str, Any]]:
+    """Return the final continuous agent-call chain for one CLI-agent trial.
 
     The controller RecordProxy captures every request carrying the trial header.
-    OpenCode also makes auxiliary requests, and a context reset begins a fresh,
+    CLI agents can make auxiliary requests, and a context reset begins a fresh,
     summary-seeded conversation. Neither belongs in the causal sequence assembled
     from the final request's chat history. A real next agent turn has the previous
     served prompt and completion as an exact prefix of its prompt, so retain the
@@ -359,9 +359,9 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 selected objective does not already require behavior logprobs.
         """
         self.base_url = f"http://{trajectory_runner_cfg.http_endpoint_host}:{trajectory_runner_cfg.http_endpoint_port}"
-        # Native controller-ingress (opencode-RL literal capture): when the runner stood up
+        # Native controller-ingress for CLI-agent literal capture: when the runner stood up
         # a controller-ingress endpoint it publishes the minted capability URL. The AGENT
-        # (opencode, in a Daytona sandbox) must reach vLLM over the public internet at that
+        # (for example, from a Daytona sandbox) must reach vLLM over the public internet at that
         # URL — NOT the loopback self.base_url, which only resolves in-cluster. So the
         # per-trial agent api_base prefers the ingress URL when present; unset
         # (default/direct) => exactly f"{self.base_url}/v1" as before (byte-identical).
@@ -391,9 +391,9 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # it on os.environ['OTAGENT_LITERAL_LOG_PATH'] in the driver, but THIS runner
         # is constructed inside a Ray worker that never inherits that late env mutation,
         # so the driver threads it through the cfg as terminal_bench_config.literal_log_path.
-        # None when record_literal is off / direct launch → the opencode correlation +
+        # None when record_literal is off / direct launch → CLI-agent correlation +
         # chat_history recovery no-op exactly as before. Used by
-        # _maybe_correlate_opencode_rollout_details / _maybe_build_opencode_chat_history.
+        # _maybe_correlate_cli_rollout_details / _maybe_build_cli_chat_history.
         _cfg_literal_log = ""
         try:
             _cfg_literal_log = str(terminal_bench_cfg.get("literal_log_path", "") or "").strip()
@@ -1496,14 +1496,14 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             return False
         return bool(main.get("logprobs"))
 
-    def _maybe_correlate_opencode_rollout_details(
+    def _maybe_correlate_cli_rollout_details(
         self,
         result: "TrialResult",
         rollout_details: Optional[List[Dict[str, Any]]],
     ) -> Optional[List[Dict[str, Any]]]:
-        """Recover a CLI agent's (opencode's) rollout_details from the shared proxy log.
+        """Recover a CLI agent's rollout_details from the shared proxy log.
 
-        opencode talks to vLLM over its own transport, bypassing harbor Chat, so its
+        OpenCode and Pi talk to vLLM over their own transports, bypassing Harbor Chat, so their
         ``rollout_details`` is empty even behind a co-located RecordProxy (which writes
         a single shared worker-side log, not the in-sandbox trial dir). Harbor stamped a
         per-trial correlation id (``x-ot-trial-id``) into every request and surfaced it
@@ -1529,16 +1529,16 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         if not log_path:
             return rollout_details
         # Per-trial indexed lookup (O(this trial's entries)). The RecordProxy also
-        # sees auxiliary OpenCode calls and context-reset sessions under the same
+        # sees auxiliary CLI-agent calls and context-reset sessions under the same
         # trial header, so retain only the final continuous agent-call route before
         # constructing the rollout detail used by TIS/TITO.
         entries = self._literal_log_store.entries_for_trial(log_path, trial_id)
-        # This is the SECOND (last) opencode literal consumer for the trial —
-        # _maybe_build_opencode_chat_history already ran earlier in _process_trial_result.
+        # This is the second and final literal consumer for the trial:
+        # _maybe_build_cli_chat_history already ran earlier in _process_trial_result.
         # Once both have consumed this trial's rows, release them so the shared-log store
         # stays O(in-flight trials) instead of retaining every row for the whole run (a
-        # long high-concurrency opencode RL run's shared log is many GB). release_trial is
-        # idempotent and also fences out any late orphaned-opencode appends for this trial.
+        # long high-concurrency CLI-agent run's shared log can be many GB). release_trial
+        # is idempotent and also fences out late orphaned-agent appends for this trial.
         try:
             if not entries:
                 return rollout_details
@@ -1546,13 +1546,13 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 from harbor.literal.rollout_build import build_rollout_details_from_pairs
             except Exception:  # harbor without the bridge → no-op
                 return rollout_details
-            selected_entries = _select_opencode_literal_chain(entries, trial_id)
+            selected_entries = _select_cli_literal_chain(entries, trial_id)
             built = build_rollout_details_from_pairs([entry["literal"] for entry in selected_entries])
             if not built:
                 return rollout_details
             if len(selected_entries) != len(entries):
                 logger.info(
-                    f"[literal-bridge] selected {len(selected_entries)}/{len(entries)} continuous opencode "
+                    f"[literal-bridge] selected {len(selected_entries)}/{len(entries)} continuous CLI-agent "
                     f"turn(s) for trial {trial_id}"
                 )
             # Persist onto the result so downstream consumers see a consistent view.
@@ -1562,30 +1562,30 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 pass
             n_turns = len(built[0].get("completion_token_ids", []))
             logger.info(
-                f"[literal-bridge] correlated {n_turns} opencode turn(s) for trial {trial_id} from shared proxy log"
+                f"[literal-bridge] correlated {n_turns} CLI-agent turn(s) for trial {trial_id} from shared proxy log"
             )
             return built
         finally:
             self._literal_log_store.release_trial(trial_id)
 
-    def _maybe_build_opencode_chat_history(
+    def _maybe_build_cli_chat_history(
         self,
         result: "TrialResult",
     ) -> Optional[List[Dict[str, Any]]]:
-        """Reconstruct a CLI agent's (opencode's) chat_history from the shared proxy log.
+        """Reconstruct a CLI agent's chat_history from the shared proxy log.
 
         ``_process_trial_result`` reads ``chat_history`` from
         ``agent_result.metadata['all_messages']``, which ONLY the harbor terminus-2
-        agent sets (it drives harbor ``Chat``). opencode is a CLI agent that talks to
-        vLLM over its own transport and bypasses harbor ``Chat``, so it never populates
-        ``all_messages`` → the terminus path ``KeyError``\\ s and every opencode
+        agent sets (it drives Harbor ``Chat``). OpenCode and Pi are CLI agents that talk
+        to vLLM over their own transports and bypass Harbor ``Chat``, so they never populate
+        ``all_messages`` → the terminus path ``KeyError``\\ s and every affected
         trajectory is dropped with no logprobs (TIS then degrades to non-TIS on 100% of
         the batch). We instead recover the served conversation from the SAME shared
-        RecordProxy log the sibling :meth:`_maybe_correlate_opencode_rollout_details`
+        RecordProxy log the sibling :meth:`_maybe_correlate_cli_rollout_details`
         uses, filtered by this trial's correlation id.
 
         The reconstruction: take the LAST (latest-timestamp) matched request's
-        ``messages`` — opencode sends the FULL accumulated conversation as the prompt of
+        ``messages`` — the CLI agent sends the full accumulated conversation as the prompt of
         each call, so the final call carries every prior system/user/assistant/tool
         message — and append the final turn's assistant completion (decoded from its
         exact ``completion_token_ids``). The returned list is a standard
@@ -1631,7 +1631,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         ]
         if not matched:
             return None
-        matched = _select_opencode_literal_chain(matched, trial_id)
+        matched = _select_cli_literal_chain(matched, trial_id)
         if not matched:
             return None
         last = matched[-1]
@@ -1639,11 +1639,11 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         base_messages = request.get("messages") if isinstance(request, dict) else None
         if not isinstance(base_messages, list) or not base_messages:
             return None
-        # opencode sends OpenAI-shaped messages: ``content`` may be a LIST of parts and
+        # CLI agents send OpenAI-shaped messages: ``content`` may be a list of parts and
         # assistant turns may carry structured ``tool_calls`` (plus ``tool``-role results).
         # The downstream re-tok+splice fallback in
         # ``get_response_ids_and_loss_mask_from_messages`` runs ``apply_chat_template``,
-        # which can only render plain ``{role, content:str}`` messages — the raw opencode
+        # which can only render plain ``{role, content:str}`` messages — the raw provider
         # shape makes it raise ``TypeError: Can only get item pairs from a mapping``, which
         # the caller classifies as a zero-reward trajectory (silently starved ~87% of the
         # keep1-v24 batch to ``response_ids=[0]`` / reward 0). Normalize each kept message
@@ -1667,7 +1667,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 final_text = ""
         chat_history.append({"role": "assistant", "content": final_text})
         logger.info(
-            f"[literal-bridge] reconstructed opencode chat_history for trial {trial_id}: "
+            f"[literal-bridge] reconstructed CLI-agent chat_history for trial {trial_id}: "
             f"{len(chat_history)} message(s) from the shared proxy log"
         )
         return chat_history
@@ -1981,13 +1981,13 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         try:
             metadata = result.agent_result.metadata
             # terminus (harbor Chat) publishes the conversation on
-            # metadata['all_messages']; opencode (a CLI agent that bypasses harbor Chat)
-            # does not, so for it we recover chat_history from the shared RecordProxy
+            # metadata['all_messages']; CLI agents that bypass Harbor Chat do not, so
+            # recover their chat_history from the shared RecordProxy
             # log by correlation id (the SAME source as the per-turn logprobs below).
             # Branch on all_messages PRESENCE, not agent name, so the terminus path
             # stays byte-identical and any future Chat-driven agent keeps working.
             if isinstance(metadata, dict) and "all_messages" not in metadata:
-                chat_history = self._maybe_build_opencode_chat_history(result)
+                chat_history = self._maybe_build_cli_chat_history(result)
                 if not chat_history:
                     # No recoverable conversation → drop the trajectory honestly,
                     # exactly as the pre-existing KeyError branch did (no silent
@@ -2079,13 +2079,13 @@ class HarborTrajectoryRunner(TrajectoryRunner):
 
         # Extract per-turn behavior logprobs from Harbor's rollout details.
         rollout_details = getattr(result.agent_result, "rollout_details", None)
-        # opencode is a CLI agent that bypasses harbor Chat, so it returns EMPTY
+        # CLI agents that bypass Harbor Chat return empty
         # rollout_details even under a co-located RecordProxy (the proxy writes a
         # shared worker-side log, not the in-sandbox trial dir). Recover this trial's
         # token_ids/logprobs from that shared log by the per-trial correlation id
         # harbor stamped (x-ot-trial-id). No-op when rollout_details is already
         # populated (terminus native), the flag is off, or no proxy log is present.
-        rollout_details = self._maybe_correlate_opencode_rollout_details(result, rollout_details)
+        rollout_details = self._maybe_correlate_cli_rollout_details(result, rollout_details)
         assistant_logprobs = extract_logprobs_from_rollout_details(rollout_details)
         # Exact-alignment ids: Harbor's per-turn completion_token_ids, index-aligned
         # with assistant_logprobs. Enables the exact (no re-tokenization guess) TIS path.

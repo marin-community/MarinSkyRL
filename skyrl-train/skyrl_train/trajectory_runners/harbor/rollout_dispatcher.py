@@ -301,7 +301,7 @@ class RolloutDispatcher:
         """Create the K coordinators (pinned to the proxy's node) and start each runner.
 
         All coordinators are pinned via NodeAffinity to THIS (rank-0/head) node — the
-        node where the RecordProxy writes the node-local opencode literal log that
+        node where the RecordProxy writes the node-local CLI-agent literal log that
         ``LiteralLogStore`` reads with a local ``open()``. A SPREAD placement would scatter
         them and break that read on every off-node coordinator (keep1-v25). Each actor
         requests ``cpus_per_coordinator`` CPUs on the head node.
@@ -314,10 +314,10 @@ class RolloutDispatcher:
             runner_config.http_endpoint_host = ray.util.get_node_ip_address()
         actor_spec = self._spec.with_runner_config(runner_config)
 
-        # The RecordProxy writes the opencode literal log to a NODE-LOCAL path on THIS
+        # The RecordProxy writes the CLI-agent literal log to a NODE-LOCAL path on THIS
         # (rank-0/head) node, and LiteralLogStore reads it with a bare local open(). A
         # SPREAD placement group scattered the K coordinators across nodes, so ~(K-1)/K of
-        # them could not open the log -> _maybe_build_opencode_chat_history returned None ->
+        # them could not open the log -> _maybe_build_cli_chat_history returned None ->
         # 100% 'all_messages' drops -> empty training batch (keep1-v25; v24 only worked
         # because its lone reader happened to co-locate with the proxy). Pin every
         # coordinator to the proxy's node so the local read always resolves. The K-pool's

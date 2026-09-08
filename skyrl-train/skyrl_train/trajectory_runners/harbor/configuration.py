@@ -137,6 +137,9 @@ AGENT_SCHEMA = SectionSchema(
         #       auto: true
         #       reserved: 16384
         "opencode_config": FieldMapping("opencode_config", field_type="kwargs"),
+        # Pi custom-provider request formatting. Required by Pi when the runner
+        # supplies its served-model api_base; omitted for every other agent.
+        "thinking_format": FieldMapping("thinking_format", field_type="kwargs"),
         # Strict JSON parser mode (for RL training)
         # When true, treats parser warnings as errors and disables auto-correction.
         # This prevents reward hacking where the model produces garbage output that the
