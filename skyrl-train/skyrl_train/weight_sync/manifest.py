@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import torch
 
@@ -118,6 +118,38 @@ def build_manifest(specs: Sequence[TensorSpec], bucket_bytes: int = 2**30) -> Pu
         if separate:
             bucket_id, used = bucket_id + 1, 0
     return PublicationManifest(bucket_bytes, tuple(entries))
+
+
+def parse_manifest(payload: Mapping[str, Any], expected_manifest_id: str) -> PublicationManifest:
+    """Validate a transported manifest before the receiver allocates or writes.
+
+    Rebuilding the deterministic plan checks complete tensor coverage, expert
+    offsets, bucket bounds and dtype isolation, even if a malformed payload has
+    an internally consistent digest. This function only handles CPU metadata.
+    """
+    if set(payload) != {"bucket_bytes", "entries"} or not payload["entries"]:
+        raise ValueError("Expected a nonempty weight-sync manifest")
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if hashlib.sha256(canonical.encode()).hexdigest() != expected_manifest_id:
+        raise ValueError("Weight-sync manifest digest mismatch")
+    required = set(ManifestEntry.__dataclass_fields__)
+    specs = {}
+    for entry in payload["entries"]:
+        if not isinstance(entry, dict) or set(entry) != required:
+            raise ValueError("Unexpected weight-sync manifest entry fields")
+        name = entry["hf_name"]
+        if not isinstance(name, str) or not name:
+            raise ValueError("Manifest tensor name must be nonempty")
+        if not isinstance(entry["full_shape"], (tuple, list)):
+            raise ValueError("Manifest tensor shape must be a sequence")
+        if name not in specs:
+            specs[name] = TensorSpec(
+                name, tuple(entry["full_shape"]), entry["wire_dtype"], entry["expert_start"] is not None
+            )
+    rebuilt = build_manifest(tuple(specs.values()), payload["bucket_bytes"])
+    if json.dumps(asdict(rebuilt), sort_keys=True, separators=(",", ":")) != canonical:
+        raise ValueError("Manifest slices do not match the complete canonical plan")
+    return rebuilt
 
 
 def pack_bucket(
