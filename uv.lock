@@ -2122,7 +2122,7 @@ daytona = [
 [[package]]
 name = "harbor-config"
 version = "0.1.0"
-source = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2aaab18221a49e7c0725e86d597c845045ae0e93/harbor_config-0.1.0-py3-none-any.whl" }
+source = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-280541674a8e684b5bd8e3d19e8c149981a2e186/harbor_config-0.1.0-py3-none-any.whl" }
 dependencies = [
     { name = "pydantic", marker = "sys_platform == 'linux' or extra == 'extra-10-marinskyrl-cpu'" },
     { name = "pyyaml", marker = "sys_platform == 'linux' or extra == 'extra-10-marinskyrl-cpu'" },
@@ -2131,7 +2131,7 @@ dependencies = [
     { name = "universal-pathlib", marker = "sys_platform == 'linux' or extra == 'extra-10-marinskyrl-cpu'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2aaab18221a49e7c0725e86d597c845045ae0e93/harbor_config-0.1.0-py3-none-any.whl", hash = "sha256:42ff3dc7e15c75c4145e707809f21eec7b70af4fb5e8e8a7551243c70049f45d" },
+    { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-280541674a8e684b5bd8e3d19e8c149981a2e186/harbor_config-0.1.0-py3-none-any.whl", hash = "sha256:42ff3dc7e15c75c4145e707809f21eec7b70af4fb5e8e8a7551243c70049f45d" },
 ]
 
 [package.metadata]
@@ -3046,11 +3046,11 @@ requires-dist = [
     { name = "fsspec", specifier = ">=2024.0.0" },
     { name = "func-timeout" },
     { name = "harbor", extras = ["analysis", "datasets", "daytona"], marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/marin-community/harbor.git" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'cuda'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2aaab18221a49e7c0725e86d597c845045ae0e93/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'deepspeed'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2aaab18221a49e7c0725e86d597c845045ae0e93/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2aaab18221a49e7c0725e86d597c845045ae0e93/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2aaab18221a49e7c0725e86d597c845045ae0e93/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "extra == 'cpu'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-2aaab18221a49e7c0725e86d597c845045ae0e93/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'cuda'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-280541674a8e684b5bd8e3d19e8c149981a2e186/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'deepspeed'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-280541674a8e684b5bd8e3d19e8c149981a2e186/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-280541674a8e684b5bd8e3d19e8c149981a2e186/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-280541674a8e684b5bd8e3d19e8c149981a2e186/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "extra == 'cpu'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-280541674a8e684b5bd8e3d19e8c149981a2e186/harbor_config-0.1.0-py3-none-any.whl" },
     { name = "hf-transfer" },
     { name = "huggingface-hub", specifier = ">=0.34.0" },
     { name = "hydra-core", specifier = "==1.3.2" },
