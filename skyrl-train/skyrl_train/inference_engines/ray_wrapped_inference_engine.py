@@ -176,7 +176,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return ray.get(self.inference_engine_actor.dp_size.remote())
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        return await self.inference_engine_actor.generate.remote(input_batch=input_batch)
+        actor_task = self.inference_engine_actor.generate.remote(input_batch=input_batch)
+        return await _await_actor_task(actor_task)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         return await self.inference_engine_actor.wake_up.remote(*args, **kwargs)
