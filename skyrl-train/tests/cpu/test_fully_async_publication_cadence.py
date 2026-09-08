@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,11 +61,14 @@ class InferenceService:
         self.publications = []
         self.ready = asyncio.Event()
         self.ready.set()
+        self.generation_paused_event = threading.Event()
 
     async def pause_generation(self):
+        self.generation_paused_event.set()
         self.ready.clear()
 
     async def resume_generation(self):
+        self.generation_paused_event.clear()
         self.ready.set()
 
 
@@ -357,10 +361,88 @@ async def test_failed_publication_stops_before_evaluating_uninstalled_update():
         assert trainer.inference_engine_client.publications == [0]
         assert trainer.trajectory_runner.evaluations == [(0, 0)]
         assert [step for step, _ in trainer.policy_model.consumed] == [1, 2]
+        assert trainer.inference_engine_client.ready.is_set()
+        assert not trainer.inference_engine_client.generation_paused_event.is_set()
     finally:
         for task in trainer._active_trajectory_tasks:
             task.cancel()
         await asyncio.gather(*trainer._active_trajectory_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["pause", "broadcast", "post_drain", "resume"])
+async def test_publication_failure_resumes_before_propagating_and_skips_eval(monkeypatch, failure_stage):
+    trainer = make_driver()
+    trainer.global_step = 1
+    trainer._published_policy_version = 0
+    trainer.policy_model.completed_update = 1
+    engine = trainer.inference_engine_client
+    engine.installed_update = 0
+    original_pause, original_resume = engine.pause_generation, engine.resume_generation
+    original_broadcast = trainer.policy_model.async_run_method
+    failure = RuntimeError(f"failed {failure_stage}")
+    resume_calls = 0
+    drain_calls = 0
+
+    async def pause():
+        await original_pause()
+        if failure_stage == "pause":
+            raise failure
+
+    async def broadcast(*args):
+        if failure_stage == "broadcast":
+            raise failure
+        return await original_broadcast(*args)
+
+    async def drain():
+        nonlocal drain_calls
+        drain_calls += 1
+        if failure_stage == "post_drain" and drain_calls == 2:
+            raise failure
+
+    async def resume():
+        nonlocal resume_calls
+        resume_calls += 1
+        if failure_stage == "resume" and resume_calls == 1:
+            raise failure
+        await original_resume()
+
+    monkeypatch.setattr(engine, "pause_generation", pause)
+    monkeypatch.setattr(engine, "resume_generation", resume)
+    monkeypatch.setattr(trainer.policy_model, "async_run_method", broadcast)
+    monkeypatch.setattr(trainer, "_drain_policy_event_loops", drain)
+    with pytest.raises(RuntimeError) as caught:
+        await trainer.eval()
+    assert caught.value is failure
+    assert resume_calls == (2 if failure_stage == "resume" else 1)
+    assert engine.ready.is_set()
+    assert not engine.generation_paused_event.is_set()
+    assert trainer.trajectory_runner.evaluations == []
+    if failure_stage in {"pause", "broadcast"}:
+        assert trainer._published_policy_version == 0
+        assert engine.publications == []
+        assert engine.installed_update == 0
+
+
+@pytest.mark.asyncio
+async def test_publication_error_survives_failed_resume_cleanup(monkeypatch):
+    trainer = make_driver()
+    trainer.global_step = 1
+    trainer._published_policy_version = 0
+    trainer.policy_model.completed_update = 1
+    trainer.policy_model.fail_update = 1
+    attempted = []
+
+    async def failed_resume():
+        attempted.append(True)
+        raise ValueError("cleanup transport failed")
+
+    monkeypatch.setattr(trainer.inference_engine_client, "resume_generation", failed_resume)
+    with pytest.raises(RuntimeError, match="publication transport failed"):
+        await trainer.eval()
+    assert attempted == [True]
+    assert trainer._published_policy_version == 0
+    assert trainer.trajectory_runner.evaluations == []
 
 
 class DelayedFirstRunner(Runner):
