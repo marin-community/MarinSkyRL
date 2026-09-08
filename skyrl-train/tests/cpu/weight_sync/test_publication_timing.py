@@ -84,3 +84,102 @@ def test_rank_wall_fold_preserves_slowest_rank_without_summing_concurrent_worker
         ],
     }
     assert publication_stage_walls(receipt) == {"weight_broadcast/export": 3.0, "weight_broadcast/load": 1.5}
+
+
+def _native_receiver_receipt(monkeypatch):
+    """Execute WorkerWrap's actual CPU-safe readback without importing vLLM."""
+    import ast
+    import os
+    from pathlib import Path
+    import socket
+    from types import SimpleNamespace
+
+    source = Path(__file__).parents[3] / "skyrl_train/inference_engines/vllm/vllm_engine.py"
+    tree = ast.parse(source.read_text())
+    worker = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "WorkerWrap")
+    method = next(
+        node for node in worker.body if isinstance(node, ast.FunctionDef) and node.name == "read_publication_timing"
+    )
+    namespace = {
+        "torch": SimpleNamespace(distributed=SimpleNamespace(get_rank=lambda: 3)),
+        "socket": socket,
+        "os": os,
+        "PublicationStageTimer": PublicationStageTimer,
+    }
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+    stages = {
+        "recv": {"wall_seconds": 0.01, "gpu_ms": 12.5, "calls": 8},
+        "load": {"wall_seconds": 0.02, "gpu_ms": 25.0, "calls": 8},
+        "finalize": {"wall_seconds": 0.001, "gpu_ms": 1.25, "calls": 1},
+    }
+    actor = SimpleNamespace(_publication_timer=SimpleNamespace(finish=lambda: stages), _publication_step=7)
+    receipt = namespace["read_publication_timing"](actor)
+    assert receipt["hostname"] == socket.gethostname()
+    assert receipt["pid"] == os.getpid()
+    assert not actor._publication_timer.enabled
+    assert receipt["stages"] is stages
+    return receipt
+
+
+def test_native_receiver_rpc_receipt_survives_transport_and_exports_origin(monkeypatch):
+    import json
+    from skyrl_train.weight_sync.publication_timing import record_receiver_publication_stages
+
+    receipt = _native_receiver_receipt(monkeypatch)
+    transported = json.loads(json.dumps([[receipt], [receipt]]))
+    events = []
+    monkeypatch.setattr(
+        "skyrl_train.telemetry.record_event", lambda name, fields, **kwargs: events.append((name, fields, kwargs))
+    )
+    monkeypatch.setattr("torch.cuda.synchronize", lambda: pytest.fail("receipt transport cannot synchronize CUDA"))
+    record_receiver_publication_stages(transported, step=7)
+    assert len(events) == 6
+    for engine_index in range(2):
+        for index, (stage, values) in enumerate(receipt["stages"].items()):
+            name, body, kwargs = events[3 * engine_index + index]
+            assert name == "publication_stage"
+            assert body == values
+            assert kwargs["attributes"] == {
+                "role": "inference",
+                "exporter_role": "trainer",
+                "engine_index": str(engine_index),
+                "origin_host": receipt["hostname"],
+                "origin_pid": str(receipt["pid"]),
+                "rank": "3",
+                "step": "7",
+                "stage": stage,
+            }
+    assert publication_stage_walls({"trainer": [], "receiver": transported}) == {
+        "weight_broadcast/recv": 0.01,
+        "weight_broadcast/load": 0.02,
+        "weight_broadcast/finalize": 0.001,
+    }
+
+
+@pytest.mark.parametrize("damage", ["missing", "step", "origin", "gpu", "wall", "stages", "duplicate"])
+def test_receiver_receipt_export_rejects_incomplete_batch_atomically(monkeypatch, damage):
+    from copy import deepcopy
+    from skyrl_train.weight_sync.publication_timing import record_receiver_publication_stages
+
+    good = _native_receiver_receipt(monkeypatch)
+    bad = deepcopy(good)
+    if damage == "step":
+        bad["step"] = 6
+    elif damage == "origin":
+        bad["hostname"] = ""
+    elif damage == "gpu":
+        bad["stages"]["recv"]["gpu_ms"] = float("nan")
+    elif damage == "wall":
+        bad["stages"]["load"]["wall_seconds"] = -1
+    elif damage == "stages":
+        bad["stages"] = {}
+    receipts = [[good], [bad]]
+    if damage == "missing":
+        receipts[1] = []
+    elif damage == "duplicate":
+        receipts[1].append(bad)
+    events = []
+    monkeypatch.setattr("skyrl_train.telemetry.record_event", lambda *args, **kwargs: events.append(args))
+    with pytest.raises(ValueError):
+        record_receiver_publication_stages(receipts, step=7)
+    assert events == []

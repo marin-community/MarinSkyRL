@@ -72,7 +72,6 @@ from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affini
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
 from skyrl_train.weight_sync.publication_timing import PublicationStageTimer
-from skyrl_train.telemetry import record_event
 from skyrl_train.models.grug_moe import is_grug_router_bias
 from skyrl_train.inference_engines.vllm.utils import (
     pop_openai_kwargs,
@@ -469,19 +468,14 @@ class WorkerWrap:
     def read_publication_timing(self):
         stages = self._publication_timer.finish()
         rank = torch.distributed.get_rank()
-        for stage, values in stages.items():
-            record_event(
-                "publication_stage",
-                values,
-                attributes={
-                    "role": "inference",
-                    "stage": stage,
-                    "rank": str(rank),
-                    "step": str(self._publication_step),
-                },
-            )
         self._publication_timer = PublicationStageTimer(enabled=False)
-        return {"rank": rank, "stages": stages}
+        return {
+            "rank": rank,
+            "step": self._publication_step,
+            "hostname": socket.gethostname(),
+            "pid": os.getpid(),
+            "stages": stages,
+        }
 
     def skyrl_finish_weight_reload(self) -> None:
         """RENAMED from ``finish_weight_update`` + NOW WIRED — see
