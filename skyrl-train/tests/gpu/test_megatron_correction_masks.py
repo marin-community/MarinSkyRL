@@ -1,6 +1,7 @@
 """Eight-H100 native numerical qualification; requires an explicitly staged Qwen snapshot."""
 
 import os
+import json
 from functools import partial
 
 import pytest
@@ -18,6 +19,8 @@ from tests.offpolicy_mask_reference import regular_correction_reference_policy_l
 @pytest.mark.parametrize("mode", ["offpolicy", "m2"])
 async def test_megatron_correction_mask_matches_independent_actor(ray_init_fixture, request, mode):
     """Two TP2/DP2 actor groups compare real losses, gradients and updated logprobs."""
+    assert torch.cuda.device_count() == 8
+    assert all("H100" in torch.cuda.get_device_name(index) for index in range(8))
     model_path = os.environ.get("MARINSKYRL_TEST_QWEN_MODEL_PATH")
     assert model_path, "stage the pinned Qwen3-0.6B snapshot before this regional test"
     reference_name = "test_correction_" + mode
@@ -52,7 +55,7 @@ async def test_megatron_correction_mask_matches_independent_actor(ray_init_fixtu
     ]
     batches = [get_test_training_batch(batch_size=4, model_name=model_path) for _ in groups]
     before = [_megatron_forward(group, batch) for group, batch in zip(groups, batches, strict=True)]
-    torch.testing.assert_close(before[0], before[1], atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(before[0], before[1], atol=1e-4, rtol=0)
     # M2 harmful deltas lie inside PPO's lower clipping bound: masking must change
     # actual gradients, not merely remove already-clipped zero-gradient terms.
     delta = torch.tensor(
@@ -78,8 +81,8 @@ async def test_megatron_correction_mask_matches_independent_actor(ray_init_fixtu
     statuses = [[item.metadata["train_status"] for item in result] for result in results]
     assert all(len(status) == 4 for status in statuses)
     for actual, reference in zip(*statuses, strict=True):
-        assert actual["policy_loss"] == pytest.approx(reference["policy_loss"], abs=1e-6)
-        assert actual["raw_grad_norm"] == pytest.approx(reference["raw_grad_norm"], abs=1e-6)
+        assert actual["policy_loss"] == pytest.approx(reference["policy_loss"], abs=1e-6, rel=0)
+        assert actual["raw_grad_norm"] == pytest.approx(reference["raw_grad_norm"], abs=1e-6, rel=0)
         assert torch.isfinite(torch.tensor(actual["raw_grad_norm"])) and actual["raw_grad_norm"] > 0
         activity_key = "m2_mask/masked_fraction" if mode == "m2" else "offpolicy_mask/masked_fraction"
         assert actual[activity_key] > 0
@@ -89,4 +92,35 @@ async def test_megatron_correction_mask_matches_independent_actor(ray_init_fixtu
             assert actual["offpolicy_mask/vetoed_sequence_fraction"] > 0
     after = [_megatron_forward(group, batch) for group, batch in zip(groups, batches, strict=True)]
     assert not torch.equal(before[0], after[0])
-    torch.testing.assert_close(after[0], after[1], atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(after[0], after[1], atol=1e-4, rtol=0)
+    print(
+        "CORRECTION_NUMERICAL_PASS "
+        + json.dumps(
+            {
+                "mode": mode,
+                "physical_h100s": 8,
+                "actor_groups": 2,
+                "tp": 2,
+                "dp": 2,
+                "loss_reduction": configs[0].trainer.algorithm.loss_reduction,
+                "loss_absolute_error_max": max(
+                    abs(a["policy_loss"] - b["policy_loss"]) for a, b in zip(*statuses, strict=True)
+                ),
+                "raw_grad_norm_absolute_error_max": max(
+                    abs(a["raw_grad_norm"] - b["raw_grad_norm"]) for a, b in zip(*statuses, strict=True)
+                ),
+                "updated_logprob_absolute_error_max": float((after[0] - after[1]).abs().max()),
+                "production": [
+                    {
+                        key: value
+                        for key, value in status.items()
+                        if key in ("policy_loss", "raw_grad_norm")
+                        or key.startswith(("offpolicy_mask/", "m2_mask/"))
+                        or key == "entropy_mean_selected"
+                    }
+                    for status in statuses[0]
+                ],
+            }
+        ),
+        flush=True,
+    )
