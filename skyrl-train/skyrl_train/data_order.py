@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from itertools import islice
 
@@ -147,3 +148,9 @@ async def normalize_async_source_epoch(dataloader, tracker, completed_step: int,
         raise ValueError("Checkpoint source-order UIDs do not belong to the saved epoch")
     await tracker.on_epoch_end()
     return True
+
+
+def consumed_uid_digest(uids: Sequence[str]) -> int:
+    """Hash the consumed prompt set into an integer exactly representable in float64."""
+    payload = json.dumps(sorted(set(uids))).encode()
+    return int(hashlib.sha256(payload).hexdigest()[:13], 16)
