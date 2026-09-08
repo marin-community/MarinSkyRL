@@ -676,8 +676,10 @@ class TimedInferenceService(InferenceService):
         self.version_resumes.append(policy_version)
         await super().resume_generation()
 
-    async def read_publication_request_state(self, initial_policy_version=None, drain_accounting=False):
-        self.accounting_reads.append((initial_policy_version, drain_accounting))
+    async def read_publication_request_state(
+        self, initial_policy_version=None, drain_accounting=False, terminal_timeout_seconds=None
+    ):
+        self.accounting_reads.append((initial_policy_version, drain_accounting, terminal_timeout_seconds))
         return [
             {
                 "shared_time_and_uts_namespaces": True,
@@ -713,7 +715,7 @@ async def test_publication_trace_reaches_step_metrics_without_batch_dispatch(mon
         assert 0 <= metrics["timing/publication_stall_seconds"] <= metrics["timing/sync_weights"]
     assert engine.publications == [0, 1, 2]
     assert engine.version_resumes == [1, 2]
-    assert engine.accounting_reads == [(0, True)] + [(None, True)] * 7
+    assert engine.accounting_reads == [(0, True, None)] + [(None, True, None)] * 6 + [(None, True, 30.0)]
     receipts = [event for event in events if event[0] == "publication_request_accounting"]
     assert len(receipts) == 16
     assert {event[2]["attributes"]["moment"] for event in receipts} == {

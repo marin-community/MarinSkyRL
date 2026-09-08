@@ -1,5 +1,7 @@
 """Request identities for auditing abort/resume across weight syncs."""
 
+import asyncio
+
 from dataclasses import dataclass, field
 
 
@@ -18,10 +20,21 @@ class PublicationRequestAccounting:
     terminal: list[dict] = field(default_factory=list)
     pauses: list[dict] = field(default_factory=list)
     pause_count: int = 0
+    idle: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.active:
+            self.idle.set()
+
+    async def wait_for_idle(self, timeout_seconds: float) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("terminal acknowledgement timeout must be positive")
+        await asyncio.wait_for(self.idle.wait(), timeout=timeout_seconds)
 
     def start(self, request_id: str) -> None:
         if request_id in self.active:
             raise ValueError("duplicate active request identity")
+        self.idle.clear()
         self.active.add(request_id)
         self.started.append(request_id)
 
@@ -37,6 +50,8 @@ class PublicationRequestAccounting:
         if request_id not in self.active:
             raise ValueError("terminal request has no active identity")
         self.active.remove(request_id)
+        if not self.active:
+            self.idle.set()
         self.terminal.append(
             {
                 "request_id": request_id,

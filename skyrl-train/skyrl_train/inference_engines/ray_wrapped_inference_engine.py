@@ -195,10 +195,15 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
     async def read_publication_request_state(
-        self, initial_policy_version: int | None = None, drain_accounting: bool = False
+        self,
+        initial_policy_version: int | None = None,
+        drain_accounting: bool = False,
+        terminal_timeout_seconds: float | None = None,
     ):
         return await self.inference_engine_actor.read_publication_request_state.remote(
-            initial_policy_version=initial_policy_version, drain_accounting=drain_accounting
+            initial_policy_version=initial_policy_version,
+            drain_accounting=drain_accounting,
+            terminal_timeout_seconds=terminal_timeout_seconds,
         )
 
     async def read_publication_receiver_state(self):

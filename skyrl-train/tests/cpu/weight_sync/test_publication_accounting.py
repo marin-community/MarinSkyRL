@@ -170,3 +170,48 @@ async def test_native_request_wrapper_records_abort_and_preserves_ledger_during_
     assert actor._publication_versions.at_first_token(time.monotonic()) == 1
     assert receipt["shared_time_and_uts_namespaces"]
     assert (await actor.read_publication_request_state(drain_accounting=True))["request_accounting"]["terminal"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["stop", "length", "abort", "CancelledError"])
+async def test_native_final_acknowledgement_waits_for_terminal_disposition(reason):
+    import asyncio
+    import os
+    from types import SimpleNamespace
+
+    async def is_paused():
+        return False
+
+    manager = SimpleNamespace(processes=[SimpleNamespace(pid=os.getpid(), is_alive=lambda: True)])
+    engine = SimpleNamespace(
+        engine_core=SimpleNamespace(resources=SimpleNamespace(engine_manager=manager)),
+        output_processor=SimpleNamespace(request_states={}),
+        is_paused=is_paused,
+    )
+    actor = _native_engine_methods(engine)
+    await actor.read_publication_request_state(initial_policy_version=0, drain_accounting=True)
+    actor._publication_requests.start("pending-cancellation")
+    readback = asyncio.create_task(
+        actor.read_publication_request_state(
+            drain_accounting=True,
+            terminal_timeout_seconds=1.0,
+        )
+    )
+    await asyncio.sleep(0.02)
+    assert not readback.done()
+    actor._publication_requests.finish("pending-cancellation", reason=reason, tokens=0, first_token_time=None)
+    receipt = await readback
+    assert receipt["terminal_wait_seconds"] >= 0.01
+    assert receipt["request_accounting"]["active_ids"] == []
+    assert receipt["request_accounting"]["terminal"][0]["reason"] == reason
+
+
+@pytest.mark.asyncio
+async def test_terminal_acknowledgement_timeout_preserves_missing_identity():
+    ledger = PublicationRequestAccounting()
+    ledger.start("still-running")
+    with pytest.raises(TimeoutError):
+        await ledger.wait_for_idle(0.01)
+    assert ledger.drain()["active_ids"] == ["still-running"]
+    ledger.finish("still-running", reason="CancelledError", tokens=0, first_token_time=None)
+    await ledger.wait_for_idle(0.01)

@@ -1222,7 +1222,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             epoch=self.cfg.trainer.epochs - 1,
         )
         if self.cfg.generator.publication_stage_timing:
-            await self._record_publication_requests("final")
+            await self._record_publication_requests("final", wait_for_terminal=True)
         logger.info("Training done!")
 
     async def _run_training(self, training_input: TrainingInputBatch):
@@ -1485,10 +1485,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
         self._log_weight_update_completed(reason=reason, duration_seconds=weight_update_timer.duration)
 
-    async def _record_publication_requests(self, moment: str, initial_policy_version: int | None = None) -> None:
+    async def _record_publication_requests(
+        self, moment: str, initial_policy_version: int | None = None, wait_for_terminal: bool = False
+    ) -> None:
         """Persist drainable native request identities without changing admission."""
         states = await self.inference_engine_client.read_publication_request_state(
-            initial_policy_version=initial_policy_version, drain_accounting=True
+            initial_policy_version=initial_policy_version,
+            drain_accounting=True,
+            terminal_timeout_seconds=self.cfg.generator.publication_pause_timeout_seconds
+            if wait_for_terminal
+            else None,
         )
         if len(states) != len(self.inference_engine_client.publication_inflight_snapshot()):
             raise RuntimeError("weight-sync request readback omitted an engine")
