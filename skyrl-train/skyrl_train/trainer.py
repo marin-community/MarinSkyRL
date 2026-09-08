@@ -2139,7 +2139,37 @@ class RayPPOTrainer:
                 record_event(
                     "policy_update",
                     {
-                        **status,
+                        # EventBody accepts at most 64 fields. Full worker status
+                        # remains in by_update scalars; this event carries the
+                        # bounded ratio family and optimizer identity only.
+                        **{key: value for key, value in status.items() if key in ("update_index", "update_age")},
+                        **{
+                            f"stale/{key}": status[f"stale/{key}"]
+                            for key in (
+                                "log_ratio_mean",
+                                "mean_squared_log_ratio",
+                                "abs_log_ratio_mean",
+                                "abs_log_ratio_max",
+                                "abs_log_ratio_p99",
+                                "p99_approximate",
+                                "abs_log_ratio_p999",
+                                "frac_outside_0.5_2",
+                                "frac_below_1e-5",
+                                "ess_fraction",
+                                "kl_k1",
+                                "kl_k3",
+                                "chi2",
+                                "statistics_valid",
+                                "selected_tokens",
+                                "p999_valid",
+                                *(
+                                    f"pos_{position}/{metric}"
+                                    for position in ("first256", "last256", "middle")
+                                    for metric in ("selected_tokens", "abs_log_ratio_mean", "frac_outside_0.5_2")
+                                ),
+                            )
+                            if f"stale/{key}" in status
+                        },
                         "abs_log_ratio_mean": status.get("stale/abs_log_ratio_mean", status.get("log_ratio_abs_mean")),
                         "ess_fraction": status.get("stale/ess_fraction"),
                         "frac_outside_0.5_2": status.get("stale/frac_outside_0.5_2"),
