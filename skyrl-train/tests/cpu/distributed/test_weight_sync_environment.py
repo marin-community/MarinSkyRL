@@ -28,6 +28,8 @@ def pinned_override(monkeypatch):
     module.override_envs_for_invariance = override_envs_for_invariance
     monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("RANK", "3")
+    monkeypatch.setenv("LOCAL_RANK", "0")
     for key in control.EXPECTED_ENVIRONMENT:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
@@ -92,10 +94,13 @@ def _load_class_from_source(path, class_name):
     return namespace[class_name]
 
 
-def test_actual_receiver_subclass_keeps_extension_and_runs_before_super(pinned_override, monkeypatch):
+def test_actual_receiver_subclass_keeps_extension_and_runs_before_super(pinned_override, monkeypatch, capfd):
     calls = []
 
     class GPUWorker:
+        rank = 5
+        local_rank = 2
+
         def init_device(self):
             assert {key: os.environ.get(key) for key in control.EXPECTED_ENVIRONMENT} == control.EXPECTED_ENVIRONMENT
             calls.append("native_init_device")
@@ -115,7 +120,12 @@ def test_actual_receiver_subclass_keeps_extension_and_runs_before_super(pinned_o
     config = SimpleNamespace(worker_cls=control.WORKER_CLASS, worker_extension_cls=extension_name)
     resolved = resolve_extended_worker(config, names.__getitem__, logger)
     assert resolved is worker
+    monkeypatch.delenv("RANK")
+    monkeypatch.delenv("LOCAL_RANK")
     assert resolved().init_device() == "initialized"
+    receipt = json.loads(capfd.readouterr().out.removeprefix("WEIGHT_SYNC_ENVIRONMENT_PRE_PG "))
+    assert (receipt["rank"], receipt["local_rank"]) == (5, 2)
+    assert receipt["environment_rank"] is None and receipt["environment_local_rank"] is None
     assert calls == ["native_init_device"]
     assert resolved().test_rpc(7, named=8) == ((7,), {"named": 8})
     assert resolved.__bases__ == (GPUWorker, extension)
