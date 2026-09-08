@@ -841,7 +841,7 @@ def test_consumed_stop_metrics_survive_padding_and_publish_after_update(dummy_co
     assert trainer.all_metrics == {}
     # Replace only the telemetry sink. Conversion and DP padding remain real.
     monkeypatch.setattr(trainer_module, "record_consumed_work", lambda **_kwargs: None)
-    trainer._log_optimizer_step_completed(epoch=0, training_input=batch, duration_seconds=1.0)
+    trainer._log_optimizer_step_completed(epoch=0, training_input=batch, uids=["a", "b", "c"], duration_seconds=1.0)
     assert trainer.all_metrics["consumed/sequences"] == 3
     assert trainer.all_metrics["consumed/length_stop_count"] == 1
     assert trainer.all_metrics["consumed/length_stop_fraction"] == pytest.approx(1 / 3)
