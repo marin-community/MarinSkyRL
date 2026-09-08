@@ -239,11 +239,16 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         actor_task = self.inference_engine_actor.completion.remote(request_payload)
         return await _await_actor_task(actor_task)
 
+    async def is_paused(self) -> bool:
+        return await self.inference_engine_actor.is_paused.remote()
+
     async def pause_generation(self) -> None:
         return await self.inference_engine_actor.pause_generation.remote()
 
-    async def resume_generation(self) -> None:
-        return await self.inference_engine_actor.resume_generation.remote()
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        if policy_version is None:
+            return await self.inference_engine_actor.resume_generation.remote()
+        return await self.inference_engine_actor.resume_generation.remote(policy_version=policy_version)
 
     async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET):
         """Return throughput, latency, cache, token, and request statistics."""
