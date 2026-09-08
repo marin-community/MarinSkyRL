@@ -3,6 +3,7 @@
 from copy import deepcopy
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -378,3 +379,54 @@ def test_real_parquet_prompt_dataset_hashes_collated_content_and_positional_uids
     changed = PromptDataset(str(changed_path), CountingTokenizer(), max_prompt_length=32, num_workers=1)
     with pytest.raises(ValueError, match="source-order contract"):
         validate_source_order_checkpoint(loader(config(), dataset=changed), saved, 1)
+
+
+@pytest.mark.parametrize("is_train,asynchronous", [(True, True), (True, False), (False, False)])
+def test_zero_worker_override_reads_rows_in_driver_process(is_train, asynchronous):
+    cfg = config(workers=8)
+    cfg.data.num_workers = 0
+    cfg.trainer.eval_batch_size = 4
+    data = ProcessRows(16)
+    built = build_dataloader(cfg, data, is_train=is_train, is_fully_async=asynchronous)
+    assert built.num_workers == 0
+    batches = list(built)
+    assert {row["read_pid"] for batch in batches for row in batch} == {os.getpid()}
+    assert len([row for batch in batches for row in batch]) == 16
+
+
+class ProcessRows(Rows):
+    def __getitem__(self, index):
+        return {**super().__getitem__(index), "read_pid": os.getpid()}
+
+
+@pytest.mark.asyncio
+async def test_zero_worker_async_epoch_reset_keeps_all_reads_in_driver_process():
+    cfg = config(workers=8)
+    cfg.data.num_workers = 0
+    data = ProcessRows(16)
+    built = build_dataloader(cfg, data, is_train=True, is_fully_async=True)
+    tracker = DataConsumptionTracker(4, 4)
+    source = _AsyncDataloader(built, 4, tracker)
+    epochs = []
+    for _ in range(2):
+        rows = []
+        while (batch := await source.get_next_non_consumed_data()) is not None:
+            rows.extend(batch)
+        assert {row["read_pid"] for row in rows} == {os.getpid()}
+        uids = [row["uid"] for row in rows]
+        assert len(uids) == len(set(uids)) == 16
+        epochs.append(uids)
+        await tracker.mark_consumed(uids)
+        await tracker.on_epoch_end()
+        await source.reset_at_epoch_end()
+    assert epochs[0] != epochs[1]
+
+
+def test_worker_override_invalidates_source_order_resume():
+    cfg = config(workers=8)
+    legacy = build_dataloader(cfg, Rows(), is_train=True)
+    saved = source_order_checkpoint(legacy, completed_step=0)
+    cfg.data.num_workers = 0
+    current = build_dataloader(cfg, Rows(), is_train=True)
+    with pytest.raises(ValueError, match="source-order contract"):
+        validate_source_order_checkpoint(current, saved, completed_step=0)
