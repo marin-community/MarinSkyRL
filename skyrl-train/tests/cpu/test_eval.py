@@ -411,3 +411,48 @@ def test_frozen_contract_metrics_reject_inconsistent_native_rows(alteration):
         extras[0]["extra_info"]["contract"] = "unknown"
     with pytest.raises(ValueError):
         evaluation_contract_metrics(["aime"], extras, ["Answer: 5"], rewards, ["stop"])
+
+
+@pytest.mark.asyncio
+async def test_untagged_evaluation_only_decodes_the_logged_example(dummy_config):
+    cfg = dummy_config
+    cfg.generator.eval_n_samples_per_prompt = 1
+    cfg.generator.trajectory_retention.enabled = False
+    cfg.trainer.dump_eval_results = False
+    loader = DummyStatefulDataLoader(
+        [
+            [
+                {
+                    "prompt": [{"role": "user", "content": "Question"}],
+                    "uid": str(i),
+                    "env_class": "gsm8k",
+                    "env_extras": {"data_source": "math"},
+                }
+                for i in range(2)
+            ]
+        ]
+    )
+    batch = {
+        "prompt_token_ids": [[1], [1]],
+        "response_ids": [[53], [57]],
+        "rewards": [1.0, 0.0],
+        "loss_masks": [[1], [1]],
+        "stop_reasons": ["stop", "stop"],
+        "rollout_logprobs": None,
+    }
+    decoder = CountingDecoder()
+    result = await evaluate(loader, DummyRunner(batch), cfg, 4, decoder)
+    assert result["eval/all/avg_score"] == 0.5
+    assert "eval/all/contract_correct" not in result
+    # Decoding is the expensive boundary under test: legacy evaluation decodes
+    # its one logged example, and must not decode an additional full batch.
+    assert decoder.decoded_responses == 1
+
+
+class CountingDecoder(CharacterDecoder):
+    def __init__(self):
+        self.decoded_responses = 0
+
+    def decode(self, tokens):
+        self.decoded_responses += 1
+        return super().decode(tokens)
