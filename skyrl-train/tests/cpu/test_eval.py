@@ -391,7 +391,7 @@ async def test_frozen_math_contract_metrics_preserve_fractional_reward_and_compl
 
 
 class CharacterDecoder:
-    def decode(self, tokens, skip_special_tokens=False):
+    def decode(self, tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False):
         return "".join(
             "<|im_end|>" if token == 151645 else chr(token)
             for token in tokens
