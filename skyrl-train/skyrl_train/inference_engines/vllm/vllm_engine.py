@@ -463,6 +463,11 @@ class WorkerWrap:
             initialize_layerwise_reload(model)
         self._skyrl_weight_update_active = True
 
+    def read_publication_receiver_state(self):
+        from skyrl_train.weight_sync.publication_receiver_state import read_publication_receiver_state
+
+        return read_publication_receiver_state(self)
+
     def begin_publication_timing(self, step: int):
         self._publication_timer = PublicationStageTimer(enabled=True)
         self._publication_step = step
@@ -2090,6 +2095,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def begin_publication_timing(self, step: int):
         return await self._get_engine().collective_rpc("begin_publication_timing", args=(step,))
+
+    async def read_publication_receiver_state(self):
+        return await self._get_engine().collective_rpc("read_publication_receiver_state")
 
     async def read_publication_timing(self):
         return await self._get_engine().collective_rpc("read_publication_timing")
