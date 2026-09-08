@@ -6,6 +6,18 @@ import io
 import pytest
 
 from tests.gpu.diagnostics.stage_qwen_correction_fixture import copy_verified
+from tests.correction_fixture_config import correction_actor_config
+
+
+def test_actual_fixture_config_uses_native_token_mean_without_credentials(monkeypatch):
+    from skyrl_train.utils.utils import validate_cfg
+
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    config = correction_actor_config("/tmp/immutable-qwen-fixture")
+    assert config.trainer.logger == "console"
+    assert config.trainer.algorithm.loss_reduction == "token_mean"
+    assert config.trainer.policy.model.path == "/tmp/immutable-qwen-fixture"
+    validate_cfg(config)
 
 
 @pytest.mark.parametrize("change", ["none", "wrong_hash", "truncated", "oversized"])

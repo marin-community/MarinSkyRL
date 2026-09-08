@@ -10,9 +10,10 @@ import torch
 
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.utils import validate_cfg
-from tests.gpu.test_megatron_worker import get_test_actor_config, get_test_training_batch, _megatron_forward
+from tests.gpu.test_megatron_worker import get_test_training_batch, _megatron_forward
 from tests.gpu.utils import init_worker_with_type
 from tests.offpolicy_mask_reference import regular_correction_reference_policy_loss
+from tests.correction_fixture_config import correction_actor_config
 
 
 @pytest.mark.asyncio
@@ -29,7 +30,7 @@ async def test_megatron_correction_mask_matches_independent_actor(ray_init_fixtu
 
     configs = []
     for reference in (False, True):
-        cfg = get_test_actor_config(model_name=model_path)
+        cfg = correction_actor_config(model_path)
         cfg.trainer.strategy = "megatron"
         cfg.trainer.placement.colocate_all = False
         cfg.trainer.placement.policy_num_gpus_per_node = 4
