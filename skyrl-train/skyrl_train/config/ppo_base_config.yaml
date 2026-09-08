@@ -190,6 +190,9 @@ trainer:
       cp_rotate_method: "allgather"
     sequence_parallel_size: 1
   algorithm:
+    grad_cosine:
+      enabled: true
+      store: gpu_fp32
     ratio_diagnostics:
       position_window: 256
       by_update_max: 16

@@ -50,6 +50,7 @@ from skyrl_train.megatron_timing import (
 from skyrl_train.learner_memory import LearnerMemory
 from skyrl_train.optimizer_state_metrics import OptimizerStateObserver
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
+from skyrl_train.utils.gradient_direction import gradient_direction_summary
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
@@ -719,6 +720,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             self.model,
                             self.scheduler,
                             name="actor",
+                            grad_observer=self._gradient_observer(megatron_optimizer=self.optimizer),
                             after_step=(
                                 partial(
                                     self._optimizer_state_observer.after_step,
@@ -743,6 +745,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # Attach grad norm only for the last micro in the mini-batch
                         if i == len(metrics_list) - 1 and grad_norm is not None:
                             status["raw_grad_norm"] = grad_norm
+                        if i == len(metrics_list) - 1:
+                            status.update(self.strategy.last_grad_metrics)
 
                         # attach response_length
                         status["response_length"] = micro_buffer[i].num_actions
@@ -773,6 +777,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         status_mean = policy_training_metrics(all_metrics, policy_update_steps)
         status_mean["update_age_mean"] = sum(row["update_age"] for row in status_by_update) / len(status_by_update)
         status_mean["update_age_max"] = max(row["update_age"] for row in status_by_update)
+        status_mean.update(gradient_direction_summary(status_by_update))
         if status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0 and not self._warned_exact_unit_policy_ratio:
             logger.warning(
                 "Megatron's recomputed old log probabilities exactly match the training forward for every policy "
