@@ -299,6 +299,7 @@ def create_ray_wrapped_inference_engines(
     mp_backend: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
     node_local: bool = False,
+    serial_engine_startup: bool = False,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -314,6 +315,8 @@ def create_ray_wrapped_inference_engines(
         non-colocated engines (each engine owns its own GPUs); colocated/hybrid engines
         still require the ray backend for shared-GPU resource management.
     """
+    if serial_engine_startup and (backend != "vllm" or data_parallel_size != 1):
+        raise ValueError("Serial startup requires independent vLLM engines with data_parallel_size=1")
     validate_node_local_inference(
         enabled=node_local,
         backend=backend,
@@ -696,6 +699,14 @@ def create_ray_wrapped_inference_engines(
                 )
                 inference_engine_actors.append(engine)
                 weight_sync_relative_rank_offsets.append(i * per_engine_gpu_count)
+                if serial_engine_startup:
+                    # Resolve the actual ready RPC before another independent
+                    # engine races vLLM's released-port-to-TCPStore bind window.
+                    wait_for_inference_engine_startup(
+                        [engine.report_engine_hosts.remote()],
+                        inference_engine_actors,
+                        timeout_seconds=engine_init_timeout_seconds,
+                    )
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang
 
