@@ -803,6 +803,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 await self._drain_policy_event_loops()
         if self.cfg.generator.publication_stage_timing:
             await self._record_publication_requests("initial", initial_policy_version=self._published_policy_version)
+        if self.cfg.generator.publication_receiver_state:
+            with Timer("publication_receiver_readback", self.all_startup_timings):
+                await self._record_publication_receiver_state()
         # Startup weight sync runs before producers exist and does not pause inference.
         await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
         self._log_weight_update_completed(
@@ -1463,6 +1466,32 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 0.0, weight_update_timer.duration - self.all_timings["weight_broadcast/nccl_send"]
             )
         self._log_weight_update_completed(reason=reason, duration_seconds=weight_update_timer.duration)
+
+    async def _record_publication_receiver_state(self) -> None:
+        states = await self.inference_engine_client.read_publication_receiver_state()
+        generator = self.cfg.generator
+        expected_engines = generator.num_inference_engines * generator.inference_engine_data_parallel_size
+        expected_workers = (
+            generator.inference_engine_tensor_parallel_size * generator.inference_engine_pipeline_parallel_size
+        )
+        if len(states) != expected_engines or any(len(rows) != expected_workers for rows in states):
+            raise RuntimeError("receiver prerequisite readback omitted an engine or worker")
+        origins = [(state["host"], state["pid"]) for rows in states for state in rows]
+        if len(set(origins)) != len(origins) or any(state["weight_reload_active"] for rows in states for state in rows):
+            raise RuntimeError("receiver prerequisite readback duplicated an origin or overlapped reload")
+        for engine_index, rows in enumerate(states):
+            for worker_index, state in enumerate(rows):
+                record_event(
+                    "publication_receiver_state",
+                    {"receipt_json": json.dumps(state, allow_nan=False)},
+                    attributes={
+                        "role": TRAINER_ROLE,
+                        "step": str(self.global_step),
+                        "engine_index": str(engine_index),
+                        "worker_index": str(worker_index),
+                        "moment": "startup_after_weight_sync",
+                    },
+                )
 
     async def _record_publication_requests(
         self, moment: str, initial_policy_version: int | None = None, wait_for_terminal: bool = False

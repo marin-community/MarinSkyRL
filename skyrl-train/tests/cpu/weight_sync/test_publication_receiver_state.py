@@ -35,6 +35,8 @@ def test_actual_worker_probe_preserves_parameters_and_reports_unknown_backend(mo
         assert synchronized and device == "cpu"
         return 3 * 2**30, 80 * 2**30
 
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 3)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 8)
     monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
     monkeypatch.setattr(torch.cuda, "mem_get_info", memory)
     monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 7)
@@ -53,7 +55,10 @@ def test_actual_worker_probe_preserves_parameters_and_reports_unknown_backend(mo
         device="cpu",
         model_runner=SimpleNamespace(model=model),
         vllm_config=SimpleNamespace(
-            model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="grug_moe", num_local_experts=4))
+            parallel_config=SimpleNamespace(tensor_parallel_size=1, data_parallel_size=8),
+            model_config=SimpleNamespace(
+                model="native-model", hf_config=SimpleNamespace(model_type="grug_moe", num_local_experts=4)
+            ),
         ),
     )
     receipt = namespace["read_publication_receiver_state"](worker)
