@@ -156,7 +156,9 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
                     f"Request {i} expected top_logprobs len {top_logprobs}, got {len(entry['top_logprobs'])}"
                 )
             # Check prompt tokens
-            prompt_tokens = client.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+            prompt_tokens = client.tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=True, return_dict=False
+            )
             assert len(prompt_tokens) == out["usage"]["prompt_tokens"], (
                 f"Request {i} expected {len(prompt_tokens)} tokens from prompt, got {out['usage']['prompt_tokens']}"
             )
