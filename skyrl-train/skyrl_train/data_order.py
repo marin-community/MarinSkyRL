@@ -30,11 +30,12 @@ def validate_epoch_seeded_shuffle(cfg) -> None:
         cfg.data.sampling.kind is not None
         or cfg.trainer.algorithm.dynamic_sampling.type is not None
         or cfg.trainer.step_wise_training
-        or cfg.trainer.train_batch_size != cfg.trainer.policy_mini_batch_size
+        or cfg.trainer.policy_mini_batch_size <= 0
+        or cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size != 0
     ):
         raise ValueError(
             "data.epoch_seeded_shuffle requires ordinary per-prompt sampling, no curriculum or dynamic sampling, "
-            "and equal train_batch_size/policy_mini_batch_size"
+            "and an integer train_batch_size/policy_mini_batch_size ratio"
         )
 
 
@@ -45,6 +46,7 @@ class SourceOrderContract:
     dataset_sha256: str
     rows: int
     prompts_per_step: int
+    updates_per_batch: int = 1
 
     @property
     def steps_per_epoch(self) -> int:
@@ -54,7 +56,7 @@ class SourceOrderContract:
 class EpochSeededSampler(DistributedSampler):
     """A single source stream; distributed policy sharding happens after generation."""
 
-    def __init__(self, dataset, *, seed: int, prompts_per_step: int):
+    def __init__(self, dataset, *, seed: int, prompts_per_step: int, updates_per_batch: int = 1):
         digest = hashlib.sha256()
         uids = set()
         for index in range(len(dataset)):
@@ -68,7 +70,12 @@ class EpochSeededSampler(DistributedSampler):
             digest.update(json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
             digest.update(b"\n")
         self.contract = SourceOrderContract(
-            "torch-randperm-seed-plus-epoch-v1", seed, digest.hexdigest(), len(dataset), prompts_per_step
+            "torch-randperm-seed-plus-epoch-v1",
+            seed,
+            digest.hexdigest(),
+            len(dataset),
+            prompts_per_step,
+            updates_per_batch,
         )
         if self.contract.steps_per_epoch < 1:
             raise ValueError("Epoch-seeded source order requires at least one complete training batch")
