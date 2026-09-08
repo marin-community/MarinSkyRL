@@ -13,12 +13,12 @@ High-level notes:
 
 import asyncio
 import collections
-import json
 import os
 import time
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
 from skyrl_train.weight_sync.publication_timing import publication_stage_walls
+from skyrl_train.weight_sync.publication_receipts import publication_receipt_fields
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
@@ -1503,16 +1503,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 raise RuntimeError("weight-sync request readback found a running engine after pause")
             if not state["shared_time_and_uts_namespaces"] or state["request_accounting"] is None:
                 raise RuntimeError("weight-sync request accounting lacks a verified engine origin")
-            record_event(
-                "publication_request_accounting",
-                {"receipt_json": json.dumps(state, allow_nan=False)},
-                attributes={
-                    "role": TRAINER_ROLE,
-                    "step": str(self.global_step),
-                    "engine_index": str(engine_index),
-                    "moment": moment,
-                },
-            )
+            for fields in publication_receipt_fields(state):
+                record_event(
+                    "publication_request_accounting",
+                    fields,
+                    attributes={
+                        "role": TRAINER_ROLE,
+                        "step": str(self.global_step),
+                        "engine_index": str(engine_index),
+                        "moment": moment,
+                    },
+                )
 
     def _record_publication_inflight(self, moment: str) -> None:
         for engine, count in enumerate(self.inference_engine_client.publication_inflight_snapshot()):
