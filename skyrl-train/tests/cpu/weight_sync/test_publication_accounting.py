@@ -24,6 +24,7 @@ def test_pause_ledger_preserves_queued_and_native_request_identities():
             "request_id": "sampling",
             "reason": "abort",
             "tokens": 23,
+            "native_first_token_time": 11.5,
             "first_token_time": 11.5,
             "policy_version_at_first_token": None,
         }
@@ -215,3 +216,51 @@ async def test_terminal_acknowledgement_timeout_preserves_missing_identity():
     assert ledger.drain()["active_ids"] == ["still-running"]
     ledger.finish("still-running", reason="CancelledError", tokens=0, first_token_time=None)
     await ledger.wait_for_idle(0.01)
+
+
+@pytest.mark.parametrize(
+    ("tokens", "native", "canonical"),
+    [(0, 0.0, None), (0, None, None), (0, 12.0, 12.0), (2, 12.0, 12.0), (2, 0.0, 0.0)],
+)
+def test_native_first_token_sentinel_preserves_raw_evidence(tokens, native, canonical):
+    ledger = PublicationRequestAccounting()
+    ledger.start("queued-abort")
+    ledger.finish("queued-abort", reason="abort", tokens=tokens, first_token_time=native)
+    terminal = ledger.drain()["terminal"][0]
+    assert terminal["native_first_token_time"] == native
+    assert terminal["first_token_time"] == canonical
+    assert terminal["tokens"] == tokens
+    assert terminal["policy_version_at_first_token"] is None
+
+
+@pytest.mark.asyncio
+async def test_native_collect_outputs_canonicalizes_queued_zero_token_abort():
+    import os
+    from types import SimpleNamespace
+
+    class Engine:
+        def __init__(self):
+            manager = SimpleNamespace(processes=[SimpleNamespace(pid=os.getpid(), is_alive=lambda: True)])
+            self.engine_core = SimpleNamespace(resources=SimpleNamespace(engine_manager=manager))
+            self.output_processor = SimpleNamespace(request_states={})
+
+        async def is_paused(self):
+            return False
+
+        async def generate(self, **kwargs):
+            yield SimpleNamespace(
+                outputs=[SimpleNamespace(finish_reason="abort", token_ids=[])],
+                metrics=SimpleNamespace(first_token_ts=0.0),
+            )
+
+    actor = _native_engine_methods(Engine())
+    await actor.read_publication_request_state(initial_policy_version=0, drain_accounting=True)
+    await actor._collect_outputs([1], "queued-native-id", object())
+    receipt = await actor.read_publication_request_state(drain_accounting=True)
+    terminal = receipt["request_accounting"]["terminal"][0]
+    assert terminal["request_id"] == "queued-native-id"
+    assert terminal["tokens"] == 0 and terminal["reason"] == "abort"
+    assert terminal["native_first_token_time"] == 0.0
+    assert terminal["first_token_time"] is None
+    assert terminal["policy_version_at_first_token"] is None
+    assert receipt["request_accounting"]["active_ids"] == []
