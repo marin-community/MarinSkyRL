@@ -202,3 +202,43 @@ def test_config_requires_paired_control_and_local_vllm(monkeypatch, change):
     cfg.trainer.algorithm.weight_sync_invariant_env = False
     cfg.generator.engine_init_kwargs = {}
     control.validate_weight_sync_environment_config(cfg)
+
+
+def test_actual_ray_deduplicator_preserves_all_sixteen_pre_pg_receipts(tmp_path, monkeypatch):
+    import ray._private.ray_logging as ray_logging
+    from cloud.iris.iris_backend import load_config_extra_env
+
+    monkeypatch.setattr(ray_logging, "RAY_DEDUP_LOGS", True)
+    monkeypatch.setenv("RAY_DEDUP_LOGS_ALLOW_REGEX", "INHERITED_DIAGNOSTIC")
+    path = tmp_path / "config.yaml"
+    config = {
+        "trainer": {"algorithm": {"weight_sync_invariant_env": True}},
+        "extra_env": {"RAY_DEDUP_LOGS_ALLOW_REGEX": "CONFIGURED_DIAGNOSTIC"},
+    }
+    path.write_text(OmegaConf.to_yaml(OmegaConf.create(config)))
+    allow = load_config_extra_env(str(path))["RAY_DEDUP_LOGS_ALLOW_REGEX"]
+    baseline = ray_logging.LogDeduplicator(100, None, None, _timesource=lambda: 0)
+    qualified = ray_logging.LogDeduplicator(100, allow, None, _timesource=lambda: 0)
+    retained, lost = [], []
+    for index in range(16):
+        receipt = {
+            "rank": index % 8,
+            "local_rank": 0,
+            "origin_host": "gpu-host-" + str(index // 8),
+            "origin_pid": 1000 + index,
+            "role": "trainer" if index < 8 else "inference",
+            "override_source_sha256": control.OVERRIDE_SHA256,
+            "values": control.EXPECTED_ENVIRONMENT,
+        }
+        line = "WEIGHT_SYNC_ENVIRONMENT_PRE_PG " + json.dumps(receipt, sort_keys=True)
+        batch = {"ip": "127.0.0.1", "pid": index, "lines": [line]}
+        retained.extend(row for output in qualified.deduplicate(batch) for row in output["lines"])
+        lost.extend(row for output in baseline.deduplicate(batch) for row in output["lines"])
+    assert len(retained) == 16 and len(lost) < 16
+    assert len({json.loads(line.split(" ", 1)[1])["origin_pid"] for line in retained}) == 16
+    for line in ("INHERITED_DIAGNOSTIC 123", "CONFIGURED_DIAGNOSTIC 123"):
+        for pid in (1, 2):
+            assert qualified.deduplicate({"ip": "127.0.0.1", "pid": pid, "lines": [line]})[0]["lines"] == [line]
+    config["trainer"]["algorithm"]["weight_sync_invariant_env"] = False
+    path.write_text(OmegaConf.to_yaml(OmegaConf.create(config)))
+    assert load_config_extra_env(str(path)) == config["extra_env"]
