@@ -1544,6 +1544,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await set_async_worker_numa_affinity(self.llm.collective_rpc)
 
     def _create_engine(self, *args, **kwargs):
+        self._publication_output_probe = None
         openai_kwargs = pop_openai_kwargs(kwargs)
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
@@ -1835,6 +1836,30 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         ):
             final_output = request_output
 
+        if self._publication_output_probe is not None and final_output is not None:
+            reason = final_output.outputs[0].finish_reason
+            stats = self._publication_output_probe.setdefault(
+                reason,
+                {
+                    "responses": 0,
+                    "with_tokens": 0,
+                    "missing_first_token": 0,
+                    "first_token_min": None,
+                    "first_token_max": None,
+                },
+            )
+            stats["responses"] += 1
+            if final_output.outputs[0].token_ids:
+                stats["with_tokens"] += 1
+                timestamp = final_output.metrics.first_token_ts if final_output.metrics is not None else None
+                if timestamp is None or timestamp <= 0:
+                    stats["missing_first_token"] += 1
+                elif stats["first_token_min"] is None:
+                    stats["first_token_min"] = stats["first_token_max"] = timestamp
+                else:
+                    stats["first_token_min"] = min(stats["first_token_min"], timestamp)
+                    stats["first_token_max"] = max(stats["first_token_max"], timestamp)
+
         return final_output
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -1978,6 +2003,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def read_publication_request_state(self):
         """Read pause precursor evidence in the engine actor's monotonic domain."""
         engine = self._get_engine()
+        if self._publication_output_probe is None:
+            self._publication_output_probe = {}
         paused = await engine.is_paused()
         manager = engine.engine_core.resources.engine_manager
         if not isinstance(manager, CoreEngineProcManager):
@@ -2000,6 +2027,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             "shared_time_and_uts_namespaces": shared_namespaces,
             "observed_monotonic": time.monotonic(),
             "clock_domain": "CLOCK_MONOTONIC",
+            "completed_output_stats": {reason: dict(stats) for reason, stats in self._publication_output_probe.items()},
             "paused": paused,
             "frontend_requests": len(states),
             "first_token_timestamps": [

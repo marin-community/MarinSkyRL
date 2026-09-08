@@ -256,6 +256,11 @@ async def publication_pause_precursor(client):
         completed_through_pause = sum(task.done() for task in tasks)
         aborted = sum(client.publication_abort_snapshot()) - aborts_before
         assert aborted + completed_through_pause == request_count
+        aborted_state = (await client.read_publication_request_state())[0]
+        abort_metrics = aborted_state["completed_output_stats"]["abort"]
+        assert abort_metrics["responses"] == aborted and abort_metrics["with_tokens"] > 0
+        assert abort_metrics["missing_first_token"] == 0
+        assert abort_metrics["first_token_max"] < paused["observed_monotonic"]
         assert client.publication_inflight_snapshot() == (0,)
         await client.resume_generation()
         after = await asyncio.wait_for(wait_for_tokens(1, after=paused["observed_monotonic"]), timeout=60)
@@ -270,7 +275,8 @@ async def publication_pause_precursor(client):
         print(
             f"pause_precursor inflight_before={request_count} first_tokens_before={len(before['first_token_timestamps'])} "
             f"frontend_after_abort={paused['frontend_requests']} completed_through_pause={completed_through_pause} "
-            f"aborted={aborted} completed={len(results)} lost=0 "
+            f"aborted={aborted} abort_metrics_responses={abort_metrics['responses']} "
+            f"missing_abort_first_token={abort_metrics['missing_first_token']} completed={len(results)} lost=0 "
             f"same_clock_namespace={after['shared_time_and_uts_namespaces']} engine_host={after['host']} "
             f"core_pids={after['core_pids']} pause_boundary={paused['observed_monotonic']} "
             f"first_after_min={min(after['first_token_timestamps'])}"
