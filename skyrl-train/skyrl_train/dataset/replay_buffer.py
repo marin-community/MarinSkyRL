@@ -70,6 +70,7 @@ class Experience:
     info: Optional[dict]
     kl: Optional[Float[torch.Tensor, "batch response_len"]] = None
     metadata: Optional[Dict[str, Any]] = None
+    rollout_age: Optional[torch.Tensor] = None  # [batch], int32
     # Teacher distillation fields
     teacher_top_k_logprobs: Optional[Float[torch.Tensor, "batch response_len K"]] = None
     teacher_top_k_indices: Optional[torch.Tensor] = None
@@ -97,6 +98,8 @@ class Experience:
             self.loss_mask = to(self.loss_mask, device)
         if self.action_mask is not None:
             self.action_mask = to(self.action_mask, device)
+        if self.rollout_age is not None:
+            self.rollout_age = to(self.rollout_age, device)
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = to(self.rollout_logprobs, device)
         if self.teacher_top_k_logprobs is not None:
@@ -125,6 +128,8 @@ class Experience:
             self.loss_mask = self.loss_mask.pin_memory()
         if self.action_mask is not None:
             self.action_mask = self.action_mask.pin_memory()
+        if self.rollout_age is not None:
+            self.rollout_age = self.rollout_age.pin_memory()
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = self.rollout_logprobs.pin_memory()
         if self.teacher_top_k_logprobs is not None:

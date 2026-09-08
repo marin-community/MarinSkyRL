@@ -848,6 +848,38 @@ def test_consumed_stop_metrics_survive_padding_and_publish_after_update(dummy_co
     assert trainer.all_metrics["consumed/stop_reason_coverage"] == 1
 
 
+def test_rollout_age_survives_driver_padding_and_experience_slicing(dummy_config, dummy_tokenizer):
+    from skyrl_train.training_batch import TrainingBatchIterator
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = dummy_tokenizer
+    trainer._training_metrics_enabled = True
+    trainer.policy_model = SimpleNamespace(actor_infos=[SimpleNamespace(rank=SimpleNamespace(dp_size=4))])
+    trainer.critic_model = trainer.ref_model = None
+    trainer.all_metrics = {}
+    trajectories = {
+        "prompt_token_ids": [[1], [2], [3]],
+        "response_ids": [[4, 5], [6], [7]],
+        "rewards": [[0.0, 1.0], [0.0], [0.0]],
+        "loss_masks": [[1, 1], [1], [1]],
+        "rollout_logprobs": None,
+        "stop_reasons": ["stop", "stop", "stop"],
+    }
+    batch = trainer.convert_to_training_input(trajectories, ["a", "b", "c"], rollout_age=[0, 3, 9])
+    assert batch["rollout_age"].tolist() == [0, 3, 9, 0]
+    assert batch["loss_mask"][-1].sum() == 0
+    for key in ("action_log_probs", "base_action_log_probs", "values", "returns", "advantages"):
+        batch[key] = None
+    experiences = list(TrainingBatchIterator(batch, 2))
+    assert [row.rollout_age.tolist() for row in experiences] == [[0, 3], [9, 0]]
+    experiences[1].to_device("cpu")
+    assert experiences[1].rollout_age.dtype == torch.int32
+    with pytest.raises(ValueError, match="one nonnegative integer"):
+        trainer.convert_to_training_input(trajectories, ["a", "b", "c"], rollout_age=[0, -1, 9])
+
+
 def test_normalize_mini_batch_size():
     """Test the _normalize_mini_batch_size method with various configurations."""
 
