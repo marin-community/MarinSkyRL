@@ -1,6 +1,8 @@
 """Audit age-conditioned ratios against hand calculations and pooled tokens."""
 
 import math
+import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -9,6 +11,8 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
     mismatch_ratio_metrics,
     ratio_statistics,
+    pack_log_ratio_accumulator,
+    gather_ratio_tensor,
 )
 
 
@@ -90,3 +94,68 @@ def test_worker_masks_padding_before_subtraction_and_keeps_unclipped_absolute_de
     assert actual["log_ratio_abs_mean"] == 1000
     assert actual["log_ratio_mean_squared"] == 1e6
     assert actual["log_ratio_statistics_valid"] == 1
+
+
+def test_rank_reduction_pools_unequal_token_counts_and_excludes_replicas():
+    shards = [torch.arange(1, 101, dtype=torch.float64) / 10, torch.zeros(19_900, dtype=torch.float64)]
+    monitors = []
+    for values in [*shards, shards[0]]:
+        monitor = LogRatioMonitor(torch.device("cpu"))
+        values = values.unsqueeze(0)
+        monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
+        monitors.append(monitor)
+    payloads = [
+        pack_log_ratio_accumulator(monitor._accumulator, owns_tokens=index != 2)
+        for index, monitor in enumerate(monitors)
+    ]
+    expected = ratio_statistics(torch.cat(shards))
+    rank_mean_ess = sum(monitor.metrics()["log_ratio_ess_fraction"] for monitor in monitors[:2]) / 2
+    assert abs(rank_mean_ess - expected["ess_fraction"]) > 0.1
+
+    def gather(tensor):
+        field = 0 if tensor.dtype == torch.float64 else 1
+        return [payload[field] for payload in payloads]
+
+    actual = monitors[0].metrics(gather_fn=gather)
+    assert actual["log_ratio_selected_tokens"] == 20_000
+    assert actual["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], rel=1e-10)
+    assert actual["log_ratio_mean"] == pytest.approx(expected["log_ratio_mean"], abs=1e-10)
+    assert actual["log_ratio_abs_p999"] == pytest.approx(expected["abs_log_ratio_p999"], abs=1e-5)
+    assert actual["log_ratio_p999_valid"] == 1
+
+    # One failing rank invalidates the family on all ranks, rather than being
+    # averaged into a fractional validity flag by the later WORLD status mean.
+    payloads[1][0][0] = 1
+    failed = monitors[0].metrics(gather_fn=gather)
+    assert failed["log_ratio_diagnostics_failed"] == 1
+    assert failed["log_ratio_p999_valid"] == 0
+    assert set(failed) == set(actual)
+
+
+def _distributed_ratio_worker(rank, directory):
+    torch.distributed.init_process_group("gloo", init_method=f"file://{directory}/group", rank=rank, world_size=2)
+    try:
+        values = torch.arange(1, 101, dtype=torch.float64) / 10 if rank == 0 else torch.zeros(19_900)
+        monitor = LogRatioMonitor(torch.device("cpu"))
+        values = values.unsqueeze(0)
+        monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
+        pooled = monitor.metrics(gather_fn=gather_ratio_tensor)
+        if rank == 1:
+            monitor._failed = True
+        failed = monitor.metrics(gather_fn=gather_ratio_tensor)
+        Path(directory, f"rank{rank}.json").write_text(json.dumps({"pooled": pooled, "failed": failed}))
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+def test_two_actual_gloo_ranks_emit_identical_token_pooled_statistics(tmp_path):
+    torch.multiprocessing.spawn(_distributed_ratio_worker, args=(str(tmp_path),), nprocs=2, join=True)
+    left, right = [json.loads((tmp_path / f"rank{rank}.json").read_text()) for rank in range(2)]
+    assert left == right
+    expected = ratio_statistics(torch.cat([torch.arange(1, 101, dtype=torch.float64) / 10, torch.zeros(19_900)]))
+    assert left["pooled"]["log_ratio_selected_tokens"] == 20_000
+    assert left["pooled"]["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], rel=1e-10)
+    assert left["pooled"]["log_ratio_abs_p999"] == pytest.approx(expected["abs_log_ratio_p999"], abs=1e-5)
+    assert left["pooled"]["log_ratio_p999_valid"] == 1
+    assert left["failed"]["log_ratio_p999_valid"] == 0
+    assert left["failed"]["log_ratio_diagnostics_failed"] == 1

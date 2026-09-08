@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import math
 from typing import Optional
 
@@ -196,6 +196,7 @@ def _stale_metric_aliases(metrics: dict[str, float]) -> dict[str, float]:
         "abs_mean": "abs_log_ratio_mean",
         "abs_max": "abs_log_ratio_max",
         "abs_p99": "abs_log_ratio_p99",
+        "p99_approximate": "p99_approximate",
         "abs_p999": "abs_log_ratio_p999",
         "frac_outside_0_5_2": "frac_outside_0.5_2",
         "frac_below_1e_5": "frac_below_1e-5",
@@ -289,14 +290,72 @@ class LogRatioMonitor:
             logger.warning(f"Log-ratio diagnostics skipped after accumulation failed: {error!r}")
             self._failed = True
 
-    def metrics(self) -> dict[str, float]:
-        if self._failed:
+    def metrics(self, *, gather_fn=None, owns_tokens: bool = True) -> dict[str, float]:
+        accumulator = self._accumulator
+        failed = self._failed
+        if gather_fn is not None:
+            # Every rank participates even after local failure. Reducing fixed
+            # sufficient statistics before finalization keeps ESS, token means,
+            # tail quantiles and validity meaningful for uneven rank populations.
+            header, tail = pack_log_ratio_accumulator(accumulator, failed=failed, owns_tokens=owns_tokens)
+            headers, tails = gather_fn(header), gather_fn(tail)
+            accumulator, failed = pool_log_ratio_accumulators(headers, tails)
+        if failed:
             return _failed_log_ratio_metrics(self.position_window)
         try:
-            return finalize_log_ratio_metrics(self._accumulator, position_window=self.position_window)
+            return finalize_log_ratio_metrics(accumulator, position_window=self.position_window)
         except Exception as error:
             logger.warning(f"Log-ratio diagnostics marked failed after finalization failed: {error!r}")
             return _failed_log_ratio_metrics(self.position_window)
+
+
+def gather_ratio_tensor(tensor: torch.Tensor, *, group=None) -> list[torch.Tensor]:
+    """Gather a fixed-size statistics tensor over the supplied ownership group."""
+    if not torch.distributed.is_initialized():
+        return [tensor]
+    values = [torch.empty_like(tensor) for _ in range(torch.distributed.get_world_size(group))]
+    torch.distributed.all_gather(values, tensor, group=group)
+    return values
+
+
+def pack_log_ratio_accumulator(accumulator, *, failed: bool = False, owns_tokens: bool = True):
+    """Encode bounded sufficient statistics, excluding replicated token owners."""
+    if not owns_tokens:
+        accumulator = _empty_log_ratio_accumulator(accumulator.abs_sum.device)
+    scalar_fields = [field.name for field in fields(accumulator) if field.name not in {"topk_abs", "top_per_mille"}]
+    approximate_p99 = (
+        accumulator.topk_abs.min() if accumulator.topk_abs.numel() else accumulator.abs_sum.new_tensor(math.inf)
+    )
+    header = torch.cat(
+        [accumulator.abs_sum.new_tensor([float(failed)], dtype=torch.float64), approximate_p99.double().reshape(1)]
+        + [getattr(accumulator, name).double().reshape(-1) for name in scalar_fields]
+    )
+    tail = accumulator.abs_sum.new_full((LOG_RATIO_TAIL_CAPACITY,), -math.inf, dtype=torch.float32)
+    tail[: accumulator.top_per_mille.numel()] = accumulator.top_per_mille
+    return header, tail
+
+
+def pool_log_ratio_accumulators(headers, tails):
+    """Merge rank payloads before computing any nonlinear scalar statistic."""
+    if len(headers) != len(tails) or not headers:
+        raise ValueError("Ratio reduction needs one header and tail per rank")
+    pooled = _empty_log_ratio_accumulator(headers[0].device)
+    scalar_fields = [field.name for field in fields(pooled) if field.name not in {"topk_abs", "top_per_mille"}]
+    failed = False
+    for header, tail in zip(headers, tails, strict=True):
+        failed = failed or bool(header[0].item())
+        partial = _empty_log_ratio_accumulator(header.device)
+        offset = 2
+        for name in scalar_fields:
+            target = getattr(partial, name)
+            target.copy_(header[offset : offset + target.numel()].reshape(target.shape))
+            offset += target.numel()
+        if offset != header.numel() or tail.numel() != LOG_RATIO_TAIL_CAPACITY:
+            raise ValueError("Ratio reduction payload shape changed")
+        partial.topk_abs = header[1:2].float() if torch.isfinite(header[1]) else partial.topk_abs
+        partial.top_per_mille = tail[torch.isfinite(tail)]
+        merge_log_ratio_partial(pooled, partial)
+    return pooled, failed
 
 
 def _failed_log_ratio_metrics(position_window: int = 256) -> dict[str, float]:
@@ -354,6 +413,7 @@ def _log_ratio_diag_zero_metrics(n_position_buckets: int = 10, *, position_windo
         + _ratio_extra_keys(position_window)
     )
     metrics = dict.fromkeys(keys, 0.0)
+    metrics["log_ratio_p99_approximate"] = 1.0
     return {**metrics, **_stale_metric_aliases(metrics)}
 
 
@@ -542,6 +602,7 @@ def finalize_log_ratio_metrics(
         .tolist()
     )
     metrics = dict(zip(LOG_RATIO_BASE_METRIC_KEYS, base_vals, strict=True))
+    metrics["log_ratio_p99_approximate"] = 1.0
 
     bucket_vals = bucket_means.cpu().tolist()
     metrics.update(dict(zip(_log_ratio_position_metric_keys(n_position_buckets), bucket_vals, strict=True)))
