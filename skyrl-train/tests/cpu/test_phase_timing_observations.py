@@ -28,3 +28,18 @@ def test_unknown_spans_are_not_published():
     observations, step = calls[0]
     assert [item.name for item in observations] == ["step"]
     assert step == 7
+
+
+def test_publication_stages_retain_measured_overlap_and_broadcast_parent():
+    observations = phase_timing_observations(
+        {
+            "sync_weights": 6.0,
+            "weight_broadcast": 5.0,
+            "weight_broadcast/nccl_send": 4.0,
+            "weight_broadcast/recv": 4.5,
+        }
+    )
+    assert [(item.duration_seconds, item.parent, item.root) for item in observations[-2:]] == [
+        (4.0, "weight_broadcast", "step"),
+        (4.5, "weight_broadcast", "step"),
+    ]

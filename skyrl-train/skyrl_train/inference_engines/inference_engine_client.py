@@ -809,6 +809,17 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self._run_on_all_engines("update_named_weights", request=request)
 
+    def publication_inflight_snapshot(self) -> tuple[int, ...]:
+        """Snapshot outstanding requests without resetting dispatch accounting."""
+        with self._routing_lock:
+            return tuple(self._engine_inflight)
+
+    async def begin_publication_timing(self, step: int):
+        return await self._run_on_all_engines("begin_publication_timing", step=step)
+
+    async def read_publication_timing(self):
+        return await self._run_on_all_engines("read_publication_timing")
+
     async def begin_weight_reload(self):
         """#1685 fix: open the layerwise-reload bracket on all engines so a multi-chunk
         RL weight sync defers per-layer processing; finish_weight_reload() then re-runs

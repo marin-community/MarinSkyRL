@@ -58,6 +58,8 @@ from skyrl_train.workers.worker import (
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper, MegatronPolicyMicroBatch
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+from skyrl_train.weight_sync.publication_timing import PublicationStageTimer
+from skyrl_train.telemetry import record_event
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode, weight_sync_dtype
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 from skyrl_train.weight_change_probe import WirePublicationObserver
@@ -808,6 +810,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     async def _broadcast_to_inference_engines(self, inference_engine_client, *, probe=None):
         from torch.multiprocessing.reductions import reduce_tensor
 
+        timing = PublicationStageTimer(enabled=bool(self.cfg.generator.publication_stage_timing))
+        rank = torch.distributed.get_rank()
+        step = self._completed_update or 0
+        if timing.enabled and rank == 0:
+            await inference_engine_client.begin_publication_timing(step)
+
         use_prefix_cache = self.cfg.generator.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)
         cache_reset_task = None
@@ -837,7 +845,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
             # Broadcast path: one chunk per parameter
             # NOTE: need to optimize this to use buckets for non-colocated weight sync as well
-            for chunk in self.weight_extractor.extract_weights(generator_dtype):
+            chunks = iter(self.weight_extractor.extract_weights(generator_dtype))
+            while True:
+                with timing.span("export"):
+                    chunk = next(chunks, None)
+                if chunk is None:
+                    break
                 # Each chunk contains one parameter
                 assert len(chunk) == 1
                 name = chunk.names[0]
@@ -860,12 +873,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 # Broadcast weights from training rank 0 to inference engine ranks via the update group
                 def broadcast_tensor(tensor):
                     if torch.distributed.get_rank() == 0:
-                        torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
+                        with timing.span("nccl_send"):
+                            torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
 
                 await asyncio.to_thread(broadcast_tensor, tensor)
                 if torch.distributed.get_rank() == 0:
-                    await update_weight_task
-                torch.distributed.barrier()
+                    with timing.span("rpc_wait"):
+                        await update_weight_task
+                with timing.span("barrier"):
+                    torch.distributed.barrier()
 
             # Close the layerwise-reload bracket: finalize_layerwise_reload re-runs
             # process_weights_after_loading over every layer ONCE -> re-applies the
@@ -873,7 +889,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if _w13_bracket:
                 torch.distributed.barrier()
                 if torch.distributed.get_rank() == 0:
-                    await inference_engine_client.finish_weight_reload()
+                    with timing.span("reload_finalize"):
+                        await inference_engine_client.finish_weight_reload()
         else:
             # CUDA IPC path: one chunk per bucket (for packing)
             device = torch.cuda.current_device()
@@ -929,6 +946,26 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             await cache_reset_task
         torch.cuda.empty_cache()
         torch.distributed.barrier()
+        stages = timing.finish(synchronized=True)
+        if timing.enabled:
+            for stage, values in stages.items():
+                record_event(
+                    "publication_stage",
+                    values,
+                    attributes={"role": "trainer", "stage": stage, "rank": str(rank), "step": str(step)},
+                )
+            ranks = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(ranks, {"rank": rank, "stages": stages})
+            if rank == 0:
+                receivers = await inference_engine_client.read_publication_timing()
+                self._publication_timing_receipt = {"trainer": ranks, "receiver": receivers}
+        return None
+
+    def read_publication_timing(self):
+        """Read the last trace through direct actor RPCs, not batch dispatch."""
+        if torch.distributed.get_rank() == 0:
+            return self._publication_timing_receipt
+        return None
 
     def grug_validation_snapshot(self, names=()):
         """Return the calling rank and requested Grug weights in HF layout, gathered on rank 0.

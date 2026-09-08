@@ -68,6 +68,8 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
+from skyrl_train.weight_sync.publication_timing import PublicationStageTimer
+from skyrl_train.telemetry import record_event
 from skyrl_train.models.grug_moe import is_grug_router_bias
 from skyrl_train.inference_engines.vllm.utils import (
     pop_openai_kwargs,
@@ -334,6 +336,7 @@ class WorkerWrap:
         )
 
         # Create receiver now that we have all the state
+        self._publication_timer = PublicationStageTimer(enabled=False)
         self._weight_receiver = VLLMWeightTransferReceiver(
             model_update_group=self._model_update_group,
             model_config=self.model_config,
@@ -457,6 +460,27 @@ class WorkerWrap:
             initialize_layerwise_reload(model)
         self._skyrl_weight_update_active = True
 
+    def begin_publication_timing(self, step: int):
+        self._publication_timer = PublicationStageTimer(enabled=True)
+        self._publication_step = step
+
+    def read_publication_timing(self):
+        stages = self._publication_timer.finish()
+        rank = torch.distributed.get_rank()
+        for stage, values in stages.items():
+            record_event(
+                "publication_stage",
+                values,
+                attributes={
+                    "role": "inference",
+                    "stage": stage,
+                    "rank": str(rank),
+                    "step": str(self._publication_step),
+                },
+            )
+        self._publication_timer = PublicationStageTimer(enabled=False)
+        return {"rank": rank, "stages": stages}
+
     def skyrl_finish_weight_reload(self) -> None:
         """RENAMED from ``finish_weight_update`` + NOW WIRED — see
         ``skyrl_begin_weight_reload`` for the collision + root-cause rationale.
@@ -478,7 +502,8 @@ class WorkerWrap:
 
         model = self.model_runner.model
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            finalize_layerwise_reload(model, self.model_config)
+            with self._publication_timer.span("finalize"):
+                finalize_layerwise_reload(model, self.model_config)
         self._skyrl_weight_update_active = False
 
     def begin_weight_update(self) -> None:
@@ -676,9 +701,8 @@ class WorkerWrap:
         Args:
             request: Weight update request with names, dtypes, shapes, etc.
         """
-        weight_list = []
-        for name, tensor in self._weight_receiver.receive_weights(request):
-            weight_list.append((name, tensor))
+        with self._publication_timer.span("recv"):
+            weight_list = list(self._weight_receiver.receive_weights(request))
 
         if hasattr(self, "_accumulated_weights"):
             # Batched mode: move to CPU and accumulate for later flush
@@ -687,7 +711,8 @@ class WorkerWrap:
             del weight_list
         else:
             # Immediate mode (default): load right away
-            load_weights_into_vllm(self.model_runner.model, weight_list)
+            with self._publication_timer.span("load"):
+                load_weights_into_vllm(self.model_runner.model, weight_list)
             for weight in weight_list:
                 del weight
 
@@ -1947,6 +1972,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def report_engine_placement(self):
         """Read actual worker GPUs and communicator ranks through the SkyRL extension."""
         return await self._get_engine().collective_rpc("report_device_placement")
+
+    async def begin_publication_timing(self, step: int):
+        return await self._get_engine().collective_rpc("begin_publication_timing", args=(step,))
+
+    async def read_publication_timing(self):
+        return await self._get_engine().collective_rpc("read_publication_timing")
 
     async def begin_weight_reload(self):
         """#1685 fix: open the layerwise-reload bracket on every engine worker so the
