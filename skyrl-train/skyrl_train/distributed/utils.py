@@ -38,7 +38,9 @@ ModelOptimPair = Tuple[nn.Module, Optimizer]
 ModelOrModelOptimPair = Union[nn.Module, ModelOptimPair]
 
 
-def init_worker_process_group_with_device(timeout_seconds: int, backend: str = "nccl") -> None:
+def init_worker_process_group_with_device(
+    timeout_seconds: int, backend: str = "nccl", *, weight_sync_invariant_env: bool = False
+) -> None:
     """Pin this actor's CUDA device to its resolved ``LOCAL_RANK`` and create the default
     torch.distributed process group with an explicit ``device_id`` — so ProcessGroupNCCL never
     falls back to *"Guessing device ID based on global rank"*.
@@ -65,6 +67,10 @@ def init_worker_process_group_with_device(timeout_seconds: int, backend: str = "
 
     Idempotent: always pins the device; only creates the process group if not already initialized.
     """
+    if weight_sync_invariant_env:
+        from skyrl_train.distributed.weight_sync_environment import apply_weight_sync_environment
+
+        apply_weight_sync_environment(True, role="trainer")
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
     # Surface the resolved rank/device + the observed CVD masking (visible_device_count)
