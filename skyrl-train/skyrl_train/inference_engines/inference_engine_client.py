@@ -77,6 +77,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self._engine_inflight: List[int] = [0] * len(engines)
         # Observe token-space requests independently of HTTP routing load.
         self._generation_inflight: list[int] = [0] * len(engines)
+        self._generation_aborts: list[int] = [0] * len(engines)
         # session_id (str) -> engine_idx. Populated on a session's FIRST request (load
         # balanced) and reused for every later turn (sticky, to preserve prefix-cache
         # reuse). LRU-capped so it cannot grow unbounded. OrderedDict is used as an LRU.
@@ -413,6 +414,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             new_response_ids: List[int] = partial_response["response_ids"][0]
             text_response = partial_response["responses"][0]
             stop_reason = partial_response["stop_reasons"][0]
+            if stop_reason == "abort":
+                with self._routing_lock:
+                    self._generation_aborts[engine_idx] += 1
             new_response_logprobs: Optional[List[float]] = None
             new_response_logprobs_list: Optional[List[List[float]]] = partial_response.get("response_logprobs", None)
             if new_response_logprobs_list is not None and len(new_response_logprobs_list) > 0:
@@ -827,6 +831,14 @@ class InferenceEngineClient(InferenceEngineInterface):
         """Snapshot outstanding requests without resetting dispatch accounting."""
         with self._routing_lock:
             return tuple(http + generate for http, generate in zip(self._engine_inflight, self._generation_inflight))
+
+    def publication_abort_snapshot(self) -> tuple[int, ...]:
+        """Read cumulative token-space abort responses returned by engines."""
+        with self._routing_lock:
+            return tuple(self._generation_aborts)
+
+    async def read_publication_request_state(self):
+        return await self._run_on_all_engines("read_publication_request_state")
 
     async def begin_publication_timing(self, step: int):
         return await self._run_on_all_engines("begin_publication_timing", step=step)

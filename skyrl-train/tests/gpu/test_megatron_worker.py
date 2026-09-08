@@ -33,6 +33,7 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.utils.policy_losses import POLICY_CLIP_METRIC_KEYS
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from tests.tis_reference import regular_tis_scalar_reference, regular_tis_reference_policy_loss
@@ -211,6 +212,78 @@ def _behavior_clip_reference(
     return ((loss * loss_mask).sum() / loss_mask.sum()).item()
 
 
+async def publication_pause_precursor(client):
+    request_count = 64
+    aborts_before = sum(client.publication_abort_snapshot())
+    tasks = [
+        asyncio.create_task(
+            client.generate(
+                InferenceEngineInput(
+                    prompt_token_ids=[[16]],
+                    sampling_params={"temperature": 0.0, "max_tokens": 4096, "ignore_eos": True},
+                )
+            )
+        )
+        for _ in range(request_count)
+    ]
+
+    async def wait_for_tokens(minimum, *, after=0.0):
+        while True:
+            states = await client.read_publication_request_state()
+            assert len(states) == 1
+            state = states[0]
+            assert state["shared_time_and_uts_namespaces"]
+            timestamps = state["first_token_timestamps"]
+            if len(timestamps) >= minimum and all(value is not None and value > after for value in timestamps):
+                return state
+            failed = [task.exception() for task in tasks if task.done() and not task.cancelled()]
+            assert not any(failed), failed
+
+    async def wait_client_idle():
+        while any(client.publication_inflight_snapshot()):
+            state = (await client.read_publication_request_state())[0]
+            assert state["paused"] and state["frontend_requests"] == 0
+
+    try:
+        before = await asyncio.wait_for(wait_for_tokens(request_count), timeout=60)
+        assert client.publication_inflight_snapshot() == (request_count,)
+        # Preserve the existing five-second grace: this probes its engine contract,
+        # without implementing the proposed K7 pause change.
+        await client.pause_generation()
+        paused = (await client.read_publication_request_state())[0]
+        assert paused["paused"] and paused["frontend_requests"] == 0
+        await asyncio.wait_for(wait_client_idle(), timeout=5)
+        completed_through_pause = sum(task.done() for task in tasks)
+        aborted = sum(client.publication_abort_snapshot()) - aborts_before
+        assert aborted + completed_through_pause == request_count
+        assert client.publication_inflight_snapshot() == (0,)
+        await client.resume_generation()
+        after = await asyncio.wait_for(wait_for_tokens(1, after=paused["observed_monotonic"]), timeout=60)
+        assert before["host"] == paused["host"] == after["host"]
+        assert before["core_pids"] == paused["core_pids"] == after["core_pids"]
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=300)
+        assert len(results) == request_count
+        assert all(len(result["response_ids"][0]) == 4096 for result in results)
+        assert client.publication_inflight_snapshot() == (0,)
+        final = (await client.read_publication_request_state())[0]
+        assert not final["paused"] and final["frontend_requests"] == 0
+        print(
+            f"pause_precursor inflight_before={request_count} first_tokens_before={len(before['first_token_timestamps'])} "
+            f"frontend_after_abort={paused['frontend_requests']} completed_through_pause={completed_through_pause} "
+            f"aborted={aborted} completed={len(results)} lost=0 "
+            f"same_clock_namespace={after['shared_time_and_uts_namespaces']} engine_host={after['host']} "
+            f"core_pids={after['core_pids']} pause_boundary={paused['observed_monotonic']} "
+            f"first_after_min={min(after['first_token_timestamps'])}"
+        )
+    finally:
+        if client.generation_paused_event.is_set():
+            await client.resume_generation()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @pytest.mark.parametrize(
     ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp"),
     [(True, 4, 2, 2, 1, None), (False, 2, 2, 1, 1, None), (False, 1, 1, 1, 1, 1)],
@@ -292,6 +365,7 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
             prompts = [[{"role": "user", "content": "Reply with the number 2."}]]
             outputs = asyncio.run(run_inference(client, prompts, {"temperature": 0.0, "max_tokens": 16}))
             assert len(outputs["response_ids"]) == 1 and outputs["response_ids"][0]
+            asyncio.run(publication_pause_precursor(client))
         else:
             policy.offload_to_cpu()
             asyncio.run(client.wake_up(tags=["kv_cache"]))

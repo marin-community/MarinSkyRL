@@ -966,6 +966,8 @@ async def test_generate_retry_no_gen_finish():
     assert second_call["sampling_params"]["max_tokens"] == 16
 
     assert out == {**engines[0].responses[1], "prompt_logprobs": None, "generator_engine_indices": [0]}
+    assert client.publication_abort_snapshot() == (1,)
+    assert client.publication_inflight_snapshot() == (0,)
 
 
 # -------------------------------------------

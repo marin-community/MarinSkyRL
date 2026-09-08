@@ -1,6 +1,8 @@
 import json
 import os
 import threading
+import socket
+import time
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
 from dataclasses import dataclass, fields as _dataclass_fields, replace
 from loguru import logger
@@ -11,6 +13,7 @@ import asyncio
 import vllm
 from dataclasses import asdict
 from types import SimpleNamespace
+from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm import SamplingParams
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group
 from skyrl_train.inference_engines.placement import inference_worker_placement
@@ -85,7 +88,6 @@ from skyrl_train.inference_engines.vllm.stats import (
     snapshot_vllm_prometheus_metrics,
 )
 from skyrl_train.utils import get_tcp_url, str_to_torch_dtype, torch_dtype_to_str
-import time
 from packaging import version
 
 
@@ -1972,6 +1974,38 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def report_engine_placement(self):
         """Read actual worker GPUs and communicator ranks through the SkyRL extension."""
         return await self._get_engine().collective_rpc("report_device_placement")
+
+    async def read_publication_request_state(self):
+        """Read pause precursor evidence in the engine actor's monotonic domain."""
+        engine = self._get_engine()
+        paused = await engine.is_paused()
+        manager = engine.engine_core.resources.engine_manager
+        if not isinstance(manager, CoreEngineProcManager):
+            raise ValueError("pause clock probe requires locally managed engine core processes")
+        core_pids = [process.pid for process in manager.processes if process.is_alive()]
+        if not core_pids:
+            raise RuntimeError("pause clock probe found no live local engine core")
+        namespaces = ("time", "uts")
+        actor_namespaces = {kind: os.stat(f"/proc/self/ns/{kind}").st_ino for kind in namespaces}
+        shared_namespaces = all(
+            os.stat(f"/proc/{pid}/ns/{kind}").st_ino == actor_namespaces[kind]
+            for pid in core_pids
+            for kind in namespaces
+        )
+        states = list(engine.output_processor.request_states.values())
+        return {
+            "host": socket.gethostname(),
+            "actor_pid": os.getpid(),
+            "core_pids": core_pids,
+            "shared_time_and_uts_namespaces": shared_namespaces,
+            "observed_monotonic": time.monotonic(),
+            "clock_domain": "CLOCK_MONOTONIC",
+            "paused": paused,
+            "frontend_requests": len(states),
+            "first_token_timestamps": [
+                state.stats.first_token_ts if state.stats is not None else None for state in states
+            ],
+        }
 
     async def begin_publication_timing(self, step: int):
         return await self._get_engine().collective_rpc("begin_publication_timing", args=(step,))
