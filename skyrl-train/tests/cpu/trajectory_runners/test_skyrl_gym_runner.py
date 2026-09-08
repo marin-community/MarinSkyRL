@@ -7,11 +7,20 @@ from typing import List, Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 from omegaconf import DictConfig
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import PreTrainedTokenizerFast
+
+from skyrl_train.inference_engines.utils import get_vllm_sampling_params
+from skyrl_train.trajectory_runners.model_clients import ModelClientOutput
+from skyrl_train.trajectory_runners.types import TokenProvenance
 
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.base import ConversationType, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
+    prepare_trajectory_request,
     get_metrics_from_trajectory_batch,
     get_rollout_metrics,
 )
@@ -1323,7 +1332,7 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     mock_make.return_value = TwoStepEnv()
 
     # Generator config
-    cfg = MagicMock()
+    cfg = get_default_config().generator
     cfg.sampling_params.max_generate_length = 50
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
@@ -1410,7 +1419,7 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     mock_make.return_value = MTEnv()
 
     # Generator config
-    cfg = MagicMock()
+    cfg = get_default_config().generator
     cfg.sampling_params.max_generate_length = 50
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
@@ -1499,7 +1508,7 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     mock_make.return_value = RetokEnv()
 
     # Generator config enabling retokenize path
-    cfg = MagicMock()
+    cfg = get_default_config().generator
     cfg.sampling_params.max_generate_length = 50
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
@@ -1588,7 +1597,7 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     mock_make.return_value = TruncEnv()
 
     # Generator config: non-retokenize message mode; max_turns=1 so max_response_tokens = max_tokens
-    cfg = MagicMock()
+    cfg = get_default_config().generator
     cfg.sampling_params.max_generate_length = 5  # enforce truncation
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
@@ -1634,3 +1643,69 @@ def test_rollout_metrics_skip_unstepped_episode_metrics():
     )
 
     assert metrics["environment/acc"] == 1.0
+
+
+class SeedRecordingModelClient:
+    """Record the sampling contract crossing the remote model boundary."""
+
+    def __init__(self):
+        self.requests = []
+
+    async def generate(self, request):
+        self.requests.append(request)
+        return ModelClientOutput(
+            responses=["#### 4"],
+            response_ids=[[2, 1]],
+            response_logprobs=[[-0.1, -0.2]],
+            stop_reasons=["stop"],
+            token_provenance=TokenProvenance.ENGINE,
+        )
+
+
+@pytest.mark.asyncio
+async def test_seeded_gym_requests_match_across_order_and_runner_clocks():
+    backend = Tokenizer(WordLevel({"[UNK]": 0, "[EOS]": 1, "4": 2}, unk_token="[UNK]"))
+    backend.pre_tokenizer = Whitespace()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, eos_token="[EOS]", unk_token="[UNK]")
+    tokenizer.chat_template = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+    cfg = get_default_config()
+    cfg.generator.seed_by_trajectory = True
+    cfg.generator.batched = False
+    cfg.generator.max_turns = 1
+    cfg.generator.use_conversation_multi_turn = False
+    cfg.generator.max_input_length = 128
+    cfg.generator.sampling_params.max_generate_length = 8
+    cfg.generator.sampling_params.logprobs = 0
+    client = SeedRecordingModelClient()
+    runner = SkyRLGymTrajectoryRunner(cfg.generator, DictConfig({"max_env_workers": 0}), None, tokenizer, client)
+    prompts = [
+        {
+            "uid": uid,
+            "prompt": [{"role": "user", "content": "2 + 2?"}],
+            "env_class": "gsm8k",
+            "env_extras": {"reward_spec": {"ground_truth": "4"}},
+        }
+        for uid in ("question-a", "question-β")
+    ]
+    params = get_vllm_sampling_params(cfg.generator.sampling_params)
+    observed = []
+    for phase, step, callback, ordered in [
+        ("train", 8, None, prompts),
+        ("train", 99, lambda: 8, list(reversed(prompts))),
+        ("eval", 7, None, prompts),
+        ("train", 9, None, prompts),
+    ]:
+        runner.global_step_fn = callback
+        request, _ = prepare_trajectory_request(ordered, 2, params, "gsm8k", phase, step)
+        client.requests.clear()
+        outputs = await runner.collector.collect(request, disable_tqdm=True)
+        assert all(output.reward.optimization_reward == 1 for output in outputs)
+        seeds = {item["session_ids"][0]: item["sampling_params"]["seed"] for item in client.requests}
+        assert len(seeds) == 4 and len(set(seeds.values())) == 4
+        assert all(0 <= seed < 2**31 for seed in seeds.values())
+        assert all(output.evidence.metadata["sampling_policy_version"] == (8 if step == 9 else 7) for output in outputs)
+        assert {output.evidence.metadata["sampling_seed"] for output in outputs} == set(seeds.values())
+        observed.append(seeds)
+    assert observed[0] == observed[1] == observed[2]
+    assert all(observed[3][key] != value for key, value in observed[0].items())
+    assert "seed" not in params and "seed" not in cfg.generator.sampling_params
