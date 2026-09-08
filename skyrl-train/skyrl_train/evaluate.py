@@ -262,15 +262,16 @@ async def evaluate(
             concat_data_sources,
             cfg.generator.eval_n_samples_per_prompt,
         )
-        eval_metrics.update(
-            evaluation_contract_metrics(
-                rollouts.env_classes,
-                rollouts.env_extras,
-                [tokenizer.decode(tokens) for tokens in concatenated_batch["response_ids"]],
-                concatenated_batch["rewards"],
-                concatenated_batch.get("stop_reasons", [None] * len(rollouts.env_extras)),
+        if any(extra.get("extra_info", {}).get("contract") for extra in rollouts.env_extras):
+            eval_metrics.update(
+                evaluation_contract_metrics(
+                    rollouts.env_classes,
+                    rollouts.env_extras,
+                    [tokenizer.decode(tokens) for tokens in concatenated_batch["response_ids"]],
+                    concatenated_batch["rewards"],
+                    concatenated_batch.get("stop_reasons", [None] * len(rollouts.env_extras)),
+                )
             )
-        )
         _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics, dump_namespace)
 
         return eval_metrics
@@ -339,17 +340,18 @@ async def evaluate_step_wise(
         data_sources_last_step,
         cfg.generator.eval_n_samples_per_prompt,
     )
-    selected_envs = [env for env, keep in zip(rollouts.env_classes, is_last_step_mask, strict=True) if keep]
-    selected_extras = [extra for extra, keep in zip(rollouts.env_extras, is_last_step_mask, strict=True) if keep]
-    eval_metrics.update(
-        evaluation_contract_metrics(
-            selected_envs,
-            selected_extras,
-            [tokenizer.decode(tokens) for tokens in trajectory_batch_last_step["response_ids"]],
-            trajectory_batch_last_step["rewards"],
-            trajectory_batch_last_step.get("stop_reasons", [None] * len(selected_extras)),
+    if any(extra.get("extra_info", {}).get("contract") for extra in rollouts.env_extras):
+        selected_envs = [env for env, keep in zip(rollouts.env_classes, is_last_step_mask, strict=True) if keep]
+        selected_extras = [extra for extra, keep in zip(rollouts.env_extras, is_last_step_mask, strict=True) if keep]
+        eval_metrics.update(
+            evaluation_contract_metrics(
+                selected_envs,
+                selected_extras,
+                [tokenizer.decode(tokens) for tokens in trajectory_batch_last_step["response_ids"]],
+                trajectory_batch_last_step["rewards"],
+                trajectory_batch_last_step.get("stop_reasons", [None] * len(selected_extras)),
+            )
         )
-    )
     _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics, dump_namespace)
 
     return eval_metrics
