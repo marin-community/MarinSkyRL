@@ -1021,6 +1021,38 @@ class _PausedGenerateEngine(_MockWeightSyncEngine):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_publication_inflight_counts_generate_requests_until_completion_or_cancel(cancel):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class Engine:
+        async def generate(self, request):
+            entered.set()
+            await release.wait()
+            return InferenceEngineOutput(
+                responses=["answer"], response_ids=[[21]], stop_reasons=["stop"], response_logprobs=[[-0.1]]
+            )
+
+    client = InferenceEngineClient([Engine()], tokenizer=object(), full_config=_make_min_cfg())
+    task = asyncio.create_task(client.generate(InferenceEngineInput(prompt_token_ids=[[1]], sampling_params={})))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert client.publication_inflight_snapshot() == (1,)
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            release.set()
+            assert (await task)["response_ids"] == [[21]]
+        assert client.publication_inflight_snapshot() == (0,)
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_incoming_single_prompt_waits_for_resume_and_preserves_tokens(monkeypatch):
     engine = _PausedGenerateEngine()
     client = InferenceEngineClient([engine], tokenizer=object(), full_config=_make_min_cfg())

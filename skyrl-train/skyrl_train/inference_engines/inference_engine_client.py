@@ -75,6 +75,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         # which resets each vLLM engine's per-step accumulators that InferenceStatsCallback
         # depends on). Used for power-of-two-choices balancing of new sessions.
         self._engine_inflight: List[int] = [0] * len(engines)
+        # Observe token-space requests independently of HTTP routing load.
+        self._generation_inflight: list[int] = [0] * len(engines)
         # session_id (str) -> engine_idx. Populated on a session's FIRST request (load
         # balanced) and reused for every later turn (sticky, to preserve prefix-cache
         # reuse). LRU-capped so it cannot grow unbounded. OrderedDict is used as an LRU.
@@ -257,7 +259,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 prompt_token_ids=cur_prompt_token_ids,
                 sampling_params=sampling_params,
             )
-            tasks.append(asyncio.create_task(self.engines[engine_idx].generate(engine_input)))
+            tasks.append(asyncio.create_task(self._generate_on_engine(engine_idx, engine_input)))
             indices_list.append(prompt_ids)
             task_engine_idxs.append(engine_idx)
 
@@ -275,7 +277,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                     prompt_token_ids=cur_prompt_token_ids,
                     sampling_params=sampling_params,
                 )
-                results[i] = await self.engines[fallback].generate(engine_input)
+                results[i] = await self._generate_on_engine(fallback, engine_input)
                 task_engine_idxs[i] = fallback
             elif isinstance(result, BaseException):
                 raise result
@@ -313,6 +315,18 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_logprobs=response_logprobs if add_resp_logprobs else None,
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
         )
+
+    async def _generate_on_engine(self, engine_idx: int, request: InferenceEngineInput) -> InferenceEngineOutput:
+        prompt_ids = request["prompt_token_ids"]
+        assert prompt_ids is not None
+        count = len(prompt_ids)
+        with self._routing_lock:
+            self._generation_inflight[engine_idx] += count
+        try:
+            return await self.engines[engine_idx].generate(request)
+        finally:
+            with self._routing_lock:
+                self._generation_inflight[engine_idx] -= count
 
     async def _generate_single_with_retry(
         self, engine_idx: int, original_prompt_ids: List[int], sampling_params: Optional[Dict[str, Any]]
@@ -380,7 +394,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             # 3.2. Send the request.
             logger.debug(f"generate() request sent (including potential retries): {engine_input}")
             try:
-                partial_response: InferenceEngineOutput = await self.engines[engine_idx].generate(engine_input)
+                partial_response: InferenceEngineOutput = await self._generate_on_engine(engine_idx, engine_input)
             except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
                 self._mark_engine_dead(engine_idx, e)
                 fallback = self._pick_fallback_engine(engine_idx)
@@ -812,7 +826,7 @@ class InferenceEngineClient(InferenceEngineInterface):
     def publication_inflight_snapshot(self) -> tuple[int, ...]:
         """Snapshot outstanding requests without resetting dispatch accounting."""
         with self._routing_lock:
-            return tuple(self._engine_inflight)
+            return tuple(http + generate for http, generate in zip(self._engine_inflight, self._generation_inflight))
 
     async def begin_publication_timing(self, step: int):
         return await self._run_on_all_engines("begin_publication_timing", step=step)
