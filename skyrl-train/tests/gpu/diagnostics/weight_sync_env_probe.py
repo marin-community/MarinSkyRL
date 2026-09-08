@@ -48,6 +48,7 @@ def worker(case: str, output: Path, port: int) -> None:
     from skyrl_train.distributed.utils import init_custom_process_group
 
     rank = int(os.environ["LOCAL_RANK"])
+    assert torch.cuda.device_count() == 2 and "H100" in torch.cuda.get_device_name(rank)
     event("imported", rank, torch_version=torch.__version__, nccl_version=torch.cuda.nccl.version())
     torch.cuda.set_device(rank)
     if case == "symmetric" or (case == "receiver_only" and rank == 1):
@@ -148,6 +149,7 @@ def run_case(case: str, output: Path, *, command: list[str] | None = None, timeo
         try:
             result = gang.wait(timeout_seconds)
             receipt = audit_output(result.output, result.returncode)
+            receipt["worker_output"] = result.output
         except ProcessGangTimeoutError as error:
             receipt = audit_output(gang.output(), gang.process.returncode)
             receipt.update(passed=False, timeout=True, error=str(error))
@@ -169,5 +171,9 @@ if __name__ == "__main__":
             event("error", int(os.environ["LOCAL_RANK"]), error_type=type(error).__name__, error=str(error))
             raise
     else:
-        receipts = [run_case(case, args.output.resolve() / case) for case in CASES]
+        receipts = []
+        for case in CASES:
+            receipt = run_case(case, args.output.resolve() / case)
+            receipts.append(receipt)
+            print("WEIGHT_SYNC_ENV_CASE " + json.dumps(receipt), flush=True)
         print("WEIGHT_SYNC_ENV_COMPARISON " + json.dumps(receipts), flush=True)
