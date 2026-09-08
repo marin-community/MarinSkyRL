@@ -160,6 +160,7 @@ class MegatronStrategy(DistributedStrategy):
         """Perform optimizer step"""
         self.last_grad_metrics = {}
         successful, grad_norm, _ = optimizer.step()
+        self.last_optimizer_step_succeeded = bool(successful)
         if grad_observer is not None:
             # Main-gradient shards remain populated after clipping/step and before
             # zero_grad. Even a skipped update must reset every rank's history.

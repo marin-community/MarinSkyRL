@@ -194,9 +194,11 @@ def test_real_trainer_checkpoint_restores_sync_cursor_or_next_epoch(workers, ste
     for _ in range((step - 1) % 4 + 1):
         next(iterator)
     original = checkpoint_trainer(cfg, source, tmp_path, step=step)
+    original._successful_policy_updates = step - 1
     original.save_checkpoints()
     restored = checkpoint_trainer(cfg, loader(cfg), tmp_path, step=step)
     assert restored.load_checkpoints()[0] == step
+    assert restored._successful_policy_updates == step - 1
     expected = loader(cfg)
     set_source_epoch(expected, step // 4)
     order = [row["uid"] for batch in expected for row in batch]
@@ -502,3 +504,17 @@ def test_prompt_sequence_is_identical_across_minibatch_counts():
     assert sources[1][0].sampler.contract.updates_per_batch == 4
     with pytest.raises(ValueError, match="source-order contract"):
         validate_source_order_checkpoint(sources[1][0], source_order_checkpoint(sources[0][0], 0), 0)
+
+
+def test_legacy_checkpoint_does_not_infer_successful_optimizer_updates(tmp_path, monkeypatch):
+    monkeypatch.setattr("skyrl_train.trainer.ray.get", lambda result: result)
+    cfg = config(workers=0)
+    original = checkpoint_trainer(cfg, loader(cfg), tmp_path, step=0)
+    original.save_checkpoints()
+    state_path = tmp_path / "global_step_0" / "trainer_state.pt"
+    state = torch.load(state_path, weights_only=False)
+    state.pop("successful_policy_updates")
+    torch.save(state, state_path)
+    restored = checkpoint_trainer(cfg, loader(cfg), tmp_path, step=0)
+    restored.load_checkpoints()
+    assert restored._successful_policy_updates is None

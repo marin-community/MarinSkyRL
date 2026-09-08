@@ -31,6 +31,7 @@ def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch, 
             return {
                 **monitor.metrics(),
                 **gradients,
+                "optimizer_step_succeeded": 1.0,
                 "log_ratio_abs_mean": float(self.update_count),
                 "policy_loss": 0.5,
                 "raw_grad_norm": float(self.update_count + 10),
@@ -119,6 +120,9 @@ def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch, 
     monkeypatch.setattr("skyrl_train.trainer.record_event", validated_event)
     mean = trainer.train_critic_and_policy(batch)
     assert mean["log_ratio_abs_mean"] == pytest.approx(2)
+    assert trainer.all_metrics["policy/updates_attempted"] == 28
+    assert trainer.all_metrics["policy/updates_completed"] == 4
+    assert trainer.all_metrics["policy/updates_completed_valid"] == 1
     assert [trainer.all_metrics[f"policy/by_update/{k}/update_age"] for k in range(4)] == [0, 1, 2, 3]
     assert [event[0][1]["update_age"] for event in events] == [0, 1, 2, 3]
     assert all(event[0][0] == "policy_update" and event[1]["attributes"]["step"] == "7" for event in events)

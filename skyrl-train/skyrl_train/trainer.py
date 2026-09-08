@@ -142,6 +142,7 @@ _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 class RayPPOTrainer:
     _training_metrics_enabled = False
     _last_successful_eval_step: int | None = None
+    _successful_policy_updates: int | None = 0
 
     def __init__(
         self,
@@ -621,10 +622,11 @@ class RayPPOTrainer:
         if self._training_metrics_enabled:
             self.all_metrics["consumed/uid_digest_u52"] = consumed_uid_digest(uids)
             self.all_metrics.update(training_input.metadata["consumed_stop_metrics"])
+            real_rows = training_input.batch_size - training_input.metadata.get("pad_size", 0)
             record_consumed_work(
-                sequences=len(training_input["sequences"]),
-                response_tokens=int(training_input["response_mask"].sum().item()),
-                loss_tokens=int(training_input["loss_mask"].sum().item()),
+                sequences=real_rows,
+                response_tokens=int(training_input["response_mask"][:real_rows].sum().item()),
+                loss_tokens=int(training_input["loss_mask"][:real_rows].sum().item()),
                 step=self.global_step,
             )
         logger.info(
@@ -1453,6 +1455,17 @@ class RayPPOTrainer:
                 len(sample_response_ids) for sample_response_ids in response_ids
             ) / len(response_ids)
 
+        if self._training_metrics_enabled and rollout_age is not None:
+            counts = {}
+            for uid, age, mask in zip(uids, rollout_age, response_masks_tensor, strict=True):
+                body = counts.setdefault(uid, {"age": age, "groups": 1, "sequences": 0, "response_tokens": 0})
+                if body["age"] != age:
+                    raise ValueError("Consumed group rows must share the admitted age")
+                body["sequences"] += 1
+                body["response_tokens"] += int(mask.sum().item())
+            for body in counts.values():
+                record_event("consumed_age", body, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)})
+
         logger.info(f"Number of sequences before padding: {len(training_input['sequences'])}")
         training_input = self.pad_batch(training_input)
         logger.info(f"Number of sequences after padding: {len(training_input['sequences'])}")
@@ -2164,7 +2177,16 @@ class RayPPOTrainer:
             empty_cache_refs += self.critic_model.async_run_ray_method("pass_through", "empty_cache")
 
         policy_status = policy_statuses[0].metadata["train_status"]
-        self.all_metrics["policy/updates_completed"] = self.global_step * policy_status["policy_update_steps"]
+        self.all_metrics["policy/updates_attempted"] = self.global_step * policy_status["policy_update_steps"]
+        if policy_status.get("policy_successful_update_steps_valid") != 1:
+            self._successful_policy_updates = None
+        elif self._successful_policy_updates is not None:
+            self._successful_policy_updates += int(policy_status["policy_successful_update_steps"])
+        self.all_metrics["policy/updates_completed_valid"] = float(self._successful_policy_updates is not None)
+        if self._successful_policy_updates is not None:
+            self.all_metrics["policy/updates_completed"] = self._successful_policy_updates
+        else:
+            self.all_metrics.pop("policy/updates_completed", None)
         if self._training_metrics_enabled:
             window = OmegaConf.select(self.cfg, "trainer.algorithm.ratio_diagnostics.position_window", default=256)
             maximum = OmegaConf.select(self.cfg, "trainer.algorithm.ratio_diagnostics.by_update_max", default=16)
@@ -2422,6 +2444,7 @@ class RayPPOTrainer:
         trainer_state = {
             "global_step": self.global_step,
             "config": self.cfg,
+            "successful_policy_updates": self._successful_policy_updates,
         }
         if epoch_seeded_shuffle_enabled(self.cfg):
             trainer_state["source_order"] = source_order_checkpoint(self.train_dataloader, self.global_step)
@@ -2550,6 +2573,7 @@ class RayPPOTrainer:
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
+        self._successful_policy_updates = trainer_state.get("successful_policy_updates")
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
             if epoch_seeded_shuffle_enabled(self.cfg):

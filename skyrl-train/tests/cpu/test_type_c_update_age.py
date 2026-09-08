@@ -12,7 +12,8 @@ from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
 from skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase
 
 
-def test_four_real_optimizer_updates_retain_age_and_increasing_stale_ratio(monkeypatch):
+@pytest.mark.parametrize("skip", [None, 1])
+def test_four_real_optimizer_updates_retain_age_and_increasing_stale_ratio(monkeypatch, skip):
     class CpuPolicy(FSDPPolicyWorkerBase):
         def training_step(self, experience, global_step, local_step, accumulation_steps):
             logits = self.tiny_model(torch.ones(1, 1))
@@ -21,11 +22,16 @@ def test_four_real_optimizer_updates_retain_age_and_increasing_stale_ratio(monke
             monitor.add(current.detach(), experience.action_log_probs, torch.ones_like(current))
             (-current.mean() / accumulation_steps).backward()
             if (local_step + 1) % accumulation_steps == 0:
-                self.optimizer.step()
+                succeeded = self.update_count != skip
+                if succeeded:
+                    self.optimizer.step()
                 self.optimizer.zero_grad()
                 self.update_count += 1
+            else:
+                succeeded = False
             return {
                 **monitor.metrics(),
+                "optimizer_step_succeeded": float(succeeded),
                 "policy_loss": -current.item(),
                 "response_length": 1,
                 "policy_lr": 0.1,
@@ -76,6 +82,8 @@ def test_four_real_optimizer_updates_retain_age_and_increasing_stale_ratio(monke
     assert worker.update_count == mean["policy_update_steps"] == 4
     assert [row["update_age"] for row in updates] == [0, 1, 2, 3]
     assert mean["update_age_max"] == 3
+    assert mean["policy_successful_update_steps_valid"] == 1
+    assert mean["policy_successful_update_steps"] == (4 if skip is None else 3)
     stale = [row["stale/abs_log_ratio_mean"] for row in updates]
     assert stale[0] == pytest.approx(0, abs=1e-8)
     assert stale[-1] > stale[0]
