@@ -1104,6 +1104,7 @@ class PolicyWorkerBase(Worker):
         accumulation_steps = micro_batches_per_mini_batch
 
         status_list = []
+        status_by_update = []
         all_metrics = defaultdict(list)
         policy_update_steps = 0
         grug_causal_lm = self._grug_causal_lm()
@@ -1179,6 +1180,9 @@ class PolicyWorkerBase(Worker):
                 #     status["kl"] *= status["response_length"]
                 #     status["kl"] /= status["response_length"]
 
+                if policy_update_steps % accumulation_steps == 0:
+                    update_index = len(status_by_update)
+                    status_by_update.append({**status, "update_index": update_index, "update_age": update_index})
                 status_list.append(status)
                 for k, v in status.items():
                     all_metrics[k].append(v)
@@ -1189,7 +1193,7 @@ class PolicyWorkerBase(Worker):
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
-        output.metadata = {"train_status": status_mean}
+        output.metadata = {"train_status": status_mean, "train_status_by_update": status_by_update}
         return output
 
     def training_step(
@@ -1299,7 +1303,10 @@ class PolicyWorkerBase(Worker):
         # dict has the same wandb keys as v4 so the downstream per-key
         # all_reduce(status) stays keyset-compatible.
         if local_step % accumulation_steps == 0 or getattr(self, "_log_ratio_monitor", None) is None:
-            self._log_ratio_monitor = LogRatioMonitor(action_log_probs.device)
+            self._log_ratio_monitor = LogRatioMonitor(
+                action_log_probs.device,
+                position_window=self.cfg.trainer.algorithm.get("ratio_diagnostics", {}).get("position_window", 256),
+            )
         self._log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
 
         grad_norm = None

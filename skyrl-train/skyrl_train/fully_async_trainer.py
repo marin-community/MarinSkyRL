@@ -42,6 +42,7 @@ from skyrl_train.data_order import (
 )
 from marinskyrl.training_completion import CompletionMode, completion_mode
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
+import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Tuple, TypeVar
 from enum import Enum, auto
@@ -1842,12 +1843,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         trajectory_batches = []
         uids = []
         stalenesses = []
+        rollout_ages = []
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.earliest_model_step
             stalenesses.append(cur_staleness)
             trajectory_batches.append(cur_generated_output_group.trajectory_batch)
             group_size = len(cur_generated_output_group.trajectory_batch["response_ids"])
             uids.extend([cur_generated_output_group.uid] * group_size)
+            rollout_ages.extend([cur_staleness] * group_size)
 
         record_rollout_staleness(stalenesses, self.global_step)
 
@@ -1880,7 +1883,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
         logger.debug(f"Example generated: {vis}")
 
-        return self.convert_to_training_input(trajectory_batch, uids)
+        training_input = self.convert_to_training_input(trajectory_batch, uids, rollout_age=rollout_ages)
+        token_ages = training_input["rollout_age"].repeat_interleave(training_input["loss_mask"].sum(-1).long()).float()
+        if token_ages.numel():
+            p50, p95 = torch.quantile(token_ages, token_ages.new_tensor([0.5, 0.95])).tolist()
+            self.all_metrics.update({"async/staleness_p50": p50, "async/staleness_p95": p95})
+        return training_input
 
     def save_checkpoints(self):
         """

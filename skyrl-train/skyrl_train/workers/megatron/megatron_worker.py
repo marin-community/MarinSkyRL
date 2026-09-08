@@ -652,6 +652,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         status_list = []
+        status_by_update = []
         all_metrics = defaultdict(list)
         policy_update_steps = 0
 
@@ -752,6 +753,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         for k, v in status.items():
                             all_metrics[k].append(v)
 
+                    status_by_update.append(
+                        {**status_list[-1], "update_index": policy_update_steps, "update_age": policy_update_steps}
+                    )
                     pbar.set_postfix(policy_progress_metrics(status_list[-1]))
 
                     policy_update_steps += 1
@@ -776,7 +780,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self._warned_exact_unit_policy_ratio = True
 
         output = TrainingOutputBatch()
-        output.metadata = {"train_status": status_mean}
+        output.metadata = {"train_status": status_mean, "train_status_by_update": status_by_update}
         return output
 
     async def broadcast_to_inference_engines(self, inference_engine_client, *, publication=None):
