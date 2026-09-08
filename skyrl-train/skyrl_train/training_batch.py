@@ -356,6 +356,7 @@ class TrainingInput(TypedDict, total=False):
     kl: Float[torch.Tensor, "batch_size seq_len"]
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    rollout_age: Optional[torch.Tensor]  # [batch], int32
     # Teacher distillation fields (populated by DistillationTrainer when teacher engine is configured)
     teacher_top_k_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len K"]]
     teacher_top_k_indices: Optional[Integer[torch.Tensor, "batch_size seq_len K"]]
@@ -424,6 +425,7 @@ class TrainingBatchIterator(Iterator[Experience]):
             action_mask=batch["response_mask"],
             num_actions=batch.metadata["response_length"],
             rollout_logprobs=batch.get("rollout_logprobs"),
+            rollout_age=batch.get("rollout_age"),
             rollout_routed_experts=batch.get("rollout_routed_experts"),
             response_span_tags=batch.get("response_span_tags"),
             info={},

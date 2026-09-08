@@ -190,6 +190,9 @@ trainer:
       cp_rotate_method: "allgather"
     sequence_parallel_size: 1
   algorithm:
+    ratio_diagnostics:
+      position_window: 256
+      by_update_max: 16
     batch_invariant: false
     advantage_estimator: "grpo"
     group_advantage_min_size: null
