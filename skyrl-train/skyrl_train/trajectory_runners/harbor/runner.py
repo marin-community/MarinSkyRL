@@ -355,8 +355,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 TrajectoryBatch byte-identical to today.
             rollout_logprobs_required: Whether the selected policy objective consumes
                 behavior-policy logprobs. Full-TITO rollout assembly defaults to this.
-            tito_full: ``trainer.algorithm.tito_full`` — explicit full-TITO override.
-                None = auto (default to ``rollout_logprobs_required``); True/False = force.
+            tito_full: ``trainer.algorithm.tito_full`` — opt into full TITO when the
+                selected objective does not already require behavior logprobs.
         """
         self.base_url = f"http://{trajectory_runner_cfg.http_endpoint_host}:{trajectory_runner_cfg.http_endpoint_port}"
         # Native controller-ingress (opencode-RL literal capture): when the runner stood up
@@ -407,7 +407,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         self.tokenizer = tokenizer
         self.model_name = trajectory_runner_cfg.model_name
         self._moe_router_replay = moe_router_replay
-        # Full-TITO follows the explicit setting when present, otherwise logprob consumption.
+        # Behavior-logprob objectives require full TITO; other objectives may opt in.
         self._rollout_logprobs_required = rollout_logprobs_required
         self._tito_full = tito_full
         self._tis_splice = tis_splice
@@ -1220,6 +1220,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         #   tis/unaligned_fraction     — fraction with NO recoverable logprob (holes)
         #   tis/alignment_fail_count   — assistant messages where alignment fully failed
         #   tis/lcs_fallback_messages  — assistant messages that took the LCS path
+        #   tis/tito_full/*            — full-token assembly success and typed declines
         batch_align = AlignmentStats()
         any_align = False
         for output in all_outputs:
@@ -1231,7 +1232,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 prefix=TIS_METRIC_PREFIX, lcs_alert_threshold=self._tis_lcs_alert_threshold
             )
             rollout_metrics.update(align_metrics)
-            if batch_align.n_lcs_messages > 0 or batch_align.n_failed_messages > 0:
+            if batch_align.n_lcs_messages > 0 or batch_align.n_failed_messages > 0 or batch_align.tito_full_declines:
                 # Escalate to ERROR for any unaligned token or when complete LCS
                 # fallback use exceeds the configured threshold.
                 alert = align_metrics.get(TIS_ALIGNMENT_ALERT_METRIC, 0.0) >= 1.0
@@ -1242,8 +1243,11 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                     f"{batch_align.n_lcs} via LCS fallback, {batch_align.n_unaligned} unaligned; "
                     f"{batch_align.n_lcs_messages} LCS-fallback messages, "
                     f"{batch_align.n_failed_messages} failed messages "
-                    f"(of {batch_align.n_messages} assistant messages). "
-                    f"Non-zero LCS/failure means serving↔training tokenizer divergence"
+                    f"(of {batch_align.n_messages} assistant messages); "
+                    f"full TITO {batch_align.n_tito_full_successes}/"
+                    f"{batch_align.n_tito_full_attempts} succeeded, declines="
+                    f"{dict(batch_align.tito_full_declines)}. "
+                    f"Non-zero LCS, failure, or full-TITO decline means serving↔training token divergence"
                     + (
                         f" ABOVE the {self._tis_lcs_alert_threshold} alert threshold — investigate before trusting TIS."
                         if alert
