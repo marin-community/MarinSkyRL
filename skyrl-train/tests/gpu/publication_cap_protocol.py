@@ -146,6 +146,11 @@ def audit_queue(receipt, *, request_count, tokens_per_request):
     by_label = {row["label"]: row for row in receipt["states"]}
     assert by_label["paused"]["state"]["paused"] and by_label["paused"]["state"]["frontend_requests"] == 0
     assert not by_label["final"]["state"]["paused"] and by_label["final"]["state"]["frontend_requests"] == 0
+    # Native continuation appends each abort prefix once and subtracts its
+    # length from the retry budget; no model death/reset is accepted here.
+    assert sum(row["tokens"] for row in terminal.values()) == request_count * tokens_per_request, (
+        "native token conservation"
+    )
     outcomes = Counter(row["reason"] for row in terminal.values())
     return {
         "native_starts": len(started),

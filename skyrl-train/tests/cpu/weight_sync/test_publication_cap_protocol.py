@@ -1,5 +1,7 @@
 import asyncio
 import copy
+import hashlib
+import io
 import threading
 import time
 
@@ -7,6 +9,7 @@ import pytest
 
 from skyrl_train.weight_sync.publication_accounting import PublicationRequestAccounting
 from tests.gpu.publication_cap_protocol import audit_queue, measure_queue
+from tests.gpu.stage_publication_cap_model import copy_verified
 
 
 class QueueEngineClient:
@@ -91,7 +94,16 @@ def test_native_attempt_audit_includes_zero_token_aborts_and_retry_tokens(measur
 
 
 @pytest.mark.parametrize(
-    "damage", ["drop_terminal", "duplicate_start", "invent_first_token", "lose_logprob", "engine_death"]
+    "damage",
+    [
+        "drop_terminal",
+        "duplicate_start",
+        "invent_first_token",
+        "lose_logprob",
+        "engine_death",
+        "drop_native_token",
+        "extra_native_token",
+    ],
 )
 def test_native_attempt_audit_rejects_corrupted_receipts(measured_receipt, damage):
     receipt = copy.deepcopy(measured_receipt)
@@ -104,8 +116,11 @@ def test_native_attempt_audit_rejects_corrupted_receipts(measured_receipt, damag
         next(row for row in paused["request_accounting"]["terminal"] if row["tokens"] == 0)["first_token_time"] = 1.0
     elif damage == "lose_logprob":
         receipt["logical"][0]["logprobs"] -= 1
-    else:
+    elif damage == "engine_death":
         paused["core_pids"] = [3]
+    else:
+        row = next(row for row in paused["request_accounting"]["terminal"] if row["tokens"] > 0)
+        row["tokens"] += 1 if damage == "extra_native_token" else -1
     with pytest.raises(AssertionError):
         audit_queue(receipt, request_count=2, tokens_per_request=4)
 
@@ -126,3 +141,20 @@ async def test_pause_error_remains_primary_and_all_logical_tasks_are_cancelled()
     assert receipt["failure_type"] == "RuntimeError"
     assert receipt["cleanup_failure_type"] == "OSError"
     assert receipt["cleanup_dispositions"] == ["CancelledError", "CancelledError"]
+
+
+@pytest.mark.parametrize("change", ["none", "wrong_hash", "truncated", "oversized"])
+def test_streamed_artifact_requires_digest_and_size(tmp_path, change):
+    payload = b"actual immutable fixture bytes"
+    digest = hashlib.sha256(payload).hexdigest()
+    incoming = payload[:-1] if change == "truncated" else payload + b"extra" if change == "oversized" else payload
+    target = tmp_path / "model.safetensors"
+    expected = "0" * 64 if change == "wrong_hash" else digest
+    if change == "none":
+        receipt = copy_verified(io.BytesIO(incoming), target, expected, expected_size=len(payload))
+        assert receipt == {"sha256": digest, "bytes": len(payload)} and target.read_bytes() == payload
+    else:
+        with pytest.raises(ValueError):
+            copy_verified(io.BytesIO(incoming), target, expected, expected_size=len(payload))
+        assert not target.exists()
+    assert not target.with_suffix(".safetensors.partial").exists()

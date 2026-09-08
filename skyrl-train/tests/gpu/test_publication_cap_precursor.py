@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 import ray
 import torch
-from huggingface_hub import snapshot_download
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
@@ -31,11 +30,19 @@ def test_cap8_preserves_queued_requests_across_original_pause():
     assert all(type(token) is int and token >= 0 for row in prompts for token in row)
     assert hashlib.sha256(json.dumps(prompts, separators=(",", ":")).encode()).hexdigest() == spec["prompts_sha256"]
     assert torch.cuda.device_count() == 1 and "H100" in torch.cuda.get_device_name(0)
-    model_path = snapshot_download(spec["model"], revision=spec["revision"])
-    assert Path(model_path).name == spec["revision"]
+    model_path = os.environ["PUBLICATION_CAP_MODEL"]
+    staging = json.loads((Path(model_path) / "staging-receipt.json").read_text())
+    assert staging["revision"] == spec["revision"]
+    assert os.environ["HF_HUB_OFFLINE"] == os.environ["TRANSFORMERS_OFFLINE"] == "1"
     cfg = compose_precursor(spec, model_path)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    receipt = {"states": [], "logical": [], "spec": spec, "config": OmegaConf.to_container(cfg, resolve=True)}
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    receipt = {
+        "states": [],
+        "logical": [],
+        "spec": spec,
+        "config": OmegaConf.to_container(cfg, resolve=True),
+        "model_staging": staging,
+    }
     output = Path(os.environ["PUBLICATION_CAP_RECEIPT"])
     assert not output.exists(), "precursor output collision"
     try:

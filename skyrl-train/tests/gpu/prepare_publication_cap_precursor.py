@@ -9,7 +9,6 @@ from unittest.mock import patch
 import fsspec
 import pyarrow.parquet as parquet
 import torch
-from huggingface_hub import snapshot_download
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
@@ -22,9 +21,9 @@ from tests.gpu.publication_cap_protocol import compose_precursor
 
 def prepare(spec):
     assert torch.cuda.device_count() == 0, "CPU prerequisite must not allocate a GPU"
-    model_path = snapshot_download(spec["model"], revision=spec["revision"], allow_patterns=["*.json", "*.jinja"])
+    model_path = os.environ["PUBLICATION_CAP_MODEL"]
     cfg = compose_precursor(spec, model_path)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
     with fsspec.open(spec["train_data"], "rb") as source:
         data = source.read()
     rows = parquet.read_table(io.BytesIO(data), columns=["prompt"]).to_pylist()[:16]
