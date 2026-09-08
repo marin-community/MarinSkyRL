@@ -98,6 +98,7 @@ from skyrl_train.utils.utils import (
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_required
 from skyrl_train.weight_change_probe import validate_weight_change_probe_config
 from skyrl_train.utils.importance_ratio_diagnostics import behavior_drift_metrics, mismatch_ratio_metrics
+from skyrl_train.utils.type_c_staleness import consumed_update_age_counts
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks import (
@@ -113,6 +114,7 @@ from skyrl_train.telemetry import (
     critical_phase,
     record_generated_work,
     record_policy_step,
+    record_rollout_staleness,
     record_training_metrics,
     record_consumed_work,
     record_event,
@@ -581,6 +583,34 @@ class RayPPOTrainer:
             duration_seconds,
         )
 
+    def _record_sync_update_ages(self, training_input: TrainingInputBatch, uids: list[str]) -> None:
+        if not self._training_metrics_enabled or not epoch_seeded_shuffle_enabled(self.cfg):
+            return
+        dp_size = self.policy_model.actor_infos[0].rank.dp_size
+        samples = self.cfg.generator.n_samples_per_prompt
+        counts = consumed_update_age_counts(
+            training_input["response_mask"],
+            dp_size=dp_size,
+            mini_batch_sequences=self.cfg.trainer.policy_mini_batch_size * samples,
+            samples_per_prompt=samples,
+            epochs=self.cfg.trainer.update_epochs_per_batch,
+        )
+        for body in counts:
+            record_rollout_staleness([body["age"]] * body["groups"], self.global_step)
+            record_event("consumed_age", body, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)})
+        prompts = list(dict.fromkeys(uids))
+        if len(prompts) != self.cfg.trainer.train_batch_size:
+            raise ValueError("Source-order receipt requires the full fixed prompt batch")
+        for start in range(0, len(prompts), 64):
+            record_event(
+                "consumed_source_order",
+                {
+                    "prompt_offset": (self.global_step - 1) * len(prompts) + start,
+                    "uids_json": json.dumps(prompts[start : start + 64], separators=(",", ":")),
+                },
+                attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
+            )
+
     def _log_optimizer_step_completed(
         self,
         *,
@@ -783,6 +813,7 @@ class RayPPOTrainer:
                         critical_phase("train_step", self.global_step),
                     ):
                         status = self.train_critic_and_policy(training_input)
+                    self._record_sync_update_ages(training_input, uids)
                     train_duration = self.all_timings["train_critic_and_policy"]
                     self._log_optimizer_step_completed(
                         epoch=epoch,
@@ -2134,6 +2165,7 @@ class RayPPOTrainer:
             empty_cache_refs += self.critic_model.async_run_ray_method("pass_through", "empty_cache")
 
         policy_status = policy_statuses[0].metadata["train_status"]
+        self.all_metrics["policy/updates_completed"] = self.global_step * policy_status["policy_update_steps"]
         if self._training_metrics_enabled:
             window = OmegaConf.select(self.cfg, "trainer.algorithm.ratio_diagnostics.position_window", default=256)
             maximum = OmegaConf.select(self.cfg, "trainer.algorithm.ratio_diagnostics.by_update_max", default=16)

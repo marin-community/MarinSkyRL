@@ -231,7 +231,7 @@ def test_changed_source_contract_fails_before_resuming(change):
         ("data.sampling.kind", "naive"),
         ("trainer.algorithm.dynamic_sampling.type", "filter"),
         ("trainer.step_wise_training", True),
-        ("trainer.policy_mini_batch_size", 2),
+        ("trainer.policy_mini_batch_size", 3),
     ],
 )
 def test_unsupported_order_controls_fail_during_config_validation(key, value):
@@ -480,3 +480,25 @@ async def test_sync_and_async_c1a0_consume_identical_uid_sets_per_step(monkeypat
     for trainer, key in ((synchronous, "sync/admission/rejected_count"), (asynchronous, "async/rejected_count")):
         rejected = [row[key] for _, row in trainer.tracker.rows if key in row]
         assert len(rejected) == 8 and max(rejected) == 0
+
+
+@pytest.mark.parametrize("ratio", [1, 3, 4])
+def test_epoch_seeded_shuffle_allows_integer_minibatch_ratio(ratio):
+    cfg = config()
+    cfg.trainer.train_batch_size = 4 * ratio
+    source = loader(cfg, dataset=Rows(48))
+    assert source.sampler.contract.updates_per_batch == ratio
+
+
+def test_prompt_sequence_is_identical_across_minibatch_counts():
+    sources = []
+    for ratio in (1, 4):
+        cfg = config()
+        cfg.trainer.train_batch_size = 4 * ratio
+        source = loader(cfg, dataset=Rows(64))
+        sources.append((source, [row["uid"] for batch in source for row in batch]))
+    assert sources[0][1] == sources[1][1]
+    assert sources[0][0].sampler.contract.updates_per_batch == 1
+    assert sources[1][0].sampler.contract.updates_per_batch == 4
+    with pytest.raises(ValueError, match="source-order contract"):
+        validate_source_order_checkpoint(sources[1][0], source_order_checkpoint(sources[0][0], 0), 0)

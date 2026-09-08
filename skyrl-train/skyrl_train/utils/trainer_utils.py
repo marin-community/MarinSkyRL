@@ -589,7 +589,12 @@ def build_dataloader(
     sampler = None
     if is_train and epoch_seeded_shuffle_enabled(cfg):
         validate_epoch_seeded_shuffle(cfg)
-        sampler = EpochSeededSampler(dataset, seed=cfg.trainer.seed, prompts_per_step=cfg.trainer.train_batch_size)
+        sampler = EpochSeededSampler(
+            dataset,
+            seed=cfg.trainer.seed,
+            prompts_per_step=cfg.trainer.train_batch_size,
+            updates_per_batch=cfg.trainer.train_batch_size // cfg.trainer.policy_mini_batch_size,
+        )
         logger.info("Epoch-seeded source-order contract: {}", sampler.contract)
     if is_train and cfg.data.sampling.kind is not None:
         if is_fully_async:
