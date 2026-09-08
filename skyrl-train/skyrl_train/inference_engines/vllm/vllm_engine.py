@@ -1854,15 +1854,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         else:
             if ledger is not None:
                 output = final_output.outputs[0] if final_output is not None else None
+                first_token_time = (
+                    final_output.metrics.first_token_ts
+                    if final_output is not None and final_output.metrics is not None
+                    else None
+                )
                 ledger.finish(
                     request_id,
                     reason=str(output.finish_reason) if output is not None else "missing_output",
                     tokens=len(output.token_ids) if output is not None else 0,
-                    first_token_time=(
-                        final_output.metrics.first_token_ts
-                        if final_output is not None and final_output.metrics is not None
-                        else None
-                    ),
+                    first_token_time=first_token_time,
+                    policy_version_at_first_token=self._publication_versions.at_first_token(first_token_time),
                 )
 
         if self._publication_output_probe is not None and final_output is not None:
@@ -2070,6 +2072,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
         return {
             "request_accounting": accounting,
+            "policy_version_boundaries": list(self._publication_versions.boundaries),
             "host": socket.gethostname(),
             "actor_pid": os.getpid(),
             "core_pids": core_pids,
