@@ -726,3 +726,50 @@ async def test_publication_trace_reaches_step_metrics_without_batch_dispatch(mon
         "final",
     }
     assert all(json.loads(event[1]["receipt_json"])["request_accounting"] == {"active_ids": []} for event in receipts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["enabled", "disabled", "missing_worker"])
+async def test_receiver_prerequisite_readback_is_opt_in_startup_only(monkeypatch, mode):
+    events = []
+    monkeypatch.setattr(
+        "skyrl_train.fully_async_trainer.record_event",
+        lambda name, fields, **kwargs: events.append((name, fields, kwargs)),
+    )
+    trainer = make_driver(interval=1, age=0, steps=1)
+    trainer.cfg.generator.publication_receiver_state = mode != "disabled"
+    trainer.cfg.generator.num_inference_engines = 1
+    trainer.cfg.generator.inference_engine_data_parallel_size = 2
+    trainer.cfg.generator.inference_engine_tensor_parallel_size = 1
+    trainer.cfg.generator.inference_engine_pipeline_parallel_size = 1
+    reads = []
+
+    async def read_state():
+        assert not trainer.trajectory_runner.generations
+        assert trainer.inference_engine_client.installed_update == 0
+        reads.append(0)
+        await asyncio.sleep(0.01)
+        return [
+            [{"host": "native", "pid": i, "weight_reload_active": False, "free_bytes": 123}]
+            if mode != "missing_worker" or i == 0
+            else []
+            for i in range(2)
+        ]
+
+    trainer.inference_engine_client.read_publication_receiver_state = read_state
+    if mode == "missing_worker":
+        with pytest.raises(RuntimeError, match="omitted an engine or worker"):
+            await trainer._train_loop()
+        assert not any(name == "publication_receiver_state" for name, _, _ in events)
+        return
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    receipts = [event for event in events if event[0] == "publication_receiver_state"]
+    if mode == "disabled":
+        assert not reads and not receipts
+        return
+    assert reads == [0] and len(receipts) == 2
+    assert trainer.all_startup_timings["publication_receiver_readback"] >= 0.01
+    assert "publication_receiver_readback" not in trainer.all_timings
+    assert all(row[2]["attributes"]["step"] == "0" for row in receipts)
+    assert all(row[2]["attributes"]["moment"] == "startup_after_weight_sync" for row in receipts)
+    assert all(json.loads(row[1]["receipt_json"])["free_bytes"] == 123 for row in receipts)
