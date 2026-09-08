@@ -43,6 +43,7 @@ from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group,
 from skyrl_train.distributed.utils import init_custom_process_group, init_worker_process_group_with_device
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
+from skyrl_train.utils.gradient_direction import GradientDirectionTracker, gradient_direction_summary
 from skyrl_train.utils.importance_ratio_diagnostics import (
     gather_ratio_tensor,
     sum_ratio_tensor,
@@ -1194,11 +1195,30 @@ class PolicyWorkerBase(Worker):
         status_mean = policy_training_metrics(all_metrics, policy_update_steps / accumulation_steps)
         status_mean["update_age_mean"] = sum(row["update_age"] for row in status_by_update) / len(status_by_update)
         status_mean["update_age_max"] = max(row["update_age"] for row in status_by_update)
+        status_mean.update(gradient_direction_summary(status_by_update))
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean, "train_status_by_update": status_by_update}
         return output
+
+    def _gradient_observer(self, *, megatron_optimizer=None):
+        config = self.cfg.trainer.algorithm.get("grad_cosine", {})
+        if not config.get("enabled", False) or config.get("store", "gpu_fp32") == "off":
+            return None
+        if self.cfg.trainer.strategy not in {"fsdp", "fsdp2", "megatron"}:
+            raise ValueError("Gradient direction monitoring supports only qualified Megatron/FSDP layouts")
+        group = megatron_optimizer.get_grad_stats_parallel_group() if megatron_optimizer is not None else None
+        identities = tuple(id(parameter) for row in self.optimizer.param_groups for parameter in row["params"])
+        if getattr(self, "_grad_tracker", None) is None:
+            self._grad_tracker = GradientDirectionTracker(
+                config.get("store", "gpu_fp32"), torch.device("cuda", torch.cuda.current_device()), world_group=group
+            )
+            self._grad_parameter_ids = identities
+        elif self._grad_parameter_ids != identities:
+            self._grad_tracker.reset()
+            self._grad_parameter_ids = identities
+        return self._grad_tracker.observe
 
     def training_step(
         self,
@@ -1318,6 +1338,7 @@ class PolicyWorkerBase(Worker):
         grad_norm = None
         ratio_diag = {}
         spike_diag = {}
+        grad_metrics = {}
         optimizer_step_succeeded = False
         if (local_step + 1) % accumulation_steps == 0:
             # StaleClip: read rolling entropy from prior steps' history; decide LR scale
@@ -1329,6 +1350,7 @@ class PolicyWorkerBase(Worker):
             stale_min = getattr(self, "_current_stale_min", None)
             lr_scale = stale_clip.compute_lr_scale(stale_min) if stale_clip is not None else 1.0
 
+            grad_observer = self._gradient_observer()
             grad_norm = self.strategy.optimizer_step(
                 self.optimizer,
                 self.model,
@@ -1336,7 +1358,9 @@ class PolicyWorkerBase(Worker):
                 name="actor",
                 z_clip=z_clip,
                 stale_clip_lr_scale=lr_scale,
+                grad_observer=grad_observer,
             )
+            grad_metrics = self.strategy.last_grad_metrics if grad_observer is not None else {}
             optimizer_step_succeeded = (
                 bool(self.strategy.last_optimizer_step_succeeded) if grug_causal_lm is not None else True
             )
@@ -1400,6 +1424,7 @@ class PolicyWorkerBase(Worker):
         status.update(ratio_diag)
         # Spike-mitigation decisions (StaleClip / ZClip). Empty dict when disabled.
         status.update(spike_diag)
+        status.update(grad_metrics)
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 

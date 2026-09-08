@@ -116,3 +116,11 @@ class GradientDirectionTracker:
             "grad_norm_valid": 1.0,
             "grad_dot": dot if valid else 0.0,
         }
+
+
+def gradient_direction_summary(updates: list[dict[str, float]]) -> dict[str, float]:
+    """Summarize valid consecutive comparisons without treating the first as zero."""
+    measured = [row["grad_cosine"] for row in updates if row.get("grad_cosine_valid") == 1.0]
+    if not any("grad_cosine_valid" in row for row in updates):
+        return {}
+    return {"grad_cosine_min": min(measured, default=0.0), "grad_cosine_max": max(measured, default=0.0)}
