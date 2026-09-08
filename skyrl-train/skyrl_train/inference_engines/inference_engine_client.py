@@ -916,38 +916,35 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     # ----------------------------
     # Generation pause and resume
+    # Matched experimental control: retain the original grace and polling cadence.
     # ----------------------------
     async def _wait_for_generation_to_resume(self) -> None:
-        """Wake immediately on resume, including callers on the HTTP thread's event loop."""
+        """Waits for generation to be resumed, intended for in-flight weight updates and partial rollouts."""
         while self.generation_paused_event.is_set():
-            waiter = (asyncio.get_running_loop(), asyncio.Event())
-            with self._routing_lock:
-                if not self.generation_paused_event.is_set():
-                    return
-                self._generation_resume_waiters.add(waiter)
-            try:
-                await waiter[1].wait()
-            finally:
-                with self._routing_lock:
-                    self._generation_resume_waiters.discard(waiter)
+            await asyncio.sleep(0.5)
 
     async def pause_generation(self) -> None:
-        """Block submissions, abort native schedulers, then verify every engine is paused.
-
-        Calls already delivered after the native abort may remain queued until resume.
-        Waiting for those calls to finish here would deadlock; record them without waiting.
         """
-        with self._routing_lock:
-            if self.generation_paused_event.is_set():
-                raise RuntimeError("Generation is already paused, cannot pause again.")
-            self.generation_paused_event.set()
-        async with asyncio.timeout(self._publication_pause_timeout):
-            await self._run_on_all_engines("pause_generation")
-            while True:
-                states = await self._run_on_all_engines("is_paused")
-                if len(states) == len(self.engines) and all(value is True for value in states):
-                    break
-        logger.info("publication_pause_ack queued_or_returning_requests={}", sum(self.publication_inflight_snapshot()))
+        Pauses generation for all engines, intended for in-flight weight updates and partial rollouts.
+
+        Supported for `/chat/completions` and single-prompt `generate()` calls.
+        Batched `generate()` and `/completions` remain unsupported.
+
+        Both in-flight and incoming requests will be blocked until `resume_generation` is called.
+        1. Set the paused event to avoid new requests from being submitted while aborting requests.
+        2. Wait for a grace period to ensure all in-flight requests have entered the engine's
+           scheduler and hence can be aborted. Otherwise, there can be requests already submitted
+           but not yet entered the scheduler, which can miss the abort request.
+        3. Finally, pause each engine scheduler in abort mode. This causes requests sent from
+           InferenceEngineClient to `InferenceEngineClient.engines` to return the already-generated tokens.
+           The request to `InferenceEngineClient` will not yet return until requests are completed with
+           stop reason that is not `abort`.
+        """
+        if self.generation_paused_event.is_set():
+            raise RuntimeError("Generation is already paused, cannot pause again.")
+        self.generation_paused_event.set()
+        await asyncio.sleep(5.0)
+        await self._run_on_all_engines("pause_generation")
 
     async def resume_generation(self, policy_version: int | None = None) -> None:
         """Release every native scheduler before waking local and HTTP-loop waiters."""
