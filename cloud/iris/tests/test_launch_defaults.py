@@ -301,6 +301,15 @@ def test_resolve_launch_defaults_uses_safe_cpu_cap_and_terminus_opt_out(tmp_path
     assert args.record_literal is False
 
 
+def test_resolve_launch_defaults_does_not_imply_pi_literal_support(tmp_path):
+    args = _args(tmp_path, "pi")
+    args.cluster_config = str(_cluster_config(tmp_path, cpu=128))
+
+    resolve_launch_defaults(args)
+
+    assert args.record_literal is False
+
+
 def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
     args = _args(
         tmp_path,

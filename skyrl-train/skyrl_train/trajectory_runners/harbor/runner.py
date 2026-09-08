@@ -355,8 +355,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 TrajectoryBatch byte-identical to today.
             rollout_logprobs_required: Whether the selected policy objective consumes
                 behavior-policy logprobs. Full-TITO rollout assembly defaults to this.
-            tito_full: ``trainer.algorithm.tito_full`` — explicit full-TITO override.
-                None = auto (default to ``rollout_logprobs_required``); True/False = force.
+            tito_full: ``trainer.algorithm.tito_full`` — opt into full TITO when the
+                selected objective does not already require behavior logprobs.
         """
         self.base_url = f"http://{trajectory_runner_cfg.http_endpoint_host}:{trajectory_runner_cfg.http_endpoint_port}"
         # Native controller-ingress (opencode-RL literal capture): when the runner stood up
@@ -407,7 +407,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         self.tokenizer = tokenizer
         self.model_name = trajectory_runner_cfg.model_name
         self._moe_router_replay = moe_router_replay
-        # Full-TITO follows the explicit setting when present, otherwise logprob consumption.
+        # Behavior-logprob objectives require full TITO; other objectives may opt in.
         self._rollout_logprobs_required = rollout_logprobs_required
         self._tito_full = tito_full
         self._tis_splice = tis_splice

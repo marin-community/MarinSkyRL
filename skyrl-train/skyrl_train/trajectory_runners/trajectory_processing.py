@@ -1657,18 +1657,14 @@ def _tito_full_enabled(rollout_logprobs_required: bool = False, tito_full: Optio
     residual BPE-boundary re-tokenization drift of prior assistant turns fed back as
     text (Stage 0 catalogue).
 
-    Resolution precedence:
-      1. the EXPLICIT config flag ``tito_full`` (``trainer.algorithm.tito_full``)
-         — if not ``None`` (an explicit True/False), use it verbatim.
-      2. else (auto / unset) — default to whether the selected objective consumes
-         behavior-policy logprobs.
+    Full TITO is mandatory when the selected objective consumes behavior-policy
+    logprobs. Outside that safety-critical case, the explicit ``tito_full`` flag can
+    opt into exact full-token assembly.
 
     With no behavior-logprob consumer and no explicit flag, every existing
     assembly path remains untouched.
     """
-    if tito_full is not None:
-        return bool(tito_full)
-    return rollout_logprobs_required
+    return rollout_logprobs_required or bool(tito_full)
 
 
 def _normalize_candidate_logprobs(candidate_logprobs):

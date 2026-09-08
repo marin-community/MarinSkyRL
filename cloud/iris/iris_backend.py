@@ -1017,7 +1017,7 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
         args.record_literal = False
     elif args.record_literal is None:
         harness = _rl_config_harness_name(args.rl_config)
-        args.record_literal = harness is None or harness.replace("_", "-") != "terminus-2"
+        args.record_literal = harness is not None and harness.replace("_", "-") == "opencode"
 
     strategy = _rl_training_strategy(args)
     expected_profile = runtime_profile_for_strategy(
@@ -1679,7 +1679,8 @@ def create_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Co-locate Harbor's RecordProxy in front of vLLM to capture literal.jsonl. "
-        "Default: enabled for every harness except terminus-2. Pass --record-literal to force "
+        "Default: enabled for OpenCode, the only CLI harness with a supported literal bridge. "
+        "Pass --record-literal to force "
         "it on or --no-record-literal to opt out. It is forwarded when controller ingress is used.",
     )
     parser.add_argument(

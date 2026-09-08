@@ -174,8 +174,8 @@ def test_tito_full_resolution_precedence():
     assert _tito_full_enabled(rollout_logprobs_required=True) is True
     assert _tito_full_enabled(rollout_logprobs_required=False) is False
 
-    # Explicit config overrides the objective when non-None.
-    assert _tito_full_enabled(rollout_logprobs_required=True, tito_full=False) is False
+    # Behavior-logprob consumers cannot disable the exact-context safety check.
+    assert _tito_full_enabled(rollout_logprobs_required=True, tito_full=False) is True
     assert _tito_full_enabled(rollout_logprobs_required=False, tito_full=True) is True
     assert _tito_full_enabled(rollout_logprobs_required=True, tito_full=None) is True
 
@@ -451,7 +451,7 @@ def test_partial_lcs_alignment_masks_the_message_when_logprobs_are_required():
     assert stats.n_unaligned == 1
 
 
-def test_missing_turn_logprobs_mask_only_the_affected_message():
+def test_missing_turn_logprobs_cannot_bypass_full_tito_with_explicit_false():
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
     messages = [
         {"role": "assistant", "content": "First answer."},
@@ -462,7 +462,7 @@ def test_missing_turn_logprobs_mask_only_the_affected_message():
     first_logprobs = [-0.1] * len(completions[0])
     stats = AlignmentStats()
 
-    _, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+    response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
         messages,
         tokenizer,
         assistant_logprobs=[first_logprobs],
@@ -472,9 +472,9 @@ def test_missing_turn_logprobs_mask_only_the_affected_message():
         tito_full=False,
     )
 
-    assert [logprob for logprob, mask in zip(rollout_logprobs, loss_mask, strict=True) if mask] == first_logprobs
-    assert sum(loss_mask) == len(completions[0])
-    assert stats.n_unaligned == len(completions[1])
+    assert not any(loss_mask)
+    assert len(rollout_logprobs) == len(response_ids)
+    assert stats.tito_full_declines == {TitoFullDeclineReason.MISSING_STREAMS: 1}
 
 
 def test_float_format_without_ids_uses_positional_exact():
