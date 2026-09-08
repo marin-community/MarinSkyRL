@@ -967,6 +967,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         # RPC args and never routes, so dropping the routing lock is safe.
         state["_routing_lock"] = None
         state["_http_bridge_stats"] = None
+        # Weight-sync consumers never tokenize. Keep the driver's tokenizer local:
+        # serializing its vocabulary into every rank's RPC blocks the event loop.
+        state["tokenizer"] = None
         return state
 
     def _spin_up_http_endpoint(self):
