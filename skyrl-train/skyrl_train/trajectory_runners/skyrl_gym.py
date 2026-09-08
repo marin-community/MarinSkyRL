@@ -8,7 +8,10 @@ For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_runn
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from dataclasses import dataclass
+from functools import partial
 from uuid import uuid4
 import skyrl_gym
 from typing import Callable, Generic, List, Dict, Any, Optional, Sequence, Tuple, TypeVar
@@ -57,7 +60,15 @@ class WholeTrajectoryCollector:
         pass
 
     async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False):
-        return await collect_agent_loops(self._runner, request, self._runner.agent_loop, disable_tqdm=disable_tqdm)
+        agent_loop = self._runner.agent_loop
+        if self._runner.trajectory_runner_cfg.get("seed_by_trajectory", False):
+            metadata = request.get("batch_metadata")
+            if metadata is None:
+                raise ValueError("Seeded trajectories require batch metadata")
+            # Sync training requests name the next update; eval names completed updates.
+            version = metadata.global_step - int(metadata.training_phase == "train")
+            agent_loop = partial(agent_loop, sampling_policy_version=version)
+        return await collect_agent_loops(self._runner, request, agent_loop, disable_tqdm=disable_tqdm)
 
 
 class BatchedTrajectoryCollector:
@@ -181,6 +192,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         self.global_step_fn: Optional[Callable[[], int]] = None
 
     def _validate_cfg(self, trajectory_runner_cfg: DictConfig):
+        if trajectory_runner_cfg.get("seed_by_trajectory", False) and (
+            trajectory_runner_cfg.batched or trajectory_runner_cfg.max_turns != 1
+        ):
+            raise ValueError("Seeded trajectories require single-turn, unbatched SkyRL-Gym collection")
         if len(trajectory_runner_cfg.chat_template_kwargs) and trajectory_runner_cfg.batched:
             raise ValueError(
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
@@ -199,6 +214,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
         global_step_fn: Optional[Callable[[], int]] = None,
+        sampling_policy_version: int | None = None,
     ) -> AgentLoopOutput:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -304,6 +320,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         captured_global_step: Optional[int] = None
         token_provenance = TokenProvenance.ENGINE
         generator_engine_indices: set[int | None] = set()
+        sampling_evidence = {}
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -311,6 +328,21 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 break
 
             # 1. Generate output
+            if captured_global_step is None and global_step_fn is not None:
+                captured_global_step = global_step_fn()
+            if self.trajectory_runner_cfg.get("seed_by_trajectory", False):
+                # The async callback is the one-based installed-step admission stamp.
+                version = captured_global_step - 1 if captured_global_step is not None else sampling_policy_version
+                if trajectory_id is None or version is None or version < 0:
+                    raise ValueError("Seeded trajectories require an identity and a known installed policy version")
+                identity = json.dumps(
+                    [trajectory_id.instance_id, trajectory_id.repetition_id, version],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                seed = int.from_bytes(hashlib.sha256(identity).digest(), "big") % (2**31)
+                sampling_params = {**current_sampling_params, "seed": seed}
+                sampling_evidence = {"sampling_seed": seed, "sampling_policy_version": version}
             if retokenize_chat_history:
                 engine_input = InferenceEngineInput(
                     prompts=[chat_history], session_ids=[session_id], sampling_params=sampling_params
@@ -320,8 +352,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
                 )
-            if captured_global_step is None and global_step_fn is not None:
-                captured_global_step = global_step_fn()
             with rollout_wait("model_client_await"):
                 engine_output = await self.model_client.generate(engine_input)
             generator_engine_indices.add(engine_output.get("generator_engine_indices", [None])[0])
@@ -509,6 +539,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             prompt_token_ids=tuple(prompt_ids),
             response_token_ids=tuple(response_ids),
             behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
+            metadata=sampling_evidence,
         )
         reward_result = RewardResult(
             unshaped_reward=unshaped_reward,

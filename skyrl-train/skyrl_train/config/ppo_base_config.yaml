@@ -371,6 +371,8 @@ generator:
   # Currently requires non-colocated async vLLM, TP=PP=1, and EP=DP.
   inference_engine_node_local: false
   n_samples_per_prompt: 5
+  # Single-turn control: hash UID, repetition and installed version into a request seed.
+  seed_by_trajectory: false
   async_engine: true
   batched: false
   max_input_length: ${trainer.max_prompt_length}
