@@ -667,12 +667,37 @@ class TimedLearnerService(LearnerService):
 
 
 class TimedInferenceService(InferenceService):
+    def __init__(self):
+        super().__init__()
+        self.version_resumes = []
+        self.accounting_reads = []
+
+    async def resume_generation(self, policy_version=None):
+        self.version_resumes.append(policy_version)
+        await super().resume_generation()
+
+    async def read_publication_request_state(self, initial_policy_version=None, drain_accounting=False):
+        self.accounting_reads.append((initial_policy_version, drain_accounting))
+        return [
+            {
+                "shared_time_and_uts_namespaces": True,
+                "paused": self.generation_paused_event.is_set(),
+                "request_accounting": {"active_ids": []},
+            }
+            for _ in range(2)
+        ]
+
     def publication_inflight_snapshot(self):
         return (2, 3)
 
 
 @pytest.mark.asyncio
-async def test_publication_trace_reaches_step_metrics_without_batch_dispatch():
+async def test_publication_trace_reaches_step_metrics_without_batch_dispatch(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        "skyrl_train.fully_async_trainer.record_event",
+        lambda name, fields, **kwargs: events.append((name, fields, kwargs)),
+    )
     trainer = make_driver(interval=1, age=0, steps=2)
     trainer.cfg.generator.publication_stage_timing = True
     trainer.policy_model = TimedLearnerService()
@@ -687,3 +712,15 @@ async def test_publication_trace_reaches_step_metrics_without_batch_dispatch():
         assert metrics["timing/weight_broadcast/apply"] == 0.00002
         assert 0 <= metrics["timing/publication_stall_seconds"] <= metrics["timing/sync_weights"]
     assert engine.publications == [0, 1, 2]
+    assert engine.version_resumes == [1, 2]
+    assert engine.accounting_reads == [(0, True)] + [(None, True)] * 7
+    receipts = [event for event in events if event[0] == "publication_request_accounting"]
+    assert len(receipts) == 16
+    assert {event[2]["attributes"]["moment"] for event in receipts} == {
+        "initial",
+        "before_pause",
+        "after_pause",
+        "after_resume",
+        "final",
+    }
+    assert all(json.loads(event[1]["receipt_json"])["request_accounting"] == {"active_ids": []} for event in receipts)

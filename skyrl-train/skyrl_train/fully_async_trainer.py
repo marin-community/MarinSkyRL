@@ -13,6 +13,7 @@ High-level notes:
 
 import asyncio
 import collections
+import json
 import os
 import time
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
@@ -812,7 +813,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             with Timer("policy_startup_drain", self.all_startup_timings):
                 await self._drain_policy_event_loops()
-        # Startup publication runs before producers exist and does not pause inference.
+        if self.cfg.generator.publication_stage_timing:
+            await self._record_publication_requests("initial", initial_policy_version=self._published_policy_version)
+        # Startup weight sync runs before producers exist and does not pause inference.
         await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
         self._log_weight_update_completed(
             reason="initial",
@@ -1218,6 +1221,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             completed_step=last_completed_step,
             epoch=self.cfg.trainer.epochs - 1,
         )
+        if self.cfg.generator.publication_stage_timing:
+            await self._record_publication_requests("final")
         logger.info("Training done!")
 
     async def _run_training(self, training_input: TrainingInputBatch):
@@ -1435,6 +1440,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         trace_publication = self.cfg.generator.publication_stage_timing
         if trace_publication:
             self._record_publication_inflight("before_pause")
+            await self._record_publication_requests("before_pause")
         with (
             Timer(timing_name, self.all_timings) as weight_update_timer,
             async_phase_window("publication", step=self.global_step, enabled=self._training_metrics_enabled),
@@ -1443,12 +1449,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             try:
                 with Timer("weight_pause", self.all_timings):
                     await self.inference_engine_client.pause_generation()
+                if trace_publication:
+                    await self._record_publication_requests("after_pause")
                 await self.async_sync_policy_weights_to_inference_engines()
                 # Keep the post-broadcast rank drain before resuming generation or dispatching a forward.
                 with Timer("policy_post_sync_drain", self.all_timings):
                     await self._drain_policy_event_loops()
                 with Timer("weight_resume", self.all_timings):
-                    await self.inference_engine_client.resume_generation()
+                    if trace_publication:
+                        await self.inference_engine_client.resume_generation(
+                            policy_version=self._published_policy_version
+                        )
+                    else:
+                        await self.inference_engine_client.resume_generation()
             except BaseException as error:
                 publication_error = error
                 raise
@@ -1465,11 +1478,35 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
         if trace_publication:
             self._record_publication_inflight("after_resume")
+            await self._record_publication_requests("after_resume")
             # Derived paused-time overhead, not an independently measured learner-idle span.
             self.all_timings["publication_stall_seconds"] = max(
                 0.0, weight_update_timer.duration - self.all_timings["weight_broadcast/nccl_send"]
             )
         self._log_weight_update_completed(reason=reason, duration_seconds=weight_update_timer.duration)
+
+    async def _record_publication_requests(self, moment: str, initial_policy_version: int | None = None) -> None:
+        """Persist drainable native request identities without changing admission."""
+        states = await self.inference_engine_client.read_publication_request_state(
+            initial_policy_version=initial_policy_version, drain_accounting=True
+        )
+        if len(states) != len(self.inference_engine_client.publication_inflight_snapshot()):
+            raise RuntimeError("weight-sync request readback omitted an engine")
+        for engine_index, state in enumerate(states):
+            if moment == "after_pause" and not state["paused"]:
+                raise RuntimeError("weight-sync request readback found a running engine after pause")
+            if not state["shared_time_and_uts_namespaces"] or state["request_accounting"] is None:
+                raise RuntimeError("weight-sync request accounting lacks a verified engine origin")
+            record_event(
+                "publication_request_accounting",
+                {"receipt_json": json.dumps(state, allow_nan=False)},
+                attributes={
+                    "role": TRAINER_ROLE,
+                    "step": str(self.global_step),
+                    "engine_index": str(engine_index),
+                    "moment": moment,
+                },
+            )
 
     def _record_publication_inflight(self, moment: str) -> None:
         for engine, count in enumerate(self.inference_engine_client.publication_inflight_snapshot()):
