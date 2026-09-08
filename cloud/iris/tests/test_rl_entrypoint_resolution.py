@@ -40,6 +40,25 @@ context_budget:
     assert parsed.entrypoint == "skyrl_train.entrypoints.terminal_bench"
 
 
+@pytest.mark.parametrize("ignore_eos", [False, True])
+def test_training_eos_control_composes_with_structured_native_config(tmp_path, ignore_eos):
+    config = tmp_path / "rl.yaml"
+    config.write_text(
+        "entrypoint: fully_async\n"
+        "context_budget:\n  request_window_tokens: 2048\n  max_new_tokens_per_turn: 1024\n  max_turns: 1\n"
+        f"generator:\n  sampling_params:\n    ignore_eos: {str(ignore_eos).lower()}\n"
+    )
+    parsed = parse_rl_config(str(config))
+    hydra_args = build_skyrl_hydra_args(parsed, {"num_nodes": 2}, SimpleNamespace(gpus_per_node=8))
+    assert f"generator.sampling_params.ignore_eos={str(ignore_eos).lower()}" in hydra_args
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=hydra_args)
+    assert OmegaConf.is_struct(cfg.generator.sampling_params)
+    assert cfg.generator.sampling_params.ignore_eos is ignore_eos
+    assert not cfg.generator.eval_sampling_params.get("ignore_eos", False)
+    assert cfg.generator.eval_sampling_params.temperature == 0.0
+
+
 def test_terminal_bench_config_group_is_packaged_with_the_trainer():
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="ppo_base_config", overrides=["+terminal_bench_config=terminal_bench"])
