@@ -268,7 +268,7 @@ async def evaluate(
                     rollouts.env_classes,
                     rollouts.env_extras,
                     [
-                        tokenizer.decode(tokens, skip_special_tokens=True)
+                        tokenizer.decode(tokens, skip_special_tokens=True, clean_up_tokenization_spaces=False)
                         for tokens in concatenated_batch["response_ids"]
                     ],
                     concatenated_batch["rewards"],
@@ -351,7 +351,7 @@ async def evaluate_step_wise(
                 selected_envs,
                 selected_extras,
                 [
-                    tokenizer.decode(tokens, skip_special_tokens=True)
+                    tokenizer.decode(tokens, skip_special_tokens=True, clean_up_tokenization_spaces=False)
                     for tokens in trajectory_batch_last_step["response_ids"]
                 ],
                 trajectory_batch_last_step["rewards"],
