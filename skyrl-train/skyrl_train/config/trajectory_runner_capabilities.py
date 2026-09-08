@@ -5,9 +5,14 @@ from enum import StrEnum
 
 from omegaconf import DictConfig
 
-from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME, OPENCODE_HARBOR_AGENT_NAME
+from marinskyrl.harbor_agent_names import (
+    DEFAULT_HARBOR_AGENT_NAME,
+    OPENCODE_HARBOR_AGENT_NAME,
+    PI_HARBOR_AGENT_NAME,
+)
 
 SUPPORTED_OPENCODE_LITERAL_VERSION = "1.18.2"
+SUPPORTED_PI_THINKING_FORMATS = frozenset({"chat-template", "qwen-chat-template"})
 
 
 class TrajectoryRunnerMode(StrEnum):
@@ -46,6 +51,29 @@ class TrajectoryRunnerCapabilities:
     requirements: tuple[CapabilityRequirement, ...] = ()
 
 
+@dataclass(frozen=True)
+class _HarborEvidenceProfile:
+    sampled_completion: EvidenceFidelity
+    full_context_continuation: EvidenceFidelity
+    action_tokens: ActionTokenHandling
+
+
+_EXACT_HARBOR_EVIDENCE = _HarborEvidenceProfile(
+    sampled_completion=EvidenceFidelity.EXACT,
+    full_context_continuation=EvidenceFidelity.EXACT,
+    action_tokens=ActionTokenHandling.EXACT,
+)
+_HARBOR_EVIDENCE_PROFILES = {
+    DEFAULT_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
+    OPENCODE_HARBOR_AGENT_NAME: _HarborEvidenceProfile(
+        sampled_completion=EvidenceFidelity.EXACT,
+        full_context_continuation=EvidenceFidelity.UNAVAILABLE,
+        action_tokens=ActionTokenHandling.EXACT,
+    ),
+    PI_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
+}
+
+
 def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
     terminal_bench = cfg.get("terminal_bench_config")
     if terminal_bench is None and str(cfg.get("entrypoint", "")) == "terminal_bench":
@@ -65,26 +93,32 @@ def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
         expected_value="true",
         satisfied=bool(harbor.get("collect_rollout_details", False)),
     )
-    if agent_name == DEFAULT_HARBOR_AGENT_NAME:
-        return TrajectoryRunnerCapabilities(
-            runner=f"Harbor {agent_name}",
-            sampled_completion=EvidenceFidelity.EXACT,
-            full_context_continuation=EvidenceFidelity.EXACT,
-            action_tokens=ActionTokenHandling.EXACT,
-            requirements=(rollout_details,),
-        )
+    requirements = [rollout_details]
     if agent_name == OPENCODE_HARBOR_AGENT_NAME:
-        tested_version = CapabilityRequirement(
-            config_path="terminal_bench.harbor.version",
-            expected_value=SUPPORTED_OPENCODE_LITERAL_VERSION,
-            satisfied=str(harbor.get("version", "")).strip() == SUPPORTED_OPENCODE_LITERAL_VERSION,
+        requirements.append(
+            CapabilityRequirement(
+                config_path="terminal_bench.harbor.version",
+                expected_value=SUPPORTED_OPENCODE_LITERAL_VERSION,
+                satisfied=str(harbor.get("version", "")).strip() == SUPPORTED_OPENCODE_LITERAL_VERSION,
+            )
         )
+    elif agent_name == PI_HARBOR_AGENT_NAME:
+        requirements.append(
+            CapabilityRequirement(
+                config_path="terminal_bench.harbor.thinking_format",
+                expected_value=" or ".join(sorted(SUPPORTED_PI_THINKING_FORMATS)),
+                satisfied=str(harbor.get("thinking_format", "")).strip() in SUPPORTED_PI_THINKING_FORMATS,
+            )
+        )
+
+    profile = _HARBOR_EVIDENCE_PROFILES.get(agent_name)
+    if profile is not None:
         return TrajectoryRunnerCapabilities(
             runner=f"Harbor {agent_name}",
-            sampled_completion=EvidenceFidelity.EXACT,
-            full_context_continuation=EvidenceFidelity.UNAVAILABLE,
-            action_tokens=ActionTokenHandling.EXACT,
-            requirements=(rollout_details, tested_version),
+            sampled_completion=profile.sampled_completion,
+            full_context_continuation=profile.full_context_continuation,
+            action_tokens=profile.action_tokens,
+            requirements=tuple(requirements),
         )
     return TrajectoryRunnerCapabilities(
         runner=f"Harbor {agent_name}",

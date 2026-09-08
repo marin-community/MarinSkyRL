@@ -8,7 +8,12 @@ from skyrl_train.config.trajectory_runner_capabilities import (
 
 
 def _harbor_config(agent_name, **harbor_overrides):
-    harbor = {"name": agent_name, "collect_rollout_details": True, **harbor_overrides}
+    harbor = {
+        "name": agent_name,
+        "collect_rollout_details": True,
+        **({"thinking_format": "qwen-chat-template"} if agent_name == "pi" else {}),
+        **harbor_overrides,
+    }
     return OmegaConf.create(
         {
             "trainer": {
@@ -42,7 +47,7 @@ def _skyrl_config(*, use_tis=True, policy_loss_type="regular"):
     )
 
 
-@pytest.mark.parametrize("agent_name", ["pi", "codex", "claude-code", "future-agent"])
+@pytest.mark.parametrize("agent_name", ["codex", "claude-code", "future-agent"])
 def test_harbor_behavior_logprobs_reject_unsupported_agents(agent_name):
     with pytest.raises(ValueError, match="cannot supply exact sampled completion"):
         validate_trajectory_runner_capabilities(_harbor_config(agent_name), TrajectoryRunnerMode.HARBOR)
@@ -53,10 +58,11 @@ def test_harbor_behavior_logprobs_accept_terminus_with_rollout_details(agent_nam
     validate_trajectory_runner_capabilities(_harbor_config(agent_name), TrajectoryRunnerMode.HARBOR)
 
 
-def test_harbor_behavior_logprobs_require_rollout_details():
+@pytest.mark.parametrize("agent_name", ["terminus-2", "pi"])
+def test_harbor_behavior_logprobs_require_rollout_details(agent_name):
     with pytest.raises(ValueError, match="collect_rollout_details=true"):
         validate_trajectory_runner_capabilities(
-            _harbor_config("terminus-2", collect_rollout_details=False), TrajectoryRunnerMode.HARBOR
+            _harbor_config(agent_name, collect_rollout_details=False), TrajectoryRunnerMode.HARBOR
         )
 
 
@@ -70,6 +76,18 @@ def test_harbor_behavior_logprobs_require_tested_opencode_version(version):
 
 def test_harbor_behavior_logprobs_accept_tested_opencode_bridge():
     validate_trajectory_runner_capabilities(_harbor_config("opencode", version="1.18.2"), TrajectoryRunnerMode.HARBOR)
+
+
+def test_harbor_behavior_logprobs_accept_pi_literal_bridge():
+    validate_trajectory_runner_capabilities(_harbor_config("pi"), TrajectoryRunnerMode.HARBOR)
+
+
+@pytest.mark.parametrize("thinking_format", [None, "unsupported"])
+def test_harbor_behavior_logprobs_require_supported_pi_thinking_format(thinking_format):
+    with pytest.raises(ValueError, match="terminal_bench.harbor.thinking_format"):
+        validate_trajectory_runner_capabilities(
+            _harbor_config("pi", thinking_format=thinking_format), TrajectoryRunnerMode.HARBOR
+        )
 
 
 @pytest.mark.parametrize(
@@ -125,8 +143,9 @@ def test_explicit_full_tito_rejects_runners_without_exact_continuation(mode, age
         validate_trajectory_runner_capabilities(cfg, mode)
 
 
-def test_explicit_full_tito_accepts_terminus_exact_continuation():
-    cfg = _harbor_config("terminus-2")
+@pytest.mark.parametrize("agent_name", ["terminus-2", "pi"])
+def test_explicit_full_tito_accepts_exact_harbor_continuation(agent_name):
+    cfg = _harbor_config(agent_name)
     cfg.trainer.algorithm.use_tis = False
     cfg.trainer.algorithm.tito_full = True
 
