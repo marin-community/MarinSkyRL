@@ -604,16 +604,22 @@ def build_dataloader(
             batch_size=batch_size,
         )
 
+    num_workers = cfg.data.num_workers
+    if num_workers is None:
+        num_workers = 0 if (isinstance(sampler, CurriculumSampler) or cfg.generator.enable_http_endpoint) else 8
+    if type(num_workers) is not int or num_workers < 0:
+        raise ValueError("data.num_workers must be a nonnegative integer or null")
+    if isinstance(sampler, CurriculumSampler) and num_workers != 0:
+        raise ValueError("Curriculum sampling requires data.num_workers=0 to avoid prefetching stale weights")
+
     dataloader = StatefulDataLoader(
         dataset,
         batch_size=batch_size if not is_fully_async else 1,
         shuffle=is_train and sampler is None,
         sampler=sampler,
         collate_fn=dataset.collate_fn,
-        # Curriculum sampling stays single-process: worker prefetch would draw several
-        # batches of indices ahead of the per-step weight updates.
-        # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if (isinstance(sampler, CurriculumSampler) or cfg.generator.enable_http_endpoint) else 8,
+        num_workers=num_workers,
+        persistent_workers=num_workers > 0 and not is_train,
         drop_last=True if is_train else False,
         generator=seeded_generator,
     )
