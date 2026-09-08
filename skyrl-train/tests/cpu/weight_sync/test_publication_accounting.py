@@ -16,6 +16,7 @@ def test_pause_ledger_preserves_queued_and_native_request_identities():
             "monotonic_time": 12.0,
             "active_before": ["queued-before", "sampling"],
             "frontend_before": ["sampling"],
+            "frontend_internal_to_external": None,
         }
     ]
     assert first["active_ids"] == ["queued-after", "queued-before"]
@@ -127,12 +128,13 @@ async def test_native_request_wrapper_records_abort_and_preserves_ledger_during_
 
         async def generate(self, *, request_id, **kwargs):
             stamp = time.monotonic()
-            self.output_processor.request_states[request_id] = SimpleNamespace(
-                stats=SimpleNamespace(first_token_ts=stamp)
+            internal_id = request_id + "-native-randomized"
+            self.output_processor.request_states[internal_id] = SimpleNamespace(
+                request_id=internal_id, external_req_id=request_id, stats=SimpleNamespace(first_token_ts=stamp)
             )
             self.entered.set()
             await self.release.wait()
-            self.output_processor.request_states.pop(request_id)
+            self.output_processor.request_states.pop(internal_id)
             yield SimpleNamespace(
                 outputs=[SimpleNamespace(finish_reason="abort", token_ids=[1, 2])],
                 metrics=SimpleNamespace(first_token_ts=stamp),
@@ -167,6 +169,9 @@ async def test_native_request_wrapper_records_abort_and_preserves_ledger_during_
     assert receipt["policy_version_boundaries"][0][0] <= accounting["terminal"][0]["first_token_time"]
     assert accounting["terminal"][0]["first_token_time"] < receipt["policy_version_boundaries"][1][0]
     assert accounting["pauses"][0]["frontend_before"] == ["actual-native-id"]
+    assert accounting["pauses"][0]["frontend_internal_to_external"] == {
+        "actual-native-id-native-randomized": "actual-native-id"
+    }
     assert actor._publication_versions.at_first_token(accounting["terminal"][0]["first_token_time"]) == 0
     assert actor._publication_versions.at_first_token(time.monotonic()) == 1
     assert receipt["shared_time_and_uts_namespaces"]
@@ -264,3 +269,14 @@ async def test_native_collect_outputs_canonicalizes_queued_zero_token_abort():
     assert terminal["first_token_time"] is None
     assert terminal["policy_version_at_first_token"] is None
     assert receipt["request_accounting"]["active_ids"] == []
+
+
+@pytest.mark.parametrize("bindings", [{"internal": "foreign"}, {"one": "tracked", "two": "tracked"}])
+def test_native_pause_rejects_untracked_or_ambiguous_external_bindings(bindings):
+    ledger = PublicationRequestAccounting()
+    ledger.start("tracked")
+    with pytest.raises(ValueError, match="untracked|one-to-one"):
+        ledger.begin_pause(
+            frontend_ids=list(bindings.values()), monotonic_time=1.0, frontend_internal_to_external=bindings
+        )
+    assert ledger.drain()["pause_count"] == 0
