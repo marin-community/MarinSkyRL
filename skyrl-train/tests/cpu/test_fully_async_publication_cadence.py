@@ -568,3 +568,40 @@ def test_initial_eval_recipe_composes_and_validates(overrides, expected):
         cfg = compose(config_name=DEFAULT_CONFIG_NAME, overrides=overrides)
     validate_cfg(cfg)
     assert cfg.trainer.initial_eval_repeat_count == expected
+
+
+class TimedLearnerService(LearnerService):
+    def async_run_ray_method(self, dispatch, method):
+        if method != "read_publication_timing":
+            return super().async_run_ray_method(dispatch, method)
+
+        async def remote_receipt():
+            return {
+                "trainer": [{"rank": 0, "stages": {"nccl_send": {"wall_seconds": 0.00001}}}],
+                "receiver": [[{"rank": 0, "stages": {"apply": {"wall_seconds": 0.00002}}}]],
+            }
+
+        return [remote_receipt()]
+
+
+class TimedInferenceService(InferenceService):
+    def publication_inflight_snapshot(self):
+        return (2, 3)
+
+
+@pytest.mark.asyncio
+async def test_publication_trace_reaches_step_metrics_without_batch_dispatch():
+    trainer = make_driver(interval=1, age=0, steps=2)
+    trainer.cfg.generator.publication_stage_timing = True
+    trainer.policy_model = TimedLearnerService()
+    engine = TimedInferenceService()
+    trainer.inference_engine_client = engine
+    trainer.trajectory_runner.engine = engine
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    rows = [metrics for _, metrics in trainer.tracker.rows if "trainer/global_step" in metrics]
+    assert len(rows) == 2
+    for metrics in rows:
+        assert metrics["timing/weight_broadcast/nccl_send"] == 0.00001
+        assert metrics["timing/weight_broadcast/apply"] == 0.00002
+        assert 0 <= metrics["timing/publication_stall_seconds"] <= metrics["timing/sync_weights"]
+    assert engine.publications == [0, 1, 2]
