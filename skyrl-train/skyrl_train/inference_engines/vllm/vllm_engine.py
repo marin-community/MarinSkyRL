@@ -14,6 +14,7 @@ from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+from skyrl_train.config.tis import TIS_WARNING_KEY, warn_if_tis_sampling_mismatch
 
 # vLLM 0.16+ reorganized entrypoints into sub-packages.
 # Try new paths first, fall back to old paths for backwards compatibility.
@@ -67,7 +68,8 @@ from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
 from skyrl_train.models.grug_moe import is_grug_router_bias
 from skyrl_train.inference_engines.vllm.utils import (
-    pop_openai_kwargs,
+    pop_vllm_wrapper_kwargs,
+    apply_openai_sampling,
     ensure_token_ids_in_sse_chunk,
     PrefixCacheHitRateAccumulator,
 )
@@ -967,6 +969,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
+        if self._warn_on_tis_sampling and request_sampling_params is not None:
+            if request_sampling_params.get("logprobs") is not None:
+                warn_if_tis_sampling_mismatch(request_sampling_params)
 
         assert prompts is None and prompt_token_ids is not None, (
             "VLLMInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
@@ -1074,14 +1079,11 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
                 "Please set `generator.async_engine=true` in your config."
             )
-        # Strip OpenAI-serving-only kwargs (e.g. openai_sampling_params, tool
-        # parser) that the config layer injects for all engines. The sync
-        # vllm.LLM/EngineArgs path does not accept these — only the async
-        # OpenAI server consumes them. Mirror the async engine's pop so the
-        # sync engine (async_engine=false, used by the batched OPD path) does
-        # not pass them through to EngineArgs and raise TypeError.
-        openai_kwargs = pop_openai_kwargs(kwargs)
-        self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
+        # Remove wrapper options before constructing vLLM EngineArgs. Both sync
+        # and async wrappers consume sampling overrides and the TIS warning flag.
+        wrapper_kwargs = pop_vllm_wrapper_kwargs(kwargs)
+        self._openai_sampling_params = wrapper_kwargs.pop("openai_sampling_params", {})
+        self._warn_on_tis_sampling = wrapper_kwargs.pop(TIS_WARNING_KEY, False)
         return vllm.LLM(*args, **kwargs)
 
     async def initialize_worker_numa_affinity(self):
@@ -1501,9 +1503,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await set_async_worker_numa_affinity(self.llm.collective_rpc)
 
     def _create_engine(self, *args, **kwargs):
-        openai_kwargs = pop_openai_kwargs(kwargs)
+        wrapper_kwargs = pop_vllm_wrapper_kwargs(kwargs)
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
-        self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
+        self._openai_sampling_params = wrapper_kwargs.pop("openai_sampling_params", {})
+        self._warn_on_tis_sampling = wrapper_kwargs.pop(TIS_WARNING_KEY, False)
         if self._openai_sampling_params:
             logger.warning(
                 f"OpenAI API sampling params overridden: "
@@ -1663,11 +1666,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         #
         # In vLLM >= 0.20.2rc0 the tool-calling config (``enable_auto_tools``,
         # ``tool_parser``) lives on the RENDER object, not on ``OpenAIServingChat``.
-        # Pop them from ``openai_kwargs`` here and pass to the render constructor.
+        # Pop them from ``wrapper_kwargs`` here and pass to the render constructor.
         # On the legacy path (no render API), restore them so ``OpenAIServingChat``
         # receives them as before.
-        enable_auto_tools = openai_kwargs.pop("enable_auto_tools", False)
-        tool_parser = openai_kwargs.pop("tool_parser", None)
+        enable_auto_tools = wrapper_kwargs.pop("enable_auto_tools", False)
+        tool_parser = wrapper_kwargs.pop("tool_parser", None)
 
         openai_serving_render = None
         try:
@@ -1686,13 +1689,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         except ImportError:
             openai_serving_render = None
             # Legacy path: OpenAIServingChat owns the tool-calling kwargs
-            openai_kwargs["enable_auto_tools"] = enable_auto_tools
-            openai_kwargs["tool_parser"] = tool_parser
+            wrapper_kwargs["enable_auto_tools"] = enable_auto_tools
+            wrapper_kwargs["tool_parser"] = tool_parser
 
         # Try the vLLM >= 0.20.2rc0 render API first, then newer (>=0.13, no
         # model_config), then legacy (<0.13, with model_config).
         if openai_serving_render is not None:
-            # ``enable_auto_tools``/``tool_parser`` were popped from ``openai_kwargs``
+            # ``enable_auto_tools``/``tool_parser`` were popped from ``wrapper_kwargs``
             # above and passed to the RENDER object, but the render API's
             # OpenAIServingChat STILL gates tool-call parsing on its OWN
             # ``self.enable_auto_tools``/``self.tool_parser`` (see
@@ -1711,7 +1714,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 chat_template_content_format="auto",
                 enable_auto_tools=enable_auto_tools,
                 tool_parser=tool_parser,
-                **openai_kwargs,
+                **wrapper_kwargs,
             )
         else:
             try:
@@ -1722,7 +1725,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     request_logger=None,
                     chat_template=custom_chat_template_content,
                     chat_template_content_format="auto",
-                    **openai_kwargs,
+                    **wrapper_kwargs,
                 )
             except TypeError:
                 self.openai_serving_chat = OpenAIServingChat(
@@ -1733,7 +1736,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     request_logger=None,
                     chat_template=custom_chat_template_content,
                     chat_template_content_format="auto",
-                    **openai_kwargs,
+                    **wrapper_kwargs,
                 )
 
         # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,
@@ -1966,15 +1969,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Apply configured sampling params from generator config.
         # Harbor requests may include their own sampling params; we override
         # with the SkyRL generator config so rollout exploration is consistent.
-        sp = getattr(self, "_openai_sampling_params", {})
-        body.update(
-            {
-                "temperature": sp.get("temperature", 1.0),
-                "top_p": sp.get("top_p", 1.0),
-                "top_k": sp.get("top_k", -1),
-                "min_p": sp.get("min_p", 0.0),
-            }
-        )
+        apply_openai_sampling(body, self._openai_sampling_params, self._warn_on_tis_sampling)
 
         # 1. Build request
         try:
@@ -2065,15 +2060,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
 
-        sp = getattr(self, "_openai_sampling_params", {})
-        body.update(
-            {
-                "temperature": sp.get("temperature", 1.0),
-                "top_p": sp.get("top_p", 1.0),
-                "top_k": sp.get("top_k", -1),
-                "min_p": sp.get("min_p", 0.0),
-            }
-        )
+        apply_openai_sampling(body, self._openai_sampling_params, self._warn_on_tis_sampling)
         body["stream"] = True
         body["return_token_ids"] = True  # force vLLM to emit per-chunk token_ids
 

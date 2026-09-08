@@ -1048,3 +1048,32 @@ def test_tis_diagnostics_all_masked_batch_emits_zeros_not_nan():
     assert out["tis/imp_ratio_mean"] == 0.0
     assert out["tis/imp_ratio_capped_fraction"] == 0.0
     assert out["tis/log_ratio_abs_mean"] == 0.0
+
+
+@pytest.mark.parametrize("temperature", [0.7, 1.2])
+def test_validate_cfg_selects_temperature_compatible_tis_logprobs(temperature):
+    cfg = _validatable_dummy_config()
+    cfg.trainer.algorithm.use_tis = True
+    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
+    cfg.generator.sampling_params.temperature = temperature
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.inference_engine_expert_parallel_size = 1
+    cfg.generator.num_inference_engines = 1
+    validate_cfg(cfg)
+
+    assert cfg.generator.engine_init_kwargs.logprobs_mode == "processed_logprobs"
+    assert cfg.generator.engine_init_kwargs.generation_config == "vllm"
+    assert cfg.generator.sampling_params.min_tokens == 0
+
+
+def test_validate_cfg_rejects_raw_tis_logprobs():
+    cfg = _validatable_dummy_config()
+    cfg.trainer.algorithm.use_tis = True
+    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.inference_engine_expert_parallel_size = 1
+    cfg.generator.num_inference_engines = 1
+    OmegaConf.update(cfg.generator.engine_init_kwargs, "logprobs_mode", "raw_logprobs", force_add=True)
+
+    with pytest.raises(ValueError, match="TIS requires processed rollout logprobs"):
+        validate_cfg(cfg)

@@ -1,6 +1,8 @@
 import json
 from typing import Any, Dict, Protocol
 
+from skyrl_train.config.tis import TIS_WARNING_KEY, warn_if_tis_sampling_mismatch
+
 
 class PrefixCacheStatsLike(Protocol):
     """The token counters vLLM's `PrefixCacheStats` carries for one scheduler iteration."""
@@ -49,26 +51,29 @@ class PrefixCacheHitRateAccumulator:
             self.samples.append(rate)
 
 
-def pop_openai_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+def pop_vllm_wrapper_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Normalize & remove OpenAI-serving-only kwargs from engine_kwargs.
+    Remove SkyRL serving options before passing engine_kwargs to vLLM.
     """
-    openai_kwargs: Dict[str, Any] = {}
+    wrapper_kwargs: Dict[str, Any] = {}
 
     enable_auto_tools = engine_kwargs.pop("enable_auto_tools", engine_kwargs.pop("enable_auto_tool_choice", None))
     if enable_auto_tools is not None:
-        openai_kwargs["enable_auto_tools"] = bool(enable_auto_tools)
+        wrapper_kwargs["enable_auto_tools"] = bool(enable_auto_tools)
 
     tool_parser = engine_kwargs.pop("tool_parser", engine_kwargs.pop("tool_call_parser", None))
     if tool_parser is not None:
-        openai_kwargs["tool_parser"] = tool_parser
+        wrapper_kwargs["tool_parser"] = tool_parser
 
     # Sampling params for OpenAI-style requests (Harbor terminal-bench rollouts)
     openai_sampling = engine_kwargs.pop("openai_sampling_params", None)
     if openai_sampling is not None:
-        openai_kwargs["openai_sampling_params"] = openai_sampling
+        wrapper_kwargs["openai_sampling_params"] = openai_sampling
 
-    return openai_kwargs
+    if TIS_WARNING_KEY in engine_kwargs:
+        wrapper_kwargs[TIS_WARNING_KEY] = engine_kwargs.pop(TIS_WARNING_KEY)
+
+    return wrapper_kwargs
 
 
 def ensure_token_ids_in_sse_chunk(sse_chunk: str) -> str:
@@ -107,3 +112,19 @@ def ensure_token_ids_in_sse_chunk(sse_chunk: str) -> str:
     except (json.JSONDecodeError, IndexError, KeyError):
         pass
     return sse_chunk
+
+
+def apply_openai_sampling(body: Dict[str, Any], sampling_params: Dict[str, Any], warn_on_tis_sampling: bool) -> None:
+    """Apply generator sampling overrides and warn about TIS probability mismatches."""
+    body.update(
+        {
+            "temperature": sampling_params.get("temperature", 1.0),
+            "top_p": sampling_params.get("top_p", 1.0),
+            "top_k": sampling_params.get("top_k", -1),
+            "min_p": sampling_params.get("min_p", 0.0),
+        }
+    )
+    # Completion logprobs=0 requests sampled-token probabilities; False disables chat logprobs.
+    logprobs = body.get("logprobs")
+    if warn_on_tis_sampling and logprobs is not None and logprobs is not False:
+        warn_if_tis_sampling_mismatch(body)
