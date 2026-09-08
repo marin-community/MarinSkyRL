@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import socket
 
 import pytest
 
@@ -38,3 +39,41 @@ def test_timeout_retains_partial_stage_and_reaps_worker(tmp_path):
     assert receipt["reaped"] is True
     with pytest.raises(ProcessLookupError):
         os.kill(receipt["leader_pid"], 0)
+
+
+@pytest.mark.parametrize("corrected", [False, True])
+def test_real_torchrun_fresh_tcp_rendezvous(tmp_path, corrected):
+    """Reproduce the no-server failure, then exercise the GPU harness fix on CPU."""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    script = tmp_path / "tcp_probe.py"
+    script.write_text(f"""
+import os
+from datetime import timedelta
+import torch.distributed as dist
+import torch
+from tests.gpu.diagnostics.weight_sync_env_probe import prepare_cross_world_rendezvous
+from skyrl_train.distributed.utils import init_custom_process_group
+assert os.environ["TORCHELASTIC_USE_AGENT_STORE"] == "True"
+if {corrected!r}:
+    prepare_cross_world_rendezvous()
+rank = int(os.environ["RANK"])
+dist.init_process_group("gloo", init_method="file://{tmp_path}/default-"+str(rank), rank=0, world_size=1)
+group = init_custom_process_group("gloo", init_method="tcp://127.0.0.1:{port}", rank=rank, world_size=2, group_name="probe", timeout=timedelta(seconds=1))
+tensor = torch.tensor([rank + 1])
+dist.all_reduce(tensor, group=group)
+assert tensor.item() == 3
+dist.destroy_process_group(group)
+dist.destroy_process_group()
+print("TCP_RENDEZVOUS_PASS", rank, flush=True)
+""")
+    command = [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nproc-per-node=2", str(script)]
+    receipt = run_case("baseline", tmp_path / "gang", command=command, timeout_seconds=30)
+    assert receipt["reaped"]
+    if corrected:
+        assert receipt["returncode"] == 0, receipt.get("worker_output", receipt)
+        assert receipt["worker_output"].count("TCP_RENDEZVOUS_PASS") == 2
+    else:
+        assert receipt["returncode"] != 0
+        assert "DistNetworkError" in receipt["worker_output"]

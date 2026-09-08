@@ -39,6 +39,11 @@ def event(stage: str, rank: int, **values) -> None:
     )
 
 
+def prepare_cross_world_rendezvous() -> None:
+    """Match Ray workers: a fresh custom TCP endpoint has no torchrun agent store."""
+    os.environ["TORCHELASTIC_USE_AGENT_STORE"] = "False"
+
+
 def worker(case: str, output: Path, port: int) -> None:
     # GPU-only imports stay in the opt-in worker; the receipt/timeout auditor is CPU usable.
     import torch
@@ -73,6 +78,7 @@ def worker(case: str, output: Path, port: int) -> None:
         **kwargs,
     )
     event("default_group_end", rank)
+    prepare_cross_world_rendezvous()
     event("custom_group_start", rank)
     group = init_custom_process_group(
         backend="nccl",
