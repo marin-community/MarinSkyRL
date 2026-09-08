@@ -15,6 +15,7 @@ import torch
 from omegaconf import DictConfig
 
 from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics
+from skyrl_train.utils.offpolicy_masks import apply_offpolicy_masks, validate_offpolicy_masks
 from skyrl_train.utils.loss_reduction import (
     GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
     SEQUENCE_MEAN_LOSS_REDUCTION,
@@ -241,15 +242,28 @@ def compute_policy_objective(
         response_span_tags,
         float(config.think_token_weight),
     )
+    validate_offpolicy_masks(config, global_loss_denom=global_loss_denom)
+    transformed = apply_offpolicy_masks(
+        action_log_probs=action_log_probs,
+        old_action_log_probs=old_action_log_probs,
+        rollout_logprobs=rollout_logprobs,
+        advantages=advantages,
+        loss_mask=policy_loss_mask,
+        token_entropy=token_entropy,
+        config=config,
+    )
+    clip_kwargs = {} if transformed.clip_bounds is None else {"clip_bounds": transformed.clip_bounds}
     policy_loss, policy_loss_metrics = policy_loss_fn(
         action_log_probs,
         old_action_log_probs,
-        advantages,
+        transformed.advantages,
         config=config,
-        loss_mask=policy_loss_mask,
+        loss_mask=transformed.loss_mask,
         rollout_logprobs=rollout_logprobs,
         global_loss_denom=global_loss_denom,
+        **clip_kwargs,
     )
+    policy_loss_metrics.update(transformed.metrics)
 
     auxiliary = _compute_policy_auxiliary_terms(
         action_log_probs=action_log_probs,
@@ -293,6 +307,7 @@ def ppo_policy_loss(
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
     global_loss_denom: Optional[float] = None,
+    clip_bounds: tuple[torch.Tensor | float, torch.Tensor | float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     assert config.policy_loss_type in ["regular", "dual_clip"], "loss_type must be either 'regular' or 'dual_clip'"
     loss_reduction = config.loss_reduction
@@ -302,14 +317,15 @@ def ppo_policy_loss(
 
     ratio = safe_exp_delta(log_probs - old_log_probs, out_dtype=log_probs.dtype)
     surr1 = ratio * advantages
-    surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
+    lower, upper = clip_bounds if clip_bounds is not None else (1 - config.eps_clip_low, 1 + config.eps_clip_high)
+    surr2 = ratio.clamp(lower, upper) * advantages
     loss = -torch.min(surr1, surr2)
     clip_metrics = clipping_metrics(
         ratio,
         -surr2 > -surr1,
         loss_mask,
-        eps_clip_low=config.eps_clip_low,
-        eps_clip_high=config.eps_clip_high,
+        eps_clip_low=config.eps_clip_low if clip_bounds is None else 1 - lower,
+        eps_clip_high=config.eps_clip_high if clip_bounds is None else upper - 1,
     )
     clip_pg_losses1 = loss
     if config.policy_loss_type == "dual_clip":

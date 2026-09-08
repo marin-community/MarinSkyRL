@@ -37,7 +37,14 @@ from marinskyrl.runtime_options import GDNBackend, R3Transport
 from marinskyrl.inference_placement import validate_node_local_config
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
-from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, sync_registries
+from .algorithm_registry import (
+    AdvantageEstimatorRegistry,
+    PolicyLossRegistry,
+    PolicyLossType,
+    sync_registries,
+    rollout_logprobs_required,
+)
+from .offpolicy_masks import validate_offpolicy_masks
 from .logging_utils import format_exception_text
 from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTIONS
 from .nccl_environment import worker_nccl_environment
@@ -778,6 +785,7 @@ def validate_cfg(cfg: DictConfig):
         )
 
     behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"
+    validate_offpolicy_masks(cfg.trainer.algorithm)
     if behavior_clip and cfg.trainer.algorithm.use_tis:
         raise ValueError(
             "trainer.algorithm.policy_loss_type=behavior_clip cannot be combined with use_tis=true; "
@@ -803,15 +811,15 @@ def validate_cfg(cfg: DictConfig):
             "dual_clip",
         ], "TIS is only implemented for regular and dual_clip policy loss types"
 
-    if behavior_clip:
+    if rollout_logprobs_required(cfg.trainer.algorithm):
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
-                "`generator.sampling_params.logprobs` is `None` but behavior_clip requires rollout logprobs. "
+                "`generator.sampling_params.logprobs` is `None` but this objective requires rollout logprobs. "
                 "Setting `logprobs` to 0."
             )
             cfg.generator.sampling_params.logprobs = 0
         if cfg.generator.backend == "sglang":
-            raise NotImplementedError("behavior_clip requires rollout logprobs; use the vLLM generator backend")
+            raise NotImplementedError("this objective requires rollout logprobs; use the vLLM generator backend")
 
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
