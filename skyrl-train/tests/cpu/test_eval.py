@@ -7,6 +7,8 @@ import json
 import hashlib
 
 import pytest
+import reasoning_gym
+from skyrl_train.evaluation_contract import evaluation_contract_metrics
 from fsspec.implementations.memory import MemoryFileSystem
 from omegaconf import OmegaConf
 
@@ -326,3 +328,86 @@ async def test_evaluation_rejects_unsafe_dump_namespace_before_generation(dummy_
             dump_namespace=namespace,
         )
     assert runner.seen_inputs == []
+
+
+@pytest.mark.asyncio
+async def test_frozen_math_contract_metrics_preserve_fractional_reward_and_completed_accuracy(dummy_config, tmp_path):
+    cfg = dummy_config
+    cfg.generator.eval_n_samples_per_prompt = 1
+    cfg.generator.trajectory_retention.enabled = False
+    cfg.trainer.dump_eval_results = True
+    cfg.trainer.export_path = str(tmp_path)
+    entry = reasoning_gym.create_dataset(
+        "chain_sum", size=1, seed=101, min_terms=2, max_terms=2, min_digits=1, max_digits=2
+    )[0]
+    specs = [
+        ("gsm8k", "gsm8k-first-hash-v1", "5", "#### 5", 1.0, "length"),
+        ("gsm8k", "gsm8k-first-hash-v1", "5", "#### 5", 1.0, "stop"),
+        ("aime", "aime-last-answer-300-v1", "5", "Answer: 9", -1.0, "stop"),
+        (
+            "reasoning_gym",
+            "reasoning-gym-0.1.25-last-answer-v1",
+            json.dumps({"task": "chain_sum", "entry": entry}),
+            "Answer: 85 extra",
+            0.25,
+            "stop",
+        ),
+    ]
+    prompts = [
+        {
+            "prompt": [{"role": "user", "content": "Question"}],
+            "uid": str(i),
+            "env_class": env,
+            "env_extras": {
+                "data_source": env,
+                "extra_info": {"contract": contract},
+                "reward_model": {"ground_truth": gold},
+                "reward_spec": {"ground_truth": gold},
+            },
+        }
+        for i, (env, contract, gold, *_rest) in enumerate(specs)
+    ]
+    responses = [list(map(ord, row[3])) for row in specs]
+    batch = {
+        "prompt_token_ids": [[1]] * 4,
+        "response_ids": responses,
+        "rewards": [[0] * (len(tokens) - 1) + [row[4]] for tokens, row in zip(responses, specs, strict=True)],
+        "loss_masks": [[1] * len(tokens) for tokens in responses],
+        "stop_reasons": [row[5] for row in specs],
+        "rollout_logprobs": None,
+    }
+    metrics = await evaluate(DummyStatefulDataLoader([prompts]), DummyRunner(batch), cfg, 4, CharacterDecoder())
+    assert metrics["eval/all/avg_score"] == 0.3125
+    assert metrics["eval/all/pass_at_1"] == 0.75
+    assert metrics["eval/all/contract_correct"] == 0.5
+    assert metrics["eval/all/contract_completed"] == 0.25
+    assert metrics["eval/reasoning_gym/pass_at_1"] == 1
+    assert metrics["eval/reasoning_gym/contract_correct"] == 0
+    assert metrics["eval/gsm8k/contract_completed"] == 0.5
+    assert json.loads((tmp_path / "dumped_evals/global_step_4_evals/aggregated_results.jsonl").read_text()) == metrics
+
+
+class CharacterDecoder:
+    def decode(self, tokens):
+        return "".join(map(chr, tokens))
+
+
+@pytest.mark.parametrize("alteration", ["reward", "gold", "tag"])
+def test_frozen_contract_metrics_reject_inconsistent_native_rows(alteration):
+    extras = [
+        {
+            "data_source": "math",
+            "extra_info": {"contract": "aime-last-answer-300-v1"},
+            "reward_model": {"ground_truth": "5"},
+            "reward_spec": {"ground_truth": "5"},
+        }
+    ]
+    rewards = [[0, 1.0]]
+    if alteration == "reward":
+        rewards = [[0.25, 1.0]]
+    elif alteration == "gold":
+        extras[0]["reward_spec"]["ground_truth"] = "9"
+    else:
+        extras[0]["extra_info"]["contract"] = "unknown"
+    with pytest.raises(ValueError):
+        evaluation_contract_metrics(["aime"], extras, ["Answer: 5"], rewards, ["stop"])
