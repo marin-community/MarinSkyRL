@@ -375,8 +375,8 @@ generator:
   engine_init_kwargs: {}
   
   override_existing_update_group: "auto"
-  # TIS defaults to processed_logprobs. Full-distribution, temperature-only
-  # sampling is validated; other explicit settings are preserved with a warning.
+  # Objectives that consume rollout logprobs use processed probabilities and
+  # require full-distribution, temperature-only sampling.
   sampling_params:
     max_generate_length: 1024
     repetition_penalty: 1.0

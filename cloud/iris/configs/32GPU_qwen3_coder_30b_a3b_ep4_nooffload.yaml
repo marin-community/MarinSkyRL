@@ -236,8 +236,8 @@ generator:
 
   sampling_params:
     temperature: 1.2
-    top_p: 0.95
-    top_k: 20
+    top_p: 1.0
+    top_k: -1
 
   engine_init_kwargs:
     custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2

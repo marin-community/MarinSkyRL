@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 from transformers import GPT2Config, GPT2LMHeadModel
 from vllm import LLM, SamplingParams
 
-from skyrl_train.config.tis import configure_tis_sampling
+from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.inference_engines.vllm.utils import pop_vllm_wrapper_kwargs
 
@@ -35,7 +35,7 @@ def model_and_engine(tmp_path_factory):
     path = tmp_path_factory.mktemp("tis-model")
     model.save_pretrained(path)
     generator = OmegaConf.create({"sampling_params": {"temperature": 1.0}, "engine_init_kwargs": {}})
-    configure_tis_sampling(generator)
+    configure_behavior_logprob_sampling(generator)
     options = OmegaConf.to_container(generator.engine_init_kwargs)
     pop_vllm_wrapper_kwargs(options)
     # CUDA may already be initialized by the test process; workers must start fresh.
@@ -71,7 +71,7 @@ def test_same_weights_temperature_scaled_tis_ratios_are_one(model_and_engine, te
             "engine_init_kwargs": {},
         }
     )
-    configure_tis_sampling(generator)
+    configure_behavior_logprob_sampling(generator)
     sampling = SamplingParams(**get_vllm_sampling_params(generator.sampling_params))
     prompts = [[1, 4, 7], [1, 9, 6]]
     outputs = engine.generate([{"prompt_token_ids": prompt} for prompt in prompts], sampling, use_tqdm=False)

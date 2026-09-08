@@ -19,7 +19,7 @@ from ray.util.placement_group import (
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
-from skyrl_train.config.tis import configure_tis_sampling
+from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
@@ -791,35 +791,26 @@ def validate_cfg(cfg: DictConfig):
             "behavior clipping already uses the full rollout importance ratio"
         )
 
+    behavior_logprobs_required = rollout_logprobs_enabled(cfg.trainer.algorithm)
+    if behavior_logprobs_required:
+        if cfg.generator.sampling_params.logprobs is None:
+            logger.warning(
+                "The selected objective requires rollout logprobs; setting generator.sampling_params.logprobs=0."
+            )
+            cfg.generator.sampling_params.logprobs = 0
+        if cfg.generator.backend == "sglang":
+            raise NotImplementedError("Behavior-logprob objectives require the vLLM generator backend")
+        configure_behavior_logprob_sampling(cfg.generator)
+
     if cfg.trainer.algorithm.use_tis:
         if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
             raise ValueError(
                 f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap}"
             )
-        if cfg.generator.sampling_params.logprobs is None:
-            logger.warning(
-                "`generator.sampling_params.logprobs` is `None` but `trainer.algorithm.use_tis` is `True`. Setting `logprobs` to `True`."
-            )
-            # just set to 0 for better user exp
-            cfg.generator.sampling_params.logprobs = 0
-
-        if cfg.generator.backend == "sglang":
-            raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
-        configure_tis_sampling(cfg.generator)
         assert cfg.trainer.algorithm.policy_loss_type in [
             "regular",
             "dual_clip",
         ], "TIS is only implemented for regular and dual_clip policy loss types"
-
-    if behavior_clip:
-        if cfg.generator.sampling_params.logprobs is None:
-            logger.warning(
-                "`generator.sampling_params.logprobs` is `None` but behavior_clip requires rollout logprobs. "
-                "Setting `logprobs` to 0."
-            )
-            cfg.generator.sampling_params.logprobs = 0
-        if cfg.generator.backend == "sglang":
-            raise NotImplementedError("behavior_clip requires rollout logprobs; use the vLLM generator backend")
 
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
