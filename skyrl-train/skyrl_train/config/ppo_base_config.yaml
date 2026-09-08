@@ -230,6 +230,19 @@ trainer:
     eps_clip_high: 0.2
     clip_ratio_c: 3.0
     tis_imp_ratio_cap: -1.0
+    offpolicy_mask:
+      enabled: false
+      ratio: mismatch
+      low: 0.5
+      high: 5.0
+      veto_ratio: 1.0e-5
+      renormalize: false
+    m2_mask:
+      enabled: false
+      ratio: stale
+      tau: 0.04
+      mode: mask
+      renormalize: false
     use_tis: false
     # Fail closed on missing behavior probabilities instead of degrading TIS for a batch.
     # behavior_clip always requires these probabilities, independently of this flag.
