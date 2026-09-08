@@ -197,6 +197,7 @@ trainer:
       position_window: 256
       by_update_max: 16
     batch_invariant: false
+    weight_sync_invariant_env: false
     advantage_estimator: "grpo"
     group_advantage_min_size: null
     resolved_group_advantage:

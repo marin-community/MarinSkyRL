@@ -204,7 +204,8 @@ class DistributedTorchRayActor:
         # passes device_id so ProcessGroupNCCL never guesses the device (fixes the cw-rno2a
         # unmasked-CVD collective deadlock; see init_worker_process_group_with_device).
         init_worker_process_group_with_device(
-            timeout_seconds=int(self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+            timeout_seconds=int(self.cfg.trainer.distributed.worker_collective_timeout_seconds),
+            weight_sync_invariant_env=bool(self.cfg.trainer.algorithm.get("weight_sync_invariant_env", False)),
         )
 
         # setup device mesh

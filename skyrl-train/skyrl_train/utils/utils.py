@@ -671,6 +671,9 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)
+    from skyrl_train.distributed.weight_sync_environment import validate_weight_sync_environment_config
+
+    validate_weight_sync_environment_config(cfg)
     validate_moe_router_replay_config(cfg)
     validate_hf_export_config(cfg)
     # Validate context-parallel config (no-op when context_parallel_size == 1 for all roles)

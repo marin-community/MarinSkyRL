@@ -480,7 +480,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # The guess deadlocks the first collective (weight-init barrier) on unmasked-CVD clusters
         # where every actor sees all GPUs (cw-rno2a); see init_worker_process_group_with_device.
         init_worker_process_group_with_device(
-            timeout_seconds=int(self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+            timeout_seconds=int(self.cfg.trainer.distributed.worker_collective_timeout_seconds),
+            weight_sync_invariant_env=bool(self.cfg.trainer.algorithm.get("weight_sync_invariant_env", False)),
         )
 
         # Explicitly wrap torch.distributed.broadcast in torch.no_grad() to avoid a warning in Megatron training where the
@@ -1035,7 +1036,8 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         # Device-pinned NCCL PG init via the shared helper (see init_worker_process_group_with_device) —
         # avoids the ProcessGroupNCCL device-guess collective deadlock on unmasked-CVD clusters (cw-rno2a).
         init_worker_process_group_with_device(
-            timeout_seconds=int(self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+            timeout_seconds=int(self.cfg.trainer.distributed.worker_collective_timeout_seconds),
+            weight_sync_invariant_env=bool(self.cfg.trainer.algorithm.get("weight_sync_invariant_env", False)),
         )
 
         self.strategy = MegatronStrategy(
