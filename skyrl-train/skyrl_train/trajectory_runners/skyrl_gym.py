@@ -461,14 +461,15 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
-        appended_eos_token = False
         if not self.use_conversation_multi_turn:
             if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
-                loss_mask.append(1)
+                # This EOS is an assembly delimiter, not a sampled action. Keep it out of
+                # behavior-referenced objectives and place the final reward on the last
+                # genuinely generated token below.
+                loss_mask.append(0)
                 if rollout_logprobs is not None:
                     rollout_logprobs.append(0.0)
-                appended_eos_token = True
 
         assert rollout_logprobs is None or len(rollout_logprobs) == len(response_ids), (
             "rollout_logprobs and response_ids should have the same length"
@@ -484,16 +485,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         else:
             # Build token-level rewards placed at assistant turn boundaries
             token_level_rewards: List[float] = [0.0] * len(response_ids)
-            for i, (step_reward, idx) in enumerate(per_step_rewards):
+            for step_reward, idx in per_step_rewards:
                 assert step_reward is not None
                 if idx >= len(response_ids):
                     break
-                if appended_eos_token and i == len(per_step_rewards) - 1:
-                    # Preserve the existing reward-placement contract: a final
-                    # synthetic EOS receives the final turn reward.
-                    token_level_rewards[-1] = step_reward
-                else:
-                    token_level_rewards[idx] += step_reward
+                token_level_rewards[idx] += step_reward
             optimization_reward = float(sum(token_level_rewards))
             token_rewards = tuple(token_level_rewards)
 

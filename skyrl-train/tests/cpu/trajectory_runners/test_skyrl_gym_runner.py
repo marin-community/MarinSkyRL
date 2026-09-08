@@ -336,6 +336,73 @@ async def test_generate_non_batched_preserves_rollout_logprobs(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "response_ids", "response_logprobs", "expected_ids", "expected_mask", "expected_rewards"),
+    [
+        ("stop", [10, 11], [-0.1, -0.2], [10, 11, 4], [1, 1, 0], [0.0, 1.0, 0.0]),
+        ("stop", [10, 11, 4], [-0.1, -0.2, -0.3], [10, 11, 4], [1, 1, 1], [0.0, 0.0, 1.0]),
+        ("length", [10, 11], [-0.1, -0.2], [10, 11], [1, 1], [0.0, 1.0]),
+    ],
+    ids=["synthetic-eos", "sampled-eos", "length"],
+)
+@patch("skyrl_gym.make")
+async def test_non_batched_terminal_assembly_masks_unsampled_tokens(
+    mock_make,
+    mock_tokenizer,
+    mock_llm,
+    mock_env,
+    generator_cfg,
+    mock_env_cfg,
+    stop_reason,
+    response_ids,
+    response_logprobs,
+    expected_ids,
+    expected_mask,
+    expected_rewards,
+):
+    generator_cfg.batched = False
+    generator_cfg.sampling_params.logprobs = 0
+    generator_cfg.use_conversation_multi_turn = False
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    mock_env.step.side_effect = None
+    mock_env.step.return_value = BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+    mock_llm.generate.side_effect = None
+    mock_llm.generate.return_value = {
+        "responses": ["answer"],
+        "stop_reasons": [stop_reason],
+        "response_ids": [response_ids],
+        "response_logprobs": [response_logprobs],
+    }
+
+    trajectory_runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    output = await trajectory_runner.agent_loop(
+        [{"role": "user", "content": "Question"}],
+        mock_env_cfg.env_class,
+        {},
+        max_tokens=8,
+        max_input_length=512,
+    )
+
+    assert list(output.evidence.response_token_ids or ()) == expected_ids
+    assert output.loss_mask == expected_mask
+    assert output.reward.token_rewards == tuple(expected_rewards)
+    assert output.reward.optimization_reward == 1.0
+    assert len(output.evidence.behavior_logprobs or ()) == len(expected_ids)
+    sampled_trainable_logprobs = [
+        logprob
+        for logprob, trainable in zip(output.evidence.behavior_logprobs or (), output.loss_mask, strict=True)
+        if trainable
+    ]
+    assert sampled_trainable_logprobs == response_logprobs
+
+
+@pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
@@ -1344,9 +1411,7 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
 
     # Response ids layout: step1 (3 tokens) + obs (1) + step2 (3) + final eos (1) = 8
     assert len(list(out.evidence.response_token_ids or ())) == 8
-    # Indices: 2 (end of step1 assistant), 6 (end of step2 assistant), 7 (manually appended eos token)
-    # Note that the last reward is placed at the 7 instead of at 6 since we manually move
-    # it using the flag `appended_eos_token` in trajectory_runners/skyrl_gym.py
+    # Indices: 2 (end of step1 assistant), 7 (sampled EOS ending the second assistant response).
     expected_rewards = [0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0, 1.7]
     assert out.reward.optimization_reward == sum(expected_rewards)
     assert out.reward.token_rewards == tuple(expected_rewards)
@@ -1610,11 +1675,10 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     assert len(list(out.evidence.response_token_ids or ())) == 5
     assert len(out.reward.token_rewards) == 5
 
-    # Step1 end index relative should be 4 (0-based) - reward placed at EOS token
-    # NOTE(Dev): Because we manually append the eos token to the response, the reward is placed at the last token;
-    # See the reward-placement comment in trajectory_runners/skyrl_gym.py for details.
-
-    assert out.reward.token_rewards[4] == 2.0
+    # The final reward stays on the last sampled response token. The synthetic EOS at index 4 is not trainable.
+    assert out.reward.token_rewards[3] == 2.0
+    assert out.reward.token_rewards[4] == 0.0
+    assert out.loss_mask[4] == 0
     assert out.reward.optimization_reward == 2.0
     assert (out.evidence.stop_reason or "unknown") == "stop"
 
