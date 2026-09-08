@@ -1420,14 +1420,27 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             Timer(timing_name, self.all_timings) as weight_update_timer,
             async_phase_window("publication", step=self.global_step, enabled=self._training_metrics_enabled),
         ):
-            with Timer("weight_pause", self.all_timings):
-                await self.inference_engine_client.pause_generation()
-            await self.async_sync_policy_weights_to_inference_engines()
-            # Keep the post-broadcast rank drain before resuming generation or dispatching a forward.
-            with Timer("policy_post_sync_drain", self.all_timings):
-                await self._drain_policy_event_loops()
-            with Timer("weight_resume", self.all_timings):
-                await self.inference_engine_client.resume_generation()
+            publication_error = None
+            try:
+                with Timer("weight_pause", self.all_timings):
+                    await self.inference_engine_client.pause_generation()
+                await self.async_sync_policy_weights_to_inference_engines()
+                # Keep the post-broadcast rank drain before resuming generation or dispatching a forward.
+                with Timer("policy_post_sync_drain", self.all_timings):
+                    await self._drain_policy_event_loops()
+                with Timer("weight_resume", self.all_timings):
+                    await self.inference_engine_client.resume_generation()
+            except BaseException as error:
+                publication_error = error
+                raise
+            finally:
+                if self.inference_engine_client.generation_paused_event.is_set():
+                    try:
+                        await self.inference_engine_client.resume_generation()
+                    except BaseException:
+                        if publication_error is None:
+                            raise
+                        logger.exception("Generation resume cleanup failed after a publication error")
             # New requests are rejected while inference is paused. Release newly
             # eligible producer slots only after the post-broadcast drain and resume.
             await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
