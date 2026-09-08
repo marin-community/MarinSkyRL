@@ -416,6 +416,7 @@ generator:
   
   override_existing_update_group: "auto"
   sampling_params:
+    ignore_eos: false
     max_generate_length: 1024
     repetition_penalty: 1.0
     temperature: 1.0
