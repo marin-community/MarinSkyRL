@@ -5,6 +5,8 @@ from enum import StrEnum
 
 from omegaconf import DictConfig
 
+from skyrl_train.config.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME, OPENCODE_HARBOR_AGENT_NAME
+
 SUPPORTED_OPENCODE_LITERAL_VERSION = "1.18.2"
 
 
@@ -57,13 +59,13 @@ def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
             action_tokens=ActionTokenHandling.UNAVAILABLE,
         )
 
-    agent_name = str(harbor.get("name", "terminus-2")).strip().lower().replace("_", "-")
+    agent_name = str(harbor.get("name", DEFAULT_HARBOR_AGENT_NAME)).strip().lower().replace("_", "-")
     rollout_details = CapabilityRequirement(
         config_path="terminal_bench.harbor.collect_rollout_details",
         expected_value="true",
         satisfied=bool(harbor.get("collect_rollout_details", False)),
     )
-    if agent_name == "terminus-2":
+    if agent_name == DEFAULT_HARBOR_AGENT_NAME:
         return TrajectoryRunnerCapabilities(
             runner=f"Harbor {agent_name}",
             sampled_completion=EvidenceFidelity.EXACT,
@@ -71,7 +73,7 @@ def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
             action_tokens=ActionTokenHandling.EXACT,
             requirements=(rollout_details,),
         )
-    if agent_name == "opencode":
+    if agent_name == OPENCODE_HARBOR_AGENT_NAME:
         tested_version = CapabilityRequirement(
             config_path="terminal_bench.harbor.version",
             expected_value=SUPPORTED_OPENCODE_LITERAL_VERSION,
@@ -147,10 +149,15 @@ def validate_trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRun
         return
 
     capabilities = trajectory_runner_capabilities(cfg, mode)
-    if capabilities.sampled_completion is not EvidenceFidelity.EXACT:
+    action_evidence_unusable = capabilities.action_tokens in {
+        ActionTokenHandling.RETOKENIZED,
+        ActionTokenHandling.UNAVAILABLE,
+    }
+    if capabilities.sampled_completion is not EvidenceFidelity.EXACT or action_evidence_unusable:
         raise ValueError(
             f"{capabilities.runner} cannot supply exact sampled completion token IDs and logprobs; "
-            f"resolved evidence fidelity is {capabilities.sampled_completion.value}"
+            f"resolved evidence fidelity is {capabilities.sampled_completion.value} and action-token handling is "
+            f"{capabilities.action_tokens.value}"
         )
     if full_tito_required and capabilities.full_context_continuation is not EvidenceFidelity.EXACT:
         raise ValueError(
@@ -160,7 +167,5 @@ def validate_trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRun
 
     unmet = [requirement for requirement in capabilities.requirements if not requirement.satisfied]
     if unmet:
-        settings = ", ".join(
-            f"{requirement.config_path}={requirement.expected_value}" for requirement in unmet
-        )
+        settings = ", ".join(f"{requirement.config_path}={requirement.expected_value}" for requirement in unmet)
         raise ValueError(f"Behavior-policy evidence with {capabilities.runner} requires {settings}")

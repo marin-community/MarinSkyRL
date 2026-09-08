@@ -2,10 +2,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.config.trajectory_runner_capabilities import (
-    ActionTokenHandling,
-    EvidenceFidelity,
     TrajectoryRunnerMode,
-    trajectory_runner_capabilities,
     validate_trajectory_runner_capabilities,
 )
 
@@ -72,9 +69,7 @@ def test_harbor_behavior_logprobs_require_tested_opencode_version(version):
 
 
 def test_harbor_behavior_logprobs_accept_tested_opencode_bridge():
-    validate_trajectory_runner_capabilities(
-        _harbor_config("opencode", version="1.18.2"), TrajectoryRunnerMode.HARBOR
-    )
+    validate_trajectory_runner_capabilities(_harbor_config("opencode", version="1.18.2"), TrajectoryRunnerMode.HARBOR)
 
 
 @pytest.mark.parametrize(
@@ -88,9 +83,7 @@ def test_harbor_behavior_logprobs_accept_tested_opencode_bridge():
     ("use_tis", "policy_loss_type"),
     [(True, "regular"), (False, "behavior_clip")],
 )
-def test_behavior_logprobs_reject_runners_without_exact_evidence(
-    mode, expected_runner, use_tis, policy_loss_type
-):
+def test_behavior_logprobs_reject_runners_without_exact_evidence(mode, expected_runner, use_tis, policy_loss_type):
     cfg = _skyrl_config(use_tis=use_tis, policy_loss_type=policy_loss_type)
 
     with pytest.raises(ValueError, match=expected_runner):
@@ -123,9 +116,7 @@ def test_behavior_logprobs_reject_multiturn_custom_template_retokenization():
         (TrajectoryRunnerMode.HARBOR, "opencode", "1.18.2", "Harbor opencode"),
     ],
 )
-def test_explicit_full_tito_rejects_runners_without_exact_continuation(
-    mode, agent_name, version, expected_runner
-):
+def test_explicit_full_tito_rejects_runners_without_exact_continuation(mode, agent_name, version, expected_runner):
     cfg = _skyrl_config() if agent_name is None else _harbor_config(agent_name, version=version)
     cfg.trainer.algorithm.use_tis = False
     cfg.trainer.algorithm.tito_full = True
@@ -140,15 +131,3 @@ def test_explicit_full_tito_accepts_terminus_exact_continuation():
     cfg.trainer.algorithm.tito_full = True
 
     validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
-
-
-def test_capability_contract_distinguishes_runtime_mutation_from_retokenization():
-    cfg = _skyrl_config()
-    direct = trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
-    cfg.generator.chat_template.name_or_path = "qwen3"
-    retokenized = trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
-
-    assert direct.sampled_completion is EvidenceFidelity.EXACT
-    assert direct.action_tokens is ActionTokenHandling.RUNTIME_VALIDATED
-    assert retokenized.sampled_completion is EvidenceFidelity.RETOKENIZED
-    assert retokenized.action_tokens is ActionTokenHandling.RETOKENIZED

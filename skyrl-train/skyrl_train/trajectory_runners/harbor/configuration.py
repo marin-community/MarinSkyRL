@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional, Set
 
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from skyrl_train.config.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 from skyrl_train.trajectory_runners.harbor.identity_aware_reward import IDENTITY_AWARE_SHAPER
 from skyrl_train.utils.harbor_errors import (
     DEFAULT_ERROR_HANDLING_CONFIG,
@@ -90,7 +91,7 @@ class SectionSchema:
 AGENT_SCHEMA = SectionSchema(
     fields={
         # Direct fields on AgentConfig
-        "name": FieldMapping("name", default="terminus-2"),  # Maps to AgentConfig.name (Harbor AgentName)
+        "name": FieldMapping("name", default=DEFAULT_HARBOR_AGENT_NAME),  # Maps to AgentConfig.name (Harbor AgentName)
         # Agent-log push-back control (direct field on AgentConfig, read by Trial._upload_agent_logs).
         # DEFAULT True (preserves current behavior). Set false to SKIP the best-effort re-upload of
         # host-side agent logs BACK into the (non-mounted) sandbox after the agent phase — those pushed-back
@@ -912,7 +913,7 @@ class HarborConfigBuilder:
 
         # Get agent name from harbor config (defaults to "terminus-2")
         # This is the Harbor AgentName value directly (e.g., "terminus-2", "oracle")
-        agent_name = agent_direct_fields.pop("name", "terminus-2")
+        agent_name = agent_direct_fields.pop("name", DEFAULT_HARBOR_AGENT_NAME)
 
         # Apply timeout override if provided (e.g., for eval runs)
         if timeout_override_sec is not None:
