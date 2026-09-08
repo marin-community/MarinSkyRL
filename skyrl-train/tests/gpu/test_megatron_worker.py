@@ -221,10 +221,12 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
-        cfg = get_test_actor_config(model_name=MODEL_NAME)
+        trace = not colocate_all and inference_tp == 1
+        model_path = snapshot_download(MODEL_NAME, revision=QWEN_MODEL_REVISION) if trace else MODEL_NAME
+        cfg = get_test_actor_config(model_name=model_path)
         cfg.trainer.placement.colocate_all = colocate_all
         cfg.generator.weight_sync_backend = "nccl"
-        cfg.generator.publication_stage_timing = not colocate_all and inference_tp == 1
+        cfg.generator.publication_stage_timing = trace
         cfg.trainer.strategy = "megatron"
         cfg.generator.backend = "vllm"
         cfg.generator.inference_engine_tensor_parallel_size = inference_tp
@@ -237,7 +239,7 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
         client, pg = init_inference_engines(
-            model=MODEL_NAME,
+            model=model_path,
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -287,7 +289,7 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
         policy.offload_to_cpu()
         asyncio.run(client.wake_up(tags=["kv_cache"]))
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
+        outputs = asyncio.run(run_inference(client, get_test_prompts(model_path), sampling_params))
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
