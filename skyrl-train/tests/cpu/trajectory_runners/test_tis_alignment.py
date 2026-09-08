@@ -16,6 +16,12 @@ import pytest
 from transformers import AutoTokenizer
 
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionPolicy, GroupAdvantageInvariant
+from skyrl_train.metric_names import (
+    TIS_ALIGNMENT_ALERT_METRIC,
+    TIS_METRIC_PREFIX,
+    TIS_TITO_FULL_DECLINE_METRIC_PREFIX,
+    TIS_TITO_FULL_SUCCESS_FRACTION_METRIC,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import (
     AlignmentStats,
     TitoFullDeclineReason,
@@ -179,16 +185,14 @@ def test_tito_full_without_rollout_logprob_consumer_preserves_existing_assembly(
 
 
 def test_tito_assembly_declines_on_inconsistent_stream(monkeypatch):
-    """When the served prompt-id stream violates the prefix invariant, the TITO
-    assembly must DECLINE (return None) so the public function falls back to the
-    re-tok + splice path — never silently assemble a wrong sequence."""
+    """Full TITO names the failed invariant instead of assembling corrupt IDs."""
     from skyrl_train.trajectory_runners.trajectory_processing import _assemble_response_ids_tito_full
 
     class _Tok:
         eos_token_id = 999
 
     # prompt[1] does NOT start with prompt[0] + completion[0] -> invariant fails.
-    output, decline_reason = _assemble_response_ids_tito_full(
+    result = _assemble_response_ids_tito_full(
         messages=[
             {"role": "assistant", "content": "a"},
             {"role": "user", "content": "b"},
@@ -204,8 +208,8 @@ def test_tito_assembly_declines_on_inconsistent_stream(monkeypatch):
         custom_chat_template=None,
         chat_template_kwargs=None,
     )
-    assert output is None
-    assert decline_reason is TitoFullDeclineReason.PREFIX_MISMATCH
+    assert result.response_ids is None
+    assert result.decline_reason is TitoFullDeclineReason.PREFIX_MISMATCH
 
 
 # ---------------------------------------------------------------------------
@@ -363,13 +367,13 @@ def test_context_mismatch_decline_masks_exact_completion_ids():
         alignment_stats=stats,
     )
 
-    metrics = stats.as_metrics(lcs_alert_threshold=0.005)
+    metrics = stats.as_metrics(prefix=TIS_METRIC_PREFIX, lcs_alert_threshold=0.005)
     assert not any(loss_mask)
     assert stats.n_exact == sum(map(len, completions))
     assert stats.tito_full_declines == {TitoFullDeclineReason.PREFIX_MISMATCH: 1}
-    assert metrics["tis/tito_full/success_fraction"] == 0.0
-    assert metrics["tis/tito_full/decline/prefix_mismatch"] == 1.0
-    assert metrics["tis/alignment_alert"] == 1.0
+    assert metrics[TIS_TITO_FULL_SUCCESS_FRACTION_METRIC] == 0.0
+    assert metrics[f"{TIS_TITO_FULL_DECLINE_METRIC_PREFIX}prefix_mismatch"] == 1.0
+    assert metrics[TIS_ALIGNMENT_ALERT_METRIC] == 1.0
 
 
 @pytest.mark.parametrize("truncate_logprobs", [False, True])
@@ -465,6 +469,7 @@ def test_missing_turn_logprobs_mask_only_the_affected_message():
         assistant_token_ids=completions,
         rollout_logprobs_required=True,
         alignment_stats=stats,
+        tito_full=False,
     )
 
     assert [logprob for logprob, mask in zip(rollout_logprobs, loss_mask, strict=True) if mask] == first_logprobs

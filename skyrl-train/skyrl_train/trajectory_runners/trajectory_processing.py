@@ -1,4 +1,5 @@
 import torch
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol
 from collections import defaultdict
@@ -24,6 +25,10 @@ from skyrl_train.metric_names import (
     TIS_ALIGNMENT_FAIL_COUNT_METRIC,
     TIS_LCS_FALLBACK_MESSAGES_METRIC,
     TIS_LCS_FALLBACK_ALERT_METRIC,
+    TIS_TITO_FULL_ATTEMPTS_METRIC,
+    TIS_TITO_FULL_SUCCESS_FRACTION_METRIC,
+    TIS_TITO_FULL_DECLINE_COUNT_METRIC,
+    TIS_TITO_FULL_DECLINE_METRIC_PREFIX,
 )
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     NormalizedReward,
@@ -47,6 +52,7 @@ class TitoFullDeclineReason(StrEnum):
     """Reason exact full-token trajectory assembly could not be proven safe."""
 
     MISSING_STREAMS = "missing_streams"
+    EMPTY_STREAMS = "empty_streams"
     TURN_COUNT_MISMATCH = "turn_count_mismatch"
     ASSISTANT_MESSAGE_COUNT_MISMATCH = "assistant_message_count_mismatch"
     MALFORMED_TURN_STREAM = "malformed_turn_stream"
@@ -54,6 +60,17 @@ class TitoFullDeclineReason(StrEnum):
     INITIAL_PROMPT_TOO_SHORT = "initial_prompt_too_short"
     GENERATION_PROMPT_MISMATCH = "generation_prompt_mismatch"
     COMPLETION_REGION_MISMATCH = "completion_region_mismatch"
+
+
+@dataclass(frozen=True)
+class TitoFullAssemblyResult:
+    """Named output of exact full-token trajectory assembly."""
+
+    response_ids: Optional[List[int]] = None
+    loss_mask: Optional[List[int]] = None
+    rollout_logprobs: Optional[List[float]] = None
+    rollout_routed_experts: Optional[List[Any]] = None
+    decline_reason: Optional[TitoFullDeclineReason] = None
 
 
 class AlignmentStats:
@@ -153,14 +170,21 @@ class AlignmentStats:
                 1.0 if self.n_unaligned > 0 or lcs_frac > lcs_alert_threshold or self.tito_full_declines else 0.0
             ),
         }
-        tito_prefix = f"{prefix}tito_full/"
-        metrics[f"{tito_prefix}attempts"] = float(self.n_tito_full_attempts)
-        metrics[f"{tito_prefix}success_fraction"] = (
+        tito_names = {
+            "attempts": TIS_TITO_FULL_ATTEMPTS_METRIC,
+            "success_fraction": TIS_TITO_FULL_SUCCESS_FRACTION_METRIC,
+            "decline_count": TIS_TITO_FULL_DECLINE_COUNT_METRIC,
+            "decline_prefix": TIS_TITO_FULL_DECLINE_METRIC_PREFIX,
+        }
+        if prefix != TIS_METRIC_PREFIX:
+            tito_names = {name: value.replace(TIS_METRIC_PREFIX, prefix, 1) for name, value in tito_names.items()}
+        metrics[tito_names["attempts"]] = float(self.n_tito_full_attempts)
+        metrics[tito_names["success_fraction"]] = (
             self.n_tito_full_successes / self.n_tito_full_attempts if self.n_tito_full_attempts else 0.0
         )
-        metrics[f"{tito_prefix}decline_count"] = float(sum(self.tito_full_declines.values()))
+        metrics[tito_names["decline_count"]] = float(sum(self.tito_full_declines.values()))
         for reason in TitoFullDeclineReason:
-            metrics[f"{tito_prefix}decline/{reason.value}"] = float(self.tito_full_declines.get(reason, 0))
+            metrics[f"{tito_names['decline_prefix']}{reason.value}"] = float(self.tito_full_declines.get(reason, 0))
         return metrics
 
     def alignment_checkpoint(self) -> int:
@@ -1696,41 +1720,43 @@ def _assemble_response_ids_tito_full(
     success, the decline reason is ``None``.
     """
     if assistant_prompt_token_ids is None or assistant_token_ids is None:
-        return None, TitoFullDeclineReason.MISSING_STREAMS
+        return TitoFullAssemblyResult(decline_reason=TitoFullDeclineReason.MISSING_STREAMS)
     n_turns = len(assistant_token_ids)
-    if n_turns == 0 or len(assistant_prompt_token_ids) != n_turns:
-        return None, TitoFullDeclineReason.TURN_COUNT_MISMATCH
+    if n_turns == 0:
+        return TitoFullAssemblyResult(decline_reason=TitoFullDeclineReason.EMPTY_STREAMS)
+    if len(assistant_prompt_token_ids) != n_turns:
+        return TitoFullAssemblyResult(decline_reason=TitoFullDeclineReason.TURN_COUNT_MISMATCH)
     assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
     if len(assistant_msgs) != n_turns:
-        return None, TitoFullDeclineReason.ASSISTANT_MESSAGE_COUNT_MISMATCH
+        return TitoFullAssemblyResult(decline_reason=TitoFullDeclineReason.ASSISTANT_MESSAGE_COUNT_MISMATCH)
     # Every turn must carry non-empty prompt + completion id streams.
     for t in range(n_turns):
         p = assistant_prompt_token_ids[t]
         c = assistant_token_ids[t]
         if not p or not isinstance(p, list) or not c or not isinstance(c, list):
-            return None, TitoFullDeclineReason.MALFORMED_TURN_STREAM
+            return TitoFullAssemblyResult(decline_reason=TitoFullDeclineReason.MALFORMED_TURN_STREAM)
     # Prefix invariant across turns.
     for t in range(1, n_turns):
         prev = list(assistant_prompt_token_ids[t - 1]) + list(assistant_token_ids[t - 1])
         cur = list(assistant_prompt_token_ids[t])
         if cur[: len(prev)] != prev:
-            return None, TitoFullDeclineReason.PREFIX_MISMATCH
+            return TitoFullAssemblyResult(decline_reason=TitoFullDeclineReason.PREFIX_MISMATCH)
     gp = list(generation_prompt_ids)
     gp_len = len(gp)
     p0 = list(assistant_prompt_token_ids[0])
     initial_prompt_len = len(p0) - gp_len
     # Turn-0 prompt must end with the generation prompt (fixes the response/prompt boundary).
     if initial_prompt_len < 0:
-        return None, TitoFullDeclineReason.INITIAL_PROMPT_TOO_SHORT
+        return TitoFullAssemblyResult(decline_reason=TitoFullDeclineReason.INITIAL_PROMPT_TOO_SHORT)
     if p0[initial_prompt_len:] != gp:
-        return None, TitoFullDeclineReason.GENERATION_PROMPT_MISMATCH
+        return TitoFullAssemblyResult(decline_reason=TitoFullDeclineReason.GENERATION_PROMPT_MISMATCH)
     served_full = list(assistant_prompt_token_ids[-1]) + list(assistant_token_ids[-1])
     # Every completion region must sit at its expected offset in the served stream.
     for t in range(n_turns):
         off = len(assistant_prompt_token_ids[t])
         comp = list(assistant_token_ids[t])
         if served_full[off : off + len(comp)] != comp:
-            return None, TitoFullDeclineReason.COMPLETION_REGION_MISMATCH
+            return TitoFullAssemblyResult(decline_reason=TitoFullDeclineReason.COMPLETION_REGION_MISMATCH)
 
     response_ids = list(served_full[initial_prompt_len:])
     total_len = len(response_ids)
@@ -1819,7 +1845,12 @@ def _assemble_response_ids_tito_full(
     assert len(loss_mask) == len(response_ids)
     assert rollout_logprobs is None or len(rollout_logprobs) == len(response_ids)
     assert rollout_routed_experts is None or len(rollout_routed_experts) == len(response_ids)
-    return (response_ids, loss_mask, rollout_logprobs, rollout_routed_experts), None
+    return TitoFullAssemblyResult(
+        response_ids=response_ids,
+        loss_mask=loss_mask,
+        rollout_logprobs=rollout_logprobs,
+        rollout_routed_experts=rollout_routed_experts,
+    )
 
 
 def get_response_ids_and_loss_mask_from_messages(
@@ -1853,8 +1884,10 @@ def get_response_ids_and_loss_mask_from_messages(
          it surfaces as ``tis/lcs_fallback_fraction`` and never silently degrades.
 
     When rollout logprobs are required, any assistant message with an unaligned
-    token is removed from the loss. Zero values remain only as shape-preserving
-    placeholders under disabled loss-mask positions.
+    token is removed from the loss. A failed full-token assembly masks the whole
+    trajectory because every later action was conditioned on an unverified token
+    context. Zero values remain only as shape-preserving placeholders under
+    disabled loss-mask positions.
 
     Args:
         messages: List of message dicts with 'role' and 'content' keys. Must contain at least
@@ -1903,13 +1936,9 @@ def get_response_ids_and_loss_mask_from_messages(
     # shape-compatible diagnostic sequence; behavior-referenced training masks it.
     # Default OFF means this block is skipped entirely.
     tito_decline_reason = None
-    if (
-        _tito_full_enabled(rollout_logprobs_required=rollout_logprobs_required, tito_full=tito_full)
-        and assistant_prompt_token_ids is not None
-        and assistant_token_ids is not None
-    ):
+    if _tito_full_enabled(rollout_logprobs_required=rollout_logprobs_required, tito_full=tito_full):
         alignment_checkpoint = alignment_stats.alignment_checkpoint()
-        _tito, tito_decline_reason = _assemble_response_ids_tito_full(
+        tito_result = _assemble_response_ids_tito_full(
             messages,
             tokenizer,
             generation_prompt_ids,
@@ -1921,21 +1950,27 @@ def get_response_ids_and_loss_mask_from_messages(
             custom_chat_template,
             chat_template_kwargs,
         )
-        if _tito is not None:
+        tito_decline_reason = tito_result.decline_reason
+        if tito_decline_reason is None:
+            assert tito_result.response_ids is not None
+            assert tito_result.loss_mask is not None
             alignment_stats.record_tito_full_success()
-            _rids, _lmask, _rlp, _rre = _tito
             _apply_alignment_validity(
-                _lmask,
+                tito_result.loss_mask,
                 span_start=0,
-                span_length=len(_lmask),
+                span_length=len(tito_result.loss_mask),
                 alignment_valid=alignment_stats.is_valid_since(alignment_checkpoint),
                 rollout_logprobs_required=rollout_logprobs_required,
             )
             if assistant_routed_experts is None:
-                return _rids, _lmask, _rlp
-            return _rids, _lmask, _rlp, _rre
+                return tito_result.response_ids, tito_result.loss_mask, tito_result.rollout_logprobs
+            return (
+                tito_result.response_ids,
+                tito_result.loss_mask,
+                tito_result.rollout_logprobs,
+                tito_result.rollout_routed_experts,
+            )
         else:
-            assert tito_decline_reason is not None
             alignment_stats.record_tito_full_decline(tito_decline_reason)
             logger.warning(
                 "Full TITO prompt-id assembly declined ({}); building a masked re-tokenized fallback for diagnostics.",
@@ -2212,8 +2247,14 @@ def get_response_ids_and_loss_mask_from_messages(
         assert len(rollout_logprobs) == len(response_ids) if rollout_logprobs is not None else True
         assert len(rollout_routed_experts) == len(response_ids) if rollout_routed_experts is not None else True
 
-    if tito_decline_reason is not None and rollout_logprobs_required:
-        loss_mask = [0] * len(loss_mask)
+    if tito_decline_reason is not None:
+        _apply_alignment_validity(
+            loss_mask,
+            span_start=0,
+            span_length=len(loss_mask),
+            alignment_valid=False,
+            rollout_logprobs_required=rollout_logprobs_required,
+        )
 
     if assistant_routed_experts is None:
         return response_ids, loss_mask, rollout_logprobs
