@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from omegaconf import DictConfig
 
-from skyrl_train.config.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME, OPENCODE_HARBOR_AGENT_NAME
+from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME, OPENCODE_HARBOR_AGENT_NAME
 
 SUPPORTED_OPENCODE_LITERAL_VERSION = "1.18.2"
 

@@ -30,7 +30,7 @@ from typing import Any, Dict, Optional, Set
 
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from skyrl_train.config.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
+from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 from skyrl_train.trajectory_runners.harbor.identity_aware_reward import IDENTITY_AWARE_SHAPER
 from skyrl_train.utils.harbor_errors import (
     DEFAULT_ERROR_HANDLING_CONFIG,
