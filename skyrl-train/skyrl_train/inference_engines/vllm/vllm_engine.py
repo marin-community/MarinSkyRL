@@ -2029,7 +2029,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await self._get_engine().collective_rpc("report_device_placement")
 
     async def read_publication_request_state(
-        self, initial_policy_version: int | None = None, drain_accounting: bool = False
+        self,
+        initial_policy_version: int | None = None,
+        drain_accounting: bool = False,
+        terminal_timeout_seconds: float | None = None,
     ):
         """Read pause precursor evidence in the engine actor's monotonic domain."""
         engine = self._get_engine()
@@ -2049,6 +2052,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             for pid in core_pids
             for kind in namespaces
         )
+        terminal_wait_seconds = 0.0
+        if terminal_timeout_seconds is not None:
+            if self._publication_requests is None:
+                raise ValueError("terminal acknowledgement requires initialized request accounting")
+            terminal_wait_started = time.monotonic()
+            await self._publication_requests.wait_for_idle(terminal_timeout_seconds)
+            terminal_wait_seconds = time.monotonic() - terminal_wait_started
         states = list(engine.output_processor.request_states.values())
         if initial_policy_version is not None:
             if states or self._publication_requests is not None or self._publication_versions.boundaries:
@@ -2062,6 +2072,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
         return {
             "request_accounting": accounting,
+            "terminal_wait_seconds": terminal_wait_seconds,
             "policy_version_boundaries": list(self._publication_versions.boundaries),
             "host": socket.gethostname(),
             "actor_pid": os.getpid(),
