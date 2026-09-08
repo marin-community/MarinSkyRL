@@ -27,7 +27,9 @@ EXPECTED_ENVIRONMENT = {
 }
 
 
-def apply_weight_sync_environment(enabled: bool, *, role: str) -> None:
+def apply_weight_sync_environment(
+    enabled: bool, *, role: str, rank: int | None = None, local_rank: int | None = None
+) -> None:
     """Apply the qualified override in this process; emit only a fixed nonsecret allowlist.
 
     The source pin intentionally rejects a changed vLLM implementation. This control
@@ -50,8 +52,10 @@ def apply_weight_sync_environment(enabled: bool, *, role: str) -> None:
         raise RuntimeError("weight sync environment override did not install the expected allowlist")
     receipt = {
         "role": role,
-        "rank": os.environ.get("RANK"),
-        "local_rank": os.environ.get("LOCAL_RANK"),
+        "rank": rank if rank is not None else int(os.environ["RANK"]),
+        "local_rank": local_rank if local_rank is not None else int(os.environ["LOCAL_RANK"]),
+        "environment_rank": os.environ.get("RANK"),
+        "environment_local_rank": os.environ.get("LOCAL_RANK"),
         "origin_host": socket.gethostname(),
         "origin_pid": os.getpid(),
         "default_process_group_initialized": dist.is_initialized(),
