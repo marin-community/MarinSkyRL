@@ -12,7 +12,7 @@ from vllm import LLM, SamplingParams
 
 from skyrl_train.config.tis import configure_tis_sampling
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
-from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
+from skyrl_train.inference_engines.vllm.utils import pop_vllm_wrapper_kwargs
 
 
 @pytest.fixture(scope="module")
@@ -37,7 +37,7 @@ def model_and_engine(tmp_path_factory):
     generator = OmegaConf.create({"sampling_params": {"temperature": 1.0}, "engine_init_kwargs": {}})
     configure_tis_sampling(generator)
     options = OmegaConf.to_container(generator.engine_init_kwargs)
-    pop_openai_kwargs(options)
+    pop_vllm_wrapper_kwargs(options)
     # CUDA may already be initialized by the test process; workers must start fresh.
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")

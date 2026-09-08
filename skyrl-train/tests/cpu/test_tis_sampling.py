@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 
 from skyrl_train.config.tis import configure_tis_sampling, warn_if_tis_sampling_mismatch
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
-from skyrl_train.inference_engines.vllm.utils import apply_openai_sampling, pop_openai_kwargs
+from skyrl_train.inference_engines.vllm.utils import apply_openai_sampling, pop_vllm_wrapper_kwargs
 
 
 @pytest.mark.parametrize("temperature", [0.7, 1.0, 1.2])
@@ -28,7 +28,7 @@ def test_tis_config_reaches_engine_and_sampling_options(temperature):
     configure_tis_sampling(generator)
     sampling = get_vllm_sampling_params(generator.sampling_params)
     options = OmegaConf.to_container(generator.engine_init_kwargs)
-    serving = pop_openai_kwargs(options)
+    serving = pop_vllm_wrapper_kwargs(options)
 
     assert options == {"logprobs_mode": "processed_logprobs", "generation_config": "vllm"}
     assert serving == {"warn_on_tis_sampling": True}
@@ -91,6 +91,7 @@ def test_tis_openai_evaluation_preserves_penalties(logprobs):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         apply_openai_sampling(body, {}, warn_on_tis_sampling=True)
+    assert body["presence_penalty"] == 0.5
 
 
 def test_tis_openai_checks_after_generator_overrides():

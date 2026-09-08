@@ -51,29 +51,29 @@ class PrefixCacheHitRateAccumulator:
             self.samples.append(rate)
 
 
-def pop_openai_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+def pop_vllm_wrapper_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """
     Remove SkyRL serving options before passing engine_kwargs to vLLM.
     """
-    openai_kwargs: Dict[str, Any] = {}
+    wrapper_kwargs: Dict[str, Any] = {}
 
     enable_auto_tools = engine_kwargs.pop("enable_auto_tools", engine_kwargs.pop("enable_auto_tool_choice", None))
     if enable_auto_tools is not None:
-        openai_kwargs["enable_auto_tools"] = bool(enable_auto_tools)
+        wrapper_kwargs["enable_auto_tools"] = bool(enable_auto_tools)
 
     tool_parser = engine_kwargs.pop("tool_parser", engine_kwargs.pop("tool_call_parser", None))
     if tool_parser is not None:
-        openai_kwargs["tool_parser"] = tool_parser
+        wrapper_kwargs["tool_parser"] = tool_parser
 
     # Sampling params for OpenAI-style requests (Harbor terminal-bench rollouts)
     openai_sampling = engine_kwargs.pop("openai_sampling_params", None)
     if openai_sampling is not None:
-        openai_kwargs["openai_sampling_params"] = openai_sampling
+        wrapper_kwargs["openai_sampling_params"] = openai_sampling
 
     if TIS_WARNING_KEY in engine_kwargs:
-        openai_kwargs[TIS_WARNING_KEY] = engine_kwargs.pop(TIS_WARNING_KEY)
+        wrapper_kwargs[TIS_WARNING_KEY] = engine_kwargs.pop(TIS_WARNING_KEY)
 
-    return openai_kwargs
+    return wrapper_kwargs
 
 
 def ensure_token_ids_in_sse_chunk(sse_chunk: str) -> str:
