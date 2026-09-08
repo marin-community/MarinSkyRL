@@ -4,12 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from rigging.telemetry.serialization import EventBody, event_fields
 
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.learner_memory import LearnerMemory
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase
+from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
 
 
 def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch):
@@ -18,7 +20,10 @@ def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch):
             assert experience.rollout_age is not None
             if (local_step + 1) % accumulation_steps == 0:
                 self.update_count += 1
+            monitor = LogRatioMonitor(torch.device("cpu"))
+            monitor.add(torch.ones(1, 600), torch.zeros(1, 600), torch.ones(1, 600))
             return {
+                **monitor.metrics(),
                 "log_ratio_abs_mean": float(self.update_count),
                 "policy_loss": 0.5,
                 "response_length": 1,
@@ -66,6 +71,9 @@ def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch):
     updates = output.metadata["train_status_by_update"]
     assert [row["update_age"] for row in updates] == [0, 1, 2, 3]
     assert [row["log_ratio_abs_mean"] for row in updates] == [1, 2, 3, 4]
+    assert len(updates[0]) > 64
+    with pytest.raises(ValueError, match="at most 64 fields"):
+        event_fields(EventBody(updates[0]), budget=100_000)
 
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = cfg
@@ -79,7 +87,14 @@ def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch):
     monkeypatch.setattr("skyrl_train.trainer.collect_actor_results", lambda infos, refs, **kwargs: refs)
     monkeypatch.setattr("skyrl_train.trainer.ray.get", lambda refs: refs)
     events = []
-    monkeypatch.setattr("skyrl_train.trainer.record_event", lambda *args, **kwargs: events.append((args, kwargs)))
+
+    def validated_event(*args, **kwargs):
+        fields = {key: value for key, value in args[1].items() if value is not None}
+        assert event_fields(EventBody(fields), budget=100_000) == fields
+        assert len(fields) <= 30
+        events.append((args, kwargs))
+
+    monkeypatch.setattr("skyrl_train.trainer.record_event", validated_event)
     mean = trainer.train_critic_and_policy(batch)
     assert mean["log_ratio_abs_mean"] == pytest.approx(2)
     assert [trainer.all_metrics[f"policy/by_update/{k}/update_age"] for k in range(4)] == [0, 1, 2, 3]
