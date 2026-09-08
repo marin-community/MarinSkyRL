@@ -23,6 +23,11 @@ from loguru import logger
 import asyncio
 import multiprocessing as mp
 
+from skyrl_train.config.trajectory_runner_capabilities import (
+    TrajectoryRunnerMode,
+    validate_trajectory_runner_capabilities,
+)
+
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
     from skyrl_train.trajectory_runners.base import TrajectoryRunner
@@ -615,7 +620,13 @@ def skyrl_entrypoint(cfg: DictConfig):
     exp.run()
 
 
-def run_ray_driver(cfg: DictConfig, entrypoint: RemoteFunction, *, failure_message: str = "Training failed") -> None:
+def run_ray_driver(
+    cfg: DictConfig,
+    entrypoint: RemoteFunction,
+    runner_mode: TrajectoryRunnerMode,
+    *,
+    failure_message: str = "Training failed",
+) -> None:
     """Run one packaged experiment entrypoint with the shared Ray driver lifecycle."""
     from skyrl_train.entrypoints.ray_lifecycle import exit_without_ray_destructors, shutdown_ray  # noqa: PLC0415
     from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry  # noqa: PLC0415
@@ -625,6 +636,7 @@ def run_ray_driver(cfg: DictConfig, entrypoint: RemoteFunction, *, failure_messa
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
 
     validate_cfg(cfg)
+    validate_trajectory_runner_capabilities(cfg, runner_mode)
     configure_progress(cfg.trainer.progress)
 
     initialize_ray(cfg)
@@ -662,7 +674,7 @@ def run_ray_driver(cfg: DictConfig, entrypoint: RemoteFunction, *, failure_messa
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    run_ray_driver(cfg, skyrl_entrypoint)
+    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.SKYRL_GYM)
 
 
 if __name__ == "__main__":

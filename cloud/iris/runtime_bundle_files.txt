@@ -19,6 +19,7 @@ cloud/iris/telemetry_env.py
 cloud/iris/training_driver.py
 marinskyrl/__init__.py
 marinskyrl/checkpoint_paths.py
+marinskyrl/harbor_agent_names.py
 marinskyrl/hf_model.py
 marinskyrl/resource_locator.py
 marinskyrl/runtime_options.py

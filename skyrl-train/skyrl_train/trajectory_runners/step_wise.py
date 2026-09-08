@@ -202,6 +202,8 @@ class StepWiseRolloutCollector:
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
                     added_eos = True
                     output_ids.append(self.tokenizer.eos_token_id)
+                    if response_logprobs is not None:
+                        response_logprobs.append(0.0)
 
             # 2. Environment step
             publish_rollout_evidence(
