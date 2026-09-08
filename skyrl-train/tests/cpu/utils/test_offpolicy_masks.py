@@ -12,6 +12,7 @@ from skyrl_train.utils.policy_losses import compute_policy_objective, LossScalin
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry, rollout_logprobs_required
 from skyrl_train.utils.offpolicy_masks import validate_offpolicy_masks
 from tests.offpolicy_mask_reference import minimal_m2_reference, offpolicy_keep_reference
+from tests.offpolicy_mask_reference import regular_correction_reference_policy_loss
 
 
 def mask_config(**changes):
@@ -357,3 +358,28 @@ def test_disabled_actual_objective_is_exactly_existing_loss():
 def test_invalid_transform_config_fails_closed(changes):
     with pytest.raises(ValueError):
         validate_offpolicy_masks(mask_config(**{"offpolicy_mask.enabled": True, **changes}))
+
+
+@pytest.mark.parametrize("mode", ["offpolicy", "m2"])
+def test_native_actor_reference_supplies_matching_nontrivial_gradient(mode):
+    current = torch.full((1, 10), -2.0, dtype=torch.float32, requires_grad=True)
+    delta = (
+        torch.tensor([[-0.221, -0.220, -0.219, -0.218, -0.217, -0.216, -0.215, -0.214, -0.213, 0.05]])
+        if mode == "m2"
+        else torch.zeros_like(current)
+    )
+    old = current.detach() - delta
+    rollout = old - torch.tensor([[0.0, 2.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
+    adv = -torch.ones_like(current)
+    mask = torch.ones_like(current)
+    cfg = mask_config(**{("m2_mask.enabled" if mode == "m2" else "offpolicy_mask.enabled"): True})
+    actual = objective(cfg, current, old, rollout, adv, mask)
+    ref_current = current.detach().clone().requires_grad_()
+    expected, _ = regular_correction_reference_policy_loss(ref_current, old, adv, cfg, mask, rollout, mode=mode)
+    torch.testing.assert_close(actual.policy_loss, expected, atol=1e-6, rtol=0)
+    actual_gradient = torch.autograd.grad(actual.policy_loss, current)[0]
+    expected_gradient = torch.autograd.grad(expected, ref_current)[0]
+    torch.testing.assert_close(actual_gradient, expected_gradient, atol=1e-6, rtol=0)
+    assert torch.count_nonzero(actual_gradient) > 0
+    assert (actual_gradient == 0).sum() > 0
+    assert actual.metrics["m2_mask/masked_fraction" if mode == "m2" else "offpolicy_mask/masked_fraction"] > 0
