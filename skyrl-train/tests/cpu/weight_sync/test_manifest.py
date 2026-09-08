@@ -2,12 +2,13 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import replace
+from dataclasses import asdict, replace
+import hashlib
 
 import pytest
 import torch
 
-from skyrl_train.weight_sync.manifest import TensorSpec, build_manifest, pack_bucket, unpack_bucket
+from skyrl_train.weight_sync.manifest import TensorSpec, build_manifest, pack_bucket, parse_manifest, unpack_bucket
 from skyrl_train.weight_sync.expert_scatter import scatter_grug_experts
 
 
@@ -99,6 +100,34 @@ def test_manifest_identity_includes_tensor_offsets_and_capacity():
     assert left.manifest_id != right.manifest_id
     assert len(left.manifest_id) == 64
     assert json.loads(json.dumps(left.manifest_id)) == left.manifest_id
+
+
+def test_transported_manifest_roundtrip_preserves_plan_and_identity():
+    original = build_manifest(specs(), 40)
+    payload = json.loads(json.dumps(asdict(original)))
+    received = parse_manifest(payload, original.manifest_id)
+    assert received == original and received.manifest_id == original.manifest_id
+
+
+@pytest.mark.parametrize("corruption", ["offset", "missing_slice", "duplicate", "dtype", "fields", "digest"])
+def test_transport_rejects_malformed_manifest_even_with_recomputed_digest(corruption):
+    original = build_manifest(specs(), 40)
+    payload = json.loads(json.dumps(asdict(original)))
+    if corruption == "offset":
+        payload["entries"][1]["tensor_offset"] += 1
+    elif corruption == "missing_slice":
+        payload["entries"].pop(2)
+    elif corruption == "duplicate":
+        payload["entries"].append(payload["entries"][0])
+    elif corruption == "dtype":
+        payload["entries"][1]["wire_dtype"] = "float32"
+    elif corruption == "fields":
+        payload["entries"][0]["unexpected"] = 1
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if corruption == "digest":
+        digest = "0" * 64
+    with pytest.raises(ValueError):
+        parse_manifest(payload, digest)
 
 
 @pytest.mark.parametrize("expert_map", [[0, 1, 2, -1, -1, -1, -1], [-1, 2, -1, 0, -1, 1, -1]])
