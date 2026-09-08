@@ -1905,6 +1905,14 @@ def load_config_extra_env(rl_config_path: str) -> dict[str, str]:
         if isinstance(v, bool):
             v = int(v)
         out[str(k)] = str(v)
+    if raw.get("trainer", {}).get("algorithm", {}).get("weight_sync_invariant_env", False):
+        # Ray drops numeric words before deduplicating worker stdout. Preserve each
+        # pre-PG receipt, while retaining both configured and inherited allowlists.
+        key = "RAY_DEDUP_LOGS_ALLOW_REGEX"
+        expressions = dict.fromkeys(
+            value for value in (os.environ.get(key), out.get(key), "WEIGHT_SYNC_ENVIRONMENT_PRE_PG") if value
+        )
+        out[key] = "|".join(f"(?:{value})" for value in expressions)
     return out
 
 
