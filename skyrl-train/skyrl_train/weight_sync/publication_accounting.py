@@ -65,7 +65,17 @@ class PublicationRequestAccounting:
             }
         )
 
-    def begin_pause(self, *, frontend_ids: list[str], monotonic_time: float) -> None:
+    def begin_pause(
+        self,
+        *,
+        frontend_ids: list[str],
+        monotonic_time: float,
+        frontend_internal_to_external: dict[str, str] | None = None,
+    ) -> None:
+        if frontend_internal_to_external is not None:
+            external_ids = list(frontend_internal_to_external.values())
+            if len(set(external_ids)) != len(external_ids) or sorted(external_ids) != sorted(frontend_ids):
+                raise ValueError("native frontend identity mapping is not one-to-one with tracked requests")
         if not set(frontend_ids) <= self.active:
             raise ValueError("native frontend includes an untracked request")
         self.pause_count += 1
@@ -75,6 +85,7 @@ class PublicationRequestAccounting:
                 "monotonic_time": monotonic_time,
                 "active_before": sorted(self.active),
                 "frontend_before": sorted(frontend_ids),
+                "frontend_internal_to_external": frontend_internal_to_external,
             }
         )
 
