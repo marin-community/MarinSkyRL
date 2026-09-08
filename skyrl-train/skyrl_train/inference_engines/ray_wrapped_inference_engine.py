@@ -194,8 +194,12 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
-    async def read_publication_request_state(self):
-        return await self.inference_engine_actor.read_publication_request_state.remote()
+    async def read_publication_request_state(
+        self, initial_policy_version: int | None = None, drain_accounting: bool = False
+    ):
+        return await self.inference_engine_actor.read_publication_request_state.remote(
+            initial_policy_version=initial_policy_version, drain_accounting=drain_accounting
+        )
 
     async def begin_publication_timing(self, step: int):
         return await self.inference_engine_actor.begin_publication_timing.remote(step)

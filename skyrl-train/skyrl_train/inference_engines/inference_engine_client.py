@@ -860,8 +860,15 @@ class InferenceEngineClient(InferenceEngineInterface):
         with self._routing_lock:
             return tuple(self._generation_aborts)
 
-    async def read_publication_request_state(self):
-        return await self._run_on_all_engines("read_publication_request_state")
+    async def read_publication_request_state(
+        self, initial_policy_version: int | None = None, drain_accounting: bool = False
+    ):
+        kwargs = {}
+        if initial_policy_version is not None:
+            kwargs["initial_policy_version"] = initial_policy_version
+        if drain_accounting:
+            kwargs["drain_accounting"] = True
+        return await self._run_on_all_engines("read_publication_request_state", **kwargs)
 
     async def begin_publication_timing(self, step: int):
         return await self._run_on_all_engines("begin_publication_timing", step=step)

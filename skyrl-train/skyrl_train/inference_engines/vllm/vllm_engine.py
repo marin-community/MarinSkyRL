@@ -1,4 +1,5 @@
 from skyrl_train.weight_sync.publication_version import PublicationVersionHistory
+from skyrl_train.weight_sync.publication_accounting import PublicationRequestAccounting
 import json
 import os
 import threading
@@ -1540,6 +1541,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def _create_engine(self, *args, **kwargs):
         self._publication_output_probe = None
+        self._publication_requests = None
         self._publication_versions = PublicationVersionHistory()
         openai_kwargs = pop_openai_kwargs(kwargs)
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
@@ -1824,13 +1826,34 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path"
                 )
 
-        async for request_output in self.llm.generate(
-            prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
-            sampling_params=sampling_params,
-            request_id=request_id,
-            lora_request=lora_request,
-        ):
-            final_output = request_output
+        ledger = getattr(self, "_publication_requests", None)
+        if ledger is not None:
+            ledger.start(request_id)
+        try:
+            async for request_output in self.llm.generate(
+                prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
+                sampling_params=sampling_params,
+                request_id=request_id,
+                lora_request=lora_request,
+            ):
+                final_output = request_output
+        except BaseException as error:
+            if ledger is not None:
+                ledger.finish(request_id, reason=type(error).__name__, tokens=0, first_token_time=None)
+            raise
+        else:
+            if ledger is not None:
+                output = final_output.outputs[0] if final_output is not None else None
+                ledger.finish(
+                    request_id,
+                    reason=str(output.finish_reason) if output is not None else "missing_output",
+                    tokens=len(output.token_ids) if output is not None else 0,
+                    first_token_time=(
+                        final_output.metrics.first_token_ts
+                        if final_output is not None and final_output.metrics is not None
+                        else None
+                    ),
+                )
 
         if self._publication_output_probe is not None and final_output is not None:
             reason = final_output.outputs[0].finish_reason
@@ -2003,7 +2026,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Read actual worker GPUs and communicator ranks through the SkyRL extension."""
         return await self._get_engine().collective_rpc("report_device_placement")
 
-    async def read_publication_request_state(self):
+    async def read_publication_request_state(
+        self, initial_policy_version: int | None = None, drain_accounting: bool = False
+    ):
         """Read pause precursor evidence in the engine actor's monotonic domain."""
         engine = self._get_engine()
         if self._publication_output_probe is None:
@@ -2023,7 +2048,18 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             for kind in namespaces
         )
         states = list(engine.output_processor.request_states.values())
+        if initial_policy_version is not None:
+            if states or self._publication_requests is not None or self._publication_versions.boundaries:
+                raise ValueError("request accounting must initialize before any generation")
+            if not shared_namespaces:
+                raise ValueError("initial weight version requires a shared engine clock domain")
+            self._publication_requests = PublicationRequestAccounting()
+            self._publication_versions.record_resume(time.monotonic(), initial_policy_version)
+        accounting = (
+            self._publication_requests.drain() if drain_accounting and self._publication_requests is not None else None
+        )
         return {
+            "request_accounting": accounting,
             "host": socket.gethostname(),
             "actor_pid": os.getpid(),
             "core_pids": core_pids,
@@ -2266,6 +2302,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # its paused state, and clears the KV/prefix cache before returning. Unlike
         # AsyncLLM.abort(), it cannot report success merely because the frontend
         # output_processor already removed the request IDs.
+        if self._publication_requests is not None:
+            self._publication_requests.begin_pause(
+                frontend_ids=list(engine.output_processor.request_states), monotonic_time=time.monotonic()
+            )
         await engine.pause_generation(mode="abort", clear_cache=True)
         logger.info(f"pause_generation() finished, aborted {outstanding_requests} requests and paused EngineCore")
 
