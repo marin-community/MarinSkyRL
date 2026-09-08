@@ -1064,3 +1064,16 @@ def test_validate_cfg_selects_temperature_compatible_tis_logprobs(temperature):
     assert cfg.generator.engine_init_kwargs.logprobs_mode == "processed_logprobs"
     assert cfg.generator.engine_init_kwargs.generation_config == "vllm"
     assert cfg.generator.sampling_params.min_tokens == 0
+
+
+def test_validate_cfg_rejects_raw_tis_logprobs():
+    cfg = _validatable_dummy_config()
+    cfg.trainer.algorithm.use_tis = True
+    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.inference_engine_expert_parallel_size = 1
+    cfg.generator.num_inference_engines = 1
+    OmegaConf.update(cfg.generator.engine_init_kwargs, "logprobs_mode", "raw_logprobs", force_add=True)
+
+    with pytest.raises(ValueError, match="TIS requires processed rollout logprobs"):
+        validate_cfg(cfg)

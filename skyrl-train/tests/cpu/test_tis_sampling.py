@@ -71,12 +71,10 @@ def test_tis_warns_about_unvalidated_sampling(settings):
         {"logits_processors": ["custom.Processor"]},
     ],
 )
-def test_tis_warns_and_preserves_conflicting_engine_options(options):
+def test_tis_rejects_conflicting_engine_options(options):
     generator = OmegaConf.create({"sampling_params": {"temperature": 1.2}, "engine_init_kwargs": options})
-    with pytest.warns(UserWarning, match="TIS"):
+    with pytest.raises(ValueError, match="TIS requires processed rollout logprobs"):
         configure_tis_sampling(generator)
-    for key, value in options.items():
-        assert generator.engine_init_kwargs[key] == value
 
 
 @pytest.mark.parametrize("logprobs", [0, 1, True])

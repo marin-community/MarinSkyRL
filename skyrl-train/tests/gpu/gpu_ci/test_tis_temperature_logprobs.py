@@ -1,7 +1,7 @@
-"""Opt-in single-GPU parity check with an offline, randomly initialized model.
+"""Single-GPU TIS parity check with an offline, randomly initialized model.
 
 Run in the pinned vLLM environment:
-    pytest skyrl-train/tests/gpu/test_tis_temperature_logprobs.py
+    pytest skyrl-train/tests/gpu/gpu_ci/test_tis_temperature_logprobs.py
 """
 
 import torch
@@ -54,6 +54,7 @@ def model_and_engine(tmp_path_factory):
 
 
 @pytest.mark.parametrize("temperature", [0.7, 1.2])
+@pytest.mark.vllm
 def test_same_weights_temperature_scaled_tis_ratios_are_one(model_and_engine, temperature):
     model, engine = model_and_engine
     generator = OmegaConf.create(

@@ -64,7 +64,7 @@ def warn_if_tis_sampling_mismatch(params: Mapping[str, Any]) -> None:
 
 
 def configure_tis_sampling(generator: DictConfig) -> None:
-    """Default to processed logprobs and warn about incompatible explicit settings."""
+    """Configure the probability convention required by TIS."""
     warn_if_tis_sampling_mismatch(generator.sampling_params)
     options = generator.engine_init_kwargs
     mismatches = []
@@ -74,12 +74,9 @@ def configure_tis_sampling(generator: DictConfig) -> None:
     if options.get("override_generation_config") or options.get("logits_processors"):
         mismatches.append("engine-level generation overrides or logits processors")
     if mismatches:
-        warnings.warn(
-            "TIS probability matching is not validated with "
+        raise ValueError(
+            "TIS requires processed rollout logprobs without checkpoint or engine-level generation overrides: "
             + "; ".join(mismatches)
-            + ". Continuing with the configured engine options.",
-            UserWarning,
-            stacklevel=2,
         )
     for key, value in TIS_NEUTRAL_SAMPLING.items():
         if generator.sampling_params.get(key) is None:
