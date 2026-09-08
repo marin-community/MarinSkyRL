@@ -200,7 +200,7 @@ def compose_precursor(spec, model_path):
             overrides=overrides
             + [
                 "++generator.num_inference_engines=1",
-                "generator.max_num_seqs=8",
+                "generator.max_num_seqs=4",
                 f"trainer.policy.model.path={model_path}",
             ],
         )

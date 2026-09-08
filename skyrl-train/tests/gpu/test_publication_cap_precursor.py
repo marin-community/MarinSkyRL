@@ -20,7 +20,7 @@ from tests.gpu.publication_cap_protocol import audit_queue, compose_precursor, m
 
 
 @pytest.mark.vllm
-def test_cap8_preserves_queued_requests_across_original_pause():
+def test_cap4_preserves_queued_requests_across_original_pause():
     spec = json.loads(os.environ["PUBLICATION_CAP_SPEC"])
     assert spec["model"] == "Qwen/Qwen3-0.6B"
     assert spec["revision"] == "c1899de289a04d12100db370d81485cdf75e47ca"

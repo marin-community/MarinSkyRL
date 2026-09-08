@@ -54,7 +54,7 @@ def prepare(spec):
         ray_wrapped_inference_engine, "create_ray_wrapped_inference_engines", side_effect=lambda **kwargs: kwargs
     ):
         allocation = create_ray_wrapped_inference_engines_from_config(cfg, None, tokenizer)
-    assert allocation["num_inference_engines"] == 1 and allocation["max_num_seqs"] == 8
+    assert allocation["num_inference_engines"] == 1 and allocation["max_num_seqs"] == 4
     assert allocation["tensor_parallel_size"] == allocation["pipeline_parallel_size"] == 1
     assert allocation["expert_parallel_size"] == allocation["data_parallel_size"] == 1
     assert allocation["seed"] == 17 and allocation["model_dtype"] == "bfloat16"
@@ -68,7 +68,7 @@ def prepare(spec):
     result["sampling"] = sampling
     result["allocation"] = {key: value for key, value in allocation.items() if key not in {"tokenizer", "shared_pg"}}
     print("PUBLICATION_CAP_CPU_INPUTS_JSON " + json.dumps(result, sort_keys=True), flush=True)
-    print("PUBLICATION_CAP_CPU_INPUTS_PASS zero_cuda=1 requests=64 max_tokens=1024 max_num_seqs=8", flush=True)
+    print("PUBLICATION_CAP_CPU_INPUTS_PASS zero_cuda=1 requests=64 max_tokens=1024 max_num_seqs=4", flush=True)
 
 
 if __name__ == "__main__":
