@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import ray
 import torch
 from datasets import Dataset
 from omegaconf import OmegaConf
@@ -33,6 +34,20 @@ from tests.cpu.test_fully_async_publication_cadence import (
     StartupLearnerService,
     make_driver,
 )
+
+
+def resolve_cpu_actor_results(monkeypatch):
+    """Replace CPU learner return values while retaining actual Ray registry I/O."""
+    original_get = ray.get
+
+    def resolve(refs, *args, **kwargs):
+        if isinstance(refs, ray.ObjectRef):
+            return original_get(refs, *args, **kwargs)
+        if isinstance(refs, list) and any(isinstance(ref, ray.ObjectRef) for ref in refs):
+            return original_get(refs, *args, **kwargs)
+        return refs
+
+    monkeypatch.setattr(ray, "get", resolve)
 
 
 class Rows:
@@ -185,7 +200,7 @@ def checkpoint_trainer(cfg, dataloader, path, *, step):
 @pytest.mark.parametrize("workers", [0, 8])
 @pytest.mark.parametrize("step", [2, 4, 6, 8])
 def test_real_trainer_checkpoint_restores_sync_cursor_or_next_epoch(workers, step, tmp_path, monkeypatch):
-    monkeypatch.setattr("skyrl_train.trainer.ray.get", lambda result: result)
+    resolve_cpu_actor_results(monkeypatch)
     cfg = config(workers)
     source = loader(cfg)
     epoch = (step - 1) // 4
@@ -346,7 +361,7 @@ async def test_actual_sync_driver_advances_the_shared_source_epoch(monkeypatch):
     )
     trainer.trajectory_runner.source_uids = []
     trainer.policy_model = StartupLearnerService()
-    monkeypatch.setattr("skyrl_train.trainer.ray.get", lambda refs: refs)
+    resolve_cpu_actor_results(monkeypatch)
     await asyncio.wait_for(trainer._train_loop(), timeout=10)
     expected = []
     for epoch in range(3):
@@ -462,7 +477,7 @@ async def test_sync_and_async_c1a0_consume_identical_uid_sets_per_step(monkeypat
         interval=1, age=0, steps=8, driver_type=SyncSourceOrderDriver, runner_type=PromptSetRecordingRunner
     )
     synchronous.policy_model = StartupLearnerService()
-    monkeypatch.setattr("skyrl_train.trainer.ray.get", lambda refs: refs)
+    resolve_cpu_actor_results(monkeypatch)
     await asyncio.wait_for(synchronous._train_loop(), timeout=10)
     await asyncio.wait_for(asynchronous._train_loop(), timeout=10)
 
@@ -507,7 +522,7 @@ def test_prompt_sequence_is_identical_across_minibatch_counts():
 
 
 def test_legacy_checkpoint_does_not_infer_successful_optimizer_updates(tmp_path, monkeypatch):
-    monkeypatch.setattr("skyrl_train.trainer.ray.get", lambda result: result)
+    resolve_cpu_actor_results(monkeypatch)
     cfg = config(workers=0)
     original = checkpoint_trainer(cfg, loader(cfg), tmp_path, step=0)
     original.save_checkpoints()
