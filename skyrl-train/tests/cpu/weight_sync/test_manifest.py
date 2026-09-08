@@ -2,11 +2,13 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 
 import pytest
 import torch
 
 from skyrl_train.weight_sync.manifest import TensorSpec, build_manifest, pack_bucket, unpack_bucket
+from skyrl_train.weight_sync.expert_scatter import scatter_grug_experts
 
 
 def specs():
@@ -97,3 +99,57 @@ def test_manifest_identity_includes_tensor_offsets_and_capacity():
     assert left.manifest_id != right.manifest_id
     assert len(left.manifest_id) == 64
     assert json.loads(json.dumps(left.manifest_id)) == left.manifest_id
+
+
+@pytest.mark.parametrize("expert_map", [[0, 1, 2, -1, -1, -1, -1], [-1, 2, -1, 0, -1, 1, -1]])
+def test_grug_expert_scatter_indices_match_reference_loader(expert_map):
+    torch.manual_seed(73)
+    tensors = {
+        f"model.layers.0.mlp.experts.{projection}.weight": torch.randn(shape, dtype=torch.bfloat16)
+        for projection, shape in (("gate_proj", (7, 2, 3)), ("up_proj", (7, 2, 3)), ("down_proj", (7, 3, 2)))
+    }
+    # Copying must preserve NaN payloads as well as ordinary values.
+    for tensor in tensors.values():
+        tensor.view(torch.int16)[:, 0, 0] = 32705
+    manifest = build_manifest([TensorSpec(name, tuple(t.shape), "bfloat16", True) for name, t in tensors.items()], 40)
+    w13, w2 = torch.full((3, 4, 3), -99, dtype=torch.bfloat16), torch.full((3, 3, 2), -99, dtype=torch.bfloat16)
+    storage = (w13.data_ptr(), w2.data_ptr())
+    buffer = torch.empty(40, dtype=torch.uint8)
+    copied = 0
+    for bucket_id in reversed(range(manifest.bucket_count)):
+        pack_bucket(manifest, bucket_id, tensors, buffer)
+        for entry, view in unpack_bucket(manifest, bucket_id, buffer):
+            copied += scatter_grug_experts(entry, view, w13, w2, expert_map, "TRITON")
+    # Independent full-tensor reference: TP1 RoutedExperts puts w1 before w3,
+    # and w2 has no split. Selecting full global experts avoids chunk arithmetic.
+    local_order = sorted((local, global_id) for global_id, local in enumerate(expert_map) if local >= 0)
+    indices = [global_id for _, global_id in local_order]
+    gate, up, down = tensors.values()
+    expected_w13 = torch.cat([gate[indices], up[indices]], dim=1)
+    assert torch.equal(w13.view(torch.uint8), expected_w13.view(torch.uint8))
+    assert torch.equal(w2.view(torch.uint8), down[indices].view(torch.uint8))
+    assert copied == 9
+    assert (w13.data_ptr(), w2.data_ptr()) == storage
+
+
+@pytest.mark.parametrize("corruption", ["backend", "offset", "map", "shape"])
+def test_expert_scatter_rejects_incompatible_layout_before_writing(corruption):
+    manifest = build_manifest(
+        [TensorSpec("model.layers.0.mlp.experts.gate_proj.weight", (7, 2, 3), "bfloat16", True)], 40
+    )
+    entry = manifest.entries[1]
+    source = torch.ones(entry.shape, dtype=torch.bfloat16)
+    w13, w2 = torch.zeros((3, 4, 3), dtype=torch.bfloat16), torch.zeros((3, 3, 2), dtype=torch.bfloat16)
+    expert_map, backend = [-1, 2, -1, 0, -1, 1, -1], "TRITON"
+    if corruption == "backend":
+        backend = "FLASHINFER_TRTLLM"
+    elif corruption == "offset":
+        entry = replace(entry, expert_start=0)
+    elif corruption == "map":
+        expert_map[1] = 0
+    else:
+        w2 = torch.zeros((3, 2, 3), dtype=torch.bfloat16)
+    with pytest.raises(ValueError):
+        scatter_grug_experts(entry, source, w13, w2, expert_map, backend)
+    assert torch.count_nonzero(w13) == 0
+    assert torch.count_nonzero(w2) == 0
