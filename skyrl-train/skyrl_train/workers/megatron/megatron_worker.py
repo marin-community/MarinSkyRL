@@ -58,7 +58,7 @@ from skyrl_train.workers.worker import (
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper, MegatronPolicyMicroBatch
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
-from skyrl_train.weight_sync.publication_timing import PublicationStageTimer
+from skyrl_train.weight_sync.publication_timing import PublicationStageTimer, record_receiver_publication_stages
 from skyrl_train.telemetry import record_event
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode, weight_sync_dtype
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
@@ -960,6 +960,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             torch.distributed.all_gather_object(ranks, {"rank": rank, "stages": stages})
             if rank == 0:
                 receivers = await inference_engine_client.read_publication_timing()
+                record_receiver_publication_stages(receivers, step=step)
                 self._publication_timing_receipt = {"trainer": ranks, "receiver": receivers}
         return None
 

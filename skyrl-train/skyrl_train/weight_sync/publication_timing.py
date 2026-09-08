@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+import math
 from time import perf_counter
 
 import torch
@@ -94,3 +95,53 @@ def publication_stage_walls(receipt: dict) -> dict[str, float]:
             key = f"weight_broadcast/{stage}"
             walls[key] = max(walls.get(key, 0.0), values["wall_seconds"])
     return walls
+
+
+def record_receiver_publication_stages(receivers: list[list[dict]], *, step: int) -> None:
+    """Export native receiver clocks through the trainer's telemetry lifecycle.
+
+    vLLM worker processes return receipts but do not own an exporter. Keep the
+    measured worker identity distinct from the trainer that transports the event.
+    Validate the whole batch before emitting any event; do not remeasure clocks.
+    """
+    from skyrl_train.telemetry import record_event
+
+    events = []
+    for engine_index, workers in enumerate(receivers):
+        if not workers:
+            raise ValueError("missing weight-sync receiver workers")
+        ranks = set()
+        for worker in workers:
+            rank = worker["rank"]
+            if rank in ranks or worker["step"] != step:
+                raise ValueError("duplicate receiver rank or wrong weight-sync step")
+            ranks.add(rank)
+            if not worker["hostname"] or worker["pid"] <= 0:
+                raise ValueError("missing weight-sync receiver origin")
+            if not worker["stages"]:
+                raise ValueError("missing weight-sync receiver stages")
+            for stage, values in worker["stages"].items():
+                if values["calls"] <= 0 or not math.isfinite(values["wall_seconds"]) or values["wall_seconds"] < 0:
+                    raise ValueError("invalid weight-sync receiver wall clock")
+                gpu_ms = values["gpu_ms"]
+                if gpu_ms is not None and (not math.isfinite(gpu_ms) or gpu_ms < 0):
+                    raise ValueError("invalid weight-sync receiver CUDA clock")
+                events.append(
+                    (
+                        values,
+                        {
+                            "role": "inference",
+                            "exporter_role": "trainer",
+                            "engine_index": str(engine_index),
+                            "origin_host": worker["hostname"],
+                            "origin_pid": str(worker["pid"]),
+                            "rank": str(rank),
+                            "step": str(step),
+                            "stage": stage,
+                        },
+                    )
+                )
+    if not events:
+        raise ValueError("missing weight-sync receiver receipts")
+    for values, attributes in events:
+        record_event("publication_stage", values, attributes=attributes)
