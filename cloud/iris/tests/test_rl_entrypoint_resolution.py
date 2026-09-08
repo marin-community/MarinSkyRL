@@ -40,6 +40,40 @@ context_budget:
     assert parsed.entrypoint == "skyrl_train.entrypoints.terminal_bench"
 
 
+def test_rl_config_rejects_removed_opd_entrypoint(tmp_path):
+    config = tmp_path / "rl.yaml"
+    config.write_text(
+        """\
+entrypoint: terminal_bench_teacher_logits
+context_budget:
+  request_window_tokens: 2
+  max_new_tokens_per_turn: 1
+  max_turns: 1
+"""
+    )
+
+    with pytest.raises(ValueError, match="terminal_bench_teacher_logits"):
+        parse_rl_config(str(config))
+
+
+def test_rl_config_rejects_teacher_configuration(tmp_path):
+    config = tmp_path / "rl.yaml"
+    config.write_text(
+        """\
+entrypoint: terminal_bench
+context_budget:
+  request_window_tokens: 2
+  max_new_tokens_per_turn: 1
+  max_turns: 1
+teacher:
+  model_path: Qwen/Qwen3-4B
+"""
+    )
+
+    with pytest.raises(ValueError, match="teacher configuration is not supported"):
+        parse_rl_config(str(config))
+
+
 def test_terminal_bench_config_group_is_packaged_with_the_trainer():
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="ppo_base_config", overrides=["+terminal_bench_config=terminal_bench"])
