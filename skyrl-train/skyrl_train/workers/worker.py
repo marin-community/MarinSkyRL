@@ -1192,6 +1192,8 @@ class PolicyWorkerBase(Worker):
 
         torch.distributed.barrier()
         status_mean = policy_training_metrics(all_metrics, policy_update_steps / accumulation_steps)
+        status_mean["update_age_mean"] = sum(row["update_age"] for row in status_by_update) / len(status_by_update)
+        status_mean["update_age_max"] = max(row["update_age"] for row in status_by_update)
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()

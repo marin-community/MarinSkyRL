@@ -771,6 +771,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler.stop_trace()
 
         status_mean = policy_training_metrics(all_metrics, policy_update_steps)
+        status_mean["update_age_mean"] = sum(row["update_age"] for row in status_by_update) / len(status_by_update)
+        status_mean["update_age_max"] = max(row["update_age"] for row in status_by_update)
         if status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0 and not self._warned_exact_unit_policy_ratio:
             logger.warning(
                 "Megatron's recomputed old log probabilities exactly match the training forward for every policy "
