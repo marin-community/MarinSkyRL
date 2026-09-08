@@ -1108,9 +1108,15 @@ def test_tis_diagnostics_all_masked_batch_emits_zeros_not_nan():
 
 
 @pytest.mark.parametrize("temperature", [0.7, 1.2])
-def test_validate_cfg_selects_temperature_compatible_tis_logprobs(temperature):
+@pytest.mark.parametrize(
+    ("use_tis", "policy_loss_type"),
+    [(True, "regular"), (False, "behavior_clip")],
+    ids=["tis", "behavior-clip"],
+)
+def test_validate_cfg_configures_behavior_logprob_probability_convention(temperature, use_tis, policy_loss_type):
     cfg = _validatable_dummy_config()
-    cfg.trainer.algorithm.use_tis = True
+    cfg.trainer.algorithm.use_tis = use_tis
+    cfg.trainer.algorithm.policy_loss_type = policy_loss_type
     cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
     cfg.generator.sampling_params.temperature = temperature
     cfg.generator.inference_engine_tensor_parallel_size = 1
@@ -1118,8 +1124,10 @@ def test_validate_cfg_selects_temperature_compatible_tis_logprobs(temperature):
     cfg.generator.num_inference_engines = 1
     validate_cfg(cfg)
 
+    assert cfg.generator.sampling_params.logprobs == 0
     assert cfg.generator.engine_init_kwargs.logprobs_mode == "processed_logprobs"
     assert cfg.generator.engine_init_kwargs.generation_config == "vllm"
+    assert cfg.generator.engine_init_kwargs.validate_rollout_logprob_sampling is True
     assert cfg.generator.sampling_params.min_tokens == 0
 
 
@@ -1132,5 +1140,15 @@ def test_validate_cfg_rejects_raw_tis_logprobs():
     cfg.generator.num_inference_engines = 1
     OmegaConf.update(cfg.generator.engine_init_kwargs, "logprobs_mode", "raw_logprobs", force_add=True)
 
-    with pytest.raises(ValueError, match="TIS requires processed rollout logprobs"):
+    with pytest.raises(ValueError, match="processed rollout logprobs"):
+        validate_cfg(cfg)
+
+
+def test_validate_cfg_rejects_behavior_clip_top_p_filter():
+    cfg = _validatable_dummy_config()
+    cfg.trainer.algorithm.use_tis = False
+    cfg.trainer.algorithm.policy_loss_type = "behavior_clip"
+    cfg.generator.sampling_params.top_p = 0.95
+
+    with pytest.raises(ValueError, match="top_p=0.95"):
         validate_cfg(cfg)

@@ -14,7 +14,10 @@ from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
-from skyrl_train.config.tis import TIS_WARNING_KEY, warn_if_tis_sampling_mismatch
+from skyrl_train.config.behavior_logprobs import (
+    ROLLOUT_LOGPROB_VALIDATION_KEY,
+    validate_behavior_logprob_sampling,
+)
 
 # vLLM 0.16+ reorganized entrypoints into sub-packages.
 # Try new paths first, fall back to old paths for backwards compatibility.
@@ -969,9 +972,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
-        if self._warn_on_tis_sampling and request_sampling_params is not None:
+        if self._validate_rollout_logprob_sampling and request_sampling_params is not None:
             if request_sampling_params.get("logprobs") is not None:
-                warn_if_tis_sampling_mismatch(request_sampling_params)
+                validate_behavior_logprob_sampling(request_sampling_params)
 
         assert prompts is None and prompt_token_ids is not None, (
             "VLLMInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
@@ -1080,10 +1083,10 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "Please set `generator.async_engine=true` in your config."
             )
         # Remove wrapper options before constructing vLLM EngineArgs. Both sync
-        # and async wrappers consume sampling overrides and the TIS warning flag.
+        # and async wrappers consume sampling overrides and the rollout-logprob validation flag.
         wrapper_kwargs = pop_vllm_wrapper_kwargs(kwargs)
         self._openai_sampling_params = wrapper_kwargs.pop("openai_sampling_params", {})
-        self._warn_on_tis_sampling = wrapper_kwargs.pop(TIS_WARNING_KEY, False)
+        self._validate_rollout_logprob_sampling = wrapper_kwargs.pop(ROLLOUT_LOGPROB_VALIDATION_KEY, False)
         return vllm.LLM(*args, **kwargs)
 
     async def initialize_worker_numa_affinity(self):
@@ -1506,7 +1509,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         wrapper_kwargs = pop_vllm_wrapper_kwargs(kwargs)
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = wrapper_kwargs.pop("openai_sampling_params", {})
-        self._warn_on_tis_sampling = wrapper_kwargs.pop(TIS_WARNING_KEY, False)
+        self._validate_rollout_logprob_sampling = wrapper_kwargs.pop(ROLLOUT_LOGPROB_VALIDATION_KEY, False)
         if self._openai_sampling_params:
             logger.warning(
                 f"OpenAI API sampling params overridden: "
@@ -1969,7 +1972,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Apply configured sampling params from generator config.
         # Harbor requests may include their own sampling params; we override
         # with the SkyRL generator config so rollout exploration is consistent.
-        apply_openai_sampling(body, self._openai_sampling_params, self._warn_on_tis_sampling)
+        apply_openai_sampling(body, self._openai_sampling_params, self._validate_rollout_logprob_sampling)
 
         # 1. Build request
         try:
@@ -2060,7 +2063,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
 
-        apply_openai_sampling(body, self._openai_sampling_params, self._warn_on_tis_sampling)
+        apply_openai_sampling(body, self._openai_sampling_params, self._validate_rollout_logprob_sampling)
         body["stream"] = True
         body["return_token_ids"] = True  # force vLLM to emit per-chunk token_ids
 

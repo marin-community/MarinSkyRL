@@ -1,7 +1,10 @@
 import json
 from typing import Any, Dict, Protocol
 
-from skyrl_train.config.tis import TIS_WARNING_KEY, warn_if_tis_sampling_mismatch
+from skyrl_train.config.behavior_logprobs import (
+    ROLLOUT_LOGPROB_VALIDATION_KEY,
+    validate_behavior_logprob_sampling,
+)
 
 
 class PrefixCacheStatsLike(Protocol):
@@ -70,8 +73,8 @@ def pop_vllm_wrapper_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     if openai_sampling is not None:
         wrapper_kwargs["openai_sampling_params"] = openai_sampling
 
-    if TIS_WARNING_KEY in engine_kwargs:
-        wrapper_kwargs[TIS_WARNING_KEY] = engine_kwargs.pop(TIS_WARNING_KEY)
+    if ROLLOUT_LOGPROB_VALIDATION_KEY in engine_kwargs:
+        wrapper_kwargs[ROLLOUT_LOGPROB_VALIDATION_KEY] = engine_kwargs.pop(ROLLOUT_LOGPROB_VALIDATION_KEY)
 
     return wrapper_kwargs
 
@@ -114,8 +117,10 @@ def ensure_token_ids_in_sse_chunk(sse_chunk: str) -> str:
     return sse_chunk
 
 
-def apply_openai_sampling(body: Dict[str, Any], sampling_params: Dict[str, Any], warn_on_tis_sampling: bool) -> None:
-    """Apply generator sampling overrides and warn about TIS probability mismatches."""
+def apply_openai_sampling(
+    body: Dict[str, Any], sampling_params: Dict[str, Any], validate_rollout_logprob_sampling: bool
+) -> None:
+    """Apply generator sampling overrides and validate training probabilities."""
     body.update(
         {
             "temperature": sampling_params.get("temperature", 1.0),
@@ -126,5 +131,5 @@ def apply_openai_sampling(body: Dict[str, Any], sampling_params: Dict[str, Any],
     )
     # Completion logprobs=0 requests sampled-token probabilities; False disables chat logprobs.
     logprobs = body.get("logprobs")
-    if warn_on_tis_sampling and logprobs is not None and logprobs is not False:
-        warn_if_tis_sampling_mismatch(body)
+    if validate_rollout_logprob_sampling and logprobs is not None and logprobs is not False:
+        validate_behavior_logprob_sampling(body)
