@@ -1540,11 +1540,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 break
             metrics = await task
             self._background_eval_tasks.pop(0)
-            self.all_metrics.update(metrics)
             # A queued evaluation can finish after later training steps have been logged.
             # Log at the current driver boundary; requested_step remains in metrics/dump.
             self._log_metrics_stdout(metrics, step=self.global_step, kind="eval")
-            self.tracker.log(metrics, step=self.global_step, commit=False)
+            self.tracker.log(metrics, step=self.global_step, commit=True)
             await self.callback_handler.call_event_async(
                 "on_evaluate", requested_state, self._control, metrics=metrics, trainer=self
             )

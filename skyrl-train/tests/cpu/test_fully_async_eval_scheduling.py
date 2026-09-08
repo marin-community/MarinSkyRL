@@ -205,3 +205,59 @@ async def test_base_eval_captures_success_identity_before_await(monkeypatch):
     await RayPPOTrainer.eval(trainer)
     assert observed == [3]
     assert trainer._last_successful_eval_step == 3
+
+
+@pytest.mark.asyncio
+async def test_completed_background_queue_preserves_each_actual_wandb_history_record(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    import wandb
+    from wandb.proto.wandb_internal_pb2 import Record
+    from wandb.sdk.internal.datastore import DataStore
+    from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
+    from skyrl_train.utils.tracking import Tracking
+
+    run = wandb.init(project="cpu-eval-queue", mode="offline", dir=str(tmp_path))
+    tracker = Tracking.__new__(Tracking)
+    tracker.logger = {"wandb": run}
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.global_step = 5
+    trainer.all_metrics = {"policy/loss": 1.0}
+    trainer.tracker = tracker
+    trainer._control = None
+    trainer._log_metrics_stdout = lambda *args, **kwargs: None
+
+    async def callback(*args, **kwargs):
+        return None
+
+    trainer.callback_handler = SimpleNamespace(call_event_async=callback)
+    trainer._background_eval_tasks = []
+    for requested in (4, 5):
+        future = asyncio.get_running_loop().create_future()
+        future.set_result({"eval/requested_at_step": requested, "eval/all/avg_score": requested / 10})
+        trainer._background_eval_tasks.append((future, SimpleNamespace(global_step=requested)))
+    try:
+        await trainer._drain_background_evaluations(wait=True)
+    finally:
+        tracker.finish()
+    assert trainer.all_metrics == {"policy/loss": 1.0}
+    files = list(tmp_path.rglob("*.wandb"))
+    assert len(files) == 1
+    store = DataStore()
+    store.open_for_scan(str(files[0]))
+    histories = []
+    try:
+        while (data := store.scan_data()) is not None:
+            record = Record()
+            record.ParseFromString(data)
+            if record.HasField("history"):
+                histories.append(
+                    {item.key or ".".join(item.nested_key): json.loads(item.value_json) for item in record.history.item}
+                )
+    finally:
+        store.close()
+    evaluations = [row for row in histories if "eval/requested_at_step" in row]
+    assert [row["eval/requested_at_step"] for row in evaluations] == [4, 5]
+    assert [row["global_step"] for row in evaluations] == [5, 5]
+    assert [row["eval/all/avg_score"] for row in evaluations] == [0.4, 0.5]
