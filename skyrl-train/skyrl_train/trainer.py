@@ -2183,7 +2183,18 @@ class RayPPOTrainer:
                         **{
                             key: value
                             for key, value in status.items()
-                            if key in ("update_index", "update_age", "raw_grad_norm", "ppo_clip_ratio")
+                            if key
+                            in (
+                                "update_index",
+                                "update_age",
+                                "raw_grad_norm",
+                                "ppo_clip_ratio",
+                                "grad_cosine",
+                                "grad_cosine_valid",
+                                "grad_norm_reduced",
+                                "grad_norm_valid",
+                                "grad_dot",
+                            )
                         },
                         **{
                             f"stale/{key}": status[f"stale/{key}"]

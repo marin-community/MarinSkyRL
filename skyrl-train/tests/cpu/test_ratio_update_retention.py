@@ -12,19 +12,25 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase
 from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
+from skyrl_train.utils.gradient_direction import GradientDirectionTracker
 
 
 @pytest.mark.parametrize("position_window", [256, 128])
-def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch, position_window):
+@pytest.mark.parametrize("grad_enabled", [False, True])
+def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch, position_window, grad_enabled):
     class CpuPolicy(FSDPPolicyWorkerBase):
         def training_step(self, experience, global_step, local_step, accumulation_steps):
             assert experience.rollout_age is not None
+            gradients = {}
             if (local_step + 1) % accumulation_steps == 0:
                 self.update_count += 1
+                if grad_enabled:
+                    gradients = self.grad_tracker.observe([torch.tensor([float(self.update_count)])])
             monitor = LogRatioMonitor(torch.device("cpu"), position_window=position_window)
             monitor.add(torch.ones(1, 600), torch.zeros(1, 600), torch.ones(1, 600))
             return {
                 **monitor.metrics(),
+                **gradients,
                 "log_ratio_abs_mean": float(self.update_count),
                 "policy_loss": 0.5,
                 "raw_grad_norm": float(self.update_count + 10),
@@ -44,6 +50,7 @@ def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch, 
     worker._rank = 0
     worker._is_lora = False
     worker.update_count = 0
+    worker.grad_tracker = GradientDirectionTracker("gpu_fp32", torch.device("cpu"))
     worker.policy_mini_batch_size_per_gpu = 2
     worker.model = SimpleNamespace(model=torch.ones(1))
     worker.strategy = SimpleNamespace(is_rank_0=lambda: False, all_reduce=lambda status: status)
@@ -75,6 +82,10 @@ def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch, 
     updates = output.metadata["train_status_by_update"]
     assert [row["update_age"] for row in updates] == [0, 1, 2, 3]
     assert [row["log_ratio_abs_mean"] for row in updates] == [1, 2, 3, 4]
+    if grad_enabled:
+        assert [row["grad_cosine_valid"] for row in updates] == [0, 1, 1, 1]
+        assert output.metadata["train_status"]["grad_cosine_min"] == 1
+        assert output.metadata["train_status"]["grad_cosine_max"] == 1
     assert len(updates[0]) > 64
     with pytest.raises(ValueError, match="at most 64 fields"):
         event_fields(EventBody(updates[0]), budget=100_000)
@@ -95,7 +106,10 @@ def test_optimizer_statuses_survive_worker_mean_and_driver_logging(monkeypatch, 
     def validated_event(*args, **kwargs):
         fields = {key: value for key, value in args[1].items() if value is not None}
         assert event_fields(EventBody(fields), budget=100_000) == fields
-        assert len(fields) <= 32
+        assert len(fields) == (37 if grad_enabled else 32)
+        if grad_enabled:
+            for key in ("grad_cosine", "grad_cosine_valid", "grad_norm_reduced", "grad_norm_valid", "grad_dot"):
+                assert fields[key] == updates[fields["update_index"]][key]
         assert fields["raw_grad_norm"] == updates[fields["update_index"]]["raw_grad_norm"]
         assert fields["ppo_clip_ratio"] == updates[fields["update_index"]]["ppo_clip_ratio"]
         assert fields[f"stale/pos_first{position_window}/selected_tokens"] > 0
