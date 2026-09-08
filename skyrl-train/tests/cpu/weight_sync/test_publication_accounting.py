@@ -19,7 +19,15 @@ def test_pause_ledger_preserves_queued_and_native_request_identities():
         }
     ]
     assert first["active_ids"] == ["queued-after", "queued-before"]
-    assert first["terminal"] == [{"request_id": "sampling", "reason": "abort", "tokens": 23, "first_token_time": 11.5}]
+    assert first["terminal"] == [
+        {
+            "request_id": "sampling",
+            "reason": "abort",
+            "tokens": 23,
+            "first_token_time": 11.5,
+            "policy_version_at_first_token": None,
+        }
+    ]
     for identity in ["queued-before", "queued-after"]:
         ledger.finish(identity, reason="stop", tokens=10, first_token_time=13.0)
     second = ledger.drain()
@@ -153,6 +161,10 @@ async def test_native_request_wrapper_records_abort_and_preserves_ledger_during_
     assert accounting["active_ids"] == []
     assert accounting["terminal"][0]["reason"] == "abort"
     assert accounting["terminal"][0]["tokens"] == 2
+    assert accounting["terminal"][0]["policy_version_at_first_token"] == 0
+    assert [version for _, version in receipt["policy_version_boundaries"]] == [0, 1]
+    assert receipt["policy_version_boundaries"][0][0] <= accounting["terminal"][0]["first_token_time"]
+    assert accounting["terminal"][0]["first_token_time"] < receipt["policy_version_boundaries"][1][0]
     assert accounting["pauses"][0]["frontend_before"] == ["actual-native-id"]
     assert actor._publication_versions.at_first_token(accounting["terminal"][0]["first_token_time"]) == 0
     assert actor._publication_versions.at_first_token(time.monotonic()) == 1

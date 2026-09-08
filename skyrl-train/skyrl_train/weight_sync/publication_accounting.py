@@ -25,12 +25,26 @@ class PublicationRequestAccounting:
         self.active.add(request_id)
         self.started.append(request_id)
 
-    def finish(self, request_id: str, *, reason: str, tokens: int, first_token_time: float | None) -> None:
+    def finish(
+        self,
+        request_id: str,
+        *,
+        reason: str,
+        tokens: int,
+        first_token_time: float | None,
+        policy_version_at_first_token: int | None = None,
+    ) -> None:
         if request_id not in self.active:
             raise ValueError("terminal request has no active identity")
         self.active.remove(request_id)
         self.terminal.append(
-            {"request_id": request_id, "reason": reason, "tokens": tokens, "first_token_time": first_token_time}
+            {
+                "request_id": request_id,
+                "reason": reason,
+                "tokens": tokens,
+                "first_token_time": first_token_time,
+                "policy_version_at_first_token": policy_version_at_first_token,
+            }
         )
 
     def begin_pause(self, *, frontend_ids: list[str], monotonic_time: float) -> None:
