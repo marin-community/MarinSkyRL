@@ -326,6 +326,12 @@ def _megatron_mini_batch_metrics(
     )
     # World-size-1 pipeline group so the final broadcast_object_list is a no-op.
     monkeypatch.setattr(mmw.mpu, "get_pipeline_model_parallel_last_rank", lambda: 0, raising=False)
+
+    def data_parallel_group(*, with_context_parallel):
+        assert with_context_parallel is False
+        return torch.distributed.group.WORLD
+
+    monkeypatch.setattr(mmw.mpu, "get_data_parallel_group", data_parallel_group, raising=False)
     monkeypatch.setattr(
         mmw.mpu, "get_pipeline_model_parallel_group", lambda: torch.distributed.group.WORLD, raising=False
     )
