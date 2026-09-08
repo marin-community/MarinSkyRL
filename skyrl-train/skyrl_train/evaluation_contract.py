@@ -3,6 +3,7 @@
 
 """Exact answer-contract metrics for explicitly tagged frozen math evaluations."""
 
+import hashlib
 import math
 from collections import defaultdict
 
@@ -46,7 +47,11 @@ def evaluation_contract_metrics(envs, extras, responses, rewards, stops):
             correct = native >= 1.0
         raw = sum(reward) if isinstance(reward, list) else reward
         if not math.isfinite(raw) or not math.isclose(raw, native, abs_tol=1e-12, rel_tol=0):
-            raise ValueError("Evaluation reward differs from its task-native answer contract")
+            raise ValueError(
+                "Evaluation reward differs from its task-native answer contract: "
+                f"env={env}, prompt_sha256={extra.get('extra_info', {}).get('prompt_sha256')}, "
+                f"raw={raw}, native={native}, response_sha256={hashlib.sha256(response.encode()).hexdigest()}"
+            )
         values = (float(correct), float(correct and stop in DEFAULT_ACCEPTED_STOP_REASONS))
         source = (extra.get("data_source") or "unknown").replace("/", "_")
         if source == "all":

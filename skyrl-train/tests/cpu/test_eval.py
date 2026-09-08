@@ -331,7 +331,10 @@ async def test_evaluation_rejects_unsafe_dump_namespace_before_generation(dummy_
 
 
 @pytest.mark.asyncio
-async def test_frozen_math_contract_metrics_preserve_fractional_reward_and_completed_accuracy(dummy_config, tmp_path):
+@pytest.mark.parametrize("append_eos", [False, True])
+async def test_frozen_math_contract_metrics_preserve_fractional_reward_and_completed_accuracy(
+    dummy_config, tmp_path, append_eos
+):
     cfg = dummy_config
     cfg.generator.eval_n_samples_per_prompt = 1
     cfg.generator.trajectory_retention.enabled = False
@@ -367,7 +370,7 @@ async def test_frozen_math_contract_metrics_preserve_fractional_reward_and_compl
         }
         for i, (env, contract, gold, *_rest) in enumerate(specs)
     ]
-    responses = [list(map(ord, row[3])) for row in specs]
+    responses = [list(map(ord, row[3])) + ([151645] if append_eos and row[5] == "stop" else []) for row in specs]
     batch = {
         "prompt_token_ids": [[1]] * 4,
         "response_ids": responses,
@@ -388,8 +391,12 @@ async def test_frozen_math_contract_metrics_preserve_fractional_reward_and_compl
 
 
 class CharacterDecoder:
-    def decode(self, tokens):
-        return "".join(map(chr, tokens))
+    def decode(self, tokens, skip_special_tokens=False):
+        return "".join(
+            "<|im_end|>" if token == 151645 else chr(token)
+            for token in tokens
+            if not (skip_special_tokens and token == 151645)
+        )
 
 
 @pytest.mark.parametrize("alteration", ["reward", "gold", "tag"])
@@ -453,6 +460,6 @@ class CountingDecoder(CharacterDecoder):
     def __init__(self):
         self.decoded_responses = 0
 
-    def decode(self, tokens):
+    def decode(self, tokens, **kwargs):
         self.decoded_responses += 1
-        return super().decode(tokens)
+        return super().decode(tokens, **kwargs)
