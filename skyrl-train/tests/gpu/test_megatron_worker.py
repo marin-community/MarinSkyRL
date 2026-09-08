@@ -249,7 +249,8 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
             sleep_level=2,  # since we explicitly sync weights
         )
 
-        asyncio.run(client.sleep())
+        if not trace:
+            asyncio.run(client.sleep())
 
         policy = init_worker_with_type(
             "policy",
@@ -259,7 +260,8 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
             cfg=cfg,
         )
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-        asyncio.run(client.wake_up(tags=["weights"]))
+        if not trace:
+            asyncio.run(client.wake_up(tags=["weights"]))
         # TODO (erictang000): improve this timing
         # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
         # or ~20 seconds on 8xH100
@@ -286,10 +288,15 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
                             f"wall_s={values['wall_seconds']} gpu_ms={values['gpu_ms']}"
                         )
 
-        policy.offload_to_cpu()
-        asyncio.run(client.wake_up(tags=["kv_cache"]))
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
-        outputs = asyncio.run(run_inference(client, get_test_prompts(model_path), sampling_params))
+        if trace:
+            prompts = [[{"role": "user", "content": "Reply with the number 2."}]]
+            outputs = asyncio.run(run_inference(client, prompts, {"temperature": 0.0, "max_tokens": 16}))
+            assert len(outputs["response_ids"]) == 1 and outputs["response_ids"][0]
+        else:
+            policy.offload_to_cpu()
+            asyncio.run(client.wake_up(tags=["kv_cache"]))
+            sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+            outputs = asyncio.run(run_inference(client, get_test_prompts(model_path), sampling_params))
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
