@@ -6,7 +6,7 @@ import io
 import pytest
 
 from tests.gpu.diagnostics.stage_qwen_correction_fixture import copy_verified
-from tests.correction_fixture_config import correction_actor_config
+from tests.correction_fixture_config import correction_actor_config, register_correction_reference
 
 
 def test_actual_fixture_config_uses_native_token_mean_without_credentials(monkeypatch):
@@ -18,6 +18,29 @@ def test_actual_fixture_config_uses_native_token_mean_without_credentials(monkey
     assert config.trainer.algorithm.loss_reduction == "token_mean"
     assert config.trainer.policy.model.path == "/tmp/immutable-qwen-fixture"
     validate_cfg(config)
+
+
+def test_correction_reference_survives_two_actual_ray_clusters():
+    import ray
+    from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
+
+    handles = []
+    try:
+        for mode in ("offpolicy", "m2"):
+            finalizers = []
+            ray.init(num_cpus=1, include_dashboard=False, log_to_driver=False)
+            try:
+                name = register_correction_reference(mode, finalizers.append)
+                assert PolicyLossRegistry.get(name).keywords["mode"] == mode
+                handles.append(PolicyLossRegistry._ray_actor._actor_id)
+            finally:
+                for finalize in reversed(finalizers):
+                    finalize()
+                ray.shutdown()
+        assert len(handles) == 2 and handles[0] != handles[1]
+    finally:
+        ray.shutdown()
+        PolicyLossRegistry.shutdown_actor()
 
 
 @pytest.mark.parametrize("change", ["none", "wrong_hash", "truncated", "oversized"])

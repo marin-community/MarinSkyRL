@@ -2,18 +2,15 @@
 
 import os
 import json
-from functools import partial
 
 import pytest
 import ray
 import torch
 
-from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.utils import validate_cfg
 from tests.gpu.test_megatron_worker import get_test_training_batch, _megatron_forward
 from tests.gpu.utils import init_worker_with_type
-from tests.offpolicy_mask_reference import regular_correction_reference_policy_loss
-from tests.correction_fixture_config import correction_actor_config
+from tests.correction_fixture_config import correction_actor_config, register_correction_reference
 
 
 @pytest.mark.asyncio
@@ -24,9 +21,7 @@ async def test_megatron_correction_mask_matches_independent_actor(ray_init_fixtu
     assert all("H100" in torch.cuda.get_device_name(index) for index in range(8))
     model_path = os.environ.get("MARINSKYRL_TEST_QWEN_MODEL_PATH")
     assert model_path, "stage the pinned Qwen3-0.6B snapshot before this regional test"
-    reference_name = "test_correction_" + mode
-    PolicyLossRegistry.register(reference_name, partial(regular_correction_reference_policy_loss, mode=mode))
-    request.addfinalizer(lambda: PolicyLossRegistry.unregister(reference_name))
+    reference_name = register_correction_reference(mode, request.addfinalizer)
 
     configs = []
     for reference in (False, True):
