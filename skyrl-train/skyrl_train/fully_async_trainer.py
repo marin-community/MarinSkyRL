@@ -17,6 +17,7 @@ import os
 import time
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
+from skyrl_train.weight_sync.publication_timing import publication_stage_walls
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
@@ -1410,6 +1411,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Install the completed learner update without draining whole rollout groups."""
         if self._published_policy_version == self.global_step:
             return
+        trace_publication = self.cfg.generator.publication_stage_timing
+        if trace_publication:
+            self._record_publication_inflight("before_pause")
         with (
             Timer(timing_name, self.all_timings) as weight_update_timer,
             async_phase_window("publication", step=self.global_step, enabled=self._training_metrics_enabled),
@@ -1425,7 +1429,26 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # New requests are rejected while inference is paused. Release newly
             # eligible producer slots only after the post-broadcast drain and resume.
             await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
+        if trace_publication:
+            self._record_publication_inflight("after_resume")
+            # Derived paused-time overhead, not an independently measured learner-idle span.
+            self.all_timings["publication_stall_seconds"] = max(
+                0.0, weight_update_timer.duration - self.all_timings["weight_broadcast/nccl_send"]
+            )
         self._log_weight_update_completed(reason=reason, duration_seconds=weight_update_timer.duration)
+
+    def _record_publication_inflight(self, moment: str) -> None:
+        for engine, count in enumerate(self.inference_engine_client.publication_inflight_snapshot()):
+            record_event(
+                "publication_inflight",
+                {"count": count},
+                attributes={
+                    "role": TRAINER_ROLE,
+                    "step": str(self.global_step),
+                    "engine_index": str(engine),
+                    "moment": moment,
+                },
+            )
 
     async def eval(self, *, dump_namespace: str | None = None) -> dict[str, float]:
         # Evaluation can be requested off the publication grid by any callback.
@@ -1471,6 +1494,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     "pass_through", "finish_weight_change_probe", publication["publication_id"]
                 )
                 self._weight_change_probe_committed(publication, time.perf_counter() - started)
+        if self.cfg.generator.publication_stage_timing:
+            receipts = await asyncio.gather(
+                *self.policy_model.async_run_ray_method("pass_through", "read_publication_timing")
+            )
+            self.all_timings.update(publication_stage_walls(receipts[0]))
         # Advance only after a successful publication. The initial call runs at
         # step zero (or the resumed completed step), before producers are started.
         self._published_policy_version = self.global_step
