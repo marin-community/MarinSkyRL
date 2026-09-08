@@ -74,9 +74,13 @@ def test_cuda_events_are_resolved_only_after_the_publication(monkeypatch):
 
 def test_rank_wall_fold_preserves_slowest_rank_without_summing_concurrent_workers():
     receipt = {
-        "trainer": [{"rank": 0, "stages": {"export": {"wall_seconds": 2.0}}},
-                    {"rank": 1, "stages": {"export": {"wall_seconds": 3.0}}}],
-        "receiver": [[{"rank": 0, "stages": {"load": {"wall_seconds": 1.5}}}],
-                     [{"rank": 0, "stages": {"load": {"wall_seconds": 1.0}}}]],
+        "trainer": [
+            {"rank": 0, "stages": {"export": {"wall_seconds": 2.0}}},
+            {"rank": 1, "stages": {"export": {"wall_seconds": 3.0}}},
+        ],
+        "receiver": [
+            [{"rank": 0, "stages": {"load": {"wall_seconds": 1.5}}}],
+            [{"rank": 0, "stages": {"load": {"wall_seconds": 1.0}}}],
+        ],
     }
     assert publication_stage_walls(receipt) == {"weight_broadcast/export": 3.0, "weight_broadcast/load": 1.5}

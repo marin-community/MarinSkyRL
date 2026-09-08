@@ -811,6 +811,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         from torch.multiprocessing.reductions import reduce_tensor
 
         timing = PublicationStageTimer(enabled=bool(self.cfg.generator.publication_stage_timing))
+        if timing.enabled and self.use_cuda_ipc:
+            raise ValueError("publication stage tracing currently requires non-colocated NCCL broadcast")
         rank = torch.distributed.get_rank()
         step = self._completed_update or 0
         if timing.enabled and rank == 0:
