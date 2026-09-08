@@ -3,6 +3,8 @@
 import math
 import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 import torch
@@ -11,8 +13,8 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
     mismatch_ratio_metrics,
     ratio_statistics,
-    pack_log_ratio_accumulator,
     gather_ratio_tensor,
+    sum_ratio_tensor,
 )
 
 
@@ -104,19 +106,33 @@ def test_rank_reduction_pools_unequal_token_counts_and_excludes_replicas():
         values = values.unsqueeze(0)
         monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
         monitors.append(monitor)
-    payloads = [
-        pack_log_ratio_accumulator(monitor._accumulator, owns_tokens=index != 2)
-        for index, monitor in enumerate(monitors)
-    ]
     expected = ratio_statistics(torch.cat(shards))
     rank_mean_ess = sum(monitor.metrics()["log_ratio_ess_fraction"] for monitor in monitors[:2]) / 2
     assert abs(rank_mean_ess - expected["ess_fraction"]) > 0.1
 
-    def gather(tensor):
-        field = 0 if tensor.dtype == torch.float64 else 1
-        return [payload[field] for payload in payloads]
+    def pooled_monitors():
+        barrier = Barrier(len(monitors))
+        inputs = [None] * len(monitors)
 
-    actual = monitors[0].metrics(gather_fn=gather)
+        def run(rank):
+            def gather(tensor):
+                inputs[rank] = tensor.clone()
+                barrier.wait(timeout=20)
+                results = [value.clone() for value in inputs]
+                barrier.wait(timeout=20)
+                return results
+
+            return monitors[rank].metrics(gather_fn=gather, owns_tokens=rank != 2)
+
+        with ThreadPoolExecutor(max_workers=len(monitors)) as executor:
+            results = list(executor.map(run, range(len(monitors))))
+        assert all(result == results[0] for result in results)
+        return results[0]
+
+    actual = pooled_monitors()
+    assert actual["stale/abs_log_ratio_p50"] == 0
+    assert actual["stale/abs_log_ratio_p95"] == 0
+    assert actual["stale/finite_fraction"] == 1
     assert actual["log_ratio_selected_tokens"] == 20_000
     assert actual["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], rel=1e-10)
     assert actual["log_ratio_mean"] == pytest.approx(expected["log_ratio_mean"], abs=1e-10)
@@ -125,8 +141,8 @@ def test_rank_reduction_pools_unequal_token_counts_and_excludes_replicas():
 
     # One failing rank invalidates the family on all ranks, rather than being
     # averaged into a fractional validity flag by the later WORLD status mean.
-    payloads[1][0][0] = 1
-    failed = monitors[0].metrics(gather_fn=gather)
+    monitors[1]._failed = True
+    failed = pooled_monitors()
     assert failed["log_ratio_diagnostics_failed"] == 1
     assert failed["log_ratio_p999_valid"] == 0
     assert set(failed) == set(actual)
@@ -139,10 +155,10 @@ def _distributed_ratio_worker(rank, directory):
         monitor = LogRatioMonitor(torch.device("cpu"))
         values = values.unsqueeze(0)
         monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
-        pooled = monitor.metrics(gather_fn=gather_ratio_tensor)
+        pooled = monitor.metrics(gather_fn=gather_ratio_tensor, sum_reduce_fn=sum_ratio_tensor)
         if rank == 1:
             monitor._failed = True
-        failed = monitor.metrics(gather_fn=gather_ratio_tensor)
+        failed = monitor.metrics(gather_fn=gather_ratio_tensor, sum_reduce_fn=sum_ratio_tensor)
         Path(directory, f"rank{rank}.json").write_text(json.dumps({"pooled": pooled, "failed": failed}))
     finally:
         torch.distributed.destroy_process_group()
@@ -159,3 +175,29 @@ def test_two_actual_gloo_ranks_emit_identical_token_pooled_statistics(tmp_path):
     assert left["pooled"]["log_ratio_p999_valid"] == 1
     assert left["failed"]["log_ratio_p999_valid"] == 0
     assert left["failed"]["log_ratio_diagnostics_failed"] == 1
+
+
+def test_worker_full_statistic_coverage_clip_bounds_and_nonfinite_counts():
+    values = torch.tensor([[-2.0, -0.25, 0.0, 0.5, 3.0]], dtype=torch.float64)
+    monitor = LogRatioMonitor(torch.device("cpu"), eps_clip_low=0.1, eps_clip_high=0.3)
+    monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
+    actual = monitor.metrics()
+    oracle = ratio_statistics(values, eps_clip_low=0.1, eps_clip_high=0.3)
+    for key in (
+        "abs_log_ratio_p50",
+        "abs_log_ratio_p95",
+        "finite_fraction",
+        "lower_clip_pressure",
+        "upper_clip_pressure",
+    ):
+        assert actual[f"stale/{key}"] == pytest.approx(oracle[key], abs=1e-12)
+    assert actual["stale/quantiles_valid"] == 1
+    assert actual["stale/quantiles_overflow_ranks"] == 0
+    monitor.add(torch.tensor([[float("nan"), 1.0]]), torch.zeros(1, 2), torch.ones(1, 2))
+    actual = monitor.metrics()
+    assert actual["stale/selected_tokens"] == 7
+    assert actual["stale/finite_tokens"] == 6
+    assert actual["stale/finite_fraction"] == 6 / 7
+    assert actual["stale/statistics_valid"] == 0
+    assert actual["stale/quantiles_valid"] == 0
+    assert actual["stale/abs_log_ratio_p50"] == 0
