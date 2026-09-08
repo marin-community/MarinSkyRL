@@ -16,8 +16,9 @@ from skyrl_train.trajectory_runners.step_wise import clamp_generation_tokens
 
 
 class _RecordingInferenceEngine:
-    def __init__(self):
+    def __init__(self, response_logprobs=None):
         self.requests = []
+        self.response_logprobs = response_logprobs
 
     async def generate(self, request):
         self.requests.append(request)
@@ -25,7 +26,7 @@ class _RecordingInferenceEngine:
             "responses": ["ok"],
             "response_ids": [[7, 8]],
             "stop_reasons": ["stop"],
-            "response_logprobs": [None],
+            "response_logprobs": [self.response_logprobs],
         }
 
 
@@ -81,3 +82,42 @@ async def test_step_wise_generation_clamps_final_request_to_tokenized_window(moc
 
     assert outputs[0].evidence.response_token_ids == (7, 8)
     assert engine.requests[0]["sampling_params"]["max_tokens"] == 2
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock_make):
+    cfg = get_default_config().generator
+    cfg.batched = False
+    cfg.use_conversation_multi_turn = True
+    cfg.max_turns = 2
+    cfg.sampling_params.stop = ["ok"]
+    cfg.append_eos_token_after_stop_str_in_multi_turn = True
+    cfg.chat_template_kwargs = {}
+
+    environment = MagicMock()
+    environment.init.return_value = ([{"role": "user", "content": "task"}], {})
+    environment.step.return_value = BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+    environment.get_metrics.return_value = {}
+    mock_make.return_value = environment
+    tokenizer = _tokenizer()
+    runner = SkyRLGymTrajectoryRunner(
+        cfg,
+        MagicMock(max_env_workers=0),
+        _RecordingInferenceEngine(response_logprobs=[-0.1, -0.2]),
+        tokenizer,
+        pipeline=TrajectoryPipeline(StepWiseRolloutCollector, StepWiseTrajectoryProjection(cfg, tokenizer)),
+    )
+
+    outputs = await StepWiseRolloutCollector(runner).agent_loop(
+        [{"role": "user", "content": "task"}],
+        "test_env",
+        {},
+        max_tokens=16,
+        max_input_length=4,
+    )
+
+    published = environment.set_rollout_evidence.call_args.args[0]
+    assert published.response_token_ids == (7, 8, tokenizer.eos_token_id)
+    assert published.behavior_logprobs == (-0.1, -0.2, 0.0)
+    assert outputs[0].evidence.behavior_logprobs == (-0.1, -0.2, 0.0)

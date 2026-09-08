@@ -7,7 +7,10 @@ import ray
 from ray.util.queue import Queue
 
 from skyrl_train.entrypoints import ray_lifecycle
-from skyrl_train.entrypoints.main_base import EntrypointSupervisor, resolve_entrypoint_node_id
+from skyrl_train.entrypoints.main_base import EntrypointSupervisor, resolve_entrypoint_node_id, run_ray_driver
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
+from skyrl_train.utils import utils as trainer_utils
 
 
 @ray.remote
@@ -73,6 +76,20 @@ def test_local_ray_owner_returns_through_normal_process_exit(monkeypatch):
     ray_lifecycle.exit_without_ray_destructors()
 
     exit_process.assert_not_called()
+
+
+def test_runner_evidence_rejection_happens_before_ray_initialization(monkeypatch):
+    cfg = get_default_config()
+    cfg.trainer.logger = "console"
+    cfg.trainer.algorithm.use_tis = True
+    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
+    initialize_ray = Mock()
+    monkeypatch.setattr(trainer_utils, "initialize_ray", initialize_ray)
+
+    with pytest.raises(ValueError, match="mini-swe cannot supply exact sampled completion"):
+        run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.MINI_SWE)
+
+    initialize_ray.assert_not_called()
 
 
 @pytest.mark.usefixtures("ray_init")

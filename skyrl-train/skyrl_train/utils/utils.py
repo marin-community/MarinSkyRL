@@ -47,46 +47,6 @@ from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
 MOE_ROUTER_REPLAY_STRATEGIES = frozenset({"fsdp", "fsdp2"})
-SUPPORTED_HARBOR_ROLLOUT_LOGPROB_AGENTS = frozenset({"opencode", "terminus-2"})
-SUPPORTED_OPENCODE_LITERAL_VERSION = "1.18.2"
-
-
-def validate_harbor_rollout_logprob_support(cfg: DictConfig) -> None:
-    """Reject Harbor agents that cannot provide exact behavior-policy evidence."""
-    terminal_bench = cfg.get("terminal_bench_config")
-    if terminal_bench is None and str(cfg.get("entrypoint", "")) == "terminal_bench":
-        terminal_bench = cfg.get("terminal_bench")
-    if terminal_bench is None:
-        return
-
-    algorithm = cfg.trainer.algorithm
-    if not rollout_logprobs_enabled(algorithm) and not bool(algorithm.get("tito_full", False)):
-        return
-
-    harbor = terminal_bench.get("harbor")
-    if harbor is None:
-        raise ValueError("TIS/TITO with entrypoint=terminal_bench requires terminal_bench.harbor configuration")
-
-    agent_name = str(harbor.get("name", "terminus-2")).strip().lower().replace("_", "-")
-    if agent_name not in SUPPORTED_HARBOR_ROLLOUT_LOGPROB_AGENTS:
-        supported = ", ".join(sorted(SUPPORTED_HARBOR_ROLLOUT_LOGPROB_AGENTS))
-        raise ValueError(
-            f"Harbor agent {agent_name!r} does not support TIS/TITO because it does not expose an exact "
-            f"token-id/logprob history to MarinSkyRL; supported agents: {supported}"
-        )
-
-    if not bool(harbor.get("collect_rollout_details", False)):
-        raise ValueError(
-            f"TIS/TITO with Harbor agent {agent_name!r} requires terminal_bench.harbor.collect_rollout_details=true"
-        )
-
-    if agent_name == "opencode":
-        version = str(harbor.get("version", "")).strip()
-        if version != SUPPORTED_OPENCODE_LITERAL_VERSION:
-            raise ValueError(
-                "TIS/TITO with Harbor agent 'opencode' requires the literal-bridge-tested "
-                f"terminal_bench.harbor.version={SUPPORTED_OPENCODE_LITERAL_VERSION!r}; got {version or 'unset'!r}"
-            )
 
 
 def moe_router_replay_requested(cfg: DictConfig) -> bool:
@@ -676,7 +636,6 @@ def validate_cfg(cfg: DictConfig):
     if cfg.generator.gdn_backend not in set(GDNBackend):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
     validate_generator_cfg(cfg)
-    validate_harbor_rollout_logprob_support(cfg)
     validate_batch_invariant_config(cfg)
     validate_moe_router_replay_config(cfg)
     validate_hf_export_config(cfg)

@@ -21,6 +21,7 @@ from skyrl_train.utils.policy_math import masked_mean
 from skyrl_train.distillation_trainer import DistillationTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.entrypoints.terminal_bench import TerminalBenchExp
+from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 
 
 class OnPolicyDistillationLogitsTerminalBenchTrainer(DistillationTrainer):
@@ -77,7 +78,7 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    run_ray_driver(cfg, skyrl_entrypoint)
+    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.HARBOR)
 
 
 if __name__ == "__main__":

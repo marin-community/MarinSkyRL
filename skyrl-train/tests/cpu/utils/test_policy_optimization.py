@@ -26,7 +26,7 @@ from skyrl_train.utils.algorithm_registry import (
     register_policy_loss,
 )
 from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics, TIS_DIAG_KEYS
-from skyrl_train.utils.utils import validate_cfg, validate_harbor_rollout_logprob_support
+from skyrl_train.utils.utils import validate_cfg
 import numpy as np
 
 
@@ -350,63 +350,6 @@ def _validatable_dummy_config():
         },
     )
     return cfg
-
-
-def _harbor_behavior_evidence_config(agent_name, **harbor_overrides):
-    harbor = {"name": agent_name, "collect_rollout_details": True, **harbor_overrides}
-    return OmegaConf.create(
-        {
-            "trainer": {
-                "algorithm": {
-                    "use_tis": True,
-                    "policy_loss_type": "regular",
-                    "tito_full": None,
-                }
-            },
-            "terminal_bench_config": {"harbor": harbor},
-        }
-    )
-
-
-@pytest.mark.parametrize("agent_name", ["pi", "codex", "claude-code", "openhands-sdk"])
-def test_harbor_behavior_logprobs_reject_unsupported_agents(agent_name):
-    cfg = _harbor_behavior_evidence_config(agent_name)
-
-    with pytest.raises(ValueError, match="does not support TIS/TITO"):
-        validate_harbor_rollout_logprob_support(cfg)
-
-
-@pytest.mark.parametrize("agent_name", ["terminus-2", "terminus_2"])
-def test_harbor_behavior_logprobs_accept_terminus_with_rollout_details(agent_name):
-    validate_harbor_rollout_logprob_support(_harbor_behavior_evidence_config(agent_name))
-
-
-def test_harbor_behavior_logprobs_require_rollout_details():
-    cfg = _harbor_behavior_evidence_config("terminus-2", collect_rollout_details=False)
-
-    with pytest.raises(ValueError, match="collect_rollout_details=true"):
-        validate_harbor_rollout_logprob_support(cfg)
-
-
-@pytest.mark.parametrize("version", [None, "latest", "1.18.1"])
-def test_harbor_behavior_logprobs_require_tested_opencode_version(version):
-    cfg = _harbor_behavior_evidence_config("opencode", version=version)
-
-    with pytest.raises(ValueError, match="literal-bridge-tested"):
-        validate_harbor_rollout_logprob_support(cfg)
-
-
-def test_harbor_behavior_logprobs_accept_tested_opencode_bridge():
-    validate_harbor_rollout_logprob_support(_harbor_behavior_evidence_config("opencode", version="1.18.2"))
-
-
-def test_explicit_tito_rejects_unsupported_harbor_without_tis():
-    cfg = _harbor_behavior_evidence_config("pi")
-    cfg.trainer.algorithm.use_tis = False
-    cfg.trainer.algorithm.tito_full = True
-
-    with pytest.raises(ValueError, match="does not support TIS/TITO"):
-        validate_harbor_rollout_logprob_support(cfg)
 
 
 @pytest.mark.parametrize(

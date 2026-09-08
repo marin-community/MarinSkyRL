@@ -9,6 +9,7 @@ from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 import asyncio
 from skyrl_train.trajectory_runners.model_clients import OpenAIHTTPModelClient
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
+from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 import ray
 
 
@@ -77,7 +78,7 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    run_ray_driver(cfg, skyrl_entrypoint)
+    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
 
 
 if __name__ == "__main__":
