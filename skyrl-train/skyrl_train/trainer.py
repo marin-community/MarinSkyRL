@@ -12,7 +12,7 @@ import ray
 from ray import ObjectRef
 import torch
 from loguru import logger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import PlacementGroup, placement_group
 from skyrl_train.utils.progress import tqdm
 from transformers import AutoTokenizer
@@ -97,7 +97,7 @@ from skyrl_train.utils.utils import (
 )
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_required
 from skyrl_train.weight_change_probe import validate_weight_change_probe_config
-from skyrl_train.utils.importance_ratio_diagnostics import behavior_drift_metrics
+from skyrl_train.utils.importance_ratio_diagnostics import behavior_drift_metrics, mismatch_ratio_metrics
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks import (
@@ -1257,11 +1257,17 @@ class RayPPOTrainer:
         self._num_experts_cache: Optional[int] = num_experts
         return num_experts
 
-    def convert_to_training_input(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrainingInputBatch:
+    def convert_to_training_input(
+        self, trajectory_batch: TrajectoryBatch, uids: List[str], *, rollout_age: List[int] | None = None
+    ) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
         assert_training_groups_eligible(trajectory_batch, uids, self.group_advantage_invariant)
         prompt_ids: List[List[int]] = trajectory_batch["prompt_token_ids"]
         response_ids: List[List[int]] = trajectory_batch["response_ids"]
+        if rollout_age is not None and (
+            len(rollout_age) != len(response_ids) or any(type(age) is not int or age < 0 for age in rollout_age)
+        ):
+            raise ValueError("rollout_age must contain one nonnegative integer per response row")
         rewards: List[List[float]] = trajectory_batch["rewards"]
         loss_masks: List[List[int]] = trajectory_batch["loss_masks"]
 
@@ -1359,6 +1365,9 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
+                "rollout_age": torch.tensor(
+                    rollout_age if rollout_age is not None else [0] * len(response_ids), dtype=torch.int32
+                ),
                 "is_last_step": (
                     torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
                     if trajectory_batch.get("is_last_step", None) is not None
@@ -1901,6 +1910,19 @@ class RayPPOTrainer:
                     eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
                 )
             )
+            self.all_metrics.update(
+                mismatch_ratio_metrics(
+                    action_log_probs,
+                    training_input["rollout_logprobs"],
+                    training_input["loss_mask"],
+                    training_input.get("rollout_age"),
+                    eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                    eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
+                    position_window=OmegaConf.select(
+                        self.cfg, "trainer.algorithm.ratio_diagnostics.position_window", default=256
+                    ),
+                )
+            )
 
         if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
             # calculates the difference in probs between inference and trainer components
@@ -2112,6 +2134,23 @@ class RayPPOTrainer:
             empty_cache_refs += self.critic_model.async_run_ray_method("pass_through", "empty_cache")
 
         policy_status = policy_statuses[0].metadata["train_status"]
+        if self._training_metrics_enabled:
+            maximum = OmegaConf.select(self.cfg, "trainer.algorithm.ratio_diagnostics.by_update_max", default=16)
+            if type(maximum) is not int or not 0 <= maximum <= 16:
+                raise ValueError("ratio_diagnostics.by_update_max must be an integer in [0,16]")
+            for index, status in enumerate(policy_statuses[0].metadata.get("train_status_by_update", [])):
+                if index < maximum:
+                    self.all_metrics.update({f"policy/by_update/{index}/{key}": value for key, value in status.items()})
+                record_event(
+                    "policy_update",
+                    {
+                        **status,
+                        "abs_log_ratio_mean": status.get("stale/abs_log_ratio_mean", status.get("log_ratio_abs_mean")),
+                        "ess_fraction": status.get("stale/ess_fraction"),
+                        "frac_outside_0.5_2": status.get("stale/frac_outside_0.5_2"),
+                    },
+                    attributes={"role": "trainer", "step": str(self.global_step)},
+                )
         for k, v in policy_status.items():
             self.all_metrics.update({f"policy/{k}": v})
         empty_cache_refs += self.policy_model.async_run_ray_method("pass_through", "empty_cache")

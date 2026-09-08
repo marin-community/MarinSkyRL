@@ -312,7 +312,10 @@ class MegatronModelWrapper:
                 global_loss_denom=data.global_loss_denom,
             )
             if log_ratio_monitor is None:
-                log_ratio_monitor = LogRatioMonitor(action_log_probs.device)
+                log_ratio_monitor = LogRatioMonitor(
+                    action_log_probs.device,
+                    position_window=self.cfg.trainer.algorithm.get("ratio_diagnostics", {}).get("position_window", 256),
+                )
             log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
             completed_microbatches += 1
 
