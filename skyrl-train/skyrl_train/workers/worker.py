@@ -44,6 +44,7 @@ from skyrl_train.distributed.utils import init_custom_process_group, init_worker
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
+    gather_ratio_tensor,
     LogRatioMonitor,
 )
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
@@ -1368,7 +1369,10 @@ class PolicyWorkerBase(Worker):
             # Finalize the accumulated diagnostics. Every rank must emit identical
             # keys (the full set from _log_ratio_diag_zero_metrics) — the per-key
             # all_reduce(status) deadlocks otherwise (killed v2/v3 of this diag).
-            ratio_diag = self._log_ratio_monitor.metrics()
+            # MeshDispatch's collector identity excludes SP/CP/EP replicas;
+            # self.device_mesh['dp'] alone does not exclude CP/EP copies.
+            owns_tokens = not torch.distributed.is_initialized() or self.mesh_rank.is_collection_dp_rank()
+            ratio_diag = self._log_ratio_monitor.metrics(gather_fn=gather_ratio_tensor, owns_tokens=owns_tokens)
             self._log_ratio_monitor = None
 
         if self.record_memory:

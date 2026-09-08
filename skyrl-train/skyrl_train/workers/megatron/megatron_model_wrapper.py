@@ -22,7 +22,7 @@ from skyrl_train.megatron_timing import (
     MegatronTrainTimings,
 )
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
-from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
+from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor, gather_ratio_tensor
 
 from skyrl_train.distributed.megatron.megatron_utils import (
     compact_left_padded_tokens,
@@ -327,7 +327,14 @@ class MegatronModelWrapper:
             }
             metrics.update(objective.metrics)
             if completed_microbatches == len(micro_batches):
-                metrics.update(log_ratio_monitor.metrics())
+                # Token logprobs have been reconstructed across TP/CP already.
+                # Pool distinct DP inputs only; PP metrics are broadcast below.
+                group = (
+                    mpu.get_data_parallel_group(with_context_parallel=False)
+                    if torch.distributed.is_initialized()
+                    else None
+                )
+                metrics.update(log_ratio_monitor.metrics(gather_fn=partial(gather_ratio_tensor, group=group)))
             return objective.optimization_loss, metrics
 
         def forward_step(batch_iter, model):
