@@ -9,6 +9,7 @@ from typing import Optional
 import torch
 from loguru import logger
 
+from skyrl_train.utils.distributed_quantiles import AbsoluteQuantileBuffer
 from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
 
 
@@ -271,14 +272,27 @@ class LogRatioAccumulator:
 class LogRatioMonitor:
     """Accumulate a fixed-key log-ratio metric contract across microbatches."""
 
-    def __init__(self, device: torch.device, *, position_window: int = 256):
+    def __init__(
+        self, device: torch.device, *, position_window: int = 256, eps_clip_low: float = 0.2, eps_clip_high: float = 0.2
+    ):
         if type(position_window) is not int or position_window <= 0:
             raise ValueError("position_window must be a positive integer")
         self.position_window = position_window
         self._accumulator = _empty_log_ratio_accumulator(device)
+        self._quantiles = AbsoluteQuantileBuffer(device)
+        self._clip_counts = torch.zeros(2, device=device, dtype=torch.float64)
+        self._clip_lower = math.log1p(-eps_clip_low) if eps_clip_low < 1 else -math.inf
+        self._clip_upper = math.log1p(eps_clip_high)
         self._failed = False
 
     def add(self, log_probs: torch.Tensor, old_log_probs: torch.Tensor, loss_mask: torch.Tensor) -> None:
+        selected = loss_mask > 0
+        delta = log_probs.detach().double()[selected] - old_log_probs.detach().double()[selected]
+        self._quantiles.add(delta)
+        finite_delta = delta[torch.isfinite(delta)]
+        self._clip_counts += torch.stack(
+            [(finite_delta < self._clip_lower).sum(), (finite_delta > self._clip_upper).sum()]
+        )
         if self._failed:
             return
         try:
@@ -290,7 +304,7 @@ class LogRatioMonitor:
             logger.warning(f"Log-ratio diagnostics skipped after accumulation failed: {error!r}")
             self._failed = True
 
-    def metrics(self, *, gather_fn=None, owns_tokens: bool = True) -> dict[str, float]:
+    def metrics(self, *, gather_fn=None, sum_reduce_fn=None, owns_tokens: bool = True) -> dict[str, float]:
         accumulator = self._accumulator
         failed = self._failed
         if gather_fn is not None:
@@ -300,13 +314,38 @@ class LogRatioMonitor:
             header, tail = pack_log_ratio_accumulator(accumulator, failed=failed, owns_tokens=owns_tokens)
             headers, tails = gather_fn(header), gather_fn(tail)
             accumulator, failed = pool_log_ratio_accumulators(headers, tails)
+
+        def sum_reduce(tensor):
+            if sum_reduce_fn is not None:
+                return sum_reduce_fn(tensor)
+            return torch.stack(gather_fn(tensor)).sum(0) if gather_fn is not None else tensor
+
+        quantiles = self._quantiles.quantiles(sum_reduce, owns_tokens=owns_tokens)
+        clip_counts = sum_reduce(self._clip_counts if owns_tokens else torch.zeros_like(self._clip_counts))
         if failed:
-            return _failed_log_ratio_metrics(self.position_window)
-        try:
-            return finalize_log_ratio_metrics(accumulator, position_window=self.position_window)
-        except Exception as error:
-            logger.warning(f"Log-ratio diagnostics marked failed after finalization failed: {error!r}")
-            return _failed_log_ratio_metrics(self.position_window)
+            metrics = _failed_log_ratio_metrics(self.position_window)
+        else:
+            try:
+                metrics = finalize_log_ratio_metrics(accumulator, position_window=self.position_window)
+            except Exception as error:
+                logger.warning(f"Log-ratio diagnostics marked failed after finalization failed: {error!r}")
+                metrics = _failed_log_ratio_metrics(self.position_window)
+                failed = True
+        if failed:
+            quantiles.update(abs_log_ratio_p50=0.0, abs_log_ratio_p95=0.0, quantiles_valid=0.0)
+        metrics.update({f"stale/{name}": value for name, value in quantiles.items()})
+        finite_count = max(1, quantiles["finite_tokens"])
+        metrics["stale/lower_clip_pressure"] = clip_counts[0].item() / finite_count
+        metrics["stale/upper_clip_pressure"] = clip_counts[1].item() / finite_count
+        return metrics
+
+
+def sum_ratio_tensor(tensor: torch.Tensor, *, group=None) -> torch.Tensor:
+    """SUM fixed-size coverage or radix histograms over the token ownership group."""
+    result = tensor.clone()
+    if torch.distributed.is_initialized():
+        torch.distributed.all_reduce(result, op=torch.distributed.ReduceOp.SUM, group=group)
+    return result
 
 
 def gather_ratio_tensor(tensor: torch.Tensor, *, group=None) -> list[torch.Tensor]:

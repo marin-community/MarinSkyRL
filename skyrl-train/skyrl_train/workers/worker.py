@@ -45,6 +45,7 @@ from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
     gather_ratio_tensor,
+    sum_ratio_tensor,
     LogRatioMonitor,
 )
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
@@ -1307,6 +1308,8 @@ class PolicyWorkerBase(Worker):
             self._log_ratio_monitor = LogRatioMonitor(
                 action_log_probs.device,
                 position_window=self.cfg.trainer.algorithm.get("ratio_diagnostics", {}).get("position_window", 256),
+                eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
             )
         self._log_ratio_monitor.add(action_log_probs, old_action_log_probs, loss_mask)
 
@@ -1372,7 +1375,9 @@ class PolicyWorkerBase(Worker):
             # MeshDispatch's collector identity excludes SP/CP/EP replicas;
             # self.device_mesh['dp'] alone does not exclude CP/EP copies.
             owns_tokens = not torch.distributed.is_initialized() or self.mesh_rank.is_collection_dp_rank()
-            ratio_diag = self._log_ratio_monitor.metrics(gather_fn=gather_ratio_tensor, owns_tokens=owns_tokens)
+            ratio_diag = self._log_ratio_monitor.metrics(
+                gather_fn=gather_ratio_tensor, sum_reduce_fn=sum_ratio_tensor, owns_tokens=owns_tokens
+            )
             self._log_ratio_monitor = None
 
         if self.record_memory:
