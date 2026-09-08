@@ -42,6 +42,7 @@ from skyrl_train.dataset.preprocess import (
 from skyrl_train.utils import trainer_utils
 from skyrl_train.io import io
 from skyrl_train.data_order import (
+    consumed_uid_digest,
     epoch_seeded_shuffle_enabled,
     set_source_epoch,
     source_order_checkpoint,
@@ -585,9 +586,11 @@ class RayPPOTrainer:
         *,
         epoch: int,
         training_input: TrainingInputBatch,
+        uids: list[str],
         duration_seconds: float,
     ) -> None:
         if self._training_metrics_enabled:
+            self.all_metrics["consumed/uid_digest_u52"] = consumed_uid_digest(uids)
             self.all_metrics.update(training_input.metadata["consumed_stop_metrics"])
             record_consumed_work(
                 sequences=len(training_input["sequences"]),
@@ -784,6 +787,7 @@ class RayPPOTrainer:
                     self._log_optimizer_step_completed(
                         epoch=epoch,
                         training_input=training_input,
+                        uids=uids,
                         duration_seconds=train_duration,
                     )
 

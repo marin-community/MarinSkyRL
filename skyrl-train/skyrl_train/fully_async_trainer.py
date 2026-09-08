@@ -1003,6 +1003,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     self._log_optimizer_step_completed(
                         epoch=epoch,
                         training_input=training_input,
+                        uids=[group.uid for group in cur_generation_group_mini_batch],
                         duration_seconds=train_duration,
                     )
                     await self.data_tracker.mark_consumed([g.uid for g in cur_generation_group_mini_batch])
