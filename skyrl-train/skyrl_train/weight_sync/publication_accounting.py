@@ -57,7 +57,10 @@ class PublicationRequestAccounting:
                 "request_id": request_id,
                 "reason": reason,
                 "tokens": tokens,
-                "first_token_time": first_token_time,
+                "native_first_token_time": first_token_time,
+                # vLLM uses zero as the unobserved first-token sentinel. Keep
+                # its raw evidence while exposing canonical absence to auditors.
+                "first_token_time": None if tokens == 0 and first_token_time == 0.0 else first_token_time,
                 "policy_version_at_first_token": policy_version_at_first_token,
             }
         )
