@@ -2,6 +2,7 @@
 
 import os
 import json
+from dataclasses import asdict
 
 import pytest
 import ray
@@ -11,6 +12,7 @@ from skyrl_train.utils.utils import validate_cfg
 from tests.gpu.test_megatron_worker import get_test_training_batch, _megatron_forward
 from tests.gpu.utils import init_worker_with_type
 from tests.correction_fixture_config import correction_actor_config, register_correction_reference
+from tests.correction_fixture_inputs import left_pad_correction_batch, m2_fixture_diagnostics
 
 
 @pytest.mark.asyncio
@@ -50,6 +52,8 @@ async def test_megatron_correction_mask_matches_independent_actor(ray_init_fixtu
         for cfg in configs
     ]
     batches = [get_test_training_batch(batch_size=4, model_name=model_path) for _ in groups]
+    if mode == "m2":
+        batches = [left_pad_correction_batch(batch) for batch in batches]
     before = [_megatron_forward(group, batch) for group, batch in zip(groups, batches, strict=True)]
     torch.testing.assert_close(before[0], before[1], atol=1e-4, rtol=0)
     # M2 harmful deltas lie inside PPO's lower clipping bound: masking must change
@@ -58,6 +62,11 @@ async def test_megatron_correction_mask_matches_independent_actor(ray_init_fixtu
         [-0.221, -0.220, -0.219, -0.218, -0.217, -0.216, -0.215, -0.214, -0.213, 0.05], dtype=before[0].dtype
     )
     old = before[0] - delta if mode == "m2" else before[0].clone()
+    if mode == "m2":
+        diagnostics = m2_fixture_diagnostics(before[0], old, batches[0]["attention_mask"])
+        print("CORRECTION_NUMERICAL_INPUT " + json.dumps(diagnostics), flush=True)
+        assert all(item["supported_action_positions"] == 10 for item in diagnostics)
+        assert all(item["retained_gradient_positions"] > 0 for item in diagnostics)
     mismatch = torch.tensor([0.0, 2.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=old.dtype).expand_as(old).clone()
     if mode == "offpolicy":
         mismatch[0, 0] = -18.0  # One real row veto, while other rows keep nonzero gradients.
@@ -75,6 +84,31 @@ async def test_megatron_correction_mask_matches_independent_actor(ray_init_fixtu
         for group, batch in zip(groups, batches, strict=True)
     ]
     statuses = [[item.metadata["train_status"] for item in result] for result in results]
+    print(
+        "CORRECTION_NUMERICAL_WORKERS "
+        + json.dumps(
+            {
+                "mode": mode,
+                "groups": [
+                    [
+                        {
+                            "worker_result_index": index,
+                            "mesh_rank": asdict(groups[group_index].actor_infos[index].rank),
+                            "metrics": {
+                                key: value
+                                for key, value in status.items()
+                                if key in ("policy_loss", "raw_grad_norm")
+                                or key.startswith(("offpolicy_mask/", "m2_mask/"))
+                            },
+                        }
+                        for index, status in enumerate(group)
+                    ]
+                    for group_index, group in enumerate(statuses)
+                ],
+            }
+        ),
+        flush=True,
+    )
     assert all(len(status) == 4 for status in statuses)
     for actual, reference in zip(*statuses, strict=True):
         assert actual["policy_loss"] == pytest.approx(reference["policy_loss"], abs=1e-6, rel=0)
