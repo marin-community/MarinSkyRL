@@ -71,8 +71,7 @@ def validate_behavior_logprob_sampling(params: Mapping[str, Any]) -> None:
     mismatches = _sampling_mismatches(params)
     if mismatches:
         raise ValueError(
-            "Behavior-logprob training requires full-distribution, temperature-only sampling: "
-            + "; ".join(mismatches)
+            "Behavior-logprob training requires full-distribution, temperature-only sampling: " + "; ".join(mismatches)
         )
 
 
@@ -89,8 +88,7 @@ def configure_behavior_logprob_sampling(generator: DictConfig) -> None:
     if mismatches:
         raise ValueError(
             "Behavior-logprob training requires processed rollout logprobs without checkpoint or engine-level "
-            "generation overrides: "
-            + "; ".join(mismatches)
+            "generation overrides: " + "; ".join(mismatches)
         )
     for key, value in ROLLOUT_LOGPROB_NEUTRAL_SAMPLING.items():
         if generator.sampling_params.get(key) is None:
