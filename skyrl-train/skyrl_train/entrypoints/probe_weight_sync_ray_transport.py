@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import socket
 import time
 from datetime import timedelta
@@ -15,19 +16,9 @@ import torch.distributed as dist
 
 from skyrl_train.distributed.utils import get_free_port, init_custom_process_group
 from skyrl_train.io.io import write_bytes_atomic
-from skyrl_train.weight_sync.readback_diagnostics import network_log_readback
+from skyrl_train.weight_sync.readback_diagnostics import ENVIRONMENT_KEYS, network_log_readback
 
-ENV_KEYS = (
-    "NCCL_DEBUG",
-    "NCCL_DEBUG_SUBSYS",
-    "NCCL_PROTO",
-    "NCCL_ALGO",
-    "NCCL_MIN_NCHANNELS",
-    "NCCL_MAX_NCHANNELS",
-    "NCCL_SOCKET_IFNAME",
-    "NCCL_IB_DISABLE",
-    "VLLM_BATCH_INVARIANT",
-)
+ENV_KEYS = ENVIRONMENT_KEYS
 SCRATCH_BYTES = 1024 * 1024
 
 
@@ -140,7 +131,7 @@ class TransportRank:
         return self.record("groups_destroyed", network_log=network_log_readback())
 
 
-def run_probe(output: str, backend: str, sizes: tuple[int, ...], repeats: int = 3) -> dict:
+def run_probe(output: str, backend: str, sizes: tuple[int, ...], repeats: int = 3, measurement_started=None) -> dict:
     if backend not in ("gloo", "nccl") or any(size <= 0 or size > 512 * 1024**2 for size in sizes):
         raise ValueError("Unsupported backend or payload allocation")
     actors = []
@@ -164,6 +155,8 @@ def run_probe(output: str, backend: str, sizes: tuple[int, ...], repeats: int = 
         result["initialization"] = ray.get(
             [actor.initialize.remote(sender["address"], sender["port"]) for actor in actors], timeout=45
         )
+        if measurement_started is not None:
+            measurement_started(result)
         for size in sizes:
             for repeat in range(repeats):
                 rows = ray.get([actor.transfer.remote(size, repeat) for actor in actors], timeout=45)
@@ -186,15 +179,36 @@ def run_probe(output: str, backend: str, sizes: tuple[int, ...], repeats: int = 
     return result
 
 
+def attempt_receipt_prefix(prefix: str, attempt_uid: str) -> str:
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", attempt_uid):
+        raise ValueError("Native attempt UID must identify immutable diagnostic receipts")
+    return prefix.rstrip("/") + "/attempts/" + attempt_uid
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
-    parser.add_argument("--durable-uri", required=True)
+    parser.add_argument("--durable-prefix", required=True)
     args = parser.parse_args()
-    ray.init(num_cpus=4, num_gpus=2, include_dashboard=False)
+    prefix = attempt_receipt_prefix(args.durable_prefix, os.environ.get("IRIS_ATTEMPT_UID", ""))
+    attempt = {"iris_task_id": os.environ.get("IRIS_TASK_ID"), "iris_attempt_uid": os.environ["IRIS_ATTEMPT_UID"]}
+
+    def measurement_started(state):
+        marker = {
+            **attempt,
+            "measurement_started": True,
+            "worlds": state["worlds"],
+            "initialization": state["initialization"],
+        }
+        write_bytes_atomic(prefix + "/measurement-started.json", json.dumps(marker, sort_keys=True).encode())
+
+    ray.init(address="local", num_cpus=4, num_gpus=2, include_dashboard=False)
     try:
-        result = run_probe(args.output, "nccl", (32 * 1024**2, 128 * 1024**2, 512 * 1024**2))
-        write_bytes_atomic(args.durable_uri, json.dumps(result, sort_keys=True).encode())
+        result = run_probe(
+            args.output, "nccl", (32 * 1024**2, 128 * 1024**2, 512 * 1024**2), measurement_started=measurement_started
+        )
+        result.update(attempt)
+        write_bytes_atomic(prefix + "/receipt.json", json.dumps(result, sort_keys=True).encode())
         if result["error"] is not None:
             raise RuntimeError(result["error"])
         print("RAY_NATIVE_WEIGHT_SYNC_TRANSPORT_PASS ranks=2 payloads=18", flush=True)
