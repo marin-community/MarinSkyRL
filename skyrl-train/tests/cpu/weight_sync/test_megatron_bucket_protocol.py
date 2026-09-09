@@ -2,6 +2,7 @@
 
 import ast
 import asyncio
+import json
 from contextlib import nullcontext
 from pathlib import Path
 from threading import Condition, main_thread, current_thread
@@ -38,7 +39,7 @@ def policy_methods():
 
 
 @pytest.fixture
-def gate(request, monkeypatch):
+def gate(request, monkeypatch, tmp_path):
     case = request.getfixturevalue("native_protocol")
     monkeypatch.setattr(protocol, "BUCKET_BYTES", 32)
     monkeypatch.setattr(protocol, "MAX_REPLAY_EXTRA_BYTES", 16)
@@ -109,13 +110,14 @@ def gate(request, monkeypatch):
     policy.bridge = SimpleNamespace(get_conversion_tasks=lambda model: tasks)
     policy.provider = SimpleNamespace(tensor_model_parallel_size=1, num_moe_experts=4)
     policy.cfg = SimpleNamespace(
+        trainer=SimpleNamespace(weight_sync_readback_output=str(tmp_path / "receiver-finishes")),
         generator=SimpleNamespace(
             model_dtype="bfloat16",
             num_inference_engines=1,
             inference_engine_tensor_parallel_size=1,
             inference_engine_data_parallel_size=1,
             inference_engine_pipeline_parallel_size=1,
-        )
+        ),
     )
 
     class Client:
@@ -285,3 +287,24 @@ def test_external_dp_bucket_receipts_keep_every_actor_identity():
     actors[7] = actors[0]
     with pytest.raises(ValueError, match="factory slice"):
         protocol.receiver_rows(actors, engine_count=1, ranks_per_engine=8, data_parallel_size=8)
+
+
+@pytest.mark.asyncio
+async def test_failed_memory_gate_retains_raw_receiver_receipt(gate, monkeypatch):
+    original = gate.client.finish_diagnostic_weight_sync_replay
+
+    async def finish_with_excess_allocation():
+        monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: 4017)
+        return await original()
+
+    monkeypatch.setattr(gate.client, "finish_diagnostic_weight_sync_replay", finish_with_excess_allocation)
+    with pytest.raises(ValueError, match="allocation gate failed"):
+        await gate.policy.diagnostic_bucket_install_and_replay(gate.client)
+    paths = list(Path(gate.policy.cfg.trainer.weight_sync_readback_output).glob("bucket-replay-receivers-*.json"))
+    assert len(paths) == 1
+    raw = json.loads(paths[0].read_text())
+    row = raw["receivers"][0]
+    assert raw["validation_status"] == "not_yet_validated"
+    assert row["replay_peak_extra_bytes"] == 17 and not row["replay_memory_within_limit"]
+    assert row["compared_bytes"] == row["expected_bytes"] and row["mismatches"] == 0
+    assert gate.policy._policy_weight_access.owner is None

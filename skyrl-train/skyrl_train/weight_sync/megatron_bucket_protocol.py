@@ -18,6 +18,7 @@ from skyrl_train.weight_sync.frozen_source_plan import frozen_source_plan
 from skyrl_train.weight_sync.frozen_view_sender import FrozenViewBucketSender
 from skyrl_train.weight_sync.manifest import TensorSpec, build_manifest
 from skyrl_train.weight_sync.receiver_readback_rpc import group_external_dp_workers
+from skyrl_train.weight_sync.readback_diagnostics import persist_readback
 from skyrl_train.weight_sync.worker_bucket_protocol import BUCKET_BYTES, MAX_REPLAY_EXTRA_BYTES
 
 
@@ -245,6 +246,19 @@ async def install_and_replay(worker, client, *, source_owners):
                     data_parallel_size=generator.inference_engine_data_parallel_size,
                     expected=receiver_identities,
                 )
+                persist_readback(
+                    worker.cfg.trainer.weight_sync_readback_output,
+                    "bucket-replay-receivers" if replay else "bucket-install-receivers",
+                    {
+                        "sender_identity": identity,
+                        "manifest_id": manifest.manifest_id,
+                        "completed_update": start_update,
+                        "receivers": receivers,
+                        "prepared_receivers": prepared_receivers,
+                        "buckets": per_bucket,
+                        "validation_status": "not_yet_validated",
+                    },
+                )
                 if any(row["manifest_id"] != manifest.manifest_id for row in receivers):
                     raise ValueError("Receiver completion changed manifest identity")
                 for index, row in enumerate(receivers):
@@ -317,5 +331,5 @@ async def install_and_replay(worker, client, *, source_owners):
         "preparation_seconds": preparation_seconds,
         "prepared_receivers": prepared_receivers,
         "phases": phases,
-        "timing_scope": "install includes complete export, pack, transfer, receiver load joins and final policy barrier; replay excluded",
+        "timing_scope": "install includes complete export, pack, transfer, load joins, diagnostic receipt persistence and final barrier; replay excluded",
     }
