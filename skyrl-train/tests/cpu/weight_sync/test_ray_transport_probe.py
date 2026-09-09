@@ -5,7 +5,12 @@ import copy
 import pytest
 import ray
 
-from skyrl_train.entrypoints.probe_weight_sync_ray_transport import ENV_KEYS, run_probe, validate_worlds
+from skyrl_train.entrypoints.probe_weight_sync_ray_transport import (
+    ENV_KEYS,
+    attempt_receipt_prefix,
+    run_probe,
+    validate_worlds,
+)
 
 
 def test_native_ray_custom_group_and_all_payload_bytes(tmp_path):
@@ -50,3 +55,13 @@ def test_pre_group_evidence_rejects_wrong_world_or_environment(mutation):
         rows[1][mutation] = 3
     with pytest.raises(ValueError):
         validate_worlds(rows)
+
+
+def test_native_attempt_receipts_cannot_overwrite_another_attempt():
+    assert attempt_receipt_prefix("s3://bucket/probe", "attempt1") != attempt_receipt_prefix(
+        "s3://bucket/probe", "attempt2"
+    )
+    for uid in ("", "../escape", "a/b"):
+        with pytest.raises(ValueError):
+            attempt_receipt_prefix("s3://bucket/probe", uid)
+    assert "NCCL_NTHREADS" in ENV_KEYS and "NCCL_P2P_NET_DISABLE" in ENV_KEYS
