@@ -6,11 +6,13 @@ replay before reuse. It does not qualify a proof-free production path.
 
 from dataclasses import dataclass
 from enum import StrEnum
+import time
 
 import torch
 
 from skyrl_train.weight_sync.frozen_source_views import local_source_slices
 from skyrl_train.weight_sync.readback_diagnostics import persist_readback
+from skyrl_train.weight_sync.reference_bucket_protocol import manifest_wire_inventory
 from skyrl_train.weight_sync.megatron_bucket_protocol import (
     PreparedBucketTransfer,
     close_preserving_failure,
@@ -40,6 +42,7 @@ class BucketTimingSession:
     prepared: PreparedBucketTransfer
     source_slices: tuple
     source_storage: dict
+    mode: str = "bucket"
     phase: Phase = Phase.READY
     publication_id: int | None = None
     receiver_publication_id: int | None = None
@@ -73,14 +76,18 @@ def session_for(worker, publication_id, expected):
     return state
 
 
-async def prepare_timing(worker, client, *, source_owners):
+async def prepare_timing(worker, client, *, source_owners, mode="bucket"):
+    if mode not in ("bucket", "reference"):
+        raise ValueError("Unknown timing transfer mode")
+    if mode == "reference" and not getattr(worker.cfg.generator, "weight_sync_wire_inventory", False):
+        raise ValueError("Reference timing requires the actual native wire inventory")
     if hasattr(worker, "_bucket_timing_session"):
         raise RuntimeError("Timing buffers are already prepared")
     with worker._policy_weight_access.hold("bucket-timing-preparation"):
         try:
             prepared = await prepare_bucket_transfer(worker, client, source_owners=source_owners)
             worker._bucket_timing_session = BucketTimingSession(
-                prepared, prepared.local_slices, source_storage(prepared.local_sources)
+                prepared, prepared.local_slices, source_storage(prepared.local_sources), mode=mode
             )
             persist_readback(
                 worker.cfg.trainer.weight_sync_readback_output, "bucket-timing-prepared", prepared.metadata
@@ -156,8 +163,11 @@ async def begin_timing(worker, client, publication_id):
         if torch.distributed.get_rank() == 0:
             cfg = worker.cfg.generator
             state.receiver_begin_pending = True
+            begin = (
+                client.begin_reference_bucket_sync if state.mode == "reference" else client.begin_diagnostic_weight_sync
+            )
             rows, _ = receiver_rows(
-                await client.begin_diagnostic_weight_sync(state.prepared.manifest.manifest_id, publication_id),
+                await begin(state.prepared.manifest.manifest_id, publication_id),
                 engine_count=cfg.num_inference_engines,
                 ranks_per_engine=(
                     cfg.inference_engine_tensor_parallel_size
@@ -198,16 +208,19 @@ async def install_timing(worker, client, publication_id):
     state = session_for(worker, publication_id, (Phase.BEGUN,))
     state.phase = Phase.INSTALLING
     try:
-        state.install = await run_bucket_phase(
-            worker,
-            client,
-            state.prepared,
-            replay=False,
-            start_versions=state.versions,
-            start_update=state.completed_update,
-            publication_id=publication_id,
-        )
-        validate_bucket_phase(state.prepared, state.install, replay=False, rank=torch.distributed.get_rank())
+        if state.mode == "reference":
+            state.install = await run_reference_phase(worker, client, state)
+        else:
+            state.install = await run_bucket_phase(
+                worker,
+                client,
+                state.prepared,
+                replay=False,
+                start_versions=state.versions,
+                start_update=state.completed_update,
+                publication_id=publication_id,
+            )
+            validate_bucket_phase(state.prepared, state.install, replay=False, rank=torch.distributed.get_rank())
         state.phase = Phase.INSTALLED
         return {"publication_id": publication_id, "install": state.install}
     except BaseException as error:
@@ -219,6 +232,8 @@ async def replay_timing(worker, client, publication_id):
     state = session_for(worker, publication_id, (Phase.INSTALLED,))
     state.phase = Phase.REPLAYING
     try:
+        if state.mode == "reference":
+            await complete_reference_install(worker, client, state)
         persist_bucket_phase(
             worker,
             state.prepared,
@@ -227,6 +242,9 @@ async def replay_timing(worker, client, publication_id):
             start_update=state.completed_update,
             publication_id=publication_id,
         )
+        if state.mode == "reference" and torch.distributed.get_rank() == 0:
+            if any(not row["reference_bind_memory_within_limit"] for row in state.install["receivers"]):
+                raise ValueError("Reference receiver binding exceeded the proof scratch limit")
         receipt = await run_bucket_phase(
             worker,
             client,
@@ -258,3 +276,74 @@ async def close_timing(worker, client, publication_id):
     state = session_for(worker, publication_id, (Phase.READY, Phase.BEGUN, Phase.INSTALLED, Phase.VERIFIED))
     await abort_timing(worker, client, state, None)
     return {"publication_id": publication_id, "closed": True}
+
+
+async def run_reference_phase(worker, client, state):
+    if parameter_versions(worker) != state.versions or worker._completed_update != state.completed_update:
+        raise ValueError("Policy weights changed before original reference installation")
+    device = torch.cuda.current_device()
+    rank = torch.distributed.get_rank()
+    torch.cuda.synchronize(device)
+    allocated = torch.cuda.memory_allocated(device)
+    free = torch.cuda.mem_get_info(device)[0]
+    torch.cuda.reset_peak_memory_stats(device)
+    started = time.monotonic()
+    # Execute the original per-tensor export/reload path without substituting its load implementation.
+    await worker.broadcast_to_inference_engines(client)
+    inventory = worker.read_weight_sync_wire_inventory() if rank == 0 else None
+    torch.cuda.synchronize(device)
+    torch.distributed.barrier()
+    elapsed = time.monotonic() - started
+    if parameter_versions(worker) != state.versions or worker._completed_update != state.completed_update:
+        raise ValueError("Policy weights changed during original reference installation")
+    return {
+        "installation_mode": "original_loader",
+        "seconds": elapsed,
+        "peak_extra_bytes": torch.cuda.max_memory_allocated(device) - allocated,
+        "allocated_before": allocated,
+        "allocated_after": torch.cuda.memory_allocated(device),
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
+        "free_device_bytes_before": free,
+        "free_device_bytes_after": torch.cuda.mem_get_info(device)[0],
+        "sender": inventory,
+        "receivers": None,
+        "buckets": None,
+        "memory_scope": "Torch allocator peak plus device-free endpoints; external allocator peak unmeasured",
+    }
+
+
+async def complete_reference_install(worker, client, state):
+    """Rebind proof views after the original timed native load has returned."""
+    rank = torch.distributed.get_rank()
+    started = time.monotonic()
+    receivers = None
+    inventory = state.install["sender"]
+    if rank == 0:
+        cfg = worker.cfg.generator
+        receivers, _ = receiver_rows(
+            await client.finish_reference_bucket_sync(state.prepared.manifest.manifest_id, state.publication_id),
+            engine_count=cfg.num_inference_engines,
+            ranks_per_engine=(
+                cfg.inference_engine_tensor_parallel_size
+                * cfg.inference_engine_data_parallel_size
+                * cfg.inference_engine_pipeline_parallel_size
+            ),
+            data_parallel_size=cfg.inference_engine_data_parallel_size,
+            expected=state.prepared.receiver_identities,
+        )
+        expected = manifest_wire_inventory(state.prepared.manifest)
+        if inventory["entries"] != expected:
+            raise ValueError("Native reference broadcasts differ from the frozen wire manifest")
+        for index, row in enumerate(receivers):
+            if (
+                row["manifest_id"] != state.prepared.manifest.manifest_id
+                or row["publication_id"] != state.publication_id
+                or not row["original_reload_complete"]
+                or row["wire_inventory"]["entries"] != inventory["entries"]
+                or row["wire_inventory"]["wire_bytes"] != inventory["wire_bytes"]
+                or row["installed_parameter_bytes"]
+                != state.prepared.prepared_receivers[index]["installed_parameter_bytes"]
+            ):
+                raise ValueError("Reference completion lacks exact native sender/receiver coverage")
+    state.install["receivers"] = receivers
+    state.install["reference_binding_seconds"] = time.monotonic() - started

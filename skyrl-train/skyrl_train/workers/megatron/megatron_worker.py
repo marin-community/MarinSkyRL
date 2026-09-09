@@ -861,6 +861,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             },
         )
 
+    async def prepare_reference_timing(self, inference_engine_client):
+        from skyrl_train.weight_sync.bucket_timing_session import prepare_timing
+
+        return await prepare_timing(
+            self,
+            inference_engine_client,
+            mode="reference",
+            source_owners={
+                "dense_owner": mpu.get_data_parallel_rank() == 0,
+                "expert_owner": mpu.get_expert_data_parallel_rank() == 0,
+            },
+        )
+
     async def begin_bucket_timing(self, inference_engine_client, publication_id):
         from skyrl_train.weight_sync.bucket_timing_session import begin_timing
 

@@ -36,6 +36,8 @@ class GrugBucketReceiver:
         self.buffers = buffers
         self.backend = backend
         self._next_install = 0
+        self._reference_install_complete = False
+        self._released_for_reference = False
         self._next_replay = 0
         self._replay_mismatches = 0
         self._replay_bytes = 0
@@ -158,20 +160,61 @@ class GrugBucketReceiver:
         if result.mismatches:
             raise ValueError("Cannot reuse a receiver after a failed byte comparison")
         self._next_install = 0
+        self._reference_install_complete = False
         self._next_replay = 0
         self._replay_mismatches = 0
         self._replay_bytes = 0
         self._replay_coverage = ReceiverByteCoverage(self.parameters)
 
+    def release_for_reference_reload(self):
+        """Drop installed storage references before the original loader replaces it."""
+        if self._next_install or self._next_replay or self._released_for_reference or self._reference_install_complete:
+            raise ValueError("Reference reload requires an unused, bound receiver")
+        layout = {
+            name: (tuple(value.shape), tuple(value.stride()), value.dtype, value.device)
+            for name, value in self.parameters.items()
+        }
+        self.parameters.clear()
+        self._replay_coverage = None
+        self._released_for_reference = True
+        return layout
+
+    def bind_reference_install(self, parameters, *, expected_layout):
+        """Bind the newly installed map after the caller proves original load coverage."""
+        if not self._released_for_reference:
+            raise ValueError("Reference installation requires a prior storage release")
+        actual_layout = {
+            name: (tuple(value.shape), tuple(value.stride()), value.dtype, value.device)
+            for name, value in parameters.items()
+        }
+        if actual_layout != expected_layout:
+            raise ValueError("Original loader changed the prepared parameter layout")
+        bound = GrugBucketReceiver(
+            self.manifest,
+            parameters,
+            self.expert_maps,
+            self.buffers,
+            backend=self.backend,
+            tensor_parallel_size=1,
+        )
+        if bound.expected_bytes != self.expected_bytes:
+            raise ValueError("Reference installation changed expected byte coverage")
+        bound._reference_install_complete = True
+        return bound
+
     def validate_next_bucket(self, bucket_id: int, *, replay: bool) -> None:
+        if self._released_for_reference:
+            raise ValueError("Receiver storage is released for the original reload")
         if type(bucket_id) is not int or type(replay) is not bool:
             raise ValueError("Bucket identity and replay phase must be typed explicitly")
         if not replay:
+            if self._reference_install_complete:
+                raise ValueError("Reference installation cannot overlap bucket installation")
             if bucket_id != self._next_install or bucket_id >= self.manifest.bucket_count:
                 raise ValueError("Install must consume every bucket once in manifest order")
             return
-        if self._next_install != self.manifest.bucket_count:
-            raise ValueError("Frozen replay starts only after every install bucket")
+        if self._next_install != self.manifest.bucket_count and not self._reference_install_complete:
+            raise ValueError("Frozen replay starts only after every install bucket or proven reference load")
         if bucket_id != self._next_replay or bucket_id >= self.manifest.bucket_count:
             raise ValueError("Replay must consume every bucket once in manifest order")
 

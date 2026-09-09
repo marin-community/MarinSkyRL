@@ -28,9 +28,12 @@ def policy_methods():
         node
         for node in cls.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and (node.name in {"ppo_train", "diagnostic_bucket_install_and_replay"} or node.name.endswith("_bucket_timing"))
+        and (
+            node.name in {"ppo_train", "diagnostic_bucket_install_and_replay", "prepare_reference_timing"}
+            or node.name.endswith("_bucket_timing")
+        )
     ]
-    assert len(methods) == 7
+    assert len(methods) == 8
     selected = ast.ClassDef(name="ActualPolicyMethods", bases=[], keywords=[], body=methods, decorator_list=[])
     tree = ast.fix_missing_locations(ast.Module(body=[selected], type_ignores=[]))
     namespace = {"mpu": SimpleNamespace(get_data_parallel_rank=lambda: 0, get_expert_data_parallel_rank=lambda: 0)}
@@ -412,3 +415,46 @@ async def test_cached_timing_replay_failure_retains_raw_values_then_releases(gat
     assert raw["receivers"][0]["replay_peak_extra_bytes"] == 17
     assert gate.policy._policy_weight_access.owner is None
     assert not hasattr(gate.receiver.worker, "_diagnostic_bucket_state")
+
+
+@pytest.mark.asyncio
+async def test_reference_timing_defers_storage_binding_until_after_native_load(gate):
+    from skyrl_train.weight_sync.reference_bucket_protocol import begin_reference_sync, finish_reference_sync
+    from skyrl_train.weight_sync.wire_inventory import WireInventory
+    from tests.cpu.weight_sync.test_reference_bucket_protocol import replace_and_load
+
+    gate.policy.cfg.generator.weight_sync_wire_inventory = True
+
+    async def begin_reference(manifest_id, publication_id):
+        return [[begin_reference_sync(gate.receiver.worker, manifest_id, publication_id)]]
+
+    async def finish_reference(manifest_id, publication_id):
+        return [[finish_reference_sync(gate.receiver.worker, manifest_id, publication_id)]]
+
+    async def original_broadcast(client):
+        assert gate.policy._policy_weight_access.owner == "bucket-timing"
+        replace_and_load(gate.receiver)
+        inventory = WireInventory()
+        for name, tensor in gate.receiver.parts[1].items():
+            inventory.observe(name, tensor)
+        gate.policy._weight_sync_wire_receipt = inventory.finish(completed_update=gate.policy._completed_update)
+
+    gate.client.begin_reference_bucket_sync = begin_reference
+    gate.client.finish_reference_bucket_sync = finish_reference
+    gate.policy.broadcast_to_inference_engines = original_broadcast
+    gate.policy.read_weight_sync_wire_inventory = lambda: gate.policy._weight_sync_wire_receipt
+    await gate.policy.prepare_reference_timing(gate.client)
+    for version in (1, 2):
+        for tensor in gate.receiver.parts[1].values():
+            tensor.add_(2)
+        gate.policy._completed_update = version
+        await gate.policy.begin_bucket_timing(gate.client, version)
+        install = await gate.policy.install_bucket_timing(gate.client, version)
+        assert install["install"]["installation_mode"] == "original_loader"
+        assert install["install"]["receivers"] is None
+        assert gate.receiver.worker._diagnostic_bucket_state["receiver"].parameters == {}
+        proof = await gate.policy.replay_bucket_timing(gate.client, version)
+        assert proof["replay"]["receivers"][0]["mismatches"] == 0
+        assert install["install"]["sender"]["wire_bytes"] == proof["replay"]["sender"]["wire_bytes"]
+        assert gate.policy._policy_weight_access.owner is None
+    await gate.policy.close_bucket_timing(gate.client, 2)

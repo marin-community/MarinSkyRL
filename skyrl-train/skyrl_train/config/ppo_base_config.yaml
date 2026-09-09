@@ -400,7 +400,7 @@ generator:
   publication_stage_timing: false
   weight_sync_wire_inventory: false
   # Gate-only: cached buffers, measured install, untimed full replay after every sync.
-  weight_sync_bucket_timing: false
+  weight_sync_timing_mode: "off"  # off | bucket | reference
   publication_pause_timeout_seconds: 30.0
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024

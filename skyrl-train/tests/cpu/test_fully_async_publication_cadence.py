@@ -730,11 +730,12 @@ async def test_publication_trace_reaches_step_metrics_without_batch_dispatch(mon
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fail_replay", [False, True])
-async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(monkeypatch, fail_replay):
+@pytest.mark.parametrize("mode", ["bucket", "reference"])
+async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(monkeypatch, fail_replay, mode):
     from skyrl_train.utils import utils as timer_module
 
     trainer = make_driver(interval=1, age=0, steps=2)
-    trainer.cfg.generator.weight_sync_bucket_timing = True
+    trainer.cfg.generator.weight_sync_timing_mode = mode
     clock = [0.0]
     monkeypatch.setattr(timer_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     calls = []
@@ -747,6 +748,7 @@ async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(m
                 return await super().async_run_method(dispatch, method, engine)
             durations = {
                 "prepare_bucket_timing": 101,
+                "prepare_reference_timing": 101,
                 "begin_bucket_timing": 3,
                 "install_bucket_timing": 7,
                 "replay_bucket_timing": 103,
@@ -775,7 +777,7 @@ async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(m
     assert trainer.all_timings["bucket_full_byte_replay"] == 103
     assert calls == [
         ("broadcast_to_inference_engines", ()),
-        ("prepare_bucket_timing", ()),
+        ("prepare_reference_timing" if mode == "reference" else "prepare_bucket_timing", ()),
         ("begin_bucket_timing", (1,)),
         ("install_bucket_timing", (1,)),
         ("replay_bucket_timing", (1,)),
@@ -785,7 +787,7 @@ async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(m
 @pytest.mark.asyncio
 async def test_bucket_timing_driver_finalizes_last_proven_weight_version():
     trainer = make_driver(interval=2, age=1, steps=3)
-    trainer.cfg.generator.weight_sync_bucket_timing = True
+    trainer.cfg.generator.weight_sync_timing_mode = "bucket"
 
     class BucketLearner(LearnerService):
         def __init__(self):
@@ -825,3 +827,29 @@ async def test_bucket_timing_driver_finalizes_last_proven_weight_version():
     assert trainer.policy_model.proven == [2, 3]
     assert trainer.policy_model.closed == 3
     assert trainer._bucket_timing_prepared is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["off", "bucket", "reference"])
+async def test_timing_mode_structured_composition_selects_native_startup(mode):
+    overrides = [] if mode == "off" else [f"generator.weight_sync_timing_mode={mode}"]
+    with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
+        cfg = compose(config_name=DEFAULT_CONFIG_NAME, overrides=overrides)
+    assert cfg.generator.weight_sync_timing_mode == mode
+    trainer = make_driver(interval=1, age=0, steps=1)
+    trainer.cfg.generator.weight_sync_timing_mode = cfg.generator.weight_sync_timing_mode
+    prepared = []
+
+    class ModeLearner(LearnerService):
+        async def async_run_method(self, dispatch, method, engine, *args):
+            if method == "broadcast_to_inference_engines":
+                return await super().async_run_method(dispatch, method, engine)
+            prepared.append(method)
+
+    trainer.policy_model = ModeLearner()
+    trainer.global_step = 0
+    await trainer.async_sync_policy_weights_to_inference_engines()
+    assert trainer.inference_engine_client.publications == [0]
+    assert prepared == (
+        [] if mode == "off" else ["prepare_reference_timing" if mode == "reference" else "prepare_bucket_timing"]
+    )

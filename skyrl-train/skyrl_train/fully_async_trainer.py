@@ -1670,9 +1670,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # async-loop-safe barrier_all (WORLD PG >> the 600s submesh default).
         with Timer("policy_pre_sync_drain", self.all_timings):
             await self._drain_policy_event_loops()
-        bucket_timing = getattr(self.cfg.generator, "weight_sync_bucket_timing", False)
-        if type(bucket_timing) is not bool:
-            raise ValueError("weight_sync_bucket_timing must be explicitly boolean")
+        timing_mode = getattr(self.cfg.generator, "weight_sync_timing_mode", "off")
+        if timing_mode not in ("off", "bucket", "reference"):
+            raise ValueError("weight_sync_timing_mode must be off, bucket or reference")
+        bucket_timing = timing_mode != "off"
         if bucket_timing and self._weight_change_probe_publication() is not None:
             raise ValueError("Bucket timing cannot overlap the independent wire-change probe")
         prepared = bucket_timing and getattr(self, "_bucket_timing_prepared", False)
@@ -1713,7 +1714,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         elif bucket_timing:
             with Timer("bucket_one_time_preparation", self.all_startup_timings):
                 await self.policy_model.async_run_method(
-                    "pass_through", "prepare_bucket_timing", self.inference_engine_client
+                    "pass_through",
+                    "prepare_reference_timing" if timing_mode == "reference" else "prepare_bucket_timing",
+                    self.inference_engine_client,
                 )
             self._bucket_timing_prepared = True
             self._bucket_timing_last_version = None

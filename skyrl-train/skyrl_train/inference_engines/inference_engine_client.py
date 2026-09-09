@@ -894,6 +894,16 @@ class InferenceEngineClient(InferenceEngineInterface):
             "begin_diagnostic_weight_sync", manifest_id=manifest_id, publication_id=publication_id
         )
 
+    async def begin_reference_bucket_sync(self, manifest_id, publication_id):
+        return await self._run_diagnostic_bucket_rpc(
+            "begin_reference_bucket_sync", manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def finish_reference_bucket_sync(self, manifest_id, publication_id):
+        return await self._run_diagnostic_bucket_rpc(
+            "finish_reference_bucket_sync", manifest_id=manifest_id, publication_id=publication_id
+        )
+
     async def receive_diagnostic_weight_sync_bucket(
         self, bucket_id: int, *, replay: bool = False, manifest_id: str | None = None, publication_id: int | None = None
     ):

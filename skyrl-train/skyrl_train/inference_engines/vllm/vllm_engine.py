@@ -478,6 +478,16 @@ class WorkerWrap:
 
         return begin_worker_bucket_sync(self, manifest_id, publication_id)
 
+    def begin_reference_bucket_sync(self, manifest_id, publication_id):
+        from skyrl_train.weight_sync.reference_bucket_protocol import begin_reference_sync
+
+        return begin_reference_sync(self, manifest_id, publication_id)
+
+    def finish_reference_bucket_sync(self, manifest_id, publication_id):
+        from skyrl_train.weight_sync.reference_bucket_protocol import finish_reference_sync
+
+        return finish_reference_sync(self, manifest_id, publication_id)
+
     def receive_diagnostic_weight_sync_bucket(self, bucket_id, replay=False, manifest_id=None, publication_id=None):
         from skyrl_train.weight_sync.worker_bucket_protocol import receive_worker_bucket
 
@@ -753,6 +763,10 @@ class WorkerWrap:
             # Immediate mode (default): load right away
             with self._publication_timer.span("load"):
                 load_weights_into_vllm(self.model_runner.model, weight_list)
+            if getattr(self, "_diagnostic_bucket_state", {}).get("reference_active", False):
+                from skyrl_train.weight_sync.reference_bucket_protocol import observe_reference_load
+
+                observe_reference_load(self, weight_list)
             for weight in weight_list:
                 del weight
 
@@ -2145,6 +2159,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         return await call_all_receiver_workers(
             self._get_engine(), "begin_diagnostic_weight_sync", args=(manifest_id, publication_id), kwargs=None
+        )
+
+    async def begin_reference_bucket_sync(self, manifest_id, publication_id):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(), "begin_reference_bucket_sync", args=(manifest_id, publication_id), kwargs=None
+        )
+
+    async def finish_reference_bucket_sync(self, manifest_id, publication_id):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(), "finish_reference_bucket_sync", args=(manifest_id, publication_id), kwargs=None
         )
 
     async def receive_diagnostic_weight_sync_bucket(
