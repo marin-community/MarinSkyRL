@@ -14,7 +14,10 @@ from skyrl_train.weight_sync.manifest import parse_manifest
 
 
 BUCKET_BYTES = 2**30
-REPLAY_SCRATCH_BYTES = 512 * 1024
+# Pinned Torch count_nonzero promotes this entire bool slice to int64.
+# 64 KiB keeps that temporary plus the router conversion below the 1 MiB gate.
+# Native phase peaks remain authoritative, including allocator/kernel overhead.
+REPLAY_SCRATCH_BYTES = 64 * 1024
 MAX_REPLAY_EXTRA_BYTES = 2**20
 
 

@@ -5,7 +5,7 @@ import torch
 from skyrl_train.weight_sync.byte_replay import ByteComparison, compare_installed_views
 
 
-ROUTER_CONVERSION_ELEMENTS = 65536  # 256 KiB of FP32, alongside 512 KiB boolean scratch.
+ROUTER_CONVERSION_ELEMENTS = 65536  # 256 KiB of FP32; the caller supplies bounded boolean scratch.
 
 
 def compare_widened_router(source: torch.Tensor, installed: torch.Tensor, scratch: torch.Tensor) -> ByteComparison:
