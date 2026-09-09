@@ -1749,7 +1749,7 @@ def _persist_failure_artifacts_bounded(action, timeout: float) -> None:
 
 def persist_readback_runtime_observability(args, node_id: str) -> None:
     """Publish the actual supervisor log destination before diagnostic setup."""
-    if os.environ.get("SKYRL_READBACK_STARTUP_DIAGNOSTICS") != "1":
+    if os.environ.get("OT_AGENT_READBACK_STARTUP_DIAGNOSTICS") != "1":
         return
     identity = os.environ.get("IRIS_ATTEMPT_UID", "")
     if (

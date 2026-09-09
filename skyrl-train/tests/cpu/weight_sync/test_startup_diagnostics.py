@@ -40,7 +40,7 @@ def test_failure_upload_does_not_replace_original_exception(tmp_path, monkeypatc
 
 
 def test_runtime_receipt_reports_actual_resolved_log_destination(tmp_path, monkeypatch):
-    monkeypatch.setenv("SKYRL_READBACK_STARTUP_DIAGNOSTICS", "1")
+    monkeypatch.setenv("OT_AGENT_READBACK_STARTUP_DIAGNOSTICS", "1")
     monkeypatch.setenv("IRIS_ATTEMPT_UID", "native-attempt")
     monkeypatch.setenv("OT_AGENT_RAY_LOG_SYNC", "1")
     monkeypatch.setenv("OT_AGENT_RAY_LOG_SYNC_INTERVAL_S", "15")
