@@ -145,16 +145,27 @@ def begin_worker_bucket_sync(worker, manifest_id: str, publication_id: int):
     }
 
 
+def validate_sync_identity(state, manifest_id, publication_id):
+    active = state["publication_id"]
+    if active is None:
+        valid = manifest_id is None and publication_id is None
+    else:
+        valid = (
+            type(manifest_id) is str
+            and type(publication_id) is int
+            and manifest_id == state["receiver"].manifest.manifest_id
+            and publication_id == active
+        )
+    if not valid:
+        raise ValueError("Bucket RPC does not match the active manifest and weight-sync version")
+
+
 def receive_worker_bucket(
     worker, bucket_id: int, *, replay: bool = False, manifest_id: str | None = None, publication_id: int | None = None
 ):
     state = worker._diagnostic_bucket_state
     receiver = state["receiver"]
-    if (manifest_id, publication_id) != (
-        receiver.manifest.manifest_id if state["publication_id"] is not None else None,
-        state["publication_id"],
-    ):
-        raise ValueError("Bucket RPC does not match the active manifest and weight-sync version")
+    validate_sync_identity(state, manifest_id, publication_id)
     receiver.validate_next_bucket(bucket_id, replay=replay)
     if replay and not state["install_complete"]:
         raise ValueError("Replay requires the explicit installed-weight completion join")
@@ -197,8 +208,9 @@ def receive_worker_bucket(
     }
 
 
-def finish_worker_install(worker):
+def finish_worker_install(worker, *, manifest_id=None, publication_id=None):
     state = worker._diagnostic_bucket_state
+    validate_sync_identity(state, manifest_id, publication_id)
     state["receiver"].validate_install_complete()
     completed_slots = []
     for slot, (used, event) in enumerate(zip(state["slot_used"], state["load_events"], strict=True)):
@@ -223,8 +235,9 @@ def finish_worker_install(worker):
     }
 
 
-def finish_worker_replay(worker):
+def finish_worker_replay(worker, *, manifest_id=None, publication_id=None):
     state = worker._diagnostic_bucket_state
+    validate_sync_identity(state, manifest_id, publication_id)
     if state["scratch"] is None:
         raise ValueError("No frozen replay was started")
     result = state["receiver"].finish_replay()
@@ -262,9 +275,10 @@ def finish_worker_replay(worker):
     }
 
 
-def close_worker_buckets(worker):
+def close_worker_buckets(worker, *, manifest_id=None, publication_id=None):
     present = hasattr(worker, "_diagnostic_bucket_state")
     if present:
+        validate_sync_identity(worker._diagnostic_bucket_state, manifest_id, publication_id)
         torch.cuda.synchronize(worker.device)
         del worker._diagnostic_bucket_state
     return {
@@ -272,5 +286,7 @@ def close_worker_buckets(worker):
         "rank": torch.distributed.get_rank(),
         "world_size": torch.distributed.get_world_size(),
         "closed": True,
+        "manifest_id": manifest_id,
+        "publication_id": publication_id,
         "state_was_present": present,
     }

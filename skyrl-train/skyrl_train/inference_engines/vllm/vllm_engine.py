@@ -485,20 +485,20 @@ class WorkerWrap:
             self, bucket_id, replay=replay, manifest_id=manifest_id, publication_id=publication_id
         )
 
-    def finish_diagnostic_weight_sync_replay(self):
+    def finish_diagnostic_weight_sync_replay(self, manifest_id=None, publication_id=None):
         from skyrl_train.weight_sync.worker_bucket_protocol import finish_worker_replay
 
-        return finish_worker_replay(self)
+        return finish_worker_replay(self, manifest_id=manifest_id, publication_id=publication_id)
 
-    def finish_diagnostic_weight_sync_install(self):
+    def finish_diagnostic_weight_sync_install(self, manifest_id=None, publication_id=None):
         from skyrl_train.weight_sync.worker_bucket_protocol import finish_worker_install
 
-        return finish_worker_install(self)
+        return finish_worker_install(self, manifest_id=manifest_id, publication_id=publication_id)
 
-    def close_diagnostic_weight_sync_buckets(self):
+    def close_diagnostic_weight_sync_buckets(self, manifest_id=None, publication_id=None):
         from skyrl_train.weight_sync.worker_bucket_protocol import close_worker_buckets
 
-        return close_worker_buckets(self)
+        return close_worker_buckets(self, manifest_id=manifest_id, publication_id=publication_id)
 
     def read_weight_sync_environment(self):
         from skyrl_train.weight_sync.readback_diagnostics import environment_readback
@@ -2159,25 +2159,34 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             kwargs={"replay": replay, "manifest_id": manifest_id, "publication_id": publication_id},
         )
 
-    async def finish_diagnostic_weight_sync_install(self):
+    async def finish_diagnostic_weight_sync_install(self, manifest_id=None, publication_id=None):
         from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 
         return await call_all_receiver_workers(
-            self._get_engine(), "finish_diagnostic_weight_sync_install", args=(), kwargs=None
+            self._get_engine(),
+            "finish_diagnostic_weight_sync_install",
+            args=(),
+            kwargs={"manifest_id": manifest_id, "publication_id": publication_id},
         )
 
-    async def finish_diagnostic_weight_sync_replay(self):
+    async def finish_diagnostic_weight_sync_replay(self, manifest_id=None, publication_id=None):
         from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 
         return await call_all_receiver_workers(
-            self._get_engine(), "finish_diagnostic_weight_sync_replay", args=(), kwargs=None
+            self._get_engine(),
+            "finish_diagnostic_weight_sync_replay",
+            args=(),
+            kwargs={"manifest_id": manifest_id, "publication_id": publication_id},
         )
 
-    async def close_diagnostic_weight_sync_buckets(self):
+    async def close_diagnostic_weight_sync_buckets(self, manifest_id=None, publication_id=None):
         from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 
         return await call_all_receiver_workers(
-            self._get_engine(), "close_diagnostic_weight_sync_buckets", args=(), kwargs=None
+            self._get_engine(),
+            "close_diagnostic_weight_sync_buckets",
+            args=(),
+            kwargs={"manifest_id": manifest_id, "publication_id": publication_id},
         )
 
     async def read_publication_receiver_state(self):

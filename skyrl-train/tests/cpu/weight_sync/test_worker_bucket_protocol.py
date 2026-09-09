@@ -306,13 +306,13 @@ def test_actual_worker_cached_manifest_reuses_buffers_across_two_exact_syncs(nat
         for bucket in range(manifest.bucket_count):
             row = case.worker.receive_diagnostic_weight_sync_bucket(bucket, **identity)
             assert row["publication_id"] == version
-        case.worker.finish_diagnostic_weight_sync_install()
+        case.worker.finish_diagnostic_weight_sync_install(**identity)
         for bucket in range(manifest.bucket_count):
             case.worker.receive_diagnostic_weight_sync_bucket(bucket, replay=True, **identity)
-        proof = case.worker.finish_diagnostic_weight_sync_replay()
+        proof = case.worker.finish_diagnostic_weight_sync_replay(**identity)
         assert proof["mismatches"] == 0 and proof["publication_id"] == version
         assert proof["compared_bytes"] == proof["expected_bytes"]
-    case.worker.close_diagnostic_weight_sync_buckets()
+    case.worker.close_diagnostic_weight_sync_buckets(**identity)
 
 
 def test_cached_sync_rejects_stale_packets_and_reset_before_proof(native_protocol):
@@ -337,3 +337,36 @@ def test_cached_sync_rejects_same_tensor_object_with_replaced_storage(native_pro
     tensor.data = tensor.clone()
     with pytest.raises(ValueError, match="parameter identity changed"):
         case.worker.begin_diagnostic_weight_sync(case.parts[0].manifest_id, 1)
+
+
+def test_delayed_finish_and_close_cannot_mutate_new_sync(native_protocol):
+    case = native_protocol
+    prepare(case)
+    manifest = case.parts[0]
+    prior = {"manifest_id": manifest.manifest_id, "publication_id": 0}
+    current = {"manifest_id": manifest.manifest_id, "publication_id": 1}
+    for identity in (prior, current):
+        case.worker.begin_diagnostic_weight_sync(**identity)
+        for bucket in range(manifest.bucket_count):
+            case.worker.receive_diagnostic_weight_sync_bucket(bucket, **identity)
+        state = case.worker._diagnostic_bucket_state
+        if identity is current:
+            for invalid in (prior, {}, {**current, "publication_id": True}):
+                with pytest.raises(ValueError, match="does not match"):
+                    case.worker.finish_diagnostic_weight_sync_install(**invalid)
+                assert state["install_complete"] is False
+        case.worker.finish_diagnostic_weight_sync_install(**identity)
+        for bucket in range(manifest.bucket_count):
+            case.worker.receive_diagnostic_weight_sync_bucket(bucket, replay=True, **identity)
+        if identity is current:
+            for invalid in (prior, {}, {**current, "publication_id": True}):
+                with pytest.raises(ValueError, match="does not match"):
+                    case.worker.finish_diagnostic_weight_sync_replay(**invalid)
+                assert state["replay_verified"] is False
+                with pytest.raises(ValueError, match="does not match"):
+                    case.worker.close_diagnostic_weight_sync_buckets(**invalid)
+                assert case.worker._diagnostic_bucket_state is state
+        case.worker.finish_diagnostic_weight_sync_replay(**identity)
+    receipt = case.worker.close_diagnostic_weight_sync_buckets(**current)
+    assert receipt["publication_id"] == 1 and receipt["closed"] is True
+    assert not hasattr(case.worker, "_diagnostic_bucket_state")

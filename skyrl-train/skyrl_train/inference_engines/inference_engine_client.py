@@ -905,14 +905,20 @@ class InferenceEngineClient(InferenceEngineInterface):
             publication_id=publication_id,
         )
 
-    async def finish_diagnostic_weight_sync_install(self):
-        return await self._run_diagnostic_bucket_rpc("finish_diagnostic_weight_sync_install")
+    async def finish_diagnostic_weight_sync_install(self, manifest_id=None, publication_id=None):
+        return await self._run_diagnostic_bucket_rpc(
+            "finish_diagnostic_weight_sync_install", manifest_id=manifest_id, publication_id=publication_id
+        )
 
-    async def finish_diagnostic_weight_sync_replay(self):
-        return await self._run_diagnostic_bucket_rpc("finish_diagnostic_weight_sync_replay")
+    async def finish_diagnostic_weight_sync_replay(self, manifest_id=None, publication_id=None):
+        return await self._run_diagnostic_bucket_rpc(
+            "finish_diagnostic_weight_sync_replay", manifest_id=manifest_id, publication_id=publication_id
+        )
 
-    async def close_diagnostic_weight_sync_buckets(self):
-        return await self._run_diagnostic_bucket_rpc("close_diagnostic_weight_sync_buckets")
+    async def close_diagnostic_weight_sync_buckets(self, manifest_id=None, publication_id=None):
+        return await self._run_diagnostic_bucket_rpc(
+            "close_diagnostic_weight_sync_buckets", manifest_id=manifest_id, publication_id=publication_id
+        )
 
     async def read_publication_receiver_state(self):
         return await self._run_on_all_engines("read_publication_receiver_state")
