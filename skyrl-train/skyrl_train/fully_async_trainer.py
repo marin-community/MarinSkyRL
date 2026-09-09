@@ -1651,6 +1651,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await self._drain_background_evaluations(wait=True)
         await self._publish_policy_weights(reason="final", timing_name="final_weight_sync")
         await super()._finalize_training(completed_step=completed_step, epoch=epoch)
+        if getattr(self, "_bucket_timing_prepared", False):
+            await self.policy_model.async_run_method(
+                "pass_through", "close_bucket_timing", self.inference_engine_client, self._bucket_timing_last_version
+            )
+            self._bucket_timing_prepared = False
 
     async def async_sync_policy_weights_to_inference_engines(self):
         # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the
@@ -1665,25 +1670,55 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # async-loop-safe barrier_all (WORLD PG >> the 600s submesh default).
         with Timer("policy_pre_sync_drain", self.all_timings):
             await self._drain_policy_event_loops()
+        bucket_timing = getattr(self.cfg.generator, "weight_sync_bucket_timing", False)
+        if type(bucket_timing) is not bool:
+            raise ValueError("weight_sync_bucket_timing must be explicitly boolean")
+        if bucket_timing and self._weight_change_probe_publication() is not None:
+            raise ValueError("Bucket timing cannot overlap the independent wire-change probe")
+        prepared = bucket_timing and getattr(self, "_bucket_timing_prepared", False)
+        if prepared:
+            with Timer("bucket_sync_begin", self.all_timings):
+                await self.policy_model.async_run_method(
+                    "pass_through", "begin_bucket_timing", self.inference_engine_client, self.global_step
+                )
         with Timer("weight_broadcast", self.all_timings):
-            publication = self._weight_change_probe_publication()
-            if publication is None:
+            if prepared:
                 result = await self.policy_model.async_run_method(
-                    "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+                    "pass_through", "install_bucket_timing", self.inference_engine_client, self.global_step
                 )
             else:
-                result = await self.policy_model.async_run_method(
-                    "pass_through",
-                    "broadcast_to_inference_engines",
-                    self.inference_engine_client,
-                    publication=publication,
-                )
-                started = time.perf_counter()
+                publication = self._weight_change_probe_publication()
+                if publication is None:
+                    result = await self.policy_model.async_run_method(
+                        "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+                    )
+                else:
+                    result = await self.policy_model.async_run_method(
+                        "pass_through",
+                        "broadcast_to_inference_engines",
+                        self.inference_engine_client,
+                        publication=publication,
+                    )
+                    started = time.perf_counter()
+                    await self.policy_model.async_run_method(
+                        "pass_through", "finish_weight_change_probe", publication["publication_id"]
+                    )
+                    self._weight_change_probe_committed(publication, time.perf_counter() - started)
+        if prepared:
+            with Timer("bucket_full_byte_replay", self.all_timings):
                 await self.policy_model.async_run_method(
-                    "pass_through", "finish_weight_change_probe", publication["publication_id"]
+                    "pass_through", "replay_bucket_timing", self.inference_engine_client, self.global_step
                 )
-                self._weight_change_probe_committed(publication, time.perf_counter() - started)
-        if self.cfg.generator.publication_stage_timing:
+            self._bucket_timing_last_version = self.global_step
+        elif bucket_timing:
+            with Timer("bucket_one_time_preparation", self.all_startup_timings):
+                await self.policy_model.async_run_method(
+                    "pass_through", "prepare_bucket_timing", self.inference_engine_client
+                )
+            self._bucket_timing_prepared = True
+            self._bucket_timing_last_version = None
+        # Packed syncs emit versioned phase receipts, not the old per-tensor stage cache.
+        if self.cfg.generator.publication_stage_timing and not prepared:
             receipts = await asyncio.gather(
                 *self.policy_model.async_run_ray_method("pass_through", "read_publication_timing")
             )

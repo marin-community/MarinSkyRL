@@ -28,9 +28,9 @@ def policy_methods():
         node
         for node in cls.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name in {"ppo_train", "diagnostic_bucket_install_and_replay"}
+        and (node.name in {"ppo_train", "diagnostic_bucket_install_and_replay"} or node.name.endswith("_bucket_timing"))
     ]
-    assert len(methods) == 2
+    assert len(methods) == 7
     selected = ast.ClassDef(name="ActualPolicyMethods", bases=[], keywords=[], body=methods, decorator_list=[])
     tree = ast.fix_missing_locations(ast.Module(body=[selected], type_ignores=[]))
     namespace = {"mpu": SimpleNamespace(get_data_parallel_rank=lambda: 0, get_expert_data_parallel_rank=lambda: 0)}
@@ -134,24 +134,27 @@ def gate(request, monkeypatch, tmp_path):
             await self.allow_prepare.wait()
             return [[case.worker.prepare_diagnostic_weight_sync_buckets(payload, manifest_id)]]
 
-        async def receive_diagnostic_weight_sync_bucket(self, bucket_id, replay=False):
+        async def begin_diagnostic_weight_sync(self, manifest_id, publication_id):
+            return [[case.worker.begin_diagnostic_weight_sync(manifest_id, publication_id)]]
+
+        async def receive_diagnostic_weight_sync_bucket(self, bucket_id, replay=False, **identity):
             self.receives += 1
-            result = case.worker.receive_diagnostic_weight_sync_bucket(bucket_id, replay=replay)
+            result = case.worker.receive_diagnostic_weight_sync_bucket(bucket_id, replay=replay, **identity)
             if replay and self.restart_after_install:
                 result["identity"]["pid"] += 1
             return [[result]]
 
-        async def finish_diagnostic_weight_sync_install(self):
-            result = case.worker.finish_diagnostic_weight_sync_install()
+        async def finish_diagnostic_weight_sync_install(self, **identity):
+            result = case.worker.finish_diagnostic_weight_sync_install(**identity)
             if self.corrupt_after_install:
                 case.parts[2]["model.embed_tokens.weight"].view(torch.uint8).view(-1)[0] ^= 1
             return [[result]]
 
-        async def finish_diagnostic_weight_sync_replay(self):
-            return [[case.worker.finish_diagnostic_weight_sync_replay()]]
+        async def finish_diagnostic_weight_sync_replay(self, **identity):
+            return [[case.worker.finish_diagnostic_weight_sync_replay(**identity)]]
 
-        async def close_diagnostic_weight_sync_buckets(self):
-            case.worker.close_diagnostic_weight_sync_buckets()
+        async def close_diagnostic_weight_sync_buckets(self, **identity):
+            case.worker.close_diagnostic_weight_sync_buckets(**identity)
 
     return SimpleNamespace(policy=policy, client=Client(), receiver=case, parameter=source_parameter)
 
@@ -308,3 +311,104 @@ async def test_failed_memory_gate_retains_raw_receiver_receipt(gate, monkeypatch
     assert row["replay_peak_extra_bytes"] == 17 and not row["replay_memory_within_limit"]
     assert row["compared_bytes"] == row["expected_bytes"] and row["mismatches"] == 0
     assert gate.policy._policy_weight_access.owner is None
+
+
+@pytest.mark.asyncio
+async def test_cached_timing_refreshes_materialized_exports_after_optimizer_updates(gate):
+    sources = gate.receiver.parts[1]
+    tensors = [*sources.values(), gate.parameter]
+    for tensor in tensors:
+        tensor.requires_grad_(True)
+    optimizer = torch.optim.SGD(tensors, lr=2.0)
+
+    def materialize(dtype):
+        for name, tensor in sources.items():
+            value = (
+                torch.stack(tuple(tensor.unbind(0))) if tensor.ndim == 3 else torch.cat(tensor.chunk(2, dim=0), dim=0)
+            )
+            yield WeightChunk(names=[name], tensors=[value], dtypes=[str(value.dtype)], shapes=[list(value.shape)])
+
+    gate.policy.weight_extractor.extract_weights = materialize
+    await gate.policy.prepare_bucket_timing(gate.client)
+    pointers = [buffer.data_ptr() for buffer in gate.policy._bucket_timing_session.prepared.buffers]
+    previous = None
+    for version in (1, 2):
+        for tensor in tensors:
+            tensor.grad = torch.ones_like(tensor)
+        optimizer.step()
+        optimizer.zero_grad()
+        gate.policy._completed_update = version
+        await gate.policy.begin_bucket_timing(gate.client, version)
+        with pytest.raises(RuntimeError, match="already owned by bucket-timing"):
+            gate.policy.ppo_train(None)
+        install = await gate.policy.install_bucket_timing(gate.client, version)
+        assert gate.policy._policy_weight_access.owner == "bucket-timing"
+        paths = Path(gate.policy.cfg.trainer.weight_sync_readback_output)
+        assert not list(paths.glob(f"bucket-*-receivers-sync-{version}-*.json"))
+        proof = await gate.policy.replay_bucket_timing(gate.client, version)
+        assert proof["replay"]["receivers"][0]["mismatches"] == 0
+        assert install["install"]["sender"]["wire_bytes"] == proof["replay"]["sender"]["wire_bytes"]
+        assert len(list(paths.glob(f"bucket-*-receivers-sync-{version}-*.json"))) == 2
+        assert gate.policy._policy_weight_access.owner is None
+        assert [buffer.data_ptr() for buffer in gate.policy._bucket_timing_session.prepared.buffers] == pointers
+        installed = {name: tensor.detach().clone() for name, tensor in gate.receiver.parts[2].items()}
+        if previous is not None:
+            assert all(not torch.equal(installed[name], old) for name, old in previous.items())
+        previous = installed
+    with pytest.raises(ValueError, match="active weight-sync version"):
+        await gate.policy.close_bucket_timing(gate.client, 1)
+    assert hasattr(gate.policy, "_bucket_timing_session")
+    await gate.policy.close_bucket_timing(gate.client, 2)
+    assert not hasattr(gate.policy, "_bucket_timing_session")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_timing_install_releases_policy_and_receiver_storage(gate):
+    await gate.policy.prepare_bucket_timing(gate.client)
+    await gate.policy.begin_bucket_timing(gate.client, 1)
+    entered = asyncio.Event()
+
+    async def pending_finish(**identity):
+        entered.set()
+        await asyncio.Event().wait()
+
+    gate.client.finish_diagnostic_weight_sync_install = pending_finish
+    task = asyncio.create_task(gate.policy.install_bucket_timing(gate.client, 1))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    with pytest.raises(RuntimeError, match="already owned"):
+        gate.policy.ppo_train(None)
+    with pytest.raises(RuntimeError, match="invalid during phase"):
+        await gate.policy.close_bucket_timing(gate.client, 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert gate.policy._policy_weight_access.owner is None
+    assert not hasattr(gate.policy, "_bucket_timing_session")
+    assert not hasattr(gate.receiver.worker, "_diagnostic_bucket_state")
+
+
+@pytest.mark.asyncio
+async def test_cached_timing_source_storage_change_closes_prepared_receiver(gate):
+    await gate.policy.prepare_bucket_timing(gate.client)
+    source = next(iter(gate.receiver.parts[1].values()))
+    source.data = source.clone()
+    with pytest.raises(ValueError, match="mapping/storage changed"):
+        await gate.policy.begin_bucket_timing(gate.client, 1)
+    assert gate.policy._policy_weight_access.owner is None
+    assert not hasattr(gate.policy, "_bucket_timing_session")
+    assert not hasattr(gate.receiver.worker, "_diagnostic_bucket_state")
+
+
+@pytest.mark.asyncio
+async def test_cached_timing_replay_failure_retains_raw_values_then_releases(gate, monkeypatch):
+    await gate.policy.prepare_bucket_timing(gate.client)
+    await gate.policy.begin_bucket_timing(gate.client, 1)
+    await gate.policy.install_bucket_timing(gate.client, 1)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: 4017)
+    with pytest.raises(ValueError, match="allocation gate failed"):
+        await gate.policy.replay_bucket_timing(gate.client, 1)
+    path = next(Path(gate.policy.cfg.trainer.weight_sync_readback_output).glob("bucket-replay-receivers-sync-1-*.json"))
+    raw = json.loads(path.read_text())
+    assert raw["receivers"][0]["replay_peak_extra_bytes"] == 17
+    assert gate.policy._policy_weight_access.owner is None
+    assert not hasattr(gate.receiver.worker, "_diagnostic_bucket_state")

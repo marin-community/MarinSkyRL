@@ -726,3 +726,102 @@ async def test_publication_trace_reaches_step_metrics_without_batch_dispatch(mon
         "final",
     }
     assert all(json.loads(event[1]["receipt_json"])["request_accounting"] == {"active_ids": []} for event in receipts)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_replay", [False, True])
+async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(monkeypatch, fail_replay):
+    from skyrl_train.utils import utils as timer_module
+
+    trainer = make_driver(interval=1, age=0, steps=2)
+    trainer.cfg.generator.weight_sync_bucket_timing = True
+    clock = [0.0]
+    monkeypatch.setattr(timer_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    calls = []
+
+    class BucketLearner(LearnerService):
+        async def async_run_method(self, dispatch, method, engine, *args):
+            calls.append((method, args))
+            if method == "broadcast_to_inference_engines":
+                clock[0] += 11
+                return await super().async_run_method(dispatch, method, engine)
+            durations = {
+                "prepare_bucket_timing": 101,
+                "begin_bucket_timing": 3,
+                "install_bucket_timing": 7,
+                "replay_bucket_timing": 103,
+            }
+            clock[0] += durations[method]
+            if method == "replay_bucket_timing" and fail_replay:
+                raise ValueError("native full-byte replay failed")
+
+    trainer.policy_model = BucketLearner()
+    trainer.global_step = 0
+    await trainer.async_sync_policy_weights_to_inference_engines()
+    assert trainer.all_timings["weight_broadcast"] == 11
+    assert trainer.all_startup_timings["bucket_one_time_preparation"] == 101
+    trainer.all_timings.clear()
+    trainer.cfg.generator.publication_stage_timing = True
+    trainer.global_step = 1
+    if fail_replay:
+        with pytest.raises(ValueError, match="native full-byte replay failed"):
+            await trainer.async_sync_policy_weights_to_inference_engines()
+        assert trainer._published_policy_version == 0
+    else:
+        await trainer.async_sync_policy_weights_to_inference_engines()
+        assert trainer._published_policy_version == 1
+    assert trainer.all_timings["weight_broadcast"] == 7
+    assert trainer.all_timings["bucket_sync_begin"] == 3
+    assert trainer.all_timings["bucket_full_byte_replay"] == 103
+    assert calls == [
+        ("broadcast_to_inference_engines", ()),
+        ("prepare_bucket_timing", ()),
+        ("begin_bucket_timing", (1,)),
+        ("install_bucket_timing", (1,)),
+        ("replay_bucket_timing", (1,)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bucket_timing_driver_finalizes_last_proven_weight_version():
+    trainer = make_driver(interval=2, age=1, steps=3)
+    trainer.cfg.generator.weight_sync_bucket_timing = True
+
+    class BucketLearner(LearnerService):
+        def __init__(self):
+            super().__init__()
+            self.phase = None
+            self.proven = []
+            self.closed = None
+
+        async def async_run_method(self, dispatch, method, engine, version=None):
+            if method == "broadcast_to_inference_engines":
+                return await super().async_run_method(dispatch, method, engine)
+            if method == "prepare_bucket_timing":
+                assert self.phase is None
+                self.phase = "ready"
+            elif method == "begin_bucket_timing":
+                assert self.phase in ("ready", "proven") and engine.generation_paused_event.is_set()
+                self.phase = "begun"
+            elif method == "install_bucket_timing":
+                assert self.phase == "begun" and engine.generation_paused_event.is_set()
+                assert version == self.completed_update
+                engine.installed_update = version
+                engine.publications.append(version)
+                self.phase = "installed"
+            elif method == "replay_bucket_timing":
+                assert self.phase == "installed" and engine.generation_paused_event.is_set()
+                self.phase = "proven"
+                self.proven.append(version)
+            elif method == "close_bucket_timing":
+                assert self.phase == "proven" and version == self.proven[-1]
+                self.closed = version
+            else:
+                raise AssertionError(method)
+
+    trainer.policy_model = BucketLearner()
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert trainer.inference_engine_client.publications == [0, 2, 3]
+    assert trainer.policy_model.proven == [2, 3]
+    assert trainer.policy_model.closed == 3
+    assert trainer._bucket_timing_prepared is False

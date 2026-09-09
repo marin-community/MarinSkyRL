@@ -849,6 +849,38 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         output.metadata = {"train_status": status_mean, "train_status_by_update": status_by_update}
         return output
 
+    async def prepare_bucket_timing(self, inference_engine_client):
+        from skyrl_train.weight_sync.bucket_timing_session import prepare_timing
+
+        return await prepare_timing(
+            self,
+            inference_engine_client,
+            source_owners={
+                "dense_owner": mpu.get_data_parallel_rank() == 0,
+                "expert_owner": mpu.get_expert_data_parallel_rank() == 0,
+            },
+        )
+
+    async def begin_bucket_timing(self, inference_engine_client, publication_id):
+        from skyrl_train.weight_sync.bucket_timing_session import begin_timing
+
+        return await begin_timing(self, inference_engine_client, publication_id)
+
+    async def install_bucket_timing(self, inference_engine_client, publication_id):
+        from skyrl_train.weight_sync.bucket_timing_session import install_timing
+
+        return await install_timing(self, inference_engine_client, publication_id)
+
+    async def replay_bucket_timing(self, inference_engine_client, publication_id):
+        from skyrl_train.weight_sync.bucket_timing_session import replay_timing
+
+        return await replay_timing(self, inference_engine_client, publication_id)
+
+    async def close_bucket_timing(self, inference_engine_client, publication_id):
+        from skyrl_train.weight_sync.bucket_timing_session import close_timing
+
+        return await close_timing(self, inference_engine_client, publication_id)
+
     async def diagnostic_bucket_install_and_replay(self, inference_engine_client):
         from skyrl_train.weight_sync.megatron_bucket_protocol import install_and_replay
 

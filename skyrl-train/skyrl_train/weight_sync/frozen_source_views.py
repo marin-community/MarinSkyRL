@@ -33,6 +33,8 @@ def local_source_slices(tasks, config):
         source = task.param_weight
         if source is None:
             continue
+        # Reuse storage across optimizer updates without retaining autograd view history.
+        source = source.detach()
         key = task.global_param_name
         if key in sources or not source.is_contiguous() or source.dtype not in (torch.bfloat16, torch.float32):
             raise ValueError("Frozen source task must have unique contiguous BF16/FP32 storage")
