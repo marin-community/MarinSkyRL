@@ -115,6 +115,14 @@ def compare_installed_views(
             raise ValueError("Installed shape/dtype differs from the frozen source")
         if any(t.device != scratch.device or not t.is_contiguous() for t in (source, installed)):
             raise ValueError("Comparison views and scratch must be contiguous on the same device")
+        tensors = (source, installed, scratch)
+        for index, left in enumerate(tensors):
+            for right in tensors[index + 1 :]:
+                left_start, right_start = left.data_ptr(), right.data_ptr()
+                left_end = left_start + left.numel() * left.element_size()
+                right_end = right_start + right.numel() * right.element_size()
+                if max(left_start, right_start) < min(left_end, right_end):
+                    raise ValueError("Frozen source, installed view and scratch must not overlap")
         expected = source.detach().view(-1).view(torch.uint8)
         actual = installed.detach().view(-1).view(torch.uint8)
         if compared + expected.numel() > expected_bytes:
