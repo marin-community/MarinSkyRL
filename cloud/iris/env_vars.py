@@ -384,6 +384,8 @@ class EnvVarManager:
             values[NUMA_AFFINITY_ENV] = "1"
         if _config_value(config, "trainer.collective_phase_diagnostics", False):
             values[COLLECTIVE_PHASE_DIAGNOSTICS_ENV] = "1"
+        if _config_value(config, "trainer.weight_sync_nccl_diagnostics", False):
+            values.update(NCCL_DEBUG="INFO", NCCL_DEBUG_SUBSYS="INIT,NET")
         raw_mode = _config_value(config, "trainer.debug_mode", "off")
         try:
             mode = DistributedDebugMode(str(raw_mode))

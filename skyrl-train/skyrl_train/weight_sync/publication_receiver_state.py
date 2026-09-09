@@ -6,6 +6,8 @@ import time
 
 import torch
 
+from skyrl_train.weight_sync.readback_diagnostics import environment_readback, tensor_sha256
+
 
 def read_publication_receiver_state(worker):
     """Report post-initialization device memory and each instantiated MoE layout.
@@ -43,11 +45,38 @@ def read_publication_receiver_state(worker):
                 "backend_repr": str(backend),
                 "parameters": parameters,
                 "expert_map": mapping,
+                "first_local_expert": {
+                    "w13_half_sha256": [tensor_sha256(half) for half in module.w13_weight[0].chunk(2, dim=0)],
+                    "w2_sha256": tensor_sha256(module.w2_weight[0]),
+                },
             }
         )
     return {
         "host": socket.gethostname(),
         "pid": os.getpid(),
+        "environment": environment_readback(),
+        "rank": torch.distributed.get_rank(),
+        "world_size": torch.distributed.get_world_size(),
+        "model_path": worker.vllm_config.model_config.model,
+        "model_dimensions": {
+            key: getattr(hf, key, None)
+            for key in (
+                "hidden_size",
+                "intermediate_size",
+                "moe_intermediate_size",
+                "num_hidden_layers",
+                "num_attention_heads",
+            )
+        },
+        "parallel_config": {
+            key: getattr(worker.vllm_config.parallel_config, key)
+            for key in (
+                "tensor_parallel_size",
+                "pipeline_parallel_size",
+                "data_parallel_size",
+                "enable_expert_parallel",
+            )
+        },
         "observed_monotonic": time.monotonic(),
         "device": str(device),
         "free_bytes": free,

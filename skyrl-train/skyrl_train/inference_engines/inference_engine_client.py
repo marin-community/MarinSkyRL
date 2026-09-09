@@ -840,6 +840,12 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def read_publication_request_state(self):
         return await self._run_on_all_engines("read_publication_request_state")
 
+    async def read_publication_receiver_state(self):
+        return await self._run_on_all_engines("read_publication_receiver_state")
+
+    async def read_weight_sync_environment(self):
+        return await self._run_on_all_engines("read_weight_sync_environment")
+
     async def begin_publication_timing(self, step: int):
         return await self._run_on_all_engines("begin_publication_timing", step=step)
 

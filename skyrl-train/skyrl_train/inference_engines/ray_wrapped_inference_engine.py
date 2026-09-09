@@ -197,6 +197,12 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def read_publication_request_state(self):
         return await self.inference_engine_actor.read_publication_request_state.remote()
 
+    async def read_publication_receiver_state(self):
+        return await self.inference_engine_actor.read_publication_receiver_state.remote()
+
+    async def read_weight_sync_environment(self):
+        return await self.inference_engine_actor.read_weight_sync_environment.remote()
+
     async def begin_publication_timing(self, step: int):
         return await self.inference_engine_actor.begin_publication_timing.remote(step)
 

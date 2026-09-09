@@ -466,6 +466,11 @@ class WorkerWrap:
 
         return read_publication_receiver_state(self)
 
+    def read_weight_sync_environment(self):
+        from skyrl_train.weight_sync.readback_diagnostics import environment_readback
+
+        return {"rank": torch.distributed.get_rank(), "environment": environment_readback()}
+
     def begin_publication_timing(self, step: int):
         self._publication_timer = PublicationStageTimer(enabled=True)
         self._publication_step = step
@@ -2039,6 +2044,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def read_publication_receiver_state(self):
         return await self._get_engine().collective_rpc("read_publication_receiver_state")
+
+    async def read_weight_sync_environment(self):
+        return await self._get_engine().collective_rpc("read_weight_sync_environment")
 
     async def read_publication_timing(self):
         return await self._get_engine().collective_rpc("read_publication_timing")

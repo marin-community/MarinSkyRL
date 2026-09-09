@@ -65,6 +65,7 @@ from skyrl_train.telemetry import record_event
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode, weight_sync_dtype
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 from skyrl_train.weight_change_probe import WirePublicationObserver
+from skyrl_train.weight_sync.readback_diagnostics import environment_readback, parameter_digests
 
 
 class _MegatronInitMode(StrEnum):
@@ -365,6 +366,54 @@ class MegatronWorker:
         output = TrainingOutputBatch({"output": log_probs})
         output.metadata = data.metadata
         return output
+
+    def read_weight_sync_environment(self):
+        return {"rank": torch.distributed.get_rank(), "environment": environment_readback()}
+
+    def read_weight_sync_policy_state(self):
+        """Read memory, layouts and all-rank replica digests after a frozen initial sync."""
+        device = torch.cuda.current_device()
+        torch.cuda.synchronize(device)
+        free, total = torch.cuda.mem_get_info(device)
+        environment = environment_readback()
+        parameters = parameter_digests(self.actor_module)
+        rank = torch.distributed.get_rank()
+        identity = {
+            "rank": rank,
+            "tp_rank": mpu.get_tensor_model_parallel_rank(),
+            "pp_rank": mpu.get_pipeline_model_parallel_rank(),
+            "ep_rank": mpu.get_expert_model_parallel_rank(),
+            "dp_rank": mpu.get_data_parallel_rank(),
+            "expert_dp_rank": mpu.get_expert_data_parallel_rank(),
+            "replica_ranks": {
+                "dense": torch.distributed.get_process_group_ranks(mpu.get_data_parallel_group()),
+                "expert": torch.distributed.get_process_group_ranks(mpu.get_expert_data_parallel_group()),
+            },
+            "digests": parameters["digests"],
+        }
+        all_ranks = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(all_ranks, identity)
+        layouts = [
+            {
+                "chunk": chunk_index,
+                "name": name,
+                "single_grouped_weight": getattr(module, "single_grouped_weight", None),
+            }
+            for chunk_index, chunk in enumerate(self.actor_module)
+            for name, module in chunk.named_modules()
+            if ".experts." in name and name.endswith(("linear_fc1", "linear_fc2"))
+        ]
+        return {
+            **identity,
+            "environment": environment,
+            "free_bytes": free,
+            "total_bytes": total,
+            "allocated_bytes": torch.cuda.memory_allocated(device),
+            "reserved_bytes": torch.cuda.memory_reserved(device),
+            "expert_samples": parameters["expert_samples"],
+            "expert_layouts": layouts,
+            "all_rank_digests": all_ranks if rank == 0 else None,
+        }
 
     def _log_forward_fingerprint(self, call: str, micro_dicts: List[dict]) -> None:
         """Log checksums of this rank's inputs and parameters so two calls can be compared."""

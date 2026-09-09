@@ -39,6 +39,8 @@ def test_actual_worker_probe_preserves_parameters_and_reports_unknown_backend(mo
     monkeypatch.setattr(torch.cuda, "mem_get_info", memory)
     monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 7)
     monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 11)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
     monkeypatch.setattr(torch, "empty", lambda *args, **kwargs: pytest.fail("readback allocated a tensor"))
     source = Path(__file__).parents[3] / "skyrl_train/inference_engines/vllm/vllm_engine.py"
     worker_class = next(
@@ -53,7 +55,12 @@ def test_actual_worker_probe_preserves_parameters_and_reports_unknown_backend(mo
         device="cpu",
         model_runner=SimpleNamespace(model=model),
         vllm_config=SimpleNamespace(
-            model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="grug_moe", num_local_experts=4))
+            model_config=SimpleNamespace(
+                model="local-model", hf_config=SimpleNamespace(model_type="grug_moe", num_local_experts=4)
+            ),
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, enable_expert_parallel=True
+            ),
         ),
     )
     receipt = namespace["read_publication_receiver_state"](worker)
@@ -62,5 +69,9 @@ def test_actual_worker_probe_preserves_parameters_and_reports_unknown_backend(mo
     assert [layer["backend"] for layer in receipt["layers"]] == ["TRITON", None]
     assert all(layer["expert_map"] == [-1, -1, 0, 1] for layer in receipt["layers"])
     assert receipt["layers"][0]["parameters"]["w13_weight"]["shape"] == [2, 4, 3]
+    assert (
+        receipt["layers"][0]["first_local_expert"]["w13_half_sha256"][0]
+        != receipt["layers"][0]["first_local_expert"]["w13_half_sha256"][1]
+    )
     for parameter, (pointer, value) in zip(model.parameters(), originals, strict=True):
         assert parameter.data_ptr() == pointer and torch.equal(parameter, value)
