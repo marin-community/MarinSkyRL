@@ -1,0 +1,442 @@
+"""Result-set-equivalence scoring for the ``text_to_sql`` verifier environment.
+
+The reward model's ``ground_truth`` is a JSON object::
+
+    {
+      "schema_sql":        "<CREATE TABLE ...; ...>",
+      "insert_sql":        "<INSERT INTO ...; ...>",
+      "reference_sql":     "<single SELECT>",
+      "order_significant": bool,          # reference has a top-level ORDER BY
+      "table_names":       ["t1", "t2"]   # for the perturbation
+    }
+
+``grade`` rebuilds an in-memory SQLite database from that DDL and compares the
+candidate query's result set to the reference's on two databases: the seeded
+one, and a copy with every third row of the database deleted. Both must match.
+A query that returns a hard-coded literal passes the first and fails the second.
+
+The candidate query runs under three independent read-only layers: a
+single-statement check, a keyword blocklist matched against comment/string
+stripped text, and a SQLite authorizer that permits only read operations. A
+progress handler bounds runaway queries.
+
+``grade`` returns ``1`` / ``0`` / ``INFRA``. ``INFRA`` marks a broken task or a
+verifier fault (missing keys, un-loadable schema, a reference query that will
+not run) — the dataset-preparation contract rejects those rows up front, and the
+rollout environment scores them ``0`` without crashing a worker.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+import sqlite3
+import time
+from typing import Any
+
+INFRA = "infra"
+_QUERY_DEADLINE_SEC = 5.0
+_MAX_RESULT_ROWS = 100_000
+
+_STRING_RE = re.compile(r"'(?:[^']|'')*'")
+_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_SOLUTION_RE = re.compile(r"<solution>\s*(.*?)\s*</solution>", re.DOTALL | re.IGNORECASE)
+_SQL_FENCE_RE = re.compile(r"```(?:sql)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
+
+_BLOCKED_KEYWORDS_RE = re.compile(
+    r"\b(insert|update|delete|drop|alter|create|replace|attach|detach|pragma|vacuum|reindex|analyze|"
+    r"begin|commit|rollback|savepoint|release|grant|revoke|truncate|trigger|into)\b",
+    re.IGNORECASE,
+)
+_NONDET_NOW_LITERAL_RE = re.compile(r"'\s*now\s*'", re.IGNORECASE)
+_NONDET_FN_RE = re.compile(
+    r"\b(current_date|current_time|current_timestamp|localtime|localtimestamp|now|curdate|curtime|"
+    r"sysdate|random|randomblob|uuid|newid|rand)\s*\(?",
+    re.IGNORECASE,
+)
+_CREATE_NAME_RE = re.compile(
+    r"^\s*create\s+(?:temp(?:orary)?\s+)?table\s+(?:if\s+not\s+exists\s+)?([`\"\[]?)(?P<name>[A-Za-z0-9_$]+)\1\s*(?P<dot>\.)?",
+    re.IGNORECASE,
+)
+
+_GROUND_TRUTH_KEYS = ("schema_sql", "insert_sql", "reference_sql", "order_significant")
+
+
+# --------------------------------------------------------------------------- #
+# static SQL analysis (shared with the dataset-preparation transform)          #
+# --------------------------------------------------------------------------- #
+
+
+def strip_sql_noise(sql: str) -> str:
+    """Return ``sql`` with block/line comments and single-quoted literals blanked."""
+    sql = _BLOCK_COMMENT_RE.sub(" ", sql)
+    sql = _LINE_COMMENT_RE.sub(" ", sql)
+    return _STRING_RE.sub("''", sql)
+
+
+def split_statements(script: str) -> list[str]:
+    """Split a SQL script on top-level semicolons, honoring quotes and comments."""
+    out: list[str] = []
+    buf: list[str] = []
+    i, n = 0, len(script)
+    while i < n:
+        ch = script[i]
+        if ch == "'":
+            buf.append(ch)
+            i += 1
+            while i < n:
+                buf.append(script[i])
+                if script[i] == "'":
+                    if i + 1 < n and script[i + 1] == "'":
+                        buf.append(script[i + 1])
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == '"':
+            buf.append(ch)
+            i += 1
+            while i < n:
+                buf.append(script[i])
+                if script[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "-" and i + 1 < n and script[i + 1] == "-":
+            while i < n and script[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and script[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (script[i] == "*" and script[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        if ch == ";":
+            stmt = "".join(buf).strip()
+            if stmt:
+                out.append(stmt)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def classify_statement(stmt: str) -> str:
+    """One of ``create_table`` / ``insert`` / ``select`` / ``other_ddl`` / ``dml`` / ``unknown``."""
+    s = strip_sql_noise(stmt).lstrip().lower()
+    if s.startswith(("create table", "create temp table", "create temporary table")):
+        return "create_table"
+    if s.startswith(("insert into", "insert or")):
+        return "insert"
+    if s.startswith(("with ", "select ")):
+        return "select"
+    if s.startswith("create "):
+        return "other_ddl"
+    if s.startswith(("update ", "delete ", "replace ", "drop ", "alter ", "truncate ", "merge ")):
+        return "dml"
+    return "unknown"
+
+
+def create_table_is_schema_qualified(stmt: str) -> bool:
+    """True for ``CREATE TABLE db.tbl (...)`` — these cannot be rebuilt in a bare in-memory DB."""
+    m = _CREATE_NAME_RE.match(strip_sql_noise(stmt))
+    return bool(m and m.group("dot"))
+
+
+def create_table_name(stmt: str) -> str | None:
+    """Return the (unqualified) table name a ``CREATE TABLE`` statement declares, or ``None``."""
+    m = _CREATE_NAME_RE.match(strip_sql_noise(stmt))
+    return m.group("name") if m and not m.group("dot") else None
+
+
+def is_nondeterministic(sql: str) -> bool:
+    """True if the query text references clock/RNG functions."""
+    if _NONDET_NOW_LITERAL_RE.search(sql):
+        return True
+    return bool(_NONDET_FN_RE.search(strip_sql_noise(sql)))
+
+
+def has_top_level_order_by(sql: str) -> bool:
+    """True iff ``sql`` has an ``ORDER BY`` not nested inside parentheses.
+
+    Parenthesized spans (subqueries, CTE bodies, ``OVER (... ORDER BY ...)``) are removed first, leaving
+    only a clause that governs the row order of the final result.
+    """
+    s = strip_sql_noise(sql)
+    prev = None
+    while prev != s:
+        prev = s
+        s = re.sub(r"\([^()]*\)", " ", s)
+    return re.search(r"\border\s+by\b", s, re.IGNORECASE) is not None
+
+
+def extract_sql(response: str) -> str:
+    """Pull the candidate query out of a model response: ``<solution>`` tags, then a fenced block, then raw."""
+    m = _SOLUTION_RE.search(response)
+    if m:
+        response = m.group(1)
+    m = _SQL_FENCE_RE.search(response)
+    if m:
+        response = m.group(1)
+    return response.strip()
+
+
+# --------------------------------------------------------------------------- #
+# execution + comparison                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def _deadline_handler(deadline: float):
+    def handler() -> int:
+        return 1 if time.monotonic() > deadline else 0
+
+    return handler
+
+
+def build_db(create_stmts: list[str], insert_stmts: list[str]) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.text_factory = str
+    cur = conn.cursor()
+    for st in create_stmts:
+        cur.execute(st)
+    for st in insert_stmts:
+        cur.execute(st)
+    conn.commit()
+    return conn
+
+
+def perturb_db(conn: sqlite3.Connection, tables: list[str], *, stride: int = 3) -> int:
+    """Delete every ``stride``-th row of the whole database (table name, then rowid order), in place."""
+    cur = conn.cursor()
+    catalog: list[tuple[str, int]] = []
+    for t in sorted(tables):
+        try:
+            catalog.extend((t, r[0]) for r in cur.execute(f'SELECT rowid FROM "{t}" ORDER BY rowid'))
+        except sqlite3.OperationalError:
+            continue
+    victims = catalog[stride - 1 :: stride]
+    by_table: dict[str, list[int]] = {}
+    for t, rid in victims:
+        by_table.setdefault(t, []).append(rid)
+    for t, rids in by_table.items():
+        placeholders = ",".join("?" * len(rids))
+        cur.execute(f'DELETE FROM "{t}" WHERE rowid IN ({placeholders})', rids)
+    conn.commit()
+    return len(victims)
+
+
+_ALLOWED_ACTIONS = {
+    getattr(sqlite3, name)
+    for name in ("SQLITE_SELECT", "SQLITE_READ", "SQLITE_FUNCTION", "SQLITE_RECURSIVE")
+    if getattr(sqlite3, name, None) is not None
+}
+
+
+def _read_only_authorizer(action, _a1, _a2, _db, _src):
+    return sqlite3.SQLITE_OK if action in _ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
+
+
+def run_reference(conn: sqlite3.Connection, sql: str) -> tuple[int, list[tuple]]:
+    conn.set_progress_handler(_deadline_handler(time.monotonic() + _QUERY_DEADLINE_SEC), 100_000)
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = [tuple(r) for r in cur.fetchmany(_MAX_RESULT_ROWS + 1)]
+        ncols = len(cur.description) if cur.description else 0
+    finally:
+        conn.set_progress_handler(None, 0)
+    return ncols, rows
+
+
+def run_candidate(conn: sqlite3.Connection, sql: str) -> tuple[int, list[tuple]]:
+    conn.set_authorizer(_read_only_authorizer)
+    conn.set_progress_handler(_deadline_handler(time.monotonic() + _QUERY_DEADLINE_SEC), 100_000)
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = [tuple(r) for r in cur.fetchmany(_MAX_RESULT_ROWS + 1)]
+        ncols = len(cur.description) if cur.description else 0
+    finally:
+        conn.set_authorizer(None)
+        conn.set_progress_handler(None, 0)
+    return ncols, rows
+
+
+def _norm_value(v: Any) -> tuple:
+    if v is None:
+        return ("~null",)
+    if isinstance(v, bool):
+        return ("~num", float(v))
+    if isinstance(v, (int, float)):
+        f = float(v)
+        if not math.isfinite(f):
+            return ("~nonfinite", repr(v))
+        return ("~num", round(f, 6))
+    if isinstance(v, bytes):
+        return ("~bytes", v.hex())
+    return ("~str", str(v))
+
+
+def _norm_rows(rows: list[tuple]) -> list[tuple]:
+    return [tuple(_norm_value(c) for c in row) for row in rows]
+
+
+def results_equivalent(
+    reference: tuple[int, list[tuple]],
+    candidate: tuple[int, list[tuple]],
+    *,
+    order_significant: bool,
+) -> tuple[bool, str]:
+    """Column count and column order are significant; column names/aliases are not. Row order is
+    compared only when ``order_significant`` is True."""
+    ref_ncols, ref_rows = reference
+    cand_ncols, cand_rows = candidate
+    if ref_ncols != cand_ncols:
+        return False, f"column count: reference {ref_ncols}, candidate {cand_ncols}"
+    ref_n = _norm_rows(ref_rows)
+    cand_n = _norm_rows(cand_rows)
+    if len(ref_n) != len(cand_n):
+        return False, f"row count: reference {len(ref_n)}, candidate {len(cand_n)}"
+    if order_significant:
+        return (ref_n == cand_n, "row order / values differ" if ref_n != cand_n else "ok (ordered)")
+    if sorted(ref_n) != sorted(cand_n):
+        return False, "row multiset differs"
+    return True, "ok (unordered)"
+
+
+def guard_candidate_sql(sql: str) -> tuple[bool, str]:
+    """Static gate on an untrusted candidate query (layer 1 of 3)."""
+    stmts = [s for s in split_statements(sql) if s.strip()]
+    if len(stmts) != 1:
+        return False, f"expected exactly 1 SQL statement, got {len(stmts)}"
+    clean = strip_sql_noise(stmts[0]).strip()
+    if not re.match(r"(?is)^(with|select)\b", clean):
+        return False, "query must start with SELECT or WITH"
+    m = _BLOCKED_KEYWORDS_RE.search(clean)
+    if m:
+        return False, f"blocked keyword: {m.group(0)!r}"
+    return True, stmts[0]
+
+
+# --------------------------------------------------------------------------- #
+# public API                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+def parse_ground_truth(ground_truth: Any) -> dict[str, Any] | None:
+    """Return the spec dict from a JSON string / mapping, or ``None`` if it cannot be used."""
+    if isinstance(ground_truth, str):
+        try:
+            ground_truth = json.loads(ground_truth)
+        except ValueError:
+            return None
+    if not isinstance(ground_truth, dict):
+        return None
+    if any(key not in ground_truth for key in _GROUND_TRUTH_KEYS):
+        return None
+    return ground_truth
+
+
+def normalize_ground_truth(ground_truth: Any) -> str:
+    """Canonical verifier input for one row. Raises ``ValueError`` for a row the verifier cannot run."""
+    spec = ground_truth
+    if isinstance(spec, str):
+        try:
+            spec = json.loads(spec)
+        except ValueError as exc:
+            raise ValueError("text_to_sql ground_truth is not valid JSON.") from exc
+    if not isinstance(spec, dict):
+        raise ValueError("text_to_sql ground_truth must be a JSON object.")
+    missing = [key for key in _GROUND_TRUTH_KEYS if key not in spec]
+    if missing:
+        raise ValueError(f"text_to_sql ground_truth missing keys: {missing}.")
+    if not isinstance(spec["schema_sql"], str) or not spec["schema_sql"].strip():
+        raise ValueError("text_to_sql schema_sql must be a non-empty string.")
+    if not isinstance(spec["insert_sql"], str) or not spec["insert_sql"].strip():
+        raise ValueError("text_to_sql insert_sql must be a non-empty string.")
+    if not isinstance(spec["reference_sql"], str) or not spec["reference_sql"].strip():
+        raise ValueError("text_to_sql reference_sql must be a non-empty string.")
+    create_stmts = [s for s in split_statements(spec["schema_sql"]) if classify_statement(s) == "create_table"]
+    insert_stmts = [s for s in split_statements(spec["insert_sql"]) if classify_statement(s) == "insert"]
+    if not create_stmts or not insert_stmts:
+        raise ValueError("text_to_sql schema_sql/insert_sql must contain CREATE TABLE and INSERT statements.")
+    try:
+        conn = build_db(create_stmts, insert_stmts)
+    except sqlite3.Error as exc:
+        raise ValueError(f"text_to_sql seed DDL does not load in SQLite: {exc}.") from exc
+    conn.close()
+    canonical = {
+        "schema_sql": spec["schema_sql"],
+        "insert_sql": spec["insert_sql"],
+        "reference_sql": spec["reference_sql"],
+        "order_significant": bool(spec["order_significant"]),
+        "table_names": sorted(str(t) for t in spec.get("table_names") or []),
+    }
+    return json.dumps(canonical, sort_keys=True)
+
+
+def grade(ground_truth: Any, candidate_sql: str) -> tuple[int | str, str]:
+    """Return ``(1 | 0 | INFRA, detail)``."""
+    spec = parse_ground_truth(ground_truth)
+    if spec is None:
+        return INFRA, "unusable ground_truth"
+    ok, payload = guard_candidate_sql(candidate_sql)
+    if not ok:
+        return 0, f"guard rejected candidate query: {payload}"
+    candidate_stmt = payload
+    create_stmts = split_statements(spec["schema_sql"])
+    insert_stmts = split_statements(spec["insert_sql"])
+    reference_sql = spec["reference_sql"]
+    order_significant = bool(spec["order_significant"])
+    tables = [str(t) for t in spec.get("table_names") or []]
+
+    for label, do_perturb in (("seeded", False), ("perturbed", True)):
+        try:
+            conn = build_db(create_stmts, insert_stmts)
+        except sqlite3.Error as exc:
+            return INFRA, f"could not rebuild database ({label}): {exc}"
+        try:
+            if do_perturb:
+                perturb_db(conn, tables)
+            try:
+                reference = run_reference(conn, reference_sql)
+            except sqlite3.Error as exc:
+                return INFRA, f"reference query failed on {label} db: {exc}"
+            if len(reference[1]) > _MAX_RESULT_ROWS:
+                return INFRA, f"reference result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
+            try:
+                candidate = run_candidate(conn, candidate_stmt)
+            except sqlite3.Error as exc:
+                return 0, f"candidate query failed on {label} db: {exc}"
+            if len(candidate[1]) > _MAX_RESULT_ROWS:
+                return 0, f"candidate result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
+            equal, detail = results_equivalent(reference, candidate, order_significant=order_significant)
+            if not equal:
+                return 0, f"{label} db: {detail}"
+        finally:
+            conn.close()
+    return 1, "result sets match on seeded and perturbed databases"
+
+
+def score(ground_truth: Any, response: str) -> tuple[float, dict[str, Any]]:
+    """Rollout-time reward: ``1.0`` for a match, ``0.0`` otherwise (INFRA also scores 0 and is flagged)."""
+    verdict, detail = grade(ground_truth, extract_sql(response))
+    if verdict == INFRA:
+        return 0.0, {"verifier_error": detail}
+    return (1.0 if verdict == 1 else 0.0), {"detail": detail}
+
+
+def is_correct(response: str, normalized_ground_truth: str) -> bool:
+    """Contract preflight check: does ``response`` satisfy the (already normalized) verifier input?"""
+    return grade(normalized_ground_truth, extract_sql(response))[0] == 1

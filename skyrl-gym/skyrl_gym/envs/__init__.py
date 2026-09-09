@@ -28,6 +28,11 @@ register(
 )
 
 register(
+    id="text_to_sql",
+    entry_point="skyrl_gym.envs.text_to_sql.env:TextToSQLEnv",
+)
+
+register(
     id="search",
     entry_point="skyrl_gym.envs.search.env:SearchEnv",
 )
