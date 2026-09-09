@@ -42,6 +42,9 @@ def _bare_trainer(
 ) -> FullyAsyncRayPPOTrainer:
     """Create a trainer shell with just enough state for stall-detection tests."""
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.admission_order = "fifo"
+    trainer.admission_seed = 17
+    trainer.injected_delay_max_steps = 0
     trainer.mini_batch_size = mini_batch_size
     trainer._step_time_history = collections.deque(step_times or [], maxlen=5)
     trainer.admission_stall_timeout = admission_stall_timeout

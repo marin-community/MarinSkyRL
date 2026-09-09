@@ -344,6 +344,7 @@ def record_group_outcome(
     completed_at: float | None = None,
     attempt_id: str | None = None,
     admitted_at: float | None = None,
+    injected_delay: int | None = None,
 ) -> None:
     attributes = {"role": TRAINER_ROLE, "step": str(step), "outcome": outcome}
     group_count.add(1, attributes=attributes)
@@ -352,4 +353,7 @@ def record_group_outcome(
         finished = time.perf_counter() if admitted_at is None else admitted_at
         buffer_dwell.record(finished - completed_at, attributes=attributes)
     if attempt_id is not None:
-        record_event("rollout_group_outcome", {"call_id": attempt_id, "tokens": tokens}, attributes=attributes)
+        body = {"call_id": attempt_id, "tokens": tokens}
+        if injected_delay is not None:
+            body["injected_delay_steps"] = injected_delay
+        record_event("rollout_group_outcome", body, attributes=attributes)

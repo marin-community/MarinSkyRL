@@ -6,6 +6,7 @@ import torch
 from omegaconf import OmegaConf
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from skyrl_train import rollout_observability
 from skyrl_train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
     GenerationStalledError,
@@ -23,6 +24,9 @@ from skyrl_train.utils.data_tracker import DataConsumptionTracker
 @pytest.mark.parametrize("partial", [False, True])
 def test_strict_tis_async_conversion_rejects_missing_group_before_training(partial):
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.admission_order = "fifo"
+    trainer.admission_seed = 17
+    trainer.injected_delay_max_steps = 0
     trainer.cfg = OmegaConf.create(
         {
             "trainer": {
@@ -88,6 +92,9 @@ def _batch_assembly_state(
     max_sample_batches: int = 30,
 ):
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.admission_order = "fifo"
+    trainer.admission_seed = 17
+    trainer.injected_delay_max_steps = 0
     trainer.global_step = 10
     trainer.max_staleness_steps = 2
     trainer.mini_batch_size = mini_batch_size
@@ -671,3 +678,107 @@ async def test_batch_assembly_rejected_only_progress_terminates_instead_of_livel
 
     with pytest.raises(GenerationStalledError):
         await trainer._get_admitted_generation_group_mini_batch(queues)
+
+
+class _ObservedCondition(asyncio.Condition):
+    def __init__(self):
+        super().__init__()
+        self.waiting = asyncio.Queue()
+
+    async def wait(self):
+        self.waiting.put_nowait(True)
+        return await super().wait()
+
+
+@pytest.mark.asyncio
+async def test_delayed_group_waits_for_real_clock_and_survives_cancellation():
+    trainer, queues = _batch_assembly_state(1, 1)
+    trainer.injected_delay_max_steps = 2
+    queues.condition = _ObservedCondition()
+    group = _generated_group("held", 10)
+    group.release_step = 12
+    group.injected_delay_steps = 2
+    queues.completed.put_nowait(group)
+    task = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    try:
+        await asyncio.wait_for(queues.condition.waiting.get(), timeout=1)
+        assert not task.done() and trainer.global_step == 10
+        assert queues.retries.empty() and queues.completed.qsize() == 1
+        async with queues.condition:
+            trainer.global_step = 11
+            queues.condition.notify_all()
+        await asyncio.wait_for(queues.condition.waiting.get(), timeout=1)
+        assert not task.done() and queues.retries.empty()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert queues.completed.qsize() == 1 and queues.admitted_groups == []
+        trainer.global_step = 12
+        batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+        assert batch == [group]
+        assert trainer.global_step - batch[0].earliest_model_step == 2
+        assert batch[0].injected_delay_steps == 2
+        assert queues.retries.empty()
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_held_only_buffer_times_out_without_fabricating_progress():
+    trainer, queues = _batch_assembly_state(1, 1)
+    trainer.injected_delay_max_steps = 2
+    trainer.admission_stall_timeout = 0.01
+    queues.condition = _ObservedCondition()
+    group = _generated_group("held", 10)
+    group.release_step = 12
+    queues.completed.put_nowait(group)
+    with pytest.raises(GenerationStalledError):
+        await asyncio.wait_for(trainer._get_admitted_generation_group_mini_batch(queues), timeout=1)
+    assert queues.condition.waiting.qsize() == 1
+    assert trainer.global_step == 10 and queues.retries.empty()
+    assert queues.completed.qsize() == 1 and queues.admitted_groups == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "policy,expected", [("fifo", ["a", "b"]), ("lifo", ["d", "c"]), ("freshest_first", ["c", "d"])]
+)
+async def test_driver_admission_order_preserves_atomic_groups(policy, expected):
+    trainer, queues = _batch_assembly_state(2, 4)
+    trainer.admission_order = policy
+    groups = [_generated_group(uid, step) for uid, step in zip("abcd", [8, 9, 10, 10], strict=True)]
+    for group in groups:
+        queues.completed.put_nowait(group)
+    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    assert [group.uid for group in batch] == expected
+    assert all(len(group.trajectory_batch["response_ids"]) == 2 for group in batch)
+    assert {id(group) for group in batch}.issubset({id(group) for group in groups})
+    assert queues.completed.qsize() == 2 and queues.retries.empty()
+    if policy == "lifo":
+        queues.admitted_groups.clear()
+        trainer.global_step = 11
+        queues.completed.put_nowait(_generated_group("e", 11))
+        next_batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+        assert {group.uid for group in next_batch} == {"b", "e"}
+        assert queues.retries.get_nowait() == [{"uid": "a"}]
+
+
+def test_delayed_group_terminal_emits_delay_once_and_default_wire_is_unchanged(monkeypatch):
+    events = []
+    monkeypatch.setattr(rollout_observability, "record_event", lambda name, body, **kwargs: events.append((name, body)))
+    trainer, _ = _batch_assembly_state(1, 1)
+    trainer._async_observations_enabled = True
+    delayed = _generated_group("delayed", 10)
+    delayed.release_step = 12
+    delayed.injected_delay_steps = 2
+    delayed.telemetry_attempt_id = "delayed-call"
+    normal = _generated_group("normal", 10)
+    normal.telemetry_attempt_id = "normal-call"
+    for group in [delayed, delayed, normal]:
+        trainer._record_group_terminal(group, "consumed")
+    assert events == [
+        ("rollout_group_outcome", {"call_id": "delayed-call", "tokens": 2, "injected_delay_steps": 2}),
+        ("rollout_group_outcome", {"call_id": "normal-call", "tokens": 2}),
+    ]

@@ -14,6 +14,7 @@ High-level notes:
 from skyrl_train.policy_version import earliest_sampled_policy_version
 import asyncio
 import json
+import random
 import collections
 import os
 import time
@@ -77,7 +78,14 @@ from skyrl_train.dynamic_sampling import (
     GroupSelectionResult,
     resolve_dynamic_sampling_criteria,
 )
-from skyrl_train.group_admission import AdmissionDecision, AdmissionRejection, GroupAdmissionPolicy
+from skyrl_train.group_admission import (
+    AdmissionDecision,
+    AdmissionRejection,
+    GroupAdmissionPolicy,
+    AdmissionOrder,
+    injected_delay_steps,
+    order_admission_candidates,
+)
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_required
 from skyrl_train.utils.utils import validate_fully_async_cfg
 
@@ -186,6 +194,7 @@ class _GroupFreshness(Enum):
 
 @dataclass
 class _AdmissionPartition:
+    held_groups: List[GeneratedOutputGroup]
     accepted_groups: List[GeneratedOutputGroup]
     rejected_groups: List[tuple[GeneratedOutputGroup, AdmissionDecision]]
     discarded_groups: List[tuple[GeneratedOutputGroup, AdmissionDecision]]
@@ -501,6 +510,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
         self.weight_sync_interval = cfg.trainer.fully_async.weight_sync_interval
+        self.admission_seed = cfg.trainer.seed
+        self.admission_order = AdmissionOrder(cfg.trainer.fully_async.admission_order)
+        self.injected_delay_max_steps = cfg.trainer.fully_async.injected_delay_max_steps
+        injected_delay_steps("validate", seed=cfg.trainer.seed, maximum=self.injected_delay_max_steps)
         self.admission_stall_timeout = int(cfg.trainer.fully_async.admission_stall_timeout)
         if self.admission_stall_timeout <= 0:
             raise ValueError("trainer.fully_async.admission_stall_timeout must be positive")
@@ -1386,11 +1399,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     cur_trajectory_batch.get("is_last_step"),
                     staleness_step,
                 )
+                delay = injected_delay_steps(uids[0], seed=self.admission_seed, maximum=self.injected_delay_max_steps)
                 completed_group = GeneratedOutputGroup(
                     trajectory_batch=cur_trajectory_batch,
                     uid=uids[0],
                     earliest_model_step=staleness_step,
                     source_prompts=rand_prompts,
+                    release_step=staleness_step + delay if self.injected_delay_max_steps else None,
+                    injected_delay_steps=delay,
                     completed_at=time.perf_counter() if observation is not None else None,
                     telemetry_attempt_id=observation.call_id if observation is not None else None,
                 )
@@ -1716,6 +1732,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             completed_at=group.completed_at,
             admitted_at=group.admitted_at,
             attempt_id=group.telemetry_attempt_id,
+            injected_delay=group.injected_delay_steps if group.release_step is not None else None,
         )
         group.telemetry_finished = True
 
@@ -1770,6 +1787,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self, completed_groups: List[GeneratedOutputGroup], occupied_uids: set[str]
     ) -> _AdmissionPartition:
         """Evaluate completed work and select at most one representative per UID."""
+        held_groups = [
+            group
+            for group in completed_groups
+            if group.release_step is not None and group.release_step > self.global_step
+        ]
+        completed_groups = [
+            group for group in completed_groups if group.release_step is None or group.release_step <= self.global_step
+        ]
         decisions = [
             self._group_admission_policy.evaluate(group, global_step=self.global_step) for group in completed_groups
         ]
@@ -1793,6 +1818,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             else:
                 rejected_groups.append((group, decision))
         return _AdmissionPartition(
+            held_groups=held_groups,
             accepted_groups=accepted_groups,
             rejected_groups=rejected_groups,
             discarded_groups=discarded_groups,
@@ -1980,7 +2006,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     self._record_group_terminal(group, "duplicate")
 
                 selection = self._select_dynamic_sampling_candidates(
-                    partition.accepted_groups,
+                    order_admission_candidates(
+                        partition.accepted_groups,
+                        global_step=self.global_step,
+                        policy=self.admission_order,
+                        rng=random.Random(self.admission_seed ^ self.global_step),
+                    ),
                     available_slots=self.mini_batch_size - len(accepted_groups),
                 )
                 queues.record_admitted(selection.admitted_groups)
@@ -1989,7 +2020,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 dynamic_discarded_count += dynamic_discarded_this_scan
                 rejection_counts_since_admission.update(selection.discarded_reasons)
 
-                for group in selection.surplus_groups:
+                for group in selection.surplus_groups + partition.held_groups:
                     queues.completed.put_nowait(group)
                 record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize)
 
@@ -2003,6 +2034,39 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 else:
                     batch = None
                 queues.condition.notify_all()
+                if self.injected_delay_max_steps or self.admission_order != AdmissionOrder.FIFO:
+                    self.all_metrics.update(
+                        {
+                            "async/admission_order": list(AdmissionOrder).index(self.admission_order),
+                            "async/held_groups": len(partition.held_groups),
+                            "async/injected_delay_mean": sum(g.injected_delay_steps for g in completed_groups)
+                            / len(completed_groups)
+                            if completed_groups
+                            else 0.0,
+                        }
+                    )
+                if batch is None and partition.held_groups and len(partition.held_groups) == len(completed_groups):
+                    # Waiting under the same condition lock prevents missing a producer notification.
+                    # A held group cannot advance the policy clock or release itself.
+                    if queues.active_producers == 0:
+                        raise GenerationStalledError(
+                            "Only delayed groups remain and no producer can supply eligible work"
+                        )
+                    remaining = stall_timeout - (loop.time() - last_admitted_progress)
+                    if remaining <= 0:
+                        self._raise_admission_stall(
+                            loop.time() - last_admitted_progress,
+                            rejection_counts_since_admission,
+                            active_producers=queues.active_producers,
+                        )
+                    try:
+                        await asyncio.wait_for(queues.condition.wait(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        self._raise_admission_stall(
+                            loop.time() - last_admitted_progress,
+                            rejection_counts_since_admission,
+                            active_producers=queues.active_producers,
+                        )
 
             self._record_admission_scan(
                 partition.rejected_groups + partition.discarded_groups,

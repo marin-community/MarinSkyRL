@@ -296,6 +296,8 @@ trainer:
     eval_mode: blocking
 
     num_parallel_generation_workers: 768
+    admission_order: fifo
+    injected_delay_max_steps: 0
     admission_stall_timeout: 21600
 
   gradient_checkpointing: true

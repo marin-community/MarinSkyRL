@@ -8,14 +8,20 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.group_admission import injected_delay_steps
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer, _GroupFreshness
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delay_max", [0, 3])
 @pytest.mark.parametrize("enabled,versions,expected", [(True, [2, 3], 3), (False, [2, 3], 1), (True, [None, 3], None)])
-async def test_actual_producer_uses_earliest_sampled_version_and_logs_both(monkeypatch, enabled, versions, expected):
+async def test_actual_producer_uses_earliest_sampled_version_and_logs_both(
+    monkeypatch, enabled, versions, expected, delay_max
+):
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.cfg = get_default_config()
+    trainer.admission_seed = trainer.cfg.trainer.seed
+    trainer.injected_delay_max_steps = delay_max
     OmegaConf.update(trainer.cfg, "trainer.fully_async.first_token_admission", enabled)
     trainer.cfg.generator.n_samples_per_prompt = 2
     trainer.global_step = 4
@@ -54,6 +60,9 @@ async def test_actual_producer_uses_earliest_sampled_version_and_logs_both(monke
         await trainer._run_generate_for_a_group_loop(queues)
         assert len(groups) == 1
         assert groups[0].earliest_model_step == expected
+        delay = injected_delay_steps("sample", seed=trainer.admission_seed, maximum=delay_max)
+        assert groups[0].release_step == (expected + delay if delay_max else None)
+        assert groups[0].injected_delay_steps == delay
         stamp = next(fields for name, fields in events if name == "rollout_admission_stamp")
         assert stamp["submission_model_step"] == 1
         assert stamp["first_token_model_step"] == 3

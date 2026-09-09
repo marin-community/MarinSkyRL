@@ -21,7 +21,7 @@ from skyrl_train.data_order import (
     source_order_checkpoint,
     validate_source_order_checkpoint,
 )
-from skyrl_train.fully_async_trainer import _AsyncDataloader
+from skyrl_train.fully_async_trainer import _AsyncDataloader, GenerationStalledError
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
@@ -533,3 +533,33 @@ def test_legacy_checkpoint_does_not_infer_successful_optimizer_updates(tmp_path,
     restored = checkpoint_trainer(cfg, loader(cfg), tmp_path, step=0)
     restored.load_checkpoints()
     assert restored._successful_policy_updates is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("maximum", [0, 3])
+async def test_actual_driver_delay_preserves_clock_or_fails_bounded_without_eligible_work(maximum):
+    def delayed_driver(**kwargs):
+        kwargs["cfg"].trainer.seed = 17
+        kwargs["cfg"].trainer.fully_async.injected_delay_max_steps = maximum
+        kwargs["train_dataset"] = PromptRows(64)
+        return SourceOrderDriver(**kwargs)
+
+    trainer = make_driver(interval=4, age=6, steps=8, driver_type=delayed_driver)
+    if maximum:
+        # Both initial producer slots can become held: spare source rows do not create clock progress.
+        try:
+            with pytest.raises(GenerationStalledError):
+                await asyncio.wait_for(trainer._train_loop(), timeout=10)
+            assert trainer.policy_model.completed_update == 0
+            assert trainer.policy_model.consumed == []
+            assert trainer.inference_engine_client.publications == [0]
+        finally:
+            await trainer._cancel_trajectory_tasks()
+        return
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert [step for step, _ in trainer.policy_model.consumed] == list(range(1, 9))
+    assert trainer.data_tracker.total_samples_consumed == 16
+    assert trainer.inference_engine_client.publications == [0, 4, 8]
+    ages = [step - 1 - version for step, versions in trainer.policy_model.consumed for version in versions]
+    assert min(ages) >= 0 and max(ages) <= 6
+    assert all("async/injected_delay_mean" not in metrics for _, metrics in trainer.tracker.rows)
