@@ -7,20 +7,20 @@ import torch
 from skyrl_train.weight_sync.manifest import ManifestEntry
 
 
-def scatter_grug_experts(
+def grug_expert_views(
     entry: ManifestEntry,
     source: torch.Tensor,
     w13: torch.Tensor,
     w2: torch.Tensor,
     expert_map: Sequence[int],
     backend: str,
-) -> int:
-    """Install a whole-expert chunk without renumbering its global expert IDs.
+) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+    """Resolve whole-expert source/destination views with global IDs intact.
 
     The caller must qualify the native backend and TP1 layout before selecting
     this path. All metadata is checked before any destination write. Returns the
-    number of local experts copied; parameter storage and unrelated slots stay
-    unchanged. This helper does not allocate transfer buffers or synchronize GPUs.
+    storage-sharing source/destination pairs for the receiver's local experts.
+    This helper does not allocate transfer buffers or synchronize GPUs.
     """
     if backend != "TRITON":
         raise ValueError("Direct expert copies require the TRITON backend")
@@ -62,18 +62,32 @@ def scatter_grug_experts(
         for tensor in (source, w13, w2)
     ):
         raise ValueError("Expert dtype, device and contiguous layout must match")
-    copied = 0
+    pairs = []
+    for chunk_index in range(count):
+        local = expert_map[first + chunk_index]
+        if local < 0:
+            continue
+        if projection == "down_proj.weight":
+            destination = w2[local]
+        elif projection == "gate_proj.weight":
+            destination = w13[local, :intermediate]
+        else:
+            destination = w13[local, intermediate:]
+        pairs.append((source[chunk_index], destination))
+    return tuple(pairs)
+
+
+def scatter_grug_experts(
+    entry: ManifestEntry,
+    source: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    expert_map: Sequence[int],
+    backend: str,
+) -> int:
+    """Install the validated views without modifying unrelated expert slots."""
+    pairs = grug_expert_views(entry, source, w13, w2, expert_map, backend)
     with torch.no_grad():
-        for chunk_index in range(count):
-            local = expert_map[first + chunk_index]
-            if local < 0:
-                continue
-            if projection == "down_proj.weight":
-                destination = w2[local]
-            elif projection == "gate_proj.weight":
-                destination = w13[local, :intermediate]
-            else:
-                destination = w13[local, intermediate:]
-            destination.copy_(source[chunk_index])
-            copied += 1
-    return copied
+        for origin, destination in pairs:
+            destination.copy_(origin)
+    return len(pairs)
