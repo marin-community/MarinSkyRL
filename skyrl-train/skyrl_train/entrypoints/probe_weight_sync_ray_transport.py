@@ -11,6 +11,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import torch
 import torch.distributed as dist
 
@@ -22,7 +23,7 @@ ENV_KEYS = ENVIRONMENT_KEYS
 SCRATCH_BYTES = 1024 * 1024
 
 
-def validate_worlds(rows: list[dict]) -> None:
+def validate_worlds(rows: list[dict], *, require_distinct_hosts: bool = False) -> None:
     if sorted(row["custom_rank"] for row in rows) != [0, 1]:
         raise ValueError("Custom group must cover ranks zero and one")
     if any(row["default_rank"] != 0 or row["default_world"] != 1 or row["custom_world"] != 2 for row in rows):
@@ -31,6 +32,13 @@ def validate_worlds(rows: list[dict]) -> None:
         raise ValueError("Communicator environments differ")
     if any(row["environment"]["VLLM_BATCH_INVARIANT"] not in (None, "0") for row in rows):
         raise ValueError("Timing requires batch invariance off")
+    if require_distinct_hosts:
+        physical_hosts = [row.get("physical_node") for row in rows]
+        ray_nodes = [row.get("ray_node_id") for row in rows]
+        if any(not value for value in physical_hosts + ray_nodes):
+            raise ValueError("Physical host and Ray node identities must be observed before measurement")
+        if len(set(physical_hosts)) != 2 or len(set(ray_nodes)) != 2:
+            raise ValueError("Transport requires two distinct physical hosts and Ray nodes")
 
 
 class TransportRank:
@@ -65,6 +73,8 @@ class TransportRank:
         row = {
             "stage": stage,
             "host": socket.gethostname(),
+            "physical_node": os.environ.get("IRIS_NODE_NAME"),
+            "ray_node_id": ray.get_runtime_context().get_node_id(),
             "pid": os.getpid(),
             "monotonic": time.monotonic(),
             "custom_rank": self.rank,
@@ -130,8 +140,21 @@ class TransportRank:
         dist.destroy_process_group()
         return self.record("groups_destroyed", network_log=network_log_readback())
 
+    def events(self) -> list[dict]:
+        if len(json.dumps(self.rows, sort_keys=True).encode()) > 1024 * 1024:
+            raise ValueError("Rank diagnostic exceeds bounded receipt size")
+        return self.rows
 
-def run_probe(output: str, backend: str, sizes: tuple[int, ...], repeats: int = 3, measurement_started=None) -> dict:
+
+def run_probe(
+    output: str,
+    backend: str,
+    sizes: tuple[int, ...],
+    repeats: int = 3,
+    measurement_started=None,
+    *,
+    require_distinct_hosts: bool = False,
+) -> dict:
     if backend not in ("gloo", "nccl") or any(size <= 0 or size > 512 * 1024**2 for size in sizes):
         raise ValueError("Unsupported backend or payload allocation")
     actors = []
@@ -144,13 +167,32 @@ def run_probe(output: str, backend: str, sizes: tuple[int, ...], repeats: int = 
         "payloads": [],
         "cleanup": [],
         "error": None,
-        "scope": "one-host, two Ray actors; no model or learner",
+        "scope": (
+            "two physical hosts, one Ray actor per host; no model or learner"
+            if require_distinct_hosts
+            else "one-host, two Ray actors; no model or learner"
+        ),
     }
     try:
         actor_type = ray.remote(num_cpus=1, num_gpus=1 if backend == "nccl" else 0)(TransportRank)
-        actors = [actor_type.remote(rank, backend, output) for rank in (0, 1)]
+        if require_distinct_hosts:
+            nodes = sorted(
+                node["NodeID"]
+                for node in ray.nodes()
+                if node["Alive"] and node["Resources"].get("GPU" if backend == "nccl" else "CPU", 0) >= 1
+            )
+            if len(nodes) != 2:
+                raise ValueError("The diagnostic Ray cluster must contain exactly two eligible nodes")
+            actors = [
+                actor_type.options(scheduling_strategy=NodeAffinitySchedulingStrategy(node_id, soft=False)).remote(
+                    rank, backend, output
+                )
+                for rank, node_id in enumerate(nodes)
+            ]
+        else:
+            actors = [actor_type.remote(rank, backend, output) for rank in (0, 1)]
         result["worlds"] = ray.get([actor.describe.remote() for actor in actors], timeout=60)
-        validate_worlds(result["worlds"])
+        validate_worlds(result["worlds"], require_distinct_hosts=require_distinct_hosts)
         sender = result["worlds"][0]
         result["initialization"] = ray.get(
             [actor.initialize.remote(sender["address"], sender["port"]) for actor in actors], timeout=45
@@ -167,14 +209,15 @@ def run_probe(output: str, backend: str, sizes: tuple[int, ...], repeats: int = 
     except Exception as error:
         result["error"] = f"{type(error).__name__}: {error}"
     finally:
+        result["rank_events"] = {}
+        for rank, actor in enumerate(actors):
+            try:
+                result["rank_events"][f"rank-{rank}.json"] = ray.get(actor.events.remote(), timeout=10)
+            except Exception as error:
+                result["error"] = result["error"] or f"Rank evidence unavailable: {type(error).__name__}: {error}"
         for actor in actors:
             ray.kill(actor, no_restart=True)
         Path(output).mkdir(parents=True, exist_ok=True)
-        result["rank_events"] = {}
-        for path in Path(output).glob("rank-*.json"):
-            if path.stat().st_size > 1024 * 1024:
-                raise ValueError("Rank diagnostic exceeds bounded receipt size")
-            result["rank_events"][path.name] = json.loads(path.read_text())
         Path(output, "receipt.json").write_text(json.dumps(result, sort_keys=True))
     return result
 
@@ -189,6 +232,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
     parser.add_argument("--durable-prefix", required=True)
+    parser.add_argument("--two-host", action="store_true")
     args = parser.parse_args()
     prefix = attempt_receipt_prefix(args.durable_prefix, os.environ.get("IRIS_ATTEMPT_UID", ""))
     attempt = {"iris_task_id": os.environ.get("IRIS_TASK_ID"), "iris_attempt_uid": os.environ["IRIS_ATTEMPT_UID"]}
@@ -202,10 +246,17 @@ def main() -> None:
         }
         write_bytes_atomic(prefix + "/measurement-started.json", json.dumps(marker, sort_keys=True).encode())
 
-    ray.init(address="local", num_cpus=4, num_gpus=2, include_dashboard=False)
+    if args.two_host:
+        ray.init(address="auto")
+    else:
+        ray.init(address="local", num_cpus=4, num_gpus=2, include_dashboard=False)
     try:
         result = run_probe(
-            args.output, "nccl", (32 * 1024**2, 128 * 1024**2, 512 * 1024**2), measurement_started=measurement_started
+            args.output,
+            "nccl",
+            (32 * 1024**2, 128 * 1024**2, 512 * 1024**2),
+            measurement_started=measurement_started,
+            require_distinct_hosts=args.two_host,
         )
         result.update(attempt)
         write_bytes_atomic(prefix + "/receipt.json", json.dumps(result, sort_keys=True).encode())
