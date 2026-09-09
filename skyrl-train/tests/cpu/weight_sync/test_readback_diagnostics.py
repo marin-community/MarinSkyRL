@@ -146,22 +146,31 @@ def test_native_network_capture_is_bounded_and_reports_truncation(tmp_path, monk
 @pytest.mark.asyncio
 async def test_receiver_readback_retains_each_dp_core_and_rejects_missing_core():
     class NativeCoreBoundary:
-        core_engines = [b"zero", b"one"]
+        core_engines = [bytes([0, 0]), bytes([1, 0])]
+        engine_ranks_managed = [0, 1]
 
         async def _call_utility_async(self, utility, method, timeout, args, kwargs, *, engine):
             assert utility == "collective_rpc" and method == "read_weight_sync_environment"
-            return [{"origin": engine.decode()}]
+            return [{"origin": int.from_bytes(engine, "little")}]
 
     core = NativeCoreBoundary()
     engine = SimpleNamespace(
-        engine_core=core, vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=2))
+        engine_core=core,
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_size=2,
+                data_parallel_index=0,
+                data_parallel_size_local=2,
+                data_parallel_rank_local=None,
+                local_engines_only=False,
+            )
+        ),
     )
-    assert await read_all_receiver_workers(engine, "read_weight_sync_environment") == [
-        {"origin": "zero"},
-        {"origin": "one"},
-    ]
-    core.core_engines = [b"zero"]
-    with pytest.raises(ValueError, match="every configured DP core"):
+    rows = await read_all_receiver_workers(engine, "read_weight_sync_environment")
+    assert [row["origin"] for row in rows] == [0, 1]
+    assert all(row["receiver_transport"]["managed_dp_ranks"] == [0, 1] for row in rows)
+    core.core_engines = [bytes([0, 0])]
+    with pytest.raises(ValueError, match="every configured managed DP core"):
         await read_all_receiver_workers(engine, "read_weight_sync_environment")
 
 
