@@ -8,6 +8,7 @@ import time
 
 import torch
 
+from skyrl_train.weight_sync.readback_diagnostics import environment_readback
 from skyrl_train.weight_sync.bucket_receiver import GrugBucketReceiver
 from skyrl_train.weight_sync.bucket_identity import bucket_identity
 from skyrl_train.weight_sync.manifest import parse_manifest
@@ -96,6 +97,7 @@ def prepare_worker_buckets(worker, payload, manifest_id):
     return {
         "identity": bucket_identity(worker.device),
         "manifest_id": manifest_id,
+        "environment": environment_readback(),
         "bucket_count": manifest.bucket_count,
         "bucket_bytes": BUCKET_BYTES,
         "installed_parameter_bytes": receiver.expected_bytes,

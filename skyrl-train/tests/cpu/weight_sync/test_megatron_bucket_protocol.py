@@ -475,3 +475,19 @@ async def test_timing_restart_cannot_repeat_a_recorded_measurement(gate):
     assert not hasattr(gate.receiver.worker, "_diagnostic_bucket_state")
     with gate.policy._policy_weight_access.hold("ppo"):
         pass
+
+
+@pytest.mark.asyncio
+async def test_preparation_observes_actual_sender_and_receiver_environment(gate, monkeypatch):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    monkeypatch.setenv("NCCL_NTHREADS", "256")
+    monkeypatch.setenv("NCCL_P2P_NET_DISABLE", "0")
+    monkeypatch.setenv("UNRELATED_SECRET", "must-never-enter-receipt")
+    receipt = await gate.policy.prepare_bucket_timing(gate.client)
+    for row in [receipt, *receipt["prepared_receivers"]]:
+        values = row["environment"]["values"]
+        assert values["VLLM_BATCH_INVARIANT"] == "0"
+        assert values["NCCL_NTHREADS"] == "256"
+        assert values["NCCL_P2P_NET_DISABLE"] == "0"
+        assert "UNRELATED_SECRET" not in values
+    await gate.policy.close_bucket_timing(gate.client, None)

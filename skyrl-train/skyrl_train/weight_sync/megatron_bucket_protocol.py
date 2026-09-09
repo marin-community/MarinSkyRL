@@ -18,7 +18,7 @@ from skyrl_train.weight_sync.frozen_source_plan import frozen_source_plan
 from skyrl_train.weight_sync.frozen_view_sender import FrozenViewBucketSender
 from skyrl_train.weight_sync.manifest import PublicationManifest, TensorSpec, build_manifest
 from skyrl_train.weight_sync.receiver_readback_rpc import group_external_dp_workers
-from skyrl_train.weight_sync.readback_diagnostics import persist_readback
+from skyrl_train.weight_sync.readback_diagnostics import environment_readback, persist_readback
 from skyrl_train.weight_sync.worker_bucket_protocol import BUCKET_BYTES, MAX_REPLAY_EXTRA_BYTES
 
 
@@ -189,6 +189,7 @@ async def prepare_bucket_transfer(worker, client, *, source_owners):
         {
             "schema": "megatron_bucket_install_replay_v1",
             "identity": identity,
+            "environment": environment_readback(),
             "manifest": asdict(manifest) if rank == 0 else None,
             "manifest_id": manifest.manifest_id,
             "policy_manifest_agreement": len(hashes),
