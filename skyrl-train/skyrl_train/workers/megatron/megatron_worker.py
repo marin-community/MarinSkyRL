@@ -61,6 +61,7 @@ from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWra
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
 from skyrl_train.weight_sync.publication_timing import PublicationStageTimer, record_receiver_publication_stages
+from skyrl_train.weight_sync.wire_inventory import WireInventory
 from skyrl_train.telemetry import record_event
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode, weight_sync_dtype
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
@@ -897,6 +898,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             raise ValueError("publication stage tracing currently requires non-colocated NCCL broadcast")
         rank = torch.distributed.get_rank()
         step = self._completed_update or 0
+        wire_enabled = bool(self.cfg.generator.get("weight_sync_wire_inventory", False))
+        if wire_enabled and self.use_cuda_ipc:
+            raise ValueError("Wire inventory requires native non-colocated tensor broadcasts")
+        wire_inventory = WireInventory() if wire_enabled and rank == 0 else None
+        if wire_enabled:
+            self._weight_sync_wire_receipt = None
         if timing.enabled and rank == 0:
             await inference_engine_client.begin_publication_timing(step)
 
@@ -964,6 +971,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 if torch.distributed.get_rank() == 0:
                     with timing.span("rpc_wait"):
                         await update_weight_task
+                    if wire_inventory is not None:
+                        wire_inventory.observe(name, tensor)
                 with timing.span("barrier"):
                     torch.distributed.barrier()
 
@@ -1044,6 +1053,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 receivers = await inference_engine_client.read_publication_timing()
                 record_receiver_publication_stages(receivers, step=step)
                 self._publication_timing_receipt = {"trainer": ranks, "receiver": receivers}
+        if wire_inventory is not None:
+            self._weight_sync_wire_receipt = wire_inventory.finish(completed_update=self._completed_update)
+        return None
+
+    def read_weight_sync_wire_inventory(self):
+        if not self.cfg.generator.get("weight_sync_wire_inventory", False):
+            raise ValueError("Wire inventory was not enabled for this run")
+        if torch.distributed.get_rank() == 0:
+            if self._weight_sync_wire_receipt is None:
+                raise ValueError("No complete successful native wire inventory is available")
+            return self._weight_sync_wire_receipt
         return None
 
     def read_publication_timing(self):
