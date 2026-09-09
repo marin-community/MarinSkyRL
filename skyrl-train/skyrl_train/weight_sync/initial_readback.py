@@ -6,6 +6,7 @@ import time
 from collections import Counter
 from itertools import product
 
+from skyrl_train.weight_sync.receiver_readback_rpc import group_external_dp_workers
 from skyrl_train.weight_sync.readback_diagnostics import persist_readback, receipt_chunks, validate_replica_digests
 
 
@@ -81,7 +82,9 @@ async def run_initial_readback(trainer, output_uri: str, geometry: dict) -> dict
     policy_environment = await asyncio.gather(
         *trainer.policy_model.async_run_ray_method("pass_through", "read_weight_sync_environment")
     )
-    receiver_environment = await trainer.inference_engine_client.read_weight_sync_environment()
+    receiver_environment = group_external_dp_workers(
+        await trainer.inference_engine_client.read_weight_sync_environment(), geometry
+    )
     pre_sync_environment = {"policy": policy_environment, "receivers": receiver_environment}
     durable_pre_sync = persist_readback(output_uri, "pre-group", pre_sync_environment)
     for chunk in receipt_chunks(pre_sync_environment):
@@ -98,7 +101,9 @@ async def run_initial_readback(trainer, output_uri: str, geometry: dict) -> dict
     policy = await asyncio.gather(
         *trainer.policy_model.async_run_ray_method("pass_through", "read_weight_sync_policy_state")
     )
-    receivers = await trainer.inference_engine_client.read_publication_receiver_state()
+    receivers = group_external_dp_workers(
+        await trainer.inference_engine_client.read_publication_receiver_state(), geometry
+    )
     observed = time.monotonic()
     comparisons = validate_initial_readback(policy, receivers, geometry)
     return {

@@ -1,27 +1,74 @@
-"""Retain every DP worker's read-only diagnostic utility response."""
+"""Retain every managed core and every outer DP actor's diagnostic response."""
 
 import asyncio
 
 
-async def read_all_receiver_workers(engine, method: str):
-    """Avoid DPLBAsyncMPClient's deliberate first-core-only utility return.
-
-    The pinned vLLM client dispatches collective_rpc to all cores but its public
-    call_utility_async returns result[0]. Readbacks need each original result.
-    This uses the same per-core dispatch without changing any worker operation.
-    """
-    dp_size = engine.vllm_config.parallel_config.data_parallel_size
-    if dp_size == 1:
-        return await engine.collective_rpc(method)
+def managed_core_identities(engine):
+    """Validate the pinned client's local/external or internal-DP core set."""
+    parallel = engine.vllm_config.parallel_config
+    dp_rank = parallel.data_parallel_index
+    count = parallel.data_parallel_size_local if parallel.local_engines_only else parallel.data_parallel_size
+    ranks = [dp_rank] if parallel.data_parallel_rank_local is not None else list(range(dp_rank, dp_rank + count))
+    expected = [rank.to_bytes(2, "little") for rank in ranks]
     core = engine.engine_core
-    if len(core.core_engines) != dp_size:
-        raise ValueError("Receiver readback requires every configured DP core")
+    if (
+        not ranks
+        or any(rank < 0 or rank >= parallel.data_parallel_size for rank in ranks)
+        or core.engine_ranks_managed != ranks
+        or list(core.core_engines) != expected
+    ):
+        raise ValueError(
+            "Receiver readback requires every configured managed DP core: "
+            f"expected={ranks}, observed_ranks={core.engine_ranks_managed}, "
+            f"observed_identities={[value.hex() for value in core.core_engines]}"
+        )
+    return expected, ranks
+
+
+async def read_all_receiver_workers(engine, method: str):
+    """Dispatch to every core this actor manages, retaining original worker results.
+
+    The SkyRL factory creates one actor per external DP rank. Such an actor owns
+    one managed core even though its native distributed world includes every DP
+    rank. Internal DPLB clients instead manage multiple cores and deliberately
+    return only the first public utility result, so use each private response.
+    """
+    if engine.vllm_config.parallel_config.data_parallel_size == 1:
+        return await engine.collective_rpc(method)
+    identities, ranks = managed_core_identities(engine)
+    core = engine.engine_core
     per_core = await asyncio.gather(
         *[
             core._call_utility_async("collective_rpc", method, None, (), None, engine=identity)
-            for identity in core.core_engines
+            for identity in identities
         ]
     )
     if any(not workers for workers in per_core):
         raise ValueError("Receiver core returned no worker readback")
-    return [worker for workers in per_core for worker in workers]
+    transport = {
+        "core_client": type(core).__name__,
+        "managed_dp_ranks": ranks,
+        "managed_core_identities": [value.hex() for value in identities],
+        "configured_dp_size": engine.vllm_config.parallel_config.data_parallel_size,
+    }
+    return [{**worker, "receiver_transport": transport} for workers in per_core for worker in workers]
+
+
+def group_external_dp_workers(actor_rows: list[list[dict]], geometry: dict) -> list[list[dict]]:
+    """Regroup the actual factory's ordered DP actors; reject missing/duplicate ranks."""
+    dp = geometry["receiver_parallel"].get("data_parallel_size", 1)
+    ranks_per_engine = geometry["receiver_ranks_per_engine"]
+    if ranks_per_engine % dp or len(actor_rows) != geometry["receiver_engines"] * dp:
+        raise ValueError("Receiver readback is missing configured external DP actors")
+    ranks_per_actor = ranks_per_engine // dp
+    engines = []
+    for engine in range(geometry["receiver_engines"]):
+        workers = []
+        for dp_rank in range(dp):
+            rows = actor_rows[engine * dp + dp_rank]
+            expected = list(range(dp_rank * ranks_per_actor, (dp_rank + 1) * ranks_per_actor))
+            if sorted(row["rank"] for row in rows) != expected:
+                raise ValueError("External DP actor worker ranks differ from the configured factory slice")
+            workers.extend(rows)
+        engines.append(workers)
+    return engines
