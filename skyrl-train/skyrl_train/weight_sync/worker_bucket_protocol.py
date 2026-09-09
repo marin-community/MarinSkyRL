@@ -9,6 +9,7 @@ import time
 import torch
 
 from skyrl_train.weight_sync.bucket_receiver import GrugBucketReceiver
+from skyrl_train.weight_sync.bucket_identity import bucket_identity
 from skyrl_train.weight_sync.manifest import parse_manifest
 
 
@@ -68,8 +69,12 @@ def prepare_worker_buckets(worker, payload, manifest_id):
         "load_events": [torch.cuda.Event(), torch.cuda.Event()],
         "slot_used": [False, False],
         "install_complete": False,
+        "install_allocated_before": torch.cuda.memory_allocated(worker.device),
+        "install_free_before": torch.cuda.mem_get_info(worker.device)[0],
     }
+    torch.cuda.reset_peak_memory_stats(worker.device)
     return {
+        "identity": bucket_identity(worker.device),
         "manifest_id": manifest_id,
         "bucket_count": manifest.bucket_count,
         "bucket_bytes": BUCKET_BYTES,
@@ -98,6 +103,7 @@ def receive_worker_bucket(worker, bucket_id: int, *, replay: bool = False):
         torch.cuda.synchronize(worker.device)
         state["replay_started"] = time.monotonic()
         state["replay_allocated_before"] = torch.cuda.memory_allocated(worker.device)
+        state["replay_free_before"] = torch.cuda.mem_get_info(worker.device)[0]
         torch.cuda.reset_peak_memory_stats(worker.device)
         state["scratch"] = torch.empty(REPLAY_SCRATCH_BYTES, dtype=torch.bool, device=worker.device)
     receive_stream = torch.cuda.current_stream(worker.device)
@@ -114,7 +120,13 @@ def receive_worker_bucket(worker, bucket_id: int, *, replay: bool = False):
             receipt = {"installed_bytes": receiver.install_bucket(bucket_id)}
         state["load_events"][slot].record(state["load_stream"])
     state["slot_used"][slot] = True
-    return {"bucket_id": bucket_id, "slot": slot, "load_completion_event_recorded": True, **receipt}
+    return {
+        "identity": bucket_identity(worker.device),
+        "bucket_id": bucket_id,
+        "slot": slot,
+        "load_completion_event_recorded": True,
+        **receipt,
+    }
 
 
 def finish_worker_install(worker):
@@ -129,7 +141,14 @@ def finish_worker_install(worker):
             completed_slots.append(slot)
     state["install_complete"] = True
     return {
+        "identity": bucket_identity(worker.device),
         "install_complete": True,
+        "allocated_before": state["install_allocated_before"],
+        "allocated_after": torch.cuda.memory_allocated(worker.device),
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated(worker.device),
+        "free_device_bytes_before": state["install_free_before"],
+        "free_device_bytes_after": torch.cuda.mem_get_info(worker.device)[0],
+        "memory_scope": "Torch allocator peak plus device-free endpoints; external allocator peak unmeasured",
         "completed_slots": completed_slots,
         "manifest_id": state["receiver"].manifest.manifest_id,
     }
@@ -145,6 +164,7 @@ def finish_worker_replay(worker):
     if peak_extra > MAX_REPLAY_EXTRA_BYTES:
         raise ValueError("Measured replay allocation exceeds the approved 1 MiB total scratch limit")
     return {
+        "identity": bucket_identity(worker.device),
         "manifest_id": state["receiver"].manifest.manifest_id,
         "compared_bytes": result.compared_bytes,
         "expected_bytes": state["receiver"].expected_bytes,
@@ -152,10 +172,18 @@ def finish_worker_replay(worker):
         "coverage": 1.0,
         "replay_seconds": time.monotonic() - state["replay_started"],
         "replay_peak_extra_bytes": peak_extra,
+        "allocated_before": state["replay_allocated_before"],
+        "allocated_after": torch.cuda.memory_allocated(worker.device),
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated(worker.device),
+        "free_device_bytes_before": state["replay_free_before"],
+        "free_device_bytes_after": torch.cuda.mem_get_info(worker.device)[0],
+        "memory_scope": "Torch allocator peak plus device-free endpoints; external allocator peak unmeasured",
         "rank": torch.distributed.get_rank(),
     }
 
 
 def close_worker_buckets(worker):
+    if not hasattr(worker, "_diagnostic_bucket_state"):
+        return
     torch.cuda.synchronize(worker.device)
     del worker._diagnostic_bucket_state

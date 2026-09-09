@@ -66,6 +66,7 @@ from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode, 
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 from skyrl_train.weight_change_probe import WirePublicationObserver
 from skyrl_train.weight_sync.readback_diagnostics import environment_readback, parameter_digests
+from skyrl_train.weight_sync.policy_weight_access import PolicyWeightAccess
 
 
 class _MegatronInitMode(StrEnum):
@@ -500,6 +501,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # A checkpoint can be restored after init_model, so the initial version is
         # unknown until this worker has completed an update with explicit metadata.
         self._completed_update: int | None = None
+        self._policy_weight_access = PolicyWeightAccess()
         self._optimizer_state_observer = OptimizerStateObserver(
             enabled=self.cfg.trainer.optimizer_state_metrics, rank=self._rank
         )
@@ -670,30 +672,33 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     # are shared with the ordinary worker through backend-neutral utilities.
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
-        timing = MegatronTrainTimings(
-            enabled=bool(OmegaConf.select(self.cfg, "trainer.policy_train_spans", default=False))
-        )
-        outcome = "failure"
-        try:
-            with self._memory.span(
-                "ppo_forward_backward_update", step=int(train_data.metadata["global_step"]), step_kind="target_update"
-            ):
-                output = self._ppo_train_with_timings(train_data, timing)
-            self._completed_update = int(train_data.metadata["global_step"])
-            outcome = "success"
-            return output
-        finally:
+        with self._policy_weight_access.hold("ppo"):
+            timing = MegatronTrainTimings(
+                enabled=bool(OmegaConf.select(self.cfg, "trainer.policy_train_spans", default=False))
+            )
+            outcome = "failure"
             try:
-                observations = timing.finish()
-                if observations:
-                    publish_megatron_train_timings(
-                        observations,
-                        step=int(train_data.metadata["global_step"]),
-                        rank=torch.distributed.get_rank(),
-                        outcome=outcome,
-                    )
-            except Exception as error:
-                logger.warning("Could not publish Megatron policy timings: {}", error)
+                with self._memory.span(
+                    "ppo_forward_backward_update",
+                    step=int(train_data.metadata["global_step"]),
+                    step_kind="target_update",
+                ):
+                    output = self._ppo_train_with_timings(train_data, timing)
+                self._completed_update = int(train_data.metadata["global_step"])
+                outcome = "success"
+                return output
+            finally:
+                try:
+                    observations = timing.finish()
+                    if observations:
+                        publish_megatron_train_timings(
+                            observations,
+                            step=int(train_data.metadata["global_step"]),
+                            rank=torch.distributed.get_rank(),
+                            outcome=outcome,
+                        )
+                except Exception as error:
+                    logger.warning("Could not publish Megatron policy timings: {}", error)
 
     def _ppo_train_with_timings(self, train_data, timing: MegatronTrainTimings) -> "TrainingOutputBatch":
         dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
@@ -842,6 +847,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean, "train_status_by_update": status_by_update}
         return output
+
+    async def diagnostic_bucket_install_and_replay(self, inference_engine_client):
+        from skyrl_train.weight_sync.megatron_bucket_protocol import install_and_replay
+
+        with self._policy_weight_access.hold("bucket-install-and-replay"):
+            return await install_and_replay(
+                self,
+                inference_engine_client,
+                source_owners={
+                    "dense_owner": mpu.get_data_parallel_rank() == 0,
+                    "expert_owner": mpu.get_expert_data_parallel_rank() == 0,
+                },
+            )
 
     async def broadcast_to_inference_engines(self, inference_engine_client, *, publication=None):
         # Enclose extraction as well as transfer: gathering/conversion can peak

@@ -77,6 +77,8 @@ def native_protocol(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_stream", lambda device: default)
     monkeypatch.setattr(torch.cuda, "stream", stream_context)
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 3)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 8)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(uuid="cpu-boundary-gpu"))
     broadcasts = []
 
     def broadcast(buffer, src, group):
