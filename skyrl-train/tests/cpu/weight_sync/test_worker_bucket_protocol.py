@@ -211,3 +211,72 @@ def test_incomplete_load_event_prevents_install_completion_and_replay(native_pro
     with pytest.raises(ValueError, match="explicit installed-weight completion join"):
         case.worker.receive_diagnostic_weight_sync_bucket(0, replay=True)
     assert len(case.broadcasts) == case.parts[0].bucket_count
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("present", [False, True])
+async def test_actual_close_worker_receipt_survives_external_dp_wrapper(native_protocol, present):
+    from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+    case = native_protocol
+    if present:
+        prepare(case)
+
+    async def call_utility(operation, method, timeout, args, kwargs, *, engine):
+        assert operation == "collective_rpc" and method == "close_diagnostic_weight_sync_buckets"
+        assert engine == b"\x03\x00" and timeout is None
+        return [getattr(case.worker, method)(*args, **(kwargs or {}))]
+
+    engine = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_size=8,
+                data_parallel_size_local=1,
+                data_parallel_index=3,
+                local_engines_only=True,
+                data_parallel_rank_local=0,
+            )
+        ),
+        engine_core=SimpleNamespace(
+            engine_ranks_managed=[3],
+            core_engines=[b"\x03\x00"],
+            _call_utility_async=call_utility,
+        ),
+    )
+    rows = await call_all_receiver_workers(engine, "close_diagnostic_weight_sync_buckets")
+    assert len(rows) == 1 and rows[0]["closed"] is True
+    assert rows[0]["state_was_present"] is present
+    assert rows[0]["rank"] == 3 and rows[0]["world_size"] == 8
+    assert rows[0]["receiver_transport"]["managed_dp_ranks"] == [3]
+    assert not hasattr(case.worker, "_diagnostic_bucket_state")
+    assert (("device_join",) in case.log) is present
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_retains_initiating_error_and_note():
+    from skyrl_train.weight_sync.megatron_bucket_protocol import close_preserving_failure
+
+    async def fail_close():
+        raise RuntimeError("receiver cleanup failed")
+
+    primary = ValueError("dense layout mismatch")
+    with pytest.raises(ValueError, match="dense layout mismatch") as caught:
+        try:
+            raise primary
+        finally:
+            await close_preserving_failure(
+                SimpleNamespace(close_diagnostic_weight_sync_buckets=fail_close), "cpu", 0, primary
+            )
+    assert caught.value is primary
+    assert any("RuntimeError: receiver cleanup failed" in note for note in primary.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_without_prior_error_remains_failure():
+    from skyrl_train.weight_sync.megatron_bucket_protocol import close_preserving_failure
+
+    async def fail_close():
+        raise RuntimeError("receiver cleanup failed")
+
+    with pytest.raises(RuntimeError, match="receiver cleanup failed"):
+        await close_preserving_failure(SimpleNamespace(close_diagnostic_weight_sync_buckets=fail_close), "cpu", 0, None)

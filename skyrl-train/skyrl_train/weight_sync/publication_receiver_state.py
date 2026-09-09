@@ -87,4 +87,18 @@ def read_publication_receiver_state(worker):
         "model_type": getattr(hf, "model_type", None),
         "num_experts": experts,
         "layers": layers,
+        "dense_parameters": [
+            {
+                "name": name,
+                "shape": list(tensor.shape),
+                "stride": list(tensor.stride()),
+                "dtype": str(tensor.dtype),
+                "device": str(tensor.device),
+                "contiguous": tensor.is_contiguous(),
+                "bytes": tensor.numel() * tensor.element_size(),
+                "data_ptr": tensor.data_ptr(),
+            }
+            for name, tensor in worker.model_runner.model.named_parameters()
+            if not name.endswith((".w13_weight", ".w2_weight"))
+        ],
     }

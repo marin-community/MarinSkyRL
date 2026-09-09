@@ -38,6 +38,20 @@ def parameter_versions(worker):
     )
 
 
+async def close_preserving_failure(client, device, rank, primary_error):
+    """Retain the initiating native failure if cleanup also fails."""
+    try:
+        if rank == 0:
+            await client.close_diagnostic_weight_sync_buckets()
+        torch.cuda.synchronize(device)
+    except BaseException as cleanup_error:
+        if primary_error is None:
+            raise
+        primary_error.add_note(
+            f"Bucket cleanup also failed: {type(cleanup_error).__name__}: {str(cleanup_error)[:4096]}"
+        )
+
+
 def receiver_rows(nested, *, engine_count: int, ranks_per_engine: int, data_parallel_size: int = 1, expected=None):
     native = [[{"rank": row["identity"]["rank"], "receipt": row} for row in actor] for actor in nested]
     grouped = group_external_dp_workers(
@@ -146,6 +160,7 @@ async def install_and_replay(worker, client, *, source_owners):
     prepared_receivers = None
     receiver_identities = None
     phases = {}
+    primary_error = None
     try:
         if rank == 0:
             prepared_receivers, receiver_identities = receiver_rows(
@@ -274,10 +289,11 @@ async def install_and_replay(worker, client, *, source_owners):
             del sender
         if parameter_versions(worker) != start_versions or worker._completed_update != start_update:
             raise ValueError("Policy weights changed before replay completed")
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        if rank == 0:
-            await client.close_diagnostic_weight_sync_buckets()
-        torch.cuda.synchronize(device)
+        await close_preserving_failure(client, device, rank, primary_error)
     return {
         "schema": "megatron_bucket_install_replay_v1",
         "identity": identity,

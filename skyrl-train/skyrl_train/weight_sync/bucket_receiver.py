@@ -1,6 +1,6 @@
 """Storage-preserving bucket install/replay for qualified TP1 TRITON Grug models.
 
-This layer owns no CUDA allocation, communication or model discovery. The native
+This layer owns no persistent CUDA allocation, communication or model discovery. The native
 caller must first qualify the actual model/backend, expert maps and headroom,
 then supply its two transfer buffers and independent installed-parameter map.
 """
@@ -12,6 +12,7 @@ import torch
 from skyrl_train.weight_sync.byte_replay import ByteComparison, ReceiverByteCoverage, compare_installed_views
 from skyrl_train.weight_sync.expert_scatter import grug_expert_views
 from skyrl_train.weight_sync.manifest import ManifestEntry, PublicationManifest, unpack_bucket
+from skyrl_train.weight_sync.router_replay import compare_widened_router
 
 
 class GrugBucketReceiver:
@@ -65,7 +66,7 @@ class GrugBucketReceiver:
             local_bytes = 0
             for source, installed in self._pairs(bucket_id):
                 inventory.observe(installed)
-                local_bytes += source.numel() * source.element_size()
+                local_bytes += installed.numel() * installed.element_size()
             self._bucket_local_bytes.append(local_bytes)
         self.expected_bytes = inventory.finish()
 
@@ -81,8 +82,22 @@ class GrugBucketReceiver:
                 self.backend,
             )
         installed = self.parameters[entry.hf_name]
-        if installed.shape != source.shape or installed.dtype != source.dtype or not installed.is_contiguous():
-            raise ValueError("Dense installed parameter must match the complete wire tensor exactly")
+        router_widening = (
+            entry.hf_name.endswith(".mlp.router.weight")
+            and source.dtype == torch.bfloat16
+            and installed.dtype == torch.float32
+        )
+        if (
+            installed.shape != source.shape
+            or (installed.dtype != source.dtype and not router_widening)
+            or not installed.is_contiguous()
+        ):
+            raise ValueError(
+                "Dense installed parameter must match the complete wire tensor exactly: "
+                f"name={entry.hf_name}, wire_shape={tuple(source.shape)}, wire_dtype={source.dtype}, "
+                f"installed_shape={tuple(installed.shape)}, installed_dtype={installed.dtype}, "
+                f"installed_stride={installed.stride()}"
+            )
         return ((source, installed),)
 
     def _pairs(self, bucket_id: int):
@@ -117,7 +132,19 @@ class GrugBucketReceiver:
             ):
                 raise ValueError("Replay scratch overlaps transfer or installed storage")
         pairs = tuple(self._pairs(bucket_id))
-        result = compare_installed_views(pairs, scratch, expected_bytes=self._bucket_local_bytes[bucket_id])
+        compared = mismatches = 0
+        for source, installed in pairs:
+            if source.dtype != installed.dtype:
+                result = compare_widened_router(source, installed, scratch)
+            else:
+                result = compare_installed_views(
+                    ((source, installed),), scratch, expected_bytes=installed.numel() * installed.element_size()
+                )
+            compared += result.compared_bytes
+            mismatches += result.mismatches
+        result = ByteComparison(compared, mismatches)
+        if result.compared_bytes != self._bucket_local_bytes[bucket_id]:
+            raise ValueError("Replay byte count differs from the planned installed bytes")
         for _, installed in pairs:
             self._replay_coverage.observe(installed)
         self._replay_bytes += result.compared_bytes

@@ -18,6 +18,7 @@ def test_actual_worker_probe_preserves_parameters_and_reports_unknown_backend(mo
             self.w13_weight = torch.nn.Parameter(torch.arange(24).reshape(2, 4, 3).bfloat16())
             self.w2_weight = torch.nn.Parameter(torch.arange(12).reshape(2, 3, 2).bfloat16())
             self.quant_method = SimpleNamespace(unquantized_backend=backend)
+            self.router = torch.nn.Linear(3, 4, bias=True, dtype=torch.float32)
 
         def _map_global_expert_id_to_local_expert_id(self, expert):
             return expert - 2 if expert >= 2 else -1
@@ -69,6 +70,15 @@ def test_actual_worker_probe_preserves_parameters_and_reports_unknown_backend(mo
     assert [layer["backend"] for layer in receipt["layers"]] == ["TRITON", None]
     assert all(layer["expert_map"] == [-1, -1, 0, 1] for layer in receipt["layers"])
     assert receipt["layers"][0]["parameters"]["w13_weight"]["shape"] == [2, 4, 3]
+    assert [row["name"] for row in receipt["dense_parameters"]] == [
+        "0.router.weight",
+        "0.router.bias",
+        "1.router.weight",
+        "1.router.bias",
+    ]
+    assert all(row["dtype"] == "torch.float32" for row in receipt["dense_parameters"])
+    assert receipt["dense_parameters"][0]["shape"] == [4, 3]
+    assert receipt["dense_parameters"][0]["bytes"] == 48
     assert (
         receipt["layers"][0]["first_local_expert"]["w13_half_sha256"][0]
         != receipt["layers"][0]["first_local_expert"]["w13_half_sha256"][1]

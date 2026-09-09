@@ -183,7 +183,14 @@ def finish_worker_replay(worker):
 
 
 def close_worker_buckets(worker):
-    if not hasattr(worker, "_diagnostic_bucket_state"):
-        return
-    torch.cuda.synchronize(worker.device)
-    del worker._diagnostic_bucket_state
+    present = hasattr(worker, "_diagnostic_bucket_state")
+    if present:
+        torch.cuda.synchronize(worker.device)
+        del worker._diagnostic_bucket_state
+    return {
+        "identity": bucket_identity(worker.device),
+        "rank": torch.distributed.get_rank(),
+        "world_size": torch.distributed.get_world_size(),
+        "closed": True,
+        "state_was_present": present,
+    }
