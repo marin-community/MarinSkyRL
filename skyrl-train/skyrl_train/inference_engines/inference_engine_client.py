@@ -1,3 +1,4 @@
+from skyrl_train.weight_sync.publication_version import earliest_sampled_policy_version
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -443,10 +444,13 @@ class InferenceEngineClient(InferenceEngineInterface):
                 continue
 
             # 3.5 Accumulate outputs
-            if not accum_response_ids and new_response_ids:
+            if new_response_ids:
                 versions = partial_response.get("policy_versions_at_first_token")
-                has_first_token_metadata = versions is not None
-                first_token_version = versions[0] if versions is not None else None
+                current_version = versions[0] if versions is not None else None
+                first_token_version = earliest_sampled_policy_version(
+                    [accum_response_ids, new_response_ids], [first_token_version, current_version]
+                )
+                has_first_token_metadata = has_first_token_metadata or versions is not None
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
                 accum_response_logprobs.extend(new_response_logprobs)

@@ -24,3 +24,15 @@ class PublicationVersionHistory:
                 return version
         # An output sampled before the first measured boundary keeps its submission stamp.
         return None
+
+
+def earliest_sampled_policy_version(response_ids: list[list[int]], versions: list[int | None]) -> int | None:
+    """Return the earliest emitted-token version only when every sampled row is known."""
+    if len(response_ids) != len(versions):
+        raise ValueError("sampled-token versions must align with response rows")
+    sampled = [version for ids, version in zip(response_ids, versions) if ids]
+    if any(version is not None and (type(version) is not int or version < 0) for version in sampled):
+        raise ValueError("sampled-token versions must be nonnegative integers")
+    if not sampled or any(version is None for version in sampled):
+        return None
+    return min(sampled)

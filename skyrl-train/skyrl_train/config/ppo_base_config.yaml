@@ -288,6 +288,7 @@ trainer:
       min_lr_scale: 0.1
 
   fully_async:
+    first_token_admission: false
     max_staleness_steps: 4
     # Completed learner updates between publications; requires at least interval - 1 allowed age.
     weight_sync_interval: 1

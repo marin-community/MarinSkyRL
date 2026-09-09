@@ -11,6 +11,7 @@ High-level notes:
   and staleness manager are also reset / validated at the end of each epoch.
 """
 
+from skyrl_train.weight_sync.publication_version import earliest_sampled_policy_version
 import asyncio
 import collections
 import os
@@ -486,6 +487,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if cfg.trainer.offload_optimizer_during_rollouts:
             raise ValueError("Fully async training requires trainer.offload_optimizer_during_rollouts=false")
         validate_fully_async_cfg(cfg)
+        if type(cfg.trainer.fully_async.get("first_token_admission", False)) is not bool:
+            raise ValueError("trainer.fully_async.first_token_admission must be boolean")
         self._async_observations_enabled = bool(cfg.trainer.get("async_spans", False))
         self._published_policy_version = 0
         self._background_eval_tasks = []
@@ -813,7 +816,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             with Timer("policy_startup_drain", self.all_startup_timings):
                 await self._drain_policy_event_loops()
-        if self.cfg.generator.publication_stage_timing:
+        if self.cfg.generator.publication_stage_timing or self.cfg.trainer.fully_async.get(
+            "first_token_admission", False
+        ):
             await self._record_publication_requests("initial", initial_policy_version=self._published_policy_version)
         # Startup weight sync runs before producers exist and does not pause inference.
         await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
@@ -1327,7 +1332,41 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     if observation is not None:
                         observation.response_tokens = sum(len(ids) for ids in cur_trajectory_batch["response_ids"])
                 actual_step = cur_trajectory_batch.get("actual_global_step")
-                staleness_step = actual_step if actual_step is not None else installed_step_at_start
+                submission_step = actual_step if actual_step is not None else installed_step_at_start
+                versions = cur_trajectory_batch.get("policy_versions_at_first_token")
+                first_token_version = (
+                    earliest_sampled_policy_version(cur_trajectory_batch["response_ids"], versions)
+                    if versions is not None
+                    else None
+                )
+                if first_token_version is not None and first_token_version > self._published_policy_version:
+                    raise RuntimeError("Sampled first-token version is newer than the installed policy")
+                first_token_step = first_token_version + 1 if first_token_version is not None else None
+                first_token_admission = self.cfg.trainer.fully_async.get("first_token_admission", False)
+                sampled_tokens = sum(len(ids) for ids in cur_trajectory_batch["response_ids"])
+                if first_token_admission and sampled_tokens and first_token_step is None:
+                    raise RuntimeError("First-token admission requires native version evidence for every sampled row")
+                staleness_step = (
+                    first_token_step if first_token_admission and first_token_step is not None else submission_step
+                )
+                cur_trajectory_batch["submission_model_step"] = submission_step
+                cur_trajectory_batch["first_token_model_step"] = first_token_step
+                record_event(
+                    "rollout_admission_stamp",
+                    {
+                        "submission_model_step": submission_step,
+                        "first_token_model_step": first_token_step,
+                        "admission_model_step": staleness_step,
+                        "sampled_tokens": sampled_tokens,
+                        "first_token_evidence_complete": first_token_step is not None,
+                        "first_token_admission": first_token_admission,
+                    },
+                    attributes={
+                        "role": TRAINER_ROLE,
+                        "step": str(self.global_step),
+                        "call_id": observation.call_id if observation is not None else "",
+                    },
+                )
 
                 record_generated_work(
                     cur_trajectory_batch["response_ids"],
@@ -1456,7 +1495,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 with Timer("policy_post_sync_drain", self.all_timings):
                     await self._drain_policy_event_loops()
                 with Timer("weight_resume", self.all_timings):
-                    if trace_publication:
+                    if trace_publication or self.cfg.trainer.fully_async.get("first_token_admission", False):
                         await self.inference_engine_client.resume_generation(
                             policy_version=self._published_policy_version
                         )

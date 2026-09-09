@@ -1658,6 +1658,7 @@ class SeedRecordingModelClient:
             response_ids=[[2, 1]],
             response_logprobs=[[-0.1, -0.2]],
             stop_reasons=["stop"],
+            policy_versions_at_first_token=[3],
             token_provenance=TokenProvenance.ENGINE,
         )
 
@@ -1700,6 +1701,9 @@ async def test_seeded_gym_requests_match_across_order_and_runner_clocks():
         client.requests.clear()
         outputs = await runner.collector.collect(request, disable_tqdm=True)
         assert all(output.reward.optimization_reward == 1 for output in outputs)
+        assert all(output.first_token_policy_version == 3 for output in outputs)
+        projected = runner.projection.project(outputs, request)
+        assert projected["policy_versions_at_first_token"] == [3] * len(outputs)
         seeds = {item["session_ids"][0]: item["sampling_params"]["seed"] for item in client.requests}
         assert len(seeds) == 4 and len(set(seeds.values())) == 4
         assert all(0 <= seed < 2**31 for seed in seeds.values())

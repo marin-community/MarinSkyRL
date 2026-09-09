@@ -7,6 +7,8 @@ For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_runn
 
 from __future__ import annotations
 
+from skyrl_train.weight_sync.publication_version import earliest_sampled_policy_version
+
 import copy
 import hashlib
 import json
@@ -318,6 +320,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         verification_results: List[VerificationResult] = []
         # Conservative lower bound on the versions used by this trajectory.
         captured_global_step: Optional[int] = None
+        sampled_version_rows: list[list[int]] = []
+        sampled_versions: list[int | None] = []
         token_provenance = TokenProvenance.ENGINE
         generator_engine_indices: set[int | None] = set()
         sampling_evidence = {}
@@ -359,6 +363,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 token_provenance = TokenProvenance.RECONSTRUCTED
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
+            sampled_version_rows.append(output_ids)
+            sampled_versions.append(engine_output.get("policy_versions_at_first_token", [None])[0])
             stop_reason = engine_output["stop_reasons"][0]
             response_logprobs_batch = engine_output.get("response_logprobs")
             response_logprobs = response_logprobs_batch[0] if response_logprobs_batch is not None else None
@@ -555,6 +561,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             loss_mask=loss_mask,
             env_metrics=env_metrics,
             captured_global_step=captured_global_step,
+            first_token_policy_version=earliest_sampled_policy_version(sampled_version_rows, sampled_versions),
             generator_engine_index=next(iter(generator_engine_indices)) if len(generator_engine_indices) == 1 else None,
             token_provenance=token_provenance,
         )
@@ -688,6 +695,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             "rollout_logprobs": truncated_logprobs,
             "exclude_from_baseline": exclude_from_baseline,
         }
+        if "policy_versions_at_first_token" in engine_output:
+            trajectory_batch["policy_versions_at_first_token"] = engine_output["policy_versions_at_first_token"]
         attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
 
         return trajectory_batch

@@ -1321,8 +1321,13 @@ async def test_cancelled_resume_waiter_is_removed_and_pickled_copy_drops_waiters
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("first_tokens,expected", [([21], 2), ([], 3)])
-async def test_retry_preserves_first_sampled_version_and_ignores_zero_token_abort(first_tokens, expected):
+@pytest.mark.parametrize(
+    "first_tokens,first_version,last_version,expected",
+    [([21], 2, 3, 2), ([], 2, 3, 3), ([21], 3, 2, 2), ([21], None, 3, None), ([21], 2, None, None)],
+)
+async def test_retry_preserves_first_sampled_version_and_ignores_zero_token_abort(
+    first_tokens, first_version, last_version, expected
+):
     class Engine:
         calls = 0
 
@@ -1333,7 +1338,7 @@ async def test_retry_preserves_first_sampled_version_and_ignores_zero_token_abor
                 responses=["answer"],
                 response_ids=[first_tokens if first else [22]],
                 stop_reasons=["abort" if first else "stop"],
-                policy_versions_at_first_token=[2 if first else 3],
+                policy_versions_at_first_token=[first_version if first else last_version],
             )
 
     class Tokenizer:
