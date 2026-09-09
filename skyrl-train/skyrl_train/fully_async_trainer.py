@@ -918,6 +918,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             duration_seconds=weight_update_timer.duration,
         )
 
+        self._claim_measurement_boundary()
+
         # Synchronize before checking completion so a requested final evaluation uses
         # the checkpoint weights. The loaded global_step is the completed step count;
         # >= treats a resume exactly at max_steps as complete without running gs N+1.

@@ -647,6 +647,19 @@ class RayPPOTrainer:
             duration_seconds,
         )
 
+    def _claim_measurement_boundary(self):
+        uri = self.cfg.trainer.get("measurement_guard_uri")
+        if uri is None:
+            return
+        if not isinstance(uri, str) or not uri:
+            raise ValueError("measurement_guard_uri must be a nonempty S3 object URI or null")
+        if self.resume_mode != ResumeMode.NONE or self.global_step != 0:
+            raise ValueError("Measurement guard supports fresh measurements only, without checkpoint resumption")
+        from skyrl_train.utils.measurement_guard import claim_measurement
+
+        receipt = claim_measurement(uri)
+        logger.info("MEASUREMENT_BOUNDARY_CLAIM_PASS {}", receipt)
+
     async def _train_loop(self):
         """
         Internal training loop, separated for proper trajectory-runner lifecycle management.
@@ -669,6 +682,8 @@ class RayPPOTrainer:
                 self.global_step, _ = self.load_checkpoints()
 
         await self._sync_policy_for_rollouts(reason="initial")
+
+        self._claim_measurement_boundary()
 
         # Synchronize before checking completion so a requested final evaluation uses
         # the checkpoint weights. The loaded global_step is the completed step count;
