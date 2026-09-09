@@ -1,7 +1,9 @@
 """Actual Ray/default-world/custom-Gloo regression for the transport fixture."""
 
 import copy
+import json
 
+from fsspec.implementations.local import LocalFileSystem
 import pytest
 import ray
 from ray.cluster_utils import Cluster
@@ -10,6 +12,8 @@ from skyrl_train.entrypoints.probe_weight_sync_ray_transport import (
     ENV_KEYS,
     attempt_receipt_prefix,
     run_probe,
+    record_measurement_start,
+    require_unmeasured_prefix,
     validate_worlds,
 )
 
@@ -110,3 +114,33 @@ def test_actual_two_ray_nodes_on_one_host_fail_before_custom_group_and_measureme
     assert result["initialization"] == result["payloads"] == []
     assert len(result["rank_events"]) == 2
     assert all(rows[-1]["stage"] == "pre_custom_group" for rows in result["rank_events"].values())
+
+
+def test_startup_retry_without_prior_measurements_can_commit_verified_marker(tmp_path):
+    prefix = str(tmp_path)
+    failed = tmp_path / "attempts" / "startup-failure"
+    failed.mkdir(parents=True)
+    (failed / "receipt.json").write_text('{"error":"startup"}')
+    require_unmeasured_prefix(prefix)
+    attempt = attempt_receipt_prefix(prefix, "next-attempt")
+    marker = {"measurement_started": True, "iris_attempt_uid": "next-attempt"}
+    record_measurement_start(prefix, attempt, marker)
+    assert json.loads((tmp_path / "attempts/next-attempt/measurement-started.json").read_text()) == marker
+
+
+def test_prior_attempt_marker_prevents_automatic_remeasurement(tmp_path):
+    prefix = str(tmp_path)
+    record_measurement_start(prefix, attempt_receipt_prefix(prefix, "first"), {"measurement_started": True})
+    with pytest.raises(RuntimeError, match="already contains a measured attempt"):
+        record_measurement_start(prefix, attempt_receipt_prefix(prefix, "retry"), {"measurement_started": True})
+    assert not (tmp_path / "attempts/retry/measurement-started.json").exists()
+
+
+def test_measurement_lookup_failure_does_not_admit_another_attempt(tmp_path, monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise OSError("Object listing unavailable")
+
+    monkeypatch.setattr(LocalFileSystem, "find", unavailable)
+    with pytest.raises(OSError, match="listing unavailable"):
+        record_measurement_start(str(tmp_path), attempt_receipt_prefix(str(tmp_path), "retry"), {})
+    assert not (tmp_path / "attempts/retry/measurement-started.json").exists()

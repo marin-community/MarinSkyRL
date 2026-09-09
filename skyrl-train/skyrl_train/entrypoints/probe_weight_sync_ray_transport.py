@@ -16,7 +16,7 @@ import torch
 import torch.distributed as dist
 
 from skyrl_train.distributed.utils import get_free_port, init_custom_process_group
-from skyrl_train.io.io import write_bytes_atomic
+from skyrl_train.io.io import find_files, read_bytes, write_bytes_atomic
 from skyrl_train.weight_sync.readback_diagnostics import ENVIRONMENT_KEYS, network_log_readback
 
 ENV_KEYS = ENVIRONMENT_KEYS
@@ -228,6 +228,22 @@ def attempt_receipt_prefix(prefix: str, attempt_uid: str) -> str:
     return prefix.rstrip("/") + "/attempts/" + attempt_uid
 
 
+def require_unmeasured_prefix(prefix: str) -> None:
+    """Allow startup retries only while every attempt lacks a measurement marker."""
+    files = find_files(prefix.rstrip("/") + "/attempts")
+    if any(path.endswith("/measurement-started.json") for path in files):
+        raise RuntimeError("This diagnostic prefix already contains a measured attempt")
+
+
+def record_measurement_start(prefix: str, attempt_prefix: str, marker: dict) -> None:
+    require_unmeasured_prefix(prefix)
+    path = attempt_prefix + "/measurement-started.json"
+    payload = json.dumps(marker, sort_keys=True).encode()
+    write_bytes_atomic(path, payload)
+    if read_bytes(path) != payload:
+        raise RuntimeError("Measurement marker failed its durable byte readback")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
@@ -236,6 +252,7 @@ def main() -> None:
     args = parser.parse_args()
     prefix = attempt_receipt_prefix(args.durable_prefix, os.environ.get("IRIS_ATTEMPT_UID", ""))
     attempt = {"iris_task_id": os.environ.get("IRIS_TASK_ID"), "iris_attempt_uid": os.environ["IRIS_ATTEMPT_UID"]}
+    require_unmeasured_prefix(args.durable_prefix)
 
     def measurement_started(state):
         marker = {
@@ -244,7 +261,7 @@ def main() -> None:
             "worlds": state["worlds"],
             "initialization": state["initialization"],
         }
-        write_bytes_atomic(prefix + "/measurement-started.json", json.dumps(marker, sort_keys=True).encode())
+        record_measurement_start(args.durable_prefix, prefix, marker)
 
     if args.two_host:
         ray.init(address="auto")
