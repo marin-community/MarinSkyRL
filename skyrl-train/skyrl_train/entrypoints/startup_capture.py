@@ -47,7 +47,15 @@ def capture(command: list[str], prefix: str, stage: str, interval: float = 5) ->
     identity = os.environ["IRIS_ATTEMPT_UID"]
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identity) or not re.fullmatch(r"[a-z0-9_-]+", stage):
         raise ValueError("Invalid native attempt or stage identity")
-    fs, path = fsspec.core.url_to_fs(f"{prefix}/{identity}/startup/{stage}.json")
+    fs, path = fsspec.core.url_to_fs(
+        f"{prefix}/{identity}/startup/{stage}.json",
+        config_kwargs={
+            "connect_timeout": 5,
+            "read_timeout": 10,
+            "retries": {"max_attempts": 1},
+            "s3": {"addressing_style": "virtual"},
+        },
+    )
     if fs.exists(path):
         raise ValueError("Existing startup receipt blocks duplicate stage execution")
     fs.makedirs(path.rsplit("/", 1)[0], exist_ok=True)
@@ -60,10 +68,16 @@ def capture(command: list[str], prefix: str, stage: str, interval: float = 5) ->
         with lock:
             raw = bytes(tail)
         row = {
-            "attempt_uid": identity, "stage": stage, "state": state,
-            "started_ns": started, "observed_ns": time.time_ns(), "exit_code": exit_code,
-            "tail_utf8": raw.decode("utf-8", errors="replace"), "tail_bytes": len(raw),
-            "tail_sha256": hashlib.sha256(raw).hexdigest(), "upload_error_types": errors[-8:],
+            "attempt_uid": identity,
+            "stage": stage,
+            "state": state,
+            "started_ns": started,
+            "observed_ns": time.time_ns(),
+            "exit_code": exit_code,
+            "tail_utf8": raw.decode("utf-8", errors="replace"),
+            "tail_bytes": len(raw),
+            "tail_sha256": hashlib.sha256(raw).hexdigest(),
+            "upload_error_types": errors[-8:],
         }
         payload = json.dumps(row, sort_keys=True).encode()
         if len(payload) >= 1048576:
