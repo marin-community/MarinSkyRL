@@ -145,6 +145,7 @@ class SkyRLExportRequest:
     training_manifest_uri: str
     attempt_id: str
     output: SkyRLExportPaths
+    exporter_runtime: RuntimeIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +187,7 @@ class SkyRLExportResponse:
     model: SkyRLModel | None
     failure: str | None
     reused_export: bool = False
+    exporter_runtime: RuntimeIdentity | None = None
 
 
 def training_receipt_uri(request: SkyRLLaunchRequest) -> str:
@@ -211,11 +213,17 @@ def _validate_protocol(value: dict[str, Any]) -> None:
 def export_spec(value: dict[str, Any]) -> SkyRLExportSpec:
     _validate_protocol(value)
     request = value["request"]
+    exporter_runtime = request.get("exporter_runtime")
     return SkyRLExportSpec(
         request=SkyRLExportRequest(
             training_manifest_uri=request["training_manifest_uri"],
             attempt_id=request["attempt_id"],
             output=SkyRLExportPaths(**request["output"]),
+            exporter_runtime=(
+                RuntimeIdentity(commit=exporter_runtime["commit"], profile=RuntimeProfile(exporter_runtime["profile"]))
+                if exporter_runtime is not None
+                else None
+            ),
         ),
         execution=IrisLaunchOptions(**value["execution"]),
     )

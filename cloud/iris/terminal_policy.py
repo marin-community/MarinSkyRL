@@ -42,6 +42,7 @@ class TerminalPolicyExport:
     request_fingerprint: str | None = None
     attempt_id: str | None = None
     timeout_seconds: int | None = None
+    max_retries: int = 0
 
 
 def storage_user_from_resource_path(path: str) -> str | None:
@@ -84,6 +85,8 @@ def _resolved_config_path(config_path: str) -> str:
 
 def submit_terminal_policy_export(spec: TerminalPolicyExport) -> None:
     """Submit and verify conversion of one checkpoint, defaulting to the legacy latest marker."""
+    if type(spec.max_retries) is not int or spec.max_retries < 0:
+        raise ValueError("Export retries must be a nonnegative integer")
     global_step = spec.global_step
     if global_step is None:
         global_step = terminal_checkpoint_step(spec.checkpoint_root)
@@ -99,6 +102,8 @@ def submit_terminal_policy_export(spec: TerminalPolicyExport) -> None:
         spec.priority,
         "--job-name",
         f"{spec.job_name}-export-{global_step}",
+        "--max-retries",
+        str(spec.max_retries),
     ]
     if spec.cluster_config:
         command.extend(["--cluster-config", _resolved_config_path(spec.cluster_config)])

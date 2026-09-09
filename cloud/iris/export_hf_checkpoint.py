@@ -88,6 +88,7 @@ class ExportJobSpec:
     receipt_uri: str | None = None
     request_fingerprint: str | None = None
     attempt_id: str | None = None
+    max_retries: int = 0
 
 
 def build_command(spec: ExportJobSpec) -> list[str]:
@@ -135,9 +136,8 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         CHECKPOINT_EXPORT_ENTRYPOINT,
         "--priority",
         spec.priority,
-        # An export job must not be retried into a second export.
         "--max-retries",
-        "0",
+        str(spec.max_retries),
         "--timeout",
         str(spec.timeout),
     ]
@@ -185,6 +185,7 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--export-receipt-uri")
     ap.add_argument("--export-request-fingerprint")
     ap.add_argument("--export-attempt-id")
+    ap.add_argument("--max-retries", type=int, default=0, help="Native task failure and preemption retries")
     ap.add_argument("--num-nodes", type=int)
     ap.add_argument("--gpus-per-node", type=int)
     ap.add_argument("--priority", default="batch")
@@ -260,6 +261,7 @@ def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_w
         receipt_uri=args.export_receipt_uri,
         request_fingerprint=args.export_request_fingerprint,
         attempt_id=args.export_attempt_id,
+        max_retries=args.max_retries,
     )
 
 
@@ -328,6 +330,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive for an export job")
+    if args.max_retries < 0:
+        parser.error("--max-retries must be nonnegative")
     if args.request:
         spec = request_spec(args, parser)
         request = spec.request

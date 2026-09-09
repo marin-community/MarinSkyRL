@@ -5,8 +5,34 @@ import sys
 from skyrl_train.hf_export_schema import HFExportRequest
 
 from cloud.iris import terminal_policy
-from cloud.iris.export_hf_checkpoint import ExportJobSpec, build_command
+from cloud.iris.export_hf_checkpoint import ExportJobSpec, argument_parser, build_command, manual_spec
 from cloud.iris.terminal_policy import TerminalPolicyExport, storage_user_from_resource_path
+
+
+def test_export_retry_survives_both_command_boundaries(monkeypatch):
+    calls = []
+    monkeypatch.setattr(terminal_policy.subprocess, "call", lambda command, **kwargs: calls.append(command) or 0)
+    spec = TerminalPolicyExport(
+        checkpoint_root="s3://bucket/checkpoints",
+        export_root="s3://bucket/exports",
+        config_path="config.yaml",
+        model_path="Qwen/Qwen3-0.6B",
+        model_source_uri=None,
+        model_source_identity=None,
+        policy_num_nodes=1,
+        policy_num_gpus_per_node=8,
+        cluster="cw-us-east-02a",
+        priority="batch",
+        job_name="export",
+        global_step=24,
+        max_retries=1,
+    )
+    terminal_policy.submit_terminal_policy_export(spec)
+    parser = argument_parser()
+    parsed = parser.parse_args(calls[0][3:])
+    command = build_command(manual_spec(parsed, parser))
+    assert command[command.index("--max-retries") + 1] == "1"
+    assert command[command.index("--entrypoint") + 1] == "skyrl_train.entrypoints.checkpoint_export"
 
 
 def test_export_command_encodes_lifecycle_storage_as_valid_hydra_values(parse_hydra_overrides) -> None:
