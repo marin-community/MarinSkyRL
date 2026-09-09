@@ -10,6 +10,8 @@ from typing import Literal, Protocol
 import ray
 from loguru import logger
 
+from skyrl_train.durable_telemetry import PREFIX_ENV, DurableTelemetryReceipt
+
 try:
     from rigging import telemetry
     from rigging.telemetry.serialization import EventBody
@@ -55,6 +57,8 @@ def record_event(
     attributes: dict[str, str] | None = None,
 ) -> None:
     """Enqueue a flat event, omitting unavailable values instead of inventing them."""
+    if _process_state.owner is not None and _process_state.owner._durable is not None:
+        _process_state.owner._durable.record("event", name, fields, attributes or {})
     telemetry.event(
         name, EventBody({key: value for key, value in fields.items() if value is not None}), attributes=attributes
     )
@@ -94,6 +98,8 @@ def record_training_metrics(metrics: Mapping[str, object], *, step: int, kind: s
             continue
         attributes = {"metric": name, "step": str(step), "role": TRAINER_ROLE, "phase": kind}
         if math.isfinite(value):
+            if _process_state.owner is not None and _process_state.owner._durable is not None:
+                _process_state.owner._durable.record("scalar", name, {"value": value}, attributes)
             training_metric.record(float(value), attributes=attributes)
         else:
             nonfinite_training_metric.add(1, attributes=attributes)
@@ -323,6 +329,7 @@ class ProcessTelemetry:
         self._config = config
         self._role = role
         self._configured = False
+        self._durable: DurableTelemetryReceipt | None = None
 
     def __enter__(self) -> "ProcessTelemetry":
         if not _process_state.claim(self):
@@ -340,6 +347,8 @@ class ProcessTelemetry:
         )
         self._configured = telemetry.runtime_status().configured
         if self._configured:
+            if prefix := os.environ.get(PREFIX_ENV):
+                self._durable = DurableTelemetryReceipt(prefix, _resources(self._config, self._role))
             record_event("lifecycle", {"state": "started"}, attributes={"role": self._role})
         return self
 
@@ -364,8 +373,21 @@ class ProcessTelemetry:
                 },
                 attributes={"role": self._role},
             )
+            if self._durable is not None:
+                # Capture the live exporter status: shutdown resets runtime_status to zeros.
+                try:
+                    flushed = telemetry.flush(SHUTDOWN_TIMEOUT_SECONDS)
+                    digest = self._durable.finish(
+                        export_status=telemetry.runtime_status(),
+                        flush_succeeded=flushed,
+                        outcome="completed" if exc_type is None else "failed",
+                    )
+                    logger.info("Durable telemetry receipt: uri={} sha256={}", self._durable.uri, digest)
+                except Exception as error:
+                    logger.error("Durable telemetry receipt failed: {}", type(error).__name__)
             telemetry.shutdown(SHUTDOWN_TIMEOUT_SECONDS)
         self._configured = False
+        self._durable = None
         _process_state.release(self)
         return False
 
