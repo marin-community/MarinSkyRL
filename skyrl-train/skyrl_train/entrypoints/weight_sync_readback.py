@@ -10,6 +10,7 @@ from omegaconf import DictConfig
 from skyrl_train.entrypoints.fully_async import AsyncPPOExp
 from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
 from skyrl_train.weight_sync.initial_readback import run_initial_readback
+from skyrl_train.weight_sync.startup_diagnostics import startup_diagnostics
 from skyrl_train.weight_sync.readback_diagnostics import persist_readback, receipt_chunks
 
 
@@ -31,7 +32,9 @@ class WeightSyncReadbackExp(AsyncPPOExp):
         self.tracker = None
         exit_code = 1
         try:
+            self.startup_diagnostic.phase("trainer_setup_started")
             trainer = self._setup_trainer()
+            self.startup_diagnostic.phase("trainer_setup_finished")
             cfg = self.cfg
             megatron = cfg.trainer.policy.megatron_config
             generator = cfg.generator
@@ -78,12 +81,16 @@ class WeightSyncReadbackExp(AsyncPPOExp):
 
 @ray.remote(num_cpus=1, max_retries=1)
 def skyrl_entrypoint(cfg: DictConfig):
-    WeightSyncReadbackExp(cfg).run()
+    with startup_diagnostics(cfg.trainer.weight_sync_readback_output, "entrypoint") as diagnostic:
+        experiment = WeightSyncReadbackExp(cfg)
+        experiment.startup_diagnostic = diagnostic
+        experiment.run()
 
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    run_ray_driver(cfg, skyrl_entrypoint, failure_message="Initial weight sync readback failed")
+    with startup_diagnostics(cfg.trainer.weight_sync_readback_output, "driver"):
+        run_ray_driver(cfg, skyrl_entrypoint, failure_message="Initial weight sync readback failed")
 
 
 if __name__ == "__main__":

@@ -1747,6 +1747,44 @@ def _persist_failure_artifacts_bounded(action, timeout: float) -> None:
         _log(f"Failure artifact upload exceeded {timeout}s; continuing task teardown")
 
 
+def persist_readback_runtime_observability(args, node_id: str) -> None:
+    """Publish the actual supervisor log destination before diagnostic setup."""
+    if os.environ.get("SKYRL_READBACK_STARTUP_DIAGNOSTICS") != "1":
+        return
+    identity = os.environ.get("IRIS_ATTEMPT_UID", "")
+    if (
+        not identity
+        or len(identity) > 128
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+            for character in identity
+        )
+    ):
+        raise ValueError("Runtime readback requires a native attempt identity")
+    if not args.rendezvous_dir:
+        raise ValueError("Runtime readback requires a durable rendezvous path")
+    uri = f"{args.rendezvous_dir.rstrip('/')}/runtime_observability/{identity}/{node_id}.json"
+    settings = _RayLogSyncSettings.from_environment()
+    receipt = {
+        "unix_ns": time.time_ns(),
+        "node_id": node_id,
+        "attempt_uid": identity,
+        "ray_log_destination": RayLogSyncSession(args.ray_log_dir, node_id).destination,
+        "ray_log_sync_enabled": settings.enabled,
+        "ray_log_sync_interval_seconds": settings.interval_seconds,
+        "debug_artifacts_dir": os.environ.get("OT_AGENT_DEBUG_ARTIFACTS_DIR"),
+    }
+    filesystem, path = fs_and_path(uri)
+    filesystem.makedirs(path.rsplit("/", 1)[0], exist_ok=True)
+    payload = json.dumps(receipt, sort_keys=True).encode()
+    with filesystem.open(path, "wb") as stream:
+        stream.write(payload)
+    with filesystem.open(path, "rb") as stream:
+        if stream.read() != payload:
+            raise ValueError("Runtime observability receipt readback mismatch")
+    os.environ["SKYRL_READBACK_RUNTIME_OBSERVABILITY_URI"] = uri
+
+
 def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifname: str | None = None) -> int:
     num_tasks = _num_tasks()
     gang_epoch = uuid.uuid4().hex
@@ -1757,6 +1795,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     _log(f"ROLE=head rank=0/{num_tasks} head_ip={head_ip} ray_port={ray_port}")
     ray_log_sync_stop: threading.Event | None = None
     ray_log_sync = RayLogSyncSession(args.ray_log_dir, node_id)
+    persist_readback_runtime_observability(args, node_id)
 
     def persist_runtime_artifacts(reason: str) -> None:
         if ray_log_sync_stop is not None:
@@ -1894,6 +1933,7 @@ def run_worker(args: argparse.Namespace) -> int:
     node_id = f"rank{rank}-{socket.gethostname()}"
     _log(f"ROLE=worker rank={rank}/{num_tasks} node_ip={node_ip}")
     ray_log_sync = RayLogSyncSession(args.ray_log_dir, node_id)
+    persist_readback_runtime_observability(args, node_id)
 
     if not args.rendezvous_dir:
         raise ValueError(
