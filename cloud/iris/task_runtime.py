@@ -1199,7 +1199,9 @@ def ray_stop() -> None:
     _log(f"Ray stop completed (exit {completed.returncode})")
 
 
-def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_cb=None) -> None:
+def wait_for_nodes(
+    ray_address: str, expected_nodes: int, timeout: int, rewrite_cb=None, membership: RendezvousGuard | None = None
+) -> None:
     """Block until the Ray cluster reports ``expected_nodes`` alive nodes.
 
     ``rewrite_cb`` (head only): a no-arg callable invoked on every poll to RE-PUBLISH
@@ -1219,6 +1221,8 @@ def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_
     try:
         last_count = -1
         while time.time() < deadline:
+            if membership is not None:
+                membership.validate()
             if rewrite_cb is not None:
                 try:
                     rewrite_cb()
@@ -1230,6 +1234,8 @@ def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_
                 _log(f"Ray nodes alive: {count}/{expected_nodes}")
                 last_count = count
             if count >= expected_nodes:
+                if membership is not None:
+                    membership.validate()
                 _log(f"All {expected_nodes} Ray node(s) joined. Resources: {ray.cluster_resources()}")
                 return
             time.sleep(POLL_INTERVAL)
@@ -1840,6 +1846,7 @@ def run_head(
             num_tasks,
             args.cluster_join_timeout,
             rewrite_cb=lambda: write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch, membership),
+            membership=membership,
         )
     else:
         _log("Single-node slice: skipping rendezvous and multi-node wait.")
@@ -1856,6 +1863,8 @@ def run_head(
 
         # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
         # `process` here arms its driver-teardown path (the closure reads this value).
+        if membership is not None:
+            membership.validate()
         process = launch_training_driver(train_argv, env)
         driver_activity = DriverOutputActivity()
         output_thread = start_driver_output_tee(process, driver_activity)
@@ -1935,7 +1944,7 @@ def run_worker(args: argparse.Namespace, membership: RendezvousGuard | None = No
         node_ip,
         resolve_ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
     )
-    wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout)
+    wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout, membership=membership)
     _log(f"Worker rank {rank} joined Ray cluster at {ray_address}; parking until the head finishes.")
 
     # Periodic Ray session-log -> object-store sync for THIS worker node (the FSDP/rollout

@@ -2,6 +2,10 @@
 
 from pathlib import Path
 import sys
+from types import SimpleNamespace
+import threading
+import contextlib
+import ray
 
 import pytest
 from iris.client.workload_codec import task_status_from_proto
@@ -127,3 +131,65 @@ def test_bootstrap_binds_current_members_before_staging_and_rejects_later_change
         task_runtime.main()
     assert client.closed
     assert not list(tmp_path.rglob(task_runtime.RENDEZVOUS_FILENAME))
+
+
+def test_ready_ray_nodes_do_not_hide_membership_change_before_driver(tmp_path, monkeypatch):
+    client = Controller([task(0, 0, "head"), task(1, 0, "worker")])
+    head = guard(client, 0, 0, "head")
+    namespace = head.namespace(str(tmp_path))
+    Path(namespace).mkdir()
+    monkeypatch.setattr(task_runtime, "_num_tasks", lambda: 2)
+    monkeypatch.setattr(task_runtime, "_own_ip", lambda: "10.0.0.1")
+    monkeypatch.setattr(task_runtime.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(task_runtime, "ray_start_head", lambda *a: None)
+    monkeypatch.setattr(ray, "init", lambda **kw: None)
+    monkeypatch.setattr(ray, "shutdown", lambda: None)
+    monkeypatch.setattr(ray, "nodes", lambda: [{"Alive": True}, {"Alive": True}])
+    monkeypatch.setattr(ray, "cluster_resources", lambda: {})
+    monkeypatch.setattr(task_runtime, "ray_metrics_telemetry", lambda *a: contextlib.nullcontext())
+    monkeypatch.setattr(task_runtime, "training_driver_env", lambda *a: {})
+    monkeypatch.setattr(
+        task_runtime,
+        "RayLogSyncSession",
+        lambda *a: SimpleNamespace(
+            start_periodic=lambda *a: threading.Event(),
+            sync_bounded=lambda *a: None,
+        ),
+    )
+    original_write = task_runtime._write_rendezvous_once
+
+    def change_members_after_first_write(fs, path, payload):
+        original_write(fs, path, payload)
+        client.rows = [task(0, 0, "head"), task(1, 1, "worker-next")]
+
+    monkeypatch.setattr(task_runtime, "_write_rendezvous_once", change_members_after_first_write)
+    marker = tmp_path / "driver-started"
+
+    def launch_driver(*a):
+        marker.touch()
+        raise AssertionError("Obsolete gang must never launch training")
+
+    monkeypatch.setattr(task_runtime, "launch_training_driver", launch_driver)
+    args = SimpleNamespace(
+        ray_port=6379,
+        ray_log_dir=None,
+        rendezvous_dir=namespace,
+        ray_spill_backend=task_runtime.RaySpillBackend.LOCAL,
+        ray_spill_dir=str(tmp_path / "spill"),
+        cluster_join_timeout=1,
+    )
+    with pytest.raises(RuntimeError, match="changed"):
+        task_runtime.run_head(args, ["unused-driver"], membership=head)
+    assert not marker.exists()
+
+
+def test_wait_for_ready_nodes_propagates_membership_failure(monkeypatch):
+    client = Controller([task(0, 0, "head"), task(1, 0, "worker")])
+    head = guard(client, 0, 0, "head")
+    client.rows = [task(0, 0, "head"), task(1, 1, "worker-next")]
+    monkeypatch.setattr(ray, "init", lambda **kw: None)
+    monkeypatch.setattr(ray, "shutdown", lambda: None)
+    monkeypatch.setattr(ray, "nodes", lambda: [{"Alive": True}, {"Alive": True}])
+    monkeypatch.setattr(ray, "cluster_resources", lambda: {})
+    with pytest.raises(RuntimeError, match="changed"):
+        task_runtime.wait_for_nodes("unused", 2, 1, rewrite_cb=head.validate, membership=head)
