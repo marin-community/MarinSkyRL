@@ -22,6 +22,7 @@ import fsspec
 import torch
 import torch.distributed as dist
 
+from skyrl_train.entrypoints.startup_capture import phase
 from skyrl_train.distributed.megatron.optimizer import init_megatron_optim_config, megatron_optimizer_kwargs
 from skyrl_train.entrypoints.probe_megatron_optimizer_precision import (
     MATRIX_WIDTH,
@@ -77,8 +78,9 @@ def tensor_bytes_equal(left: torch.Tensor, right: torch.Tensor) -> bool:
     return (
         left.dtype == right.dtype
         and left.shape == right.shape
-        and torch.equal(left.detach().cpu().contiguous().view(torch.uint8),
-                        right.detach().cpu().contiguous().view(torch.uint8))
+        and torch.equal(
+            left.detach().cpu().contiguous().view(torch.uint8), right.detach().cpu().contiguous().view(torch.uint8)
+        )
     )
 
 
@@ -112,8 +114,7 @@ def run_arm(base: str, remainders: bool, lr: float, weight_decay: float) -> tupl
         update(model, optimizer, step, lr, weight_decay)
     actual = dict(live_tensors(model, optimizer))
     checkpoint_exact = actual.keys() == expected.keys() and all(
-        tensor_bytes_equal(p, expected[name])
-        for name, p in actual.items()
+        tensor_bytes_equal(p, expected[name]) for name, p in actual.items()
     )
     result = {
         "declared": declared,
@@ -132,8 +133,7 @@ def compare_arm_states(results: dict, snapshots: dict) -> dict:
     """Apply separate memory and every-byte update gates to observed arm states."""
     baseline = results["native_fp32"]["optimizer_inventory"]["bytes_per_owned_parameter"]
     savings = {
-        name: baseline - result["optimizer_inventory"]["bytes_per_owned_parameter"]
-        for name, result in results.items()
+        name: baseline - result["optimizer_inventory"]["bytes_per_owned_parameter"] for name, result in results.items()
     }
     control_masters, control_weights = snapshots["aware_fp32"]
     remainder_masters, remainder_weights = snapshots["fp32_remainders"]
@@ -179,13 +179,24 @@ def main() -> None:
                 normalized = megatron_optimizer_kwargs(
                     {"lr": args.lr, "weight_decay": decay, "max_grad_norm": 0.0}, declared
                 )
-                composed.append({"arm": name, "weight_decay": decay, "declared": declared,
-                                 "native_optimizer_kwargs": normalized})
-        print(json.dumps({"arms": composed, "updates": 10, "decay_diagnostic_steps": 1, "world_size": 2,
-                          "arguments": vars(args), "matrix_width": MATRIX_WIDTH,
-                          "memory_gates": {"bf16_both": 3.5, "bf16_remainders": 5.5},
-                          "equality": "every FP32 master and BF16 model bit at update ten; checkpoint continuation"},
-                         default=str))
+                composed.append(
+                    {"arm": name, "weight_decay": decay, "declared": declared, "native_optimizer_kwargs": normalized}
+                )
+        print(
+            json.dumps(
+                {
+                    "arms": composed,
+                    "updates": 10,
+                    "decay_diagnostic_steps": 1,
+                    "world_size": 2,
+                    "arguments": vars(args),
+                    "matrix_width": MATRIX_WIDTH,
+                    "memory_gates": {"bf16_both": 3.5, "bf16_remainders": 5.5},
+                    "equality": "every FP32 master and BF16 model bit at update ten; checkpoint continuation",
+                },
+                default=str,
+            )
+        )
         return
     from megatron.core import parallel_state
     from transformer_engine.pytorch.optimizers import FusedAdam
@@ -196,17 +207,34 @@ def main() -> None:
     if versions["megatron-core"] != "0.18.0" or versions["transformer-engine"] != "2.11.0":
         raise ValueError("Use the inspected MCore 0.18.0 and TE 2.11.0 pin")
     identity = os.environ["IRIS_ATTEMPT_UID"]
+    phase("cuda_device_started")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    phase("nccl_init_started")
     dist.init_process_group("nccl", timeout=timedelta(seconds=120))
+    phase("nccl_init_finished")
+    phase("gloo_init_started")
     control = dist.new_group(backend="gloo", timeout=timedelta(seconds=120))
+    phase("gloo_init_finished")
+    phase("model_parallel_init_started")
     parallel_state.initialize_model_parallel()
+    phase("model_parallel_init_finished")
     rank = dist.get_rank()
     provenance = {
-        "versions": versions, "rank": rank, "world_size": dist.get_world_size(),
-        "host": socket.gethostname(), "gpu": torch.cuda.get_device_name(), "arguments": vars(args),
-        "source_sha256": {name: hashlib.sha256(Path(inspect.getfile(value)).read_bytes()).hexdigest()
-                          for name, value in {"entrypoint": main, "adapter": init_megatron_optim_config,
-                                              "shared_probe": update, "te_fused_adam": FusedAdam}.items()},
+        "versions": versions,
+        "rank": rank,
+        "world_size": dist.get_world_size(),
+        "host": socket.gethostname(),
+        "gpu": torch.cuda.get_device_name(),
+        "arguments": vars(args),
+        "source_sha256": {
+            name: hashlib.sha256(Path(inspect.getfile(value)).read_bytes()).hexdigest()
+            for name, value in {
+                "entrypoint": main,
+                "adapter": init_megatron_optim_config,
+                "shared_probe": update,
+                "te_fused_adam": FusedAdam,
+            }.items()
+        },
         "scope": "Synthetic DP2 actual MCore/TE optimizer; no EP/Snowball learning or checkpoint resharding claim",
         "peak_scope": "Update peaks include diagnostic snapshots; retained optimizer bytes measured separately",
         "started_ns": time.time_ns(),
@@ -226,14 +254,22 @@ def main() -> None:
             reports.append(report)
         gathered = [None] * dist.get_world_size()
         dist.all_gather_object(gathered, {"provenance": provenance, "reports": reports}, group=control)
-        keys = ("bf16_moments_memory_pass", "combined_remainders_memory_pass",
-                "fp32_remainders_master_bits_equal_at_update10", "fp32_remainders_model_bits_equal_at_update10",
-                "all_same_geometry_checkpoints_exact")
+        keys = (
+            "bf16_moments_memory_pass",
+            "combined_remainders_memory_pass",
+            "fp32_remainders_master_bits_equal_at_update10",
+            "fp32_remainders_model_bits_equal_at_update10",
+            "all_same_geometry_checkpoints_exact",
+        )
         passed = all(report["checks"][key] for item in gathered for report in item["reports"] for key in keys)
         if rank == 0:
             write_receipt(args.durable_prefix, identity, "complete", {"passed": passed, "ranks": gathered})
-            print("MEGATRON_REMAINDERS_CAPABILITY_PASS ranks=2 updates=10" if passed
-                  else "MEGATRON_REMAINDERS_CAPABILITY_FAIL see=complete_receipt", flush=True)
+            print(
+                "MEGATRON_REMAINDERS_CAPABILITY_PASS ranks=2 updates=10"
+                if passed
+                else "MEGATRON_REMAINDERS_CAPABILITY_FAIL see=complete_receipt",
+                flush=True,
+            )
         if not passed:
             raise AssertionError("Observed remainder capability did not meet all declared gates")
     finally:
