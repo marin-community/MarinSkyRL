@@ -1,9 +1,10 @@
 """Zero-update initial-sync diagnostic lifecycle, independent of the training loop."""
 
 import asyncio
+import json
 import time
 
-from skyrl_train.weight_sync.readback_diagnostics import validate_replica_digests
+from skyrl_train.weight_sync.readback_diagnostics import receipt_chunks, validate_replica_digests
 
 
 ALIGNED_ENVIRONMENT_KEYS = (
@@ -63,6 +64,9 @@ async def run_initial_readback(trainer) -> dict:
         *trainer.policy_model.async_run_ray_method("pass_through", "read_weight_sync_environment")
     )
     receiver_environment = await trainer.inference_engine_client.read_weight_sync_environment()
+    pre_sync_environment = {"policy": policy_environment, "receivers": receiver_environment}
+    for chunk in receipt_chunks(pre_sync_environment):
+        print("WEIGHT_SYNC_PRE_GROUP_CHUNK " + json.dumps(chunk, sort_keys=True), flush=True)
     validate_communicator_environment(
         [*policy_environment, *(row for engine in receiver_environment for row in engine)]
     )
@@ -88,6 +92,6 @@ async def run_initial_readback(trainer) -> dict:
         "policy": policy,
         "receivers": receivers,
         "replica_digest_comparisons": comparisons,
-        "pre_sync_environment": {"policy": policy_environment, "receivers": receiver_environment},
+        "pre_sync_environment": pre_sync_environment,
         "digest_scope": "diagnostic SHA-256; not K14 every-byte equality proof",
     }

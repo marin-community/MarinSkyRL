@@ -184,7 +184,7 @@ def test_initial_readback_rejects_incomplete_or_asymmetric_native_state(damage):
 
 
 @pytest.mark.asyncio
-async def test_zero_update_lifecycle_reads_installed_weights_without_training():
+async def test_zero_update_lifecycle_reads_installed_weights_without_training(capsys):
     policy, receivers = _readbacks()
 
     class NativeBoundary:
@@ -232,3 +232,18 @@ async def test_zero_update_lifecycle_reads_installed_weights_without_training():
     assert receipt["updates"] == 0 and receipt["initial_syncs"] == 1
     assert receipt["policy"] == policy and receipt["receivers"] == receivers
     assert receipt["replica_digest_comparisons"][0]["bytes"] == 2
+    chunks = [
+        json.loads(line.removeprefix("WEIGHT_SYNC_PRE_GROUP_CHUNK ")) for line in capsys.readouterr().out.splitlines()
+    ]
+    assert reassemble_receipt(chunks) == receipt["pre_sync_environment"]
+
+    def failed_group_init():
+        raise RuntimeError("native group rendezvous failed")
+
+    trainer.init_weight_sync_state = failed_group_init
+    with pytest.raises(RuntimeError, match="rendezvous"):
+        await run_initial_readback(trainer)
+    failed_chunks = [
+        json.loads(line.removeprefix("WEIGHT_SYNC_PRE_GROUP_CHUNK ")) for line in capsys.readouterr().out.splitlines()
+    ]
+    assert reassemble_receipt(failed_chunks) == receipt["pre_sync_environment"]
