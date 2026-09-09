@@ -9,7 +9,11 @@ import pytest
 
 @pytest.mark.parametrize(
     "module",
-    ["skyrl_train.inference_engines.inference_engine_client", "skyrl_train.trajectory_runners.skyrl_gym", "skyrl_train.entrypoints.fully_async"],
+    [
+        "skyrl_train.inference_engines.inference_engine_client",
+        "skyrl_train.trajectory_runners.skyrl_gym",
+        "skyrl_train.entrypoints.fully_async",
+    ],
 )
 def test_first_token_consumers_import_in_fresh_process(module):
     root = Path(__file__).resolve().parents[3]
