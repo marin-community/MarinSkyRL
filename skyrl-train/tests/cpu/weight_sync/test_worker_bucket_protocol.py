@@ -71,6 +71,8 @@ def native_protocol(monkeypatch):
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (1000, 2000))
     monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 4000)
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: 4011)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 5000)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda device: 6000)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda device: log.append(("reset_peak",)))
     monkeypatch.setattr(torch.cuda, "Stream", lambda device: load)
     monkeypatch.setattr(torch.cuda, "Event", Event)
@@ -196,8 +198,14 @@ def test_peak_gate_counts_more_than_the_boolean_scratch(native_protocol, monkeyp
     for bucket in range(case.parts[0].bucket_count):
         case.worker.receive_diagnostic_weight_sync_bucket(bucket, replay=True)
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: 4017)
-    with pytest.raises(ValueError, match="1 MiB total scratch limit"):
-        case.worker.finish_diagnostic_weight_sync_replay()
+    receipt = case.worker.finish_diagnostic_weight_sync_replay()
+    assert receipt["replay_memory_within_limit"] is False
+    assert receipt["replay_peak_extra_bytes"] == 17
+    assert receipt["allocated_before"] == 4000 and receipt["peak_allocated_bytes"] == 4017
+    assert receipt["reserved_before"] == receipt["reserved_after"] == 5000
+    assert receipt["peak_reserved_bytes"] == 6000
+    assert receipt["compared_bytes"] == receipt["expected_bytes"]
+    assert receipt["mismatches"] == 0
 
 
 def test_incomplete_load_event_prevents_install_completion_and_replay(native_protocol, monkeypatch):

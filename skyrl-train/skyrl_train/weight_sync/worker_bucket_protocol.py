@@ -103,6 +103,7 @@ def receive_worker_bucket(worker, bucket_id: int, *, replay: bool = False):
         torch.cuda.synchronize(worker.device)
         state["replay_started"] = time.monotonic()
         state["replay_allocated_before"] = torch.cuda.memory_allocated(worker.device)
+        state["replay_reserved_before"] = torch.cuda.memory_reserved(worker.device)
         state["replay_free_before"] = torch.cuda.mem_get_info(worker.device)[0]
         torch.cuda.reset_peak_memory_stats(worker.device)
         state["scratch"] = torch.empty(REPLAY_SCRATCH_BYTES, dtype=torch.bool, device=worker.device)
@@ -161,8 +162,8 @@ def finish_worker_replay(worker):
     result = state["receiver"].finish_replay()
     torch.cuda.synchronize(worker.device)
     peak_extra = torch.cuda.max_memory_allocated(worker.device) - state["replay_allocated_before"]
-    if peak_extra > MAX_REPLAY_EXTRA_BYTES:
-        raise ValueError("Measured replay allocation exceeds the approved 1 MiB total scratch limit")
+    # Return the measured failure evidence before the aggregate gate rejects it.
+    # Rank zero persists this receipt before applying the unchanged 1 MiB bound.
     return {
         "identity": bucket_identity(worker.device),
         "manifest_id": state["receiver"].manifest.manifest_id,
@@ -172,6 +173,11 @@ def finish_worker_replay(worker):
         "coverage": 1.0,
         "replay_seconds": time.monotonic() - state["replay_started"],
         "replay_peak_extra_bytes": peak_extra,
+        "replay_scratch_limit_bytes": MAX_REPLAY_EXTRA_BYTES,
+        "replay_memory_within_limit": peak_extra <= MAX_REPLAY_EXTRA_BYTES,
+        "reserved_before": state["replay_reserved_before"],
+        "reserved_after": torch.cuda.memory_reserved(worker.device),
+        "peak_reserved_bytes": torch.cuda.max_memory_reserved(worker.device),
         "allocated_before": state["replay_allocated_before"],
         "allocated_after": torch.cuda.memory_allocated(worker.device),
         "peak_allocated_bytes": torch.cuda.max_memory_allocated(worker.device),
