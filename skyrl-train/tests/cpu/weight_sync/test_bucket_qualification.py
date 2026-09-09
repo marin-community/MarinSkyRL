@@ -18,8 +18,16 @@ def diagnostic(request, monkeypatch):
     monkeypatch.setattr(qualification, "BUCKET_BYTES", 32)
     monkeypatch.setattr(qualification, "MAX_REPLAY_EXTRA_BYTES", 16)
     policy, receivers = _readbacks()
-    policy[0]["expert_samples"] = [{"name": "source-expert"}]
-    policy[0]["expert_layouts"] = [{"single_grouped_weight": False}]
+    policy[0]["expert_samples"] = [
+        {
+            "name": "module.experts.linear_fc1.weight0",
+            "dtype": "torch.bfloat16",
+            "shape": [4, 2],
+            "stride": [2, 1],
+            "contiguous": True,
+        }
+    ]
+    policy[0]["expert_layouts"] = [{"single_grouped_weight": None}]
     receivers[0][0].update(free_bytes=1000, layers=[{"backend": "TRITON"}])
 
     class NativeBoundary:
@@ -93,6 +101,7 @@ async def test_reference_then_one_frozen_install_and_replay_with_durable_evidenc
     assert raw["policy"][0]["phases"]["replay"]["receivers"][0]["mismatches"] == 0
     assert json.loads(Path(result["reference_durable"]["uri"]).read_text())["updates"] == 0
     assert result["policy"][0]["source_byte_coverage"] == 1.0
+    assert result["reference"]["precursor_coverage"]["policy_grouped_weight_layout"] is False
     with pytest.raises(ValueError, match="previous attempt"):
         qualification.mark_measurement_once(str(tmp_path))
 
@@ -121,3 +130,19 @@ def test_marker_lookup_error_never_authorizes_measurement(tmp_path, monkeypatch)
     with pytest.raises(OSError, match="lookup failed"):
         qualification.mark_measurement_once(str(tmp_path))
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_layout", ["rank", "stride", "dtype"])
+async def test_unqualified_source_sample_cannot_enter_bucket_interval(diagnostic, tmp_path, bad_layout):
+    sample = diagnostic.readbacks[0][0]["expert_samples"][0]
+    if bad_layout == "rank":
+        sample["shape"] = [2, 2, 2]
+    elif bad_layout == "stride":
+        sample["stride"] = [1, 4]
+    else:
+        sample["dtype"] = "torch.float32"
+    with pytest.raises(ValueError, match="source layout"):
+        await qualification.run_bucket_qualification(diagnostic, str(tmp_path), _geometry())
+    assert diagnostic.calls == ["init", "reference-sync", "drain"]
+    assert not (tmp_path / "bucket-measurement-started.json").exists()

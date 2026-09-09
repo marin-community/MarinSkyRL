@@ -30,8 +30,26 @@ def mark_measurement_once(output_uri: str) -> dict:
 
 
 def validate_bucket_prerequisites(reference: dict) -> None:
-    if not reference["precursor_coverage"] or not all(reference["precursor_coverage"].values()):
+    coverage = reference["precursor_coverage"]
+    required = ("policy_expert_samples", "receiver_moe_layout", "receiver_backend")
+    if any(not coverage.get(key, False) for key in required):
         raise ValueError("Native source or receiver precursor coverage is incomplete")
+    # K10's optional grouped-allocation attribute is not used by this path.
+    # Replay resolves each original expert matrix through actual Bridge tasks;
+    # local_source_slices validates every task before transfer buffer allocation.
+    for policy in reference["policy"]:
+        if not policy["expert_samples"]:
+            raise ValueError("Native per-expert source precursor is missing")
+        for sample in policy["expert_samples"]:
+            if (
+                not sample["name"].endswith(("linear_fc1.weight0", "linear_fc2.weight0"))
+                or sample["dtype"] != "torch.bfloat16"
+                or len(sample["shape"]) != 2
+                or any(size <= 0 for size in sample["shape"])
+                or not sample["contiguous"]
+                or sample["stride"] != [sample["shape"][1], 1]
+            ):
+                raise ValueError("Native per-expert source layout is not qualified for frozen views")
     for engine in reference["receivers"]:
         for row in engine:
             if row["free_bytes"] < 2 * BUCKET_BYTES + MAX_REPLAY_EXTRA_BYTES:
@@ -120,4 +138,5 @@ async def run_bucket_qualification(trainer, output_uri: str, geometry: dict) -> 
         "policy": rows,
         "requested_geometry": geometry,
         "timing_scope": "one diagnostic sample; no latency gate or speedup claim",
+        "source_layout_scope": "per-expert source samples plus complete native Bridge task/view coverage; K10 grouped-allocation attribute remains separate",
     }
