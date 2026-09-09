@@ -31,6 +31,7 @@ from skyrl_train.trajectory_runners.non_agentic_interventions import INTERVENTIO
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.types import TokenProvenance
 from skyrl_train.utils.trainer_utils import dump_per_dataset_eval_results
+from skyrl_train.weight_sync.receiver_readback_rpc import read_all_receiver_workers
 
 
 BASE_PROCESSOR = "skyrl_train.inference_engines.non_agentic_logits_processor.NonAgenticTokenProcessor"
@@ -73,12 +74,28 @@ def worker_memory(worker) -> dict:
     return {
         "pid": os.getpid(),
         "device": str(worker.device),
+        "gpu_uuid": str(torch.cuda.get_device_properties(worker.device).uuid),
+        "data_parallel_rank": worker.vllm_config.parallel_config.data_parallel_rank,
         "allocated": torch.cuda.memory_allocated(),
         "reserved": torch.cuda.memory_reserved(),
         "peak_allocated": torch.cuda.max_memory_allocated(),
         "free": free,
         "total": total,
     }
+
+
+async def all_worker_memory(engine) -> list[dict]:
+    """Retain all eight DP-core responses and distinct physical GPU identities."""
+    identities = list(engine.engine_core.core_engines)
+    assert len(identities) == len(set(identities)) == 8
+    workers = await asyncio.wait_for(read_all_receiver_workers(engine, worker_memory), timeout=30)
+    assert len(workers) == 8
+    assert {worker["data_parallel_rank"] for worker in workers} == set(range(8))
+    assert len({worker["gpu_uuid"] for worker in workers}) == 8
+    assert len({worker["pid"] for worker in workers}) == 8
+    return [
+        dict(core_identity_hex=identity.hex(), **worker) for identity, worker in zip(identities, workers, strict=True)
+    ]
 
 
 def engine_arguments(config: dict) -> dict:
@@ -250,7 +267,7 @@ async def run(config: dict):
         assert parallel.enable_expert_parallel and native_config.model_config.dtype == torch.bfloat16
         assert native_config.model_config.max_model_len == 8192
         assert native_config.scheduler_config.max_num_seqs == 32
-        memory_after_load = await engine.collective_rpc(worker_memory, timeout=30)
+        memory_after_load = await all_worker_memory(engine)
         write_json(
             root + "/measurement-start.json", {"attempt": attempt, "time_ns": time.time_ns(), "source": provenance}
         )
@@ -340,7 +357,7 @@ async def run(config: dict):
             "model_generation_eos_ids": generation_eos,
             "tokenizer_file_sha256": input_hashes,
             "worker_memory_after_load": memory_after_load,
-            "worker_memory_after_generation": await engine.collective_rpc(worker_memory, timeout=30),
+            "worker_memory_after_generation": await all_worker_memory(engine),
             "synthetic_cuda_checks": synthetic,
             "scope": "Mechanical prerequisite only; no quality adoption or 25-update training qualification",
         }
