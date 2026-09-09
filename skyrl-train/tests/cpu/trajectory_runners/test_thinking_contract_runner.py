@@ -88,6 +88,8 @@ async def test_post_thinking_runner_preserves_tokens_and_dumped_parser_identity(
     assert dumped["response_ids"] == client.tokens and sum(dumped["score"]) == expected
     if enabled:
         assert dumped["parser_protocol"] == "post-thinking-native-v1"
+        assert dumped["behavior_logprobs"] == [-0.5] * len(client.tokens)
+        assert dumped["policy_action_mask"] == [1] * len(client.tokens)
         assert dumped["non_agentic_contract"]["contract_correct"] == 1
         assert dumped["non_agentic_contract"]["legacy_full_text_reward"] == 0
         assert dumped["non_agentic_contract"]["verifier_reward"] == 1

@@ -322,6 +322,13 @@ def dump_per_dataset_eval_results(
                     contract = trajectory_batch["non_agentic_contract"][i]
                     entry["non_agentic_contract"] = contract
                     entry["parser_protocol"] = contract["parser_protocol"]
+                    entry["policy_action_mask"] = trajectory_batch["loss_masks"][i]
+                    logprobs = trajectory_batch.get("rollout_logprobs")
+                    entry["behavior_logprobs"] = None if logprobs is None else logprobs[i]
+                    components = trajectory_batch.get("reward_shaping_components")
+                    versions = trajectory_batch.get("reward_shaping_versions")
+                    entry["reward_shaping_components"] = None if components is None else components[i]
+                    entry["reward_shaping_version"] = None if versions is None else versions[i]
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         logger.info(f"Dumped eval data for {data_source} to {filename}")
