@@ -13,6 +13,7 @@ High-level notes:
 
 from skyrl_train.policy_version import earliest_sampled_policy_version
 import asyncio
+import json
 import collections
 import os
 import time
@@ -1015,6 +1016,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         uids=[group.uid for group in cur_generation_group_mini_batch],
                         duration_seconds=train_duration,
                     )
+                    if self._training_metrics_enabled:
+                        consumed_uids = [group.uid for group in cur_generation_group_mini_batch]
+                        for start in range(0, len(consumed_uids), 64):
+                            record_event(
+                                "consumed_source_order",
+                                {
+                                    "prompt_offset": (self.global_step - 1) * self.mini_batch_size + start,
+                                    "uids_json": json.dumps(consumed_uids[start : start + 64], separators=(",", ":")),
+                                    "epoch": epoch,
+                                },
+                                attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
+                            )
                     await self.data_tracker.mark_consumed([g.uid for g in cur_generation_group_mini_batch])
                     generation_queues.mark_admitted_consumed()
                     for group in cur_generation_group_mini_batch:
