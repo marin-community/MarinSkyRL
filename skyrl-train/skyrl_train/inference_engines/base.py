@@ -27,6 +27,7 @@ class InferenceEngineOutput(TypedDict):
     # Indices in the dispatcher's engines list, not GPU ordinals. Absent/None
     # means that the transport did not identify the selected engine.
     generator_engine_indices: NotRequired[List[int | None]]
+    policy_versions_at_first_token: NotRequired[List[int | None]]
     response_logprobs: Optional[List[List[float]]]
     # prompt_logprobs: per-prompt-token top-K logprobs from vLLM (for teacher scoring).
     # Format: List[List[Optional[Dict[int, float]]]] — outer list is batch,

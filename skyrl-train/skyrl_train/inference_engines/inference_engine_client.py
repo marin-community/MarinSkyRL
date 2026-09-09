@@ -1,3 +1,4 @@
+from skyrl_train.policy_version import earliest_sampled_policy_version
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -26,8 +27,6 @@ from loguru import logger
 import random
 import ray.exceptions
 from dataclasses import dataclass, field
-
-ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
 
 # Cap on the session -> engine memo so it cannot grow unbounded across a long run.
 # Sessions are evicted LRU once the cap is exceeded (a re-appearing evicted session
@@ -65,6 +64,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.http_endpoint_host = full_config.generator.http_endpoint_host
         self.http_endpoint_port = full_config.generator.http_endpoint_port
         self.generation_paused_event = threading.Event()
+        self._generation_resume_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
+        self._publication_pause_timeout = float(
+            getattr(full_config.generator, "publication_pause_timeout_seconds", 30.0)
+        )
+        if self._publication_pause_timeout <= 0:
+            raise ValueError("publication_pause_timeout_seconds must be positive")
         self._dead_engines: set[int] = set()
 
         # ---- Load-aware session routing state ----
@@ -291,6 +296,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         response_ids: List[List[int]] = [[] for _ in range(n)]
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         generator_engine_indices: list[int | None] = [None] * n
+        first_token_versions: list[int | None] = [None] * n
+        has_first_token_metadata = False
         # a bit hacky for now
         add_resp_logprobs = False
         add_prompt_logprobs = False
@@ -298,6 +305,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         for indices, result, engine_idx in zip(indices_list, results, task_engine_idxs):
             for local_idx, original_idx in enumerate(indices):
                 generator_engine_indices[original_idx] = engine_idx
+                if result.get("policy_versions_at_first_token") is not None:
+                    has_first_token_metadata = True
+                    first_token_versions[original_idx] = result["policy_versions_at_first_token"][local_idx]
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
                 response_ids[original_idx] = result["response_ids"][local_idx]
@@ -308,7 +318,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                     add_prompt_logprobs = True
                     prompt_logprobs[original_idx] = result["prompt_logprobs"][local_idx]
 
-        return InferenceEngineOutput(
+        output = InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
@@ -316,6 +326,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_logprobs=response_logprobs if add_resp_logprobs else None,
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
         )
+        if has_first_token_metadata:
+            output["policy_versions_at_first_token"] = first_token_versions
+        return output
 
     async def _generate_on_engine(self, engine_idx: int, request: InferenceEngineInput) -> InferenceEngineOutput:
         prompt_ids = request["prompt_token_ids"]
@@ -375,6 +388,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
         text_response: Optional[str] = None
         num_turns = 0
+        first_token_version = None
+        has_first_token_metadata = False
 
         # 3. Loop until geneartion is completed.
         while stop_reason == "abort":
@@ -406,6 +421,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_response_ids = []
                 accum_response_logprobs = []
                 num_turns = 0
+                first_token_version = None
+                has_first_token_metadata = False
                 stop_reason = "abort"
                 continue
 
@@ -427,6 +444,13 @@ class InferenceEngineClient(InferenceEngineInterface):
                 continue
 
             # 3.5 Accumulate outputs
+            if new_response_ids:
+                versions = partial_response.get("policy_versions_at_first_token")
+                current_version = versions[0] if versions is not None else None
+                first_token_version = earliest_sampled_policy_version(
+                    [accum_response_ids, new_response_ids], [first_token_version, current_version]
+                )
+                has_first_token_metadata = has_first_token_metadata or versions is not None
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
                 accum_response_logprobs.extend(new_response_logprobs)
@@ -442,7 +466,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # for teacher scoring where max_tokens=1 and num_turns=1).
         final_prompt_logprobs = partial_response.get("prompt_logprobs") if partial_response else None
 
-        return InferenceEngineOutput(
+        result = InferenceEngineOutput(
             responses=[final_text_response],
             stop_reasons=[stop_reason],
             response_ids=[accum_response_ids],
@@ -450,6 +474,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
             prompt_logprobs=final_prompt_logprobs,
         )
+        if has_first_token_metadata:
+            result["policy_versions_at_first_token"] = [first_token_version]
+        return result
 
     async def _chat_completion_with_retry(
         self, engine_idx: int, original_request_payload: Dict[str, Any]
@@ -837,8 +864,20 @@ class InferenceEngineClient(InferenceEngineInterface):
         with self._routing_lock:
             return tuple(self._generation_aborts)
 
-    async def read_publication_request_state(self):
-        return await self._run_on_all_engines("read_publication_request_state")
+    async def read_publication_request_state(
+        self,
+        initial_policy_version: int | None = None,
+        drain_accounting: bool = False,
+        terminal_timeout_seconds: float | None = None,
+    ):
+        kwargs = {}
+        if initial_policy_version is not None:
+            kwargs["initial_policy_version"] = initial_policy_version
+        if drain_accounting:
+            kwargs["drain_accounting"] = True
+        if terminal_timeout_seconds is not None:
+            kwargs["terminal_timeout_seconds"] = terminal_timeout_seconds
+        return await self._run_on_all_engines("read_publication_request_state", **kwargs)
 
     async def read_publication_receiver_state(self):
         return await self._run_on_all_engines("read_publication_receiver_state")
@@ -889,44 +928,51 @@ class InferenceEngineClient(InferenceEngineInterface):
     # Generation pause and resume
     # ----------------------------
     async def _wait_for_generation_to_resume(self) -> None:
-        """Waits for generation to be resumed, intended for in-flight weight updates and partial rollouts."""
+        """Wake immediately on resume, including callers on the HTTP thread's event loop."""
         while self.generation_paused_event.is_set():
-            await asyncio.sleep(0.5)
+            waiter = (asyncio.get_running_loop(), asyncio.Event())
+            with self._routing_lock:
+                if not self.generation_paused_event.is_set():
+                    return
+                self._generation_resume_waiters.add(waiter)
+            try:
+                await waiter[1].wait()
+            finally:
+                with self._routing_lock:
+                    self._generation_resume_waiters.discard(waiter)
 
     async def pause_generation(self) -> None:
-        """
-        Pauses generation for all engines, intended for in-flight weight updates and partial rollouts.
+        """Block submissions, abort native schedulers, then verify every engine is paused.
 
-        Supported for `/chat/completions` and single-prompt `generate()` calls.
-        Batched `generate()` and `/completions` remain unsupported.
-
-        Both in-flight and incoming requests will be blocked until `resume_generation` is called.
-        1. Set the paused event to avoid new requests from being submitted while aborting requests.
-        2. Wait for a grace period to ensure all in-flight requests have entered the engine's
-           scheduler and hence can be aborted. Otherwise, there can be requests already submitted
-           but not yet entered the scheduler, which can miss the abort request.
-        3. Finally, pause each engine scheduler in abort mode. This causes requests sent from
-           InferenceEngineClient to `InferenceEngineClient.engines` to return the already-generated tokens.
-           The request to `InferenceEngineClient` will not yet return until requests are completed with
-           stop reason that is not `abort`.
+        Calls already delivered after the native abort may remain queued until resume.
+        Waiting for those calls to finish here would deadlock; record them without waiting.
         """
-        if self.generation_paused_event.is_set():
-            raise RuntimeError("Generation is already paused, cannot pause again.")
-        self.generation_paused_event.set()
-        await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
-        await self._run_on_all_engines("pause_generation")
+        with self._routing_lock:
+            if self.generation_paused_event.is_set():
+                raise RuntimeError("Generation is already paused, cannot pause again.")
+            self.generation_paused_event.set()
+        async with asyncio.timeout(self._publication_pause_timeout):
+            await self._run_on_all_engines("pause_generation")
+            while True:
+                states = await self._run_on_all_engines("is_paused")
+                if len(states) == len(self.engines) and all(value is True for value in states):
+                    break
+        logger.info("publication_pause_ack queued_or_returning_requests={}", sum(self.publication_inflight_snapshot()))
 
-    async def resume_generation(self) -> None:
-        """
-        Resumes generation for all engines, intended for in-flight weight updates and partial rollouts.
-
-        Resume all in-flight requests with the previously-generated tokens, and unblock incoming requests
-        that were blocked by `pause_generation()`.
-        """
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        """Release every native scheduler before waking local and HTTP-loop waiters."""
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Generation is not paused, cannot resume.")
-        await self._run_on_all_engines("resume_generation")
-        self.generation_paused_event.clear()
+        if policy_version is None:
+            await self._run_on_all_engines("resume_generation")
+        else:
+            await self._run_on_all_engines("resume_generation", policy_version=policy_version)
+        with self._routing_lock:
+            self.generation_paused_event.clear()
+            waiters = tuple(self._generation_resume_waiters)
+        for loop, event in waiters:
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(event.set)
 
     # ----------------------------
     # HTTP endpoint related methods
@@ -969,6 +1015,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         state = self.__dict__.copy()
         state["_server_thread"] = None
         state["generation_paused_event"] = None
+        state["_generation_resume_waiters"] = None
         # threading.Lock is not picklable; the pickled copy is only used for weight-sync
         # RPC args and never routes, so dropping the routing lock is safe.
         state["_routing_lock"] = None

@@ -28,6 +28,7 @@ class AgentLoopOutput:
     loss_mask: List[int]
     env_metrics: Dict[str, Any]
     captured_global_step: Optional[int] = None
+    first_token_policy_version: int | None = None
     token_provenance: TokenProvenance = TokenProvenance.ENGINE
     error_treatment: Optional[str] = None
     # Dispatcher index; None covers unknown transport identity or mixed engines.
@@ -103,6 +104,9 @@ class TrajectoryBatch(TypedDict):
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
     generator_engine_indices: NotRequired[List[int | None]]
+    policy_versions_at_first_token: NotRequired[List[int | None]]
+    submission_model_step: NotRequired[int]
+    first_token_model_step: NotRequired[int | None]
     exception_types: Optional[List[Optional[str]]]
     error_treatments: Optional[List[Optional[str]]]
     rollout_metrics: Optional[Dict[str, Any]]

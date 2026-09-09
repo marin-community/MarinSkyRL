@@ -11,6 +11,7 @@ High-level notes:
   and staleness manager are also reset / validated at the end of each epoch.
 """
 
+from skyrl_train.policy_version import earliest_sampled_policy_version
 import asyncio
 import collections
 import os
@@ -18,6 +19,7 @@ import time
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
 from skyrl_train.weight_sync.publication_timing import publication_stage_walls
+from skyrl_train.weight_sync.publication_receipts import publication_receipt_fields
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
@@ -485,6 +487,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if cfg.trainer.offload_optimizer_during_rollouts:
             raise ValueError("Fully async training requires trainer.offload_optimizer_during_rollouts=false")
         validate_fully_async_cfg(cfg)
+        if type(cfg.trainer.fully_async.get("first_token_admission", False)) is not bool:
+            raise ValueError("trainer.fully_async.first_token_admission must be boolean")
         self._async_observations_enabled = bool(cfg.trainer.get("async_spans", False))
         self._published_policy_version = 0
         self._background_eval_tasks = []
@@ -812,7 +816,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             with Timer("policy_startup_drain", self.all_startup_timings):
                 await self._drain_policy_event_loops()
-        # Startup publication runs before producers exist and does not pause inference.
+        if self.cfg.generator.publication_stage_timing or self.cfg.trainer.fully_async.get(
+            "first_token_admission", False
+        ):
+            await self._record_publication_requests("initial", initial_policy_version=self._published_policy_version)
+        # Startup weight sync runs before producers exist and does not pause inference.
         await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
         self._log_weight_update_completed(
             reason="initial",
@@ -1218,6 +1226,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             completed_step=last_completed_step,
             epoch=self.cfg.trainer.epochs - 1,
         )
+        if self.cfg.generator.publication_stage_timing:
+            await self._record_publication_requests("final", wait_for_terminal=True)
         logger.info("Training done!")
 
     async def _run_training(self, training_input: TrainingInputBatch):
@@ -1322,7 +1332,41 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     if observation is not None:
                         observation.response_tokens = sum(len(ids) for ids in cur_trajectory_batch["response_ids"])
                 actual_step = cur_trajectory_batch.get("actual_global_step")
-                staleness_step = actual_step if actual_step is not None else installed_step_at_start
+                submission_step = actual_step if actual_step is not None else installed_step_at_start
+                versions = cur_trajectory_batch.get("policy_versions_at_first_token")
+                first_token_version = (
+                    earliest_sampled_policy_version(cur_trajectory_batch["response_ids"], versions)
+                    if versions is not None
+                    else None
+                )
+                if first_token_version is not None and first_token_version > self._published_policy_version:
+                    raise RuntimeError("Sampled first-token version is newer than the installed policy")
+                first_token_step = first_token_version + 1 if first_token_version is not None else None
+                first_token_admission = self.cfg.trainer.fully_async.get("first_token_admission", False)
+                sampled_tokens = sum(len(ids) for ids in cur_trajectory_batch["response_ids"])
+                if first_token_admission and sampled_tokens and first_token_step is None:
+                    raise RuntimeError("First-token admission requires native version evidence for every sampled row")
+                staleness_step = (
+                    first_token_step if first_token_admission and first_token_step is not None else submission_step
+                )
+                cur_trajectory_batch["submission_model_step"] = submission_step
+                cur_trajectory_batch["first_token_model_step"] = first_token_step
+                record_event(
+                    "rollout_admission_stamp",
+                    {
+                        "submission_model_step": submission_step,
+                        "first_token_model_step": first_token_step,
+                        "admission_model_step": staleness_step,
+                        "sampled_tokens": sampled_tokens,
+                        "first_token_evidence_complete": first_token_step is not None,
+                        "first_token_admission": first_token_admission,
+                    },
+                    attributes={
+                        "role": TRAINER_ROLE,
+                        "step": str(self.global_step),
+                        "call_id": observation.call_id if observation is not None else "",
+                    },
+                )
 
                 record_generated_work(
                     cur_trajectory_batch["response_ids"],
@@ -1435,28 +1479,80 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         trace_publication = self.cfg.generator.publication_stage_timing
         if trace_publication:
             self._record_publication_inflight("before_pause")
+            await self._record_publication_requests("before_pause")
         with (
             Timer(timing_name, self.all_timings) as weight_update_timer,
             async_phase_window("publication", step=self.global_step, enabled=self._training_metrics_enabled),
         ):
-            with Timer("weight_pause", self.all_timings):
-                await self.inference_engine_client.pause_generation()
-            await self.async_sync_policy_weights_to_inference_engines()
-            # Keep the post-broadcast rank drain before resuming generation or dispatching a forward.
-            with Timer("policy_post_sync_drain", self.all_timings):
-                await self._drain_policy_event_loops()
-            with Timer("weight_resume", self.all_timings):
-                await self.inference_engine_client.resume_generation()
+            publication_error = None
+            try:
+                with Timer("weight_pause", self.all_timings):
+                    await self.inference_engine_client.pause_generation()
+                if trace_publication:
+                    await self._record_publication_requests("after_pause")
+                await self.async_sync_policy_weights_to_inference_engines()
+                # Keep the post-broadcast rank drain before resuming generation or dispatching a forward.
+                with Timer("policy_post_sync_drain", self.all_timings):
+                    await self._drain_policy_event_loops()
+                with Timer("weight_resume", self.all_timings):
+                    if trace_publication or self.cfg.trainer.fully_async.get("first_token_admission", False):
+                        await self.inference_engine_client.resume_generation(
+                            policy_version=self._published_policy_version
+                        )
+                    else:
+                        await self.inference_engine_client.resume_generation()
+            except BaseException as error:
+                publication_error = error
+                raise
+            finally:
+                if self.inference_engine_client.generation_paused_event.is_set():
+                    try:
+                        await self.inference_engine_client.resume_generation()
+                    except BaseException:
+                        if publication_error is None:
+                            raise
+                        logger.exception("Generation resume cleanup failed after a publication error")
             # New requests are rejected while inference is paused. Release newly
             # eligible producer slots only after the post-broadcast drain and resume.
             await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
         if trace_publication:
             self._record_publication_inflight("after_resume")
+            await self._record_publication_requests("after_resume")
             # Derived paused-time overhead, not an independently measured learner-idle span.
             self.all_timings["publication_stall_seconds"] = max(
                 0.0, weight_update_timer.duration - self.all_timings["weight_broadcast/nccl_send"]
             )
         self._log_weight_update_completed(reason=reason, duration_seconds=weight_update_timer.duration)
+
+    async def _record_publication_requests(
+        self, moment: str, initial_policy_version: int | None = None, wait_for_terminal: bool = False
+    ) -> None:
+        """Persist drainable native request identities without changing admission."""
+        states = await self.inference_engine_client.read_publication_request_state(
+            initial_policy_version=initial_policy_version,
+            drain_accounting=True,
+            terminal_timeout_seconds=self.cfg.generator.publication_pause_timeout_seconds
+            if wait_for_terminal
+            else None,
+        )
+        if len(states) != len(self.inference_engine_client.publication_inflight_snapshot()):
+            raise RuntimeError("weight-sync request readback omitted an engine")
+        for engine_index, state in enumerate(states):
+            if moment == "after_pause" and not state["paused"]:
+                raise RuntimeError("weight-sync request readback found a running engine after pause")
+            if not state["shared_time_and_uts_namespaces"] or state["request_accounting"] is None:
+                raise RuntimeError("weight-sync request accounting lacks a verified engine origin")
+            for fields in publication_receipt_fields(state):
+                record_event(
+                    "publication_request_accounting",
+                    fields,
+                    attributes={
+                        "role": TRAINER_ROLE,
+                        "step": str(self.global_step),
+                        "engine_index": str(engine_index),
+                        "moment": moment,
+                    },
+                )
 
     def _record_publication_inflight(self, moment: str) -> None:
         for engine, count in enumerate(self.inference_engine_client.publication_inflight_snapshot()):

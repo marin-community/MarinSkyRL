@@ -1,3 +1,5 @@
+from skyrl_train.policy_version import PublicationVersionHistory
+from skyrl_train.weight_sync.publication_accounting import PublicationRequestAccounting
 import json
 import os
 import threading
@@ -1549,6 +1551,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def _create_engine(self, *args, **kwargs):
         self._publication_output_probe = None
+        self._publication_requests = None
+        self._publication_versions = PublicationVersionHistory()
         openai_kwargs = pop_openai_kwargs(kwargs)
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = openai_kwargs.pop("openai_sampling_params", {})
@@ -1832,13 +1836,36 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path"
                 )
 
-        async for request_output in self.llm.generate(
-            prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
-            sampling_params=sampling_params,
-            request_id=request_id,
-            lora_request=lora_request,
-        ):
-            final_output = request_output
+        ledger = getattr(self, "_publication_requests", None)
+        if ledger is not None:
+            ledger.start(request_id)
+        try:
+            async for request_output in self.llm.generate(
+                prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
+                sampling_params=sampling_params,
+                request_id=request_id,
+                lora_request=lora_request,
+            ):
+                final_output = request_output
+        except BaseException as error:
+            if ledger is not None:
+                ledger.finish(request_id, reason=type(error).__name__, tokens=0, first_token_time=None)
+            raise
+        else:
+            if ledger is not None:
+                output = final_output.outputs[0] if final_output is not None else None
+                first_token_time = (
+                    final_output.metrics.first_token_ts
+                    if final_output is not None and final_output.metrics is not None
+                    else None
+                )
+                ledger.finish(
+                    request_id,
+                    reason=str(output.finish_reason) if output is not None else "missing_output",
+                    tokens=len(output.token_ids) if output is not None else 0,
+                    first_token_time=first_token_time,
+                    policy_version_at_first_token=self._publication_versions.at_first_token(first_token_time),
+                )
 
         if self._publication_output_probe is not None and final_output is not None:
             reason = final_output.outputs[0].finish_reason
@@ -1917,7 +1944,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
             raise
 
-        return self._postprocess_outputs(outputs)
+        result = self._postprocess_outputs(outputs)
+        result["policy_versions_at_first_token"] = [
+            self._publication_versions.at_first_token(
+                output.metrics.first_token_ts if output.metrics is not None else None
+            )
+            for output in outputs
+        ]
+        return result
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
@@ -2004,7 +2038,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Read actual worker GPUs and communicator ranks through the SkyRL extension."""
         return await self._get_engine().collective_rpc("report_device_placement")
 
-    async def read_publication_request_state(self):
+    async def read_publication_request_state(
+        self,
+        initial_policy_version: int | None = None,
+        drain_accounting: bool = False,
+        terminal_timeout_seconds: float | None = None,
+    ):
         """Read pause precursor evidence in the engine actor's monotonic domain."""
         engine = self._get_engine()
         if self._publication_output_probe is None:
@@ -2023,8 +2062,28 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             for pid in core_pids
             for kind in namespaces
         )
+        terminal_wait_seconds = 0.0
+        if terminal_timeout_seconds is not None:
+            if self._publication_requests is None:
+                raise ValueError("terminal acknowledgement requires initialized request accounting")
+            terminal_wait_started = time.monotonic()
+            await self._publication_requests.wait_for_idle(terminal_timeout_seconds)
+            terminal_wait_seconds = time.monotonic() - terminal_wait_started
         states = list(engine.output_processor.request_states.values())
+        if initial_policy_version is not None:
+            if states or self._publication_requests is not None or self._publication_versions.boundaries:
+                raise ValueError("request accounting must initialize before any generation")
+            if not shared_namespaces:
+                raise ValueError("initial weight version requires a shared engine clock domain")
+            self._publication_requests = PublicationRequestAccounting()
+            self._publication_versions.record_resume(time.monotonic(), initial_policy_version)
+        accounting = (
+            self._publication_requests.drain() if drain_accounting and self._publication_requests is not None else None
+        )
         return {
+            "request_accounting": accounting,
+            "terminal_wait_seconds": terminal_wait_seconds,
+            "policy_version_boundaries": list(self._publication_versions.boundaries),
             "host": socket.gethostname(),
             "actor_pid": os.getpid(),
             "core_pids": core_pids,
@@ -2265,6 +2324,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             histograms=native.histograms,
         )
 
+    async def is_paused(self) -> bool:
+        return await self._get_engine().is_paused()
+
     async def pause_generation(self) -> None:
         """Abort outstanding requests and hold the EngineCore scheduler idle for weight reload."""
         engine = self._get_engine()
@@ -2274,11 +2336,29 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # its paused state, and clears the KV/prefix cache before returning. Unlike
         # AsyncLLM.abort(), it cannot report success merely because the frontend
         # output_processor already removed the request IDs.
+        if self._publication_requests is not None:
+            # vLLM keys frontend states by randomized internal IDs. The ledger
+            # tracks the external ID supplied to generate(), including zero-token
+            # requests. Read its explicit mapping before the first await.
+            native_states = engine.output_processor.request_states
+            if any(internal_id != state.request_id for internal_id, state in native_states.items()):
+                raise ValueError("native frontend key disagrees with RequestState.request_id")
+            bindings = {internal_id: state.external_req_id for internal_id, state in native_states.items()}
+            self._publication_requests.begin_pause(
+                frontend_ids=list(bindings.values()),
+                monotonic_time=time.monotonic(),
+                frontend_internal_to_external=bindings,
+            )
         await engine.pause_generation(mode="abort", clear_cache=True)
         logger.info(f"pause_generation() finished, aborted {outstanding_requests} requests and paused EngineCore")
 
-    async def resume_generation(self) -> None:
-        """Release the EngineCore scheduler after the weight reload completes."""
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        """Release the scheduler with an engine-local boundary for the installed version."""
+        if policy_version is not None:
+            state = await self.read_publication_request_state()
+            assert state["paused"] and state["shared_time_and_uts_namespaces"]
+            # Capture before releasing the scheduler: tokens can arrive while its RPC returns.
+            self._publication_versions.record_resume(state["observed_monotonic"], policy_version)
         await self._get_engine().resume_generation()
         logger.info("resume_generation() finished, EngineCore scheduler released")
 

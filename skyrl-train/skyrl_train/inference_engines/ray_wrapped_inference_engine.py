@@ -176,7 +176,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return ray.get(self.inference_engine_actor.dp_size.remote())
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        return await self.inference_engine_actor.generate.remote(input_batch=input_batch)
+        actor_task = self.inference_engine_actor.generate.remote(input_batch=input_batch)
+        return await _await_actor_task(actor_task)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         return await self.inference_engine_actor.wake_up.remote(*args, **kwargs)
@@ -194,8 +195,17 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
-    async def read_publication_request_state(self):
-        return await self.inference_engine_actor.read_publication_request_state.remote()
+    async def read_publication_request_state(
+        self,
+        initial_policy_version: int | None = None,
+        drain_accounting: bool = False,
+        terminal_timeout_seconds: float | None = None,
+    ):
+        return await self.inference_engine_actor.read_publication_request_state.remote(
+            initial_policy_version=initial_policy_version,
+            drain_accounting=drain_accounting,
+            terminal_timeout_seconds=terminal_timeout_seconds,
+        )
 
     async def read_publication_receiver_state(self):
         return await self.inference_engine_actor.read_publication_receiver_state.remote()
@@ -245,11 +255,16 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         actor_task = self.inference_engine_actor.completion.remote(request_payload)
         return await _await_actor_task(actor_task)
 
+    async def is_paused(self) -> bool:
+        return await self.inference_engine_actor.is_paused.remote()
+
     async def pause_generation(self) -> None:
         return await self.inference_engine_actor.pause_generation.remote()
 
-    async def resume_generation(self) -> None:
-        return await self.inference_engine_actor.resume_generation.remote()
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        if policy_version is None:
+            return await self.inference_engine_actor.resume_generation.remote()
+        return await self.inference_engine_actor.resume_generation.remote(policy_version=policy_version)
 
     async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET):
         """Return throughput, latency, cache, token, and request statistics."""

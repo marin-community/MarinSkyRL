@@ -981,6 +981,9 @@ class _MockStreamEngine:
     def __init__(self):
         self.entered = asyncio.Event()
 
+    async def resume_generation(self):
+        pass
+
     async def chat_completion_stream(self, request_payload):
         self.entered.set()
         yield 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
@@ -996,6 +999,9 @@ class _MockWeightSyncEngine:
     async def pause_generation(self):
         self.scheduler_paused = True
         self.outstanding_requests = 0
+
+    async def is_paused(self):
+        return self.scheduler_paused
 
     async def update_named_weights(self, **_request):
         if not self.scheduler_paused or self.outstanding_requests:
@@ -1058,19 +1064,17 @@ async def test_publication_inflight_counts_generate_requests_until_completion_or
 async def test_incoming_single_prompt_waits_for_resume_and_preserves_tokens(monkeypatch):
     engine = _PausedGenerateEngine()
     client = InferenceEngineClient([engine], tokenizer=object(), full_config=_make_min_cfg())
-    monkeypatch.setattr(
-        "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
-    )
     await client.pause_generation()
 
     waiting, release_wait = asyncio.Event(), asyncio.Event()
 
-    async def controlled_wait(_delay):
-        waiting.set()
-        await release_wait.wait()
+    original_wait = client._wait_for_generation_to_resume
 
-    # Control the polling clock boundary; no wall-clock delay determines readiness.
-    monkeypatch.setattr("skyrl_train.inference_engines.inference_engine_client.asyncio.sleep", controlled_wait)
+    async def controlled_wait():
+        waiting.set()
+        await original_wait()
+
+    monkeypatch.setattr(client, "_wait_for_generation_to_resume", controlled_wait)
     request = InferenceEngineInput(
         prompt_token_ids=[[1, 2, 3]], sampling_params={"max_tokens": 5, "temperature": 0}, session_ids=["prompt-0"]
     )
@@ -1116,9 +1120,6 @@ async def test_incoming_batch_remains_rejected_while_paused():
 async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes(monkeypatch):
     engine = _MockWeightSyncEngine()
     client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-    monkeypatch.setattr(
-        "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
-    )
 
     await client.pause_generation()
     await client.update_named_weights(request={"names": ["model.weight"]})
@@ -1161,7 +1162,7 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
     engines = [_MockStreamEngine()]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
-    # Simulate a weight-sync pause directly (bypass pause_generation()'s 5s grace +
+    # Simulate a weight-sync pause directly (bypass native scheduler RPCs +
     # engine scheduler fan-out, which is not needed to exercise the barrier).
     client.generation_paused_event.set()
 
@@ -1179,7 +1180,7 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
     assert not task.done()
 
     # Resume -> the stream should now proceed to the engine and complete.
-    client.generation_paused_event.clear()
+    await client.resume_generation()
     chunks = await asyncio.wait_for(task, timeout=5)
     assert engines[0].entered.is_set()
     assert any("[DONE]" in c for c in chunks)
@@ -1217,3 +1218,150 @@ async def test_generate_reports_actual_dispatch_after_failover_in_response_order
     assert engines[0].received == ([1] if batched else [0])
     for i, engine_index in enumerate(output["generator_engine_indices"]):
         assert i in engines[engine_index].received
+
+
+@pytest.mark.asyncio
+async def test_pause_generation_has_no_sleep_grace(monkeypatch):
+    import time
+
+    client = InferenceEngineClient([_MockWeightSyncEngine() for _ in range(4)], object(), _make_min_cfg())
+
+    async def forbidden_sleep(_delay):
+        raise AssertionError("pause must not sleep")
+
+    monkeypatch.setattr(asyncio, "sleep", forbidden_sleep)
+    start = time.monotonic()
+    await client.pause_generation()
+    assert time.monotonic() - start < 0.2
+    assert all(engine.scheduler_paused for engine in client.engines)
+
+
+@pytest.mark.asyncio
+async def test_pause_waits_until_every_engine_reports_paused():
+    entered, released = asyncio.Event(), asyncio.Event()
+
+    class DelayedEngine(_MockWeightSyncEngine):
+        async def is_paused(self):
+            entered.set()
+            return released.is_set()
+
+    client = InferenceEngineClient([_MockWeightSyncEngine(), DelayedEngine()], object(), _make_min_cfg())
+    pause = asyncio.create_task(client.pause_generation())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert not pause.done()
+    released.set()
+    await asyncio.wait_for(pause, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_resume_wakes_waiters_without_polling_delay():
+    import time
+
+    client = InferenceEngineClient([_MockWeightSyncEngine()], object(), _make_min_cfg())
+    await client.pause_generation()
+    waiter = asyncio.create_task(client._wait_for_generation_to_resume())
+    while not client._generation_resume_waiters:
+        await asyncio.sleep(0)
+    start = time.monotonic()
+    await client.resume_generation()
+    await asyncio.wait_for(waiter, timeout=1)
+    assert time.monotonic() - start < 0.01
+    assert not client._generation_resume_waiters
+
+
+@pytest.mark.asyncio
+async def test_resume_wakes_http_thread_event_loop():
+    import threading
+
+    client = InferenceEngineClient([_MockWeightSyncEngine()], object(), _make_min_cfg())
+    await client.pause_generation()
+    registered, finished = threading.Event(), threading.Event()
+    failures = []
+
+    def thread_main():
+        async def wait_on_http_loop():
+            task = asyncio.create_task(client._wait_for_generation_to_resume())
+            while not client._generation_resume_waiters:
+                await asyncio.sleep(0)
+            registered.set()
+            await asyncio.wait_for(task, timeout=2)
+
+        try:
+            asyncio.run(wait_on_http_loop())
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=thread_main)
+    thread.start()
+    try:
+        assert await asyncio.to_thread(registered.wait, 1)
+        await client.resume_generation()
+        assert await asyncio.to_thread(finished.wait, 1)
+        assert not failures
+        assert not client._generation_resume_waiters
+    finally:
+        thread.join(timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_resume_waiter_is_removed_and_pickled_copy_drops_waiters():
+    client = InferenceEngineClient([_MockWeightSyncEngine()], object(), _make_min_cfg())
+    await client.pause_generation()
+    waiter = asyncio.create_task(client._wait_for_generation_to_resume())
+    while not client._generation_resume_waiters:
+        await asyncio.sleep(0)
+    assert client.__getstate__()["_generation_resume_waiters"] is None
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert not client._generation_resume_waiters
+    await client.resume_generation()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "first_tokens,first_version,last_version,expected",
+    [([21], 2, 3, 2), ([], 2, 3, 3), ([21], 3, 2, 2), ([21], None, 3, None), ([21], 2, None, None)],
+)
+async def test_retry_preserves_first_sampled_version_and_ignores_zero_token_abort(
+    first_tokens, first_version, last_version, expected
+):
+    class Engine:
+        calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            first = self.calls == 1
+            return InferenceEngineOutput(
+                responses=["answer"],
+                response_ids=[first_tokens if first else [22]],
+                stop_reasons=["abort" if first else "stop"],
+                policy_versions_at_first_token=[first_version if first else last_version],
+            )
+
+    class Tokenizer:
+        def decode(self, *_args, **_kwargs):
+            return "answer"
+
+    client = InferenceEngineClient([Engine()], Tokenizer(), _make_min_cfg())
+    result = await client.generate(InferenceEngineInput(prompt_token_ids=[[1]], sampling_params={"max_tokens": 4}))
+    assert result["policy_versions_at_first_token"] == [expected]
+    assert result["response_ids"] == [first_tokens + [22]]
+
+
+@pytest.mark.asyncio
+async def test_explicit_installed_version_reaches_every_engine_on_resume():
+    class Engine(_MockWeightSyncEngine):
+        installed_version = None
+
+        async def resume_generation(self, policy_version=None):
+            self.installed_version = policy_version
+            await super().resume_generation()
+
+    engines = [Engine(), Engine()]
+    client = InferenceEngineClient(engines, object(), _make_min_cfg())
+    await client.pause_generation()
+    await client.resume_generation(policy_version=7)
+    assert [engine.installed_version for engine in engines] == [7, 7]
