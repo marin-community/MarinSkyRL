@@ -201,6 +201,7 @@ trainer:
     batch_invariant: false
     weight_sync_invariant_env: false
     advantage_estimator: "grpo"
+    non_agentic_truncated_advantage_cap: null
     group_advantage_min_size: null
     resolved_group_advantage:
       kind: exact_physical
@@ -445,6 +446,7 @@ generator:
 
   # Explicit opt-in; existing non-agentic reward parsing is unchanged when null.
   non_agentic_parser_protocol: null
+  non_agentic_intervention: null
 
   trajectory_reward_shaping:
     schema_version: 2

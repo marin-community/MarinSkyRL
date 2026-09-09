@@ -50,6 +50,7 @@ from skyrl_train.data_order import (
 )
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
 from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
+from skyrl_train.utils.non_agentic_advantages import cap_truncated_advantages
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
 from skyrl_train.utils.loss_reduction import (
@@ -1428,6 +1429,26 @@ class RayPPOTrainer:
         if loop_advantages_tensor is not None:
             training_input["loop_advantages"] = loop_advantages_tensor
         training_input.metadata = {"uids": uids}
+        contracts = trajectory_batch.get("non_agentic_contract")
+        if contracts is not None:
+            if len(contracts) != len(response_ids):
+                raise ValueError("Non-agentic contract rows must align with training responses")
+            training_input.metadata["non_agentic_contract"] = contracts
+            training_input.metadata["non_agentic_uids"] = list(uids)
+            training_input.metadata["non_agentic_post_shaping_reward"] = [sum(row) for row in rewards]
+        if self.cfg.trainer.algorithm.get("non_agentic_truncated_advantage_cap") is not None:
+            if (
+                contracts is None
+                or self.cfg.trainer.algorithm.advantage_estimator != "grpo"
+                or self.cfg.trainer.step_wise_training
+            ):
+                raise ValueError("Negative truncation treatment requires post-thinking single-turn GRPO")
+            reasons = trajectory_batch.get("stop_reasons")
+            if reasons is None or len(reasons) != len(response_ids):
+                raise ValueError("Negative truncation treatment requires every native stop reason")
+            training_input["non_agentic_truncated"] = torch.tensor(
+                [reason == "length" for reason in reasons], dtype=torch.bool
+            )
         if self._training_metrics_enabled:
             training_input.metadata["consumed_stop_metrics"] = consumed_stop_metrics(
                 trajectory_batch.get("stop_reasons"), len(response_ids)
@@ -1757,6 +1778,12 @@ class RayPPOTrainer:
         """Apply configured normalization before finalizing the advantage tensor."""
         if self.cfg.trainer.algorithm.advantage_batch_normalize:
             data = normalize_advantages_dict(data)
+        cap = self.cfg.trainer.algorithm.get("non_agentic_truncated_advantage_cap")
+        if cap is not None:
+            loop = data.get("loop_advantages")
+            if loop is not None and torch.count_nonzero(loop):
+                raise ValueError("Negative truncation treatment cannot silently compose with loop credit")
+            data = cap_truncated_advantages(data, cap)
         return self.apply_loop_credit_and_drop_advantage_inputs(data)
 
     def apply_loop_credit_and_drop_advantage_inputs(self, data: TrainingInputBatch) -> TrainingInputBatch:

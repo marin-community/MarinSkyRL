@@ -3,7 +3,7 @@ from typing import Dict, Any, Optional, Union
 import random
 import hashlib
 import socket
-from omegaconf import DictConfig, ListConfig
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
 from typing import List
 from http import HTTPStatus
@@ -30,8 +30,8 @@ def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
     for key, value in sampling_params.items():
         if key not in vllm_sampling_params and key not in exclude_keys:
             # Convert OmegaConf ListConfig to regular list if needed
-            if isinstance(value, ListConfig):
-                value = list(value)
+            if isinstance(value, (ListConfig, DictConfig)):
+                value = OmegaConf.to_container(value, resolve=True)
             vllm_sampling_params[key] = value
     return vllm_sampling_params
 
