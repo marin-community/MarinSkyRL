@@ -91,6 +91,11 @@ class WholeTrajectoryProjection:
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
             actual_global_step=minimum_captured_global_step(outputs),
         )
+        contracts = [output.evidence.metadata.get("non_agentic_contract") for output in outputs]
+        if any(contract is not None for contract in contracts):
+            if any(contract is None for contract in contracts):
+                raise ValueError("Mixed parser protocols in one trajectory batch")
+            batch["non_agentic_contract"] = contracts
         attach_terminal_classifications(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
         return batch

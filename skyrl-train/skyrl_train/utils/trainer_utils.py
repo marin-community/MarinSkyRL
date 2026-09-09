@@ -318,6 +318,10 @@ def dump_per_dataset_eval_results(
                     "env_extras": concat_env_extras[i],
                     "data_source": data_source,
                 }
+                if "non_agentic_contract" in trajectory_batch:
+                    contract = trajectory_batch["non_agentic_contract"][i]
+                    entry["non_agentic_contract"] = contract
+                    entry["parser_protocol"] = contract["parser_protocol"]
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         logger.info(f"Dumped eval data for {data_source} to {filename}")

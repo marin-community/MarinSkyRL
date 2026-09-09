@@ -443,6 +443,9 @@ generator:
 
   eval_n_samples_per_prompt: 1
 
+  # Explicit opt-in; existing non-agentic reward parsing is unchanged when null.
+  non_agentic_parser_protocol: null
+
   trajectory_reward_shaping:
     schema_version: 2
     enabled: false
