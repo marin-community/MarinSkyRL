@@ -158,8 +158,18 @@ def write_receipt(prefix: str, identity: str, name: str, value: dict) -> None:
     if len(data) > 1024**2:
         raise ValueError("Native diagnostic receipt exceeds one MiB")
     path = f"{prefix}/{identity}/{name}.json"
-    filesystem = fsspec.filesystem("s3", config_kwargs={"connect_timeout": 5, "read_timeout": 10})
+    filesystem = fsspec.filesystem(
+        "s3",
+        config_kwargs={
+            "connect_timeout": 5,
+            "read_timeout": 10,
+            "retries": {"max_attempts": 1},
+            "s3": {"addressing_style": "virtual"},
+        },
+    )
     filesystem.pipe(path, data)
+    if filesystem.cat(path) != data:
+        raise RuntimeError("Native diagnostic receipt readback differs from the written bytes")
     print("REMAINDERS_RECEIPT " + json.dumps({"uri": path, "sha256": hashlib.sha256(data).hexdigest()}), flush=True)
 
 

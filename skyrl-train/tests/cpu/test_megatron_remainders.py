@@ -1,9 +1,14 @@
 """Exact remainder decoding and independently scoped qualification gates."""
 
+import hashlib
+import json
+
+import fsspec
+import pytest
 import torch
 
 from skyrl_train.entrypoints.probe_megatron_optimizer_precision import reconstruct_remainder_master
-from skyrl_train.entrypoints.probe_megatron_remainders import compare_arm_states, tensor_bytes_equal
+from skyrl_train.entrypoints.probe_megatron_remainders import compare_arm_states, tensor_bytes_equal, write_receipt
 
 
 def test_decode_native_remainders_recovers_float_bits_including_rounding_and_signed_zero():
@@ -59,3 +64,33 @@ def test_checkpoint_exactness_rejects_signed_zero_difference():
     restored = torch.tensor([-0.0, 1.0], dtype=torch.float32)
     assert not tensor_bytes_equal(original, restored)
     assert tensor_bytes_equal(original, original.clone())
+
+
+@pytest.mark.parametrize("corrupt_readback", [False, True])
+def test_receipt_uses_virtual_addressing_and_verifies_durable_bytes(monkeypatch, capsys, corrupt_readback):
+    storage = fsspec.filesystem("memory")
+    original_cat = storage.cat
+
+    def create_remote(protocol, *, config_kwargs):
+        assert protocol == "s3"
+        # The native east endpoint rejects the frozen path-style configuration.
+        assert config_kwargs["s3"]["addressing_style"] == "virtual"
+        assert config_kwargs["connect_timeout"] == 5
+        assert config_kwargs["read_timeout"] == 10
+        assert config_kwargs["retries"]["max_attempts"] == 1
+        return storage
+
+    monkeypatch.setattr(fsspec, "filesystem", create_remote)
+    if corrupt_readback:
+        monkeypatch.setattr(storage, "cat", lambda path: original_cat(path) + b"corrupt")
+        with pytest.raises(RuntimeError, match="readback differs"):
+            write_receipt("s3://test-receipts", "attempt-a", "rank0", {"rank": 0})
+        assert not capsys.readouterr().out
+        return
+    value = {"rank": 0, "unicode": "\u03bb", "measurements": [1, 2]}
+    write_receipt("s3://test-receipts", "attempt-a", "rank0", value)
+    line = capsys.readouterr().out.strip()
+    receipt = json.loads(line.removeprefix("REMAINDERS_RECEIPT "))
+    payload = original_cat(receipt["uri"])
+    assert json.loads(payload) == value
+    assert receipt["sha256"] == hashlib.sha256(payload).hexdigest()
