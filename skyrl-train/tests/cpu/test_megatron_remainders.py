@@ -19,8 +19,13 @@ def test_decode_native_remainders_recovers_float_bits_including_rounding_and_sig
 def observed_states():
     results = {
         name: {"optimizer_inventory": {"bytes_per_owned_parameter": size}, "checkpoint_continuation_exact": True}
-        for name, size in {"native_fp32": 12, "aware_fp32": 12, "bf16_both": 8,
-                           "fp32_remainders": 10, "bf16_remainders": 6}.items()
+        for name, size in {
+            "native_fp32": 12,
+            "aware_fp32": 12,
+            "bf16_both": 8,
+            "fp32_remainders": 10,
+            "bf16_remainders": 6,
+        }.items()
     }
     master = torch.tensor([1.00001, -0.0], dtype=torch.float32)
     model = master.to(torch.bfloat16).view(torch.int16)
