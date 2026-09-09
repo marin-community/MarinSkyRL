@@ -67,7 +67,7 @@ def test_actual_packed_expert_views_cover_round_robin_local_slots(projection):
 def test_missing_or_extra_coverage_fails(expected):
     source = torch.arange(4, dtype=torch.uint8)
     with pytest.raises(ValueError, match="coverage|cover"):
-        compare_installed_views([(source, source)], torch.empty(2, dtype=torch.bool), expected_bytes=expected)
+        compare_installed_views([(source, source.clone())], torch.empty(2, dtype=torch.bool), expected_bytes=expected)
 
 
 def test_scratch_limit_and_empty_receiver_slice():
@@ -109,3 +109,20 @@ def test_storage_coverage_detects_parameter_replacement():
     installed.data = installed.clone()
     with pytest.raises(ValueError, match="storage changed"):
         coverage.finish()
+
+
+@pytest.mark.parametrize("alias", ["source", "installed", "self"])
+def test_comparison_rejects_scratch_and_evidence_storage_overlap(alias):
+    source = torch.arange(8, dtype=torch.uint8)
+    installed = source.clone()
+    scratch = torch.empty(3, dtype=torch.bool)
+    if alias == "source":
+        scratch = source[2:5].view(torch.bool)
+    elif alias == "installed":
+        scratch = installed[2:5].view(torch.bool)
+    else:
+        installed = source
+    original = source.clone()
+    with pytest.raises(ValueError, match="must not overlap"):
+        compare_installed_views([(source, installed)], scratch, expected_bytes=8)
+    assert torch.equal(source, original)
