@@ -130,24 +130,28 @@ def live_tensors(model, optimizer) -> list[tuple[str, torch.Tensor]]:
     return tensors
 
 
-def build_arm(name: str, lr: float, weight_decay: float):
-    # Native dependencies belong to the optional, pinned Megatron CUDA profile.
-    from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
-    from megatron.core.tensor_parallel.layers import set_defaults_if_not_set_tensor_model_parallel_attributes
-    from megatron.core.transformer.transformer_config import TransformerConfig
-    from transformer_engine.pytorch.optimizers import FusedAdam
-
+def declared_arm_kwargs(name: str, store_param_remainders: bool = False) -> dict:
     aware, first, second = ARMS[name]
-    declared = {
+    return {
         "use_precision_aware_optimizer": aware,
         "optimizer_cuda_graph": False,
-        "store_param_remainders": False,
+        "store_param_remainders": store_param_remainders,
         "optimizer_cpu_offload": False,
         "main_params_dtype": "float32",
         "main_grads_dtype": "float32",
         "exp_avg_dtype": first,
         "exp_avg_sq_dtype": second,
     }
+
+
+def build_arm(name: str, lr: float, weight_decay: float, *, store_param_remainders: bool = False):
+    # Native dependencies belong to the optional, pinned Megatron CUDA profile.
+    from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
+    from megatron.core.tensor_parallel.layers import set_defaults_if_not_set_tensor_model_parallel_attributes
+    from megatron.core.transformer.transformer_config import TransformerConfig
+    from transformer_engine.pytorch.optimizers import FusedAdam
+
+    declared = declared_arm_kwargs(name, store_param_remainders)
     config = init_megatron_optim_config({"lr": lr, "weight_decay": weight_decay, "max_grad_norm": 0.0}, declared)
     module = GradientMatrix()
     for parameter in module.parameters():
@@ -196,15 +200,31 @@ def expected_reduced_gradient(step: int, device: torch.device, world_size: int) 
     return torch.stack(local_gradients).mean(dim=0)
 
 
+def reconstruct_remainder_master(parameter: torch.Tensor, remainder: torch.Tensor) -> torch.Tensor:
+    """Decode TE 2.11's rounded BF16 upper word plus signed lower word."""
+    if parameter.dtype != torch.bfloat16 or remainder.dtype != torch.int16 or parameter.shape != remainder.shape:
+        raise ValueError("Remainder decoding requires matching BF16 parameters and int16 words")
+    upper = parameter.detach().contiguous().view(torch.int16).to(torch.int32)
+    upper = upper - (remainder < 0).to(torch.int32)
+    bits = (upper << 16) | (remainder.to(torch.int32) & 0xFFFF)
+    return bits.contiguous().view(torch.float32)
+
+
 def main_parameter_tensors(optimizer) -> list[torch.Tensor]:
     tensors = []
     for part in optimizer.chained_optimizers:
         inner = part.optimizer
         for group in inner.param_groups:
             for parameter in group["params"]:
-                tensors.append(inner.state[parameter]["master_param"] if inner.master_weights else parameter)
+                if inner.master_weights:
+                    master = inner.state[parameter]["master_param"]
+                    if inner.store_param_remainders and parameter.dtype == torch.bfloat16:
+                        master = reconstruct_remainder_master(parameter, master)
+                    tensors.append(master)
+                else:
+                    tensors.append(parameter)
     if any(tensor.dtype != torch.float32 for tensor in tensors):
-        raise AssertionError("This gate requires full FP32 master weights and excludes remainders")
+        raise AssertionError("This gate requires full or exactly reconstructed FP32 master weights")
     return tensors
 
 
