@@ -43,7 +43,7 @@ def test_actual_lifecycle_preserves_uid_vector_and_live_export_status(monkeypatc
                 {"prompt_offset": start, "uids_json": json.dumps([f"uid-{n}" for n in range(start, start + 64)])},
                 attributes={"step": "1", "role": "trainer"},
             )
-        training.record_training_metrics({"policy/correction/m2_m_before": 0.05}, step=4, kind="train")
+        training.record_training_metrics({"policy/m2_mask/m2_before": 0.05}, step=4, kind="train")
         assert not stored, "Durable storage belongs to lifecycle exit, not the update path"
     assert not exporter.runtime_status().configured
     assert len(stored) == int(enabled)
@@ -68,12 +68,27 @@ def test_actual_lifecycle_preserves_uid_vector_and_live_export_status(monkeypatc
 
 
 def test_overflow_is_explicit_and_cross_region_prefix_is_rejected(monkeypatch):
-    monkeypatch.setattr(durable, "MAX_RECORD_BYTES", 1)
+    monkeypatch.setitem(durable.BUDGETS, "event", 1)
     receipt = durable.DurableTelemetryReceipt("s3://marin-us-east-02a/marin/receipts", {"run_id": "run"})
     receipt.record("event", "consumed_source_order", {"uids_json": '["a"]'}, {})
     assert receipt.rows == [] and receipt.overflow_records == 1
     with pytest.raises(ValueError, match="east"):
         durable.DurableTelemetryReceipt("s3://marin-us-west-02/marin/receipts", {})
+
+
+def test_scalar_saturation_preserves_gate_events_and_bad_capture_is_nonfatal(monkeypatch):
+    monkeypatch.setitem(durable.BUDGETS, "scalar", 1)
+    receipt = durable.DurableTelemetryReceipt("s3://marin-us-east-02a/marin/receipts", {})
+    for _ in range(96):
+        receipt.record("scalar", "policy/m2_mask/m2_before", {"value": 0.05}, {})
+    receipt.record("scalar", "policy/irrelevant", {"value": 1}, {})
+    receipt.record("event", "consumed_source_order", {"uids_json": '["late"]'}, {})
+    receipt.record("event", "terminal", {"export_lost_records": 3}, {})
+    for bad in (float("nan"), object()):
+        receipt.record("event", "policy_update", {"bad": bad}, {})
+    assert receipt.overflow_by_kind == {"event": 0, "scalar": 96, "terminal": 0}
+    assert receipt.capture_errors == 2
+    assert [json.loads(row)["name"] for row in receipt.rows] == ["consumed_source_order", "terminal"]
 
 
 def test_explicit_receipt_prefix_reaches_every_runtime_scope():
