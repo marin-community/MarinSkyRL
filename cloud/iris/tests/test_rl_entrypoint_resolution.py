@@ -40,6 +40,23 @@ context_budget:
     assert parsed.entrypoint == "skyrl_train.entrypoints.terminal_bench"
 
 
+def test_native_readback_output_uri_survives_launcher_translation(tmp_path):
+    uri = "s3://marin-us-east-02a/diagnostics/native-readback"
+    config = tmp_path / "readback.yaml"
+    config.write_text(
+        "entrypoint: weight_sync_readback\n"
+        "context_budget:\n  request_window_tokens: 2\n  max_new_tokens_per_turn: 1\n  max_turns: 1\n"
+        f"trainer:\n  weight_sync_readback_output: {uri}\n  weight_sync_nccl_diagnostics: true\n  logger: console\n"
+    )
+    parsed = parse_rl_config(str(config))
+    generated = build_skyrl_hydra_args(parsed, {"num_nodes": 1}, SimpleNamespace(gpus_per_node=8))
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=generated)
+    assert parsed.entrypoint == "skyrl_train.entrypoints.weight_sync_readback"
+    assert cfg.trainer.weight_sync_readback_output == uri
+    assert cfg.trainer.logger == "console"
+
+
 def test_terminal_bench_config_group_is_packaged_with_the_trainer():
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="ppo_base_config", overrides=["+terminal_bench_config=terminal_bench"])

@@ -617,7 +617,7 @@ def parse_rl_config(
     # Resolve relative paths in config sections to absolute paths so they work
     # regardless of the working directory at runtime. Skip data.train_data /
     # data.val_data as they may be HF repo IDs.
-    trainer = resolve_paths_in_dict(trainer, skip_keys={"policy.model.path"})
+    trainer = resolve_paths_in_dict(trainer, skip_keys={"policy.model.path", "weight_sync_readback_output"})
     generator = resolve_paths_in_dict(generator)
 
     if model_override:
@@ -656,7 +656,9 @@ def parse_checkpoint_export_config(
     with path.open() as source:
         raw = yaml.safe_load(source) or {}
 
-    trainer = resolve_paths_in_dict(copy.deepcopy(raw.get("trainer", {})), skip_keys={"policy.model.path"})
+    trainer = resolve_paths_in_dict(
+        copy.deepcopy(raw.get("trainer", {})), skip_keys={"policy.model.path", "weight_sync_readback_output"}
+    )
     trainer.setdefault("policy", {}).setdefault("model", {})["path"] = model_override
     return ParsedCheckpointExportConfig(
         config_path=path,
