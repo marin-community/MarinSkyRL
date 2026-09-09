@@ -5,8 +5,10 @@ import json
 import os
 import socket
 import time
+from pathlib import Path
 
 import torch
+from skyrl_train.io.io import read_bytes, write_bytes_atomic
 
 
 HASH_CHUNK_BYTES = 1 << 20
@@ -14,6 +16,7 @@ RECEIPT_CHUNK_BYTES = 3072
 ENVIRONMENT_KEYS = (
     "NCCL_DEBUG",
     "NCCL_DEBUG_SUBSYS",
+    "NCCL_DEBUG_FILE",
     "NCCL_IB_HCA",
     "NCCL_SOCKET_IFNAME",
     "NCCL_NET",
@@ -40,7 +43,48 @@ def environment_readback() -> dict:
         "pid": os.getpid(),
         "observed_monotonic": time.monotonic(),
         "values": {key: os.environ.get(key) for key in ENVIRONMENT_KEYS},
+        "network_log": network_log_readback(),
     }
+
+
+def network_log_readback() -> dict:
+    """Retain a bounded local NCCL network tail, with truncation and absence explicit."""
+    pattern = os.environ.get("NCCL_DEBUG_FILE")
+    if not pattern:
+        return {"available": False, "reason": "NCCL_DEBUG_FILE is unset"}
+    path = Path(pattern.replace("%h", socket.gethostname()).replace("%p", str(os.getpid())))
+    if not path.is_file():
+        return {"available": False, "path": str(path), "reason": "native file not present"}
+    size = path.stat().st_size
+    offset = max(0, size - 262144)
+    with path.open("rb") as stream:
+        stream.seek(offset)
+        raw = stream.read(262144)
+    lines = [
+        line
+        for line in raw.decode("utf-8", errors="replace").splitlines()
+        if any(marker in line for marker in ("NET/IB", "NET/Socket", "Using network", "Bootstrap"))
+    ]
+    return {
+        "available": True,
+        "path": str(path),
+        "file_bytes": size,
+        "read_offset": offset,
+        "tail_sha256": hashlib.sha256(raw).hexdigest(),
+        "tail_bytes": len(raw),
+        "truncated": offset > 0 or len(lines) > 128 or any(len(line) > 1024 for line in lines),
+        "network_lines": [line[:1024] for line in lines[-128:]],
+    }
+
+
+def persist_readback(output_uri: str, stage: str, receipt: dict) -> dict:
+    """Write and read back native evidence before advancing to the next phase."""
+    payload = json.dumps(receipt, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+    uri = f"{output_uri.rstrip('/')}/{stage}-{socket.gethostname()}-{os.getpid()}.json"
+    write_bytes_atomic(uri, payload)
+    if read_bytes(uri) != payload:
+        raise ValueError("Durable native readback differs from the original receipt")
+    return {"uri": uri, "sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload)}
 
 
 def tensor_sha256(tensor: torch.Tensor) -> str:

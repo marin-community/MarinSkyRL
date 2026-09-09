@@ -10,7 +10,7 @@ from omegaconf import DictConfig
 from skyrl_train.entrypoints.fully_async import AsyncPPOExp
 from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
 from skyrl_train.weight_sync.initial_readback import run_initial_readback
-from skyrl_train.weight_sync.readback_diagnostics import receipt_chunks
+from skyrl_train.weight_sync.readback_diagnostics import persist_readback, receipt_chunks
 
 
 class WeightSyncReadbackExp(AsyncPPOExp):
@@ -21,6 +21,8 @@ class WeightSyncReadbackExp(AsyncPPOExp):
             raise ValueError("Readback requires weight_sync_nccl_diagnostics=true and debug_mode=off")
         if cfg.trainer.algorithm.batch_invariant:
             raise ValueError("Initial weight sync readback requires batch invariance off")
+        if not cfg.trainer.weight_sync_readback_output or cfg.trainer.logger != "console":
+            raise ValueError("Readback requires durable output and the console tracker")
         super().__init__(cfg)
 
     def _run(self):
@@ -30,7 +32,33 @@ class WeightSyncReadbackExp(AsyncPPOExp):
         exit_code = 1
         try:
             trainer = self._setup_trainer()
-            receipt = asyncio.run(run_initial_readback(trainer))
+            cfg = self.cfg
+            megatron = cfg.trainer.policy.megatron_config
+            generator = cfg.generator
+            tp, dp, pp = (
+                generator.inference_engine_tensor_parallel_size,
+                generator.inference_engine_data_parallel_size,
+                generator.inference_engine_pipeline_parallel_size,
+            )
+            geometry = {
+                "policy_ranks": cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node,
+                "tp_rank": megatron.tensor_model_parallel_size,
+                "pp_rank": megatron.pipeline_model_parallel_size,
+                "ep_rank": megatron.expert_model_parallel_size,
+                "receiver_engines": generator.num_inference_engines,
+                "receiver_ranks_per_engine": tp * dp * pp,
+                "receiver_parallel": {
+                    "tensor_parallel_size": tp,
+                    "data_parallel_size": dp,
+                    "pipeline_parallel_size": pp,
+                    "enable_expert_parallel": generator.inference_engine_expert_parallel_size > 1,
+                },
+            }
+            receipt = asyncio.run(run_initial_readback(trainer, cfg.trainer.weight_sync_readback_output, geometry))
+            receipt["run_id"] = self.cfg.trainer.completion.run_id
+            receipt["attempt_id"] = self.cfg.trainer.completion.attempt_id
+            durable = persist_readback(self.cfg.trainer.weight_sync_readback_output, "complete", receipt)
+            print("WEIGHT_SYNC_READBACK_DURABLE " + json.dumps(durable, sort_keys=True), flush=True)
             for chunk in receipt_chunks(receipt):
                 print("WEIGHT_SYNC_READBACK_CHUNK " + json.dumps(chunk, sort_keys=True), flush=True)
             exit_code = 0

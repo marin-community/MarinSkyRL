@@ -385,7 +385,11 @@ class EnvVarManager:
         if _config_value(config, "trainer.collective_phase_diagnostics", False):
             values[COLLECTIVE_PHASE_DIAGNOSTICS_ENV] = "1"
         if _config_value(config, "trainer.weight_sync_nccl_diagnostics", False):
-            values.update(NCCL_DEBUG="INFO", NCCL_DEBUG_SUBSYS="INIT,NET")
+            values.update(
+                NCCL_DEBUG="INFO",
+                NCCL_DEBUG_SUBSYS="INIT,NET",
+                NCCL_DEBUG_FILE="/tmp/skyrl-weight-sync-nccl.%h.%p.log",
+            )
         raw_mode = _config_value(config, "trainer.debug_mode", "off")
         try:
             mode = DistributedDebugMode(str(raw_mode))

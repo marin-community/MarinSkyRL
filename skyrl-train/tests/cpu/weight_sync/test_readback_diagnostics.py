@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import io
 from datetime import timedelta
 
 import pytest
@@ -8,10 +9,13 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as multiprocessing
 import requests
+import sys
 from rigging.telemetry.metrics import MetricSnapshotPublisher
 from rigging.telemetry.prometheus import PrometheusCollector, PrometheusScraper
 from hydra import compose, initialize_config_dir
 from pathlib import Path
+from loguru import logger
+from types import SimpleNamespace
 from cloud.iris.env_vars import ALL_RUNTIME_SCOPES, EnvVarManager
 
 from skyrl_train.weight_sync.initial_readback import run_initial_readback, validate_initial_readback
@@ -23,7 +27,10 @@ from skyrl_train.weight_sync.readback_diagnostics import (
     reassemble_receipt,
     tensor_sha256,
     validate_replica_digests,
+    network_log_readback,
 )
+from skyrl_train.weight_sync.receiver_readback_rpc import read_all_receiver_workers
+from skyrl_train.utils.tracking import Tracking
 
 
 @pytest.mark.parametrize("length", [1, 7, HASH_CHUNK_BYTES + 17])
@@ -99,6 +106,22 @@ def test_actual_metrics_poller_recovers_after_endpoint_connection_failure(monkey
     assert [(family.name, family.samples[0].value) for family in observed] == [("ray_tasks", 3.0)]
 
 
+def test_diagnostic_console_tracker_never_initializes_wandb(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Diagnostic initialized W&B")
+
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=forbidden))
+    stream = io.StringIO()
+    sink = logger.add(stream)
+    try:
+        tracker = Tracking(project_name="readback", experiment_name="zero-update", backends="console")
+        tracker.log({"native_readback_updates": 0}, step=0)
+        tracker.finish(exit_code=0)
+    finally:
+        logger.remove(sink)
+    assert "native_readback_updates" in stream.getvalue()
+
+
 def test_typed_nccl_readback_diagnostics_reach_every_runtime_scope():
     config_dir = str(Path(__file__).parents[3] / "skyrl_train/config")
     with initialize_config_dir(config_dir=config_dir, version_base=None):
@@ -107,7 +130,39 @@ def test_typed_nccl_readback_diagnostics_reach_every_runtime_scope():
     for scope in ALL_RUNTIME_SCOPES:
         values = manager.environment_for(scope)
         assert values["NCCL_DEBUG"] == "INFO" and values["NCCL_DEBUG_SUBSYS"] == "INIT,NET"
-        assert "NCCL_DEBUG_FILE" not in values and "VLLM_BATCH_INVARIANT" not in values
+        assert values["NCCL_DEBUG_FILE"] == "/tmp/skyrl-weight-sync-nccl.%h.%p.log"
+        assert "VLLM_BATCH_INVARIANT" not in values
+
+
+def test_native_network_capture_is_bounded_and_reports_truncation(tmp_path, monkeypatch):
+    path = tmp_path / "nccl.log"
+    path.write_text("unrelated\n" * 40000 + "host NCCL INFO NET/IB : Using mlx5_0\n")
+    monkeypatch.setenv("NCCL_DEBUG_FILE", str(path))
+    receipt = network_log_readback()
+    assert receipt["network_lines"] == ["host NCCL INFO NET/IB : Using mlx5_0"]
+    assert receipt["truncated"] and receipt["tail_bytes"] == 262144
+
+
+@pytest.mark.asyncio
+async def test_receiver_readback_retains_each_dp_core_and_rejects_missing_core():
+    class NativeCoreBoundary:
+        core_engines = [b"zero", b"one"]
+
+        async def _call_utility_async(self, utility, method, timeout, args, kwargs, *, engine):
+            assert utility == "collective_rpc" and method == "read_weight_sync_environment"
+            return [{"origin": engine.decode()}]
+
+    core = NativeCoreBoundary()
+    engine = SimpleNamespace(
+        engine_core=core, vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=2))
+    )
+    assert await read_all_receiver_workers(engine, "read_weight_sync_environment") == [
+        {"origin": "zero"},
+        {"origin": "one"},
+    ]
+    core.core_engines = [b"zero"]
+    with pytest.raises(ValueError, match="every configured DP core"):
+        await read_all_receiver_workers(engine, "read_weight_sync_environment")
 
 
 def _distributed_digests(rank, rendezvous, output, mutate):
@@ -159,13 +214,46 @@ def _readbacks():
     digest = {"parameters": 1, "bytes": 2, "sha256": "x" * 64}
     identity = {
         "rank": 0,
+        "tp_rank": 0,
+        "pp_rank": 0,
+        "ep_rank": 0,
         "digests": {"dense": digest, "expert": digest},
         "replica_ranks": {"dense": [0], "expert": [0]},
     }
     environment = {"values": dict.fromkeys(ENVIRONMENT_KEYS)}
-    policy = [{**identity, "environment": environment, "all_rank_digests": [identity]}]
-    receivers = [[{"rank": 0, "world_size": 1, "environment": copy.deepcopy(environment)}]]
+    policy = [
+        {
+            **identity,
+            "environment": environment,
+            "all_rank_digests": [identity],
+            "expert_samples": [],
+            "expert_layouts": [],
+        }
+    ]
+    receivers = [
+        [
+            {
+                "rank": 0,
+                "world_size": 1,
+                "environment": copy.deepcopy(environment),
+                "parallel_config": {"tensor_parallel_size": 1},
+                "layers": [],
+            }
+        ]
+    ]
     return policy, receivers
+
+
+def _geometry():
+    return {
+        "policy_ranks": 1,
+        "receiver_engines": 1,
+        "tp_rank": 1,
+        "pp_rank": 1,
+        "ep_rank": 1,
+        "receiver_ranks_per_engine": 1,
+        "receiver_parallel": {"tensor_parallel_size": 1},
+    }
 
 
 @pytest.mark.parametrize("damage", ["missing_receiver", "missing_allgather", "invariance", "nccl"])
@@ -180,11 +268,11 @@ def test_initial_readback_rejects_incomplete_or_asymmetric_native_state(damage):
     else:
         receivers[0][0]["environment"]["values"]["NCCL_PROTO"] = "Simple"
     with pytest.raises(ValueError):
-        validate_initial_readback(policy, receivers)
+        validate_initial_readback(policy, receivers, _geometry())
 
 
 @pytest.mark.asyncio
-async def test_zero_update_lifecycle_reads_installed_weights_without_training(capsys):
+async def test_zero_update_lifecycle_reads_installed_weights_without_training(capsys, tmp_path):
     policy, receivers = _readbacks()
 
     class NativeBoundary:
@@ -228,10 +316,12 @@ async def test_zero_update_lifecycle_reads_installed_weights_without_training(ca
     trainer = NativeBoundary()
     trainer.policy_model = trainer
     trainer.inference_engine_client = trainer
-    receipt = await run_initial_readback(trainer)
+    receipt = await run_initial_readback(trainer, str(tmp_path), _geometry())
     assert receipt["updates"] == 0 and receipt["initial_syncs"] == 1
     assert receipt["policy"] == policy and receipt["receivers"] == receivers
     assert receipt["replica_digest_comparisons"][0]["bytes"] == 2
+    assert json.loads(Path(receipt["durable_pre_sync"]["uri"]).read_text()) == receipt["pre_sync_environment"]
+    assert receipt["precursor_coverage"]["policy_expert_samples"] is False
     chunks = [
         json.loads(line.removeprefix("WEIGHT_SYNC_PRE_GROUP_CHUNK ")) for line in capsys.readouterr().out.splitlines()
     ]
@@ -242,7 +332,7 @@ async def test_zero_update_lifecycle_reads_installed_weights_without_training(ca
 
     trainer.init_weight_sync_state = failed_group_init
     with pytest.raises(RuntimeError, match="rendezvous"):
-        await run_initial_readback(trainer)
+        await run_initial_readback(trainer, str(tmp_path), _geometry())
     failed_chunks = [
         json.loads(line.removeprefix("WEIGHT_SYNC_PRE_GROUP_CHUNK ")) for line in capsys.readouterr().out.splitlines()
     ]

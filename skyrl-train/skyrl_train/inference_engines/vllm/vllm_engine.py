@@ -2043,10 +2043,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await self._get_engine().collective_rpc("begin_publication_timing", args=(step,))
 
     async def read_publication_receiver_state(self):
-        return await self._get_engine().collective_rpc("read_publication_receiver_state")
+        from skyrl_train.weight_sync.receiver_readback_rpc import read_all_receiver_workers
+
+        return await read_all_receiver_workers(self._get_engine(), "read_publication_receiver_state")
 
     async def read_weight_sync_environment(self):
-        return await self._get_engine().collective_rpc("read_weight_sync_environment")
+        from skyrl_train.weight_sync.receiver_readback_rpc import read_all_receiver_workers
+
+        return await read_all_receiver_workers(self._get_engine(), "read_weight_sync_environment")
 
     async def read_publication_timing(self):
         return await self._get_engine().collective_rpc("read_publication_timing")

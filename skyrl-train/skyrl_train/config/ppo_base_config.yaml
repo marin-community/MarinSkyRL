@@ -40,6 +40,7 @@ checkpoint_export:
 trainer:
   debug_mode: "off"
   weight_sync_nccl_diagnostics: false
+  weight_sync_readback_output: null
   policy_train_spans: false
   generate_spans: false
   async_spans: false
