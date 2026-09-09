@@ -17,6 +17,7 @@ from skyrl_train.weight_sync.frozen_source_views import local_source_slices
 from skyrl_train.weight_sync.frozen_source_plan import frozen_source_plan
 from skyrl_train.weight_sync.frozen_view_sender import FrozenViewBucketSender
 from skyrl_train.weight_sync.manifest import TensorSpec, build_manifest
+from skyrl_train.weight_sync.receiver_readback_rpc import group_external_dp_workers
 from skyrl_train.weight_sync.worker_bucket_protocol import BUCKET_BYTES, MAX_REPLAY_EXTRA_BYTES
 
 
@@ -37,7 +38,17 @@ def parameter_versions(worker):
     )
 
 
-def receiver_rows(nested, *, engine_count: int, ranks_per_engine: int, expected=None):
+def receiver_rows(nested, *, engine_count: int, ranks_per_engine: int, data_parallel_size: int = 1, expected=None):
+    native = [[{"rank": row["identity"]["rank"], "receipt": row} for row in actor] for actor in nested]
+    grouped = group_external_dp_workers(
+        native,
+        {
+            "receiver_engines": engine_count,
+            "receiver_ranks_per_engine": ranks_per_engine,
+            "receiver_parallel": {"data_parallel_size": data_parallel_size},
+        },
+    )
+    nested = [[row["receipt"] for row in engine] for engine in grouped]
     if len(nested) != engine_count or any(len(rows) != ranks_per_engine for rows in nested):
         raise ValueError("Bucket receipt is missing configured receiver workers")
     identities = []
@@ -141,6 +152,7 @@ async def install_and_replay(worker, client, *, source_owners):
                 await client.prepare_diagnostic_weight_sync_buckets(asdict(manifest), manifest.manifest_id),
                 engine_count=engine_count,
                 ranks_per_engine=ranks_per_engine,
+                data_parallel_size=generator.inference_engine_data_parallel_size,
             )
             if any(row["manifest_id"] != manifest.manifest_id for row in prepared_receivers):
                 raise ValueError("A receiver prepared a different manifest")
@@ -185,6 +197,7 @@ async def install_and_replay(worker, client, *, source_owners):
                         await receive_task,
                         engine_count=engine_count,
                         ranks_per_engine=ranks_per_engine,
+                        data_parallel_size=generator.inference_engine_data_parallel_size,
                         expected=receiver_identities,
                     )
                     if any(row["bucket_id"] != bucket or not row["load_completion_event_recorded"] for row in rows):
@@ -214,6 +227,7 @@ async def install_and_replay(worker, client, *, source_owners):
                     await method(),
                     engine_count=engine_count,
                     ranks_per_engine=ranks_per_engine,
+                    data_parallel_size=generator.inference_engine_data_parallel_size,
                     expected=receiver_identities,
                 )
                 if any(row["manifest_id"] != manifest.manifest_id for row in receivers):

@@ -270,3 +270,18 @@ async def test_replay_only_catalogue_gpu_allocation_is_included_in_proof_gate(ga
     assert gate.client.receives == 0
     assert not hasattr(gate.receiver.worker, "_diagnostic_bucket_state")
     assert gate.policy._policy_weight_access.owner is None
+
+
+def test_external_dp_bucket_receipts_keep_every_actor_identity():
+    actors = [
+        [{"identity": {"rank": rank, "world_size": 8, "host": "receiver", "gpu_uuid": f"gpu-{rank}"}}]
+        for rank in range(8)
+    ]
+    rows, identities = protocol.receiver_rows(actors, engine_count=1, ranks_per_engine=8, data_parallel_size=8)
+    assert [row["identity"]["rank"] for row in rows] == list(range(8))
+    assert len(identities) == 8
+    with pytest.raises(ValueError, match="external DP actors"):
+        protocol.receiver_rows(actors[:-1], engine_count=1, ranks_per_engine=8, data_parallel_size=8)
+    actors[7] = actors[0]
+    with pytest.raises(ValueError, match="factory slice"):
+        protocol.receiver_rows(actors, engine_count=1, ranks_per_engine=8, data_parallel_size=8)

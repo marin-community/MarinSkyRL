@@ -38,18 +38,34 @@ def client_route():
     for engine_id in range(2):
 
         class Core:
-            core_engines = [b"a", b"b"]
+            core_engines = [bytes([0, 0]), bytes([1, 0])]
+            engine_ranks_managed = [0, 1]
 
             async def _call_utility_async(self, utility, method, timeout, args, kwargs, *, engine):
                 assert utility == "collective_rpc" and timeout is None
-                row = {"engine": self.number, "core": engine.decode(), "method": method, "args": args, "kwargs": kwargs}
+                row = {
+                    "engine": self.number,
+                    "core": int.from_bytes(engine, "little"),
+                    "method": method,
+                    "args": args,
+                    "kwargs": kwargs,
+                }
                 calls.append(row)
                 return [row]
 
         core = Core()
         core.number = engine_id
         native = SimpleNamespace(
-            engine_core=core, vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=2))
+            engine_core=core,
+            vllm_config=SimpleNamespace(
+                parallel_config=SimpleNamespace(
+                    data_parallel_size=2,
+                    data_parallel_index=0,
+                    data_parallel_size_local=2,
+                    data_parallel_rank_local=None,
+                    local_engines_only=False,
+                )
+            ),
         )
         engine = route_class("vllm/vllm_engine.py", "AsyncVLLMInferenceEngine")()
         engine._get_engine = lambda native=native: native
@@ -72,10 +88,10 @@ async def test_bucket_request_reaches_every_dp_worker_and_keeps_origin():
     payload = {"entries": [{"hf_name": "weight"}]}
     outputs = await client.prepare_diagnostic_weight_sync_buckets(payload, "manifest")
     assert {(row["engine"], row["core"]) for group in outputs for row in group} == {
-        (0, "a"),
-        (0, "b"),
-        (1, "a"),
-        (1, "b"),
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
     }
     assert all(row["args"] == (payload, "manifest") for row in calls)
     calls.clear()
