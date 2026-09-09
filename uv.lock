@@ -2831,8 +2831,8 @@ wheels = [
 
 [[package]]
 name = "marin-rigging"
-version = "0.2.91.dev32816546334"
-source = { registry = "https://pypi.org/simple" }
+version = "0.2.91.dev32816546334+asyncv2digest1"
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=73ce24cbbdb94b4cabd10b7ecb1340b0ccc4008b#73ce24cbbdb94b4cabd10b7ecb1340b0ccc4008b" }
 dependencies = [
     { name = "aiobotocore", version = "3.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "aiobotocore", version = "3.9.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2850,10 +2850,6 @@ dependencies = [
     { name = "s3fs" },
     { name = "starlette" },
     { name = "zstandard" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/be/bc/eb306e1d24c19a578d8be97d2b8a638cc6fd05d100cbc72b6d35d27e26bd/marin_rigging-0.2.91.dev32816546334.tar.gz", hash = "sha256:6cb79524ce8951bc994fe93cc774d75f0a67ec71374768239dc55059f76fd13d", size = 213375, upload-time = "2026-08-25T06:22:22.51Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2c/fc/bf16a07e3b23559e4878f848fa61b0af9fc4c68c530b8e06266db6bf1d29/marin_rigging-0.2.91.dev32816546334-py3-none-any.whl", hash = "sha256:a170173c320aa8acad6f458da3654039423e7ff509afdad867aa1f387ef63da6", size = 430721, upload-time = "2026-08-25T06:22:10.935Z" },
 ]
 
 [package.optional-dependencies]
@@ -3063,7 +3059,7 @@ requires-dist = [
     { name = "marin-finelog-server" },
     { name = "marin-iris" },
     { name = "marin-iris-native" },
-    { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'" },
+    { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=73ce24cbbdb94b4cabd10b7ecb1340b0ccc4008b" },
     { name = "megatron-bridge", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.5.0" },
     { name = "megatron-core", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },
     { name = "memray", marker = "sys_platform == 'linux' and extra == 'telemetry'" },
@@ -3131,7 +3127,7 @@ analysis = [
 ]
 dev = [
     { name = "litellm" },
-    { name = "marin-rigging", extras = ["prometheus"] },
+    { name = "marin-rigging", extras = ["prometheus"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=73ce24cbbdb94b4cabd10b7ecb1340b0ccc4008b" },
     { name = "marin-style", git = "https://github.com/marin-community/marin-style?rev=5094279da60b47b9a8fa8effaf7f73cd13f1e96f" },
     { name = "matplotlib" },
     { name = "pandas" },

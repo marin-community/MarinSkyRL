@@ -192,6 +192,7 @@ transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_to
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
 
 [tool.uv.sources]
+marin-rigging = { git = "https://github.com/marin-community/marin.git", rev = "73ce24cbbdb94b4cabd10b7ecb1340b0ccc4008b", subdirectory = "lib/rigging" }
 flash-attn = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
