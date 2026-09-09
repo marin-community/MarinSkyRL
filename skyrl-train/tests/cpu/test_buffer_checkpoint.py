@@ -264,3 +264,30 @@ async def test_no_trainer_in_kwargs():
     cb = BufferCheckpointCallback()
     with pytest.raises(RuntimeError, match="requires trainer context"):
         await cb.on_save_async(_FakeState(1), _FakeControl())
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_preserves_delayed_groups_and_legacy_undelayed_schema(tmp_path):
+    delayed = _make_item("delayed", step=10)
+    delayed.release_step = 12
+    delayed.injected_delay_steps = 2
+    undelayed = _make_item("undelayed", step=10)
+    admitted = _make_item("admitted", step=9)
+    admitted.release_step = 10
+    admitted.injected_delay_steps = 1
+    queues = _GenerationQueues(completed=asyncio.Queue(), retries=asyncio.Queue(), condition=asyncio.Condition())
+    queues.completed.put_nowait(delayed)
+    queues.completed.put_nowait(undelayed)
+    queues.record_admitted([admitted])
+    callback = BufferCheckpointCallback()
+    callback.bind_queues(queues)
+    await callback.flush_to_checkpoint(str(tmp_path))
+    restored = BufferCheckpointCallback.load_buffer_state(str(tmp_path))
+    held, legacy = restored.completed_groups
+    assert (held.uid, held.earliest_model_step, held.release_step, held.injected_delay_steps) == ("delayed", 10, 12, 2)
+    assert held.trajectory_batch == delayed.trajectory_batch
+    assert legacy.release_step is None and legacy.injected_delay_steps == 0
+    assert (restored.admitted_groups[0].release_step, restored.admitted_groups[0].injected_delay_steps) == (10, 1)
+    assert queues.completed.qsize() == 2
+    raw = torch.load(tmp_path / callback.ARTIFACT_NAME, weights_only=False)
+    assert set(raw["completed_groups"][1]) == {"trajectory_batch", "uid", "earliest_model_step", "source_prompts"}

@@ -14,6 +14,9 @@ class GeneratedOutputGroup:
     uid: str
     earliest_model_step: int
     source_prompts: List[dict]
+    # Delay scheduling survives checkpoint restore without changing the admission stamp.
+    release_step: int | None = None
+    injected_delay_steps: int = 0
     # Process-local observations deliberately omitted from checkpoint serialization.
     completed_at: float | None = None
     telemetry_attempt_id: str | None = None

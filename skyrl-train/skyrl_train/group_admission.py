@@ -4,7 +4,63 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Mapping, Protocol, Sequence
+import math
+import random
+from typing import Mapping, Protocol, Sequence, TypeVar
+import zlib
+
+
+class AdmissionOrder(StrEnum):
+    """Ordering of already eligible, atomic rollout groups."""
+
+    FIFO = "fifo"
+    LIFO = "lifo"
+    FRESHEST_FIRST = "freshest_first"
+    AGE_WEIGHTED = "age_weighted"
+
+
+class AdmissionCandidate(Protocol):
+    earliest_model_step: int
+
+
+Candidate = TypeVar("Candidate", bound=AdmissionCandidate)
+
+
+def order_admission_candidates(
+    groups: Sequence[Candidate], *, global_step: int, policy: AdmissionOrder, rng: random.Random
+) -> list[Candidate]:
+    """Order eligible groups without splitting or changing their existing version stamps.
+
+    Age-weighted ordering samples without replacement with weight 1/(age+1).
+    Logarithmic Efraimidis–Spirakis keys avoid underflow for older groups. Ties
+    retain arrival order, including a zero random draw whose key is minus infinity.
+    """
+    policy = AdmissionOrder(policy)
+    if policy is AdmissionOrder.FIFO:
+        return list(groups)
+    if policy is AdmissionOrder.LIFO:
+        return list(reversed(groups))
+    if policy is AdmissionOrder.FRESHEST_FIRST:
+        return sorted(groups, key=lambda group: group.earliest_model_step, reverse=True)
+    keys = []
+    for group in groups:
+        age = global_step - group.earliest_model_step
+        if age < 0:
+            raise ValueError("Age-weighted admission requires nonnegative group ages")
+        uniform = rng.random()
+        keys.append(math.log(uniform) * (age + 1) if uniform > 0 else -math.inf)
+    return [groups[index] for index in sorted(range(len(groups)), key=keys.__getitem__, reverse=True)]
+
+
+def injected_delay_steps(uid: str, *, seed: int, maximum: int) -> int:
+    """Assign a length-independent delay, reproducible for the same seed and UID."""
+    if type(maximum) is not int or maximum < 0:
+        raise ValueError("Maximum injected delay must be a nonnegative integer")
+    if not isinstance(uid, str) or not uid or type(seed) is not int:
+        raise ValueError("Injected delay requires a nonempty UID and integer seed")
+    if maximum == 0:
+        return 0
+    return random.Random(seed ^ zlib.crc32(uid.encode("utf-8"))).randint(0, maximum)
 
 
 class GroupAdvantageKind(StrEnum):

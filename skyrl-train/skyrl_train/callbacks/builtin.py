@@ -1073,7 +1073,7 @@ class BufferCheckpointCallback(TrainerCallback):
 
     @staticmethod
     def _serialize_groups(groups: List[GeneratedOutputGroup]) -> List[dict]:
-        return [
+        records = [
             {
                 "trajectory_batch": dict(item.trajectory_batch),
                 "uid": item.uid,
@@ -1082,6 +1082,12 @@ class BufferCheckpointCallback(TrainerCallback):
             }
             for item in groups
         ]
+
+        for group, record in zip(groups, records, strict=True):
+            if group.release_step is not None or group.injected_delay_steps:
+                record["release_step"] = group.release_step
+                record["injected_delay_steps"] = group.injected_delay_steps
+        return records
 
     async def _save_bound_state(
         self,
@@ -1165,6 +1171,8 @@ class BufferCheckpointCallback(TrainerCallback):
                         uid=entry["uid"],
                         earliest_model_step=entry["earliest_model_step"],
                         source_prompts=entry["source_prompts"],
+                        release_step=entry.get("release_step"),
+                        injected_delay_steps=entry.get("injected_delay_steps", 0),
                     )
                 )
             return groups
