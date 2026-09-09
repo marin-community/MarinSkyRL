@@ -468,6 +468,31 @@ class WorkerWrap:
 
         return read_publication_receiver_state(self)
 
+    def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+        from skyrl_train.weight_sync.worker_bucket_protocol import prepare_worker_buckets
+
+        return prepare_worker_buckets(self, payload, manifest_id)
+
+    def receive_diagnostic_weight_sync_bucket(self, bucket_id, replay=False):
+        from skyrl_train.weight_sync.worker_bucket_protocol import receive_worker_bucket
+
+        return receive_worker_bucket(self, bucket_id, replay=replay)
+
+    def finish_diagnostic_weight_sync_replay(self):
+        from skyrl_train.weight_sync.worker_bucket_protocol import finish_worker_replay
+
+        return finish_worker_replay(self)
+
+    def finish_diagnostic_weight_sync_install(self):
+        from skyrl_train.weight_sync.worker_bucket_protocol import finish_worker_install
+
+        return finish_worker_install(self)
+
+    def close_diagnostic_weight_sync_buckets(self):
+        from skyrl_train.weight_sync.worker_bucket_protocol import close_worker_buckets
+
+        return close_worker_buckets(self)
+
     def read_weight_sync_environment(self):
         from skyrl_train.weight_sync.readback_diagnostics import environment_readback
 

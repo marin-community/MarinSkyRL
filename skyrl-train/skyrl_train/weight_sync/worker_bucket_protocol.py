@@ -1,0 +1,161 @@
+"""Explicit diagnostic RPC protocol for native Grug bucket install and replay.
+
+Ordinary weight sync never calls this protocol. The driver must keep inference
+paused and the sender frozen through install and the subsequent untimed replay.
+"""
+
+import time
+
+import torch
+
+from skyrl_train.weight_sync.bucket_receiver import GrugBucketReceiver
+from skyrl_train.weight_sync.manifest import parse_manifest
+
+
+BUCKET_BYTES = 2**30
+REPLAY_SCRATCH_BYTES = 512 * 1024
+MAX_REPLAY_EXTRA_BYTES = 2**20
+
+
+def prepare_worker_buckets(worker, payload, manifest_id):
+    if getattr(worker, "_model_update_group", None) is None:
+        raise ValueError("The native weight-update communicator must already exist")
+    if hasattr(worker, "_diagnostic_bucket_state"):
+        raise ValueError("Receiver bucket state must be closed before preparing again")
+    if getattr(worker, "_skyrl_weight_update_active", False) or hasattr(worker, "_accumulated_weights"):
+        raise ValueError("Bucket protocol cannot overlap the layerwise reload protocol")
+    config = worker.vllm_config
+    hf = config.model_config.hf_config
+    parallel = config.parallel_config
+    if (
+        hf.model_type != "grug_moe"
+        or config.model_config.quantization is not None
+        or parallel.tensor_parallel_size != 1
+        or parallel.pipeline_parallel_size != 1
+        or parallel.enable_eplb
+    ):
+        raise ValueError("Receiver bucket protocol requires unquantized TP1 PP1 Grug without expert rebalancing")
+    manifest = parse_manifest(payload, manifest_id)
+    if manifest.bucket_bytes != BUCKET_BYTES:
+        raise ValueError("Native receiver requires the approved 1 GiB bucket capacity")
+    model = worker.model_runner.model
+    maps = {}
+    for name, module in model.named_modules():
+        if not hasattr(module, "w13_weight") or not hasattr(module, "w2_weight"):
+            continue
+        backend = getattr(getattr(module.quant_method, "unquantized_backend", None), "name", None)
+        if backend != "TRITON":
+            raise ValueError("Every instantiated expert module must report the native TRITON backend")
+        mapper = module._map_global_expert_id_to_local_expert_id
+        maps[name] = tuple(int(mapper(expert)) for expert in range(hf.num_experts))
+    if len(maps) != hf.num_hidden_layers:
+        raise ValueError("Native expert module coverage differs from the configured layer count")
+    parameters = dict(model.named_parameters())
+    torch.cuda.synchronize(worker.device)
+    free, total = torch.cuda.mem_get_info(worker.device)
+    if free < 2 * BUCKET_BYTES + MAX_REPLAY_EXTRA_BYTES:
+        raise ValueError("Receiver lacks free space for both buffers and bounded replay scratch")
+    allocated_before = torch.cuda.memory_allocated(worker.device)
+    buffers = tuple(torch.empty(BUCKET_BYTES, dtype=torch.uint8, device=worker.device) for _ in range(2))
+    receiver = GrugBucketReceiver(
+        manifest, parameters, maps, buffers, backend="TRITON", tensor_parallel_size=parallel.tensor_parallel_size
+    )
+    worker._diagnostic_bucket_state = {
+        "receiver": receiver,
+        "scratch": None,
+        "load_stream": torch.cuda.Stream(device=worker.device),
+        "receive_events": [torch.cuda.Event(), torch.cuda.Event()],
+        "load_events": [torch.cuda.Event(), torch.cuda.Event()],
+        "slot_used": [False, False],
+        "install_complete": False,
+    }
+    return {
+        "manifest_id": manifest_id,
+        "bucket_count": manifest.bucket_count,
+        "bucket_bytes": BUCKET_BYTES,
+        "installed_parameter_bytes": receiver.expected_bytes,
+        "expert_modules": len(maps),
+        "free_bytes_before": free,
+        "total_bytes": total,
+        "buffer_allocated_delta": torch.cuda.memory_allocated(worker.device) - allocated_before,
+        "rank": torch.distributed.get_rank(),
+    }
+
+
+def receive_worker_bucket(worker, bucket_id: int, *, replay: bool = False):
+    state = worker._diagnostic_bucket_state
+    receiver = state["receiver"]
+    receiver.validate_next_bucket(bucket_id, replay=replay)
+    if replay and not state["install_complete"]:
+        raise ValueError("Replay requires the explicit installed-weight completion join")
+    entries = receiver.manifest.bucket(bucket_id)
+    nbytes = entries[-1].offset + entries[-1].nbytes
+    slot = bucket_id % 2
+    buffer = receiver.buffers[slot]
+    if replay and state["scratch"] is None:
+        # Peak is measured across allocation, every comparison and reduction.
+        # This resets process allocator statistics only in the explicit diagnostic.
+        torch.cuda.synchronize(worker.device)
+        state["replay_started"] = time.monotonic()
+        state["replay_allocated_before"] = torch.cuda.memory_allocated(worker.device)
+        torch.cuda.reset_peak_memory_stats(worker.device)
+        state["scratch"] = torch.empty(REPLAY_SCRATCH_BYTES, dtype=torch.bool, device=worker.device)
+    receive_stream = torch.cuda.current_stream(worker.device)
+    if state["slot_used"][slot]:
+        receive_stream.wait_event(state["load_events"][slot])
+    torch.distributed.broadcast(buffer.narrow(0, 0, nbytes), src=0, group=worker._model_update_group)
+    state["receive_events"][slot].record(receive_stream)
+    with torch.cuda.stream(state["load_stream"]):
+        state["load_stream"].wait_event(state["receive_events"][slot])
+        if replay:
+            result = receiver.replay_bucket(bucket_id, state["scratch"])
+            receipt = {"compared_bytes": result.compared_bytes, "mismatches": result.mismatches}
+        else:
+            receipt = {"installed_bytes": receiver.install_bucket(bucket_id)}
+        state["load_events"][slot].record(state["load_stream"])
+    state["slot_used"][slot] = True
+    return {"bucket_id": bucket_id, "slot": slot, "load_completion_event_recorded": True, **receipt}
+
+
+def finish_worker_install(worker):
+    state = worker._diagnostic_bucket_state
+    state["receiver"].validate_install_complete()
+    completed_slots = []
+    for slot, (used, event) in enumerate(zip(state["slot_used"], state["load_events"], strict=True)):
+        if used:
+            event.synchronize()
+            if not event.query():
+                raise RuntimeError("A receiver load event remains incomplete after its completion join")
+            completed_slots.append(slot)
+    state["install_complete"] = True
+    return {
+        "install_complete": True,
+        "completed_slots": completed_slots,
+        "manifest_id": state["receiver"].manifest.manifest_id,
+    }
+
+
+def finish_worker_replay(worker):
+    state = worker._diagnostic_bucket_state
+    if state["scratch"] is None:
+        raise ValueError("No frozen replay was started")
+    result = state["receiver"].finish_replay()
+    torch.cuda.synchronize(worker.device)
+    peak_extra = torch.cuda.max_memory_allocated(worker.device) - state["replay_allocated_before"]
+    if peak_extra > MAX_REPLAY_EXTRA_BYTES:
+        raise ValueError("Measured replay allocation exceeds the approved 1 MiB total scratch limit")
+    return {
+        "manifest_id": state["receiver"].manifest.manifest_id,
+        "compared_bytes": result.compared_bytes,
+        "expected_bytes": state["receiver"].expected_bytes,
+        "mismatches": result.mismatches,
+        "coverage": 1.0,
+        "replay_seconds": time.monotonic() - state["replay_started"],
+        "replay_peak_extra_bytes": peak_extra,
+        "rank": torch.distributed.get_rank(),
+    }
+
+
+def close_worker_buckets(worker):
+    torch.cuda.synchronize(worker.device)
+    del worker._diagnostic_bucket_state

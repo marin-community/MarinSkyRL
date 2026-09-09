@@ -91,8 +91,7 @@ class GrugBucketReceiver:
             yield from self._entry_pairs(entry, source)
 
     def install_bucket(self, bucket_id: int) -> int:
-        if bucket_id != self._next_install or bucket_id >= self.manifest.bucket_count:
-            raise ValueError("Install must consume every bucket once in manifest order")
+        self.validate_next_bucket(bucket_id, replay=False)
         with torch.no_grad():
             for source, installed in self._pairs(bucket_id):
                 installed.copy_(source)
@@ -100,10 +99,7 @@ class GrugBucketReceiver:
         return self._bucket_local_bytes[bucket_id]
 
     def replay_bucket(self, bucket_id: int, scratch: torch.Tensor) -> ByteComparison:
-        if self._next_install != self.manifest.bucket_count:
-            raise ValueError("Frozen replay starts only after every install bucket")
-        if bucket_id != self._next_replay or bucket_id >= self.manifest.bucket_count:
-            raise ValueError("Replay must consume every bucket once in manifest order")
+        self.validate_next_bucket(bucket_id, replay=True)
         if (
             scratch.dtype != torch.bool
             or scratch.ndim != 1
@@ -128,6 +124,22 @@ class GrugBucketReceiver:
         self._replay_mismatches += result.mismatches
         self._next_replay += 1
         return result
+
+    def validate_next_bucket(self, bucket_id: int, *, replay: bool) -> None:
+        if type(bucket_id) is not int or type(replay) is not bool:
+            raise ValueError("Bucket identity and replay phase must be typed explicitly")
+        if not replay:
+            if bucket_id != self._next_install or bucket_id >= self.manifest.bucket_count:
+                raise ValueError("Install must consume every bucket once in manifest order")
+            return
+        if self._next_install != self.manifest.bucket_count:
+            raise ValueError("Frozen replay starts only after every install bucket")
+        if bucket_id != self._next_replay or bucket_id >= self.manifest.bucket_count:
+            raise ValueError("Replay must consume every bucket once in manifest order")
+
+    def validate_install_complete(self) -> None:
+        if self._next_install != self.manifest.bucket_count:
+            raise ValueError("Install is missing manifest buckets")
 
     def finish_replay(self) -> ByteComparison:
         if self._next_replay != self.manifest.bucket_count:
