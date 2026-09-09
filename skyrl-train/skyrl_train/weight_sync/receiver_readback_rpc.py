@@ -1,9 +1,9 @@
-"""Retain every DP worker's read-only diagnostic utility response."""
+"""Retain every DP worker's diagnostic utility response."""
 
 import asyncio
 
 
-async def read_all_receiver_workers(engine, method: str):
+async def call_all_receiver_workers(engine, method: str, *, args: tuple = (), kwargs: dict | None = None):
     """Avoid DPLBAsyncMPClient's deliberate first-core-only utility return.
 
     The pinned vLLM client dispatches collective_rpc to all cores but its public
@@ -12,13 +12,13 @@ async def read_all_receiver_workers(engine, method: str):
     """
     dp_size = engine.vllm_config.parallel_config.data_parallel_size
     if dp_size == 1:
-        return await engine.collective_rpc(method)
+        return await engine.collective_rpc(method, args=args, kwargs=kwargs)
     core = engine.engine_core
     if len(core.core_engines) != dp_size:
         raise ValueError("Receiver readback requires every configured DP core")
     per_core = await asyncio.gather(
         *[
-            core._call_utility_async("collective_rpc", method, None, (), None, engine=identity)
+            core._call_utility_async("collective_rpc", method, None, args, kwargs, engine=identity)
             for identity in core.core_engines
         ]
     )

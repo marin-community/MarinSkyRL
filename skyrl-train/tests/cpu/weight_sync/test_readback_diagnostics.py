@@ -29,7 +29,7 @@ from skyrl_train.weight_sync.readback_diagnostics import (
     validate_replica_digests,
     network_log_readback,
 )
-from skyrl_train.weight_sync.receiver_readback_rpc import read_all_receiver_workers
+from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 from skyrl_train.utils.tracking import Tracking
 
 
@@ -156,13 +156,13 @@ async def test_receiver_readback_retains_each_dp_core_and_rejects_missing_core()
     engine = SimpleNamespace(
         engine_core=core, vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=2))
     )
-    assert await read_all_receiver_workers(engine, "read_weight_sync_environment") == [
+    assert await call_all_receiver_workers(engine, "read_weight_sync_environment") == [
         {"origin": "zero"},
         {"origin": "one"},
     ]
     core.core_engines = [b"zero"]
     with pytest.raises(ValueError, match="every configured DP core"):
-        await read_all_receiver_workers(engine, "read_weight_sync_environment")
+        await call_all_receiver_workers(engine, "read_weight_sync_environment")
 
 
 def _distributed_digests(rank, rendezvous, output, mutate):

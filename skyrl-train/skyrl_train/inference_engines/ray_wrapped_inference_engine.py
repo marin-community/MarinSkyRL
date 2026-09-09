@@ -207,6 +207,25 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             terminal_timeout_seconds=terminal_timeout_seconds,
         )
 
+    async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+        return await self.inference_engine_actor.prepare_diagnostic_weight_sync_buckets.remote(
+            payload=payload, manifest_id=manifest_id
+        )
+
+    async def receive_diagnostic_weight_sync_bucket(self, bucket_id: int, *, replay: bool = False):
+        return await self.inference_engine_actor.receive_diagnostic_weight_sync_bucket.remote(
+            bucket_id=bucket_id, replay=replay
+        )
+
+    async def finish_diagnostic_weight_sync_install(self):
+        return await self.inference_engine_actor.finish_diagnostic_weight_sync_install.remote()
+
+    async def finish_diagnostic_weight_sync_replay(self):
+        return await self.inference_engine_actor.finish_diagnostic_weight_sync_replay.remote()
+
+    async def close_diagnostic_weight_sync_buckets(self):
+        return await self.inference_engine_actor.close_diagnostic_weight_sync_buckets.remote()
+
     async def read_publication_receiver_state(self):
         return await self.inference_engine_actor.read_publication_receiver_state.remote()
 

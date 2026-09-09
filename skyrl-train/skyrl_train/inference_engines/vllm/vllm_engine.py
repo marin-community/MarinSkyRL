@@ -2126,15 +2126,50 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def begin_publication_timing(self, step: int):
         return await self._get_engine().collective_rpc("begin_publication_timing", args=(step,))
 
-    async def read_publication_receiver_state(self):
-        from skyrl_train.weight_sync.receiver_readback_rpc import read_all_receiver_workers
+    async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 
-        return await read_all_receiver_workers(self._get_engine(), "read_publication_receiver_state")
+        return await call_all_receiver_workers(
+            self._get_engine(), "prepare_diagnostic_weight_sync_buckets", args=(payload, manifest_id), kwargs=None
+        )
+
+    async def receive_diagnostic_weight_sync_bucket(self, bucket_id: int, *, replay: bool = False):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(), "receive_diagnostic_weight_sync_bucket", args=(bucket_id,), kwargs={"replay": replay}
+        )
+
+    async def finish_diagnostic_weight_sync_install(self):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(), "finish_diagnostic_weight_sync_install", args=(), kwargs=None
+        )
+
+    async def finish_diagnostic_weight_sync_replay(self):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(), "finish_diagnostic_weight_sync_replay", args=(), kwargs=None
+        )
+
+    async def close_diagnostic_weight_sync_buckets(self):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(), "close_diagnostic_weight_sync_buckets", args=(), kwargs=None
+        )
+
+    async def read_publication_receiver_state(self):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(self._get_engine(), "read_publication_receiver_state")
 
     async def read_weight_sync_environment(self):
-        from skyrl_train.weight_sync.receiver_readback_rpc import read_all_receiver_workers
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 
-        return await read_all_receiver_workers(self._get_engine(), "read_weight_sync_environment")
+        return await call_all_receiver_workers(self._get_engine(), "read_weight_sync_environment")
 
     async def read_publication_timing(self):
         return await self._get_engine().collective_rpc("read_publication_timing")

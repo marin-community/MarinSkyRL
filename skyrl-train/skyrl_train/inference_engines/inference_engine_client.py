@@ -879,6 +879,30 @@ class InferenceEngineClient(InferenceEngineInterface):
             kwargs["terminal_timeout_seconds"] = terminal_timeout_seconds
         return await self._run_on_all_engines("read_publication_request_state", **kwargs)
 
+    async def _run_diagnostic_bucket_rpc(self, method_name: str, **kwargs):
+        if self._dead_engines:
+            raise RuntimeError("Bucket collectives require every configured inference engine")
+        return await self._run_on_all_engines(method_name, **kwargs)
+
+    async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+        return await self._run_diagnostic_bucket_rpc(
+            "prepare_diagnostic_weight_sync_buckets", payload=payload, manifest_id=manifest_id
+        )
+
+    async def receive_diagnostic_weight_sync_bucket(self, bucket_id: int, *, replay: bool = False):
+        return await self._run_diagnostic_bucket_rpc(
+            "receive_diagnostic_weight_sync_bucket", bucket_id=bucket_id, replay=replay
+        )
+
+    async def finish_diagnostic_weight_sync_install(self):
+        return await self._run_diagnostic_bucket_rpc("finish_diagnostic_weight_sync_install")
+
+    async def finish_diagnostic_weight_sync_replay(self):
+        return await self._run_diagnostic_bucket_rpc("finish_diagnostic_weight_sync_replay")
+
+    async def close_diagnostic_weight_sync_buckets(self):
+        return await self._run_diagnostic_bucket_rpc("close_diagnostic_weight_sync_buckets")
+
     async def read_publication_receiver_state(self):
         return await self._run_on_all_engines("read_publication_receiver_state")
 
