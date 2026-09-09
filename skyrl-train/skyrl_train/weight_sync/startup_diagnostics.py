@@ -46,8 +46,8 @@ class StartupDiagnostics:
             return
         size = self.path.stat().st_size
         with self.path.open("rb") as stream:
-            stream.seek(max(0, size - 262144))
-            raw = stream.read(262144)
+            stream.seek(max(0, size - 32768))
+            raw = stream.read(32768)
         persist_readback(
             self.output_uri,
             "stack",
@@ -83,7 +83,7 @@ def startup_diagnostics(output_uri: str, role: str):
         except BaseException as error:
             try:
                 diagnostic.phase(
-                    "python_exception", error_type=type(error).__name__, traceback=traceback.format_exc()[-262144:]
+                    "python_exception", error_type=type(error).__name__, traceback=traceback.format_exc()[-32768:]
                 )
             except Exception as upload_error:
                 diagnostic.errors.append(type(upload_error).__name__)
