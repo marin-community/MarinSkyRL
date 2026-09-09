@@ -44,6 +44,7 @@ def policy_methods():
 @pytest.fixture
 def gate(request, monkeypatch, tmp_path):
     case = request.getfixturevalue("native_protocol")
+    monkeypatch.setenv("IRIS_ATTEMPT_UID", "cpu-timing-original-attempt")
     monkeypatch.setattr(protocol, "BUCKET_BYTES", 32)
     monkeypatch.setattr(protocol, "MAX_REPLAY_EXTRA_BYTES", 16)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: torch.device("cpu"))
@@ -458,3 +459,19 @@ async def test_reference_timing_defers_storage_binding_until_after_native_load(g
         assert install["install"]["sender"]["wire_bytes"] == proof["replay"]["sender"]["wire_bytes"]
         assert gate.policy._policy_weight_access.owner is None
     await gate.policy.close_bucket_timing(gate.client, 2)
+
+
+@pytest.mark.asyncio
+async def test_timing_restart_cannot_repeat_a_recorded_measurement(gate):
+    from skyrl_train.weight_sync.bucket_qualification import mark_measurement_once
+
+    marker = mark_measurement_once(gate.policy.cfg.trainer.weight_sync_readback_output)
+    original = Path(marker["uri"]).read_bytes()
+    await gate.policy.prepare_bucket_timing(gate.client)
+    with pytest.raises(ValueError, match="previous attempt"):
+        await gate.policy.begin_bucket_timing(gate.client, 1)
+    assert Path(marker["uri"]).read_bytes() == original
+    assert not hasattr(gate.policy, "_bucket_timing_session")
+    assert not hasattr(gate.receiver.worker, "_diagnostic_bucket_state")
+    with gate.policy._policy_weight_access.hold("ppo"):
+        pass

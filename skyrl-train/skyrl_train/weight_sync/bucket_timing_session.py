@@ -10,6 +10,7 @@ import time
 
 import torch
 
+from skyrl_train.weight_sync.bucket_qualification import mark_measurement_once
 from skyrl_train.weight_sync.frozen_source_views import local_source_slices
 from skyrl_train.weight_sync.readback_diagnostics import persist_readback
 from skyrl_train.weight_sync.reference_bucket_protocol import manifest_wire_inventory
@@ -51,6 +52,7 @@ class BucketTimingSession:
     versions: tuple = ()
     completed_update: int | None = None
     install: dict | None = None
+    measurement_marker: dict | None = None
 
 
 def source_storage(sources):
@@ -161,6 +163,8 @@ async def begin_timing(worker, client, publication_id):
         state.install = None
         rows = None
         if torch.distributed.get_rank() == 0:
+            if state.measurement_marker is None:
+                state.measurement_marker = mark_measurement_once(worker.cfg.trainer.weight_sync_readback_output)
             cfg = worker.cfg.generator
             state.receiver_begin_pending = True
             begin = (
@@ -188,6 +192,7 @@ async def begin_timing(worker, client, publication_id):
         state.phase = Phase.BEGUN
         receipt = {
             "publication_id": publication_id,
+            "measurement_marker": state.measurement_marker,
             "source_refresh_allocated_before": allocated,
             "source_refresh_peak_allocated_bytes": peak,
             "source_refresh_peak_extra_bytes": peak - allocated,
