@@ -66,6 +66,7 @@ class TransportRank:
             rank=0,
             world_size=1,
             timeout=timedelta(seconds=20),
+            device_id=self.device if backend == "nccl" else None,
         )
         self.record("default_group_ready")
 
