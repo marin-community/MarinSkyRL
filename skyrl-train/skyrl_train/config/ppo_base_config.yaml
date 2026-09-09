@@ -38,6 +38,8 @@ checkpoint_export:
   hf_upload_mode: latest
 
 trainer:
+  # Optional S3 claim before initial evaluation/training; blocks remeasurement after an Iris retry.
+  measurement_guard_uri: null
   debug_mode: "off"
   weight_sync_nccl_diagnostics: false
   weight_sync_readback_output: null
