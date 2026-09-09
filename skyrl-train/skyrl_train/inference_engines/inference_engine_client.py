@@ -889,9 +889,20 @@ class InferenceEngineClient(InferenceEngineInterface):
             "prepare_diagnostic_weight_sync_buckets", payload=payload, manifest_id=manifest_id
         )
 
-    async def receive_diagnostic_weight_sync_bucket(self, bucket_id: int, *, replay: bool = False):
+    async def begin_diagnostic_weight_sync(self, manifest_id: str, publication_id: int):
         return await self._run_diagnostic_bucket_rpc(
-            "receive_diagnostic_weight_sync_bucket", bucket_id=bucket_id, replay=replay
+            "begin_diagnostic_weight_sync", manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def receive_diagnostic_weight_sync_bucket(
+        self, bucket_id: int, *, replay: bool = False, manifest_id: str | None = None, publication_id: int | None = None
+    ):
+        return await self._run_diagnostic_bucket_rpc(
+            "receive_diagnostic_weight_sync_bucket",
+            bucket_id=bucket_id,
+            replay=replay,
+            manifest_id=manifest_id,
+            publication_id=publication_id,
         )
 
     async def finish_diagnostic_weight_sync_install(self):

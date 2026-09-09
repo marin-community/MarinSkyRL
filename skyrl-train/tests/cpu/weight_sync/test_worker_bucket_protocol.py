@@ -19,7 +19,7 @@ def worker_methods():
     methods = [
         node for node in worker.body if isinstance(node, ast.FunctionDef) and "diagnostic_weight_sync" in node.name
     ]
-    assert len(methods) == 5
+    assert len(methods) == 6
     body = ast.ClassDef(name="NativeWorkerMethods", bases=[], keywords=[], body=methods, decorator_list=[])
     module = ast.fix_missing_locations(ast.Module(body=[body], type_ignores=[]))
     namespace = {}
@@ -288,3 +288,52 @@ async def test_cleanup_failure_without_prior_error_remains_failure():
 
     with pytest.raises(RuntimeError, match="receiver cleanup failed"):
         await close_preserving_failure(SimpleNamespace(close_diagnostic_weight_sync_buckets=fail_close), "cpu", 0, None)
+
+
+def test_actual_worker_cached_manifest_reuses_buffers_across_two_exact_syncs(native_protocol):
+    case = native_protocol
+    prepare(case)
+    manifest = case.parts[0]
+    pointers = None
+    for version in (1, 2):
+        begin = case.worker.begin_diagnostic_weight_sync(manifest.manifest_id, version)
+        if pointers is None:
+            pointers = begin["buffer_pointers"]
+        assert begin["buffer_pointers"] == pointers
+        for source in case.parts[1].values():
+            source.add_(1)
+        identity = {"manifest_id": manifest.manifest_id, "publication_id": version}
+        for bucket in range(manifest.bucket_count):
+            row = case.worker.receive_diagnostic_weight_sync_bucket(bucket, **identity)
+            assert row["publication_id"] == version
+        case.worker.finish_diagnostic_weight_sync_install()
+        for bucket in range(manifest.bucket_count):
+            case.worker.receive_diagnostic_weight_sync_bucket(bucket, replay=True, **identity)
+        proof = case.worker.finish_diagnostic_weight_sync_replay()
+        assert proof["mismatches"] == 0 and proof["publication_id"] == version
+        assert proof["compared_bytes"] == proof["expected_bytes"]
+    case.worker.close_diagnostic_weight_sync_buckets()
+
+
+def test_cached_sync_rejects_stale_packets_and_reset_before_proof(native_protocol):
+    case = native_protocol
+    prepare(case)
+    manifest = case.parts[0]
+    case.worker.begin_diagnostic_weight_sync(manifest.manifest_id, 1)
+    with pytest.raises(ValueError, match="complete successful replay"):
+        case.worker.begin_diagnostic_weight_sync(manifest.manifest_id, 2)
+    with pytest.raises(ValueError, match="versions must increase"):
+        case.worker.begin_diagnostic_weight_sync(manifest.manifest_id, 1)
+    for manifest_id, version in ((manifest.manifest_id, 0), ("wrong", 1), (None, None)):
+        with pytest.raises(ValueError, match="does not match"):
+            case.worker.receive_diagnostic_weight_sync_bucket(0, manifest_id=manifest_id, publication_id=version)
+    assert not case.broadcasts
+
+
+def test_cached_sync_rejects_same_tensor_object_with_replaced_storage(native_protocol):
+    case = native_protocol
+    prepare(case)
+    tensor = next(iter(case.parts[2].values()))
+    tensor.data = tensor.clone()
+    with pytest.raises(ValueError, match="parameter identity changed"):
+        case.worker.begin_diagnostic_weight_sync(case.parts[0].manifest_id, 1)

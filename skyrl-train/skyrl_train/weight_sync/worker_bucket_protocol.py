@@ -21,6 +21,20 @@ REPLAY_SCRATCH_BYTES = 64 * 1024
 MAX_REPLAY_EXTRA_BYTES = 2**20
 
 
+def parameter_storage(parameters):
+    return {
+        name: (
+            id(tensor),
+            tensor.data_ptr(),
+            tuple(tensor.shape),
+            tuple(tensor.stride()),
+            str(tensor.dtype),
+            str(tensor.device),
+        )
+        for name, tensor in parameters.items()
+    }
+
+
 def prepare_worker_buckets(worker, payload, manifest_id):
     if getattr(worker, "_model_update_group", None) is None:
         raise ValueError("The native weight-update communicator must already exist")
@@ -66,12 +80,15 @@ def prepare_worker_buckets(worker, payload, manifest_id):
     )
     worker._diagnostic_bucket_state = {
         "receiver": receiver,
+        "parameter_storage": parameter_storage(parameters),
         "scratch": None,
         "load_stream": torch.cuda.Stream(device=worker.device),
         "receive_events": [torch.cuda.Event(), torch.cuda.Event()],
         "load_events": [torch.cuda.Event(), torch.cuda.Event()],
         "slot_used": [False, False],
         "install_complete": False,
+        "publication_id": None,
+        "replay_verified": False,
         "install_allocated_before": torch.cuda.memory_allocated(worker.device),
         "install_free_before": torch.cuda.mem_get_info(worker.device)[0],
     }
@@ -90,9 +107,54 @@ def prepare_worker_buckets(worker, payload, manifest_id):
     }
 
 
-def receive_worker_bucket(worker, bucket_id: int, *, replay: bool = False):
+def begin_worker_bucket_sync(worker, manifest_id: str, publication_id: int):
+    """Reuse prepared buffers while binding all subsequent RPCs to one sync."""
     state = worker._diagnostic_bucket_state
     receiver = state["receiver"]
+    if type(publication_id) is not int or publication_id < 0 or manifest_id != receiver.manifest.manifest_id:
+        raise ValueError("Invalid cached-manifest weight-sync identity")
+    prior = state["publication_id"]
+    if prior is not None and publication_id <= prior:
+        raise ValueError("Weight-sync versions must increase; delayed reset RPC rejected")
+    if getattr(worker, "_skyrl_weight_update_active", False) or hasattr(worker, "_accumulated_weights"):
+        raise ValueError("Bucket reset cannot overlap layerwise reload")
+    current = dict(worker.model_runner.model.named_parameters())
+    if parameter_storage(current) != state["parameter_storage"]:
+        raise ValueError("Installed parameter identity changed since manifest preparation")
+    if prior is not None or any(state["slot_used"]):
+        if not state["replay_verified"]:
+            raise ValueError("The preceding sync needs a complete successful replay")
+        receiver.reset_after_verified_replay()
+    torch.cuda.synchronize(worker.device)
+    state["scratch"] = None
+    state.update(
+        publication_id=publication_id,
+        replay_verified=False,
+        slot_used=[False, False],
+        install_complete=False,
+        install_allocated_before=torch.cuda.memory_allocated(worker.device),
+        install_free_before=torch.cuda.mem_get_info(worker.device)[0],
+    )
+    torch.cuda.reset_peak_memory_stats(worker.device)
+    return {
+        "identity": bucket_identity(worker.device),
+        "manifest_id": manifest_id,
+        "publication_id": publication_id,
+        "buffers_reused": True,
+        "buffer_pointers": [buffer.data_ptr() for buffer in receiver.buffers],
+    }
+
+
+def receive_worker_bucket(
+    worker, bucket_id: int, *, replay: bool = False, manifest_id: str | None = None, publication_id: int | None = None
+):
+    state = worker._diagnostic_bucket_state
+    receiver = state["receiver"]
+    if (manifest_id, publication_id) != (
+        receiver.manifest.manifest_id if state["publication_id"] is not None else None,
+        state["publication_id"],
+    ):
+        raise ValueError("Bucket RPC does not match the active manifest and weight-sync version")
     receiver.validate_next_bucket(bucket_id, replay=replay)
     if replay and not state["install_complete"]:
         raise ValueError("Replay requires the explicit installed-weight completion join")
@@ -127,6 +189,8 @@ def receive_worker_bucket(worker, bucket_id: int, *, replay: bool = False):
     return {
         "identity": bucket_identity(worker.device),
         "bucket_id": bucket_id,
+        "manifest_id": receiver.manifest.manifest_id,
+        "publication_id": state["publication_id"],
         "slot": slot,
         "load_completion_event_recorded": True,
         **receipt,
@@ -147,6 +211,7 @@ def finish_worker_install(worker):
     return {
         "identity": bucket_identity(worker.device),
         "install_complete": True,
+        "publication_id": state["publication_id"],
         "allocated_before": state["install_allocated_before"],
         "allocated_after": torch.cuda.memory_allocated(worker.device),
         "peak_allocated_bytes": torch.cuda.max_memory_allocated(worker.device),
@@ -165,6 +230,11 @@ def finish_worker_replay(worker):
     result = state["receiver"].finish_replay()
     torch.cuda.synchronize(worker.device)
     peak_extra = torch.cuda.max_memory_allocated(worker.device) - state["replay_allocated_before"]
+    state["replay_verified"] = (
+        result.mismatches == 0
+        and result.compared_bytes == state["receiver"].expected_bytes
+        and peak_extra <= MAX_REPLAY_EXTRA_BYTES
+    )
     # Return the measured failure evidence before the aggregate gate rejects it.
     # Rank zero persists this receipt before applying the unchanged 1 MiB bound.
     return {
@@ -175,6 +245,7 @@ def finish_worker_replay(worker):
         "mismatches": result.mismatches,
         "coverage": 1.0,
         "replay_seconds": time.monotonic() - state["replay_started"],
+        "publication_id": state["publication_id"],
         "replay_peak_extra_bytes": peak_extra,
         "replay_scratch_limit_bytes": MAX_REPLAY_EXTRA_BYTES,
         "replay_memory_within_limit": peak_extra <= MAX_REPLAY_EXTRA_BYTES,

@@ -152,6 +152,17 @@ class GrugBucketReceiver:
         self._next_replay += 1
         return result
 
+    def reset_after_verified_replay(self) -> None:
+        """Reuse the immutable manifest/storage only after complete exact proof."""
+        result = self.finish_replay()
+        if result.mismatches:
+            raise ValueError("Cannot reuse a receiver after a failed byte comparison")
+        self._next_install = 0
+        self._next_replay = 0
+        self._replay_mismatches = 0
+        self._replay_bytes = 0
+        self._replay_coverage = ReceiverByteCoverage(self.parameters)
+
     def validate_next_bucket(self, bucket_id: int, *, replay: bool) -> None:
         if type(bucket_id) is not int or type(replay) is not bool:
             raise ValueError("Bucket identity and replay phase must be typed explicitly")

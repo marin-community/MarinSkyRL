@@ -473,10 +473,17 @@ class WorkerWrap:
 
         return prepare_worker_buckets(self, payload, manifest_id)
 
-    def receive_diagnostic_weight_sync_bucket(self, bucket_id, replay=False):
+    def begin_diagnostic_weight_sync(self, manifest_id, publication_id):
+        from skyrl_train.weight_sync.worker_bucket_protocol import begin_worker_bucket_sync
+
+        return begin_worker_bucket_sync(self, manifest_id, publication_id)
+
+    def receive_diagnostic_weight_sync_bucket(self, bucket_id, replay=False, manifest_id=None, publication_id=None):
         from skyrl_train.weight_sync.worker_bucket_protocol import receive_worker_bucket
 
-        return receive_worker_bucket(self, bucket_id, replay=replay)
+        return receive_worker_bucket(
+            self, bucket_id, replay=replay, manifest_id=manifest_id, publication_id=publication_id
+        )
 
     def finish_diagnostic_weight_sync_replay(self):
         from skyrl_train.weight_sync.worker_bucket_protocol import finish_worker_replay
@@ -2133,11 +2140,23 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             self._get_engine(), "prepare_diagnostic_weight_sync_buckets", args=(payload, manifest_id), kwargs=None
         )
 
-    async def receive_diagnostic_weight_sync_bucket(self, bucket_id: int, *, replay: bool = False):
+    async def begin_diagnostic_weight_sync(self, manifest_id: str, publication_id: int):
         from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 
         return await call_all_receiver_workers(
-            self._get_engine(), "receive_diagnostic_weight_sync_bucket", args=(bucket_id,), kwargs={"replay": replay}
+            self._get_engine(), "begin_diagnostic_weight_sync", args=(manifest_id, publication_id), kwargs=None
+        )
+
+    async def receive_diagnostic_weight_sync_bucket(
+        self, bucket_id: int, *, replay: bool = False, manifest_id: str | None = None, publication_id: int | None = None
+    ):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(),
+            "receive_diagnostic_weight_sync_bucket",
+            args=(bucket_id,),
+            kwargs={"replay": replay, "manifest_id": manifest_id, "publication_id": publication_id},
         )
 
     async def finish_diagnostic_weight_sync_install(self):
