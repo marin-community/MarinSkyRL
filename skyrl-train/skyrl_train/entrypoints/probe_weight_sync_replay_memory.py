@@ -12,10 +12,11 @@ from skyrl_train.weight_sync.bucket_qualification import mark_measurement_once
 from skyrl_train.weight_sync.byte_replay import compare_installed_views
 from skyrl_train.weight_sync.readback_diagnostics import persist_readback
 from skyrl_train.weight_sync.router_replay import compare_widened_router
+from skyrl_train.weight_sync.worker_bucket_protocol import REPLAY_SCRATCH_BYTES
 
 
 BUFFER_BYTES = 1 << 30
-SCRATCH_BYTES = 512 << 10
+SCRATCH_BYTES = REPLAY_SCRATCH_BYTES
 REPETITIONS = 3
 CASES = ("count_nonzero", "installed_bytes", "router_widening")
 

@@ -3,6 +3,9 @@ import weakref
 import pytest
 import torch
 
+from skyrl_train.weight_sync.byte_replay import compare_installed_views
+from skyrl_train.weight_sync.worker_bucket_protocol import REPLAY_SCRATCH_BYTES
+
 from skyrl_train.weight_sync.router_replay import ROUTER_CONVERSION_ELEMENTS, compare_widened_router
 from skyrl_train.weight_sync.manifest import TensorSpec, build_manifest, pack_bucket
 from skyrl_train.weight_sync.bucket_receiver import GrugBucketReceiver
@@ -75,3 +78,14 @@ def test_other_dense_dtype_mismatch_remains_rejected():
     buffers = (torch.empty(32, dtype=torch.uint8), torch.empty(32, dtype=torch.uint8))
     with pytest.raises(ValueError, match="name=model.embed_tokens.weight"):
         GrugBucketReceiver(manifest, parameters, {}, buffers, backend="TRITON", tensor_parallel_size=1)
+
+
+def test_production_scratch_preserves_exact_mismatch_count_across_chunks():
+    scratch = torch.empty(REPLAY_SCRATCH_BYTES, dtype=torch.bool)
+    source = torch.zeros(REPLAY_SCRATCH_BYTES * 3 + 1, dtype=torch.uint8)
+    installed = source.clone()
+    installed[REPLAY_SCRATCH_BYTES - 1] = 1
+    installed[REPLAY_SCRATCH_BYTES] = 1
+    installed[-1] = 1
+    result = compare_installed_views(((source, installed),), scratch, expected_bytes=source.numel())
+    assert result.compared_bytes == source.numel() and result.mismatches == 3
