@@ -48,7 +48,11 @@ def gate(request, monkeypatch):
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
     monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
-    monkeypatch.setattr(torch.distributed, "all_gather_object", lambda output, value: output.__setitem__(0, value))
+    monkeypatch.setattr(
+        torch.distributed, "all_gather_object", lambda output, value, group=None: output.__setitem__(0, value)
+    )
+    monkeypatch.setattr(torch.distributed, "new_group", lambda **kwargs: "cpu-gloo-group")
+    monkeypatch.setattr(torch.distributed, "destroy_process_group", lambda group: None)
     condition = Condition()
     wire = []
 
@@ -256,3 +260,13 @@ async def test_completed_exporter_is_released_before_replay_can_allocate(gate, m
     monkeypatch.setattr(protocol, "StreamingBucketSender", ObservedTimedSender)
     monkeypatch.setattr(protocol, "FrozenViewBucketSender", ObservedReplaySender)
     await gate.policy.diagnostic_bucket_install_and_replay(gate.client)
+
+
+@pytest.mark.asyncio
+async def test_replay_only_catalogue_gpu_allocation_is_included_in_proof_gate(gate, monkeypatch):
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: 4017)
+    with pytest.raises(ValueError, match="source catalogue introduced"):
+        await gate.policy.diagnostic_bucket_install_and_replay(gate.client)
+    assert gate.client.receives == 0
+    assert not hasattr(gate.receiver.worker, "_diagnostic_bucket_state")
+    assert gate.policy._policy_weight_access.owner is None

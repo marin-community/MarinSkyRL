@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 
 from skyrl_train.weight_sync.frozen_source_plan import frozen_source_plan
+from skyrl_train.weight_sync.cpu_source_catalogue import gather_source_catalogue
 from skyrl_train.weight_sync.frozen_view_sender import FrozenViewBucketSender
 from skyrl_train.weight_sync.manifest import pack_bucket
 from tests.cpu.weight_sync.test_frozen_source_plan import plan_fixture
@@ -46,8 +47,7 @@ def distributed_sender(rank, rendezvous, output):
             patch.setattr(torch.cuda, "current_stream", lambda device: CpuStream())
             patch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
             case = plan_fixture()
-            gathered = [None, None]
-            dist.all_gather_object(gathered, case.rows[rank])
+            gathered = gather_source_catalogue(case.rows[rank])
             plan = frozen_source_plan(case.manifest, gathered)
             buffers = (torch.empty(24, dtype=torch.uint8), torch.empty(24, dtype=torch.uint8))
             sender = FrozenViewBucketSender(case.manifest, plan, case.sources[rank], buffers)

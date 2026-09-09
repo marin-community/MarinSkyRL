@@ -59,6 +59,8 @@ def validate_bucket_results(rows: list[dict], geometry: dict) -> None:
             or row["exclusive_weight_owner"] != "bucket-install-and-replay"
             or not row["parameter_version_tripwire_unchanged"]
             or row["source_byte_coverage"] != 1.0
+            or row["source_catalogue_memory"]["backend"] != "gloo"
+            or row["source_catalogue_memory"]["peak_extra_bytes"] > MAX_REPLAY_EXTRA_BYTES
             or sum(row["frozen_source_bytes_by_owner"].values()) != wire_bytes
             or row["policy_manifest_agreement"] != geometry["policy_ranks"]
         ):

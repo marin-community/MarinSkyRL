@@ -11,6 +11,7 @@ import time
 import torch
 
 from skyrl_train.weight_sync.bucket_identity import bucket_identity
+from skyrl_train.weight_sync.cpu_source_catalogue import gather_source_catalogue
 from skyrl_train.weight_sync.bucket_sender import StreamingBucketSender
 from skyrl_train.weight_sync.frozen_source_views import local_source_slices
 from skyrl_train.weight_sync.frozen_source_plan import frozen_source_plan
@@ -92,12 +93,13 @@ async def install_and_replay(worker, client, *, source_owners):
     torch.distributed.all_gather_object(hashes, manifest.manifest_id)
     if any(value != manifest.manifest_id for value in hashes):
         raise ValueError("Policy ranks disagree on the canonical export manifest")
+    torch.cuda.synchronize(device)
+    catalogue_allocated_before = torch.cuda.memory_allocated(device)
+    torch.cuda.reset_peak_memory_stats(device)
     tasks = worker.bridge.get_conversion_tasks(worker.actor_module)
     local_slices, local_sources = local_source_slices(tasks, worker.provider)
-    source_catalogue = [None] * torch.distributed.get_world_size()
-    torch.distributed.all_gather_object(
-        source_catalogue,
-        {"rank": rank, **source_owners, "slices": [asdict(item) for item in local_slices]},
+    source_catalogue = gather_source_catalogue(
+        {"rank": rank, **source_owners, "slices": [asdict(item) for item in local_slices]}
     )
     source_plan = frozen_source_plan(manifest, source_catalogue)
     source_bytes = Counter()
@@ -108,6 +110,16 @@ async def install_and_replay(worker, client, *, source_owners):
         json.dumps(source_catalogue, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     torch.cuda.synchronize(device)
+    catalogue_peak_extra = torch.cuda.max_memory_allocated(device) - catalogue_allocated_before
+    if catalogue_peak_extra > MAX_REPLAY_EXTRA_BYTES:
+        raise ValueError("Replay-only source catalogue introduced more than 1 MiB of GPU allocation")
+    catalogue_memory = {
+        "backend": "gloo",
+        "allocated_before": catalogue_allocated_before,
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
+        "peak_extra_bytes": catalogue_peak_extra,
+        "scope": "replay-only source task/catalogue construction and CPU group creation/gather/destruction",
+    }
     free, total = torch.cuda.mem_get_info(device)
     if free < 2 * BUCKET_BYTES + MAX_REPLAY_EXTRA_BYTES:
         raise ValueError("A policy rank lacks headroom for both transfer buffers")
@@ -262,6 +274,7 @@ async def install_and_replay(worker, client, *, source_owners):
         "frozen_source_segments": sum(len(bucket) for bucket in source_plan),
         "frozen_source_bytes_by_owner": dict(sorted(source_bytes.items())),
         "source_catalogue_sha256": source_catalogue_sha256,
+        "source_catalogue_memory": catalogue_memory,
         "source_byte_coverage": 1.0,
         "local_source_parameters": len(local_sources),
         "completed_update_before": start_update,
