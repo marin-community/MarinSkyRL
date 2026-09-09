@@ -1,4 +1,4 @@
-from skyrl_train.weight_sync.publication_version import PublicationVersionHistory
+from skyrl_train.policy_version import PublicationVersionHistory
 from skyrl_train.weight_sync.publication_accounting import PublicationRequestAccounting
 import json
 import os

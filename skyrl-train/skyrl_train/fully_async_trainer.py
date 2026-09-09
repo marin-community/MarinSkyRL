@@ -11,7 +11,7 @@ High-level notes:
   and staleness manager are also reset / validated at the end of each epoch.
 """
 
-from skyrl_train.weight_sync.publication_version import earliest_sampled_policy_version
+from skyrl_train.policy_version import earliest_sampled_policy_version
 import asyncio
 import collections
 import os

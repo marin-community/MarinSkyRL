@@ -7,7 +7,7 @@ For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_runn
 
 from __future__ import annotations
 
-from skyrl_train.weight_sync.publication_version import earliest_sampled_policy_version
+from skyrl_train.policy_version import earliest_sampled_policy_version
 
 import copy
 import hashlib
