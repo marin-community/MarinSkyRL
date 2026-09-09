@@ -24,6 +24,7 @@ from cloud.iris.protocol import (
     job_spec,
 )
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
+from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
 from cloud.iris.terminal_policy import (
     TerminalPolicyExport,
     storage_user_from_resource_path,
@@ -84,7 +85,8 @@ def execute_export(
         raise ValueError("Export requires a successful checkpoint training manifest")
     if request.training_manifest_uri != source.request.output.terminal_manifest_uri:
         raise ValueError("Training manifest URI differs from the recorded training destination")
-    runtime_bundle_inputs(source.request.runtime.commit)
+    exporter_runtime = request.exporter_runtime
+    runtime_bundle_inputs(exporter_runtime.commit if exporter_runtime is not None else source.request.runtime.commit)
     training = read_training_result(source.request, check_latest=False, check_files=False)
     if json.loads(json.dumps(asdict(training))) != source_response["training"]:
         raise ValueError("Training manifest and completion receipt disagree")
@@ -92,6 +94,11 @@ def execute_export(
     assert checkpoint is not None
     resolved = read_json(training.resolved_config_uri)
     export_config = _export_config(source, resolved)
+    if exporter_runtime is not None:
+        strategy = OmegaConf.create(export_config).trainer.strategy
+        expected_profile = runtime_profile_for_strategy(strategy, mode=RuntimeMode.CHECKPOINT_EXPORT)
+        if exporter_runtime.profile != expected_profile:
+            raise ValueError("Exporter runtime profile differs from the checkpoint conversion strategy")
     export_path = policy_export_path(request.output.export_root, checkpoint.global_step)
     fingerprint = _digest(
         {
@@ -101,6 +108,7 @@ def execute_export(
             "checkpoint": checkpoint.to_dict(),
             "export_path": export_path,
             "runtime": asdict(source.request.runtime),
+            **({"exporter_runtime": asdict(exporter_runtime)} if exporter_runtime is not None else {}),
         }
     )
     receipt_uri = posixpath.join(request.output.export_root, "receipts", f"{fingerprint}.json")
@@ -110,6 +118,7 @@ def execute_export(
         attempt_id=request.attempt_id,
         runtime=source.request.runtime,
         training_iris_job_id=source_response["iris_job_id"],
+        exporter_runtime=exporter_runtime,
     )
     reused = False
     try:
@@ -151,6 +160,7 @@ def execute_export(
                         request_fingerprint=fingerprint,
                         attempt_id=request.attempt_id,
                         timeout_seconds=execution.timeout_seconds or None,
+                        max_retries=execution.max_retries,
                     )
                 )
             verify_export_receipt(receipt_uri, fingerprint, export_path, checkpoint.global_step)
