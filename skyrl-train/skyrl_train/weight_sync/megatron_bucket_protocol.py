@@ -83,6 +83,10 @@ async def install_and_replay(worker, client, *, source_owners):
             name.endswith(f".experts.{projection}.weight") for projection in ("gate_proj", "up_proj", "down_proj")
         )
         specs.append(TensorSpec(name, tuple(tensor.shape), str(tensor.dtype).removeprefix("torch."), expert))
+    if not specs:
+        raise ValueError("The frozen source exporter returned no tensors")
+    # The catalogue retains metadata only, not the last converted tensor.
+    del tensor
     manifest = build_manifest(specs, bucket_bytes=BUCKET_BYTES)
     hashes = [None] * torch.distributed.get_world_size()
     torch.distributed.all_gather_object(hashes, manifest.manifest_id)
@@ -239,6 +243,9 @@ async def install_and_replay(worker, client, *, source_owners):
                 "receivers": receivers,
                 "buckets": per_bucket if rank == 0 else None,
             }
+            # Release the completed exporter before taking the next phase baseline.
+            # Otherwise a freed conversion tensor could mask new replay allocation.
+            del sender
         if parameter_versions(worker) != start_versions or worker._completed_update != start_update:
             raise ValueError("Policy weights changed before replay completed")
     finally:

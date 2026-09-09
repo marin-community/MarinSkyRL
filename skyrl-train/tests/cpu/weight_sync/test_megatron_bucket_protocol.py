@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from threading import Condition, main_thread, current_thread
 from types import SimpleNamespace
+import weakref
 
 import pytest
 import torch
@@ -234,3 +235,24 @@ async def test_receiver_prepare_rejection_closes_allocated_state(gate):
         await gate.policy.diagnostic_bucket_install_and_replay(gate.client)
     assert not hasattr(gate.receiver.worker, "_diagnostic_bucket_state")
     assert gate.policy._policy_weight_access.owner is None
+
+
+@pytest.mark.asyncio
+async def test_completed_exporter_is_released_before_replay_can_allocate(gate, monkeypatch):
+    timed_sender = protocol.StreamingBucketSender
+    replay_sender = protocol.FrozenViewBucketSender
+    references = []
+
+    class ObservedTimedSender(timed_sender):
+        def __init__(self, *args):
+            super().__init__(*args)
+            references.append(weakref.ref(self))
+
+    class ObservedReplaySender(replay_sender):
+        def __init__(self, *args):
+            assert references and references[0]() is None, "timed conversion storage remained live at replay entry"
+            super().__init__(*args)
+
+    monkeypatch.setattr(protocol, "StreamingBucketSender", ObservedTimedSender)
+    monkeypatch.setattr(protocol, "FrozenViewBucketSender", ObservedReplaySender)
+    await gate.policy.diagnostic_bucket_install_and_replay(gate.client)
