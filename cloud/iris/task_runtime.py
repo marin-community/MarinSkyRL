@@ -66,6 +66,7 @@ from cloud.iris.ray_storage import (
     validate_ray_spill_dir,
 )
 from cloud.iris.runtime_bundle import validate_bundled_runtime
+from cloud.iris.ray_membership import RendezvousGuard, resolve_membership
 from skyrl_train.hf_export_schema import TRAINER_STATE_FILENAME
 
 try:
@@ -863,7 +864,11 @@ def _write_rendezvous_once(fs, path: str, payload: dict[str, object]) -> None:
         json.dump(payload, f)
 
 
-def write_rendezvous(rendezvous_dir: str, head_ip: str, ray_port: int, gang_epoch: str) -> None:
+def write_rendezvous(
+    rendezvous_dir: str, head_ip: str, ray_port: int, gang_epoch: str, membership: RendezvousGuard | None = None
+) -> None:
+    if membership is not None:
+        membership.validate()
     uri = _rendezvous_uri(rendezvous_dir)
     python_version, ray_version = _runtime_versions()
     payload = RendezvousPayload(
@@ -942,6 +947,7 @@ def poll_rendezvous(
     rendezvous_dir: str,
     timeout: int,
     min_written_at: float | None = None,
+    membership: RendezvousGuard | None = None,
 ) -> RendezvousPayload:
     """Poll for the head's rendezvous file. Returns its parsed payload.
 
@@ -954,6 +960,8 @@ def poll_rendezvous(
     threshold = (min_written_at - RENDEZVOUS_FRESHNESS_SLACK) if min_written_at else None
     _log(f"Polling for rendezvous {uri} (timeout {timeout}s)...")
     while time.time() < deadline:
+        if membership is not None:
+            membership.validate()
         try:
             if fs.exists(path):
                 with fs.open(path, "r") as f:
@@ -1191,7 +1199,9 @@ def ray_stop() -> None:
     _log(f"Ray stop completed (exit {completed.returncode})")
 
 
-def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_cb=None) -> None:
+def wait_for_nodes(
+    ray_address: str, expected_nodes: int, timeout: int, rewrite_cb=None, membership: RendezvousGuard | None = None
+) -> None:
     """Block until the Ray cluster reports ``expected_nodes`` alive nodes.
 
     ``rewrite_cb`` (head only): a no-arg callable invoked on every poll to RE-PUBLISH
@@ -1211,6 +1221,8 @@ def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_
     try:
         last_count = -1
         while time.time() < deadline:
+            if membership is not None:
+                membership.validate()
             if rewrite_cb is not None:
                 try:
                     rewrite_cb()
@@ -1222,6 +1234,8 @@ def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_
                 _log(f"Ray nodes alive: {count}/{expected_nodes}")
                 last_count = count
             if count >= expected_nodes:
+                if membership is not None:
+                    membership.validate()
                 _log(f"All {expected_nodes} Ray node(s) joined. Resources: {ray.cluster_resources()}")
                 return
             time.sleep(POLL_INTERVAL)
@@ -1747,7 +1761,12 @@ def _persist_failure_artifacts_bounded(action, timeout: float) -> None:
         _log(f"Failure artifact upload exceeded {timeout}s; continuing task teardown")
 
 
-def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifname: str | None = None) -> int:
+def run_head(
+    args: argparse.Namespace,
+    train_argv: list[str],
+    derived_gloo_ifname: str | None = None,
+    membership: RendezvousGuard | None = None,
+) -> int:
     num_tasks = _num_tasks()
     gang_epoch = uuid.uuid4().hex
     head_ip = _own_ip()
@@ -1819,14 +1838,15 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
         _log(
             f"[task-runtime] Ray head subprocess returned; writing rendezvous -> {_rendezvous_uri(args.rendezvous_dir)}"
         )
-        write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch)
+        write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch, membership)
         # Re-publish the rendezvous each poll so a late cold-node worker never sees it
         # as "stale" (see wait_for_nodes docstring — prevents the freshness deadlock).
         wait_for_nodes(
             ray_address,
             num_tasks,
             args.cluster_join_timeout,
-            rewrite_cb=lambda: write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch),
+            rewrite_cb=lambda: write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch, membership),
+            membership=membership,
         )
     else:
         _log("Single-node slice: skipping rendezvous and multi-node wait.")
@@ -1843,6 +1863,8 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
 
         # The SIGTERM/SIGINT handler is already installed at the top of run_head; assigning
         # `process` here arms its driver-teardown path (the closure reads this value).
+        if membership is not None:
+            membership.validate()
         process = launch_training_driver(train_argv, env)
         driver_activity = DriverOutputActivity()
         output_thread = start_driver_output_tee(process, driver_activity)
@@ -1886,7 +1908,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
     return exit_code
 
 
-def run_worker(args: argparse.Namespace) -> int:
+def run_worker(args: argparse.Namespace, membership: RendezvousGuard | None = None) -> int:
     worker_start = time.time()
     rank = _rank()
     num_tasks = _num_tasks()
@@ -1900,7 +1922,9 @@ def run_worker(args: argparse.Namespace) -> int:
             "Worker rank requires --rendezvous-dir (or OT_AGENT_IRIS_RENDEZVOUS_DIR) to discover the head IP."
         )
 
-    payload = poll_rendezvous(args.rendezvous_dir, args.rendezvous_timeout, min_written_at=worker_start)
+    payload = poll_rendezvous(
+        args.rendezvous_dir, args.rendezvous_timeout, min_written_at=worker_start, membership=membership
+    )
     python_version, ray_version = _runtime_versions()
     payload = validate_rendezvous_runtime(
         payload,
@@ -1912,13 +1936,15 @@ def run_worker(args: argparse.Namespace) -> int:
     ray_port = payload.port
     ray_address = f"{head_ip}:{ray_port}"
 
+    if membership is not None:
+        membership.validate()
     ray_start_worker(
         head_ip,
         ray_port,
         node_ip,
         resolve_ray_spill_target(args.rendezvous_dir, args.ray_spill_backend, args.ray_spill_dir),
     )
-    wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout)
+    wait_for_nodes(ray_address, num_tasks, args.cluster_join_timeout, membership=membership)
     _log(f"Worker rank {rank} joined Ray cluster at {ray_address}; parking until the head finishes.")
 
     # Periodic Ray session-log -> object-store sync for THIS worker node (the FSDP/rollout
@@ -2119,57 +2145,72 @@ def _print_env_snapshot() -> None:
 def main() -> None:
     validate_bundled_runtime()
     args, train_argv = parse_args()
-    if args.checkpoint_source_uri:
-        if not args.checkpoint_local_path:
-            raise ValueError("--checkpoint-source-uri requires --checkpoint-local-path")
-        materialize_checkpoint(args.checkpoint_source_uri, args.checkpoint_local_path)
-    _print_env_snapshot()
-    # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO workers)
-    # BEFORE any `ray start`, on head + every worker — CoreWeave R2 rejects path-style.
-    _pin_boto3_s3_addressing_style()
-    # Derive GLOO_SOCKET_IFNAME from the pod IP BEFORE any torch/gloo init, on head
-    # and every worker. Must precede `ray start`: Ray actors inherit this env, and
-    # the gloo mesh is built long after, at the first checkpoint save. The derived
-    # name is node-local; training_driver_env keeps it out of the driver, which
-    # would otherwise broadcast the head's name to every node.
-    derived_gloo_ifname = pin_socket_ifname()
-    # Resolve before Ray starts so its actors inherit this task's telemetry settings.
-    export_telemetry_environment(args.run_id)
-    # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
-    # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
-    ensure_fr_dump_dir()
-    debug_artifact_root = os.environ.get(DEBUG_ARTIFACT_DIR_ENV)
-    if debug_artifact_root:
-        ensure_debug_artifact_directories(debug_artifact_root)
-    # Stage task datasets on THIS node before Ray bootstrap (head + every worker).
-    # Without this, only rank-0 has the extracted tasks and the rollout workers die
-    # with FileNotFoundError on task.toml. See stage_task_data docstring.
-    if args.train_data:
-        stage_task_data(args.train_data, role="training")
-    if args.val_data:
-        stage_task_data(args.val_data, role="validation")
-    if args.data_sources_json:
-        materialize_data_sources(args.data_sources_json)
-    if args.model_source_uri:
-        if not args.model_local_path or not args.model_source_identity:
-            raise ValueError("--model-source-uri requires --model-local-path and --model-source-identity")
-        materialize_model_export(args.model_source_uri, args.model_local_path, args.model_source_identity)
-    # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
-    # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
-    if args.prestage_model:
-        stage_model(args.prestage_model, warm_source=(args.model_warm_source or None))
-    # Force the policy chat template onto the staged Hub snapshot or materialized local
-    # model on every node before Ray; the training driver's tokenizer may load anywhere.
-    if args.policy_chat_template:
-        model_path = policy_chat_template_model(args.prestage_model, args.model_local_path)
-        apply_policy_chat_template(model_path, args.policy_chat_template)
-    rank = _rank()
-    if rank == 0:
-        exit_code = run_head(args, train_argv, derived_gloo_ifname)
-    else:
-        exit_code = run_worker(args)
-    if exit_code != 0:
-        sys.exit(exit_code)
+    membership = None
+    if args.rendezvous_dir and _num_tasks() > 1 and os.environ.get("IRIS_TASK_ID"):
+        membership = resolve_membership(
+            os.environ["IRIS_CONTROLLER_ADDRESS"],
+            os.environ["IRIS_TASK_ID"],
+            os.environ["IRIS_ATTEMPT_UID"],
+            _num_tasks(),
+            min(args.rendezvous_timeout, 60),
+        )
+        args.rendezvous_dir = membership.namespace(args.rendezvous_dir)
+        _log("IRIS_RENDEZVOUS_MEMBERSHIP " + json.dumps(membership.diagnostic(), sort_keys=True))
+    try:
+        if args.checkpoint_source_uri:
+            if not args.checkpoint_local_path:
+                raise ValueError("--checkpoint-source-uri requires --checkpoint-local-path")
+            materialize_checkpoint(args.checkpoint_source_uri, args.checkpoint_local_path)
+        _print_env_snapshot()
+        # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO workers)
+        # BEFORE any `ray start`, on head + every worker — CoreWeave R2 rejects path-style.
+        _pin_boto3_s3_addressing_style()
+        # Derive GLOO_SOCKET_IFNAME from the pod IP BEFORE any torch/gloo init, on head
+        # and every worker. Must precede `ray start`: Ray actors inherit this env, and
+        # the gloo mesh is built long after, at the first checkpoint save. The derived
+        # name is node-local; training_driver_env keeps it out of the driver, which
+        # would otherwise broadcast the head's name to every node.
+        derived_gloo_ifname = pin_socket_ifname()
+        # Resolve before Ray starts so its actors inherit this task's telemetry settings.
+        export_telemetry_environment(args.run_id)
+        # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
+        # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
+        ensure_fr_dump_dir()
+        debug_artifact_root = os.environ.get(DEBUG_ARTIFACT_DIR_ENV)
+        if debug_artifact_root:
+            ensure_debug_artifact_directories(debug_artifact_root)
+        # Stage task datasets on THIS node before Ray bootstrap (head + every worker).
+        # Without this, only rank-0 has the extracted tasks and the rollout workers die
+        # with FileNotFoundError on task.toml. See stage_task_data docstring.
+        if args.train_data:
+            stage_task_data(args.train_data, role="training")
+        if args.val_data:
+            stage_task_data(args.val_data, role="validation")
+        if args.data_sources_json:
+            materialize_data_sources(args.data_sources_json)
+        if args.model_source_uri:
+            if not args.model_local_path or not args.model_source_identity:
+                raise ValueError("--model-source-uri requires --model-local-path and --model-source-identity")
+            materialize_model_export(args.model_source_uri, args.model_local_path, args.model_source_identity)
+        # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
+        # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
+        if args.prestage_model:
+            stage_model(args.prestage_model, warm_source=(args.model_warm_source or None))
+        # Force the policy chat template onto the staged Hub snapshot or materialized local
+        # model on every node before Ray; the training driver's tokenizer may load anywhere.
+        if args.policy_chat_template:
+            model_path = policy_chat_template_model(args.prestage_model, args.model_local_path)
+            apply_policy_chat_template(model_path, args.policy_chat_template)
+        rank = _rank()
+        if rank == 0:
+            exit_code = run_head(args, train_argv, derived_gloo_ifname, membership)
+        else:
+            exit_code = run_worker(args, membership)
+        if exit_code != 0:
+            sys.exit(exit_code)
+    finally:
+        if membership is not None:
+            membership.client.shutdown()
 
 
 if __name__ == "__main__":
