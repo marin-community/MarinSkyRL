@@ -12,7 +12,7 @@ from skyrl_train.policy_version import earliest_sampled_policy_version
 import copy
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 from uuid import uuid4
 import skyrl_gym
@@ -26,6 +26,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.envs.thinking_contract import THINKING_CONTRACT_VERSION, score_thinking_contract
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
     environment_metrics_from_step,
@@ -161,6 +162,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         else:
             self.env_executor = None
 
+        self.parser_protocol = trajectory_runner_cfg.get("non_agentic_parser_protocol")
         self._validate_cfg(trajectory_runner_cfg)
         self.collector.validate()
 
@@ -194,6 +196,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         self.global_step_fn: Optional[Callable[[], int]] = None
 
     def _validate_cfg(self, trajectory_runner_cfg: DictConfig):
+        if self.parser_protocol is not None:
+            if self.parser_protocol != THINKING_CONTRACT_VERSION:
+                raise ValueError("Unknown non-agentic parser protocol")
+            if trajectory_runner_cfg.batched or trajectory_runner_cfg.max_turns != 1 or self.custom_chat_template:
+                raise ValueError("Post-thinking parsing requires single-turn, unbatched token-preserving collection")
+            vocabulary = self.tokenizer.get_vocab()
+            if not {"<|start_think|>", "<|end_think|>"} <= vocabulary.keys():
+                raise ValueError("Post-thinking parsing requires the model's declared thinking tokens")
         if trajectory_runner_cfg.get("seed_by_trajectory", False) and (
             trajectory_runner_cfg.batched or trajectory_runner_cfg.max_turns != 1
         ):
@@ -248,6 +258,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
+        if self.parser_protocol is not None:
+            if env_class not in {"gsm8k", "aime", "reasoning_gym"}:
+                raise ValueError("Post-thinking parsing is only qualified for math environments")
+            if env_class == "aime" and float(env_config.get("length_penalty_weight", 0)) != 0:
+                raise ValueError("Post-thinking parsing requires unshaped native AIME rewards")
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
 
         session_id = (
@@ -402,6 +417,35 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 metadata={"generation_token_budget": max_tokens},
             )
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+            if self.parser_protocol is not None:
+                gold_key = "reward_spec" if env_class == "gsm8k" else "reward_model"
+                verdict = score_thinking_contract(
+                    env_class=env_class,
+                    ground_truth=env_extras[gold_key]["ground_truth"],
+                    native_response=output,
+                    prompt_tokens=input_ids,
+                    response_tokens=output_ids,
+                    stop_reason=stop_reason,
+                    decoder=self.tokenizer.backend_tokenizer,
+                )
+                if env_step_output["reward"] != verdict.legacy_full_text_reward:
+                    raise ValueError("Native reward differs from the declared unshaped verifier")
+                contract = asdict(verdict)
+                sampling_evidence["non_agentic_contract"] = contract
+                env_step_output = {
+                    **env_step_output,
+                    "reward": verdict.verifier_reward,
+                    "verification": VerificationResult.verified(
+                        verdict.verifier_reward, passed=bool(verdict.contract_correct), diagnostics=contract
+                    ),
+                    "reward_result": RewardResult(
+                        unshaped_reward=verdict.verifier_reward, optimization_reward=verdict.verifier_reward
+                    ),
+                    "metadata": {
+                        **{f"legacy_full_text/{key}": value for key, value in env_step_output["metadata"].items()},
+                        **contract,
+                    },
+                }
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             verification_results.append(verification_from_env_step(env_step_output))
