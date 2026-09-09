@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from skyrl_train.weight_sync.byte_replay import MAX_SCRATCH_BYTES, compare_installed_views
+from skyrl_train.weight_sync.byte_replay import MAX_SCRATCH_BYTES, ReceiverByteCoverage, compare_installed_views
 from skyrl_train.weight_sync.expert_scatter import grug_expert_views, scatter_grug_experts
 from skyrl_train.weight_sync.manifest import TensorSpec, build_manifest, pack_bucket, unpack_bucket
 
@@ -76,3 +76,36 @@ def test_scratch_limit_and_empty_receiver_slice():
         compare_installed_views([], scratch, expected_bytes=0)
     result = compare_installed_views([], scratch[:1], expected_bytes=0)
     assert result.compared_bytes == result.mismatches == 0
+
+
+def test_storage_coverage_rejects_equal_count_with_duplicated_or_missing_expert():
+    installed = torch.empty(4, 6, dtype=torch.bfloat16)
+    coverage = ReceiverByteCoverage({"experts": installed})
+    for row in (3, 1, 0):
+        coverage.observe(installed[row])
+    with pytest.raises(ValueError, match="more than once"):
+        coverage.observe(installed[1])
+    with pytest.raises(ValueError, match="missed"):
+        coverage.finish()
+    coverage.observe(installed[2])
+    assert coverage.finish() == 48
+
+
+def test_storage_coverage_rejects_alias_inventory_and_unrelated_equal_tensor():
+    installed = torch.zeros(8, dtype=torch.float32)
+    with pytest.raises(ValueError, match="aliases"):
+        ReceiverByteCoverage({"full": installed, "alias": installed[:4]})
+    coverage = ReceiverByteCoverage({"full": installed})
+    with pytest.raises(ValueError, match="outside"):
+        coverage.observe(installed.clone())
+    coverage.observe(installed)
+    assert coverage.finish() == 32
+
+
+def test_storage_coverage_detects_parameter_replacement():
+    installed = torch.zeros(8, dtype=torch.float32)
+    coverage = ReceiverByteCoverage({"full": installed})
+    coverage.observe(installed)
+    installed.data = installed.clone()
+    with pytest.raises(ValueError, match="storage changed"):
+        coverage.finish()
