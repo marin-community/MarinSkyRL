@@ -24,7 +24,7 @@ from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequ
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_gym.envs.thinking_contract import THINKING_CONTRACT_VERSION, score_thinking_contract
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
@@ -51,6 +51,7 @@ from skyrl_train.trajectory_runners.projections import (
     TrajectoryProjection,
     WholeTrajectoryProjection,
 )
+from skyrl_train.trajectory_runners.non_agentic_interventions import TokenIntervention, intervention_trace
 
 
 class WholeTrajectoryCollector:
@@ -163,6 +164,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             self.env_executor = None
 
         self.parser_protocol = trajectory_runner_cfg.get("non_agentic_parser_protocol")
+        self.token_intervention = None
         self._validate_cfg(trajectory_runner_cfg)
         self.collector.validate()
 
@@ -204,6 +206,26 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             vocabulary = self.tokenizer.get_vocab()
             if not {"<|start_think|>", "<|end_think|>"} <= vocabulary.keys():
                 raise ValueError("Post-thinking parsing requires the model's declared thinking tokens")
+        intervention = trajectory_runner_cfg.get("non_agentic_intervention")
+        if intervention is not None:
+            if self.parser_protocol is None or not self.use_conversation_multi_turn:
+                raise ValueError("Token interventions require token-preserving post-thinking parsing")
+            values = (
+                OmegaConf.to_container(intervention, resolve=True)
+                if OmegaConf.is_config(intervention)
+                else dict(intervention)
+            )
+            self.token_intervention = TokenIntervention(**values)
+            if self.token_intervention.thinking_end_id != self.tokenizer.get_vocab()["<|end_think|>"]:
+                raise ValueError("Intervention thinking token differs from the actual tokenizer")
+            if self.token_intervention.eos_id != self.tokenizer.eos_token_id:
+                raise ValueError("Intervention EOS differs from the actual tokenizer")
+            engine = trajectory_runner_cfg.engine_init_kwargs
+            processor = "skyrl_train.inference_engines.non_agentic_logits_processor.NonAgenticTokenProcessor"
+            if processor not in engine.get("logits_processors", []) or engine.get("logprobs_mode") != "raw_logprobs":
+                raise ValueError("Token interventions require the registered native processor and raw logprobs")
+            if trajectory_runner_cfg.sampling_params.logprobs is None:
+                raise ValueError("Token interventions require actual engine logprob evidence")
         if trajectory_runner_cfg.get("seed_by_trajectory", False) and (
             trajectory_runner_cfg.batched or trajectory_runner_cfg.max_turns != 1
         ):
@@ -328,6 +350,17 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         current_sampling_params = (
             sampling_params if sampling_params is not None else self.trajectory_runner_cfg.sampling_params
         )
+        if self.token_intervention is not None:
+            current_sampling_params = (
+                OmegaConf.to_container(current_sampling_params, resolve=True)
+                if OmegaConf.is_config(current_sampling_params)
+                else copy.deepcopy(current_sampling_params)
+            )
+            extra_args = current_sampling_params.setdefault("extra_args", {})
+            if "non_agentic_intervention" in extra_args:
+                raise ValueError("Request cannot silently override the frozen token intervention")
+            extra_args["non_agentic_intervention"] = asdict(self.token_intervention)
+            sampling_params = current_sampling_params
         collect_logprobs = current_sampling_params.get("logprobs", None) is not None
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
@@ -340,6 +373,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         token_provenance = TokenProvenance.ENGINE
         generator_engine_indices: set[int | None] = set()
         sampling_evidence = {}
+        intervention_engine_ids = None
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -381,6 +415,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             sampled_version_rows.append(output_ids)
             sampled_versions.append(engine_output.get("policy_versions_at_first_token", [None])[0])
             stop_reason = engine_output["stop_reasons"][0]
+            original_engine_stop_reason = stop_reason
             response_logprobs_batch = engine_output.get("response_logprobs")
             response_logprobs = response_logprobs_batch[0] if response_logprobs_batch is not None else None
             if response_logprobs is not None and len(response_logprobs) != len(output_ids):
@@ -390,6 +425,16 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
             if collect_logprobs and response_logprobs is None:
                 rollout_logprobs = None
+            if self.token_intervention is not None:
+                if token_provenance != TokenProvenance.ENGINE or response_logprobs is None:
+                    raise ValueError("Token intervention requires native IDs and actual aligned logprobs")
+                trace = intervention_trace(output_ids, self.token_intervention)
+                intervention_engine_ids = tuple(output_ids)
+                trace["original_engine_stop_reason"] = original_engine_stop_reason
+                trace["configuration"] = asdict(self.token_intervention)
+                sampling_evidence["non_agentic_intervention"] = trace
+                if trace["repetition_stopped"]:
+                    stop_reason = "repetition"
 
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
@@ -431,6 +476,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 if env_step_output["reward"] != verdict.legacy_full_text_reward:
                     raise ValueError("Native reward differs from the declared unshaped verifier")
                 contract = asdict(verdict)
+                if self.token_intervention is not None:
+                    contract["intervention"] = sampling_evidence["non_agentic_intervention"]
                 sampling_evidence["non_agentic_contract"] = contract
                 env_step_output = {
                     **env_step_output,
@@ -539,6 +586,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 rollout_logprobs = rollout_logprobs[: len(response_ids)]
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
+        if self.token_intervention is not None:
+            if tuple(response_ids) != intervention_engine_ids:
+                raise ValueError("Intervention output was retokenized after native generation")
+            for position in sampling_evidence["non_agentic_intervention"]["forced_positions"]:
+                loss_mask[position] = 0
 
         appended_eos_token = False
         if not self.use_conversation_multi_turn:
