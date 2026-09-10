@@ -4,6 +4,7 @@ import time
 
 import torch
 
+from skyrl_train.weight_sync.shard_memory import device_memory
 from skyrl_train.weight_sync.byte_replay import ReceiverByteCoverage, compare_installed_views
 from skyrl_train.weight_sync.frozen_source_views import source_view
 from skyrl_train.weight_sync.router_replay import compare_widened_router
@@ -13,20 +14,6 @@ from skyrl_train.weight_sync.shard_stream import dense_chunks
 
 REPLAY_COMPARISON_BYTES = 64 * 1024
 REPLAY_EXTRA_LIMIT_BYTES = 1024 * 1024
-
-
-def _memory(device):
-    if device.type != "cuda":
-        return {"cuda_measured": False}
-    torch.cuda.synchronize(device)
-    return {
-        "cuda_measured": True,
-        "allocated_bytes": torch.cuda.memory_allocated(device),
-        "reserved_bytes": torch.cuda.memory_reserved(device),
-        "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
-        "peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
-        "free_bytes": torch.cuda.mem_get_info(device)[0],
-    }
 
 
 class ShardReplay:
@@ -41,7 +28,7 @@ class ShardReplay:
         ):
             raise ValueError("Retained proof workspace must be explicitly accounted within the scratch limit")
         self.runner = runner
-        self.memory_before = _memory(runner.scratch.device)
+        self.memory_before = device_memory(runner.scratch.device)
         if runner.scratch.is_cuda:
             torch.cuda.reset_peak_memory_stats(runner.scratch.device)
         self.retained_proof_workspace_bytes = retained_proof_workspace_bytes
@@ -68,7 +55,7 @@ class ShardReplay:
             self.expected_bytes = 0
 
     def memory_snapshot(self):
-        return _memory(self.runner.scratch.device)
+        return device_memory(self.runner.scratch.device)
 
     def dense_destination(self, item):
         return self.runner.parameters[item.source.hf_name].view(-1).narrow(0, item.source.hf_offset, item.source.numel)
@@ -165,7 +152,7 @@ class ShardReplay:
                     )
         if self.receiver and (observed.finish() != self.expected_bytes or compared != self.expected_bytes):
             raise ValueError("Replay did not compare the complete independently inventoried receiver")
-        after = _memory(runner.scratch.device)
+        after = device_memory(runner.scratch.device)
         extra = (
             after["peak_allocated_bytes"] - self.memory_before["allocated_bytes"] + self.retained_proof_workspace_bytes
             if after["cuda_measured"]

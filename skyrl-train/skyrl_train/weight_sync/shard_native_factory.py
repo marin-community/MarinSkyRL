@@ -87,6 +87,7 @@ def prepare_native_shard_worker(
     policy_access,
     borrowed_groups=None,
     borrowed_source_ranks=None,
+    proof_capture=None,
 ):
     """Prepare actual groups, validate live storage, then expose the bound session.
 
@@ -136,6 +137,7 @@ def prepare_native_shard_worker(
                 transfer_workspace,
                 comparison_workspace,
                 broadcast_source_ranks=borrowed_source_ranks,
+                capture=proof_capture,
             )
             if trainer
             else None

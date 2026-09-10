@@ -9,9 +9,12 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 
+import time
+
 import torch
 import torch.distributed as dist
 
+from skyrl_train.weight_sync.shard_memory import device_memory
 from skyrl_train.weight_sync.byte_replay import compare_installed_views
 from skyrl_train.weight_sync.shard_session import SourceReplicaProof, storage_versions
 
@@ -121,7 +124,9 @@ def build_replica_plan(trainers, schedule, catalogue):
 class FullReplicaComparator:
     """Use prepared groups and bounded independent storage; never overwrite weights."""
 
-    def __init__(self, rank, plan, groups, transfer_workspace, comparison_workspace, *, broadcast_source_ranks=None):
+    def __init__(
+        self, rank, plan, groups, transfer_workspace, comparison_workspace, *, broadcast_source_ranks=None, capture=None
+    ):
         self.rank, self.plan, self.groups = rank, plan, groups
         self.broadcast_source_ranks = (
             {item.name: 0 for item in plan.groups if rank in item.members}
@@ -133,6 +138,9 @@ class FullReplicaComparator:
         ):
             raise ValueError("Replica collective roots require complete typed native identities")
         self.transfer, self.comparison = transfer_workspace, comparison_workspace
+        if capture is not None and not callable(capture):
+            raise ValueError("Replica proof capture must be callable")
+        self.capture = capture
         self.last_receipt = None
         if (
             transfer_workspace.dtype != torch.uint8
@@ -157,6 +165,63 @@ class FullReplicaComparator:
                     raise ValueError("Actual replica communicator differs from typed source membership")
 
     def __call__(self, sources, manifest_id, publication_id, rank):
+        before = device_memory(self.transfer.device)
+        if self.transfer.is_cuda:
+            torch.cuda.reset_peak_memory_stats(self.transfer.device)
+        started = time.monotonic()
+        self.last_receipt = {
+            "plan_id": self.plan.identity,
+            "rank": rank,
+            "manifest_id": manifest_id,
+            "publication_id": publication_id,
+            "phase": "source-proof-running",
+        }
+        primary = None
+        try:
+            result = self._compare(sources, manifest_id, publication_id, rank)
+            self.last_receipt["phase"] = "source-proof-compared"
+            return result
+        except BaseException as error:
+            primary = error
+            self.last_receipt.update(phase="failed", error_type=type(error).__name__, error=str(error)[:4096])
+            raise
+        finally:
+            try:
+                after = device_memory(self.transfer.device)
+                extra = (
+                    after["peak_allocated_bytes"] - before["allocated_bytes"] + self.comparison.numel()
+                    if after["cuda_measured"]
+                    else None
+                )
+                self.last_receipt.update(
+                    memory_before=before,
+                    memory_after=after,
+                    source_proof_seconds=time.monotonic() - started,
+                    retained_comparison_bytes=self.comparison.numel(),
+                    existing_transfer_workspace_bytes=self.transfer.numel(),
+                    proof_peak_extra_bytes=extra,
+                    proof_scratch_limit_bytes=1024 * 1024,
+                    proof_memory_within_limit=extra <= 1024 * 1024 if extra is not None else None,
+                )
+            except BaseException as error:
+                self.last_receipt["memory_readback_error"] = f"{type(error).__name__}: {error}"
+                if primary is None:
+                    primary = error
+                else:
+                    primary.add_note(f"Source proof memory readback: {type(error).__name__}: {error}")
+            if self.capture is not None:
+                try:
+                    binding = self.capture(self.last_receipt)
+                    self.last_receipt["durable_receipt"] = binding
+                except BaseException as error:
+                    if primary is None:
+                        primary = error
+                    else:
+                        primary.add_note(f"Source proof durable receipt: {type(error).__name__}: {error}")
+            if primary is not None:
+                raise primary
+
+    def _compare(self, sources, manifest_id, publication_id, rank):
         if rank != self.rank or type(publication_id) is not int or publication_id < 0:
             raise ValueError("Replica proof caller identity differs from preparation")
         if set(sources) != {item.name for item in self.tensors}:

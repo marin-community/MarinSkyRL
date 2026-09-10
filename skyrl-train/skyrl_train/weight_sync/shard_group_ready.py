@@ -7,10 +7,10 @@ import torch.distributed as dist
 
 
 def warm_owned_groups(runner, groups, memberships):
-    """Use only the validated transfer buffer, before binding a publication.
+    """Use only the validated transfer buffer, before binding a weight sync.
 
     Custom NCCL groups may connect lazily at their first collective. This
-    acknowledged payload keeps that work outside later publication timers.
+    acknowledged payload keeps that work outside later weight sync timers.
     Source and installed parameter bytes are never used as warmup storage.
     """
     if runner.completed or runner.manifest_id is not None:

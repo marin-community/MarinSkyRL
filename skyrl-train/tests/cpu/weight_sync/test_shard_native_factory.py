@@ -1,6 +1,12 @@
+from functools import partial
+import hashlib
+import json
+from pathlib import Path
+
 import ray
 import torch
 
+from skyrl_train.weight_sync.readback_diagnostics import persist_readback
 from skyrl_train.weight_sync.policy_weight_access import PolicyWeightAccess
 from skyrl_train.weight_sync.shard_group_factory import GroupEndpoint
 from skyrl_train.weight_sync.shard_native_factory import prepare_native_shard_worker, required_group_memberships
@@ -51,6 +57,7 @@ class FactoryActor(StreamActor):
             comparison_workspace=torch.empty(17, dtype=torch.bool) if self.sources else None,
             dense_chunk_bytes=64,
             policy_access=self.access,
+            proof_capture=partial(persist_readback, str(self.directory), "source-proof"),
         )
 
     def phase(self, name, manifest):
@@ -97,6 +104,18 @@ def test_native_factory_binds_actual_groups_and_complete_replica_comparator(tmp_
         ray.get([actor.phase.remote("begin", manifest) for actor in actors], timeout=30)
         proofs = ray.get([actor.phase.remote("verify_replicas", manifest) for actor in actors[:4]], timeout=60)
         assert all(row["proof"]["mismatches"] == 0 for row in proofs)
+        for row in proofs:
+            receipt = row["replica_groups"]
+            assert receipt["memory_after"]["cuda_measured"] is False
+            assert receipt["proof_peak_extra_bytes"] is None
+            assert receipt["retained_comparison_bytes"] == 17
+            binding = receipt["durable_receipt"]
+            raw = Path(binding["uri"]).read_bytes()
+            assert hashlib.sha256(raw).hexdigest() == binding["sha256"]
+            persisted = json.loads(raw)
+            assert persisted["unique_source_bytes"] == row["proof"]["expected_bytes"]
+            assert persisted["phase"] == "source-proof-compared"
+
         ray.get([actor.phase.remote("run", manifest) for actor in actors], timeout=60)
         inspected = ray.get([actor.inspect.remote() for actor in actors], timeout=30)
         assert all(row["unchanged"] for row in inspected)

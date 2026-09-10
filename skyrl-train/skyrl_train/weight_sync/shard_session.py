@@ -162,6 +162,10 @@ class ShardSession:
             ):
                 self.phase = ShardPhase.FAILED
                 raise ValueError("Exact source-replica proof is incomplete, stale or mismatched")
+            memory = getattr(self.replica_verifier, "last_receipt", None)
+            if memory is not None and memory.get("proof_memory_within_limit") is False:
+                self.phase = ShardPhase.FAILED
+                raise ValueError("Source-copy proof exceeds the complete additional scratch limit")
             self.proof = proof
             self.phase = ShardPhase.VERIFIED
             return {

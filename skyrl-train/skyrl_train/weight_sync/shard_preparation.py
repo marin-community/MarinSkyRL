@@ -393,7 +393,7 @@ def _allocation_state(device):
     }
 
 
-def bind_live_preparation(worker, plan, parallel_state, capture):
+def bind_live_preparation(worker, plan, parallel_state, capture, *, proof_capture=None):
     state = getattr(worker, "_shard_preparation", None)
     if state is None or state.preparation_id != plan.preparation_id or state.geometry != plan.geometry:
         raise ValueError("Native binding does not match retained preparation")
@@ -460,6 +460,7 @@ def bind_live_preparation(worker, plan, parallel_state, capture):
             policy_access=worker._policy_weight_access if state.token is not None else None,
             borrowed_groups=groups,
             borrowed_source_ranks=roots,
+            proof_capture=proof_capture,
         )
         receipt.update(bound, phase="prepared")
         if storage_versions(state.sources) != state.source_versions:

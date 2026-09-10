@@ -35,7 +35,11 @@ def bind_policy(worker, plan, output_uri):
     from megatron.core import parallel_state
 
     return bind_live_preparation(
-        worker, plan, parallel_state, partial(persist_readback, output_uri, f"shard-bind-{plan.preparation_id}")
+        worker,
+        plan,
+        parallel_state,
+        partial(persist_readback, output_uri, f"shard-bind-{plan.preparation_id}"),
+        proof_capture=partial(persist_readback, output_uri, f"shard-source-proof-{plan.preparation_id}"),
     )
 
 
