@@ -74,21 +74,38 @@ def hardware_identity(device, root=Path("/sys/class/infiniband")):
     return result
 
 
+def native_worker_identity(device):
+    """Read current process/attempt/device identity without sysfs or subprocess I/O."""
+    return {
+        "host": socket.gethostname(),
+        "pid": os.getpid(),
+        "physical_node": os.environ.get("IRIS_NODE_NAME"),
+        "ray_node_id": ray.get_runtime_context().get_node_id() if ray.is_initialized() else None,
+        "rank": torch.distributed.get_rank(),
+        "world_size": torch.distributed.get_world_size(),
+        "device": str(device),
+        "gpu_uuid": str(torch.cuda.get_device_properties(device).uuid) if device.type == "cuda" else None,
+        "attempt_uid": os.environ.get("IRIS_ATTEMPT_UID"),
+        "task_id": os.environ.get("IRIS_TASK_ID"),
+        "cuda_measured": device.type == "cuda",
+    }
+
+
 def observe_worker(worker, device, role, observation_id, output_uri):
     """Persist one physical endpoint outside the matched reference's broadcast timer."""
-    identity = getattr(worker, "_physical_weight_sync_identity", None)
-    if identity is None:
-        identity = {
-            **hardware_identity(device),
-            "host": socket.gethostname(),
-            "pid": os.getpid(),
-            "role": role,
-            "rank": torch.distributed.get_rank(),
-            "world_size": torch.distributed.get_world_size(),
-            "attempt_uid": os.environ.get("IRIS_ATTEMPT_UID"),
-            "task_id": os.environ.get("IRIS_TASK_ID"),
-        }
-        worker._physical_weight_sync_identity = identity
+    hardware = getattr(worker, "_physical_weight_sync_identity", None)
+    if hardware is None:
+        hardware = hardware_identity(device)
+        worker._physical_weight_sync_identity = hardware
+    identity = {**hardware, **native_worker_identity(device), "role": role}
+    if device.type == "cuda" and observation_id.endswith("-before"):
+        torch.cuda.reset_peak_memory_stats(device)
     memory = device_memory(device)
-    result = {"observation_id": observation_id, "identity": identity, "ports": port_counters(), "memory": memory}
+    result = {
+        "observation_id": observation_id,
+        "identity": identity,
+        "ports": port_counters(),
+        "memory": memory,
+        "memory_scope": "Torch allocator peak plus device-free endpoints; external allocator peak unmeasured",
+    }
     return {**result, "durable_receipt": persist_readback(output_uri, f"physical-{observation_id}-{role}", result)}

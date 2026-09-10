@@ -11,13 +11,11 @@ import hashlib
 import json
 from threading import Lock
 
-import torch
 import torch.distributed as dist
 
-from skyrl_train.weight_sync.shard_memory import device_memory
-from skyrl_train.weight_sync.shard_observations import port_counters
 
 from skyrl_train.weight_sync.shard_replay import ShardReplay
+from skyrl_train.weight_sync.shard_observations import native_worker_identity
 
 
 class ShardPhase(StrEnum):
@@ -203,14 +201,7 @@ class ShardSession:
                 raise ValueError("Shard install requires unchanged frozen weights and completed replica proof")
             self.phase = ShardPhase.RUNNING
         try:
-            device = self.runner.scratch.device
-            memory_before = device_memory(device)
-            if device.type == "cuda":
-                torch.cuda.reset_peak_memory_stats(device)
-            ports_before = port_counters()
             result = self.runner.run(manifest_id=manifest_id, publication_id=publication_id)
-            ports_after = port_counters()
-            memory_after = device_memory(device)
             if storage_versions(self.runner.sources) != self.versions:
                 raise ValueError("Learner source changed during shard installation")
         except BaseException:
@@ -223,13 +214,6 @@ class ShardSession:
         return {
             **self.receipt(),
             "stream": result,
-            "install_observations": {
-                "ports_before": ports_before,
-                "ports_after": ports_after,
-                "memory_before": memory_before,
-                "memory_after": memory_after,
-                "memory_scope": "Torch allocator peak plus device-free endpoints; external allocator peak unmeasured",
-            },
         }
 
     def prepare_replay(self, manifest_id, publication_id):
@@ -361,7 +345,9 @@ def worker_shard_call(worker, method, manifest_id, publication_id):
     state = getattr(worker, "_shard_stream_session", None)
     if state is None:
         raise ValueError("Native shard preparation has not bound a runner")
+    identity = native_worker_identity(state.runner.scratch.device)
     result = getattr(state, method)(manifest_id, publication_id)
+    result["identity"] = identity
     if method == "close":
         del worker._shard_stream_session
     return result

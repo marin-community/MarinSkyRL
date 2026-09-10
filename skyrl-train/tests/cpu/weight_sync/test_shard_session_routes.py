@@ -287,6 +287,23 @@ async def test_imported_client_wrapper_actual_worker_policy_and_driver_interval(
         expected_receiver_bytes=EXPECTED_RECEIVER_BYTES,
     )
     assert len(result["source_proof"]) == 2 and len(result["receiver_install"]) == 2
+    identities = {}
+    for phase in (
+        "policy_begin",
+        "source_proof",
+        "policy_install",
+        "receiver_begin",
+        "receiver_install",
+        "policy_close",
+        "receiver_close",
+    ):
+        for row in result[phase]:
+            identity = row["identity"]
+            assert identity["host"] and identity["pid"] > 0 and identity["ray_node_id"]
+            assert identity["cuda_measured"] is False and identity["gpu_uuid"] is None
+            assert {"attempt_uid", "task_id", "physical_node"} <= identity.keys()
+            assert identities.setdefault(row["rank"], identity) == identity
+    assert len({identity["pid"] for identity in identities.values()}) == 4
     assert all(row["mismatches"] == 0 and row["compared_bytes"] > 0 for row in result["replay"])
     assert all(await asyncio.gather(*(actor.lease_free.remote() for actor in actors[:2])))
     assert not driver.inference_engine_client.generation_paused_event.is_set()

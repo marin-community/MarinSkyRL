@@ -78,6 +78,7 @@ async def run_shard_interval(
     lifecycle=ShardLifecycle.CLOSE,
     generation_boundary=GenerationBoundary.INTERVAL,
     capture=None,
+    observe=None,
 ):
     """Pause, freeze, prove, install and replay before releasing publication ownership.
 
@@ -145,9 +146,13 @@ async def run_shard_interval(
             receiver_ranks,
             "frozen",
         )
+        if observe is not None:
+            result["physical_before"] = await measured("observation_before", observe("before"))
         installed = await measured(
             "install", settled(policy("run_shard_publication"), client.run_shard_stream(manifest_id, publication_id))
         )
+        if observe is not None:
+            result["physical_after"] = await measured("observation_after", observe("after"))
         result["policy_install"] = validate_rows(installed[0], manifest_id, publication_id, policy_ranks, "installed")
         result["receiver_install"] = validate_rows(
             installed[1], manifest_id, publication_id, receiver_ranks, "installed"

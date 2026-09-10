@@ -6,7 +6,7 @@ import ray
 
 from skyrl_train.weight_sync.readback_diagnostics import persist_readback
 from skyrl_train.weight_sync.bucket_qualification import mark_measurement_once
-from skyrl_train.weight_sync.shard_interval import GenerationBoundary, ShardLifecycle, run_shard_interval
+from skyrl_train.weight_sync.shard_interval import GenerationBoundary, ShardLifecycle, run_shard_interval, settled
 from skyrl_train.weight_sync.shard_preparation import PreparationOptions, ShardGeometry
 from skyrl_train.weight_sync.shard_rendezvous import native_prepared_shard_diagnostic
 from skyrl_train.weight_sync.shard_replay_rpc import replay_prepared_shards
@@ -81,6 +81,16 @@ class ShardTrainingPublication:
             capture=self.capture,
         )
 
+    async def observe(self, publication_id, moment):
+        observation_id = f"shard-{publication_id}-{moment}"
+        refs = self.driver.policy_model.async_run_ray_method(
+            "pass_through", "read_weight_sync_observations", observation_id, self.output_uri
+        )
+        return await settled(
+            settled(*refs),
+            self.driver.inference_engine_client.read_weight_sync_observations(observation_id, self.output_uri),
+        )
+
     async def publish(self, publication_id):
         started = time.perf_counter()
         try:
@@ -99,6 +109,7 @@ class ShardTrainingPublication:
                 lifecycle=ShardLifecycle.RETAIN,
                 generation_boundary=GenerationBoundary.DRIVER,
                 capture=self.capture,
+                observe=lambda moment: self.observe(publication_id, moment),
             )
             result["measurement_marker"] = self.measurement_marker
             result["total_seconds_including_proof"] = time.perf_counter() - started
