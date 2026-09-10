@@ -212,19 +212,42 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             payload=payload, manifest_id=manifest_id
         )
 
-    async def receive_diagnostic_weight_sync_bucket(self, bucket_id: int, *, replay: bool = False):
-        return await self.inference_engine_actor.receive_diagnostic_weight_sync_bucket.remote(
-            bucket_id=bucket_id, replay=replay
+    async def begin_diagnostic_weight_sync(self, manifest_id: str, publication_id: int):
+        return await self.inference_engine_actor.begin_diagnostic_weight_sync.remote(
+            manifest_id=manifest_id, publication_id=publication_id
         )
 
-    async def finish_diagnostic_weight_sync_install(self):
-        return await self.inference_engine_actor.finish_diagnostic_weight_sync_install.remote()
+    async def begin_reference_bucket_sync(self, manifest_id, publication_id):
+        return await self.inference_engine_actor.begin_reference_bucket_sync.remote(
+            manifest_id=manifest_id, publication_id=publication_id
+        )
 
-    async def finish_diagnostic_weight_sync_replay(self):
-        return await self.inference_engine_actor.finish_diagnostic_weight_sync_replay.remote()
+    async def finish_reference_bucket_sync(self, manifest_id, publication_id):
+        return await self.inference_engine_actor.finish_reference_bucket_sync.remote(
+            manifest_id=manifest_id, publication_id=publication_id
+        )
 
-    async def close_diagnostic_weight_sync_buckets(self):
-        return await self.inference_engine_actor.close_diagnostic_weight_sync_buckets.remote()
+    async def receive_diagnostic_weight_sync_bucket(
+        self, bucket_id: int, *, replay: bool = False, manifest_id: str | None = None, publication_id: int | None = None
+    ):
+        return await self.inference_engine_actor.receive_diagnostic_weight_sync_bucket.remote(
+            bucket_id=bucket_id, replay=replay, manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def finish_diagnostic_weight_sync_install(self, manifest_id=None, publication_id=None):
+        return await self.inference_engine_actor.finish_diagnostic_weight_sync_install.remote(
+            manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def finish_diagnostic_weight_sync_replay(self, manifest_id=None, publication_id=None):
+        return await self.inference_engine_actor.finish_diagnostic_weight_sync_replay.remote(
+            manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def close_diagnostic_weight_sync_buckets(self, manifest_id=None, publication_id=None):
+        return await self.inference_engine_actor.close_diagnostic_weight_sync_buckets.remote(
+            manifest_id=manifest_id, publication_id=publication_id
+        )
 
     async def read_publication_receiver_state(self):
         return await self.inference_engine_actor.read_publication_receiver_state.remote()
