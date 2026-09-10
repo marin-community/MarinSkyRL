@@ -4,7 +4,12 @@ import copy
 
 import pytest
 
-from skyrl_train.entrypoints.probe_pipeline_timing import BUCKET_BYTES, BUCKET_COUNT, validate_pair
+from skyrl_train.entrypoints.probe_pipeline_timing import (
+    BUCKET_BYTES,
+    BUCKET_COUNT,
+    REQUIRED_ENVIRONMENT,
+    validate_pair,
+)
 
 
 def receipt_rows():
@@ -22,6 +27,7 @@ def receipt_rows():
                     "rank": rank,
                     "manifest_id": "one-manifest",
                     "identity": {"gpu_uuid": f"gpu-{rank}"},
+                    "environment": dict(REQUIRED_ENVIRONMENT),
                     "operation_complete": True,
                     "timing": {"events_complete": True, "intervals": intervals},
                     "installed_bytes": BUCKET_BYTES * BUCKET_COUNT if rank else 0,
@@ -36,11 +42,14 @@ def test_complete_serial_and_concurrent_controls():
 
 
 @pytest.mark.parametrize(
-    "failure", ["bytes", "missing", "duplicate", "unfinished", "nonfinite", "serial_overlap", "no_overlap"]
+    "failure",
+    ["bytes", "missing", "duplicate", "unfinished", "nonfinite", "serial_overlap", "no_overlap", "environment"],
 )
 def test_rejects_invalid_device_proof(failure):
     rows = copy.deepcopy(receipt_rows())
-    if failure == "bytes":
+    if failure == "environment":
+        rows[3]["environment"]["CUDA_DEVICE_MAX_CONNECTIONS"] = "8"
+    elif failure == "bytes":
         rows[1]["mismatched_bytes"] = 1
     elif failure == "missing":
         rows[0]["timing"]["intervals"]["export"].pop()

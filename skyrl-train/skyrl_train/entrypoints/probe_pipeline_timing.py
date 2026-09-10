@@ -19,11 +19,19 @@ from skyrl_train.weight_sync.bucket_receiver import GrugBucketReceiver
 from skyrl_train.weight_sync.bucket_sender import StreamingBucketSender
 from skyrl_train.weight_sync.manifest import TensorSpec, build_manifest
 from skyrl_train.weight_sync.pipeline_timing import CudaPipelineTiming, overlap_seconds
+from skyrl_train.weight_sync.readback_diagnostics import ENVIRONMENT_KEYS
 from skyrl_train.weight_sync.worker_bucket_protocol import finish_worker_install, receive_worker_bucket
 
 
 BUCKET_BYTES = 256 * 2**20
 BUCKET_COUNT = 4
+REQUIRED_ENVIRONMENT = {
+    "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+    "NCCL_CUMEM_ENABLE": "0",
+    "VLLM_BATCH_INVARIANT": "0",
+    "NCCL_DEBUG": "INFO",
+    "NCCL_DEBUG_SUBSYS": "INIT,NET",
+}
 
 
 def validate_pair(rows):
@@ -35,6 +43,7 @@ def validate_pair(rows):
     assert len({row["manifest_id"] for row in rows}) == 1
     for row in rows:
         assert row["operation_complete"] and row["timing"]["events_complete"]
+        assert all(row["environment"].get(key) == value for key, value in REQUIRED_ENVIRONMENT.items())
         stages = row["timing"]["intervals"]
         required = ("export", "pack", "nccl_send") if row["rank"] == 0 else ("nccl_receive", "load")
         assert set(stages) == set(required)
@@ -128,6 +137,7 @@ def run_case(mode, device):
         "rank": rank,
         "manifest_id": manifest.manifest_id,
         "identity": bucket_identity(device),
+        "environment": {key: os.environ.get(key) for key in dict.fromkeys((*REQUIRED_ENVIRONMENT, *ENVIRONMENT_KEYS))},
         "timing": receipt,
         "installed_bytes": installed_bytes,
         "mismatched_bytes": mismatched_bytes,
@@ -139,6 +149,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-commit", required=True)
     args = parser.parse_args()
+    assert all(os.environ.get(key) == value for key, value in REQUIRED_ENVIRONMENT.items())
+    assert not torch.cuda.is_initialized(), "Environment must be established before CUDA initialization"
     rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
