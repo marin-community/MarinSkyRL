@@ -12,7 +12,7 @@ class _StubTokenizer:
     DataLoader workers need a real picklable object.
     """
 
-    def apply_chat_template(self, messages, add_generation_prompt):
+    def apply_chat_template(self, messages, add_generation_prompt, *, tokenize=True, return_dict=False):
         return messages
 
 
