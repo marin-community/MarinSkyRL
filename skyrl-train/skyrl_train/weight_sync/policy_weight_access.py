@@ -22,6 +22,15 @@ class PolicyWeightAccess:
             self.owner = owner
             return self._token
 
+    def transfer(self, token: str, owner: str):
+        """Move an existing lease between phases without admitting an update."""
+        if not isinstance(owner, str) or not owner:
+            raise ValueError("Policy-weight ownership needs a nonempty name")
+        with self._lock:
+            if self._token is None or token != self._token:
+                raise RuntimeError("Policy-weight session token is absent or does not match")
+            self.owner = owner
+
     def release(self, token: str):
         """Only the matching session may end ownership; stale calls fail closed."""
         with self._lock:

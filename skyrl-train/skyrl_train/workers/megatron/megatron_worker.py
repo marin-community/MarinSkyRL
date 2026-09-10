@@ -849,6 +849,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         output.metadata = {"train_status": status_mean, "train_status_by_update": status_by_update}
         return output
 
+    async def collect_shard_policy_preparation(self, preparation_id, geometry, output_uri):
+        from skyrl_train.weight_sync.shard_worker_preparation import collect_policy
+
+        return await asyncio.to_thread(collect_policy, self, preparation_id, geometry, output_uri)
+
+    async def bind_shard_policy_preparation(self, plan, output_uri):
+        from skyrl_train.weight_sync.shard_worker_preparation import bind_policy
+
+        return await asyncio.to_thread(bind_policy, self, plan, output_uri)
+
+    async def close_shard_policy_preparation(self, preparation_id):
+        from skyrl_train.weight_sync.shard_worker_preparation import close_preparation
+
+        return await asyncio.to_thread(close_preparation, self, preparation_id)
+
     async def begin_shard_publication(self, manifest_id: str, publication_id: int):
         from skyrl_train.weight_sync.shard_session import worker_shard_call
 

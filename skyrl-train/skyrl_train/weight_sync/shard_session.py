@@ -82,6 +82,17 @@ class ShardSession:
         if runner.rank in runner.receivers and (policy_access is not None or replica_verifier is not None):
             raise ValueError("Receiver session cannot claim learner ownership")
 
+    def adopt_preparation_lease(self, token, versions):
+        """Retain preparation ownership until this session closes or fails to begin."""
+        with self.lock:
+            if self.phase is not ShardPhase.PREPARED or self.token is not None or self.policy_access is None:
+                raise ValueError("Only a fresh policy session can adopt preparation ownership")
+            if storage_versions(self.runner.sources) != versions:
+                raise ValueError("Policy sources changed before preparation ownership transfer")
+            self.policy_access.transfer(token, "shard-publication")
+            self.token = token
+            self.versions = versions
+
     def identity(self, manifest_id, publication_id):
         if manifest_id != self.manifest_id or type(publication_id) is not int or publication_id < 0:
             raise ValueError("Shard manifest/publication identity is invalid")
@@ -101,10 +112,13 @@ class ShardSession:
             self.identity(manifest_id, publication_id)
             if self.phase is not ShardPhase.PREPARED:
                 raise ValueError("Shard session is already active")
-            if self.policy_access is not None:
+            if self.policy_access is not None and self.token is None:
                 self.token = self.policy_access.acquire("shard-publication")
             try:
-                self.versions = storage_versions(self.runner.sources)
+                current = storage_versions(self.runner.sources)
+                if self.versions is not None and current != self.versions:
+                    raise ValueError("Policy sources changed after preparation ownership transfer")
+                self.versions = current
                 self.runner.begin(manifest_id=manifest_id, publication_id=publication_id)
             except BaseException:
                 if self.token is not None:

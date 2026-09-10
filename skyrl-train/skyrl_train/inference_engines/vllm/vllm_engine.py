@@ -468,6 +468,21 @@ class WorkerWrap:
 
         return read_publication_receiver_state(self)
 
+    def collect_shard_receiver_preparation(self, preparation_id, geometry, replica):
+        from skyrl_train.weight_sync.shard_worker_preparation import collect_receiver
+
+        return collect_receiver(self, preparation_id, geometry, replica)
+
+    def bind_shard_receiver_preparation(self, plan, output_uri):
+        from skyrl_train.weight_sync.shard_worker_preparation import bind_receiver
+
+        return bind_receiver(self, plan, output_uri)
+
+    def close_shard_receiver_preparation(self, preparation_id):
+        from skyrl_train.weight_sync.shard_worker_preparation import close_preparation
+
+        return close_preparation(self, preparation_id)
+
     def begin_shard_stream(self, manifest_id: str, publication_id: int):
         from skyrl_train.weight_sync.shard_session import worker_shard_call
 
@@ -2161,6 +2176,50 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def begin_publication_timing(self, step: int):
         return await self._get_engine().collective_rpc("begin_publication_timing", args=(step,))
+
+    async def collect_shard_receiver_preparation(self, preparation_id, geometry, replica):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        if not await self.is_paused():
+            raise RuntimeError("Shard preparation requires the native idle acknowledgement")
+        return await call_all_receiver_workers(
+            self._get_engine(),
+            "collect_shard_receiver_preparation",
+            args=(
+                preparation_id,
+                geometry,
+                replica,
+            ),
+            kwargs=None,
+            settle_calls=True,
+        )
+
+    async def bind_shard_receiver_preparation(self, plan, output_uri):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        if not await self.is_paused():
+            raise RuntimeError("Shard preparation requires the native idle acknowledgement")
+        return await call_all_receiver_workers(
+            self._get_engine(),
+            "bind_shard_receiver_preparation",
+            args=(
+                plan,
+                output_uri,
+            ),
+            kwargs=None,
+            settle_calls=True,
+        )
+
+    async def close_shard_receiver_preparation(self, preparation_id):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(),
+            "close_shard_receiver_preparation",
+            args=(preparation_id,),
+            kwargs=None,
+            settle_calls=True,
+        )
 
     async def begin_shard_stream(self, manifest_id: str, publication_id: int):
         from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers

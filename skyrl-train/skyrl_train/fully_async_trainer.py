@@ -1657,6 +1657,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             self._bucket_timing_prepared = False
 
+    def prepared_shard_diagnostic(self, preparation_id, geometry, options, *, endpoint_factory, output_uri, capture):
+        from skyrl_train.weight_sync.shard_coordinator import prepared_shard_diagnostic
+
+        return prepared_shard_diagnostic(
+            self,
+            preparation_id,
+            geometry,
+            options,
+            endpoint_factory=endpoint_factory,
+            output_uri=output_uri,
+            capture=capture,
+        )
+
     async def diagnostic_shard_publication(
         self, manifest_id, publication_id, *, replay, policy_ranks, receiver_ranks, expected_receiver_bytes
     ):

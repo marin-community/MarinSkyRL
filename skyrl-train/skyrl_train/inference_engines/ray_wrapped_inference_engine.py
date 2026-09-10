@@ -207,6 +207,17 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             terminal_timeout_seconds=terminal_timeout_seconds,
         )
 
+    async def collect_shard_receiver_preparation(self, preparation_id, geometry, replica):
+        return await self.inference_engine_actor.collect_shard_receiver_preparation.remote(
+            preparation_id, geometry, replica
+        )
+
+    async def bind_shard_receiver_preparation(self, plan, output_uri):
+        return await self.inference_engine_actor.bind_shard_receiver_preparation.remote(plan, output_uri)
+
+    async def close_shard_receiver_preparation(self, preparation_id):
+        return await self.inference_engine_actor.close_shard_receiver_preparation.remote(preparation_id)
+
     async def begin_shard_stream(self, manifest_id: str, publication_id: int):
         return await self.inference_engine_actor.begin_shard_stream.remote(
             manifest_id=manifest_id, publication_id=publication_id

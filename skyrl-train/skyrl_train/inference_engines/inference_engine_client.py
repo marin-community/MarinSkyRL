@@ -888,6 +888,33 @@ class InferenceEngineClient(InferenceEngineInterface):
             raise RuntimeError("Bucket collectives require every configured inference engine")
         return await self._run_on_all_engines(method_name, **kwargs)
 
+    async def collect_shard_receiver_preparation(self, preparation_id, geometry):
+        from skyrl_train.weight_sync.shard_interval import settled
+
+        expected = geometry.receiver_replicas * geometry.expert_parallel_size
+        if self._dead_engines or len(self.engines) != expected:
+            raise RuntimeError("Shard preparation requires every external-DP receiver actor")
+        if not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard preparation requires the client idle acknowledgement")
+        return await settled(
+            *(
+                engine.collect_shard_receiver_preparation(
+                    preparation_id, geometry, index // geometry.expert_parallel_size
+                )
+                for index, engine in enumerate(self.engines)
+            )
+        )
+
+    async def bind_shard_receiver_preparation(self, plan, output_uri):
+        if self._dead_engines or not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard preparation requires all receivers and the client idle acknowledgement")
+        return await self._run_on_all_engines("bind_shard_receiver_preparation", plan, output_uri, _settle_calls=True)
+
+    async def close_shard_receiver_preparation(self, preparation_id):
+        if self._dead_engines:
+            raise RuntimeError("Shard cleanup requires every configured receiver actor")
+        return await self._run_on_all_engines("close_shard_receiver_preparation", preparation_id, _settle_calls=True)
+
     async def begin_shard_stream(self, manifest_id: str, publication_id: int):
         if self._dead_engines:
             raise RuntimeError("Shard collectives require every configured inference engine")
