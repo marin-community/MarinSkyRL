@@ -491,3 +491,84 @@ async def test_preparation_observes_actual_sender_and_receiver_environment(gate,
         assert values["NCCL_P2P_NET_DISABLE"] == "0"
         assert "UNRELATED_SECRET" not in values
     await gate.policy.close_bucket_timing(gate.client, None)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_packs_next_bucket_while_receiver_receipt_is_held(gate, monkeypatch):
+    gate.policy.cfg.generator.weight_sync_bucket_pipeline = True
+    held = asyncio.Event()
+    release = asyncio.Event()
+    prefetched = asyncio.Event()
+    receive = gate.client.receive_diagnostic_weight_sync_bucket
+    pack = protocol.StreamingBucketSender.pack_next_bucket
+
+    async def held_receive(bucket_id, replay=False, **identity):
+        result = await receive(bucket_id, replay=replay, **identity)
+        if bucket_id == 0 and not replay:
+            held.set()
+            await release.wait()
+        return result
+
+    def observed_pack(sender):
+        result = pack(sender)
+        if sender.next_bucket == 2:
+            assert held.is_set() and not release.is_set()
+            prefetched.set()
+        return result
+
+    monkeypatch.setattr(gate.client, "receive_diagnostic_weight_sync_bucket", held_receive)
+    monkeypatch.setattr(protocol.StreamingBucketSender, "pack_next_bucket", observed_pack)
+    task = asyncio.create_task(gate.policy.diagnostic_bucket_install_and_replay(gate.client))
+    try:
+        await asyncio.wait_for(prefetched.wait(), timeout=5)
+    finally:
+        release.set()
+    receipt = await asyncio.wait_for(task, timeout=10)
+    install, replay = receipt["phases"]["install"], receipt["phases"]["replay"]
+    assert install["pipeline_enabled"] and not replay["pipeline_enabled"]
+    assert install["sender"]["send_completion_joined"]
+    assert replay["receivers"][0]["coverage"] == 1.0
+    assert replay["receivers"][0]["mismatches"] == 0
+    assert replay["receivers"][0]["compared_bytes"] == receipt["prepared_receivers"][0]["installed_parameter_bytes"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_prefetch_failure_joins_held_receiver_before_cleanup(gate, monkeypatch):
+    gate.policy.cfg.generator.weight_sync_bucket_pipeline = True
+    held = asyncio.Event()
+    joined = asyncio.Event()
+    receive = gate.client.receive_diagnostic_weight_sync_bucket
+    pack = protocol.StreamingBucketSender.pack_next_bucket
+
+    async def held_receive(bucket_id, replay=False, **identity):
+        result = await receive(bucket_id, replay=replay, **identity)
+        if bucket_id == 0 and not replay:
+            held.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                joined.set()
+        return result
+
+    def failed_prefetch(sender):
+        if sender.next_bucket == 1:
+            assert held.is_set()
+            raise RuntimeError("prefetch export failed")
+        return pack(sender)
+
+    monkeypatch.setattr(gate.client, "receive_diagnostic_weight_sync_bucket", held_receive)
+    monkeypatch.setattr(protocol.StreamingBucketSender, "pack_next_bucket", failed_prefetch)
+    with pytest.raises(RuntimeError, match="prefetch export failed"):
+        await asyncio.wait_for(gate.policy.diagnostic_bucket_install_and_replay(gate.client), timeout=10)
+    assert joined.is_set()
+    assert gate.policy._policy_weight_access.owner is None
+
+
+@pytest.mark.asyncio
+async def test_reference_timing_rejects_bucket_pipeline_before_preparation(gate):
+    gate.policy.cfg.generator.weight_sync_bucket_pipeline = True
+    gate.policy.cfg.generator.weight_sync_wire_inventory = True
+    with pytest.raises(ValueError, match="Bucket pipeline requires bucket timing mode"):
+        await gate.policy.prepare_reference_timing(gate.client)
+    assert not gate.client.entered.is_set()
+    assert gate.policy._policy_weight_access.owner is None

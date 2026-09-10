@@ -6,6 +6,7 @@ Neither path requests incomplete bridge conversion groups.
 """
 
 from collections.abc import Iterator
+from contextlib import nullcontext
 
 import torch
 
@@ -87,9 +88,12 @@ class BucketSenderSlots:
 class StreamingBucketSender(BucketSenderSlots):
     """Pack complete Bridge exports without retaining the complete HF model."""
 
-    def __init__(self, manifest: PublicationManifest, sources: Iterator[tuple[str, torch.Tensor]], buffers):
+    def __init__(
+        self, manifest: PublicationManifest, sources: Iterator[tuple[str, torch.Tensor]], buffers, *, export_stream=None
+    ):
         super().__init__(manifest, buffers)
         self.sources = iter(sources)
+        self.export_stream = export_stream
         self.source_ready = torch.cuda.Event()
         self.source_copied = torch.cuda.Event()
         self.current_name = None
@@ -103,7 +107,8 @@ class StreamingBucketSender(BucketSenderSlots):
             self.source_copied.synchronize()
             self.current_source = None
         try:
-            name, source = next(self.sources)
+            with torch.cuda.stream(self.export_stream) if self.export_stream is not None else nullcontext():
+                name, source = next(self.sources)
         except StopIteration as error:
             raise ValueError("Export ended before the complete manifest") from error
         if (
@@ -119,7 +124,7 @@ class StreamingBucketSender(BucketSenderSlots):
         self.current_name = name
         self.current_source = source
         self.source_count += 1
-        self.source_ready.record(torch.cuda.current_stream(self.device))
+        self.source_ready.record(self.export_stream or torch.cuda.current_stream(self.device))
         self.pack_stream.wait_event(self.source_ready)
 
     def pack_next_bucket(self):
@@ -139,8 +144,9 @@ class StreamingBucketSender(BucketSenderSlots):
         self.finish_slots()
         self.source_copied.synchronize()
         self.current_source = None
-        if next(self.sources, None) is not None:
-            raise ValueError("Export contains a tensor absent from the manifest")
+        with torch.cuda.stream(self.export_stream) if self.export_stream is not None else nullcontext():
+            if next(self.sources, None) is not None:
+                raise ValueError("Export contains a tensor absent from the manifest")
         self.finished = True
         return {
             "manifest_id": self.manifest.manifest_id,

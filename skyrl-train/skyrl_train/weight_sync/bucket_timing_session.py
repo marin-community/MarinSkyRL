@@ -81,6 +81,8 @@ def session_for(worker, publication_id, expected):
 async def prepare_timing(worker, client, *, source_owners, mode="bucket"):
     if mode not in ("bucket", "reference"):
         raise ValueError("Unknown timing transfer mode")
+    if mode != "bucket" and getattr(worker.cfg.generator, "weight_sync_bucket_pipeline", False):
+        raise ValueError("Bucket pipeline requires bucket timing mode")
     if mode == "reference" and not getattr(worker.cfg.generator, "weight_sync_wire_inventory", False):
         raise ValueError("Reference timing requires the actual native wire inventory")
     if hasattr(worker, "_bucket_timing_session"):

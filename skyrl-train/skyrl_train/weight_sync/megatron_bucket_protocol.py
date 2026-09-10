@@ -240,9 +240,14 @@ async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, 
         if replay
         else StreamingBucketSender(manifest, complete_exports(worker), buffers)
     )
+    pipeline = not replay and getattr(generator, "weight_sync_bucket_pipeline", False)
+    if pipeline:
+        sender.export_stream = torch.cuda.Stream(device=device)
+    pending_buffer = None
     per_bucket = []
     for bucket in range(manifest.bucket_count):
-        buffer = sender.pack_next_bucket()
+        buffer = sender.pack_next_bucket() if pending_buffer is None else pending_buffer
+        pending_buffer = None
         if rank == 0:
             receive_task = asyncio.create_task(
                 client.receive_diagnostic_weight_sync_bucket(bucket, replay=replay, **sync_identity)
@@ -257,11 +262,13 @@ async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, 
 
             try:
                 await asyncio.to_thread(broadcast)
+                sender.mark_bucket_sent(bucket)
+                if pipeline and bucket + 1 < manifest.bucket_count:
+                    pending_buffer = sender.pack_next_bucket()
             except BaseException:
                 receive_task.cancel()
                 await asyncio.gather(receive_task, return_exceptions=True)
                 raise
-            sender.mark_bucket_sent(bucket)
             rows, _ = receiver_rows(
                 await receive_task,
                 engine_count=engine_count,
@@ -283,6 +290,8 @@ async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, 
             # All policy ranks currently perform the complete bridge
             # export/pack; only rank zero uses the update communicator.
             sender.mark_bucket_sent(bucket)
+            if pipeline and bucket + 1 < manifest.bucket_count:
+                pending_buffer = sender.pack_next_bucket()
         torch.distributed.barrier()
     sender_receipt = sender.finish()
     receivers = None
@@ -301,6 +310,7 @@ async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, 
     peak_extra = torch.cuda.max_memory_allocated(device) - allocated_at_phase
     receipt = {
         "seconds": elapsed,
+        "pipeline_enabled": pipeline,
         "peak_extra_bytes": peak_extra,
         "allocated_before": allocated_at_phase,
         "allocated_after": torch.cuda.memory_allocated(device),

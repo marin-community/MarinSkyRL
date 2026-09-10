@@ -187,3 +187,20 @@ def test_three_slot_ring_rejects_alias_of_last_slot(cuda_boundary):
     manifest, sources, buffers = fixture_parts()
     with pytest.raises(ValueError, match="must not alias"):
         StreamingBucketSender(manifest, iter(sources.items()), (*buffers, buffers[1]))
+
+
+def test_export_stream_records_source_readiness_before_pack(cuda_boundary):
+    manifest, sources, buffers = fixture_parts()
+    export_stream = torch.cuda.Stream(device=buffers[0].device)
+    sender = StreamingBucketSender(manifest, iter(sources.items()), buffers, export_stream=export_stream)
+    chunks = []
+    for bucket in range(manifest.bucket_count):
+        chunks.append(sender.pack_next_bucket().clone())
+        sender.mark_bucket_sent(bucket)
+    sender.finish()
+    reference = torch.cat([tensor.view(torch.uint8).flatten() for tensor in sources.values()])
+    assert torch.equal(torch.cat(chunks), reference)
+    ready = sender.source_ready.number
+    log = cuda_boundary.log
+    assert log.index(("record", export_stream.name, ready)) < log.index(("wait", sender.pack_streams[0].name, ready))
+    assert ("record", "caller", ready) not in log
