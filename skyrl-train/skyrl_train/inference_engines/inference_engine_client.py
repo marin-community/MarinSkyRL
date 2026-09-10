@@ -20,6 +20,7 @@ from typing import List, Any, Optional, Dict, Union
 from skyrl_train.inference_engines.utils import (
     route_prompts_to_engines,
     hash_with_sha256,
+    is_single_completion_prompt,
     postprocess_completion_request,
     aggregate_completion_usage_info,
 )
@@ -669,6 +670,54 @@ class InferenceEngineClient(InferenceEngineInterface):
         finally:
             self._dec_inflight(engine_idx)
 
+    async def _single_completion_with_pause_retry(
+        self, engine_idx: int, request_json: Dict[str, Any], headers: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """Issue a single-prompt `/completions` request across a weight-sync pause.
+
+        Two things go wrong at a pause boundary, and this mirrors how `_chat_completion_with_retry`
+        answers each:
+        1. A request that ARRIVES during the pause must not enter the engine — it waits at the
+           weight-sync barrier first, for the same reason `_chat_completion_with_retry` and
+           `chat_completion_stream` do: a request registered in the vLLM scheduler after
+           `pause_generation()` drained the engine would have the next engine step run a forward
+           pass against params the layerwise reload has moved to the `meta` device
+           (`EngineDeadError`).
+        2. A request that is IN FLIGHT when the pause starts comes back with
+           `finish_reason == "abort"` (the abort-mode scheduler pause returns the tokens generated
+           so far). The chat path resumes such a generation with `continue_final_message`; the
+           `/completions` protocol has no equivalent, so we re-issue the request from the start
+           instead, once, after waiting out the pause.
+
+        Once and not a loop: because a re-issue restarts generation rather than continuing it, an
+        unbounded loop could livelock a long generation under frequent weight syncs. A second abort
+        is returned to the caller as-is (a partial completion with `finish_reason == "abort"`),
+        which is what the caller would have received before this handling existed.
+
+        A dead engine fails over once per attempt, mirroring the batched path's failover, and the
+        retry then goes to whichever engine actually served.
+        """
+        for attempt in (0, 1):
+            await self._wait_for_generation_to_resume()
+            try:
+                result = await self.engines[engine_idx].completion({"json": request_json, "headers": headers})
+            except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
+                self._mark_engine_dead(engine_idx, e)
+                fallback = self._pick_fallback_engine(engine_idx)
+                if fallback is None:
+                    raise RuntimeError("All inference engines have died") from e
+                engine_idx = fallback
+                await self._wait_for_generation_to_resume()
+                result = await self.engines[engine_idx].completion({"json": request_json, "headers": headers})
+
+            if not _completion_response_was_aborted(result):
+                return result
+            if attempt == 0:
+                logger.info("/completions generation was aborted by a weight-sync pause; re-issuing once after resume")
+
+        logger.warning("/completions generation was aborted again after the pause retry; returning it as-is")
+        return result
+
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Handles an OpenAI /completions request.
@@ -682,16 +731,23 @@ class InferenceEngineClient(InferenceEngineInterface):
         `request["session_id"]` if present, and if not we split evenly across engines.
 
         Regardless, the order will be maintained, i.e. `output["choices"][i]` corresponds to `request["prompt"][i]`.
+
+        The SINGLE-prompt case is pause-safe: it waits out a weight-sync pause instead of erroring,
+        and re-issues once if a pause aborted the generation mid-flight (see
+        `_single_completion_with_pause_retry`). This is the path harbor drives for terminus-2's
+        token-in-token-out transport, so a weight sync must not surface to it as an error. The
+        BATCHED path has no such handling and still raises while generation is paused.
         """
-        if self.generation_paused_event.is_set():
-            raise RuntimeError("pause_generation is unsupported for /completions requests.")
         body = request_payload.get("json", {})
 
         # NOTE(Charlie): do not reuse headers here as the single request may become various new requests
         headers = {"Content-Type": "application/json"}
 
-        # 1. Postprocess prompt, session_id, and validate request.
+        # 1. Postprocess prompt, session_id, and validate request. `is_single_prompt` has to be
+        # read off the RAW prompt: postprocess normalises a single prompt into a singleton list,
+        # after which it is indistinguishable from a length-1 batch.
         prompt = body.get("prompt")
+        is_single_prompt = is_single_completion_prompt(prompt)
         session_id_value = body.pop("session_id", None)
         ret = postprocess_completion_request(prompt, session_id_value)
         session_id_list: Optional[Union[List[int], List[str], ErrorResponse]] = ret[0]
@@ -721,6 +777,20 @@ class InferenceEngineClient(InferenceEngineInterface):
             resolved = self._resolve_engine_idx(engine_idx)
             rerouted_mapping.setdefault(resolved, []).extend(prompt_ids)
 
+        # 1.1. Single prompt: one engine, one sub-request, and a weight-sync pause is survivable
+        # (barrier + one re-issue on abort). Handled on its own path below.
+        if is_single_prompt:
+            ((single_engine_idx, _),) = rerouted_mapping.items()
+            single_json = dict(body)
+            single_json["prompt"] = list(prompt)
+            result = await self._single_completion_with_pause_retry(single_engine_idx, single_json, headers)
+            error_response = _completion_engine_error_response([result])
+            return error_response if error_response is not None else result
+
+        # Batched: no pause handling exists for a fan-out request, so a pause is still an error.
+        if self.generation_paused_event.is_set():
+            raise RuntimeError("pause_generation is unsupported for batched /completions requests.")
+
         for engine_idx, prompt_ids in rerouted_mapping.items():
             cur_prompt = [prompt[i] for i in prompt_ids]
             cur_json = dict(body)
@@ -749,19 +819,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 3. Check for errors.
         # results can be ErrorResponse or CompletionResponse. If one of the sub-requests fails, we
         # return an error response. That is, there is no partial success, following vLLM and SGLang's behavior.
-        for result in results:
-            if "error" in result or result.get("object", "") == "error":
-                # former is vllm format, latter is sglang format
-                error_details = result.get("error", result)  # resolves vllm/sglang format difference
-                error_code = error_details["code"]
-                error_type = error_details["type"]
-                return ErrorResponse(
-                    error=ErrorInfo(
-                        message=f"In one of the engines that SkyRL manages, an error occurred: {error_details['message']}",
-                        type=error_type,
-                        code=error_code,
-                    ),
-                ).model_dump()
+        error_response = _completion_engine_error_response(results)
+        if error_response is not None:
+            return error_response
 
         # 4. Combine choices and preserve original order.
         # If there is only one result, we return it directly.
@@ -879,7 +939,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         Pauses generation for all engines, intended for in-flight weight updates and partial rollouts.
 
-        Currently only supported for `/chat/completions` and not `/completions` or `generate()`.
+        Supported for `/chat/completions` and for SINGLE-prompt `/completions` (which waits at the
+        barrier and re-issues once on abort, see `_single_completion_with_pause_retry`). Not
+        supported for batched `/completions` or `generate()`.
 
         Both in-flight and incoming requests will be blocked until `resume_generation` is called.
         1. Set the paused event to avoid new requests from being submitted while aborting requests.
@@ -1068,6 +1130,39 @@ def _prepare_retry_request(
         cur_request_json[max_key] = orig_max_tokens - accum.completion_tokens
 
     return cur_request_json
+
+
+def _completion_response_was_aborted(response: Dict[str, Any]) -> bool:
+    """Whether a `/completions` response was cut short by `pause_generation()`.
+
+    Same signal the chat path reads (`choices[0]["finish_reason"] == "abort"`, set when the
+    abort-mode scheduler pause returns the tokens generated so far). Engine error payloads carry no
+    `choices`, so they are never mistaken for an abort — they are handled as errors instead.
+    """
+    if "error" in response or response.get("object", "") == "error":
+        return False
+    choices = response.get("choices") or []
+    return bool(choices) and choices[0].get("finish_reason") == "abort"
+
+
+def _completion_engine_error_response(results: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Wrap the first engine-side `/completions` error as a client-level error, else None.
+
+    There is no partial success: if any sub-request errored, the whole request errors, following
+    vLLM's and SGLang's behavior.
+    """
+    for result in results:
+        if "error" in result or result.get("object", "") == "error":
+            # former is vllm format, latter is sglang format
+            error_details = result.get("error", result)  # resolves vllm/sglang format difference
+            return ErrorResponse(
+                error=ErrorInfo(
+                    message=f"In one of the engines that SkyRL manages, an error occurred: {error_details['message']}",
+                    type=error_details["type"],
+                    code=error_details["code"],
+                ),
+            ).model_dump()
+    return None
 
 
 def _parse_partial_response_and_inplace_update_accum(
