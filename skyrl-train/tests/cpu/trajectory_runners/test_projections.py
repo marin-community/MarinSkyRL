@@ -110,3 +110,12 @@ def test_projection_derives_mask_baseline_and_token_credit_from_contracts():
     assert output["exception_types"] == ["TurnCapExhaustedError"]
     assert output["error_treatments"] == ["passthrough"]
     assert "unshaped_rewards" not in output
+
+
+def test_abort_evidence_survives_unknown_token_versions():
+    output = WholeTrajectoryProjection(_config(), _Tokenizer()).project(
+        [replace(_step([3, 4], 1.0), response_abort_count=2)],
+        {"env_classes": None, "sampling_params": {"logprobs": True}},
+    )
+    assert output["rollout_abort_counts"] == [2]
+    assert "rollout_versions" not in output

@@ -40,13 +40,14 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     NormalizedReward,
     aggregate_reward_shaping_components,
 )
+from skyrl_train.group_admission import sampled_token_version_bounds
 from skyrl_train.json_serialization import canonical_json_bytes, to_jsonable
 from skyrl_train.io import io
 
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
 RETENTION_SCHEMA_VERSION = 1
-TRAJECTORY_RECORD_SCHEMA_VERSION = 3
+TRAJECTORY_RECORD_SCHEMA_VERSION = 4
 _LEDGER_NAME = "_retention_ledger.json"
 _SELECTION_COUNT = "count"
 _SELECTION_FRACTION = "fraction"
@@ -207,6 +208,9 @@ class _ProvenanceTrace:
     model_source_identity: str | None
     resume_path: str | None
     model_version_step: int
+    model_version_step_max: int | None
+    token_version_runs: tuple[tuple[int, int | None], ...] | None
+    response_abort_count: int | None
     sampling: dict[str, Any]
     reward_shaping_schema_version: int | None
 
@@ -411,6 +415,31 @@ def build_trajectory_records(
         response_ids = [token for index in row_indices for token in output["response_ids"][index]]
         loss_mask = [value for index in row_indices for value in output["loss_masks"][index]]
         prompt_ids = output["prompt_token_ids"][row_indices[0]]
+        version_rows = output.get("rollout_versions")
+        versions = (
+            [version for index in row_indices for version in version_rows[index]] if version_rows is not None else None
+        )
+        bounds = (
+            sampled_token_version_bounds(
+                {"response_ids": [response_ids], "loss_masks": [loss_mask], "rollout_versions": [versions]}
+            )
+            if versions is not None
+            else None
+        )
+        version_runs = (
+            tuple(
+                (index, version)
+                for index, version in enumerate(versions)
+                if index == 0 or version != versions[index - 1]
+            )
+            if versions is not None
+            else None
+        )
+        abort_rows = output.get("rollout_abort_counts")
+        abort_values = [abort_rows[index] for index in row_indices] if abort_rows is not None else []
+        known_aborts = [value for value in abort_values if value is not None]
+        abort_count = sum(known_aborts) if known_aborts and len(known_aborts) == len(abort_values) else None
+
         normalized_reward = NormalizedReward.from_output(output["rewards"][final_index])
         shaped_reward = normalized_reward.total
         outcome = float(unshaped[final_index]) if unshaped is not None else normalized_reward.outcome
@@ -466,6 +495,9 @@ def build_trajectory_records(
                 model_source_identity=config.model_source_identity,
                 resume_path=config.resume_path,
                 model_version_step=model_version_step,
+                model_version_step_max=bounds[1] if bounds is not None else None,
+                token_version_runs=version_runs,
+                response_abort_count=abort_count,
                 sampling=to_jsonable(input_batch.get("sampling_params") or {}),
                 reward_shaping_schema_version=None if shaping_versions is None else shaping_versions[final_index],
             ),

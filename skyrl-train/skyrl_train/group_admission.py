@@ -150,6 +150,37 @@ def _aligned_sequence(batch: Mapping[str, object], key: str, row_count: int) -> 
     return value
 
 
+def sampled_token_version_bounds(batch: Mapping[str, object]) -> tuple[int, int] | None:
+    """Return exact model-step bounds only when every loss token has a known version."""
+    responses = batch["response_ids"]
+    if not isinstance(responses, Sequence) or isinstance(responses, (str, bytes)):
+        raise ValueError("response_ids must be a sequence")
+    rows = _aligned_sequence(batch, "rollout_versions", len(responses))
+    if rows is None:
+        return None
+    masks = _aligned_sequence(batch, "loss_masks", len(responses))
+    if masks is None:
+        raise ValueError("Token version bounds require aligned loss masks")
+    known: list[int] = []
+    missing = False
+    for row, response, mask in zip(rows, responses, masks, strict=True):
+        if not isinstance(response, Sequence) or not isinstance(mask, Sequence):
+            raise ValueError("response_ids and loss_masks rows must be sequences")
+        if not isinstance(row, Sequence) or isinstance(row, (str, bytes)) or len(row) != len(response):
+            raise ValueError("rollout_versions must align with response tokens")
+        if len(mask) != len(row):
+            raise ValueError("rollout_versions must align with loss masks")
+        for version, sampled in zip(row, mask, strict=True):
+            if version is not None and (type(version) is not int or version < 1):
+                raise ValueError("Token versions must be positive model steps or None")
+            if sampled:
+                if version is None:
+                    missing = True
+                else:
+                    known.append(version)
+    return (min(known), max(known)) if known and not missing else None
+
+
 @dataclass(frozen=True)
 class _GroupFacts:
     physical_count: int
@@ -178,6 +209,8 @@ def _inspect_group(group: GeneratedGroup) -> _GroupFacts:
                 f"loss_masks row {row_index} must align with response_ids, got {len(loss_mask)} and {len(response)}"
             )
 
+    sampled_token_version_bounds(batch)
+    _aligned_sequence(batch, "rollout_abort_counts", row_count)
     is_last_step = _aligned_sequence(batch, "is_last_step", row_count)
     final_indices = (
         list(range(row_count)) if is_last_step is None else [i for i, value in enumerate(is_last_step) if value]
@@ -218,6 +251,11 @@ def group_is_fully_excluded_from_training(trajectory_batch: Mapping[str, object]
     return facts.trainable_count == 0 and facts.baseline_contributor_count == 0
 
 
+class StalenessReference(StrEnum):
+    OLDEST = "oldest"
+    NEWEST = "newest"
+
+
 class GroupAdmissionPolicy:
     """Evaluate completed groups without mutating async lifecycle state."""
 
@@ -227,14 +265,22 @@ class GroupAdmissionPolicy:
         *,
         max_staleness_steps: int,
         rollout_logprobs_required: bool,
+        staleness_reference: StalenessReference = StalenessReference.OLDEST,
     ) -> None:
+        self.staleness_reference = StalenessReference(staleness_reference)
         self.invariant = invariant
         self.max_staleness_steps = max_staleness_steps
         self.rollout_logprobs_required = rollout_logprobs_required
 
     def is_stale(self, group: GeneratedGroup, *, global_step: int) -> bool:
-        """Return whether the group's oldest sample exceeds the run's staleness cap."""
-        return global_step - group.earliest_model_step > self.max_staleness_steps
+        """Apply the explicit oldest/newest model-step reference for admission."""
+        reference_step = group.earliest_model_step
+        if self.staleness_reference is StalenessReference.NEWEST:
+            bounds = sampled_token_version_bounds(group.trajectory_batch)
+            if bounds is None:
+                raise ValueError("Newest-token admission requires complete token version evidence")
+            reference_step = bounds[1]
+        return global_step - reference_step > self.max_staleness_steps
 
     def evaluate(self, group: GeneratedGroup, *, global_step: int) -> AdmissionDecision:
         facts = _inspect_group(group)

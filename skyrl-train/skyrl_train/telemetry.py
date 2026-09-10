@@ -269,7 +269,11 @@ def record_policy_step(step: int) -> None:
 
 
 def record_generated_work(
-    response_ids: Sequence[Sequence[int]], is_last_step: Sequence[bool] | None, weights_step: int
+    response_ids: Sequence[Sequence[int]],
+    is_last_step: Sequence[bool] | None,
+    weights_step: int,
+    *,
+    token_versions: Sequence[Sequence[int | None]] | None = None,
 ) -> None:
     """Count generated work against the policy version that produced it.
 
@@ -283,15 +287,30 @@ def record_generated_work(
     progress_time = time.time()
     if sample_count:
         _process_state.last_progress_timestamp = progress_time
-    for work_kind, count in (
-        ("rollout", rollout_count),
-        ("sample", sample_count),
-        ("generated_token", generated_token_count),
-    ):
+    token_counts: dict[int | None, int] = {}
+    if token_versions is not None:
+        for response, versions in zip(response_ids, token_versions, strict=True):
+            if len(response) != len(versions):
+                raise ValueError("Generated token versions must align with response IDs")
+            for version in versions:
+                if version is not None and (type(version) is not int or version < 1):
+                    raise ValueError("Generated token versions must be positive model steps or None")
+                token_counts[version] = token_counts.get(version, 0) + 1
+    else:
+        token_counts[weights_step] = generated_token_count
+    for work_kind, count, version in [
+        ("rollout", rollout_count, weights_step),
+        ("sample", sample_count, weights_step),
+        *(("generated_token", count, version) for version, count in token_counts.items()),
+    ]:
         if count:
             work_completed.add(
                 count,
-                attributes={"work_kind": work_kind, "role": TRAINER_ROLE, "weights_step": str(weights_step)},
+                attributes={
+                    "work_kind": work_kind,
+                    "role": TRAINER_ROLE,
+                    "weights_step": "unknown" if version is None else str(version),
+                },
             )
     if rollout_count:
         progress_timestamp.set(

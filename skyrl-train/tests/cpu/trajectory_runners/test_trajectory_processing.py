@@ -1057,3 +1057,19 @@ def test_required_rollout_logprobs_reject_fully_masked_baseline_contributor(poli
             ),
             tis_lcs_alert_threshold=0.005,
         )
+
+
+@pytest.mark.parametrize("known_first", [True, False])
+def test_mixed_legacy_token_versions_and_abort_counts_concatenate(known_first):
+    known, legacy = _generated_group(1, 0), _generated_group(1, 0)
+    known["rollout_versions"] = [[4, 5]]
+    known["rollout_abort_counts"] = [2]
+    groups = [known, legacy] if known_first else [legacy, known]
+    merged = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=0.005)
+    expected = [[4, 5], [None, None]]
+    assert merged["rollout_versions"] == (expected if known_first else expected[::-1])
+    assert merged["rollout_abort_counts"] == ([2, None] if known_first else [None, 2])
+    assert merged["latest_global_step"] is None
+    del known["rollout_versions"]
+    merged = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=0.005)
+    assert merged["rollout_abort_counts"] == ([2, None] if known_first else [None, 2])

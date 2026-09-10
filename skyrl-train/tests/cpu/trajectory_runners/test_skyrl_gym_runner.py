@@ -369,6 +369,8 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "stop_reasons": ["stop"],
             "response_ids": [[10, 4]],
             "response_logprobs": [[-0.1, -0.2]],
+            "response_versions": [[3, 4]],
+            "response_abort_count": [2],
         },
         {
             "responses": ["second"],
@@ -376,6 +378,8 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "stop_reasons": ["stop"],
             "response_ids": [[20, 4]],
             "response_logprobs": [[-0.3, -0.4]],
+            "response_versions": [[5, 5]],
+            "response_abort_count": [1],
         },
     ]
 
@@ -399,6 +403,10 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     assert output["rollout_logprobs"] == [[-0.1, -0.2, 0.0, 0.0, 0.0, 0.0, -0.3, -0.4]]
 
     assert output["generator_engine_indices"] == [expected_index]
+
+    assert output["rollout_versions"] == [[3, 4, None, None, None, None, 5, 5]]
+    assert output["rollout_abort_counts"] == [3]
+    assert output["latest_global_step"] == 5
 
 
 @pytest.mark.asyncio
@@ -424,12 +432,16 @@ async def test_generate_non_batched_single_message_multiturn_aligns_rollout_logp
             "stop_reasons": ["stop"],
             "response_ids": [[10, 4]],
             "response_logprobs": [[-0.1, -0.2]],
+            "response_versions": [[3, 4]],
+            "response_abort_count": [2],
         },
         {
             "responses": ["second"],
             "stop_reasons": ["stop"],
             "response_ids": [[20, 4]],
             "response_logprobs": [[-0.3, -0.4]],
+            "response_versions": [[5, 5]],
+            "response_abort_count": [1],
         },
     ]
 
@@ -450,6 +462,10 @@ async def test_generate_non_batched_single_message_multiturn_aligns_rollout_logp
     assert output["response_ids"] == [[10, *MOCK_TOKENIZER_ENCODED_IDS, 20, 4]]
     assert output["loss_masks"] == [[1, 0, 0, 0, 0, 1, 1]]
     assert output["rollout_logprobs"] == [[-0.1, 0.0, 0.0, 0.0, 0.0, -0.3, -0.4]]
+
+    assert output["rollout_versions"] == [[3, None, None, None, None, 5, 5]]
+    assert output["rollout_abort_counts"] == [3]
+    assert output["latest_global_step"] == 5
 
 
 @pytest.mark.asyncio
@@ -1483,6 +1499,8 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
             "stop_reasons": ["stop"] * num,
             "response_logprobs": None,
             "response_ids": [[20, 21, 22] for _ in range(num)],
+            "response_versions": [[4, 5, 5] for _ in range(num)],
+            "response_abort_count": [1] * num,
         }
 
     mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
@@ -1536,6 +1554,8 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
         prompt, mock_env_cfg.env_class, extras, max_tokens=50, max_input_length=512
     )
 
+    assert out.token_versions is None
+    assert out.response_abort_count == 2
     assert out.reward.optimization_reward == 2.5
     assert out.reward.token_rewards is None
     assert (out.evidence.stop_reason or "unknown") == "stop"
@@ -1659,6 +1679,8 @@ class SeedRecordingModelClient:
             response_logprobs=[[-0.1, -0.2]],
             stop_reasons=["stop"],
             policy_versions_at_first_token=[3],
+            response_versions=[[4, 5]],
+            response_abort_count=[1],
             token_provenance=TokenProvenance.ENGINE,
         )
 
@@ -1704,6 +1726,10 @@ async def test_seeded_gym_requests_match_across_order_and_runner_clocks():
         assert all(output.first_token_policy_version == 3 for output in outputs)
         projected = runner.projection.project(outputs, request)
         assert projected["policy_versions_at_first_token"] == [3] * len(outputs)
+        assert all(output.token_versions == (4, 5) and output.response_abort_count == 1 for output in outputs)
+        assert projected["rollout_versions"] == [[4, 5]] * len(outputs)
+        assert projected["rollout_abort_counts"] == [1] * len(outputs)
+        assert projected["latest_global_step"] == 5
         seeds = {item["session_ids"][0]: item["sampling_params"]["seed"] for item in client.requests}
         assert len(seeds) == 4 and len(set(seeds.values())) == 4
         assert all(0 <= seed < 2**31 for seed in seeds.values())
@@ -1713,3 +1739,39 @@ async def test_seeded_gym_requests_match_across_order_and_runner_clocks():
     assert observed[0] == observed[1] == observed[2]
     assert all(observed[3][key] != value for key, value in observed[0].items())
     assert "seed" not in params and "seed" not in cfg.generator.sampling_params
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_batched_token_versions_truncate_with_response(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    generator_cfg.sampling_params.max_generate_length = 2
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    mock_llm.generate = AsyncMock(
+        return_value={
+            "responses": ["mocked output"],
+            "response_ids": [[10, 11, 12]],
+            "stop_reasons": ["length"],
+            "response_versions": [[4, 5, 6]],
+            "response_abort_count": [2],
+        }
+    )
+    runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    output = await runner.run(
+        {
+            "prompts": [[{"role": "user", "content": "What is 3 + 5?"}]],
+            "env_extras": [{"answer": "8"}],
+            "env_classes": [mock_env_cfg.env_class],
+        }
+    )
+    assert output["response_ids"] == [[10, 11]]
+    assert output["rollout_versions"] == [[4, 5]]
+    assert output["latest_global_step"] == 5
+    assert output["rollout_abort_counts"] == [2]

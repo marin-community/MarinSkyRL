@@ -272,19 +272,43 @@ async def test_no_trainer_in_kwargs():
 @pytest.mark.parametrize("location", ["completed", "admitted"])
 @pytest.mark.parametrize(
     "evidence",
-    ["missing", "wrong_stamp", "wrong_group_stamp", "partial_earliest", "partial_missing", "valid", "legacy_disabled"],
+    [
+        "missing",
+        "wrong_stamp",
+        "wrong_group_stamp",
+        "partial_earliest",
+        "partial_missing",
+        "valid",
+        "legacy_disabled",
+        "wrong_latest",
+        "newest_missing",
+        "newest_valid",
+    ],
 )
 async def test_restore_preserves_admission_semantics_before_reserving_work(tmp_path, location, evidence):
     item = _make_item("pending", step=5)
-    if evidence in {"valid", "wrong_stamp", "wrong_group_stamp", "partial_earliest", "partial_missing"}:
+    if evidence in {
+        "valid",
+        "wrong_stamp",
+        "wrong_group_stamp",
+        "partial_earliest",
+        "partial_missing",
+        "wrong_latest",
+        "newest_missing",
+        "newest_valid",
+    }:
         item.trajectory_batch["policy_versions_at_first_token"] = [4]
         item.trajectory_batch["first_token_model_step"] = 4 if evidence == "wrong_stamp" else 5
         item.trajectory_batch["submission_model_step"] = 2
     if evidence == "wrong_group_stamp":
         item.earliest_model_step = 6
+        item.latest_model_step = 6
     if evidence in {"partial_earliest", "partial_missing"}:
         item.trajectory_batch["response_ids"] = [[4, 5, 6], [7]]
         item.trajectory_batch["policy_versions_at_first_token"] = [4, None if evidence == "partial_missing" else 6]
+    if evidence in {"wrong_latest", "newest_valid"}:
+        item.trajectory_batch["rollout_versions"] = [[5, 5, 5]]
+        item.latest_model_step = 6 if evidence == "wrong_latest" else 5
     saved_queue = asyncio.Queue(maxsize=4)
     saved = _FakeTrainer(str(tmp_path), saved_queue)
     if location == "completed":
@@ -299,6 +323,8 @@ async def test_restore_preserves_admission_semantics_before_reserving_work(tmp_p
 
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.cfg = get_default_config()
+    if evidence in {"newest_missing", "newest_valid"}:
+        trainer.cfg.trainer.fully_async.staleness_reference = "newest"
     if evidence == "legacy_disabled":
         trainer.cfg.trainer.fully_async.first_token_admission = False
     trainer.global_step = 5
@@ -312,7 +338,12 @@ async def test_restore_preserves_admission_semantics_before_reserving_work(tmp_p
     queues = _GenerationQueues(
         completed=asyncio.Queue(maxsize=4), retries=asyncio.Queue(), condition=asyncio.Condition()
     )
-    if evidence in {"missing", "wrong_stamp", "wrong_group_stamp", "partial_missing"}:
+    if evidence in {"wrong_latest", "newest_missing"}:
+        match = "latest model step" if evidence == "wrong_latest" else "complete token version evidence"
+        with pytest.raises(ValueError, match=match):
+            trainer._restore_buffer_from_checkpoint(queues, str(checkpoint))
+        assert not reserved and queues.completed.empty() and not queues.admitted_groups
+    elif evidence in {"missing", "wrong_stamp", "wrong_group_stamp", "partial_missing"}:
         with pytest.raises(ValueError, match="pending groups lack matching first-token admission evidence"):
             trainer._restore_buffer_from_checkpoint(queues, str(checkpoint))
         assert not reserved and queues.completed.empty() and not queues.admitted_groups
@@ -322,3 +353,49 @@ async def test_restore_preserves_admission_semantics_before_reserving_work(tmp_p
         assert reserved == {"pending"}
         assert restored.earliest_model_step == 5
         assert restored.trajectory_batch == item.trajectory_batch
+
+
+def test_legacy_buffer_without_latest_stamp_restores_single_version(tmp_path):
+    item = _make_item("legacy", step=7)
+    entry = {
+        "trajectory_batch": dict(item.trajectory_batch),
+        "uid": item.uid,
+        "earliest_model_step": 7,
+        "source_prompts": item.source_prompts,
+    }
+    torch.save({"completed_groups": [entry], "retry_prompts": []}, tmp_path / BufferCheckpointCallback.ARTIFACT_NAME)
+    restored = BufferCheckpointCallback.load_buffer_state(str(tmp_path))
+    assert len(restored.completed_groups) == 1
+    assert restored.completed_groups[0].earliest_model_step == restored.completed_groups[0].latest_model_step == 7
+    assert restored.completed_groups[0].trajectory_batch == item.trajectory_batch
+
+
+@pytest.mark.asyncio
+async def test_buffer_roundtrip_preserves_mixed_token_versions(tmp_path):
+    item = _make_item("mixed", step=7)
+    item.latest_model_step = 9
+    item.trajectory_batch["rollout_versions"] = [[7, 8, 9]]
+    buf = asyncio.Queue()
+    buf.put_nowait(item)
+    trainer = _FakeTrainer(str(tmp_path), buf)
+    callback = BufferCheckpointCallback()
+    callback.bind_queues(trainer._generation_queues)
+    await callback.flush_to_checkpoint(str(tmp_path))
+    restored = BufferCheckpointCallback.load_buffer_state(str(tmp_path)).completed_groups[0]
+    assert restored.earliest_model_step == 7
+    assert restored.latest_model_step == 9
+    assert restored.trajectory_batch["rollout_versions"] == [[7, 8, 9]]
+
+
+def test_buffer_rejects_inverted_model_version_interval(tmp_path):
+    item = _make_item("inverted", step=7)
+    entry = {
+        "trajectory_batch": dict(item.trajectory_batch),
+        "uid": item.uid,
+        "earliest_model_step": 7,
+        "latest_model_step": 6,
+        "source_prompts": item.source_prompts,
+    }
+    torch.save({"completed_groups": [entry], "retry_prompts": []}, tmp_path / BufferCheckpointCallback.ARTIFACT_NAME)
+    with pytest.raises(ValueError, match="latest model step cannot precede"):
+        BufferCheckpointCallback.load_buffer_state(str(tmp_path))

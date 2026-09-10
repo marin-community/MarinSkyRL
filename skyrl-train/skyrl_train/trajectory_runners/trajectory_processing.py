@@ -3,7 +3,7 @@ from difflib import SequenceMatcher
 from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol
 from collections import defaultdict
 import numpy as np
-from skyrl_train.group_admission import group_is_fully_excluded_from_training
+from skyrl_train.group_admission import group_is_fully_excluded_from_training, sampled_token_version_bounds
 from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
@@ -783,6 +783,21 @@ def concatenate_trajectory_batches(
         result[key] = values
     if baseline_exclusions_concat is not None:
         result["exclude_from_baseline"] = baseline_exclusions_concat
+
+    if any(output.get("rollout_versions") is not None for output in trajectory_batches):
+        result["rollout_versions"] = [
+            row
+            for output in trajectory_batches
+            for row in (output.get("rollout_versions") or [[None] * len(ids) for ids in output["response_ids"]])
+        ]
+        bounds = sampled_token_version_bounds(result)
+        result["latest_global_step"] = bounds[1] if bounds is not None else None
+    if any(output.get("rollout_abort_counts") is not None for output in trajectory_batches):
+        result["rollout_abort_counts"] = [
+            count
+            for output in trajectory_batches
+            for count in (output.get("rollout_abort_counts") or [None] * len(output["response_ids"]))
+        ]
 
     # propagate additional keys with list values as-is
     additional_keys = [

@@ -7,6 +7,7 @@ For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_runn
 
 from __future__ import annotations
 
+from skyrl_train.group_admission import sampled_token_version_bounds
 from skyrl_train.policy_version import earliest_sampled_policy_version
 
 import copy
@@ -322,6 +323,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         captured_global_step: Optional[int] = None
         sampled_version_rows: list[list[int]] = []
         sampled_versions: list[int | None] = []
+        rollout_versions: list[int | None] | None = []
+        has_token_versions = False
+        response_abort_count: int | None = 0
         token_provenance = TokenProvenance.ENGINE
         generator_engine_indices: set[int | None] = set()
         sampling_evidence = {}
@@ -366,6 +370,17 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             sampled_version_rows.append(output_ids)
             sampled_versions.append(engine_output.get("policy_versions_at_first_token", [None])[0])
             stop_reason = engine_output["stop_reasons"][0]
+            version_rows = engine_output.get("response_versions")
+            output_versions = list(version_rows[0]) if version_rows is not None else [None] * len(output_ids)
+            has_token_versions = has_token_versions or version_rows is not None
+            if len(output_versions) != len(output_ids):
+                raise ValueError("Inference engine returned token versions that do not align with response IDs")
+            abort_counts = engine_output.get("response_abort_count")
+            response_abort_count = (
+                response_abort_count + abort_counts[0]
+                if response_abort_count is not None and abort_counts is not None
+                else None
+            )
             response_logprobs_batch = engine_output.get("response_logprobs")
             response_logprobs = response_logprobs_batch[0] if response_logprobs_batch is not None else None
             if response_logprobs is not None and len(response_logprobs) != len(output_ids):
@@ -387,6 +402,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             ):
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
                     output_ids.append(self.tokenizer.eos_token_id)
+                    output_versions.append(output_versions[-1] if output_versions else None)
                     if response_logprobs is not None:
                         response_logprobs.append(0.0)
                     added_eos = True
@@ -422,8 +438,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     )
                     response_logprobs = None
                     rollout_logprobs = None
+                if postprocessed_output_ids != output_ids:
+                    output_versions = [None] * len(postprocessed_output_ids)
                 output_ids = postprocessed_output_ids
 
+            previous_input_length = len(input_ids)
             # 3. Update states: input ids, loss_mask, chat_history, etc.
             # Three ways of managing input
             if retokenize_chat_history:
@@ -434,6 +453,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 # Re-tokenizing text can change token boundaries, so engine logprobs no
                 # longer have an exact position in the returned response.
                 rollout_logprobs = None
+                rollout_versions = None
                 # TODO(tgriggs): Support turn-level rewards for multi-turn chat template
                 per_step_rewards.append((step_reward, None))
             elif self.use_conversation_multi_turn:
@@ -466,6 +486,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
                 per_step_rewards.append((step_reward, response_end_idx))
 
+            if rollout_versions is not None:
+                generated_count = response_end_idx - previous_input_length + 1
+                rollout_versions.extend(output_versions[:generated_count])
+                observation_count = len(input_ids) - response_end_idx - 1
+                rollout_versions.extend([captured_global_step] * observation_count)
+                if len(rollout_versions) != len(input_ids) - initial_prompt_length:
+                    raise ValueError("Trajectory token versions lost alignment after an environment step")
+
         # Get environment-specific metrics after the episode is done
         env_metrics = environment_metrics_from_step(env_step_output, env.get_metrics())
         # Close the environment
@@ -493,6 +521,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             response_ids = input_ids[initial_prompt_length : response_end_idx + 1]
             if rollout_logprobs is not None:
                 rollout_logprobs = rollout_logprobs[: len(response_ids)]
+            if rollout_versions is not None:
+                rollout_versions = rollout_versions[: len(response_ids)]
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
@@ -500,6 +530,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if not self.use_conversation_multi_turn:
             if stop_reason != "length" and response_ids and response_ids[-1] != self.tokenizer.eos_token_id:
                 response_ids.append(self.tokenizer.eos_token_id)
+                if rollout_versions is not None:
+                    rollout_versions.append(rollout_versions[-1] if rollout_versions else None)
                 loss_mask.append(1)
                 if rollout_logprobs is not None:
                     rollout_logprobs.append(0.0)
@@ -561,6 +593,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             loss_mask=loss_mask,
             env_metrics=env_metrics,
             captured_global_step=captured_global_step,
+            token_versions=tuple(rollout_versions) if has_token_versions and rollout_versions is not None else None,
+            response_abort_count=response_abort_count,
             first_token_policy_version=earliest_sampled_policy_version(sampled_version_rows, sampled_versions),
             generator_engine_index=next(iter(generator_engine_indices)) if len(generator_engine_indices) == 1 else None,
             token_provenance=token_provenance,
@@ -697,6 +731,15 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         }
         if "policy_versions_at_first_token" in engine_output:
             trajectory_batch["policy_versions_at_first_token"] = engine_output["policy_versions_at_first_token"]
+        if "response_versions" in engine_output:
+            trajectory_batch["rollout_versions"] = [
+                versions[: len(response)]
+                for versions, response in zip(engine_output["response_versions"], truncated_responses, strict=True)
+            ]
+            bounds = sampled_token_version_bounds(trajectory_batch)
+            trajectory_batch["latest_global_step"] = bounds[1] if bounds is not None else None
+        if "response_abort_count" in engine_output:
+            trajectory_batch["rollout_abort_counts"] = engine_output["response_abort_count"]
         attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
 
         return trajectory_batch

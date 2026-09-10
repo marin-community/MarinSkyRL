@@ -95,3 +95,25 @@ def test_records_carry_the_step_they_describe(monkeypatch):
         # The gauge's value is the step.
         ("policy_step", None): (None, None),
     }
+
+
+def test_generated_token_work_conserves_counts_across_versions_and_unknowns(monkeypatch):
+    import skyrl_train.telemetry as trainer_telemetry
+
+    recorded = []
+
+    class Counter:
+        def add(self, value, attributes):
+            recorded.append((value, attributes))
+
+    monkeypatch.setattr(trainer_telemetry, "work_completed", Counter())
+    trainer_telemetry.record_generated_work(
+        [[10, 11, 12], [20, 21]], [True, True], 4, token_versions=[[4, 5, None], [5, 6]]
+    )
+    tokens = {attrs["weights_step"]: count for count, attrs in recorded if attrs["work_kind"] == "generated_token"}
+    assert tokens == {"4": 1, "5": 2, "6": 1, "unknown": 1}
+    assert sum(tokens.values()) == 5
+    assert {attrs["work_kind"]: count for count, attrs in recorded if attrs["work_kind"] != "generated_token"} == {
+        "rollout": 2,
+        "sample": 2,
+    }

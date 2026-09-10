@@ -6,6 +6,7 @@ from typing import List, Protocol
 
 import torch
 
+from skyrl_train.group_admission import sampled_token_version_bounds
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.rollout_observability import consumed_stop_metrics
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
@@ -24,6 +25,72 @@ class GeneratedOutputGroup:
     telemetry_attempt_id: str | None = None
     admitted_at: float | None = None
     telemetry_finished: bool = False
+    latest_model_step: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.latest_model_step is None:
+            self.latest_model_step = self.earliest_model_step
+        if self.latest_model_step < self.earliest_model_step:
+            raise ValueError("latest model step cannot precede the earliest model step")
+
+
+def consumed_token_version_metrics(groups: List[GeneratedOutputGroup], step: int) -> dict[str, float]:
+    """Summarize loss-token ages with explicit coverage for legacy or unknown evidence."""
+    if not any(
+        group.trajectory_batch.get("rollout_versions") is not None
+        or group.trajectory_batch.get("rollout_abort_counts") is not None
+        for group in groups
+    ):
+        return {}
+    ages = []
+    unknown = 0
+    spreads = []
+    newest_ages = []
+    aborts = []
+    response_count = 0
+    for group in groups:
+        batch = group.trajectory_batch
+        rows = batch.get("rollout_versions") or [[None] * len(ids) for ids in batch["response_ids"]]
+        bounds = sampled_token_version_bounds(batch)
+        if bounds is not None:
+            spreads.append(bounds[1] - bounds[0])
+            newest_ages.append(step - bounds[1])
+        response_count += len(rows)
+        aborts.extend(value for value in (batch.get("rollout_abort_counts") or []) if value is not None)
+        for row, mask in zip(rows, batch["loss_masks"], strict=True):
+            for version, sampled in zip(row, mask, strict=True):
+                if not sampled:
+                    continue
+                if version is None:
+                    unknown += 1
+                else:
+                    age = step - version
+                    if age < 0:
+                        raise ValueError("Consumed token version is newer than the consuming model step")
+                    ages.append(age)
+    total = len(ages) + unknown
+    metrics = {
+        "async/token_version_known_tokens": len(ages),
+        "async/token_version_unknown_tokens": unknown,
+        "async/token_version_known_fraction": len(ages) / total if total else 0.0,
+        "async/token_version_complete_group_fraction": len(spreads) / len(groups),
+        "async/response_abort_count_known_fraction": len(aborts) / response_count if response_count else 0.0,
+    }
+    if aborts:
+        metrics["async/response_abort_count"] = sum(aborts)
+    if spreads:
+        metrics.update(
+            {
+                "async/version_spread_mean": sum(spreads) / len(spreads),
+                "async/version_spread_max": max(spreads),
+                "async/staleness_newest_mean": sum(newest_ages) / len(newest_ages),
+            }
+        )
+    if ages:
+        for bucket in (0, 1, 2):
+            metrics[f"async/token_age_frac/{bucket}"] = sum(age == bucket for age in ages) / len(ages)
+        metrics["async/token_age_frac/3plus"] = sum(age >= 3 for age in ages) / len(ages)
+    return metrics
 
 
 @dataclass(frozen=True)

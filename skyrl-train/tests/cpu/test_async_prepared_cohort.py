@@ -7,7 +7,12 @@ import pytest
 import torch
 
 from marinskyrl.runtime_options import R3Transport
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, PreparedAsyncCohort
+from skyrl_train.async_rollout_state import (
+    GeneratedOutputGroup,
+    GenerationBufferState,
+    PreparedAsyncCohort,
+    consumed_token_version_metrics,
+)
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
 from skyrl_train.distributed.dispatch import ActorInfo, DispatchSettings, MeshDispatch, MeshRank
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch
@@ -122,3 +127,71 @@ def test_shutdown_snapshot_replays_only_the_uncheckpointed_partition():
     assert len(queues.shutdown_snapshot().pending_uids()) == 64
     queues.clear_admitted()
     assert queues.shutdown_snapshot().pending_uids() == set()
+
+
+@pytest.mark.parametrize("step,fractions,newest_age", [(8, [0.25, 0.25, 0.25, 0.25], 0), (9, [0, 0.25, 0.25, 0.5], 1)])
+def test_token_age_metrics_preserve_unknowns_and_ignore_masked_observations(step, fractions, newest_age):
+    groups = [
+        GeneratedOutputGroup(
+            {
+                "response_ids": [[1, 2, 3, 4]],
+                "loss_masks": [[1, 0, 1, 1]],
+                "rollout_versions": [[5, 100, 7, None]],
+                "rollout_abort_counts": [2],
+            },
+            "a",
+            5,
+            [],
+        ),
+        GeneratedOutputGroup(
+            {
+                "response_ids": [[5, 6]],
+                "loss_masks": [[1, 1]],
+                "rollout_versions": [[6, 8]],
+                "rollout_abort_counts": [None],
+            },
+            "b",
+            6,
+            [],
+            latest_model_step=8,
+        ),
+    ]
+    metrics = consumed_token_version_metrics(groups, step)
+    assert metrics["async/token_version_known_tokens"] == 4
+    assert metrics["async/token_version_unknown_tokens"] == 1
+    assert metrics["async/token_version_known_fraction"] == 0.8
+    assert metrics["async/token_version_complete_group_fraction"] == 0.5
+    assert metrics["async/version_spread_mean"] == metrics["async/version_spread_max"] == 2
+    assert metrics["async/staleness_newest_mean"] == newest_age
+    assert [metrics[f"async/token_age_frac/{bucket}"] for bucket in (0, 1, 2, "3plus")] == fractions
+    assert metrics["async/response_abort_count"] == 2
+    assert metrics["async/response_abort_count_known_fraction"] == 0.5
+
+
+def test_abort_metrics_preserve_counts_without_token_version_evidence():
+    group = GeneratedOutputGroup(
+        {"response_ids": [[1, 2]], "loss_masks": [[1, 1]], "rollout_abort_counts": [2]},
+        "a",
+        5,
+        [],
+    )
+    metrics = consumed_token_version_metrics([group], 8)
+    assert metrics["async/response_abort_count"] == 2
+    assert metrics["async/response_abort_count_known_fraction"] == 1
+    assert metrics["async/token_version_unknown_tokens"] == 2
+    assert metrics["async/token_version_known_fraction"] == 0
+    assert "async/staleness_newest_mean" not in metrics
+    assert "async/token_age_frac/0" not in metrics
+
+
+def test_known_token_versions_with_explicit_null_abort_channel_keep_unknown_coverage():
+    group = GeneratedOutputGroup(
+        {"response_ids": [[7]], "loss_masks": [[1]], "rollout_versions": [[1]], "rollout_abort_counts": None},
+        "a",
+        1,
+        [],
+    )
+    metrics = consumed_token_version_metrics([group], 2)
+    assert metrics["async/token_version_known_fraction"] == 1
+    assert metrics["async/response_abort_count_known_fraction"] == 0
+    assert "async/response_abort_count" not in metrics

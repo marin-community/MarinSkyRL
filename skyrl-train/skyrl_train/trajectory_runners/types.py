@@ -33,6 +33,8 @@ class AgentLoopOutput:
     error_treatment: Optional[str] = None
     # Dispatcher index; None covers unknown transport identity or mixed engines.
     generator_engine_index: int | None = None
+    token_versions: tuple[int | None, ...] | None = None
+    response_abort_count: int | None = None
 
 
 @dataclass
@@ -111,6 +113,9 @@ class TrajectoryBatch(TypedDict):
     error_treatments: Optional[List[Optional[str]]]
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
+    rollout_versions: NotRequired[List[List[int | None]]]
+    rollout_abort_counts: NotRequired[List[int | None]]
+    latest_global_step: NotRequired[int | None]
     rollout_routed_experts: Optional[List[List[List[List[int]]]]]
     token_level_shaping: Optional[List[List[float]]]
     response_span_tags: Optional[List[List[int]]]

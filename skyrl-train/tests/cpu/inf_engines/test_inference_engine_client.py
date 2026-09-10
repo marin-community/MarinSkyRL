@@ -965,7 +965,12 @@ async def test_generate_retry_no_gen_finish():
     assert first_call["sampling_params"]["max_tokens"] == 16
     assert second_call["sampling_params"]["max_tokens"] == 16
 
-    assert out == {**engines[0].responses[1], "prompt_logprobs": None, "generator_engine_indices": [0]}
+    assert out == {
+        **engines[0].responses[1],
+        "prompt_logprobs": None,
+        "generator_engine_indices": [0],
+        "response_abort_count": [1],
+    }
     assert client.publication_abort_snapshot() == (1,)
     assert client.publication_inflight_snapshot() == (0,)
 
@@ -1322,11 +1327,17 @@ async def test_cancelled_resume_waiter_is_removed_and_pickled_copy_drops_waiters
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "first_tokens,first_version,last_version,expected",
-    [([21], 2, 3, 2), ([], 2, 3, 3), ([21], 3, 2, 2), ([21], None, 3, None), ([21], 2, None, None)],
+    "first_tokens,first_version,last_version,expected,token_steps",
+    [
+        ([21], 2, 3, 2, [3, 4]),
+        ([], 2, 3, 3, [4]),
+        ([21], 3, 2, 2, [4, 3]),
+        ([21], None, 3, None, [None, 4]),
+        ([21], 2, None, None, [3, None]),
+    ],
 )
 async def test_retry_preserves_first_sampled_version_and_ignores_zero_token_abort(
-    first_tokens, first_version, last_version, expected
+    first_tokens, first_version, last_version, expected, token_steps
 ):
     class Engine:
         calls = 0
@@ -1349,6 +1360,8 @@ async def test_retry_preserves_first_sampled_version_and_ignores_zero_token_abor
     result = await client.generate(InferenceEngineInput(prompt_token_ids=[[1]], sampling_params={"max_tokens": 4}))
     assert result["policy_versions_at_first_token"] == [expected]
     assert result["response_ids"] == [first_tokens + [22]]
+    assert result["response_versions"] == [token_steps]
+    assert result["response_abort_count"] == [1]
 
 
 @pytest.mark.asyncio
@@ -1365,3 +1378,37 @@ async def test_explicit_installed_version_reaches_every_engine_on_resume():
     await client.pause_generation()
     await client.resume_generation(policy_version=7)
     assert [engine.installed_version for engine in engines] == [7, 7]
+
+
+@pytest.mark.asyncio
+async def test_failover_discards_abandoned_token_version_evidence():
+    class Engine:
+        def __init__(self, index):
+            self.index = index
+            self.calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            if self.index == 0 and self.calls > 1:
+                raise ActorDiedError()
+            return {
+                "responses": ["piece"],
+                "response_ids": [[10 + self.index]],
+                "stop_reasons": ["abort" if self.index == 0 else "stop"],
+                "policy_versions_at_first_token": [3 if self.index == 0 else 6],
+            }
+
+    engines = [Engine(0), Engine(1)]
+    client = InferenceEngineClient(engines, object(), _make_min_cfg())
+    output = await client.generate(
+        {
+            "prompt_token_ids": [[1]],
+            "session_ids": ["B"],
+            "sampling_params": {"max_tokens": 3},
+        }
+    )
+    assert engines[0].calls == 2
+    assert output["response_ids"] == [[11]]
+    assert output["response_versions"] == [[7]]
+    assert output["response_abort_count"] == [0]
+    assert output["policy_versions_at_first_token"] == [6]

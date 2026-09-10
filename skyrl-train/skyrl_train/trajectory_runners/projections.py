@@ -5,6 +5,7 @@ from typing import Generic, Protocol, Sequence, TypeVar
 
 from omegaconf import DictConfig
 
+from skyrl_train.group_admission import sampled_token_version_bounds
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
 from skyrl_gym.verification import RewardResult, TrainingDisposition
 from skyrl_train.trajectory_runners.types import (
@@ -92,6 +93,7 @@ class WholeTrajectoryProjection:
             actual_global_step=minimum_captured_global_step(outputs),
         )
         attach_terminal_classifications(batch, outputs)
+        attach_token_versions(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
         return batch
 
@@ -152,8 +154,26 @@ class StepWiseTrajectoryProjection:
             actual_global_step=minimum_captured_global_step(steps),
         )
         attach_terminal_classifications(batch, steps)
+        attach_token_versions(batch, steps)
         _attach_reward_channels(batch, steps, responses)
         return batch
+
+
+def attach_token_versions(batch: TrajectoryBatch, outputs: Sequence[AgentLoopOutput]) -> None:
+    """Project aligned version evidence without assigning versions to unknown tokens."""
+    if any(output.response_abort_count is not None for output in outputs):
+        batch["rollout_abort_counts"] = [output.response_abort_count for output in outputs]
+    if not any(output.token_versions is not None for output in outputs):
+        return
+    rows = [
+        list(output.token_versions) if output.token_versions is not None else [None] * len(response)
+        for output, response in zip(outputs, batch["response_ids"], strict=True)
+    ]
+    if any(len(row) != len(response) for row, response in zip(rows, batch["response_ids"], strict=True)):
+        raise ValueError("Token version rows must align with projected responses")
+    batch["rollout_versions"] = rows
+    bounds = sampled_token_version_bounds(batch)
+    batch["latest_global_step"] = bounds[1] if bounds is not None else None
 
 
 def attach_terminal_classifications(batch: TrajectoryBatch, outputs: Sequence[TrainableInteraction]) -> None:

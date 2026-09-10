@@ -26,12 +26,13 @@ def test_strict_tis_async_conversion_rejects_missing_group_before_training(parti
     trainer.cfg = OmegaConf.create(
         {
             "trainer": {
+                "fully_async": {"staleness_reference": "oldest"},
                 "algorithm": {
                     "policy_loss_type": "regular",
                     "use_tis": True,
                     "require_rollout_logprobs": True,
                     "tis_lcs_alert_threshold": 0.005,
-                }
+                },
             }
         }
     )

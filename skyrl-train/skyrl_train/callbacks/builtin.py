@@ -1084,6 +1084,7 @@ class BufferCheckpointCallback(TrainerCallback):
                 "trajectory_batch": dict(item.trajectory_batch),
                 "uid": item.uid,
                 "earliest_model_step": item.earliest_model_step,
+                "latest_model_step": item.latest_model_step,
                 "source_prompts": item.source_prompts,
             }
             for item in groups
@@ -1186,6 +1187,7 @@ class BufferCheckpointCallback(TrainerCallback):
                         trajectory_batch=trajectory_batch,
                         uid=entry["uid"],
                         earliest_model_step=entry["earliest_model_step"],
+                        latest_model_step=entry.get("latest_model_step", entry["earliest_model_step"]),
                         source_prompts=entry["source_prompts"],
                     )
                 )

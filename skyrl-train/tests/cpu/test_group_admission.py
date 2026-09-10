@@ -291,3 +291,47 @@ def test_dynamic_filter_applies_minimum_reward_std():
 def test_fully_async_selection_rejects_replace_sampling():
     with pytest.raises(ValueError, match="supports dynamic_sampling.type=filter or null"):
         GroupSelectionPolicy.for_fully_async("replace")
+
+
+@pytest.mark.parametrize("reference,accepted", [("oldest", False), ("newest", True)])
+def test_admission_reference_controls_mixed_version_group_without_changing_tokens(reference, accepted):
+    group = _group(loss_masks=[[1], [1]], earliest_model_step=4)
+    group.trajectory_batch["rollout_versions"] = [[4], [8]]
+    policy = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        max_staleness_steps=2,
+        rollout_logprobs_required=False,
+        staleness_reference=reference,
+    )
+    result = policy.evaluate(group, global_step=9)
+    assert result.accepted is accepted
+    assert group.trajectory_batch["rollout_versions"] == [[4], [8]]
+    assert group.earliest_model_step == 4
+
+
+@pytest.mark.parametrize("versions", [None, [[4], [None]]])
+def test_newest_admission_requires_complete_generated_token_versions(versions):
+    group = _group(loss_masks=[[1], [1]], earliest_model_step=4)
+    if versions is not None:
+        group.trajectory_batch["rollout_versions"] = versions
+    policy = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        max_staleness_steps=2,
+        rollout_logprobs_required=False,
+        staleness_reference="newest",
+    )
+    with pytest.raises(ValueError, match="Newest-token admission requires complete"):
+        policy.evaluate(group, global_step=9)
+
+
+@pytest.mark.parametrize("versions", [[[4, 5]], [[4], [True]], [[4], [0]], [[4], [-1]]])
+def test_admission_rejects_misaligned_or_invalid_token_version_evidence(versions):
+    group = _group(loss_masks=[[1], [1]], earliest_model_step=4)
+    group.trajectory_batch["rollout_versions"] = versions
+    policy = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
+        max_staleness_steps=2,
+        rollout_logprobs_required=False,
+    )
+    with pytest.raises(ValueError):
+        policy.evaluate(group, global_step=5)

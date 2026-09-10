@@ -255,7 +255,7 @@ def test_normalized_output_produces_complete_core_trace_schema():
     assert record["prompt"]["messages"] == [{"role": "user", "content": "first"}]
     assert record["response"]["text"] == "10 11"
     assert record["verifier"] is None
-    assert record["schema_version"] == 3
+    assert record["schema_version"] == 4
     assert record["disposition"] == {"exception_type": None, "error_treatment": None}
     assert record["provenance"]["runner"] == "SkyRLGymTrajectoryRunner"
 
@@ -581,6 +581,9 @@ def test_record_contains_replay_provenance_and_trainable_boundaries():
         "model_source_identity": "sha256:model",
         "resume_path": "/checkpoints/global_step_6",
         "model_version_step": 6,
+        "model_version_step_max": None,
+        "token_version_runs": None,
+        "response_abort_count": None,
         "sampling": {"temperature": 0.7, "max_tokens": 16},
         "reward_shaping_schema_version": 2,
     }
@@ -737,3 +740,24 @@ def test_retention_counters_survive_group_concatenation():
     combined = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=1.0)
 
     assert combined["rollout_metrics"][f"{RETENTION_METRIC_PREFIX}/written"] == 5.0
+
+
+def test_retention_preserves_token_version_runs_and_unknown_evidence():
+    output = _output()
+    output["rollout_versions"] = [[5, 6], [6, 6, 8], [None, 7]]
+    output["rollout_abort_counts"] = [1, 2, None]
+    records = [
+        record.to_json()
+        for record in build_trajectory_records(
+            _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="SkyRLGymTrajectoryRunner"
+        )
+    ]
+    provenance = [record["provenance"] for record in records]
+    assert [value["model_version_step_max"] for value in provenance] == [6, 8, None]
+    assert [value["token_version_runs"] for value in provenance] == [
+        [[0, 5], [1, 6]],
+        [[0, 6], [2, 8]],
+        [[0, None], [1, 7]],
+    ]
+    assert [value["response_abort_count"] for value in provenance] == [1, 2, None]
+    assert [record["response"]["token_ids"] for record in records] == output["response_ids"]

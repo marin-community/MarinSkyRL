@@ -28,6 +28,9 @@ class InferenceEngineOutput(TypedDict):
     # means that the transport did not identify the selected engine.
     generator_engine_indices: NotRequired[List[int | None]]
     policy_versions_at_first_token: NotRequired[List[int | None]]
+    # One-based model steps aligned with response IDs; unknown evidence stays None.
+    response_versions: NotRequired[List[List[int | None]]]
+    response_abort_count: NotRequired[List[int]]
     response_logprobs: Optional[List[List[float]]]
     # prompt_logprobs: per-prompt-token top-K logprobs from vLLM (for teacher scoring).
     # Format: List[List[Optional[Dict[int, float]]]] — outer list is batch,

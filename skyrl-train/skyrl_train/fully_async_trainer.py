@@ -69,7 +69,12 @@ from skyrl_train.rollout_observability import (
     monitor_event_loop_lag,
 )
 from skyrl_train.timing_observability import publish_step_timings
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, PreparedAsyncCohort
+from skyrl_train.async_rollout_state import (
+    GeneratedOutputGroup,
+    GenerationBufferState,
+    PreparedAsyncCohort,
+    consumed_token_version_metrics,
+)
 from skyrl_train.io import io
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
@@ -77,7 +82,13 @@ from skyrl_train.dynamic_sampling import (
     GroupSelectionResult,
     resolve_dynamic_sampling_criteria,
 )
-from skyrl_train.group_admission import AdmissionDecision, AdmissionRejection, GroupAdmissionPolicy
+from skyrl_train.group_admission import (
+    AdmissionDecision,
+    AdmissionRejection,
+    GroupAdmissionPolicy,
+    StalenessReference,
+    sampled_token_version_bounds,
+)
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_required
 from skyrl_train.utils.utils import validate_fully_async_cfg
 
@@ -613,6 +624,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             self.group_advantage_invariant,
             max_staleness_steps=self.max_staleness_steps,
             rollout_logprobs_required=rollout_logprobs_required(self.cfg.trainer.algorithm),
+            staleness_reference=StalenessReference(self.cfg.trainer.fully_async.get("staleness_reference", "oldest")),
         )
         # Some async-specific validations
         assert not self.cfg.generator.batched, "batched is not supported for fully async training."
@@ -720,6 +732,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         ):
             raise ValueError("prepared checkpoint cohort does not match the current geometry/update clock")
         prepared_groups = cohort.pending_groups() if cohort is not None else []
+        for group in [*buffer_state.completed_groups, *buffer_state.admitted_groups, *prepared_groups]:
+            bounds = sampled_token_version_bounds(group.trajectory_batch)
+            if bounds is not None and group.latest_model_step != bounds[1]:
+                raise ValueError("Checkpoint latest model step does not match saved token version evidence")
+            if self.cfg.trainer.fully_async.get("staleness_reference", "oldest") == "newest" and bounds is None:
+                raise ValueError("Newest-token admission requires complete token version evidence")
         if self.cfg.trainer.fully_async.get("first_token_admission", True):
             for group in [*buffer_state.completed_groups, *buffer_state.admitted_groups, *prepared_groups]:
                 batch = group.trajectory_batch
@@ -1524,6 +1542,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 staleness_step = (
                     first_token_step if first_token_admission and first_token_step is not None else submission_step
                 )
+                version_bounds = sampled_token_version_bounds(cur_trajectory_batch)
+                latest_step = version_bounds[1] if version_bounds is not None else staleness_step
+                if version_bounds is not None and latest_step - 1 > self._published_policy_version:
+                    raise RuntimeError("Sampled token version is newer than the installed policy")
+                cur_trajectory_batch["latest_global_step"] = version_bounds[1] if version_bounds is not None else None
                 cur_trajectory_batch["submission_model_step"] = submission_step
                 cur_trajectory_batch["first_token_model_step"] = first_token_step
                 record_event(
@@ -1547,11 +1570,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     cur_trajectory_batch["response_ids"],
                     cur_trajectory_batch.get("is_last_step"),
                     staleness_step,
+                    token_versions=cur_trajectory_batch.get("rollout_versions"),
                 )
                 completed_group = GeneratedOutputGroup(
                     trajectory_batch=cur_trajectory_batch,
                     uid=uids[0],
                     earliest_model_step=staleness_step,
+                    latest_model_step=latest_step,
                     source_prompts=rand_prompts,
                     completed_at=time.perf_counter() if observation is not None else None,
                     telemetry_attempt_id=observation.call_id if observation is not None else None,
@@ -2218,8 +2243,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.updates_per_cohort == 1:
             record_rollout_staleness(stalenesses, self.global_step)
 
-        assert max(stalenesses) <= self.max_staleness_steps, (
-            f"Fresh batch assembly returned staleness {max(stalenesses)} above max {self.max_staleness_steps}"
+        admission_ages = stalenesses
+        if self.cfg.trainer.fully_async.get("staleness_reference", "oldest") == "newest":
+            bounds = [sampled_token_version_bounds(group.trajectory_batch) for group in cur_generation_group_mini_batch]
+            if any(value is None for value in bounds):
+                raise ValueError("Newest-token admission requires complete token version evidence")
+            admission_ages = [self.global_step - value[1] for value in bounds if value is not None]
+        assert max(admission_ages) <= self.max_staleness_steps, (
+            f"Fresh batch assembly returned admission age {max(admission_ages)} above max {self.max_staleness_steps}"
         )
 
         trajectory_batch = concatenate_trajectory_batches(
@@ -2239,6 +2270,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
             }
         )
+
+        if self.updates_per_cohort == 1:
+            self.all_metrics.update(consumed_token_version_metrics(cur_generation_group_mini_batch, self.global_step))
 
         # Convert rewards to per-token form and compute reward metrics before training conversion
         trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
@@ -2260,6 +2294,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self, training_input: TrainingInputBatch, groups: List[GeneratedOutputGroup]
     ) -> None:
         ages = [self.global_step - group.earliest_model_step for group in groups]
+        self.all_metrics.update(consumed_token_version_metrics(groups, self.global_step))
         lag = training_input.metadata["async_cohort_update_index"]
         self.all_metrics.update(
             {

@@ -328,6 +328,11 @@ class InferenceEngineClient(InferenceEngineInterface):
         )
         if has_first_token_metadata:
             output["policy_versions_at_first_token"] = first_token_versions
+            output["response_versions"] = [
+                [version + 1 if version is not None else None] * len(ids)
+                for ids, version in zip(response_ids, first_token_versions, strict=True)
+            ]
+        output["response_abort_count"] = [0] * n
         return output
 
     async def _generate_on_engine(self, engine_idx: int, request: InferenceEngineInput) -> InferenceEngineOutput:
@@ -383,6 +388,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 2. Initialize fields we want to accumulate or update in each loop iteration
         accum_response_ids: List[int] = []
         accum_response_logprobs: List[float] = []
+        accum_response_versions: list[int | None] = []
+        response_abort_count = 0
         stop_reason: str = "abort"
 
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
@@ -420,6 +427,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 # Reset accumulation — new engine has no prior context
                 accum_response_ids = []
                 accum_response_logprobs = []
+                accum_response_versions = []
+                response_abort_count = 0
                 num_turns = 0
                 first_token_version = None
                 has_first_token_metadata = False
@@ -432,6 +441,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             text_response = partial_response["responses"][0]
             stop_reason = partial_response["stop_reasons"][0]
             if stop_reason == "abort":
+                response_abort_count += 1
                 with self._routing_lock:
                     self._generation_aborts[engine_idx] += 1
             new_response_logprobs: Optional[List[float]] = None
@@ -451,6 +461,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                     [accum_response_ids, new_response_ids], [first_token_version, current_version]
                 )
                 has_first_token_metadata = has_first_token_metadata or versions is not None
+                step = current_version + 1 if current_version is not None else None
+                accum_response_versions.extend([step] * len(new_response_ids))
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
                 accum_response_logprobs.extend(new_response_logprobs)
@@ -476,6 +488,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         )
         if has_first_token_metadata:
             result["policy_versions_at_first_token"] = [first_token_version]
+            result["response_versions"] = [accum_response_versions]
+        result["response_abort_count"] = [response_abort_count]
         return result
 
     async def _chat_completion_with_retry(
