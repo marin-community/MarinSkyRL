@@ -88,6 +88,7 @@ def prepare_native_shard_worker(
     borrowed_groups=None,
     borrowed_source_ranks=None,
     proof_capture=None,
+    inventory_validator=None,
 ):
     """Prepare actual groups, validate live storage, then expose the bound session.
 
@@ -150,6 +151,7 @@ def prepare_native_shard_worker(
             replica_verifier=comparator,
             owned_groups=tuple(groups.values()),
             retained_proof_workspace_bytes=comparison_workspace.numel() if trainer else 0,
+            inventory_validator=inventory_validator,
         )
         return {
             "rank": rank,

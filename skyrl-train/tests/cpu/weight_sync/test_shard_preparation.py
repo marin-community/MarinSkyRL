@@ -380,3 +380,21 @@ def test_unstarted_binding_cleanup_detects_mutation_and_still_releases(monkeypat
     assert worker._policy_weight_access.owner is None
     assert not hasattr(worker, "_shard_preparation")
     assert not hasattr(worker, "_shard_stream_session")
+
+
+@pytest.mark.parametrize("replace_storage", [False, True])
+def test_live_inventory_accepts_updated_values_but_rejects_replaced_bridge_storage(monkeypatch, replace_storage):
+    worker, geometry, parallel = policy_worker(monkeypatch)
+    preparation.collect_policy_preparation(worker, "actual", geometry, parallel, {"rank": 0}, lambda row: None)
+    state = worker._shard_preparation
+    conversion = worker.bridge.get_conversion_tasks(worker.actor_module)[0]
+    try:
+        if replace_storage:
+            conversion.param_weight = conversion.param_weight.clone()
+            with pytest.raises(ValueError, match="Live learner inventory"):
+                preparation.validate_live_inventory(worker, state)
+        else:
+            conversion.param_weight.add_(1)
+            preparation.validate_live_inventory(worker, state)
+    finally:
+        preparation.close_live_preparation(worker, "actual")

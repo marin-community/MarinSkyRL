@@ -1726,6 +1726,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             expected_receiver_bytes=expected_receiver_bytes,
         )
 
+    async def persistent_shard_publication(
+        self, manifest_id, publication_id, *, replay, policy_ranks, receiver_ranks, expected_receiver_bytes
+    ):
+        from skyrl_train.weight_sync.shard_interval import ShardLifecycle, run_shard_interval
+
+        return await run_shard_interval(
+            self,
+            manifest_id,
+            publication_id,
+            lifecycle=ShardLifecycle.RETAIN,
+            replay=replay,
+            policy_ranks=policy_ranks,
+            receiver_ranks=receiver_ranks,
+            expected_receiver_bytes=expected_receiver_bytes,
+        )
+
     async def _run_bucket_timing_rpc(self, method: str, *args):
         # Timing methods return per-rank diagnostic dictionaries. The standard
         # pass-through collector concatenates TrainingOutputBatch values instead.

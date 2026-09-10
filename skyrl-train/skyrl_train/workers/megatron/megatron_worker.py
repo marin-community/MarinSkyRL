@@ -891,6 +891,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return await asyncio.to_thread(worker_shard_call, self, "run", manifest_id, publication_id)
 
+    async def finish_shard_publication(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return await asyncio.to_thread(worker_shard_call, self, "finish", manifest_id, publication_id)
+
     async def close_shard_publication(self, manifest_id: str, publication_id: int):
         from skyrl_train.weight_sync.shard_session import worker_shard_call
 

@@ -67,7 +67,16 @@ class SourceReplicaProof:
 
 
 class ShardSession:
-    def __init__(self, runner, *, policy_access, replica_verifier, owned_groups, retained_proof_workspace_bytes=0):
+    def __init__(
+        self,
+        runner,
+        *,
+        policy_access,
+        replica_verifier,
+        owned_groups,
+        retained_proof_workspace_bytes=0,
+        inventory_validator=None,
+    ):
         if runner.completed or runner.manifest_id is not None:
             raise ValueError("Only an unused stream runner may be bound")
         self.runner = runner
@@ -84,13 +93,16 @@ class ShardSession:
         self.installed_versions = None
         self.replay_state = None
         self.retained_proof_workspace_bytes = retained_proof_workspace_bytes
+        self.inventory_validator = inventory_validator
+        self.last_completed_publication = None
+        self.source_layout = {name: value[:-1] for name, value in storage_versions(runner.sources).items()}
         if runner.rank in runner.trainers and (policy_access is None or replica_verifier is None):
             raise ValueError("Trainer stream requires an enforceable lease and exact replica verifier")
         if runner.rank in runner.receivers and (policy_access is not None or replica_verifier is not None):
             raise ValueError("Receiver session cannot claim learner ownership")
 
     def adopt_preparation_lease(self, token, versions):
-        """Retain preparation ownership until this session closes or fails to begin."""
+        """Retain preparation ownership until publication finish, close or failed begin."""
         with self.lock:
             if self.phase is not ShardPhase.PREPARED or self.token is not None or self.policy_access is None:
                 raise ValueError("Only a fresh policy session can adopt preparation ownership")
@@ -119,10 +131,16 @@ class ShardSession:
             self.identity(manifest_id, publication_id)
             if self.phase is not ShardPhase.PREPARED:
                 raise ValueError("Shard session is already active")
+            if self.last_completed_publication is not None and publication_id <= self.last_completed_publication:
+                raise ValueError("Shard publication must advance beyond the completed version")
             if self.policy_access is not None and self.token is None:
                 self.token = self.policy_access.acquire("shard-publication")
             try:
+                if self.inventory_validator is not None:
+                    self.inventory_validator()
                 current = storage_versions(self.runner.sources)
+                if {name: value[:-1] for name, value in current.items()} != self.source_layout:
+                    raise ValueError("Prepared learner source storage changed between publications")
                 if self.versions is not None and current != self.versions:
                     raise ValueError("Policy sources changed after preparation ownership transfer")
                 self.versions = current
@@ -245,6 +263,31 @@ class ShardSession:
             )
         return {**self.receipt(), **result}
 
+    def finish(self, manifest_id, publication_id):
+        """Release frozen ownership after replay while retaining warmed groups and buffers."""
+        with self.lock:
+            self.identity(manifest_id, publication_id)
+            if (
+                self.phase is not ShardPhase.VERIFIED
+                or self.replay_state is None
+                or not self.replay_state.executed
+                or storage_versions(self.runner.sources) != self.versions
+                or storage_versions(self.runner.parameters) != self.installed_versions
+            ):
+                raise ValueError("Persistent publication finish requires unchanged, fully replayed weights")
+            self.runner.reset(manifest_id=manifest_id, publication_id=publication_id)
+            if self.token is not None:
+                self.policy_access.release(self.token)
+                self.token = None
+            self.last_completed_publication = publication_id
+            self.publication_id = None
+            self.versions = None
+            self.installed_versions = None
+            self.proof = None
+            self.replay_state = None
+            self.phase = ShardPhase.PREPARED
+            return {**self.receipt(), "publication_id": publication_id, "groups_retained": True}
+
     def close(self, manifest_id, publication_id):
         with self.lock:
             self.identity(manifest_id, publication_id)
@@ -272,7 +315,14 @@ class ShardSession:
 
 
 def bind_worker_shard_stream(
-    worker, runner, *, policy_access, replica_verifier, owned_groups, retained_proof_workspace_bytes=0
+    worker,
+    runner,
+    *,
+    policy_access,
+    replica_verifier,
+    owned_groups,
+    retained_proof_workspace_bytes=0,
+    inventory_validator=None,
 ):
     if getattr(worker, "_shard_stream_session", None) is not None:
         raise ValueError("Close the previous shard worker session before binding another")
@@ -282,6 +332,7 @@ def bind_worker_shard_stream(
         replica_verifier=replica_verifier,
         owned_groups=owned_groups,
         retained_proof_workspace_bytes=retained_proof_workspace_bytes,
+        inventory_validator=inventory_validator,
     )
     return worker._shard_stream_session.manifest_id
 

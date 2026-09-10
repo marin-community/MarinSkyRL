@@ -1,6 +1,13 @@
-"""Explicit diagnostic entrypoint for one frozen K10 install/replay interval."""
+"""Own a frozen K10 install/replay interval with explicit group lifetime."""
 
 import asyncio
+from enum import StrEnum
+import time
+
+
+class ShardLifecycle(StrEnum):
+    CLOSE = "close"
+    RETAIN = "retain"
 
 
 async def settled(*calls):
@@ -55,15 +62,24 @@ def validate_rows(value, manifest_id, publication_id, expected_ranks, phase):
 
 
 async def run_shard_interval(
-    driver, manifest_id, publication_id, *, replay, policy_ranks, receiver_ranks, expected_receiver_bytes
+    driver,
+    manifest_id,
+    publication_id,
+    *,
+    replay,
+    policy_ranks,
+    receiver_ranks,
+    expected_receiver_bytes,
+    lifecycle=ShardLifecycle.CLOSE,
 ):
-    """Pause, freeze, prove source copies, install, replay, close, then resume.
+    """Pause, freeze, prove, install and replay before releasing publication ownership.
 
     The explicit replay callback must execute the complete native byte proof.
     No callback or replica verifier is installed by default. Failed/partial
     installation leaves inference paused; the caller must terminate or recover
     the diagnostic job, never continue generation with unverified weights.
     """
+    lifecycle = ShardLifecycle(lifecycle)
     if not callable(replay) or not policy_ranks or not receiver_ranks:
         raise ValueError("Shard interval requires explicit complete proof and rank coverage")
     # Snapshot independently prepared installed storage counts before any RPC.
@@ -81,30 +97,49 @@ async def run_shard_interval(
         refs = driver.policy_model.async_run_ray_method("pass_through", method, manifest_id, publication_id)
         return await settled(*refs)
 
-    result = {}
+    timings = {}
+
+    async def measured(name, call):
+        started = time.perf_counter()
+        try:
+            return await call
+        finally:
+            timings[name] = time.perf_counter() - started
+
+    result = {"phase_seconds": timings}
     installed_and_verified = False
     primary = None
     try:
-        await settled(client.pause_generation(settle_native_calls=True))
+        await measured("pause", settled(client.pause_generation(settle_native_calls=True)))
         result["policy_begin"] = validate_rows(
-            await policy("begin_shard_publication"), manifest_id, publication_id, policy_ranks, "frozen"
+            await measured("freeze", policy("begin_shard_publication")),
+            manifest_id,
+            publication_id,
+            policy_ranks,
+            "frozen",
         )
         result["source_proof"] = validate_rows(
-            await policy("verify_shard_publication"), manifest_id, publication_id, policy_ranks, "verified"
+            await measured("source_replica_proof", policy("verify_shard_publication")),
+            manifest_id,
+            publication_id,
+            policy_ranks,
+            "verified",
         )
         result["receiver_begin"] = validate_rows(
-            (await settled(client.begin_shard_stream(manifest_id, publication_id)))[0],
+            (await measured("receiver_begin", settled(client.begin_shard_stream(manifest_id, publication_id))))[0],
             manifest_id,
             publication_id,
             receiver_ranks,
             "frozen",
         )
-        installed = await settled(policy("run_shard_publication"), client.run_shard_stream(manifest_id, publication_id))
+        installed = await measured(
+            "install", settled(policy("run_shard_publication"), client.run_shard_stream(manifest_id, publication_id))
+        )
         result["policy_install"] = validate_rows(installed[0], manifest_id, publication_id, policy_ranks, "installed")
         result["receiver_install"] = validate_rows(
             installed[1], manifest_id, publication_id, receiver_ranks, "installed"
         )
-        proof = (await settled(replay(manifest_id, publication_id)))[0]
+        proof = (await measured("full_byte_replay", settled(replay(manifest_id, publication_id))))[0]
         proof_rows = validate_rows(proof, manifest_id, publication_id, receiver_ranks, "verified")
         if any(
             type(row["mismatches"]) is not int
@@ -116,19 +151,35 @@ async def run_shard_interval(
         ):
             raise ValueError("Shard frozen replay did not prove complete installed bytes")
         result["replay"] = proof_rows
+        if lifecycle is ShardLifecycle.RETAIN:
+            finished = await measured(
+                "finish",
+                settled(policy("finish_shard_publication"), client.finish_shard_stream(manifest_id, publication_id)),
+            )
+            result["policy_finish"] = validate_rows(finished[0], manifest_id, publication_id, policy_ranks, "prepared")
+            result["receiver_finish"] = validate_rows(
+                finished[1], manifest_id, publication_id, receiver_ranks, "prepared"
+            )
+            if any(not row.get("groups_retained") for rows in finished for row in receipt_rows(rows)):
+                raise ValueError("Persistent shard finish did not retain every participant's groups")
         installed_and_verified = True
     except BaseException as error:
         primary = error
         raise
     finally:
         try:
-            cleanup = await settled(
-                policy("close_shard_publication"), client.close_shard_stream(manifest_id, publication_id)
-            )
-            result["policy_close"] = validate_rows(cleanup[0], manifest_id, publication_id, policy_ranks, "closed")
-            result["receiver_close"] = validate_rows(cleanup[1], manifest_id, publication_id, receiver_ranks, "closed")
+            if lifecycle is ShardLifecycle.CLOSE or not installed_and_verified:
+                cleanup = await settled(
+                    policy("close_shard_publication"), client.close_shard_stream(manifest_id, publication_id)
+                )
+                result["policy_close"] = validate_rows(cleanup[0], manifest_id, publication_id, policy_ranks, "closed")
+                result["receiver_close"] = validate_rows(
+                    cleanup[1], manifest_id, publication_id, receiver_ranks, "closed"
+                )
             if installed_and_verified:
-                await settled(client.resume_generation(policy_version=publication_id, settle_native_calls=True))
+                await measured(
+                    "resume", settled(client.resume_generation(policy_version=publication_id, settle_native_calls=True))
+                )
         except BaseException as cleanup_error:
             if primary is None:
                 raise

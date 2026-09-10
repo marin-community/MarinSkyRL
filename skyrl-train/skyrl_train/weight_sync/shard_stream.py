@@ -124,6 +124,14 @@ class ShardStreamRank:
             raise ValueError("Stream requires a typed publication version")
         self.manifest_id, self.publication_id = manifest_id, publication_id
 
+    def reset(self, *, manifest_id, publication_id):
+        """Reuse installed stream metadata only after the owning session verifies replay."""
+        if not self.completed or manifest_id != self.manifest_id or publication_id != self.publication_id:
+            raise ValueError("Cannot reset an incomplete or different shard publication")
+        self.manifest_id = None
+        self.publication_id = None
+        self.completed = False
+
     def _workspace(self, nbytes, dtype):
         return self.scratch.narrow(0, 0, nbytes).view(dtype)
 

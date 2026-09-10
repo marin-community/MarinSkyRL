@@ -24,7 +24,7 @@ from tests.cpu.weight_sync.test_shard_stream import StreamActor, fixture_plan
 
 
 ROOT = Path(__file__).parents[3] / "skyrl_train"
-RECEIVER_METHODS = {"begin_shard_stream", "run_shard_stream", "close_shard_stream"}
+RECEIVER_METHODS = {"begin_shard_stream", "run_shard_stream", "close_shard_stream", "finish_shard_stream"}
 # Independent fixture inventory: two layers, BF16 expert matrices (12+6),
 # BF16 Q projection (4), FP32 router weight (2), FP32 router bias (2).
 EXPECTED_RECEIVER_BYTES = {rank: 2 * ((12 + 6 + 4) * 2 + (2 + 2) * 4) for rank in (2, 3)}
@@ -33,6 +33,7 @@ POLICY_METHODS = {
     "verify_shard_publication",
     "run_shard_publication",
     "close_shard_publication",
+    "finish_shard_publication",
 }
 
 

@@ -234,6 +234,11 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             manifest_id=manifest_id, publication_id=publication_id
         )
 
+    async def finish_shard_stream(self, manifest_id: str, publication_id: int):
+        return await self.inference_engine_actor.finish_shard_stream.remote(
+            manifest_id=manifest_id, publication_id=publication_id
+        )
+
     async def close_shard_stream(self, manifest_id: str, publication_id: int):
         return await self.inference_engine_actor.close_shard_stream.remote(
             manifest_id=manifest_id, publication_id=publication_id

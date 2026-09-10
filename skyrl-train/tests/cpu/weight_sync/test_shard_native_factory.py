@@ -1,8 +1,11 @@
+import asyncio
 from functools import partial
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 import ray
 import torch
 
@@ -12,6 +15,7 @@ from skyrl_train.weight_sync.shard_group_factory import GroupEndpoint
 from skyrl_train.weight_sync.shard_native_factory import prepare_native_shard_worker, required_group_memberships
 from skyrl_train.weight_sync.shard_replica_proof import ReplicaCatalogue, ReplicaTensor, build_replica_plan
 from skyrl_train.weight_sync.shard_session import worker_shard_call
+from skyrl_train.weight_sync.shard_interval import ShardLifecycle, run_shard_interval
 from tests.cpu.weight_sync.test_shard_stream import StreamActor, fixture_plan
 
 
@@ -131,3 +135,133 @@ def test_native_factory_binds_actual_groups_and_complete_replica_comparator(tmp_
         for actor in actors:
             ray.kill(actor, no_restart=True)
         ray.shutdown()
+
+
+class PersistentFactoryActor(FactoryActor):
+    def versioned_phase(self, name, manifest, version):
+        return worker_shard_call(self, name, manifest, version)
+
+    def update_sources(self):
+        if self.access is None:
+            return
+        with self.access.hold("policy-train"):
+            for value in self.sources.values():
+                value.add_(1)
+
+
+def test_persistent_groups_publish_updated_source_bytes_after_verified_finish(tmp_path):
+    payload = fixture_plan(1, 2, 2)
+    trainers, receivers, _, schedule, _, _ = payload
+    count = len(trainers) + len(receivers)
+    ray.init(num_cpus=count, include_dashboard=False)
+    actors = []
+    try:
+        actor_type = ray.remote(num_cpus=1)(PersistentFactoryActor)
+        actors = [actor_type.remote(rank, payload, str(tmp_path)) for rank in range(count)]
+        catalogue = ray.get([actor.catalogue.remote() for actor in actors[: len(trainers)]], timeout=60)
+        plan = build_replica_plan(trainers, schedule, tuple(catalogue))
+        prepared = ray.get([actor.prepare.remote(plan) for actor in actors], timeout=60)
+        manifest = prepared[0]["manifest_id"]
+        snapshots = []
+        for version in (4, 5):
+            ray.get([actor.versioned_phase.remote("begin", manifest, version) for actor in actors], timeout=30)
+            ray.get(
+                [
+                    actor.versioned_phase.remote("verify_replicas", manifest, version)
+                    for actor in actors[: len(trainers)]
+                ],
+                timeout=60,
+            )
+            ray.get([actor.versioned_phase.remote("run", manifest, version) for actor in actors], timeout=60)
+            for actor in actors:
+                with pytest.raises(ray.exceptions.RayTaskError, match="fully replayed weights"):
+                    ray.get(actor.versioned_phase.remote("finish", manifest, version), timeout=30)
+            ray.get([actor.versioned_phase.remote("prepare_replay", manifest, version) for actor in actors], timeout=30)
+            proof = ray.get([actor.versioned_phase.remote("replay", manifest, version) for actor in actors], timeout=60)
+            assert all(row["mismatches"] == 0 and row["coverage"] == 1.0 for row in proof[len(trainers) :])
+            snapshots.append(ray.get([actor.inspect.remote() for actor in actors[len(trainers) :]], timeout=30))
+            finished = ray.get(
+                [actor.versioned_phase.remote("finish", manifest, version) for actor in actors], timeout=30
+            )
+            assert all(row["groups_retained"] and row["phase"] == "prepared" for row in finished)
+            if version == 4:
+                ray.get([actor.update_sources.remote() for actor in actors], timeout=30)
+        assert all(before["parameters"] != after["parameters"] for before, after in zip(*snapshots, strict=True))
+        for actor in actors:
+            try:
+                ray.get(actor.versioned_phase.remote("begin", manifest, 5), timeout=30)
+            except ray.exceptions.RayTaskError as error:
+                assert "advance beyond the completed version" in str(error)
+            else:
+                raise AssertionError("Completed publication version was reused")
+        asyncio.run(exercise_persistent_coordinator(actors, len(trainers), manifest, prepared))
+    finally:
+        if actors:
+            ray.get([actor.shutdown.remote() for actor in actors], timeout=30)
+        for actor in actors:
+            ray.kill(actor, no_restart=True)
+        ray.shutdown()
+
+
+async def exercise_persistent_coordinator(actors, trainer_count, manifest, prepared):
+    class Policy:
+        def async_run_ray_method(self, dispatch, method, manifest_id, publication_id):
+            assert dispatch == "pass_through"
+            phase = {"verify": "verify_replicas"}.get(method.split("_")[0], method.split("_")[0])
+            return [
+                actor.versioned_phase.remote(phase, manifest_id, publication_id) for actor in actors[:trainer_count]
+            ]
+
+    class Client:
+        paused = False
+
+        async def pause_generation(self, **kwargs):
+            self.paused = True
+
+        async def resume_generation(self, **kwargs):
+            self.paused = False
+
+        async def phase(self, phase, manifest_id, publication_id):
+            return await asyncio.gather(
+                *[actor.versioned_phase.remote(phase, manifest_id, publication_id) for actor in actors[trainer_count:]]
+            )
+
+        async def begin_shard_stream(self, *args):
+            return await self.phase("begin", *args)
+
+        async def run_shard_stream(self, *args):
+            return await self.phase("run", *args)
+
+        async def finish_shard_stream(self, *args):
+            return await self.phase("finish", *args)
+
+        async def close_shard_stream(self, *args):
+            return await self.phase("close", *args)
+
+    async def replay(manifest_id, version):
+        if version == 7:
+            raise ValueError("Injected replay boundary failure")
+        await asyncio.gather(
+            *[actor.versioned_phase.remote("prepare_replay", manifest_id, version) for actor in actors]
+        )
+        rows = await asyncio.gather(*[actor.versioned_phase.remote("replay", manifest_id, version) for actor in actors])
+        return rows[trainer_count:]
+
+    client = Client()
+    driver = SimpleNamespace(policy_model=Policy(), inference_engine_client=client)
+    arguments = dict(
+        replay=replay,
+        policy_ranks=tuple(range(trainer_count)),
+        receiver_ranks=tuple(range(trainer_count, len(actors))),
+        expected_receiver_bytes={row["rank"]: row["expected_receiver_bytes"] for row in prepared[trainer_count:]},
+        lifecycle=ShardLifecycle.RETAIN,
+    )
+    result = await run_shard_interval(driver, manifest, 6, **arguments)
+    assert not client.paused and "policy_close" not in result
+    assert all(row["groups_retained"] for row in result["policy_finish"] + result["receiver_finish"])
+    assert result["phase_seconds"]["install"] >= 0 and result["phase_seconds"]["full_byte_replay"] >= 0
+    with pytest.raises(ValueError, match="Injected replay boundary failure"):
+        await run_shard_interval(driver, manifest, 7, **arguments)
+    assert client.paused
+    # Cleanup has released every learner lease even after a failed publication.
+    await asyncio.gather(*[actor.update_sources.remote() for actor in actors[:trainer_count]])

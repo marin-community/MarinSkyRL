@@ -8,6 +8,7 @@ from the later source-replica comparison's proof-memory gate.
 
 from dataclasses import asdict, dataclass
 from enum import StrEnum
+from functools import partial
 import hashlib
 import json
 import time
@@ -393,6 +394,29 @@ def _allocation_state(device):
     }
 
 
+def validate_live_inventory(worker, state):
+    """Resolve the actual model again under the publication lease before reuse."""
+    if state.metadata["role"] == "policy":
+        slices, sources = local_source_slices(worker.bridge.get_conversion_tasks(worker.actor_module), worker.provider)
+        trainer, geometry = state.metadata["trainer"], state.geometry
+        inventory = local_shard_inventory(
+            slices,
+            sources,
+            trainer,
+            layers=geometry.layers_by_pp[trainer.pp],
+            num_experts=geometry.num_experts,
+            expert_parallel_size=geometry.expert_parallel_size,
+            hidden_size=geometry.hidden_size,
+            intermediate_size=geometry.intermediate_size,
+        )
+        if inventory != state.metadata["inventory"] or storage_versions(sources) != storage_versions(state.sources):
+            raise ValueError("Live learner inventory differs from prepared source views")
+    else:
+        parameters, maps, _ = native_receiver_sources(worker)
+        if maps != state.expert_maps or storage_versions(parameters) != storage_versions(state.parameters):
+            raise ValueError("Live receiver inventory differs from prepared destinations")
+
+
 def bind_live_preparation(worker, plan, parallel_state, capture, *, proof_capture=None):
     state = getattr(worker, "_shard_preparation", None)
     if state is None or state.preparation_id != plan.preparation_id or state.geometry != plan.geometry:
@@ -461,6 +485,7 @@ def bind_live_preparation(worker, plan, parallel_state, capture, *, proof_captur
             borrowed_groups=groups,
             borrowed_source_ranks=roots,
             proof_capture=proof_capture,
+            inventory_validator=partial(validate_live_inventory, worker, state),
         )
         receipt.update(bound, phase="prepared")
         if storage_versions(state.sources) != state.source_versions:

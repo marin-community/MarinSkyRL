@@ -947,6 +947,13 @@ class InferenceEngineClient(InferenceEngineInterface):
             "run_shard_stream", manifest_id=manifest_id, publication_id=publication_id, _settle_calls=True
         )
 
+    async def finish_shard_stream(self, manifest_id: str, publication_id: int):
+        if self._dead_engines:
+            raise RuntimeError("Shard collectives require every configured inference engine")
+        return await self._run_on_all_engines(
+            "finish_shard_stream", manifest_id=manifest_id, publication_id=publication_id, _settle_calls=True
+        )
+
     async def close_shard_stream(self, manifest_id: str, publication_id: int):
         if self._dead_engines:
             raise RuntimeError("Shard collectives require every configured inference engine")
