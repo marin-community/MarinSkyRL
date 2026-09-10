@@ -1,62 +1,80 @@
-"""Actual client/Ray-wrapper/engine methods, with external Ray and vLLM I/O faked."""
+"""Actual client and Ray wrapper, real Ray actors, and pinned engine RPC methods.
+
+The CUDA-only module's engine methods are compiled unchanged from its AST.
+Only the vLLM core I/O boundary is simulated; each call must also bind the actual
+WorkerWrap method signature. Tensor installation has separate protocol tests.
+"""
 
 import ast
 import asyncio
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
+from omegaconf import OmegaConf
 import pytest
+import ray
+
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 
 
 ROOT = Path(__file__).parents[3] / "skyrl_train/inference_engines"
+METHODS = (
+    "prepare_diagnostic_weight_sync_buckets",
+    "begin_diagnostic_weight_sync",
+    "begin_reference_bucket_sync",
+    "finish_reference_bucket_sync",
+    "receive_diagnostic_weight_sync_bucket",
+    "finish_diagnostic_weight_sync_install",
+    "finish_diagnostic_weight_sync_replay",
+    "close_diagnostic_weight_sync_buckets",
+)
 
 
-def route_class(relative_path, class_name, extra=()):
-    path = ROOT / relative_path
+def native_methods(class_name):
+    path = ROOT / "vllm/vllm_engine.py"
     tree = ast.parse(path.read_text())
     parent = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
     selected = [
         node
         for node in parent.body
-        if isinstance(node, ast.AsyncFunctionDef) and ("diagnostic_weight_sync" in node.name or node.name in extra)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in METHODS
     ]
-    assert len(selected) == 5 + len(extra)
-    cls = ast.ClassDef(name="ActualRoute", bases=[], keywords=[], body=selected, decorator_list=[])
+    assert {node.name for node in selected} == set(METHODS)
+    cls = ast.ClassDef(name="NativeMethods", bases=[], keywords=[], body=selected, decorator_list=[])
     module = ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[]))
-    namespace = {"asyncio": asyncio}
+    namespace = {"__name__": __name__}
     exec(compile(module, str(path), "exec"), namespace)
-    return namespace["ActualRoute"]
+    return namespace["NativeMethods"]
 
 
-def client_route():
-    client = route_class(
-        "inference_engine_client.py", "InferenceEngineClient", ("_run_on_all_engines", "_run_diagnostic_bucket_rpc")
-    )()
-    client._dead_engines = set()
-    client.engines = []
-    calls = []
-    for engine_id in range(2):
+class CoreBoundary:
+    core_engines = [bytes([0, 0]), bytes([1, 0])]
+    engine_ranks_managed = [0, 1]
 
-        class Core:
-            core_engines = [bytes([0, 0]), bytes([1, 0])]
-            engine_ranks_managed = [0, 1]
+    def __init__(self, number):
+        self.number = number
+        self.worker = native_methods("WorkerWrap")()
 
-            async def _call_utility_async(self, utility, method, timeout, args, kwargs, *, engine):
-                assert utility == "collective_rpc" and timeout is None
-                row = {
-                    "engine": self.number,
-                    "core": int.from_bytes(engine, "little"),
-                    "method": method,
-                    "args": args,
-                    "kwargs": kwargs,
-                }
-                calls.append(row)
-                return [row]
+    async def _call_utility_async(self, utility, method, timeout, args, kwargs, *, engine):
+        assert utility == "collective_rpc" and timeout is None
+        bound = inspect.signature(getattr(self.worker, method)).bind(*(args or ()), **(kwargs or {}))
+        bound.apply_defaults()
+        return [
+            {
+                "engine": self.number,
+                "core": int.from_bytes(engine, "little"),
+                "method": method,
+                "arguments": bound.arguments,
+            }
+        ]
 
-        core = Core()
-        core.number = engine_id
-        native = SimpleNamespace(
-            engine_core=core,
+
+class EngineBoundary(native_methods("AsyncVLLMInferenceEngine")):
+    def __init__(self, number):
+        self.native = SimpleNamespace(
+            engine_core=CoreBoundary(number),
             vllm_config=SimpleNamespace(
                 parallel_config=SimpleNamespace(
                     data_parallel_size=2,
@@ -67,50 +85,75 @@ def client_route():
                 )
             ),
         )
-        engine = route_class("vllm/vllm_engine.py", "AsyncVLLMInferenceEngine")()
-        engine._get_engine = lambda native=native: native
-        actor = SimpleNamespace(
-            **{
-                name: SimpleNamespace(remote=getattr(engine, name))
-                for name in dir(engine)
-                if "diagnostic_weight_sync" in name
+
+    def _get_engine(self):
+        return self.native
+
+
+@pytest.fixture(scope="module")
+def live_client():
+    ray.init(num_cpus=2, include_dashboard=False)
+    actor_type = ray.remote(num_cpus=1)(EngineBoundary)
+    actors = [actor_type.remote(i) for i in range(2)]
+    client = InferenceEngineClient(
+        [RayWrappedInferenceEngine(actor) for actor in actors],
+        tokenizer=None,
+        full_config=OmegaConf.create(
+            {
+                "trainer": {"policy": {"model": {"path": "cpu-route-fixture"}}},
+                "generator": {
+                    "backend": "vllm",
+                    "enable_http_endpoint": False,
+                    "http_endpoint_host": "127.0.0.1",
+                    "http_endpoint_port": 0,
+                },
             }
-        )
-        wrapped = route_class("ray_wrapped_inference_engine.py", "RayWrappedInferenceEngine")()
-        wrapped.inference_engine_actor = actor
-        client.engines.append(wrapped)
-    return client, calls
+        ),
+    )
+    yield client
+    for actor in actors:
+        ray.kill(actor, no_restart=True)
+    ray.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_bucket_request_reaches_every_dp_worker_and_keeps_origin():
-    client, calls = client_route()
-    payload = {"entries": [{"hf_name": "weight"}]}
-    outputs = await client.prepare_diagnostic_weight_sync_buckets(payload, "manifest")
-    assert {(row["engine"], row["core"]) for group in outputs for row in group} == {
-        (0, 0),
-        (0, 1),
-        (1, 0),
-        (1, 1),
-    }
-    assert all(row["args"] == (payload, "manifest") for row in calls)
-    calls.clear()
-    await client.receive_diagnostic_weight_sync_bucket(7, replay=True)
-    assert len(calls) == 4
-    assert all(row["args"] == (7,) and row["kwargs"] == {"replay": True} for row in calls)
-    for name in (
-        "finish_diagnostic_weight_sync_install",
-        "finish_diagnostic_weight_sync_replay",
-        "close_diagnostic_weight_sync_buckets",
-    ):
-        outputs = await getattr(client, name)()
-        assert len([row for group in outputs for row in group]) == 4
+@pytest.mark.parametrize(
+    "method,arguments",
+    [
+        ("prepare_diagnostic_weight_sync_buckets", {"payload": {"entries": ["weight"]}, "manifest_id": "manifest"}),
+        ("begin_diagnostic_weight_sync", {"manifest_id": "manifest", "publication_id": 7}),
+        ("begin_reference_bucket_sync", {"manifest_id": "manifest", "publication_id": 7}),
+        ("finish_reference_bucket_sync", {"manifest_id": "manifest", "publication_id": 7}),
+        (
+            "receive_diagnostic_weight_sync_bucket",
+            {"bucket_id": 3, "replay": False, "manifest_id": "manifest", "publication_id": 7},
+        ),
+        (
+            "receive_diagnostic_weight_sync_bucket",
+            {"bucket_id": 3, "replay": True, "manifest_id": "manifest", "publication_id": 7},
+        ),
+        ("finish_diagnostic_weight_sync_install", {"manifest_id": "manifest", "publication_id": 7}),
+        ("finish_diagnostic_weight_sync_replay", {"manifest_id": "manifest", "publication_id": 7}),
+        ("close_diagnostic_weight_sync_buckets", {"manifest_id": "manifest", "publication_id": 7}),
+        ("close_diagnostic_weight_sync_buckets", {"manifest_id": None, "publication_id": None}),
+        ("finish_diagnostic_weight_sync_install", {"manifest_id": None, "publication_id": None}),
+        ("finish_diagnostic_weight_sync_replay", {"manifest_id": None, "publication_id": None}),
+    ],
+)
+async def test_actual_client_wrapper_actor_engine_worker_contract(live_client, method, arguments):
+    outputs = await asyncio.wait_for(getattr(live_client, method)(**arguments), timeout=30)
+    rows = [row for group in outputs for row in group]
+    assert {(row["engine"], row["core"]) for row in rows} == {(0, 0), (0, 1), (1, 0), (1, 1)}
+    assert len(rows) == 4
+    assert all(row["method"] == method and row["arguments"] == arguments for row in rows)
+    assert all(row["receiver_transport"]["managed_dp_ranks"] == [0, 1] for row in rows)
 
 
 @pytest.mark.asyncio
-async def test_known_dead_engine_rejects_before_any_collective_dispatch():
-    client, calls = client_route()
-    client._dead_engines.add(1)
-    with pytest.raises(RuntimeError, match="every configured inference engine"):
-        await client.receive_diagnostic_weight_sync_bucket(0)
-    assert calls == []
+async def test_known_dead_engine_rejects_before_any_collective_dispatch(live_client):
+    live_client._dead_engines.add(1)
+    try:
+        with pytest.raises(RuntimeError, match="every configured inference engine"):
+            await live_client.begin_reference_bucket_sync("manifest", 7)
+    finally:
+        live_client._dead_engines.clear()
