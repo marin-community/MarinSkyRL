@@ -30,7 +30,13 @@ from omegaconf import DictConfig
 import torch
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, GenerationQueuesProvider
+from skyrl_train.async_rollout_state import (
+    GeneratedOutputGroup,
+    GenerationBufferState,
+    GenerationQueuesProvider,
+    PreparedAsyncCohort,
+)
+from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.utils.data_tracker import DataConsumptionState, DataConsumptionTracker
@@ -1069,7 +1075,7 @@ class BufferCheckpointCallback(TrainerCallback):
         if self._queues is None:
             return False
         state = self._queues.shutdown_snapshot()
-        return bool(state.completed_groups or state.admitted_groups or state.retry_prompts)
+        return bool(state.completed_groups or state.admitted_groups or state.retry_prompts or state.prepared_cohort)
 
     @staticmethod
     def _serialize_groups(groups: List[GeneratedOutputGroup]) -> List[dict]:
@@ -1091,19 +1097,30 @@ class BufferCheckpointCallback(TrainerCallback):
         completed = self._serialize_groups(buffer_state.completed_groups)
         admitted = self._serialize_groups(buffer_state.admitted_groups)
         retry_prompts = buffer_state.retry_prompts
+        payload = {
+            "completed_groups": completed,
+            "admitted_groups": admitted,
+            "retry_prompts": retry_prompts,
+        }
+        cohort = buffer_state.prepared_cohort
+        if cohort is not None:
+            payload["prepared_cohort"] = {
+                "schema_version": 1,
+                "batch": dict(cohort.batch),
+                "metadata": cohort.batch.metadata,
+                "groups": self._serialize_groups(cohort.groups),
+                "admission_step": cohort.admission_step,
+                "dp_size": cohort.dp_size,
+                "mini_batch_groups": cohort.mini_batch_groups,
+                "samples_per_prompt": cohort.samples_per_prompt,
+                "next_update": cohort.next_update,
+            }
 
         artifact_path = os.path.join(checkpoint_path, self.ARTIFACT_NAME)
 
         def save_state() -> None:
             with io.open_file(artifact_path, "wb") as f:
-                torch.save(
-                    {
-                        "completed_groups": completed,
-                        "admitted_groups": admitted,
-                        "retry_prompts": retry_prompts,
-                    },
-                    f,
-                )
+                torch.save(payload, f)
 
         await asyncio.to_thread(save_state)
         logger.info(
@@ -1133,7 +1150,12 @@ class BufferCheckpointCallback(TrainerCallback):
             raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")
 
         buffer_state = self._queues.snapshot()
-        if not (buffer_state.completed_groups or buffer_state.admitted_groups or buffer_state.retry_prompts):
+        if not (
+            buffer_state.completed_groups
+            or buffer_state.admitted_groups
+            or buffer_state.retry_prompts
+            or buffer_state.prepared_cohort
+        ):
             return control
 
         ckpt_path = os.path.join(
@@ -1171,8 +1193,18 @@ class BufferCheckpointCallback(TrainerCallback):
 
         items = deserialize_groups(state["completed_groups"])
         admitted = deserialize_groups(state.get("admitted_groups", []))
+        cohort = None
+        if "prepared_cohort" in state:
+            entry = dict(state["prepared_cohort"])
+            if entry.pop("schema_version") != 1:
+                raise ValueError("unsupported prepared async cohort checkpoint schema")
+            batch = TrainingInputBatch(entry.pop("batch"))
+            batch.metadata = entry.pop("metadata")
+            groups = deserialize_groups(entry.pop("groups"))
+            cohort = PreparedAsyncCohort(batch=batch, groups=groups, **entry)
         return GenerationBufferState(
             completed_groups=items,
             retry_prompts=state["retry_prompts"],
             admitted_groups=admitted,
+            prepared_cohort=cohort,
         )

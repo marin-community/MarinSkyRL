@@ -303,6 +303,8 @@ async def test_restore_preserves_admission_semantics_before_reserving_work(tmp_p
         trainer.cfg.trainer.fully_async.first_token_admission = False
     trainer.global_step = 5
     trainer.mini_batch_size = 4
+    trainer.cohort_size = 4
+    trainer.updates_per_cohort = 1
     trainer._async_observations_enabled = False
     reserved = set()
     trainer.async_train_dataloader = SimpleNamespace(reserve_pending_uids=reserved.update)

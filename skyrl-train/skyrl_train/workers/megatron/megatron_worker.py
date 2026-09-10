@@ -810,7 +810,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             all_metrics[k].append(v)
 
                     status_by_update.append(
-                        {**status_list[-1], "update_index": policy_update_steps, "update_age": policy_update_steps}
+                        {
+                            **status_list[-1],
+                            "update_index": policy_update_steps
+                            + train_data.metadata.get("async_cohort_update_index", 0),
+                            "update_age": policy_update_steps + train_data.metadata.get("async_cohort_update_index", 0),
+                        }
                     )
                     pbar.set_postfix(policy_progress_metrics(status_list[-1]))
 

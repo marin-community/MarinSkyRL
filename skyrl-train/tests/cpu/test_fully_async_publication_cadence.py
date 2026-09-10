@@ -212,6 +212,7 @@ def make_driver(
     dynamic_sampling_type=None,
     driver_type=DriverWithCpuLearner,
     first_token_admission=False,
+    minibatches=1,
 ):
     cfg = get_default_config()
     updates = {
@@ -221,7 +222,7 @@ def make_driver(
         "trainer.fully_async.num_parallel_generation_workers": 2,
         "trainer.fully_async.max_buffered_groups": 1,
         "trainer.fully_async.admission_stall_timeout": 3,
-        "trainer.train_batch_size": 2,
+        "trainer.train_batch_size": 2 * minibatches,
         "trainer.policy_mini_batch_size": 2,
         "trainer.eval_batch_size": 1,
         "trainer.max_steps": steps,
@@ -239,6 +240,10 @@ def make_driver(
         "generator.n_samples_per_prompt": 2,
         "generator.eval_n_samples_per_prompt": 1,
     }
+    if minibatches > 1:
+        updates["trainer.strategy"] = "megatron"
+        updates["trainer.algorithm.use_kl_loss"] = False
+        updates["data.num_workers"] = 0
     if first_token_admission is not None:
         updates["trainer.fully_async.first_token_admission"] = first_token_admission
     if interval is None:

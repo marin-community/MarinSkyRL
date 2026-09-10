@@ -69,7 +69,7 @@ from skyrl_train.rollout_observability import (
     monitor_event_loop_lag,
 )
 from skyrl_train.timing_observability import publish_step_timings
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
+from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, PreparedAsyncCohort
 from skyrl_train.io import io
 from skyrl_train.dynamic_sampling import (
     DynamicSamplingType,
@@ -108,6 +108,20 @@ class _GenerationQueues:
     admitted_groups: List[GeneratedOutputGroup] = field(default_factory=list)
     admitted_groups_consumed: bool = False
     producer_failure: Exception | None = None
+    prepared_cohort: PreparedAsyncCohort | None = None
+    rollback_prepared_cohort: PreparedAsyncCohort | None = None
+
+    def install_prepared_cohort(self, cohort: PreparedAsyncCohort) -> None:
+        if self.prepared_cohort is not None or self.rollback_prepared_cohort is not None:
+            raise RuntimeError("cannot replace a pending prepared cohort")
+        self.prepared_cohort = cohort
+        self.admitted_groups.clear()
+
+    def mark_prepared_partition_consumed(self) -> None:
+        if self.prepared_cohort is None:
+            raise RuntimeError("cannot consume an absent prepared cohort")
+        self.rollback_prepared_cohort = self.prepared_cohort
+        self.prepared_cohort = self.prepared_cohort.advanced()
 
     async def mark_producer_finished(self) -> None:
         """Wake admission when a generation worker permanently exits."""
@@ -133,6 +147,9 @@ class _GenerationQueues:
         """Release the prior step's admitted groups before assembling the next step."""
         self.admitted_groups.clear()
         self.admitted_groups_consumed = False
+        self.rollback_prepared_cohort = None
+        if self.prepared_cohort is not None and self.prepared_cohort.next_update == self.prepared_cohort.num_updates:
+            self.prepared_cohort = None
 
     def snapshot(self) -> GenerationBufferState:
         """Copy queued and admitted work without yielding to another event-loop task."""
@@ -141,7 +158,10 @@ class _GenerationQueues:
 
     def shutdown_snapshot(self) -> GenerationBufferState:
         """Copy all work needed to recover from shutdown before the next checkpoint."""
-        return self._snapshot(list(self.admitted_groups))
+        state = self._snapshot(list(self.admitted_groups))
+        if self.rollback_prepared_cohort is not None:
+            state.prepared_cohort = self.rollback_prepared_cohort
+        return state
 
     def _snapshot(self, admitted_groups: List[GeneratedOutputGroup]) -> GenerationBufferState:
         completed = _drain_queue(self.completed)
@@ -154,6 +174,11 @@ class _GenerationQueues:
             completed_groups=completed,
             retry_prompts=retries,
             admitted_groups=admitted_groups,
+            prepared_cohort=(
+                self.prepared_cohort
+                if self.prepared_cohort is not None and self.prepared_cohort.pending_groups()
+                else None
+            ),
         )
 
 
@@ -263,10 +288,18 @@ class _AsyncStalenessManager:
     - The idea of this controller is from section 5.1 of AReal's paper: https://arxiv.org/pdf/2505.24298v3
     """
 
-    def __init__(self, max_concurrent_generation_groups: int, mini_batch_size: int, max_staleness_steps: int):
+    def __init__(
+        self,
+        max_concurrent_generation_groups: int,
+        mini_batch_size: int,
+        max_staleness_steps: int,
+        *,
+        cohort_extra_groups: int = 0,
+    ):
         self.max_concurrent_generation_groups = max_concurrent_generation_groups
         self.mini_batch_size = mini_batch_size
         self.max_staleness_steps = max_staleness_steps
+        self.cohort_extra_groups = cohort_extra_groups
 
         # Control logics.
         self._stat = _RolloutStat()
@@ -286,7 +319,7 @@ class _AsyncStalenessManager:
         self._stat.accepted = (global_step - 1) * self.mini_batch_size
         self._stat.submitted = self._stat.accepted
 
-    async def validate_state_at_epoch_end(self, global_step: int) -> None:
+    async def validate_state_at_epoch_end(self, global_step: int, *, prepared_pending_groups: int = 0) -> None:
         """
         Check that the current version and accepted rollouts are consistent with the global step.
 
@@ -298,7 +331,7 @@ class _AsyncStalenessManager:
             assert self._stat.submitted == self._stat.accepted, (
                 "We expect all submitted rollouts to be accepted at end of an epoch."
             )
-            consumed = (global_step - 1) * self.mini_batch_size
+            consumed = (global_step - 1) * self.mini_batch_size + prepared_pending_groups
             assert self._stat.accepted == consumed, (
                 f"Unexpected number of accepted rollouts. Got {self._stat.accepted} != {consumed}."
             )
@@ -320,6 +353,7 @@ class _AsyncStalenessManager:
         eligible_through_step = self._published_policy_version + self.max_staleness_steps + 1
         consumer_capacity = (
             min(self.max_staleness_steps + self._current_global_step, eligible_through_step) * self.mini_batch_size
+            + self.cohort_extra_groups
         )
         producer_staleness_capacity = consumer_capacity - (self._stat.accepted + self._stat.running)
         producer_concurrency_capacity = self.max_concurrent_generation_groups - self._stat.running
@@ -499,6 +533,24 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # Initialize async-specific knobs
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
+        self.cohort_size = cfg.trainer.train_batch_size
+        if self.cohort_size % self.mini_batch_size or self.cohort_size < self.mini_batch_size:
+            raise ValueError("fully async train_batch_size must contain complete policy minibatches")
+        self.updates_per_cohort = self.cohort_size // self.mini_batch_size
+        if self.updates_per_cohort > 1 and (
+            self.updates_per_cohort != 2
+            or cfg.trainer.strategy != "megatron"
+            or cfg.trainer.algorithm.loss_reduction != "token_mean"
+            or cfg.trainer.algorithm.advantage_estimator != "grpo"
+            or cfg.trainer.update_epochs_per_batch != 1
+            or cfg.trainer.algorithm.use_kl_in_reward
+            or cfg.trainer.algorithm.use_kl_loss
+            or cfg.trainer.algorithm.dynamic_sampling.type is not None
+            or cfg.trainer.step_wise_training
+        ):
+            raise ValueError(
+                "async N2 currently requires Megatron/token_mean/GRPO, one epoch, no KL or dynamic sampling"
+            )
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
         self.weight_sync_interval = cfg.trainer.fully_async.weight_sync_interval
         self.admission_stall_timeout = int(cfg.trainer.fully_async.admission_stall_timeout)
@@ -563,9 +615,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             rollout_logprobs_required=rollout_logprobs_required(self.cfg.trainer.algorithm),
         )
         # Some async-specific validations
-        assert self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size, (
-            "train_batch_size must equal policy_mini_batch_size for fully async training"
-        )
         assert not self.cfg.generator.batched, "batched is not supported for fully async training."
         assert self.cfg.generator.async_engine, "async_engine must be True for fully async training."
         # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
@@ -580,7 +629,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
         self.async_train_dataloader = _AsyncDataloader(
             self.train_dataloader,
-            self.mini_batch_size,
+            self.cohort_size,
             self.data_tracker,
             self._dynamic_sampling_type,
         )
@@ -594,6 +643,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
             max_staleness_steps=self.max_staleness_steps,
+            cohort_extra_groups=self.cohort_size - self.mini_batch_size,
         )
         # Tracked at instance level so the finally block in train() can cancel
         # them even when an exception skips the per-epoch epilogue.
@@ -608,11 +658,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         Overrides to build dataloader for fully async training. See `_AsyncDataloader` for more details.
         """
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
-        self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size
+        self.num_steps_per_epoch = len(self.train_dataloader) // self.cohort_size * self.updates_per_cohort
         self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
         max_steps = getattr(self.cfg.trainer, "max_steps", None)
         if max_steps is not None and max_steps > 0:
             self.total_training_steps = min(self.total_training_steps, max_steps)
+        if self.total_training_steps % self.updates_per_cohort:
+            raise ValueError("fully async max_steps must end at a complete prepared cohort")
         logger.info(f"Length of train_dataloader: {len(self.train_dataloader)}")
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
         logger.info(f"Total training steps: {self.total_training_steps}")
@@ -648,13 +700,28 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 f"Checkpoint contains {len(buffer_state.completed_groups)} completed groups, exceeding buffer capacity "
                 f"{queues.completed.maxsize}"
             )
-        if len(buffer_state.admitted_groups) > self.mini_batch_size:
+        if len(buffer_state.admitted_groups) > self.cohort_size:
             raise ValueError(
                 f"Checkpoint contains {len(buffer_state.admitted_groups)} admitted groups, exceeding mini-batch size "
-                f"{self.mini_batch_size}"
+                f"{self.cohort_size}"
             )
+        cohort = buffer_state.prepared_cohort
+        expected_cohort_cursor = (self.global_step - 1) % self.updates_per_cohort
+        if expected_cohort_cursor and cohort is None:
+            raise ValueError("mid-cohort async resume requires the saved prepared cohort")
+        if cohort is not None and (
+            self.updates_per_cohort != cohort.num_updates
+            or cohort.mini_batch_groups != self.mini_batch_size
+            or cohort.samples_per_prompt != self.cfg.generator.n_samples_per_prompt
+            or cohort.admission_step + cohort.next_update != self.global_step
+            or cohort.next_update != expected_cohort_cursor
+            or cohort.dp_size != self.policy_model.actor_infos[0].rank.dp_size
+            or buffer_state.admitted_groups
+        ):
+            raise ValueError("prepared checkpoint cohort does not match the current geometry/update clock")
+        prepared_groups = cohort.pending_groups() if cohort is not None else []
         if self.cfg.trainer.fully_async.get("first_token_admission", True):
-            for group in [*buffer_state.completed_groups, *buffer_state.admitted_groups]:
+            for group in [*buffer_state.completed_groups, *buffer_state.admitted_groups, *prepared_groups]:
                 batch = group.trajectory_batch
                 if not any(batch["response_ids"]):
                     continue
@@ -675,7 +742,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         for item in buffer_state.completed_groups:
             queues.completed.put_nowait(item)
         if self._async_observations_enabled:
-            for item in [*buffer_state.completed_groups, *buffer_state.admitted_groups]:
+            for item in [*buffer_state.completed_groups, *buffer_state.admitted_groups, *prepared_groups]:
                 record_group_outcome(
                     outcome="restored",
                     step=self.global_step,
@@ -684,7 +751,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         for prompts in buffer_state.retry_prompts:
             queues.retries.put_nowait(prompts)
         queues.record_admitted(buffer_state.admitted_groups)
-        restored_group_count = len(buffer_state.completed_groups) + len(buffer_state.admitted_groups)
+        if cohort is not None:
+            queues.install_prepared_cohort(cohort)
+        restored_group_count = (
+            len(buffer_state.completed_groups) + len(buffer_state.admitted_groups) + len(prepared_groups)
+        )
         self._staleness_manager._stat.accepted += restored_group_count
         self._staleness_manager._stat.submitted += restored_group_count
         logger.info(
@@ -733,7 +804,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             if queues is not None:
                 snapshot = queues.snapshot()
                 record_rollout_buffer(queues.completed.qsize(), queues.completed.maxsize)
-                for group in [*snapshot.completed_groups, *snapshot.admitted_groups]:
+                prepared = snapshot.prepared_cohort.pending_groups() if snapshot.prepared_cohort is not None else []
+                for group in [*snapshot.completed_groups, *snapshot.admitted_groups, *prepared]:
                     self._record_group_terminal(group, "shutdown_pending")
             await super().shutdown()
 
@@ -973,8 +1045,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             "rollout_wait", step=self.global_step, enabled=self._training_metrics_enabled
                         ),
                     ):
-                        cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
-                            generation_queues,
+                        cur_generation_group_mini_batch = (
+                            await self._get_admitted_generation_group_mini_batch(generation_queues)
+                            if generation_queues.prepared_cohort is None
+                            else []
                         )
                     if self._async_observations_enabled:
                         for group in cur_generation_group_mini_batch:
@@ -982,10 +1056,37 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                     # 2. Post-process the complete generated mini-batch and convert it to training format.
                     with Timer("convert_to_training_input", self.all_timings):
-                        training_input = await asyncio.to_thread(
-                            self.convert_generation_group_mini_batch_to_training_input,
-                            cur_generation_group_mini_batch,
-                        )
+                        if self.updates_per_cohort > 1:
+                            if generation_queues.prepared_cohort is None:
+                                metrics_before_preparation = set(self.all_metrics)
+                                full_input = await asyncio.to_thread(
+                                    self.convert_generation_group_mini_batch_to_training_input,
+                                    cur_generation_group_mini_batch,
+                                )
+                                full_input = await self._prepare_training_input(full_input)
+                                # These forwards and reward summaries cover the whole
+                                # cohort at admission, not a fresh forward at each update.
+                                for key in set(self.all_metrics) - metrics_before_preparation:
+                                    self.all_metrics[f"async/cohort_preparation/{key}"] = self.all_metrics.pop(key)
+                                generation_queues.install_prepared_cohort(
+                                    PreparedAsyncCohort(
+                                        full_input,
+                                        list(cur_generation_group_mini_batch),
+                                        self.global_step,
+                                        self.policy_model.actor_infos[0].rank.dp_size,
+                                        self.mini_batch_size,
+                                        self.cfg.generator.n_samples_per_prompt,
+                                    )
+                                )
+                            cohort = generation_queues.prepared_cohort
+                            training_input = cohort.partition(self.global_step)
+                            cur_generation_group_mini_batch = [cohort.groups[i] for i in cohort.group_indices()]
+                            self._record_prepared_partition_ages(training_input, cur_generation_group_mini_batch)
+                        else:
+                            training_input = await asyncio.to_thread(
+                                self.convert_generation_group_mini_batch_to_training_input,
+                                cur_generation_group_mini_batch,
+                            )
                     response_ids = [
                         response_ids
                         for group in cur_generation_group_mini_batch
@@ -1026,7 +1127,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         Timer("run_training", self.all_timings),
                         async_phase_window("training", step=self.global_step, enabled=self._training_metrics_enabled),
                     ):
-                        status = await self._run_training(training_input)
+                        status = await (
+                            self._train_prepared_input(training_input)
+                            if self.updates_per_cohort > 1
+                            else self._run_training(training_input)
+                        )
+                    if self.updates_per_cohort > 1 and (
+                        status.get("policy_successful_update_steps_valid") != 1
+                        or status.get("policy_successful_update_steps") != 1
+                    ):
+                        raise RuntimeError("async N2 requires exactly one successful optimizer update before advancing")
                     train_duration = self.all_timings["train_critic_and_policy"]
                     self._log_optimizer_step_completed(
                         epoch=epoch,
@@ -1047,7 +1157,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
                             )
                     await self.data_tracker.mark_consumed([g.uid for g in cur_generation_group_mini_batch])
-                    generation_queues.mark_admitted_consumed()
+                    if self.updates_per_cohort > 1:
+                        generation_queues.mark_prepared_partition_consumed()
+                    else:
+                        generation_queues.mark_admitted_consumed()
                     for group in cur_generation_group_mini_batch:
                         self._record_group_terminal(group, "consumed")
 
@@ -1218,6 +1331,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             for group in drained_groups:
                 self._record_group_terminal(group, "epoch_discarded")
             n_drained = len(drained_groups)
+            pending = (
+                len(generation_queues.prepared_cohort.pending_groups())
+                if generation_queues.prepared_cohort is not None
+                else 0
+            )
             assert generation_queues.retries.empty(), (
                 f"Epoch ended with {generation_queues.retries.qsize()} stale-group retries still pending"
             )
@@ -1233,13 +1351,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # interrupted by CancelledError — those are already handled by
                 # the CancelledError fix above).  Only undo accepted/submitted
                 # for properly-accepted items that were never consumed.
-                consumed = (self.global_step - 1) * self.mini_batch_size
+                consumed = (self.global_step - 1) * self.mini_batch_size + pending
                 n_accepted_surplus = self._staleness_manager._stat.accepted - consumed
                 if n_accepted_surplus > 0:
                     self._staleness_manager._stat.accepted -= n_accepted_surplus
                     self._staleness_manager._stat.submitted -= n_accepted_surplus
             await self.async_train_dataloader.reset_at_epoch_end()
-            await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
+            await self._staleness_manager.validate_state_at_epoch_end(self.global_step, prepared_pending_groups=pending)
 
             if self.global_step > self.total_training_steps:
                 break
@@ -1262,6 +1380,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         logger.info("Training done!")
 
     async def _run_training(self, training_input: TrainingInputBatch):
+        training_input = await self._prepare_training_input(training_input)
+        return await self._train_prepared_input(training_input)
+
+    async def _prepare_training_input(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
         # TODO(Charlie): share this code with the one-step-off async trainer.
         # Drain the policy workers' event loops to a hard sync point IMMEDIATELY
         # before dispatching this step's forward (the MoE-RL async-dispatch wedge
@@ -1297,9 +1419,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # calculate advantages and returns / along with tensorboard logging
         with Timer("compute_advantages_and_returns", self.all_timings):
+            cohort_uids = list(training_input.metadata["uids"]) if self.updates_per_cohort > 1 else None
             training_input = self.compute_advantages_and_returns(training_input)
+            cohort_rewards = training_input["rewards"].clone() if cohort_uids is not None else None
             training_input = self.finalize_advantages_for_training(training_input)
+            if cohort_uids is not None:
+                training_input.metadata["uids"] = cohort_uids
+                training_input["prepared_rewards"] = cohort_rewards
 
+        return training_input
+
+    async def _train_prepared_input(self, training_input: TrainingInputBatch):
         if self.cfg.trainer.dump_data_batch:
             # dump data to file
             with Timer("dump_data_batch", self.all_timings):
@@ -1955,13 +2085,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             async with queues.condition:
                 if queues.producer_failure is not None:
                     raise GenerationStalledError("A rollout producer failed") from queues.producer_failure
-                while len(accepted_groups) < self.mini_batch_size and queues.completed.empty():
+                while len(accepted_groups) < self.cohort_size and queues.completed.empty():
                     if queues.producer_failure is not None:
                         raise GenerationStalledError("A rollout producer failed") from queues.producer_failure
                     if queues.active_producers == 0:
                         raise GenerationStalledError(
                             "Generation exhausted its dataset before assembling a complete training batch: "
-                            f"admitted={len(accepted_groups)}/{self.mini_batch_size}, "
+                            f"admitted={len(accepted_groups)}/{self.cohort_size}, "
                             f"dynamic_candidates={dynamic_candidate_metrics.group_count}, "
                             f"dynamic_discarded={dynamic_discarded_count}, "
                             f"rejections={dict(rejection_counts_since_admission)}"
@@ -1999,7 +2129,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 selection = self._select_dynamic_sampling_candidates(
                     partition.accepted_groups,
-                    available_slots=self.mini_batch_size - len(accepted_groups),
+                    available_slots=self.cohort_size - len(accepted_groups),
                 )
                 queues.record_admitted(selection.admitted_groups)
                 dynamic_candidate_metrics.merge(selection.candidate_metrics)
@@ -2016,8 +2146,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     stall_timeout = float(self.admission_stall_timeout)
                     rejection_counts_since_admission.clear()
 
-                if len(accepted_groups) >= self.mini_batch_size:
-                    batch = accepted_groups[: self.mini_batch_size]
+                if len(accepted_groups) >= self.cohort_size:
+                    batch = accepted_groups[: self.cohort_size]
                 else:
                     batch = None
                 queues.condition.notify_all()
@@ -2040,7 +2170,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 raise RuntimeError(
                     "Exiting training loop due to hitting dynamic sampling limit for filter strategy with "
                     f"{self._dynamic_sampling_max_sample_batches} max sample batches. "
-                    f"Collected {len(accepted_groups)} of {self.mini_batch_size} required groups."
+                    f"Collected {len(accepted_groups)} of {self.cohort_size} required groups."
                 )
 
             if batch is not None:
@@ -2056,8 +2186,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]
     ) -> TrainingInputBatch:
         """Convert one complete generated mini-batch to a training batch."""
-        assert len(cur_generation_group_mini_batch) == self.mini_batch_size, (
-            f"Expected {self.mini_batch_size} generated groups, got {len(cur_generation_group_mini_batch)}"
+        assert len(cur_generation_group_mini_batch) == self.cohort_size, (
+            f"Expected {self.cohort_size} generated groups, got {len(cur_generation_group_mini_batch)}"
         )
         trajectory_batches = []
         uids = []
@@ -2071,7 +2201,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             uids.extend([cur_generated_output_group.uid] * group_size)
             rollout_ages.extend([cur_staleness] * group_size)
 
-        record_rollout_staleness(stalenesses, self.global_step)
+        if self.updates_per_cohort == 1:
+            record_rollout_staleness(stalenesses, self.global_step)
 
         assert max(stalenesses) <= self.max_staleness_steps, (
             f"Fresh batch assembly returned staleness {max(stalenesses)} above max {self.max_staleness_steps}"
@@ -2102,12 +2233,62 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
         logger.debug(f"Example generated: {vis}")
 
-        training_input = self.convert_to_training_input(trajectory_batch, uids, rollout_age=rollout_ages)
+        training_input = self.convert_to_training_input(
+            trajectory_batch, uids, rollout_age=rollout_ages, emit_consumed_age=self.updates_per_cohort == 1
+        )
         token_ages = training_input["rollout_age"].repeat_interleave(training_input["loss_mask"].sum(-1).long()).float()
         if token_ages.numel():
             p50, p95 = torch.quantile(token_ages, token_ages.new_tensor([0.5, 0.95])).tolist()
             self.all_metrics.update({"async/staleness_p50": p50, "async/staleness_p95": p95})
         return training_input
+
+    def _record_prepared_partition_ages(
+        self, training_input: TrainingInputBatch, groups: List[GeneratedOutputGroup]
+    ) -> None:
+        ages = [self.global_step - group.earliest_model_step for group in groups]
+        lag = training_input.metadata["async_cohort_update_index"]
+        self.all_metrics.update(
+            {
+                "async/staleness_mean": sum(ages) / len(ages),
+                "async/staleness_max": max(ages),
+                "async/staleness_min": min(ages),
+                "async/staleness_ratio": sum(age > 0 for age in ages) / len(ages),
+                "async/cohort_admission_age_mean": sum(ages) / len(ages) - lag,
+                "async/cohort_admission_age_max": max(ages) - lag,
+                "async/cohort_minibatch_lag": lag,
+                "async/cohort_preparation_step": training_input.metadata["async_cohort_admission_step"],
+            }
+        )
+        metrics = training_input.metadata.get("metrics", {})
+        if "avg_final_rewards" in metrics:
+            self.all_metrics["loss/avg_final_rewards"] = metrics["avg_final_rewards"]
+            self.all_metrics["loss/avg_final_advantages"] = metrics["avg_advantages"]
+            self.all_metrics["loss/avg_final_advantages_abs"] = metrics["avg_advantages_abs"]
+        record_rollout_staleness(ages, self.global_step)
+        if self._training_metrics_enabled:
+            masks = training_input["response_mask"].reshape(len(groups), self.cfg.generator.n_samples_per_prompt, -1)
+            for group, age, mask in zip(groups, ages, masks, strict=True):
+                record_event(
+                    "consumed_age",
+                    {"age": age, "groups": 1, "sequences": len(mask), "response_tokens": int(mask.sum().item())},
+                    attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
+                )
+                record_event(
+                    "cohort_consumption",
+                    {
+                        "uid": group.uid,
+                        "admission_step": training_input.metadata["async_cohort_admission_step"],
+                        "admission_model_step": group.earliest_model_step,
+                        "admission_age": age - lag,
+                        "consume_age": age,
+                        "within_cohort_lag": lag,
+                    },
+                    attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
+                )
+        token_ages = training_input["rollout_age"].repeat_interleave(training_input["loss_mask"].sum(-1).long()).float()
+        if token_ages.numel():
+            p50, p95 = torch.quantile(token_ages, token_ages.new_tensor([0.5, 0.95])).tolist()
+            self.all_metrics.update({"async/staleness_p50": p50, "async/staleness_p95": p95})
 
     def save_checkpoints(self):
         """

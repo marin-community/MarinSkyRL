@@ -89,6 +89,48 @@ async def drain(source):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("seed", [17, 29])
+async def test_async_n2_native_loader_1918_rows_uses_optimizer_epoch_clock(seed):
+    cfg = config()
+    cfg.trainer.seed = seed
+    cfg.trainer.train_batch_size = 128
+    cfg.trainer.policy_mini_batch_size = 64
+    source = loader(cfg, asynchronous=True, dataset=Rows(1918))
+    tracker = DataConsumptionTracker(mini_batch_size=64, num_steps_per_epoch=28)
+    async_source = _AsyncDataloader(source, 128, tracker)
+    consumed = 0
+    for epoch in range(4):
+        set_source_epoch(source, epoch)
+        rows = await drain(async_source)
+        assert len(rows) == len(set(rows)) == 1792
+        expected = torch.randperm(1918, generator=torch.Generator().manual_seed(seed + epoch)).tolist()[:1792]
+        assert rows == list(map(str, expected))
+        cohorts = 14 if epoch < 3 else 6
+        for start in range(0, cohorts * 128, 128):
+            cohort = rows[start : start + 128]
+            for update in range(2):
+                strip = [cohort[rank * 32 + update * 16 + j] for rank in range(4) for j in range(16)]
+                await tracker.mark_consumed(strip)
+                consumed += 64
+                step = consumed // 64
+                saved = source_order_checkpoint(source, step)
+                assert saved["epoch"] == step // 28
+                assert saved["step_in_epoch"] == step % 28
+                if update == 0:
+                    pending = set(cohort) - set(strip)
+                    assert not await normalize_async_source_epoch(source, tracker, step, pending)
+        if epoch < 3:
+            assert await normalize_async_source_epoch(source, tracker, consumed // 64, set())
+            await async_source.reset_at_epoch_end()
+    assert consumed == tracker.total_samples_consumed == 6144
+    sync = loader(cfg, dataset=Rows(1918))
+    assert source_order_checkpoint(sync, 48)["epoch"] == 3
+    assert source_order_checkpoint(sync, 48)["step_in_epoch"] == 6
+    assert source_order_checkpoint(source, 96)["epoch"] == 3
+    assert source_order_checkpoint(source, 96)["step_in_epoch"] == 12
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("workers", [0, 8])
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_multiple_epochs_and_partial_tail_share_source_order_only_when_enabled(workers, enabled):

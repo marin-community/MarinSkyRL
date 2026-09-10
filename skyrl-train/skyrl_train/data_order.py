@@ -103,7 +103,10 @@ def source_order_checkpoint(dataloader, completed_step: int) -> dict | None:
     if not isinstance(dataloader.sampler, EpochSeededSampler):
         return None
     contract = dataloader.sampler.contract
-    epoch, step_in_epoch = divmod(completed_step, contract.steps_per_epoch)
+    # Async loaders emit one prompt at a time; their driver step counts successful
+    # optimizer updates, while the synchronous driver step counts whole cohorts.
+    updates_per_step = contract.updates_per_batch if dataloader.batch_size == 1 else 1
+    epoch, step_in_epoch = divmod(completed_step, contract.steps_per_epoch * updates_per_step)
     return {
         "contract": asdict(contract),
         "loader_batch_size": dataloader.batch_size,
@@ -135,14 +138,15 @@ async def normalize_async_source_epoch(dataloader, tracker, completed_step: int,
     if not isinstance(sampler, EpochSeededSampler):
         return False
     contract = sampler.contract
-    epoch, position = divmod(completed_step, contract.steps_per_epoch)
-    if tracker.total_samples_consumed != completed_step * contract.prompts_per_step:
+    epoch, position = divmod(completed_step, contract.steps_per_epoch * contract.updates_per_batch)
+    prompts_per_update = contract.prompts_per_step // contract.updates_per_batch
+    if tracker.total_samples_consumed != completed_step * prompts_per_update:
         raise ValueError("Checkpoint source-order total consumed prompt count is inconsistent")
     consumed = tracker.get_consumed_uids_in_epoch()
     if position:
         if not (consumed | pending_uids) <= sampler.epoch_uids(epoch):
             raise ValueError("Checkpoint source-order UIDs do not belong to the saved epoch")
-        if tracker.current_epoch != epoch or tracker.consumed_in_epoch_count != position * contract.prompts_per_step:
+        if tracker.current_epoch != epoch or tracker.consumed_in_epoch_count != position * prompts_per_update:
             raise ValueError("Checkpoint source-order consumed epoch position is inconsistent")
         return False
     if tracker.current_epoch == epoch and not consumed:

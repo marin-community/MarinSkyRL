@@ -38,6 +38,8 @@ def test_strict_tis_async_conversion_rejects_missing_group_before_training(parti
     trainer.global_step = 10
     trainer.max_staleness_steps = 2
     trainer.mini_batch_size = 2
+    trainer.cohort_size = 2
+    trainer.updates_per_cohort = 1
     groups = [_generated_group("a", 10), _generated_group("b", 10)]
     if partial:
         groups[0].trajectory_batch["rollout_logprobs"] = [[-0.5], [-0.25]]
@@ -89,8 +91,12 @@ def _batch_assembly_state(
 ):
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.global_step = 10
+    # These synthetic legacy buffers test source ownership, not token-stamp migration.
+    trainer.cfg = OmegaConf.create({"trainer": {"fully_async": {"first_token_admission": False}}})
     trainer.max_staleness_steps = 2
     trainer.mini_batch_size = mini_batch_size
+    trainer.cohort_size = mini_batch_size
+    trainer.updates_per_cohort = 1
     trainer.all_metrics = {}
     trainer._groups_rejected_since_step = 0
     trainer._rejection_reasons_since_step = collections.Counter()

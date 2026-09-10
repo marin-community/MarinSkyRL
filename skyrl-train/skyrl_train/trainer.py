@@ -1291,7 +1291,12 @@ class RayPPOTrainer:
         return num_experts
 
     def convert_to_training_input(
-        self, trajectory_batch: TrajectoryBatch, uids: List[str], *, rollout_age: List[int] | None = None
+        self,
+        trajectory_batch: TrajectoryBatch,
+        uids: List[str],
+        *,
+        rollout_age: List[int] | None = None,
+        emit_consumed_age: bool = True,
     ) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
         assert_training_groups_eligible(trajectory_batch, uids, self.group_advantage_invariant)
@@ -1456,7 +1461,7 @@ class RayPPOTrainer:
                 len(sample_response_ids) for sample_response_ids in response_ids
             ) / len(response_ids)
 
-        if self._training_metrics_enabled and rollout_age is not None:
+        if self._training_metrics_enabled and rollout_age is not None and emit_consumed_age:
             counts = {}
             for uid, age, mask in zip(uids, rollout_age, response_masks_tensor, strict=True):
                 body = counts.setdefault(uid, {"age": age, "groups": 1, "sequences": 0, "response_tokens": 0})
@@ -2194,6 +2199,7 @@ class RayPPOTrainer:
             if type(maximum) is not int or not 0 <= maximum <= 16:
                 raise ValueError("ratio_diagnostics.by_update_max must be an integer in [0,16]")
             for index, status in enumerate(policy_statuses[0].metadata.get("train_status_by_update", [])):
+                index += int(data.metadata.get("async_cohort_update_index", 0))
                 if index < maximum:
                     self.all_metrics.update({f"policy/by_update/{index}/{key}": value for key, value in status.items()})
                 record_event(

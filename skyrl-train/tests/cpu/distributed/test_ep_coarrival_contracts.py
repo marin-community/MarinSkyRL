@@ -44,6 +44,7 @@ def test_worker_replicates_dispatch_data_across_ep_and_cp_ranks(
     config = OmegaConf.create(
         {
             "trainer": {
+                "algorithm": {"weight_sync_invariant_env": False},
                 "distributed": {"worker_collective_timeout_seconds": 1800},
                 "policy": {
                     "fsdp_config": {
@@ -80,8 +81,9 @@ def test_worker_replicates_dispatch_data_across_ep_and_cp_ranks(
 async def test_fully_async_step_finishes_policy_drain_before_forward():
     events = []
 
-    class TrainingStep:
+    class TrainingStep(FullyAsyncRayPPOTrainer):
         _async_observations_enabled = False
+        updates_per_cohort = 1
 
         def __init__(self):
             self.cfg = OmegaConf.create(
