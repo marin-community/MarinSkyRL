@@ -14,7 +14,7 @@ from skyrl_train.weight_sync.bucket_identity import bucket_identity
 from skyrl_train.weight_sync.manifest import parse_manifest
 
 
-BUCKET_BYTES = 2**30
+BUCKET_BYTES = 2**31
 # Pinned Torch count_nonzero promotes this entire bool slice to int64.
 # 64 KiB keeps that temporary plus the router conversion below the 1 MiB gate.
 # Native phase peaks remain authoritative, including allocator/kernel overhead.
@@ -56,7 +56,7 @@ def prepare_worker_buckets(worker, payload, manifest_id):
         raise ValueError("Receiver bucket protocol requires unquantized TP1 PP1 Grug without expert rebalancing")
     manifest = parse_manifest(payload, manifest_id)
     if manifest.bucket_bytes != BUCKET_BYTES:
-        raise ValueError("Native receiver requires the approved 1 GiB bucket capacity")
+        raise ValueError("Native receiver requires the approved 2 GiB bucket capacity")
     model = worker.model_runner.model
     maps = {}
     for name, module in model.named_modules():
