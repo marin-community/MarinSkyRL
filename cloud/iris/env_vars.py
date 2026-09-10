@@ -64,6 +64,7 @@ ALL_RUNTIME_SCOPES = frozenset(EnvVarScope)
 DEBUG_MODE_ENV = "SKYRL_DEBUG_MODE"
 DEBUG_ARTIFACT_DIR_ENV = "SKYRL_DEBUG_ARTIFACT_DIR"
 COLLECTIVE_PHASE_DIAGNOSTICS_ENV = "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"
+CAPTURE_INFERENCE_TIMINGS_ENV = "SKYRL_CAPTURE_INFERENCE_TIMINGS"
 FR_DUMP_TEMP_FILE_ENV = "TORCH_FR_DUMP_TEMP_FILE"
 NCCL_DEBUG_INFO_TEMP_FILE_ENV = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
 PYTHONPATH_ENV = "PYTHONPATH"
@@ -84,6 +85,12 @@ DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
 ENV_VAR_SPECS = (
+    EnvVarSpec(
+        CAPTURE_INFERENCE_TIMINGS_ENV,
+        "generator.capture_request_timings",
+        EnvVarSource.CONFIG,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
+    ),
     EnvVarSpec(DEBUG_MODE_ENV, "trainer.debug_mode", EnvVarSource.CONFIG, ALL_RUNTIME_SCOPES),
     EnvVarSpec(DEBUG_ARTIFACT_DIR_ENV, "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("NCCL_DEBUG", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
@@ -376,6 +383,8 @@ class EnvVarManager:
         for name in passthrough_names:
             if value := ambient.get(name):
                 values[name] = value
+        if _config_value(config, "generator.capture_request_timings", False):
+            values[CAPTURE_INFERENCE_TIMINGS_ENV] = "1"
         if _config_value(config, "trainer.algorithm.batch_invariant", False):
             values[VLLM_BATCH_INVARIANT_ENV] = "1"
         if _config_value(config, "generator.fuse_weights", False):

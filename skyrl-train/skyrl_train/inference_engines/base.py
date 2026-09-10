@@ -5,6 +5,16 @@ MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 
 
+class InferenceRequestTiming(TypedDict):
+    """Actor-side wall-clock times, captured only when explicitly enabled."""
+
+    request_id: str
+    engine_id: str
+    submitted_at: float
+    first_token_at: float | None
+    completed_at: float
+
+
 class InferenceEngineInput(TypedDict):
     # Either prompts or prompt_token_ids must be provided, but not both.
     prompts: Optional[List[ConversationType]]
@@ -30,6 +40,9 @@ class InferenceEngineOutput(TypedDict):
     # inner list is prompt positions, dict maps token_id → logprob.
     # Only populated when SamplingParams(prompt_logprobs=K) is used.
     prompt_logprobs: Optional[List[List[Optional[Dict[int, float]]]]]
+    # Outer list follows prompt order; inner list contains attempts after retries.
+    # First-token time is when the async wrapper observes the first output token.
+    request_timings: NotRequired[List[List[InferenceRequestTiming]]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):

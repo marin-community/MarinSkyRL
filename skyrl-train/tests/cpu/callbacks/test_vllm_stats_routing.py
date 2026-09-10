@@ -29,6 +29,13 @@ def test_vllm_stats_reach_finelog():
                 count=1,
                 sum=0.07,
             ),
+            Record(
+                name="vllm:inter_token_latency_seconds",
+                labels=labels,
+                buckets={"0.01": 1, "0.025": 9, "+Inf": 12},
+                count=12,
+                sum=0.35,
+            ),
             Record(name="vllm:generation_tokens", labels={**labels, "engine": "1"}, value=999),
         ],
         engine_index="0",
@@ -63,6 +70,16 @@ def test_vllm_stats_reach_finelog():
     reasons = {r.attributes["finished_reason"]: r.value for r in engine if r.name == "request_success_total"}
     assert reasons == {"stop": 0, "length": 1, "abort": 0, "error": 0, "repetition": 0}
     assert values["request_time_per_output_token_seconds_sum"] == 0.07
+    itl = [record for record in engine if record.name.startswith("inter_token_latency_seconds_")]
+    assert {record.attributes["le"]: record.value for record in itl if record.name.endswith("_bucket")} == {
+        "0.01": 1,
+        "0.025": 9,
+        "+Inf": 12,
+    }
+    assert values["inter_token_latency_seconds_count"] == 12
+    assert values["inter_token_latency_seconds_sum"] == 0.35
+    assert all(record.attributes["engine_index"] == "0" for record in itl)
+    assert all("step" not in record.attributes for record in itl)
     assert all(record.attributes["engine"] == "physical-a" for record in engine)
     assert all("engine" not in record.attributes for record in http)
     assert trainer_metrics(snapshot)["vllm/total_finished_requests"] == 1
