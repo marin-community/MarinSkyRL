@@ -1,8 +1,12 @@
 """Request-scoped package and common-off evaluation for the K16 parser contract."""
 
+import hashlib
+import json
 from copy import deepcopy
 
-from omegaconf import open_dict
+from omegaconf import OmegaConf, open_dict
+from marinskyrl.resource_locator import join_resource_path
+from skyrl_train.io import io
 from skyrl_gym.envs.thinking_contract import THINKING_CONTRACT_VERSION
 
 METRIC_VERSION = "post-thinking-native-metrics-v1"
@@ -21,7 +25,7 @@ def request_endpoint(request, parser_protocol):
     return endpoint
 
 
-async def evaluate_endpoints(evaluate_fn, *, cfg, **kwargs):
+async def evaluate_endpoints(evaluate_fn, *, cfg, policy_version=None, **kwargs):
     """Evaluate installed weights sequentially without changing the training config.
 
     Token-intervention arms generate both views. Shaping-only arms generate one
@@ -40,6 +44,14 @@ async def evaluate_endpoints(evaluate_fn, *, cfg, **kwargs):
     expected = list(ENDPOINTS) if intervention is not None else ["package_on"]
     if modes != expected:
         raise ValueError("Endpoint list differs from the declared generation intervention")
+    step = kwargs.get("global_step")
+    if type(policy_version) is not int or type(step) is not int or policy_version != step:
+        raise ValueError("Quality endpoints require the observed installed version at the requested update")
+    if cfg.trainer.dump_eval_results and cfg.trainer.completion is None:
+        raise ValueError("Endpoint dumps require the native completion request binding")
+    config_sha256 = hashlib.sha256(
+        json.dumps(OmegaConf.to_container(cfg, resolve=True), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     namespace = kwargs.get("dump_namespace")
     combined = {}
     for endpoint in modes:
@@ -48,6 +60,27 @@ async def evaluate_endpoints(evaluate_fn, *, cfg, **kwargs):
             endpoint_cfg.generator.non_agentic_evaluation_endpoint = endpoint
         arguments = {**kwargs, "dump_namespace": f"{namespace}_{endpoint}" if namespace else endpoint}
         metrics = await evaluate_fn(cfg=endpoint_cfg, **arguments)
+        if cfg.trainer.dump_eval_results:
+            metadata = {
+                "schema": "non_agentic_endpoint_metadata_v1",
+                "endpoint": endpoint,
+                "global_step": step,
+                "policy_version": policy_version,
+                "parser_protocol": THINKING_CONTRACT_VERSION,
+                "metric_protocol": METRIC_VERSION,
+                "request_fingerprint": cfg.trainer.completion.request_fingerprint,
+                "config_sha256": config_sha256,
+                "dump_namespace": arguments["dump_namespace"],
+            }
+            path = join_resource_path(
+                cfg.trainer.export_path,
+                "dumped_evals",
+                f"global_step_{step}_evals",
+                arguments["dump_namespace"],
+                "endpoint_metadata.json",
+            )
+            with io.open_file(path, "w") as stream:
+                json.dump(metadata, stream, sort_keys=True)
         if endpoint == "package_on":
             combined.update(metrics)
         combined.update({f"eval/{endpoint}/{key.removeprefix('eval/')}": value for key, value in metrics.items()})

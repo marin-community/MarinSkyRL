@@ -1586,7 +1586,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if not installed:
             await self._publish_policy_weights(reason="evaluation", timing_name="eval_weight_sync")
         version = self._published_policy_version
-        metrics = await super().eval(dump_namespace=dump_namespace, eval_step=requested_step)
+        metrics = await super().eval(dump_namespace=dump_namespace, eval_step=requested_step, policy_version=version)
         if installed:
             metrics.update({"eval/policy_version": version, "eval/policy_version_lag": requested_step - version})
         return metrics

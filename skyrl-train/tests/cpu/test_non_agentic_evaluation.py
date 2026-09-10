@@ -161,6 +161,7 @@ async def test_real_evaluation_persists_separate_endpoint_token_reward_and_mask_
     cfg.generator.eval_sampling_params.logprobs = 0
     cfg.generator.non_agentic_eval_endpoints = ["common_off", "package_on"] if intervention else ["package_on"]
     cfg.trainer.dump_eval_results = True
+    cfg.trainer.completion = {"request_fingerprint": "a" * 64}
     cfg.trainer.export_path = str(tmp_path)
 
     class Loader:
@@ -183,7 +184,13 @@ async def test_real_evaluation_persists_separate_endpoint_token_reward_and_mask_
 
     original_config = copy.deepcopy(cfg)
     metrics = await evaluate_endpoints(
-        evaluate, cfg=cfg, eval_dataloader=Loader(), trajectory_runner=runner, global_step=25, tokenizer=tokenizer
+        evaluate,
+        cfg=cfg,
+        policy_version=25,
+        eval_dataloader=Loader(),
+        trajectory_runner=runner,
+        global_step=25,
+        tokenizer=tokenizer,
     )
     assert cfg == original_config
     assert metrics["eval/package_on/all/contract_completed"] == 1
@@ -200,6 +207,11 @@ async def test_real_evaluation_persists_separate_endpoint_token_reward_and_mask_
         aggregate = json.loads((path / "aggregated_results.jsonl").read_text())
         assert aggregate["eval/all/contract_completed"] == 1
         assert aggregate["eval/all/score_contract"] == (0.5 if shaped else 1)
+        metadata = json.loads((path / "endpoint_metadata.json").read_text())
+        assert metadata["endpoint"] == mode and metadata["dump_namespace"] == mode
+        assert metadata["global_step"] == metadata["policy_version"] == 25
+        assert metadata["parser_protocol"] == "post-thinking-native-v1"
+        assert metadata["request_fingerprint"] == cfg.trainer.completion.request_fingerprint
     assert (tmp_path / "dumped_evals/global_step_25_evals/common_off").exists() == intervention
 
 
@@ -277,3 +289,19 @@ def test_corrected_endpoint_preserves_signed_fractional_and_completed_channels(e
     assert metrics["eval/all/score_contract"] == metrics["eval/all/corrected_verifier_reward"] == expected
     assert metrics["eval/all/contract_correct"] == int(expected == 1)
     assert metrics["eval/all/contract_completed"] == int(expected == 1 and stop == "stop")
+
+
+@pytest.mark.asyncio
+async def test_endpoint_refuses_stale_installed_version_before_generation(tmp_path):
+    cfg = get_default_config()
+    cfg.generator.non_agentic_parser_protocol = "post-thinking-native-v1"
+    cfg.generator.non_agentic_eval_endpoints = ["package_on"]
+    cfg.trainer.export_path = str(tmp_path)
+    cfg.trainer.completion = {"request_fingerprint": "a" * 64}
+
+    async def forbidden(**kwargs):
+        pytest.fail("Stale endpoint generated responses")
+
+    with pytest.raises(ValueError, match="observed installed version"):
+        await evaluate_endpoints(forbidden, cfg=cfg, policy_version=24, global_step=25)
+    assert list(tmp_path.iterdir()) == []
