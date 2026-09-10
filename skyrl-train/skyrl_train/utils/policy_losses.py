@@ -15,6 +15,7 @@ import torch
 from omegaconf import DictConfig
 
 from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics
+from skyrl_train.utils.offpolicy_masks import apply_offpolicy_masks, validate_offpolicy_masks
 from skyrl_train.utils.loss_reduction import (
     GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
     SEQUENCE_MEAN_LOSS_REDUCTION,
@@ -241,15 +242,26 @@ def compute_policy_objective(
         response_span_tags,
         float(config.think_token_weight),
     )
+    validate_offpolicy_masks(config, global_loss_denom=global_loss_denom)
+    transformed = apply_offpolicy_masks(
+        action_log_probs=action_log_probs,
+        old_action_log_probs=old_action_log_probs,
+        rollout_logprobs=rollout_logprobs,
+        advantages=advantages,
+        loss_mask=policy_loss_mask,
+        token_entropy=token_entropy,
+        config=config,
+    )
     policy_loss, policy_loss_metrics = policy_loss_fn(
         action_log_probs,
         old_action_log_probs,
-        advantages,
+        transformed.advantages,
         config=config,
-        loss_mask=policy_loss_mask,
+        loss_mask=transformed.loss_mask,
         rollout_logprobs=rollout_logprobs,
         global_loss_denom=global_loss_denom,
     )
+    policy_loss_metrics.update(transformed.metrics)
 
     auxiliary = _compute_policy_auxiliary_terms(
         action_log_probs=action_log_probs,

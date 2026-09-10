@@ -100,8 +100,12 @@ def policy_loss_requires_rollout_logprobs(policy_loss_type: str) -> bool:
 
 def rollout_logprobs_required(algorithm_config: DictConfig) -> bool:
     """Require native behavior probabilities for the objective or an explicit strict run."""
-    return bool(algorithm_config.get("require_rollout_logprobs", False)) or policy_loss_requires_rollout_logprobs(
-        algorithm_config.policy_loss_type
+    off = algorithm_config.get("offpolicy_mask", {})
+    correction_requires_rollout = bool(off.get("enabled", False))
+    return (
+        correction_requires_rollout
+        or bool(algorithm_config.get("require_rollout_logprobs", False))
+        or policy_loss_requires_rollout_logprobs(algorithm_config.policy_loss_type)
     )
 
 
