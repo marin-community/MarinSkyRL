@@ -57,6 +57,7 @@ class TrajectoryRequestBatch(TypedDict):
     sampling_params: Optional[Dict[str, Any]]
     trajectory_ids: Optional[List[TrajectoryID]]
     batch_metadata: Optional[BatchMetadata]
+    non_agentic_evaluation_endpoint: NotRequired[Literal["package_on", "common_off"]]
 
 
 class RewardShapingComponents(TypedDict):

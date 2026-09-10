@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from marinskyrl.resource_locator import join_resource_path
 
-from skyrl_train.evaluation_contract import evaluation_contract_metrics
+from skyrl_train.non_agentic_evaluation_metrics import endpoint_contract_metrics
 from skyrl_train.utils import Timer
 
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -129,6 +129,9 @@ async def _collect_evaluation_rollouts(
                 "eval",
                 global_step,
             )
+            endpoint = cfg.generator.get("non_agentic_evaluation_endpoint")
+            if endpoint is not None:
+                request["non_agentic_evaluation_endpoint"] = endpoint
             batch = await trajectory_runner.run(request)
             trajectory_batches.append(batch)
             last_request, last_batch = request, batch
@@ -262,17 +265,16 @@ async def evaluate(
             concat_data_sources,
             cfg.generator.eval_n_samples_per_prompt,
         )
-        if any(extra.get("extra_info", {}).get("contract") for extra in rollouts.env_extras):
+        if cfg.generator.get("non_agentic_parser_protocol") is not None or any(
+            extra.get("extra_info", {}).get("contract") for extra in rollouts.env_extras
+        ):
             eval_metrics.update(
-                evaluation_contract_metrics(
+                endpoint_contract_metrics(
                     rollouts.env_classes,
                     rollouts.env_extras,
-                    [
-                        tokenizer.decode(tokens, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-                        for tokens in concatenated_batch["response_ids"]
-                    ],
-                    concatenated_batch["rewards"],
-                    concatenated_batch.get("stop_reasons", [None] * len(rollouts.env_extras)),
+                    concatenated_batch,
+                    tokenizer,
+                    cfg.generator.get("non_agentic_parser_protocol"),
                 )
             )
         _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics, dump_namespace)
@@ -343,19 +345,18 @@ async def evaluate_step_wise(
         data_sources_last_step,
         cfg.generator.eval_n_samples_per_prompt,
     )
-    if any(extra.get("extra_info", {}).get("contract") for extra in rollouts.env_extras):
+    if cfg.generator.get("non_agentic_parser_protocol") is not None or any(
+        extra.get("extra_info", {}).get("contract") for extra in rollouts.env_extras
+    ):
         selected_envs = [env for env, keep in zip(rollouts.env_classes, is_last_step_mask, strict=True) if keep]
         selected_extras = [extra for extra, keep in zip(rollouts.env_extras, is_last_step_mask, strict=True) if keep]
         eval_metrics.update(
-            evaluation_contract_metrics(
+            endpoint_contract_metrics(
                 selected_envs,
                 selected_extras,
-                [
-                    tokenizer.decode(tokens, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-                    for tokens in trajectory_batch_last_step["response_ids"]
-                ],
-                trajectory_batch_last_step["rewards"],
-                trajectory_batch_last_step.get("stop_reasons", [None] * len(selected_extras)),
+                trajectory_batch_last_step,
+                tokenizer,
+                cfg.generator.get("non_agentic_parser_protocol"),
             )
         )
     _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics, dump_namespace)

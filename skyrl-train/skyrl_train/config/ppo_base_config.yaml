@@ -447,6 +447,7 @@ generator:
   # Explicit opt-in; existing non-agentic reward parsing is unchanged when null.
   non_agentic_parser_protocol: null
   non_agentic_intervention: null
+  non_agentic_eval_endpoints: []
 
   trajectory_reward_shaping:
     schema_version: 2
