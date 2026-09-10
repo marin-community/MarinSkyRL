@@ -207,6 +207,21 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             terminal_timeout_seconds=terminal_timeout_seconds,
         )
 
+    async def begin_shard_stream(self, manifest_id: str, publication_id: int):
+        return await self.inference_engine_actor.begin_shard_stream.remote(
+            manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def run_shard_stream(self, manifest_id: str, publication_id: int):
+        return await self.inference_engine_actor.run_shard_stream.remote(
+            manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def close_shard_stream(self, manifest_id: str, publication_id: int):
+        return await self.inference_engine_actor.close_shard_stream.remote(
+            manifest_id=manifest_id, publication_id=publication_id
+        )
+
     async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
         return await self.inference_engine_actor.prepare_diagnostic_weight_sync_buckets.remote(
             payload=payload, manifest_id=manifest_id

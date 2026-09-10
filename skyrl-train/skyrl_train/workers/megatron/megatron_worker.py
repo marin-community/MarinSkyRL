@@ -849,6 +849,26 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         output.metadata = {"train_status": status_mean, "train_status_by_update": status_by_update}
         return output
 
+    async def begin_shard_publication(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return await asyncio.to_thread(worker_shard_call, self, "begin", manifest_id, publication_id)
+
+    async def verify_shard_publication(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return await asyncio.to_thread(worker_shard_call, self, "verify_replicas", manifest_id, publication_id)
+
+    async def run_shard_publication(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return await asyncio.to_thread(worker_shard_call, self, "run", manifest_id, publication_id)
+
+    async def close_shard_publication(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return await asyncio.to_thread(worker_shard_call, self, "close", manifest_id, publication_id)
+
     async def prepare_bucket_timing(self, inference_engine_client):
         from skyrl_train.weight_sync.bucket_timing_session import prepare_timing
 

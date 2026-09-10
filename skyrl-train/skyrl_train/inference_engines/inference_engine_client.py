@@ -190,7 +190,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             if 0 <= engine_idx < len(self._engine_inflight) and self._engine_inflight[engine_idx] > 0:
                 self._engine_inflight[engine_idx] -= 1
 
-    async def _run_on_all_engines(self, method_name: str, *args, **kwargs):
+    async def _run_on_all_engines(self, method_name: str, *args, _settle_calls: bool = False, **kwargs):
         """
         Call a method on all live engines concurrently and gather the results.
         """
@@ -199,6 +199,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             raise RuntimeError("All inference engines have died")
 
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in live_engines]
+        if _settle_calls:
+            from skyrl_train.weight_sync.shard_interval import settled
+
+            return await settled(*awaitables)
         return await asyncio.gather(*awaitables)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -884,6 +888,31 @@ class InferenceEngineClient(InferenceEngineInterface):
             raise RuntimeError("Bucket collectives require every configured inference engine")
         return await self._run_on_all_engines(method_name, **kwargs)
 
+    async def begin_shard_stream(self, manifest_id: str, publication_id: int):
+        if self._dead_engines:
+            raise RuntimeError("Shard collectives require every configured inference engine")
+        if not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard publication requires the client idle acknowledgement")
+        return await self._run_on_all_engines(
+            "begin_shard_stream", manifest_id=manifest_id, publication_id=publication_id, _settle_calls=True
+        )
+
+    async def run_shard_stream(self, manifest_id: str, publication_id: int):
+        if self._dead_engines:
+            raise RuntimeError("Shard collectives require every configured inference engine")
+        if not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard publication requires the client idle acknowledgement")
+        return await self._run_on_all_engines(
+            "run_shard_stream", manifest_id=manifest_id, publication_id=publication_id, _settle_calls=True
+        )
+
+    async def close_shard_stream(self, manifest_id: str, publication_id: int):
+        if self._dead_engines:
+            raise RuntimeError("Shard collectives require every configured inference engine")
+        return await self._run_on_all_engines(
+            "close_shard_stream", manifest_id=manifest_id, publication_id=publication_id, _settle_calls=True
+        )
+
     async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
         return await self._run_diagnostic_bucket_rpc(
             "prepare_diagnostic_weight_sync_buckets", payload=payload, manifest_id=manifest_id
@@ -992,7 +1021,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 with self._routing_lock:
                     self._generation_resume_waiters.discard(waiter)
 
-    async def pause_generation(self) -> None:
+    async def pause_generation(self, *, settle_native_calls: bool = False) -> None:
         """Block submissions, abort native schedulers, then verify every engine is paused.
 
         Calls already delivered after the native abort may remain queued until resume.
@@ -1003,21 +1032,23 @@ class InferenceEngineClient(InferenceEngineInterface):
                 raise RuntimeError("Generation is already paused, cannot pause again.")
             self.generation_paused_event.set()
         async with asyncio.timeout(self._publication_pause_timeout):
-            await self._run_on_all_engines("pause_generation")
+            await self._run_on_all_engines("pause_generation", _settle_calls=settle_native_calls)
             while True:
-                states = await self._run_on_all_engines("is_paused")
+                states = await self._run_on_all_engines("is_paused", _settle_calls=settle_native_calls)
                 if len(states) == len(self.engines) and all(value is True for value in states):
                     break
         logger.info("publication_pause_ack queued_or_returning_requests={}", sum(self.publication_inflight_snapshot()))
 
-    async def resume_generation(self, policy_version: int | None = None) -> None:
+    async def resume_generation(self, policy_version: int | None = None, *, settle_native_calls: bool = False) -> None:
         """Release every native scheduler before waking local and HTTP-loop waiters."""
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Generation is not paused, cannot resume.")
         if policy_version is None:
-            await self._run_on_all_engines("resume_generation")
+            await self._run_on_all_engines("resume_generation", _settle_calls=settle_native_calls)
         else:
-            await self._run_on_all_engines("resume_generation", policy_version=policy_version)
+            await self._run_on_all_engines(
+                "resume_generation", policy_version=policy_version, _settle_calls=settle_native_calls
+            )
         with self._routing_lock:
             self.generation_paused_event.clear()
             waiters = tuple(self._generation_resume_waiters)

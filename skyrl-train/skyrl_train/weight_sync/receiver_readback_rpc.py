@@ -25,7 +25,9 @@ def managed_core_identities(engine):
     return expected, ranks
 
 
-async def call_all_receiver_workers(engine, method: str, *, args: tuple = (), kwargs: dict | None = None):
+async def call_all_receiver_workers(
+    engine, method: str, *, args: tuple = (), kwargs: dict | None = None, settle_calls: bool = False
+):
     """Dispatch to every core this actor manages, retaining original worker results.
 
     The SkyRL factory creates one actor per external DP rank. Such an actor owns
@@ -37,12 +39,16 @@ async def call_all_receiver_workers(engine, method: str, *, args: tuple = (), kw
         return await engine.collective_rpc(method, args=args, kwargs=kwargs)
     identities, ranks = managed_core_identities(engine)
     core = engine.engine_core
-    per_core = await asyncio.gather(
-        *[
-            core._call_utility_async("collective_rpc", method, None, args, kwargs, engine=identity)
-            for identity in identities
-        ]
-    )
+    calls = [
+        core._call_utility_async("collective_rpc", method, None, args, kwargs, engine=identity)
+        for identity in identities
+    ]
+    if settle_calls:
+        from skyrl_train.weight_sync.shard_interval import settled
+
+        per_core = await settled(*calls)
+    else:
+        per_core = await asyncio.gather(*calls)
     if any(not workers for workers in per_core):
         raise ValueError("Receiver core returned no worker readback")
     transport = {
