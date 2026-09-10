@@ -1,9 +1,10 @@
-"""The KL loss must carry a gradient: compute_approx_kl is @torch.no_grad (metrics), approx_kl is not (loss)."""
+"""The KL loss must carry a gradient: compute_approx_kl is @torch.no_grad (metrics),
+differentiable_approx_kl is not (loss)."""
 
 import torch
 from omegaconf import OmegaConf
 
-from skyrl_train.utils.policy_math import approx_kl, compute_approx_kl
+from skyrl_train.utils.policy_math import compute_approx_kl, differentiable_approx_kl
 
 
 def _grad_norm(coef: float, estimator: str = "k3") -> float:
@@ -11,13 +12,13 @@ def _grad_norm(coef: float, estimator: str = "k3") -> float:
     logp = torch.randn(2, 6, requires_grad=True)
     base = (logp.detach() + 0.3 * torch.randn(2, 6)).detach()
     mask = torch.ones(2, 6)
-    kl = approx_kl(logp, base, loss_mask=mask, kl_estimator_type=estimator)
+    kl = differentiable_approx_kl(logp, base, loss_mask=mask, kl_estimator_type=estimator)
     loss = (kl * mask).sum() / mask.sum() * coef
     loss.backward()
     return float(logp.grad.norm())
 
 
-def test_approx_kl_is_differentiable_and_scales_with_coef():
+def test_differentiable_approx_kl_is_differentiable_and_scales_with_coef():
     g1 = _grad_norm(1.0)
     g10 = _grad_norm(10.0)
     assert g1 > 0.0
@@ -29,14 +30,20 @@ def test_compute_approx_kl_is_metrics_only():
     base = torch.randn(2, 6)
     kl = compute_approx_kl(logp, base, loss_mask=torch.ones(2, 6))
     assert not kl.requires_grad
-    assert torch.allclose(kl, approx_kl(logp, base, loss_mask=torch.ones(2, 6)).detach())
+    assert torch.allclose(kl, differentiable_approx_kl(logp, base, loss_mask=torch.ones(2, 6)).detach())
 
 
 def test_policy_loss_kl_term_has_gradient():
     from skyrl_train.utils.policy_losses import _compute_policy_auxiliary_terms
 
     cfg = OmegaConf.create(
-        {"use_kl_loss": True, "kl_loss_coef": 0.1, "kl_estimator_type": "k3", "use_entropy_loss": False, "entropy_loss_coef": 0.0}
+        {
+            "use_kl_loss": True,
+            "kl_loss_coef": 0.1,
+            "kl_estimator_type": "k3",
+            "use_entropy_loss": False,
+            "entropy_loss_coef": 0.0,
+        }
     )
     logp = torch.randn(2, 6, requires_grad=True)
     base = torch.randn(2, 6)

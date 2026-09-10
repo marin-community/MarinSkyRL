@@ -390,6 +390,8 @@ generator:
   # path does; a request whose prompt leaves less room than the cap is retried once uncapped. Off by
   # default so that a mid-campaign pull leaves running recipes and eval probes unchanged; opt in per run.
   openai_max_tokens_cap: false
+  # Objectives that consume rollout logprobs use processed probabilities and
+  # require full-distribution, temperature-only sampling.
   sampling_params:
     max_generate_length: 1024
     repetition_penalty: 1.0

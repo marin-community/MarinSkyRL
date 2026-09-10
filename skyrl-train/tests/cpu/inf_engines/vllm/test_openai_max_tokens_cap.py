@@ -11,7 +11,7 @@ from skyrl_train.inference_engines.vllm.utils import (
     apply_openai_max_tokens_cap,
     is_openai_output_budget_overflow,
     openai_error_message,
-    pop_openai_kwargs,
+    pop_vllm_wrapper_kwargs,
 )
 
 
@@ -88,9 +88,9 @@ def test_cap_switch_is_popped_from_engine_kwargs_as_a_bool():
         "openai_sampling_params": {"max_generate_length": 16384},
         "other": "keep",
     }
-    openai_kwargs = pop_openai_kwargs(engine_kwargs)
-    assert openai_kwargs["openai_max_tokens_cap"] is True
-    assert openai_kwargs["openai_sampling_params"] == {"max_generate_length": 16384}
+    wrapper_kwargs = pop_vllm_wrapper_kwargs(engine_kwargs)
+    assert wrapper_kwargs["openai_max_tokens_cap"] is True
+    assert wrapper_kwargs["openai_sampling_params"] == {"max_generate_length": 16384}
     assert engine_kwargs == {"other": "keep"}
 
-    assert "openai_max_tokens_cap" not in pop_openai_kwargs({"other": "keep"})
+    assert "openai_max_tokens_cap" not in pop_vllm_wrapper_kwargs({"other": "keep"})

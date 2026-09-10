@@ -24,7 +24,14 @@ class HarborRunner(Protocol):
 
     def set_trajectory_sink(self, sink: TrajectorySink) -> None: ...
 
-    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None: ...
+    async def start_eval_session(
+        self,
+        *,
+        run_name: str,
+        eval_step: int,
+        val_set_name: str | None = None,
+        n_concurrent_trials: int | None = None,
+    ) -> None: ...
 
     async def stop_eval_session(self) -> None: ...
 

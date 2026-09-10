@@ -16,8 +16,15 @@ import pytest
 from transformers import AutoTokenizer
 
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionPolicy, GroupAdvantageInvariant
+from skyrl_train.metric_names import (
+    TIS_ALIGNMENT_ALERT_METRIC,
+    TIS_METRIC_PREFIX,
+    TIS_TITO_FULL_DECLINE_METRIC_PREFIX,
+    TIS_TITO_FULL_SUCCESS_FRACTION_METRIC,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import (
     AlignmentStats,
+    TitoFullDeclineReason,
     align_logprobs_by_token_ids,
     align_logprobs_with_lcs,
     extract_logprobs_from_rollout_details,
@@ -167,8 +174,8 @@ def test_tito_full_resolution_precedence():
     assert _tito_full_enabled(rollout_logprobs_required=True) is True
     assert _tito_full_enabled(rollout_logprobs_required=False) is False
 
-    # Explicit config overrides the objective when non-None.
-    assert _tito_full_enabled(rollout_logprobs_required=True, tito_full=False) is False
+    # Behavior-logprob consumers cannot disable the exact-context safety check.
+    assert _tito_full_enabled(rollout_logprobs_required=True, tito_full=False) is True
     assert _tito_full_enabled(rollout_logprobs_required=False, tito_full=True) is True
     assert _tito_full_enabled(rollout_logprobs_required=True, tito_full=None) is True
 
@@ -178,16 +185,14 @@ def test_tito_full_without_rollout_logprob_consumer_preserves_existing_assembly(
 
 
 def test_tito_assembly_declines_on_inconsistent_stream(monkeypatch):
-    """When the served prompt-id stream violates the prefix invariant, the TITO
-    assembly must DECLINE (return None) so the public function falls back to the
-    re-tok + splice path — never silently assemble a wrong sequence."""
+    """Full TITO names the failed invariant instead of assembling corrupt IDs."""
     from skyrl_train.trajectory_runners.trajectory_processing import _assemble_response_ids_tito_full
 
     class _Tok:
         eos_token_id = 999
 
     # prompt[1] does NOT start with prompt[0] + completion[0] -> invariant fails.
-    out = _assemble_response_ids_tito_full(
+    result = _assemble_response_ids_tito_full(
         messages=[
             {"role": "assistant", "content": "a"},
             {"role": "user", "content": "b"},
@@ -203,7 +208,8 @@ def test_tito_assembly_declines_on_inconsistent_stream(monkeypatch):
         custom_chat_template=None,
         chat_template_kwargs=None,
     )
-    assert out is None
+    assert result.response_ids is None
+    assert result.decline_reason is TitoFullDeclineReason.PREFIX_MISMATCH
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +333,47 @@ def test_valid_multi_turn_full_tito_preserves_all_training_logprobs():
     )
     assert stats.n_exact == sum(map(len, completions))
     assert stats.n_unaligned == 0
+    assert stats.n_tito_full_attempts == 1
+    assert stats.n_tito_full_successes == 1
+    assert not stats.tito_full_declines
+
+
+def test_context_mismatch_decline_masks_exact_completion_ids():
+    """A context mismatch must not hide behind exact completion-id alignment."""
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    messages = [
+        {"role": "assistant", "content": "First answer."},
+        {"role": "user", "content": "A tool returned more evidence."},
+        {"role": "assistant", "content": "Revised answer."},
+    ]
+    completions = [
+        _generated_ids(tokenizer, "First answer."),
+        _generated_ids(tokenizer, "Revised answer."),
+    ]
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+    behavior_logprobs = [[-0.1] * len(completions[0]), [-0.2] * len(completions[1])]
+    stats = AlignmentStats()
+
+    _, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
+        messages,
+        tokenizer,
+        assistant_logprobs=behavior_logprobs,
+        assistant_token_ids=completions,
+        assistant_prompt_token_ids=[
+            [700, 701] + generation_prompt_ids,
+            [999] + generation_prompt_ids,
+        ],
+        rollout_logprobs_required=True,
+        alignment_stats=stats,
+    )
+
+    metrics = stats.as_metrics(prefix=TIS_METRIC_PREFIX, lcs_alert_threshold=0.005)
+    assert not any(loss_mask)
+    assert stats.n_exact == sum(map(len, completions))
+    assert stats.tito_full_declines == {TitoFullDeclineReason.PREFIX_MISMATCH: 1}
+    assert metrics[TIS_TITO_FULL_SUCCESS_FRACTION_METRIC] == 0.0
+    assert metrics[f"{TIS_TITO_FULL_DECLINE_METRIC_PREFIX}prefix_mismatch"] == 1.0
+    assert metrics[TIS_ALIGNMENT_ALERT_METRIC] == 1.0
 
 
 @pytest.mark.parametrize("truncate_logprobs", [False, True])
@@ -404,7 +451,7 @@ def test_partial_lcs_alignment_masks_the_message_when_logprobs_are_required():
     assert stats.n_unaligned == 1
 
 
-def test_missing_turn_logprobs_mask_only_the_affected_message():
+def test_missing_turn_logprobs_cannot_bypass_full_tito_with_explicit_false():
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
     messages = [
         {"role": "assistant", "content": "First answer."},
@@ -415,18 +462,19 @@ def test_missing_turn_logprobs_mask_only_the_affected_message():
     first_logprobs = [-0.1] * len(completions[0])
     stats = AlignmentStats()
 
-    _, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+    response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
         messages,
         tokenizer,
         assistant_logprobs=[first_logprobs],
         assistant_token_ids=completions,
         rollout_logprobs_required=True,
         alignment_stats=stats,
+        tito_full=False,
     )
 
-    assert [logprob for logprob, mask in zip(rollout_logprobs, loss_mask, strict=True) if mask] == first_logprobs
-    assert sum(loss_mask) == len(completions[0])
-    assert stats.n_unaligned == len(completions[1])
+    assert not any(loss_mask)
+    assert len(rollout_logprobs) == len(response_ids)
+    assert stats.tito_full_declines == {TitoFullDeclineReason.MISSING_STREAMS: 1}
 
 
 def test_float_format_without_ids_uses_positional_exact():

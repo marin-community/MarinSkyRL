@@ -99,6 +99,7 @@ class LocalRLRunner:
     def __init__(self, config: LocalRLConfig):
         self.config = config
         self._train_data_sources = list(config.train_data)
+        self._val_data_sources = list(config.val_data)
         self._processes: List[subprocess.Popen] = []
         self.rl_env_path: Path | None = None
         # Set by _ingress_context when ingress_mode=controller mints a capability
@@ -172,6 +173,7 @@ class LocalRLRunner:
         print(f"  Model: {self.config.model_path}")
         print(f"  GPUs: {self.config.gpus}")
         print(f"  Train Data: {self.config.train_data}")
+        print(f"  Validation Data: {self.config.val_data}")
         print(f"  Experiments Dir: {self.config.experiments_dir}")
         print("=======================================")
 
@@ -209,6 +211,7 @@ class LocalRLRunner:
                     "hydra_args": hydra_args,
                     "source_config": str(source_config),
                     "train_data_sources": self._train_data_sources,
+                    "val_data_sources": self._val_data_sources,
                 },
                 destination,
                 sort_keys=True,
@@ -226,6 +229,20 @@ class LocalRLRunner:
             print(get_skyrl_command_preview(CHECKPOINT_EXPORT_ENTRYPOINT, hydra_args))
             return 0
         return self._run_skyrl(CHECKPOINT_EXPORT_ENTRYPOINT, hydra_args)
+
+    def _resolve_data_inputs(self, data_kind: str, exp_args: Dict[str, Any]) -> None:
+        for role, attribute in (("train", "train_data"), ("validation", "val_data")):
+            values = getattr(self.config, attribute)
+            if not values:
+                continue
+            print(f"\nResolving {role} data (kind={data_kind}): {values}")
+            resolved = resolve_rl_train_data_with_sources(values, kind=data_kind)
+            paths = list(resolved.paths)
+            sources = list(resolved.sources)
+            setattr(self.config, attribute, paths)
+            setattr(self, f"_{attribute}_sources", sources)
+            exp_args[attribute] = paths
+            print(f"Resolved {role} data: {paths}")
 
     def run(self) -> int:
         """Execute the RL training job. Returns an exit code (0 for success)."""
@@ -247,13 +264,7 @@ class LocalRLRunner:
         parsed, skyrl_overrides = apply_context_budget_overrides(parsed, self.config.skyrl_overrides)
         entrypoint = self.config.entrypoint or parsed.entrypoint
         self.config.tensor_parallel_size = parsed.tensor_parallel_size
-        if self.config.train_data:
-            print(f"\nResolving train_data (kind={parsed.data_kind}): {self.config.train_data}")
-            resolved_train = resolve_rl_train_data_with_sources(self.config.train_data, kind=parsed.data_kind)
-            self.config.train_data = list(resolved_train.paths)
-            self._train_data_sources = list(resolved_train.sources)
-            exp_args["train_data"] = self.config.train_data
-            print(f"Resolved train_data: {self.config.train_data}")
+        self._resolve_data_inputs(parsed.data_kind, exp_args)
         hydra_args = build_skyrl_hydra_args(parsed, exp_args, hpc_stub)
         self._record_context_budget(parsed, skyrl_overrides)
 

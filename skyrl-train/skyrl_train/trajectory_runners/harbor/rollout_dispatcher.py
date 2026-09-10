@@ -27,6 +27,7 @@ from skyrl_train.worker_setup import configure_worker_process
 # A literal because the harbor package does not import off Linux and this runs in the driver.
 # Nothing catches a rename of the class: fan-out would fail at startup on `bind_runner`.
 RETAINED_RUNNER_NAME = "HarborTrajectoryRunner"
+DEFAULT_CONCURRENT_TRIALS = 16
 
 
 class RolloutCoordinatorRPCTimeoutError(TimeoutError):
@@ -104,6 +105,13 @@ def _scale_terminal_bench_cfg(terminal_bench_cfg: DictConfig, num_coordinators: 
             )
 
     return scaled
+
+
+def _configured_concurrent_trials(terminal_bench_cfg: DictConfig) -> int:
+    harbor = terminal_bench_cfg.get("harbor", None)
+    if harbor is not None:
+        return int(harbor.get("n_concurrent_trials", DEFAULT_CONCURRENT_TRIALS))
+    return int(terminal_bench_cfg.get("n_concurrent_trials", DEFAULT_CONCURRENT_TRIALS))
 
 
 @ray.remote
@@ -209,8 +217,20 @@ class RolloutCoordinator:
         return await self._runner.run(sub_batch)
 
     # ---- Eval session passthrough (single-coordinator delegation) ----
-    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
-        await self._runner.start_eval_session(run_name=run_name, eval_step=eval_step, val_set_name=val_set_name)
+    async def start_eval_session(
+        self,
+        *,
+        run_name: str,
+        eval_step: int,
+        val_set_name: str | None = None,
+        n_concurrent_trials: int,
+    ) -> None:
+        await self._runner.start_eval_session(
+            run_name=run_name,
+            eval_step=eval_step,
+            val_set_name=val_set_name,
+            n_concurrent_trials=n_concurrent_trials,
+        )
 
     async def stop_eval_session(self) -> None:
         await self._runner.stop_eval_session()
@@ -240,6 +260,7 @@ class RolloutDispatcher:
         self._cpus_per_coordinator = resources.cpus_per_coordinator
         self._executor_workers = resources.executor_workers
         self._coordinator_rpc_timeout = resources.rpc_timeout_seconds
+        self._eval_concurrent_trials = _configured_concurrent_trials(spec.terminal_bench_config)
 
         # Trainer sets this; default returns None until then.
         self.global_step_fn = None
@@ -256,11 +277,16 @@ class RolloutDispatcher:
         self._actor_pending_rpcs = [0 for _ in range(self._num_coordinators)]
         self._actor_last_progress: list[float | None] = [None for _ in range(self._num_coordinators)]
         self._rr = itertools.cycle(range(self._num_coordinators))
+        self._routing_condition = asyncio.Condition()
         self._pg = None
-        # Eval sessions are broadcast to every coordinator (see
-        # start_eval_session), so eval groups round-robin like training groups.
+        # Eval reserves shard 0. Training continues on the other shards while
+        # evaluation uses shard 0's dedicated orchestrator.
         self._eval_session_active = False
-        # evaluate() checks this to know it may issue eval chunks concurrently.
+        # evaluate() checks this to know it may issue every eval chunk up front instead of
+        # one at a time. Every eval group routes to shard 0 (above), whose eval orchestrator
+        # holds the UNSCALED n_concurrent_trials (#514), so feeding it the whole eval set at
+        # once is what keeps that global concurrency saturated; chunk-at-a-time would cap it
+        # at one chunk's rows. Training keeps the other shards either way.
         self.supports_concurrent_eval = True
 
         _log().info(
@@ -281,7 +307,7 @@ class RolloutDispatcher:
         """Create the K coordinators (pinned to the proxy's node) and start each runner.
 
         All coordinators are pinned via NodeAffinity to THIS (rank-0/head) node — the
-        node where the RecordProxy writes the node-local opencode literal log that
+        node where the RecordProxy writes the node-local CLI-agent literal log that
         ``LiteralLogStore`` reads with a local ``open()``. A SPREAD placement would scatter
         them and break that read on every off-node coordinator (keep1-v25). Each actor
         requests ``cpus_per_coordinator`` CPUs on the head node.
@@ -294,10 +320,10 @@ class RolloutDispatcher:
             runner_config.http_endpoint_host = ray.util.get_node_ip_address()
         actor_spec = self._spec.with_runner_config(runner_config)
 
-        # The RecordProxy writes the opencode literal log to a NODE-LOCAL path on THIS
+        # The RecordProxy writes the CLI-agent literal log to a NODE-LOCAL path on THIS
         # (rank-0/head) node, and LiteralLogStore reads it with a bare local open(). A
         # SPREAD placement group scattered the K coordinators across nodes, so ~(K-1)/K of
-        # them could not open the log -> _maybe_build_opencode_chat_history returned None ->
+        # them could not open the log -> _maybe_build_cli_chat_history returned None ->
         # 100% 'all_messages' drops -> empty training batch (keep1-v25; v24 only worked
         # because its lone reader happened to co-locate with the proxy). Pin every
         # coordinator to the proxy's node so the local read always resolves. The K-pool's
@@ -355,6 +381,8 @@ class RolloutDispatcher:
     async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Run complete reward groups concurrently and restore input row order."""
         del disable_tqdm
+        metadata = input_batch.get("batch_metadata")
+        training_phase = metadata.training_phase if metadata is not None else "train"
         trajectory_ids = input_batch.get("trajectory_ids")
         if not trajectory_ids or len(trajectory_ids) != len(input_batch["prompts"]):
             raise ValueError("process-isolated trajectory execution requires one trajectory ID per request row")
@@ -376,7 +404,9 @@ class RolloutDispatcher:
         else:
             result = concatenate_trajectory_batches(
                 outputs,
-                require_rollout_logprobs=rollout_logprobs_enabled(self._spec.config.trainer.algorithm),
+                require_rollout_logprobs=(
+                    training_phase == "train" and rollout_logprobs_enabled(self._spec.config.trainer.algorithm)
+                ),
                 tis_lcs_alert_threshold=float(self._spec.config.trainer.algorithm.tis_lcs_alert_threshold),
             )
             actual_steps = [output.get("actual_global_step") for output in outputs]
@@ -391,15 +421,25 @@ class RolloutDispatcher:
         return result
 
     async def _run_group(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
-        # Eval sessions are broadcast to every coordinator (see start_eval_session),
-        # so eval groups round-robin like training groups instead of pinning to shard 0.
-        coordinator_index = next(self._rr)
-        actor = self._actors[coordinator_index]
+        metadata = input_batch.get("batch_metadata")
+        training_phase = metadata.training_phase if metadata is not None else "train"
+        async with self._routing_condition:
+            while training_phase == "train" and self._eval_session_active and self._num_coordinators == 1:
+                await self._routing_condition.wait()
+            if training_phase == "eval":
+                if not self._eval_session_active:
+                    raise RuntimeError("evaluation request received without an active eval session")
+                coordinator_index = 0
+            else:
+                coordinator_index = next(self._rr)
+                while self._eval_session_active and coordinator_index == 0:
+                    coordinator_index = next(self._rr)
+            actor = self._actors[coordinator_index]
+            loop = asyncio.get_running_loop()
+            if self._actor_pending_rpcs[coordinator_index] == 0:
+                self._actor_last_progress[coordinator_index] = loop.time()
+            self._actor_pending_rpcs[coordinator_index] += 1
         global_step = self._current_global_step()
-        loop = asyncio.get_running_loop()
-        if self._actor_pending_rpcs[coordinator_index] == 0:
-            self._actor_last_progress[coordinator_index] = loop.time()
-        self._actor_pending_rpcs[coordinator_index] += 1
         try:
             rpc = actor.run_shard.remote(input_batch, global_step)
             rpc_future = asyncio.ensure_future(rpc)
@@ -432,9 +472,11 @@ class RolloutDispatcher:
                 self._actor_last_progress[coordinator_index] = loop.time()
                 return output
         finally:
-            self._actor_pending_rpcs[coordinator_index] -= 1
-            if self._actor_pending_rpcs[coordinator_index] == 0:
-                self._actor_last_progress[coordinator_index] = None
+            async with self._routing_condition:
+                self._actor_pending_rpcs[coordinator_index] -= 1
+                if self._actor_pending_rpcs[coordinator_index] == 0:
+                    self._actor_last_progress[coordinator_index] = None
+                self._routing_condition.notify_all()
 
     @staticmethod
     def _select_request_rows(input_batch: TrajectoryRequestBatch, indices: list[int]) -> TrajectoryRequestBatch:
@@ -484,24 +526,47 @@ class RolloutDispatcher:
         self._actors = []
 
     # ---- Eval session passthrough ----
-    # Eval sessions are broadcast to EVERY coordinator so eval groups can
-    # round-robin across the full fan-out (a single pinned shard capped eval at
-    # n_concurrent_trials // K and starved training for the whole session).
-    # Safe to fan out: each runner builds its own per-session QueueOrchestrator,
-    # the eval trials_dir is deterministic and created with exist_ok=True, and
-    # metrics are computed trainer-side from the returned batches, so no
-    # per-coordinator state needs merging.
-    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
-        if self._actors:
-            await asyncio.gather(
-                *[
-                    actor.start_eval_session.remote(run_name=run_name, eval_step=eval_step, val_set_name=val_set_name)
-                    for actor in self._actors
-                ]
-            )
+    # Eval reserves shard 0 and waits for its prior training work to drain before
+    # replacing that runner's active orchestrator. Other shards keep serving
+    # asynchronous training requests during evaluation.
+    async def start_eval_session(
+        self,
+        *,
+        run_name: str,
+        eval_step: int,
+        val_set_name: str | None = None,
+        n_concurrent_trials: int | None = None,
+    ) -> None:
+        if not self._actors:
+            return
+        async with self._routing_condition:
+            if self._eval_session_active:
+                raise RuntimeError("an eval session is already active")
             self._eval_session_active = True
+            while self._actor_pending_rpcs[0] > 0:
+                await self._routing_condition.wait()
+        try:
+            eval_concurrent_trials = (
+                self._eval_concurrent_trials if n_concurrent_trials is None else n_concurrent_trials
+            )
+            await self._actors[0].start_eval_session.remote(
+                run_name=run_name,
+                eval_step=eval_step,
+                val_set_name=val_set_name,
+                n_concurrent_trials=eval_concurrent_trials,
+            )
+        except BaseException:
+            async with self._routing_condition:
+                self._eval_session_active = False
+                self._routing_condition.notify_all()
+            raise
 
     async def stop_eval_session(self) -> None:
-        if self._actors:
-            await asyncio.gather(*[actor.stop_eval_session.remote() for actor in self._actors])
-            self._eval_session_active = False
+        if not self._actors:
+            return
+        try:
+            await self._actors[0].stop_eval_session.remote()
+        finally:
+            async with self._routing_condition:
+                self._eval_session_active = False
+                self._routing_condition.notify_all()

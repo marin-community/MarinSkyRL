@@ -29,6 +29,7 @@ import yaml
 
 from cloud.iris.paths import resolve_paths_in_dict
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
+from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 
 # Directory containing the bundled example RL config YAML files.
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
@@ -679,7 +680,7 @@ def extract_terminal_bench_agent_env(parsed: ParsedRLConfig) -> tuple:
     tb = parsed.terminal_bench or {}
     harbor = tb.get("harbor", {})
 
-    agent_name = harbor.get("name", "terminus-2")
+    agent_name = harbor.get("name", DEFAULT_HARBOR_AGENT_NAME)
 
     import_path = harbor.get("import_path")
     if import_path:

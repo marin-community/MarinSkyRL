@@ -19,6 +19,7 @@ from ray.util.placement_group import (
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
+from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
@@ -33,7 +34,13 @@ from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
-from .algorithm_registry import AdvantageEstimatorRegistry, PolicyLossRegistry, PolicyLossType, sync_registries
+from .algorithm_registry import (
+    AdvantageEstimatorRegistry,
+    PolicyLossRegistry,
+    PolicyLossType,
+    rollout_logprobs_enabled,
+    sync_registries,
+)
 from .logging_utils import format_exception_text
 from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTIONS
 from .nccl_environment import worker_nccl_environment
@@ -281,6 +288,13 @@ class Timer:
         if self._duration is None:
             raise RuntimeError("Timer duration is only available after its context exits")
         return self._duration
+
+    @property
+    def elapsed(self) -> float:
+        """Return the elapsed duration without ending an active timer."""
+        if self._duration is not None:
+            return self._duration
+        return time.monotonic() - self.start_time
 
     def __enter__(self):
         self.start_time = time.monotonic()
@@ -748,44 +762,15 @@ def validate_cfg(cfg: DictConfig):
             "trainer.algorithm.policy_loss_type=behavior_clip cannot be combined with use_tis=true; "
             "behavior clipping already uses the full rollout importance ratio"
         )
-    # DPPO (upstream SkyRL port): optimizes against rollout logprobs, so it mirrors behavior_clip's
-    # rollout-logprob requirements (below) and cannot stack with TIS.
+    # DPPO (upstream SkyRL port): optimizes against rollout logprobs, so it cannot stack with TIS.
+    # Its rollout-logprob requirements (logprobs=0, vLLM backend, probability parity) come from the
+    # shared `rollout_logprobs_enabled` path below - DPPO is in ROLLOUT_LOGPROB_POLICY_LOSSES.
     dppo = cfg.trainer.algorithm.policy_loss_type == "dppo"
     if dppo and cfg.trainer.algorithm.use_tis:
         raise ValueError(
             "trainer.algorithm.policy_loss_type=dppo cannot be combined with use_tis=true; "
             "dppo already uses the full rollout importance ratio"
         )
-
-    if cfg.trainer.algorithm.use_tis:
-        if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
-            raise ValueError(
-                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap}"
-            )
-        if cfg.generator.sampling_params.logprobs is None:
-            logger.warning(
-                "`generator.sampling_params.logprobs` is `None` but `trainer.algorithm.use_tis` is `True`. Setting `logprobs` to `True`."
-            )
-            # just set to 0 for better user exp
-            cfg.generator.sampling_params.logprobs = 0
-
-        if cfg.generator.backend == "sglang":
-            raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
-        assert cfg.trainer.algorithm.policy_loss_type in [
-            "regular",
-            "dual_clip",
-        ], "TIS is only implemented for regular and dual_clip policy loss types"
-
-    if behavior_clip:
-        if cfg.generator.sampling_params.logprobs is None:
-            logger.warning(
-                "`generator.sampling_params.logprobs` is `None` but behavior_clip requires rollout logprobs. "
-                "Setting `logprobs` to 0."
-            )
-            cfg.generator.sampling_params.logprobs = 0
-        if cfg.generator.backend == "sglang":
-            raise NotImplementedError("behavior_clip requires rollout logprobs; use the vLLM generator backend")
-
     if dppo:
         dppo_cfg = cfg.trainer.algorithm.get("dppo")
         if dppo_cfg is None:
@@ -796,13 +781,27 @@ def validate_cfg(cfg: DictConfig):
             raise ValueError(
                 f"Invalid trainer.algorithm.dppo.dppo_type={dppo_cfg.dppo_type!r}; must be 'binary_tv' or 'binary_kl'"
             )
+
+    behavior_logprobs_required = rollout_logprobs_enabled(cfg.trainer.algorithm)
+    if behavior_logprobs_required:
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
-                "`generator.sampling_params.logprobs` is `None` but dppo requires rollout logprobs. Setting `logprobs` to 0."
+                "The selected objective requires rollout logprobs; setting generator.sampling_params.logprobs=0."
             )
             cfg.generator.sampling_params.logprobs = 0
         if cfg.generator.backend == "sglang":
-            raise NotImplementedError("dppo requires rollout logprobs; use the vLLM generator backend")
+            raise NotImplementedError("Behavior-logprob objectives require the vLLM generator backend")
+        configure_behavior_logprob_sampling(cfg.generator)
+
+    if cfg.trainer.algorithm.use_tis:
+        if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
+            raise ValueError(
+                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap}"
+            )
+        assert cfg.trainer.algorithm.policy_loss_type in [
+            "regular",
+            "dual_clip",
+        ], "TIS is only implemented for regular and dual_clip policy loss types"
 
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled

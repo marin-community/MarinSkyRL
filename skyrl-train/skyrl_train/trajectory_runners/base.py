@@ -69,7 +69,14 @@ class TrajectoryRunner(ABC):
         sink.bind_runner(type(self).__name__)
         self.trajectory_sink = sink
 
-    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
+    async def start_eval_session(
+        self,
+        *,
+        run_name: str,
+        eval_step: int,
+        val_set_name: str | None = None,
+        n_concurrent_trials: int | None = None,
+    ) -> None:
         """Start an evaluation-scoped resource session when a runner needs one."""
 
     async def stop_eval_session(self) -> None:

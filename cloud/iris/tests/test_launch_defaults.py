@@ -301,6 +301,15 @@ def test_resolve_launch_defaults_uses_safe_cpu_cap_and_terminus_opt_out(tmp_path
     assert args.record_literal is False
 
 
+def test_resolve_launch_defaults_does_not_imply_pi_literal_support(tmp_path):
+    args = _args(tmp_path, "pi")
+    args.cluster_config = str(_cluster_config(tmp_path, cpu=128))
+
+    resolve_launch_defaults(args)
+
+    assert args.record_literal is False
+
+
 def test_resolve_launch_defaults_preserves_explicit_values(tmp_path):
     args = _args(
         tmp_path,
@@ -375,6 +384,23 @@ def test_task_command_forwards_driver_liveness_timeout(tmp_path):
     options = _shell_options(build_task_command(args)[-1])
 
     assert options["--driver-liveness-timeout"] == ["600"]
+
+
+def test_task_command_stages_training_and_validation_selectors_on_every_node(tmp_path):
+    train_selector = "fixture-org/tasks@immutable::train"
+    val_selector = "fixture-org/tasks@immutable::validation"
+    args = _args(
+        tmp_path,
+        "opencode",
+        ["--train-data", json.dumps([train_selector]), "--val-data", json.dumps([val_selector])],
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert options["--train-data"] == [json.dumps([train_selector])]
+    assert options["--val-data"] == [json.dumps([val_selector])]
 
 
 def test_normalize_rejects_negative_driver_liveness_timeout(tmp_path):

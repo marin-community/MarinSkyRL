@@ -1,6 +1,11 @@
 import json
 from typing import Any, Dict, Optional, Protocol
 
+from skyrl_train.config.behavior_logprobs import (
+    ROLLOUT_LOGPROB_VALIDATION_KEY,
+    validate_behavior_logprob_sampling,
+)
+
 # Values vLLM's chat renderer accepts for ``chat_template_content_format``.
 CHAT_TEMPLATE_CONTENT_FORMATS = ("auto", "string", "openai")
 
@@ -52,29 +57,29 @@ class PrefixCacheHitRateAccumulator:
             self.samples.append(rate)
 
 
-def pop_openai_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+def pop_vllm_wrapper_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Normalize & remove OpenAI-serving-only kwargs from engine_kwargs.
+    Remove SkyRL serving options before passing engine_kwargs to vLLM.
     """
-    openai_kwargs: Dict[str, Any] = {}
+    wrapper_kwargs: Dict[str, Any] = {}
 
     enable_auto_tools = engine_kwargs.pop("enable_auto_tools", engine_kwargs.pop("enable_auto_tool_choice", None))
     if enable_auto_tools is not None:
-        openai_kwargs["enable_auto_tools"] = bool(enable_auto_tools)
+        wrapper_kwargs["enable_auto_tools"] = bool(enable_auto_tools)
 
     tool_parser = engine_kwargs.pop("tool_parser", engine_kwargs.pop("tool_call_parser", None))
     if tool_parser is not None:
-        openai_kwargs["tool_parser"] = tool_parser
+        wrapper_kwargs["tool_parser"] = tool_parser
 
     # Bound OpenAI-path completions at sampling_params.max_generate_length (see apply_openai_max_tokens_cap)
     cap_flag = engine_kwargs.pop("openai_max_tokens_cap", None)
     if cap_flag is not None:
-        openai_kwargs["openai_max_tokens_cap"] = bool(cap_flag)
+        wrapper_kwargs["openai_max_tokens_cap"] = bool(cap_flag)
 
     # Sampling params for OpenAI-style requests (Harbor terminal-bench rollouts)
     openai_sampling = engine_kwargs.pop("openai_sampling_params", None)
     if openai_sampling is not None:
-        openai_kwargs["openai_sampling_params"] = openai_sampling
+        wrapper_kwargs["openai_sampling_params"] = openai_sampling
 
     # How vLLM's renderer hands message content to the chat template. Unset leaves vLLM's
     # ``auto``, which sniffs the template and may pick the OpenAI parts format; a template
@@ -87,9 +92,12 @@ def pop_openai_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(
                 f"chat_template_content_format must be one of {CHAT_TEMPLATE_CONTENT_FORMATS}, got {content_format!r}"
             )
-        openai_kwargs["chat_template_content_format"] = content_format
+        wrapper_kwargs["chat_template_content_format"] = content_format
 
-    return openai_kwargs
+    if ROLLOUT_LOGPROB_VALIDATION_KEY in engine_kwargs:
+        wrapper_kwargs[ROLLOUT_LOGPROB_VALIDATION_KEY] = engine_kwargs.pop(ROLLOUT_LOGPROB_VALIDATION_KEY)
+
+    return wrapper_kwargs
 
 
 def ensure_token_ids_in_sse_chunk(sse_chunk: str) -> str:
@@ -128,6 +136,24 @@ def ensure_token_ids_in_sse_chunk(sse_chunk: str) -> str:
     except (json.JSONDecodeError, IndexError, KeyError):
         pass
     return sse_chunk
+
+
+def apply_openai_sampling(
+    body: Dict[str, Any], sampling_params: Dict[str, Any], validate_rollout_logprob_sampling: bool
+) -> None:
+    """Apply generator sampling overrides and validate training probabilities."""
+    body.update(
+        {
+            "temperature": sampling_params.get("temperature", 1.0),
+            "top_p": sampling_params.get("top_p", 1.0),
+            "top_k": sampling_params.get("top_k", -1),
+            "min_p": sampling_params.get("min_p", 0.0),
+        }
+    )
+    # Completion logprobs=0 requests sampled-token probabilities; False disables chat logprobs.
+    logprobs = body.get("logprobs")
+    if validate_rollout_logprob_sampling and logprobs is not None and logprobs is not False:
+        validate_behavior_logprob_sampling(body)
 
 
 _OPENAI_MAX_TOKENS_KEYS = ("max_tokens", "max_completion_tokens")

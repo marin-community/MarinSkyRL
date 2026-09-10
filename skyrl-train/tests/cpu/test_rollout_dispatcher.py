@@ -14,20 +14,41 @@ from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import (
     RolloutCoordinatorRPCTimeoutError,
     RolloutDispatcher,
 )
-from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.trajectory_runners.types import BatchMetadata, TrainingPhase, TrajectoryID
 
 
 class _RemoteMethod:
     def __init__(self, call: Callable[..., Awaitable[dict]]):
         self._call = call
 
-    def remote(self, *args):
-        return self._call(*args)
+    def remote(self, *args, **kwargs):
+        return self._call(*args, **kwargs)
 
 
 class _Coordinator:
     def __init__(self, call: Callable[..., Awaitable[dict]]):
         self.run_shard = _RemoteMethod(call)
+
+
+class _SessionCoordinator(_Coordinator):
+    def __init__(self, name: str, calls: list[tuple[str, str]]):
+        self.eval_concurrency: list[int | None] = []
+
+        async def run_shard(input_batch, _global_step):
+            phase = input_batch["batch_metadata"].training_phase
+            calls.append((name, phase))
+            return _output(input_batch["trajectory_ids"])
+
+        async def start_eval_session(*, n_concurrent_trials=None, **_kwargs):
+            calls.append((name, "start_eval"))
+            self.eval_concurrency.append(n_concurrent_trials)
+
+        async def stop_eval_session():
+            calls.append((name, "stop_eval"))
+
+        super().__init__(run_shard)
+        self.start_eval_session = _RemoteMethod(start_eval_session)
+        self.stop_eval_session = _RemoteMethod(stop_eval_session)
 
 
 @ray.remote
@@ -43,14 +64,14 @@ class _BlockingCoordinator:
         await self._started.wait()
 
 
-def _request(ids: list[TrajectoryID]) -> dict:
+def _request(ids: list[TrajectoryID], phase: TrainingPhase | None = None) -> dict:
     return {
         "prompts": [f"prompt-{trajectory_id.to_string()}" for trajectory_id in ids],
         "env_classes": ["terminal" for _ in ids],
         "env_extras": [{} for _ in ids],
         "sampling_params": {},
         "trajectory_ids": ids,
-        "batch_metadata": None,
+        "batch_metadata": BatchMetadata(global_step=1, training_phase=phase) if phase is not None else None,
     }
 
 
@@ -134,6 +155,42 @@ async def test_dispatcher_partitions_complete_groups_and_restores_request_order(
 
 
 @pytest.mark.asyncio
+async def test_dispatcher_isolates_eval_from_concurrent_training(harbor_runner_spec):
+    calls: list[tuple[str, str]] = []
+    dispatcher = _dispatcher(
+        [_SessionCoordinator("eval", calls), _SessionCoordinator("train", calls)],
+        harbor_runner_spec,
+    )
+
+    await dispatcher.start_eval_session(run_name="run", eval_step=0)
+    await dispatcher.run(_request([TrajectoryID("heldout", 0)], "eval"))
+    await dispatcher.run(_request([TrajectoryID("training", 0)], "train"))
+    await dispatcher.stop_eval_session()
+
+    assert calls == [
+        ("eval", "start_eval"),
+        ("eval", "eval"),
+        ("train", "train"),
+        ("eval", "stop_eval"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_preserves_global_eval_concurrency_when_training_is_sharded(harbor_runner_spec):
+    calls: list[tuple[str, str]] = []
+    eval_coordinator = _SessionCoordinator("eval", calls)
+    harbor_runner_spec.terminal_bench_config.harbor = {"n_concurrent_trials": 32}
+    dispatcher = _dispatcher(
+        [eval_coordinator, _SessionCoordinator("train-1", calls), _SessionCoordinator("train-2", calls)],
+        harbor_runner_spec,
+    )
+
+    await dispatcher.start_eval_session(run_name="run", eval_step=0)
+
+    assert eval_coordinator.eval_concurrency == [32]
+
+
+@pytest.mark.asyncio
 async def test_dispatcher_concatenates_fully_excluded_group_without_logprobs(harbor_runner_spec):
     harbor_runner_spec.config.trainer.algorithm.use_tis = True
 
@@ -161,6 +218,26 @@ async def test_dispatcher_concatenates_fully_excluded_group_without_logprobs(har
 
     assert result["trajectory_ids"] == ids
     assert result["loss_masks"] == [[1], [0], [1], [0]]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_does_not_require_rollout_logprobs_during_eval(harbor_runner_spec):
+    harbor_runner_spec.config.trainer.algorithm.use_tis = True
+    calls: list[tuple[str, str]] = []
+    ids = [TrajectoryID("a", 0), TrajectoryID("b", 0)]
+    dispatcher = _dispatcher(
+        [_SessionCoordinator("eval", calls), _SessionCoordinator("train", calls)],
+        harbor_runner_spec,
+    )
+
+    await dispatcher.start_eval_session(run_name="run", eval_step=0)
+    try:
+        result = await dispatcher.run(_request(ids, "eval"))
+    finally:
+        await dispatcher.stop_eval_session()
+
+    assert result["trajectory_ids"] == ids
+    assert result["rollout_logprobs"] is None
 
 
 @pytest.mark.asyncio
@@ -314,39 +391,11 @@ def _fanout_dispatcher(actors: list, harbor_runner_spec: HarborRunnerSpec) -> Ro
     return dispatcher
 
 
-@pytest.mark.asyncio
-async def test_eval_session_broadcasts_to_all_coordinators(harbor_runner_spec):
-    actors = [_EvalCoordinator() for _ in range(3)]
-    dispatcher = _fanout_dispatcher(actors, harbor_runner_spec)
-
-    await dispatcher.start_eval_session(run_name="r", eval_step=7, val_set_name="v")
-    for actor in actors:
-        starts = [c for c in actor.calls if c[0] == "start_eval_session"]
-        assert len(starts) == 1
-        assert starts[0][2] == {"run_name": "r", "eval_step": 7, "val_set_name": "v"}
-    assert dispatcher._eval_session_active is True
-
-    await dispatcher.stop_eval_session()
-    for actor in actors:
-        assert [c[0] for c in actor.calls].count("stop_eval_session") == 1
-    assert dispatcher._eval_session_active is False
-
-
-@pytest.mark.asyncio
-async def test_eval_groups_round_robin_across_coordinators(harbor_runner_spec):
-    actors = [_EvalCoordinator() for _ in range(3)]
-    dispatcher = _fanout_dispatcher(actors, harbor_runner_spec)
-    await dispatcher.start_eval_session(run_name="r", eval_step=0, val_set_name=None)
-
-    counter = iter(range(100))
-
-    for _ in range(6):
-        await dispatcher.run(_request([TrajectoryID(f"task-{next(counter)}", 0)]))
-
-    per_actor = [sum(1 for c in actor.calls if c[0] == "run_shard") for actor in actors]
-    assert per_actor == [2, 2, 2]
-
-
 def test_dispatcher_advertises_concurrent_eval(harbor_runner_spec):
+    """evaluate() may hand the dispatcher every eval chunk at once.
+
+    Eval runs on shard 0 with the unscaled n_concurrent_trials (#514); issuing the chunks
+    together is what keeps that concurrency saturated.
+    """
     dispatcher = _fanout_dispatcher([_EvalCoordinator()], harbor_runner_spec)
     assert dispatcher.supports_concurrent_eval is True

@@ -25,7 +25,7 @@ from skyrl_train.utils.loss_reduction import (
     reduce_loss,
 )
 from skyrl_train.utils.algorithm_registry import ROLLOUT_LOGPROB_POLICY_LOSSES, PolicyLossType, register_policy_loss
-from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP, approx_kl, masked_mean, safe_exp_delta
+from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP, differentiable_approx_kl, masked_mean, safe_exp_delta
 
 
 @dataclass(frozen=True)
@@ -144,9 +144,7 @@ def _compute_policy_auxiliary_terms(
     if config.use_kl_loss:
         if base_action_log_probs is None:
             raise ValueError("base_action_log_probs are required when use_kl_loss is enabled")
-        # approx_kl, not compute_approx_kl: the latter is @torch.no_grad (metrics) and gave
-        # the KL loss a zero gradient in every run before 2026-09-05.
-        kl_loss = approx_kl(
+        kl_loss = differentiable_approx_kl(
             action_log_probs,
             base_action_log_probs,
             loss_mask=loss_mask,

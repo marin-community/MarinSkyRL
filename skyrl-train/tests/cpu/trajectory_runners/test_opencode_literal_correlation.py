@@ -37,8 +37,8 @@ except ImportError:
 # does — the reader is a collaborator, not a bound method on the fake self.
 from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogStore  # noqa: E402
 
-_correlate = HarborTrajectoryRunner._maybe_correlate_opencode_rollout_details
-_select_chain = harbor_runner_module._select_opencode_literal_chain
+_correlate = HarborTrajectoryRunner._maybe_correlate_cli_rollout_details
+_select_chain = harbor_runner_module._select_cli_literal_chain
 
 
 def _attach_store(s):
@@ -189,7 +189,7 @@ def test_noop_when_trial_absent_from_log(tmp_path, monkeypatch):
 
 # --- opencode chat_history reconstruction (feeds _process_trial_result) ---------
 
-_build_chat = HarborTrajectoryRunner._maybe_build_opencode_chat_history
+_build_chat = HarborTrajectoryRunner._maybe_build_cli_chat_history
 
 
 class _FakeTokenizer:

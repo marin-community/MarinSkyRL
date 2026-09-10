@@ -45,20 +45,14 @@ def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: Optiona
     return (tensor * mask).sum(axis=dim) / mask.sum(axis=dim).clamp(min=1.0)
 
 
-def approx_kl(
+def differentiable_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
     loss_mask: Optional[torch.Tensor] = None,
     kl_estimator_type: str = "k3",
 ) -> torch.Tensor:
     """
-    Differentiable per-token approximate KL between two distributions. Use this for the
-    KL LOSS. ``compute_approx_kl`` below is the same math under ``torch.no_grad`` for
-    metrics; using that one in the loss silently drops the KL gradient (2026-09-05: every
-    ``use_kl_loss`` run on this fork and upstream main had kl_loss_coef with zero effect on
-    the backward pass).
-
-    Compute the approximate KL divergence between two distributions.
+    Compute differentiable per-token approximate KL divergence.
     Schulman blog: http://joschu.net/blog/kl-approx.html
 
     Args:
@@ -97,8 +91,11 @@ def compute_approx_kl(
     loss_mask: Optional[torch.Tensor] = None,
     kl_estimator_type: str = "k3",
 ) -> torch.Tensor:
-    """Metrics-only approximate KL (no gradient). For the KL loss use ``approx_kl``."""
-    return approx_kl(log_probs, log_probs_base, loss_mask=loss_mask, kl_estimator_type=kl_estimator_type)
+    """Compute approximate KL without gradients for metrics and reward shaping.
+
+    Use ``differentiable_approx_kl`` for a differentiable KL regularization loss.
+    """
+    return differentiable_approx_kl(log_probs, log_probs_base, loss_mask=loss_mask, kl_estimator_type=kl_estimator_type)
 
 
 @torch.no_grad()
