@@ -2,7 +2,7 @@
 
 This layer owns no persistent CUDA allocation, communication or model discovery. The native
 caller must first qualify the actual model/backend, expert maps and headroom,
-then supply its two transfer buffers and independent installed-parameter map.
+then supply its bounded transfer buffers and independent installed-parameter map.
 """
 
 from collections.abc import Mapping, Sequence
@@ -21,15 +21,15 @@ class GrugBucketReceiver:
         manifest: PublicationManifest,
         parameters: Mapping[str, torch.Tensor],
         expert_maps: Mapping[str, Sequence[int]],
-        buffers: tuple[torch.Tensor, torch.Tensor],
+        buffers: tuple[torch.Tensor, ...],
         *,
         backend: str,
         tensor_parallel_size: int,
     ):
         if backend != "TRITON" or tensor_parallel_size != 1:
             raise ValueError("Bucket receiver requires qualified unquantized TP1 TRITON Grug layout")
-        if not manifest.entries or len(buffers) != 2:
-            raise ValueError("Bucket receiver requires a nonempty manifest and two buffers")
+        if not manifest.entries or len(buffers) not in (2, 3):
+            raise ValueError("Bucket receiver requires a nonempty manifest and two or three buffers")
         self.manifest = manifest
         self.parameters = dict(parameters)
         self.expert_maps = {name: tuple(mapping) for name, mapping in expert_maps.items()}
@@ -103,7 +103,7 @@ class GrugBucketReceiver:
         return ((source, installed),)
 
     def _pairs(self, bucket_id: int):
-        buffer = self.buffers[bucket_id % 2]
+        buffer = self.buffers[bucket_id % len(self.buffers)]
         for entry, source in unpack_bucket(self.manifest, bucket_id, buffer):
             yield from self._entry_pairs(entry, source)
 

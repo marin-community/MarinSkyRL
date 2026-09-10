@@ -12,6 +12,7 @@ from skyrl_train.weight_sync.readback_diagnostics import environment_readback
 from skyrl_train.weight_sync.bucket_receiver import GrugBucketReceiver
 from skyrl_train.weight_sync.bucket_identity import bucket_identity
 from skyrl_train.weight_sync.manifest import parse_manifest
+from skyrl_train.weight_sync.pipeline_timing import CudaPipelineTiming
 
 
 BUCKET_BYTES = 2**30
@@ -36,7 +37,11 @@ def parameter_storage(parameters):
     }
 
 
-def prepare_worker_buckets(worker, payload, manifest_id):
+def prepare_worker_buckets(worker, payload, manifest_id, *, num_buffers=2, stage_timing=False):
+    if type(num_buffers) is not int or num_buffers not in (2, 3):
+        raise ValueError("Receiver requires two or three transfer buffers")
+    if type(stage_timing) is not bool:
+        raise ValueError("Receiver stage timing must be boolean")
     if getattr(worker, "_model_update_group", None) is None:
         raise ValueError("The native weight-update communicator must already exist")
     if hasattr(worker, "_diagnostic_bucket_state"):
@@ -55,8 +60,8 @@ def prepare_worker_buckets(worker, payload, manifest_id):
     ):
         raise ValueError("Receiver bucket protocol requires unquantized TP1 PP1 Grug without expert rebalancing")
     manifest = parse_manifest(payload, manifest_id)
-    if manifest.bucket_bytes != BUCKET_BYTES:
-        raise ValueError("Native receiver requires the approved 1 GiB bucket capacity")
+    if manifest.bucket_bytes not in (BUCKET_BYTES, 2**31):
+        raise ValueError("Native receiver requires the approved 1 or 2 GiB bucket capacity")
     model = worker.model_runner.model
     maps = {}
     for name, module in model.named_modules():
@@ -72,10 +77,12 @@ def prepare_worker_buckets(worker, payload, manifest_id):
     parameters = dict(model.named_parameters())
     torch.cuda.synchronize(worker.device)
     free, total = torch.cuda.mem_get_info(worker.device)
-    if free < 2 * BUCKET_BYTES + MAX_REPLAY_EXTRA_BYTES:
-        raise ValueError("Receiver lacks free space for both buffers and bounded replay scratch")
+    if free < num_buffers * manifest.bucket_bytes + MAX_REPLAY_EXTRA_BYTES:
+        raise ValueError("Receiver lacks free space for all transfer buffers and bounded replay scratch")
     allocated_before = torch.cuda.memory_allocated(worker.device)
-    buffers = tuple(torch.empty(BUCKET_BYTES, dtype=torch.uint8, device=worker.device) for _ in range(2))
+    buffers = tuple(
+        torch.empty(manifest.bucket_bytes, dtype=torch.uint8, device=worker.device) for _ in range(num_buffers)
+    )
     receiver = GrugBucketReceiver(
         manifest, parameters, maps, buffers, backend="TRITON", tensor_parallel_size=parallel.tensor_parallel_size
     )
@@ -84,9 +91,11 @@ def prepare_worker_buckets(worker, payload, manifest_id):
         "parameter_storage": parameter_storage(parameters),
         "scratch": None,
         "load_stream": torch.cuda.Stream(device=worker.device),
-        "receive_events": [torch.cuda.Event(), torch.cuda.Event()],
-        "load_events": [torch.cuda.Event(), torch.cuda.Event()],
-        "slot_used": [False, False],
+        "receive_events": [torch.cuda.Event() for _ in buffers],
+        "load_events": [torch.cuda.Event() for _ in buffers],
+        "slot_used": [False for _ in buffers],
+        "stage_timing_enabled": stage_timing,
+        "stage_timing": CudaPipelineTiming(worker.device) if stage_timing else None,
         "install_complete": False,
         "publication_id": None,
         "replay_verified": False,
@@ -99,7 +108,8 @@ def prepare_worker_buckets(worker, payload, manifest_id):
         "manifest_id": manifest_id,
         "environment": environment_readback(),
         "bucket_count": manifest.bucket_count,
-        "bucket_bytes": BUCKET_BYTES,
+        "bucket_bytes": manifest.bucket_bytes,
+        "buffer_count": num_buffers,
         "installed_parameter_bytes": receiver.expected_bytes,
         "expert_modules": len(maps),
         "free_bytes_before": free,
@@ -132,7 +142,8 @@ def begin_worker_bucket_sync(worker, manifest_id: str, publication_id: int):
     state.update(
         publication_id=publication_id,
         replay_verified=False,
-        slot_used=[False, False],
+        slot_used=[False for _ in receiver.buffers],
+        stage_timing=CudaPipelineTiming(worker.device) if state["stage_timing_enabled"] else None,
         install_complete=False,
         install_allocated_before=torch.cuda.memory_allocated(worker.device),
         install_free_before=torch.cuda.mem_get_info(worker.device)[0],
@@ -173,7 +184,7 @@ def receive_worker_bucket(
         raise ValueError("Replay requires the explicit installed-weight completion join")
     entries = receiver.manifest.bucket(bucket_id)
     nbytes = entries[-1].offset + entries[-1].nbytes
-    slot = bucket_id % 2
+    slot = bucket_id % len(receiver.buffers)
     buffer = receiver.buffers[slot]
     if replay and state["scratch"] is None:
         # Peak is measured across allocation, every comparison and reduction.
@@ -188,7 +199,11 @@ def receive_worker_bucket(
     receive_stream = torch.cuda.current_stream(worker.device)
     if state["slot_used"][slot]:
         receive_stream.wait_event(state["load_events"][slot])
+    stage_timing = state["stage_timing"] if not replay else None
+    token = stage_timing.start("nccl_receive", receive_stream) if stage_timing else None
     torch.distributed.broadcast(buffer.narrow(0, 0, nbytes), src=0, group=worker._model_update_group)
+    if stage_timing:
+        stage_timing.end(token, receive_stream)
     state["receive_events"][slot].record(receive_stream)
     with torch.cuda.stream(state["load_stream"]):
         state["load_stream"].wait_event(state["receive_events"][slot])
@@ -196,7 +211,10 @@ def receive_worker_bucket(
             result = receiver.replay_bucket(bucket_id, state["scratch"])
             receipt = {"compared_bytes": result.compared_bytes, "mismatches": result.mismatches}
         else:
+            token = stage_timing.start("load", state["load_stream"]) if stage_timing else None
             receipt = {"installed_bytes": receiver.install_bucket(bucket_id)}
+            if stage_timing:
+                stage_timing.end(token, state["load_stream"])
         state["load_events"][slot].record(state["load_stream"])
     state["slot_used"][slot] = True
     return {
@@ -222,7 +240,9 @@ def finish_worker_install(worker, *, manifest_id=None, publication_id=None):
                 raise RuntimeError("A receiver load event remains incomplete after its completion join")
             completed_slots.append(slot)
     state["install_complete"] = True
+    timing_receipt = {"cuda_pipeline_stages": state["stage_timing"].finish()} if state["stage_timing"] else {}
     return {
+        **timing_receipt,
         "identity": bucket_identity(worker.device),
         "install_complete": True,
         "publication_id": state["publication_id"],

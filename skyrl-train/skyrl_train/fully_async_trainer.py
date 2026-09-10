@@ -1685,6 +1685,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         timing_mode = getattr(self.cfg.generator, "weight_sync_timing_mode", "off")
         if timing_mode not in ("off", "bucket", "reference"):
             raise ValueError("weight_sync_timing_mode must be off, bucket or reference")
+        if timing_mode != "bucket" and (
+            getattr(self.cfg.generator, "weight_sync_bucket_pipeline", False)
+            or getattr(self.cfg.generator, "weight_sync_bucket_stage_timing", False)
+        ):
+            raise ValueError("Bucket pipeline and CUDA stage timing require bucket timing mode")
         bucket_timing = timing_mode != "off"
         if bucket_timing and self._weight_change_probe_publication() is not None:
             raise ValueError("Bucket timing cannot overlap the independent wire-change probe")

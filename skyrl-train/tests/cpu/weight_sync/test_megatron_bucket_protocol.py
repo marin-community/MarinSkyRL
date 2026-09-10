@@ -130,13 +130,14 @@ def gate(request, monkeypatch, tmp_path):
             self.allow_prepare = asyncio.Event()
             self.allow_prepare.set()
             self.receives = 0
+            self.worker_fifo = asyncio.Lock()
             self.corrupt_after_install = False
             self.restart_after_install = False
 
-        async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+        async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id, **options):
             self.entered.set()
             await self.allow_prepare.wait()
-            return [[case.worker.prepare_diagnostic_weight_sync_buckets(payload, manifest_id)]]
+            return [[case.worker.prepare_diagnostic_weight_sync_buckets(payload, manifest_id, **options)]]
 
         async def begin_diagnostic_weight_sync(self, manifest_id, publication_id):
             return [[case.worker.begin_diagnostic_weight_sync(manifest_id, publication_id)]]
@@ -150,8 +151,11 @@ def gate(request, monkeypatch, tmp_path):
                 with condition:
                     assert condition.wait_for(lambda: bool(wire), timeout=5)
 
-            await asyncio.to_thread(transport_ready)
-            result = case.worker.receive_diagnostic_weight_sync_bucket(bucket_id, replay=replay, **identity)
+            # Model the synchronous vLLM worker command queue, including the
+            # transport wait, rather than racing two thread-pool wakeups.
+            async with self.worker_fifo:
+                await asyncio.to_thread(transport_ready)
+                result = case.worker.receive_diagnostic_weight_sync_bucket(bucket_id, replay=replay, **identity)
             if replay and self.restart_after_install:
                 result["identity"]["pid"] += 1
             return [[result]]
@@ -635,4 +639,81 @@ async def test_repeated_cancellation_joins_native_send_before_releasing_policy(g
         release.set()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=10)
+    assert gate.policy._policy_weight_access.owner is None
+
+
+@pytest.mark.asyncio
+async def test_three_buffers_install_replay_and_join_all_slots(gate):
+    gate.policy.cfg.generator.weight_transfer_buffers_in_flight = 3
+    gate.policy.cfg.generator.weight_sync_bucket_pipeline = True
+    result = await gate.policy.diagnostic_bucket_install_and_replay(gate.client)
+    install, replay = result["phases"]["install"], result["phases"]["replay"]
+    assert result["buffer_count"] == 3
+    assert result["prepared_receivers"][0]["buffer_count"] == 3
+    assert install["receivers"][0]["completed_slots"] == list(range(min(3, install["sender"]["bucket_count"])))
+    assert replay["receivers"][0]["coverage"] == 1 and replay["receivers"][0]["mismatches"] == 0
+
+
+@pytest.mark.asyncio
+async def test_send_events_exclude_delayed_actor_completion_handling(gate, monkeypatch):
+    from skyrl_train.weight_sync import worker_bucket_protocol
+
+    clock = [0.0]
+
+    class Timer:
+        def __init__(self, device):
+            self.durations = {}
+
+        def start(self, stage, stream):
+            return stage, clock[0]
+
+        def end(self, token, stream):
+            stage, start = token
+            self.durations[stage] = self.durations.get(stage, 0.0) + clock[0] - start
+
+        def finish(self):
+            return {"stage_seconds": self.durations}
+
+    monkeypatch.setattr(protocol, "CudaPipelineTiming", Timer)
+    monkeypatch.setattr(worker_bucket_protocol, "CudaPipelineTiming", Timer)
+    gate.policy.cfg.generator.weight_sync_bucket_stage_timing = True
+    gate.policy.cfg.generator.weight_sync_bucket_pipeline = True
+    broadcast, shield = torch.distributed.broadcast, asyncio.shield
+
+    def observed_broadcast(tensor, src, group=None):
+        if group == "native-custom-group" and current_thread() is not main_thread():
+            clock[0] += 1.0
+        return broadcast(tensor, src, group=group)
+
+    async def delayed_completion(future):
+        result = await shield(future)
+        clock[0] += 100.0
+        return result
+
+    monkeypatch.setattr(torch.distributed, "broadcast", observed_broadcast)
+    monkeypatch.setattr(asyncio, "shield", delayed_completion)
+    result = await gate.policy.diagnostic_bucket_install_and_replay(gate.client)
+    install, replay = result["phases"]["install"], result["phases"]["replay"]
+    assert install["sender"]["cuda_pipeline_stages"]["stage_seconds"]["nccl_send"] == install["sender"]["bucket_count"]
+    assert "cuda_pipeline_stages" in install["receivers"][0]
+    assert "cuda_pipeline_stages" not in replay["sender"]
+    assert "cuda_pipeline_stages" not in replay["receivers"][0]
+
+
+@pytest.mark.asyncio
+async def test_post_update_export_reserve_is_telemetry_after_preparation(gate, monkeypatch):
+    prepare = gate.client.prepare_diagnostic_weight_sync_buckets
+
+    async def prepare_then_consume_headroom(*args, **kwargs):
+        result = await prepare(*args, **kwargs)
+        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (1, 2000))
+        return result
+
+    monkeypatch.setattr(gate.client, "prepare_diagnostic_weight_sync_buckets", prepare_then_consume_headroom)
+    result = await gate.policy.diagnostic_bucket_install_and_replay(gate.client)
+    phase = result["phases"]["install"]
+    assert phase["free_device_bytes_before"] == 1
+    assert phase["bridge_export_reserve_bytes"] == 2 * phase["largest_full_export_bytes"]
+    assert phase["bridge_export_reserve_bytes"] > phase["free_device_bytes_before"]
+    assert gate.client.receives > 0
     assert gate.policy._policy_weight_access.owner is None

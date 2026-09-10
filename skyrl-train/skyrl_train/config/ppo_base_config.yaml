@@ -401,6 +401,9 @@ generator:
   weight_sync_wire_inventory: false
   # Gate-only: cached buffers, measured install, untimed full replay after every sync.
   weight_sync_timing_mode: "off"  # off | bucket | reference
+  weight_sync_bucket_stage_timing: false # CUDA stage intervals for install only
+  weight_transfer_buffers_in_flight: 2
+  weight_transfer_bucket_bytes: 1073741824
   weight_sync_bucket_pipeline: false  # Prefetch the next export/pack while the current bucket sends.
   publication_pause_timeout_seconds: 30.0
   gpu_memory_utilization: 0.8

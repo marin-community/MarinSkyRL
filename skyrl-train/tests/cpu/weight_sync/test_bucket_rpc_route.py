@@ -120,7 +120,14 @@ def live_client():
 @pytest.mark.parametrize(
     "method,arguments",
     [
-        ("prepare_diagnostic_weight_sync_buckets", {"payload": {"entries": ["weight"]}, "manifest_id": "manifest"}),
+        (
+            "prepare_diagnostic_weight_sync_buckets",
+            {"payload": {"entries": ["weight"]}, "manifest_id": "manifest", "num_buffers": 2, "stage_timing": False},
+        ),
+        (
+            "prepare_diagnostic_weight_sync_buckets",
+            {"payload": {"entries": ["weight"]}, "manifest_id": "manifest", "num_buffers": 3, "stage_timing": True},
+        ),
         ("begin_diagnostic_weight_sync", {"manifest_id": "manifest", "publication_id": 7}),
         ("begin_reference_bucket_sync", {"manifest_id": "manifest", "publication_id": 7}),
         ("finish_reference_bucket_sync", {"manifest_id": "manifest", "publication_id": 7}),

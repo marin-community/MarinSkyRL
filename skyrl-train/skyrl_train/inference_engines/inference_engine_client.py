@@ -884,9 +884,14 @@ class InferenceEngineClient(InferenceEngineInterface):
             raise RuntimeError("Bucket collectives require every configured inference engine")
         return await self._run_on_all_engines(method_name, **kwargs)
 
-    async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+    async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id, *, num_buffers=2, stage_timing=False):
+        options = {}
+        if num_buffers != 2:
+            options["num_buffers"] = num_buffers
+        if stage_timing:
+            options["stage_timing"] = stage_timing
         return await self._run_diagnostic_bucket_rpc(
-            "prepare_diagnostic_weight_sync_buckets", payload=payload, manifest_id=manifest_id
+            "prepare_diagnostic_weight_sync_buckets", payload=payload, manifest_id=manifest_id, **options
         )
 
     async def begin_diagnostic_weight_sync(self, manifest_id: str, publication_id: int):

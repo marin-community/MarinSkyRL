@@ -89,11 +89,18 @@ class StreamingBucketSender(BucketSenderSlots):
     """Pack complete Bridge exports without retaining the complete HF model."""
 
     def __init__(
-        self, manifest: PublicationManifest, sources: Iterator[tuple[str, torch.Tensor]], buffers, *, export_stream=None
+        self,
+        manifest: PublicationManifest,
+        sources: Iterator[tuple[str, torch.Tensor]],
+        buffers,
+        *,
+        export_stream=None,
+        stage_timing=None,
     ):
         super().__init__(manifest, buffers)
         self.sources = iter(sources)
         self.export_stream = export_stream
+        self.stage_timing = stage_timing
         self.source_ready = torch.cuda.Event()
         self.source_copied = torch.cuda.Event()
         self.current_name = None
@@ -108,7 +115,11 @@ class StreamingBucketSender(BucketSenderSlots):
             self.current_source = None
         try:
             with torch.cuda.stream(self.export_stream) if self.export_stream is not None else nullcontext():
+                stream = self.export_stream or torch.cuda.current_stream(self.device)
+                token = self.stage_timing.start("export", stream) if self.stage_timing else None
                 name, source = next(self.sources)
+                if self.stage_timing:
+                    self.stage_timing.end(token, stream)
         except StopIteration as error:
             raise ValueError("Export ended before the complete manifest") from error
         if (
@@ -134,9 +145,12 @@ class StreamingBucketSender(BucketSenderSlots):
             if self.current_name != entry.hf_name:
                 self._next_source(entry)
             with torch.cuda.stream(self.pack_stream):
+                token = self.stage_timing.start("pack", self.pack_stream) if self.stage_timing else None
                 source = self.current_source.view(-1).narrow(0, entry.tensor_offset, entry.numel).view(torch.uint8)
                 buffer.narrow(0, entry.offset, entry.nbytes).copy_(source)
                 self.source_copied.record(self.pack_stream)
+                if self.stage_timing:
+                    self.stage_timing.end(token, self.pack_stream)
         return self.ready_bucket(entries[-1].offset + entries[-1].nbytes)
 
     def finish(self):

@@ -468,10 +468,10 @@ class WorkerWrap:
 
         return read_publication_receiver_state(self)
 
-    def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+    def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id, *, num_buffers=2, stage_timing=False):
         from skyrl_train.weight_sync.worker_bucket_protocol import prepare_worker_buckets
 
-        return prepare_worker_buckets(self, payload, manifest_id)
+        return prepare_worker_buckets(self, payload, manifest_id, num_buffers=num_buffers, stage_timing=stage_timing)
 
     def begin_diagnostic_weight_sync(self, manifest_id, publication_id):
         from skyrl_train.weight_sync.worker_bucket_protocol import begin_worker_bucket_sync
@@ -2147,11 +2147,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def begin_publication_timing(self, step: int):
         return await self._get_engine().collective_rpc("begin_publication_timing", args=(step,))
 
-    async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+    async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id, *, num_buffers=2, stage_timing=False):
         from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 
         return await call_all_receiver_workers(
-            self._get_engine(), "prepare_diagnostic_weight_sync_buckets", args=(payload, manifest_id), kwargs=None
+            self._get_engine(),
+            "prepare_diagnostic_weight_sync_buckets",
+            args=(payload, manifest_id),
+            kwargs={"num_buffers": num_buffers, "stage_timing": stage_timing}
+            if num_buffers != 2 or stage_timing
+            else None,
         )
 
     async def begin_diagnostic_weight_sync(self, manifest_id: str, publication_id: int):

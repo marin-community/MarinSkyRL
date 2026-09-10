@@ -207,9 +207,12 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             terminal_timeout_seconds=terminal_timeout_seconds,
         )
 
-    async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+    async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id, *, num_buffers=2, stage_timing=False):
+        options = {}
+        if num_buffers != 2 or stage_timing:
+            options = {"num_buffers": num_buffers, "stage_timing": stage_timing}
         return await self.inference_engine_actor.prepare_diagnostic_weight_sync_buckets.remote(
-            payload=payload, manifest_id=manifest_id
+            payload=payload, manifest_id=manifest_id, **options
         )
 
     async def begin_diagnostic_weight_sync(self, manifest_id: str, publication_id: int):

@@ -5,6 +5,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import math
 from itertools import chain
 import time
 
@@ -16,6 +17,7 @@ from skyrl_train.weight_sync.bucket_sender import StreamingBucketSender
 from skyrl_train.weight_sync.frozen_source_views import local_source_slices
 from skyrl_train.weight_sync.frozen_source_plan import frozen_source_plan
 from skyrl_train.weight_sync.frozen_view_sender import FrozenViewBucketSender
+from skyrl_train.weight_sync.pipeline_timing import CudaPipelineTiming
 from skyrl_train.weight_sync.manifest import PublicationManifest, TensorSpec, build_manifest
 from skyrl_train.weight_sync.receiver_readback_rpc import group_external_dp_workers
 from skyrl_train.weight_sync.readback_diagnostics import environment_readback, persist_readback
@@ -107,6 +109,15 @@ async def prepare_bucket_transfer(worker, client, *, source_owners):
     generator = worker.cfg.generator
     if generator.model_dtype != "bfloat16":
         raise ValueError("Bucket diagnostic preserves the BF16 export and FP32 router biases")
+    buffer_count = getattr(generator, "weight_transfer_buffers_in_flight", 2)
+    bucket_bytes = getattr(generator, "weight_transfer_bucket_bytes", BUCKET_BYTES)
+    stage_timing_enabled = getattr(generator, "weight_sync_bucket_stage_timing", False)
+    if type(buffer_count) is not int or buffer_count not in (2, 3):
+        raise ValueError("Bucket transfer requires two or three buffers")
+    if type(bucket_bytes) is not int or bucket_bytes not in (BUCKET_BYTES, 2**31):
+        raise ValueError("Bucket transfer requires an approved 1 or 2 GiB capacity")
+    if type(stage_timing_enabled) is not bool:
+        raise ValueError("Bucket stage timing must be boolean")
     rank = torch.distributed.get_rank()
     device = torch.cuda.current_device()
     identity = bucket_identity(device)
@@ -121,7 +132,7 @@ async def prepare_bucket_transfer(worker, client, *, source_owners):
         raise ValueError("The frozen source exporter returned no tensors")
     # The catalogue retains metadata only, not the last converted tensor.
     del tensor
-    manifest = build_manifest(specs, bucket_bytes=BUCKET_BYTES)
+    manifest = build_manifest(specs, bucket_bytes=bucket_bytes)
     hashes = [None] * torch.distributed.get_world_size()
     torch.distributed.all_gather_object(hashes, manifest.manifest_id)
     if any(value != manifest.manifest_id for value in hashes):
@@ -154,10 +165,10 @@ async def prepare_bucket_transfer(worker, client, *, source_owners):
         "scope": "replay-only source task/catalogue construction and CPU group creation/gather/destruction",
     }
     free, total = torch.cuda.mem_get_info(device)
-    if free < 2 * BUCKET_BYTES + MAX_REPLAY_EXTRA_BYTES:
-        raise ValueError("A policy rank lacks headroom for both transfer buffers")
+    if free < buffer_count * bucket_bytes + MAX_REPLAY_EXTRA_BYTES:
+        raise ValueError("A policy rank lacks headroom for every transfer buffer")
     allocated_before = torch.cuda.memory_allocated(device)
-    buffers = tuple(torch.empty(BUCKET_BYTES, device=device, dtype=torch.uint8) for _ in range(2))
+    buffers = tuple(torch.empty(bucket_bytes, device=device, dtype=torch.uint8) for _ in range(buffer_count))
     buffer_delta = torch.cuda.memory_allocated(device) - allocated_before
     engine_count = generator.num_inference_engines
     ranks_per_engine = (
@@ -168,8 +179,15 @@ async def prepare_bucket_transfer(worker, client, *, source_owners):
     prepared_receivers = None
     receiver_identities = None
     if rank == 0:
+        receiver_options = {}
+        if buffer_count != 2:
+            receiver_options["num_buffers"] = buffer_count
+        if stage_timing_enabled:
+            receiver_options["stage_timing"] = True
         prepared_receivers, receiver_identities = receiver_rows(
-            await client.prepare_diagnostic_weight_sync_buckets(asdict(manifest), manifest.manifest_id),
+            await client.prepare_diagnostic_weight_sync_buckets(
+                asdict(manifest), manifest.manifest_id, **receiver_options
+            ),
             engine_count=engine_count,
             ranks_per_engine=ranks_per_engine,
             data_parallel_size=generator.inference_engine_data_parallel_size,
@@ -203,6 +221,8 @@ async def prepare_bucket_transfer(worker, client, *, source_owners):
             "free_bytes_before_buffers": free,
             "total_device_bytes": total,
             "buffer_allocated_delta": buffer_delta,
+            "buffer_count": buffer_count,
+            "bucket_bytes": bucket_bytes,
             "preparation_seconds": preparation_seconds,
             "prepared_receivers": prepared_receivers,
             "timing_scope": "install includes complete export, pack, transfer, load joins and final barrier; receipt persistence and replay excluded",
@@ -244,13 +264,26 @@ async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, 
     torch.cuda.synchronize(device)
     allocated_at_phase = torch.cuda.memory_allocated(device)
     free_at_phase = torch.cuda.mem_get_info(device)[0]
+    # Report the post-update free space and a declared group/stack estimate.
+    # Existing storage may alias parameters; this is not an incremental allocation bound.
+    largest_export_bytes = max(
+        math.prod(entry.full_shape) * getattr(torch, entry.wire_dtype).itemsize for entry in manifest.entries
+    )
+    export_reserve_bytes = 2 * largest_export_bytes
     torch.cuda.reset_peak_memory_stats(device)
     started = time.monotonic()
+    stage_timing = (
+        CudaPipelineTiming(device)
+        if not replay and getattr(generator, "weight_sync_bucket_stage_timing", False)
+        else None
+    )
     sender = (
         FrozenViewBucketSender(manifest, source_plan, local_sources, buffers)
         if replay
         else StreamingBucketSender(manifest, complete_exports(worker), buffers)
     )
+    if not replay:
+        sender.stage_timing = stage_timing
     pipeline = not replay and getattr(generator, "weight_sync_bucket_pipeline", False)
     if pipeline:
         sender.export_stream = torch.cuda.Stream(device=device)
@@ -280,7 +313,10 @@ async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, 
                 def broadcast():
                     # Keep dispatch on the caller's stream while the actor loop services RPCs.
                     with torch.cuda.device(device), torch.cuda.stream(send_stream):
+                        token = stage_timing.start("nccl_send", send_stream) if stage_timing else None
                         torch.distributed.broadcast(buffer, 0, group=worker._model_update_group)
+                        if stage_timing:
+                            stage_timing.end(token, send_stream)
 
                 send_task = asyncio.create_task(asyncio.to_thread(broadcast))
                 native_sends.append(send_task)
@@ -322,6 +358,8 @@ async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, 
         await join_native_work(issued_receives)
         raise
     sender_receipt = sender.finish()
+    if stage_timing:
+        sender_receipt["cuda_pipeline_stages"] = stage_timing.finish()
     receivers = None
     if rank == 0:
         method = client.finish_diagnostic_weight_sync_replay if replay else client.finish_diagnostic_weight_sync_install
@@ -344,6 +382,9 @@ async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, 
         "allocated_after": torch.cuda.memory_allocated(device),
         "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
         "free_device_bytes_before": free_at_phase,
+        "largest_full_export_bytes": largest_export_bytes,
+        "bridge_export_reserve_bytes": export_reserve_bytes if not replay else 0,
+        "bridge_reserve_scope": "telemetry only; twice largest full export is not a proven incremental allocation bound; native peak remains authoritative",
         "free_device_bytes_after": torch.cuda.mem_get_info(device)[0],
         "memory_scope": "Torch allocator peak plus device-free endpoints; external allocator peak unmeasured",
         "sender": sender_receipt,
@@ -421,7 +462,9 @@ def validate_bucket_phase(prepared, receipt, *, replay, rank):
                     or row["replay_peak_extra_bytes"] > MAX_REPLAY_EXTRA_BYTES
                 ):
                     raise ValueError("Full-byte replay or its allocation gate failed")
-            elif not row["install_complete"] or row["completed_slots"] != list(range(min(2, manifest.bucket_count))):
+            elif not row["install_complete"] or row["completed_slots"] != list(
+                range(min(len(prepared.buffers), manifest.bucket_count))
+            ):
                 raise ValueError("Receiver installation did not join every used load slot")
     if replay and receipt["peak_extra_bytes"] > MAX_REPLAY_EXTRA_BYTES:
         raise ValueError("Sender replay introduced more than 1 MiB of additional allocation")
