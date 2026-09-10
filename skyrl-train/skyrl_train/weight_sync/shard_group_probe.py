@@ -14,6 +14,7 @@ import socket
 import time
 
 import ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import torch
 import torch.distributed as dist
 
@@ -33,7 +34,9 @@ def tiny_schedule(receiver_replicas: int, payload_bytes: int, *, ep: int = 1) ->
     if receiver_replicas not in (2, 4):
         raise ValueError("The native fixture requires two or four receiver replicas")
     trainers = tuple(TrainerRank(pp * ep + k, 0, pp, k) for pp in range(2) for k in range(ep))
-    receivers = tuple(ReceiverRank(replica * ep + k, replica, k) for replica in range(receiver_replicas) for k in range(ep))
+    receivers = tuple(
+        ReceiverRank(replica * ep + k, replica, k) for replica in range(receiver_replicas) for k in range(ep)
+    )
     entries = tuple(
         ExpertEntry(f"layer{layer}.expert{expert}.{projection}", layer, layer, expert, projection, payload_bytes)
         for layer in range(2)
@@ -104,12 +107,19 @@ class ShardProbeRank:
         return row
 
     def describe(self) -> dict:
+        device = None
+        if self.backend == "nccl":
+            properties = torch.cuda.get_device_properties(self.device)
+            device = {"name": properties.name, "uuid": str(properties.uuid), "local_ordinal": self.device.index}
         return self.record(
             "ready",
             default_world=dist.get_world_size(),
             default_rank=dist.get_rank(),
             environment={key: os.environ.get(key) for key in ENVIRONMENT_KEYS},
             cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+            device=device,
+            torch_version=torch.__version__,
+            cuda_version=torch.version.cuda,
             address=ray.util.get_node_ip_address(),
             port=get_free_port(),
             counters=port_counters(),
@@ -170,18 +180,54 @@ class ShardProbeRank:
         return self.record("closed", network_log=network_log_readback())
 
 
-def run_group_probe(schedule: ShardGroupSchedule, backend: str, output: str, measurement_started=None) -> dict:
+def validate_role_hosts(rows: list[dict], trainer_count: int) -> None:
+    """Require one physical/Ray host per role and distinct hosts across roles."""
+    identities = []
+    for role in (rows[:trainer_count], rows[trainer_count:]):
+        if not role or any(not row.get("physical_node") or not row.get("ray_node_id") for row in role):
+            raise ValueError("Missing physical host or Ray node identity")
+        physical = {row["physical_node"] for row in role}
+        nodes = {row["ray_node_id"] for row in role}
+        if len(physical) != 1 or len(nodes) != 1:
+            raise ValueError("Each role requires one physical host and Ray node")
+        identities.append((physical.pop(), nodes.pop()))
+    if identities[0][0] == identities[1][0] or identities[0][1] == identities[1][1]:
+        raise ValueError("Trainer and receiver roles require distinct physical hosts and Ray nodes")
+
+
+def run_group_probe(
+    schedule: ShardGroupSchedule, backend: str, output: str, measurement_started=None, *, two_hosts: bool = False
+) -> dict:
     """Execute every scheduled collective through real Ray actors and custom PGs."""
     if backend not in ("gloo", "nccl") or max(item.nbytes for item in schedule.broadcasts) > 32 * 1024**2:
         raise ValueError("Unsupported native fixture backend or allocation")
+    if backend == "nccl" and not two_hosts:
+        raise ValueError("The native NCCL fixture requires explicit two-host placement")
     result = {"schedule": asdict(schedule), "ready": [], "groups": [], "broadcasts": [], "cleanup": [], "error": None}
     actors = []
     try:
         actor_type = ray.remote(num_cpus=1, num_gpus=1 if backend == "nccl" else 0)(ShardProbeRank)
-        count = len(schedule.trainer_global_ranks) + len(schedule.receiver_global_ranks)
-        actors = [actor_type.remote(rank, schedule, backend, output) for rank in range(count)]
+        trainer_count = len(schedule.trainer_global_ranks)
+        count = trainer_count + len(schedule.receiver_global_ranks)
+        nodes = []
+        if two_hosts:
+            resource, minimum = ("GPU", 8) if backend == "nccl" else ("CPU", max(trainer_count, count - trainer_count))
+            nodes = sorted(
+                row["NodeID"] for row in ray.nodes() if row["Alive"] and row["Resources"].get(resource, 0) >= minimum
+            )
+            if len(nodes) != 2:
+                raise ValueError("Expected exactly two qualified native Ray nodes")
+        for rank in range(count):
+            selected = actor_type
+            if two_hosts:
+                selected = selected.options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(nodes[int(rank >= trainer_count)], soft=False)
+                )
+            actors.append(selected.remote(rank, schedule, backend, output))
         ready = ray.get([actor.describe.remote() for actor in actors], timeout=90)
         result["ready"] = ready
+        if two_hosts:
+            validate_role_hosts(ready, trainer_count)
         if any(row["default_world"] != 1 or row["default_rank"] != 0 for row in ready):
             raise ValueError("Expected independent default worlds")
         if any(row["environment"] != ready[0]["environment"] for row in ready):
@@ -197,7 +243,7 @@ def run_group_probe(schedule: ShardGroupSchedule, backend: str, output: str, mea
                 )
             )
         if measurement_started is not None:
-            measurement_started()
+            measurement_started(result)
         for index, item in enumerate(schedule.broadcasts):
             result["broadcasts"].extend(
                 ray.get(

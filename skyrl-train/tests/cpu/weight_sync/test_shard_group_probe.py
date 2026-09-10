@@ -4,11 +4,13 @@ import hashlib
 
 import pytest
 import ray
+from ray.cluster_utils import Cluster
 
-from skyrl_train.weight_sync.shard_group_probe import port_counters, run_group_probe, tiny_schedule
+from skyrl_train.weight_sync.shard_group_probe import port_counters, run_group_probe, tiny_schedule, validate_role_hosts
+from skyrl_train.entrypoints.probe_shard_groups import persist, require_unmeasured
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def native_ray():
     ray.init(num_cpus=8, include_dashboard=False)
     yield
@@ -18,10 +20,16 @@ def native_ray():
 @pytest.mark.parametrize("receivers,ep", [(2, 1), (4, 1), (2, 2)])
 def test_native_groups_deliver_every_byte_from_alternating_pp_roots(tmp_path, native_ray, receivers, ep):
     schedule = tiny_schedule(receivers, 257, ep=ep)
-    result = run_group_probe(schedule, "gloo", str(tmp_path))
+    markers = []
+
+    def measured(state):
+        markers.append((len(state["ready"]), len(state["groups"]), len(state["broadcasts"])))
+
+    result = run_group_probe(schedule, "gloo", str(tmp_path), measured)
     assert result["error"] is None, result["error"]
     assert "cleanup_error" not in result, result.get("cleanup_error")
     count = (2 + receivers) * ep
+    assert markers == [(count, count, 0)]
     assert len(result["ready"]) == len(result["groups"]) == len(result["cleanup"]) == count
     assert len({row["pid"] for row in result["ready"]}) == count
     for index, item in enumerate(schedule.broadcasts):
@@ -47,3 +55,61 @@ def test_port_readback_retains_raw_units_and_missing_counter_error(tmp_path):
     ]
     (directory / "port_rcv_data").unlink()
     assert "FileNotFoundError" in port_counters(tmp_path)["ports"][0]["error"]
+
+
+@pytest.mark.parametrize("fault", ["same_host", "same_ray_node", "missing", "split_role"])
+def test_role_placement_rejects_incomplete_or_shared_physical_host(fault):
+    rows = [
+        {"physical_node": "sender-host" if rank < 2 else "receiver-host", "ray_node_id": "a" if rank < 2 else "b"}
+        for rank in range(6)
+    ]
+    validate_role_hosts(rows, 2)
+    if fault == "same_host":
+        for row in rows:
+            row["physical_node"] = "one-host"
+    elif fault == "same_ray_node":
+        for row in rows:
+            row["ray_node_id"] = "one-node"
+    elif fault == "missing":
+        rows[0]["physical_node"] = None
+    else:
+        rows[3]["physical_node"] = "third-host"
+    with pytest.raises(ValueError):
+        validate_role_hosts(rows, 2)
+
+
+def test_two_actual_ray_nodes_on_one_physical_host_fail_before_group_init(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_NODE_NAME", "one-physical-cpu-host")
+    cluster = Cluster()
+    try:
+        for _ in range(2):
+            cluster.add_node(num_cpus=4, include_dashboard=False, object_store_memory=80 * 1024**2)
+        ray.init(address=cluster.address)
+        result = run_group_probe(tiny_schedule(4, 257), "gloo", str(tmp_path), two_hosts=True)
+    finally:
+        ray.shutdown()
+        cluster.shutdown()
+    assert "distinct physical hosts" in result["error"]
+    assert result["groups"] == result["broadcasts"] == []
+    assert len(result["cleanup"]) == 6
+    assert len({row["ray_node_id"] for row in result["ready"][:2]}) == 1
+    assert len({row["ray_node_id"] for row in result["ready"][2:]}) == 1
+    assert len({row["ray_node_id"] for row in result["ready"]}) == 2
+
+
+def test_prior_native_attempt_marker_prevents_remeasurement(tmp_path):
+    persist(str(tmp_path / "attempts/startup-only/entered.json"), {"attempt": "startup-only"})
+    require_unmeasured(str(tmp_path))
+    receipt = persist(str(tmp_path / "attempts/measured/measurement-started.json"), {"attempt": "measured"})
+    assert receipt["bytes"] == len((tmp_path / "attempts/measured/measurement-started.json").read_bytes())
+    with pytest.raises(ValueError, match="measured attempt"):
+        require_unmeasured(str(tmp_path))
+
+
+def test_measurement_marker_lookup_fails_closed_on_storage_error(tmp_path, monkeypatch):
+    def unavailable(path):
+        raise PermissionError("storage unavailable")
+
+    monkeypatch.setattr("skyrl_train.entrypoints.probe_shard_groups.find_files", unavailable)
+    with pytest.raises(PermissionError):
+        require_unmeasured(str(tmp_path))
