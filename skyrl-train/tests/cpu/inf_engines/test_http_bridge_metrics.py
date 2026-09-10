@@ -11,8 +11,11 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator, IntervalReadMode
 
 
+TEST_MODEL_NAME = "test-model"
+
+
 class _Backend:
-    model_name = "test-model"
+    model_name = TEST_MODEL_NAME
 
     async def chat_completion(self, _request):
         return {"choices": [{"message": {"content": "ok"}}]}
@@ -61,7 +64,7 @@ class _Tokenizer:
 def _tokenizing_backend() -> InferenceEngineClient:
     config = OmegaConf.create(
         {
-            "trainer": {"policy": {"model": {"path": "test-model"}}},
+            "trainer": {"policy": {"model": {"path": TEST_MODEL_NAME}}},
             "generator": {
                 "backend": "vllm",
                 "enable_http_endpoint": False,
@@ -88,7 +91,7 @@ async def test_tokenize_renders_chat_with_inference_client_tokenizer(add_generat
         response = await client.post(
             "/tokenize",
             json={
-                "model": "test-model",
+                "model": TEST_MODEL_NAME,
                 "messages": [
                     {"role": "system", "content": "system"},
                     {"role": "user", "content": "continue"},

@@ -9,7 +9,11 @@ from skyrl_train.inference_engines.vllm.stats import (
     IntervalReadMode,
     InferenceStatsSnapshot,
 )
-from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
+from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
+    ErrorResponse,
+    ErrorInfo,
+    TokenizeRequest,
+)
 from transformers import PreTrainedTokenizerBase
 import asyncio
 from typing import List, Any, Optional, Dict, Union
@@ -312,28 +316,28 @@ class InferenceEngineClient(InferenceEngineInterface):
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
         )
 
-    def tokenize(self, request_payload: Dict[str, Any]) -> List[int]:
-        """Render a vLLM-compatible chat tokenization request."""
-        add_generation_prompt = request_payload.get("add_generation_prompt", True)
-        continue_final_message = request_payload.get("continue_final_message", False)
+    def tokenize(self, request: TokenizeRequest) -> List[int]:
+        """Return token IDs for a validated vLLM-compatible chat request."""
+        add_generation_prompt = request.add_generation_prompt
+        continue_final_message = request.continue_final_message
         if add_generation_prompt and continue_final_message:
             raise ValueError("Cannot set both `continue_final_message` and `add_generation_prompt` to True.")
 
-        template_kwargs = dict(request_payload.get("chat_template_kwargs") or {})
+        template_kwargs = dict(request.chat_template_kwargs or {})
         template_kwargs["add_generation_prompt"] = add_generation_prompt
         template_kwargs["continue_final_message"] = continue_final_message
-        if request_payload.get("tools") is not None:
-            template_kwargs["tools"] = request_payload["tools"]
+        if request.tools is not None:
+            template_kwargs["tools"] = request.tools
 
         prompt = self.tokenizer.apply_chat_template(
-            request_payload["messages"],
-            chat_template=request_payload.get("chat_template"),
+            request.messages,
+            chat_template=request.chat_template,
             tokenize=False,
             **template_kwargs,
         )
         return self.tokenizer.encode(
             prompt,
-            add_special_tokens=request_payload.get("add_special_tokens", False),
+            add_special_tokens=request.add_special_tokens,
         )
 
     async def _generate_single_with_retry(
