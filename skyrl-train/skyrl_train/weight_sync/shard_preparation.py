@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 import hashlib
 import json
+import time
 
 import torch
 import torch.distributed as dist
@@ -146,6 +147,7 @@ def collect_policy_preparation(worker, preparation_id, geometry, parallel_state,
         raise ValueError("Live source preparation requires a durable allocation receipt sink")
     token = worker._policy_weight_access.acquire("shard-native-preparation")
     device, before = None, None
+    started = time.monotonic()
     try:
         device = next(worker.actor_module[0].parameters()).device
         before = _allocation_state(device)
@@ -177,6 +179,7 @@ def collect_policy_preparation(worker, preparation_id, geometry, parallel_state,
             "native_groups": groups,
             "geometry": geometry,
         }
+        metadata["source_setup_seconds"] = time.monotonic() - started
         metadata["source_setup_allocation"] = {"before": before, "after": _allocation_state(device)}
         capture(
             {
@@ -185,6 +188,7 @@ def collect_policy_preparation(worker, preparation_id, geometry, parallel_state,
                 "identity": identity,
                 "phase": "source-metadata",
                 "source_setup_allocation": metadata["source_setup_allocation"],
+                "source_setup_seconds": metadata["source_setup_seconds"],
             }
         )
         worker._shard_preparation = LocalPreparation(
@@ -197,6 +201,7 @@ def collect_policy_preparation(worker, preparation_id, geometry, parallel_state,
             "rank": rank,
             "identity": identity,
             "phase": "source-metadata-failed",
+            "source_setup_seconds": time.monotonic() - started,
             "error_type": type(primary).__name__,
             "error": str(primary)[:4096],
             "allocation_before": before,
@@ -410,6 +415,7 @@ def bind_live_preparation(worker, plan, parallel_state, capture):
     if device.type == "cuda" and before["free_bytes"] < required + plan.options.minimum_free_bytes:
         raise ValueError("Actual native free memory does not satisfy prepared workspace headroom")
     state.phase = PreparationPhase.BINDING
+    started = time.monotonic()
     receipt = {
         "preparation_id": plan.preparation_id,
         "plan_id": plan.plan_id,
@@ -476,6 +482,7 @@ def bind_live_preparation(worker, plan, parallel_state, capture):
                     primary = error
                 else:
                     primary.add_note(f"Preparation allocation readback: {type(error).__name__}: {error}")
+            receipt["binding_seconds"] = time.monotonic() - started
             try:
                 capture(receipt)
             except BaseException as error:

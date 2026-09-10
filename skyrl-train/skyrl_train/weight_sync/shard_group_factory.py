@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import timedelta
+from urllib.parse import urlparse
 
 import torch.distributed as dist
 
@@ -15,6 +16,7 @@ class GroupEndpoint:
     backend: str
     init_method: str
     timeout_seconds: int
+    store_namespace: str | None = None
 
 
 def prepare_rank_groups(rank, endpoints):
@@ -40,14 +42,45 @@ def prepare_rank_groups(rank, endpoints):
             or item.timeout_seconds <= 0
         ):
             raise ValueError("Group endpoint has invalid identity, membership or bounded backend settings")
+    reserved = [(item.init_method, item.store_namespace) for item in endpoints if item.store_namespace is not None]
+    if len(set(reserved)) != len(reserved):
+        raise ValueError("Reserved groups must have independent store namespaces")
+    for item in endpoints:
+        if item.store_namespace is not None:
+            address = urlparse(item.init_method)
+            if (
+                not item.store_namespace
+                or address.scheme != "tcp"
+                or not address.hostname
+                or address.port is None
+                or not 0 < address.port < 65536
+                or address.path
+                or address.query
+                or address.fragment
+                or address.username
+                or address.password
+            ):
+                raise ValueError("Reserved group store needs an explicit TCP endpoint and namespace")
     groups = {}
     try:
         for item in endpoints:
             if rank not in item.members:
                 continue
+            rendezvous = {"init_method": item.init_method}
+            if item.store_namespace is not None:
+                address = urlparse(item.init_method)
+                client = dist.TCPStore(
+                    address.hostname,
+                    address.port,
+                    world_size=None,
+                    is_master=False,
+                    timeout=timedelta(seconds=item.timeout_seconds),
+                    wait_for_workers=False,
+                )
+                rendezvous = {"store": dist.PrefixStore(item.store_namespace, client)}
             groups[item.name] = init_custom_process_group(
                 item.backend,
-                init_method=item.init_method,
+                **rendezvous,
                 rank=item.members.index(rank),
                 world_size=len(item.members),
                 group_name=item.name,

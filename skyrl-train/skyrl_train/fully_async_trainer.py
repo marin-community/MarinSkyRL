@@ -1657,6 +1657,23 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             self._bucket_timing_prepared = False
 
+    def native_prepared_shard_diagnostic(
+        self, preparation_id, geometry, options, *, store_node_id, backend, timeout_seconds, output_uri, capture
+    ):
+        from skyrl_train.weight_sync.shard_rendezvous import native_prepared_shard_diagnostic
+
+        return native_prepared_shard_diagnostic(
+            self,
+            preparation_id,
+            geometry,
+            options,
+            store_node_id=store_node_id,
+            backend=backend,
+            timeout_seconds=timeout_seconds,
+            output_uri=output_uri,
+            capture=capture,
+        )
+
     def prepared_shard_diagnostic(self, preparation_id, geometry, options, *, endpoint_factory, output_uri, capture):
         from skyrl_train.weight_sync.shard_coordinator import prepared_shard_diagnostic
 
