@@ -456,7 +456,23 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
 def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
     """Copy and validate an object-store HF export on this allocated node."""
     source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_identity)
+    started = time.monotonic()
     artifact = materialize(source, validate=validate_portable_hf_model_files)
+    receipt = {
+        "schema": "model-staging-v1",
+        "task_id": os.environ.get("IRIS_TASK_ID", ""),
+        "attempt_uid": os.environ.get("IRIS_ATTEMPT_UID", ""),
+        "physical_node": os.environ.get("IRIS_NODE_NAME", ""),
+        "rank": _rank(),
+        "num_tasks": _num_tasks(),
+        "source_identity": source.identity,
+        "source_uri": source.uri,
+        "local_path": source.local_path,
+        "file_count": len(artifact.files),
+        "seconds": time.monotonic() - started,
+        "scope": "one task per node, before Ray workers start",
+    }
+    _log("MODEL_STAGING_RECEIPT " + json.dumps(receipt, sort_keys=True))
     _log(
         f"Model export staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
         f"({len(artifact.files)} files, identity={source.identity})"
