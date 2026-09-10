@@ -38,6 +38,7 @@ from cloud.iris.rl_config_translation import (
     apply_context_budget_overrides,
     build_checkpoint_export_hydra_args,
     build_skyrl_hydra_args,
+    dedupe_hydra_args,
     get_skyrl_command_preview,
     materialize_rl_config,
     parse_checkpoint_export_config,
@@ -223,7 +224,10 @@ class LocalRLRunner:
         """Run the policy-only conversion pipeline without training setup."""
         parsed = parse_checkpoint_export_config(rl_config_path, model_override=self.config.model_path)
         hydra_args = build_checkpoint_export_hydra_args(parsed, exp_args, hpc)
-        hydra_args.extend(self.config.skyrl_overrides)
+        # Hydra is last-wins, so an override that repeats a config-derived key is
+        # already decided; collapsing it keeps the recorded arguments honest about
+        # what actually applied.
+        hydra_args = dedupe_hydra_args(hydra_args + list(self.config.skyrl_overrides))
         print(f"Loaded RL config: {parsed.config_path}")
         self._write_resolved_config(CHECKPOINT_EXPORT_ENTRYPOINT, hydra_args, parsed.config_path)
         if self.config.dry_run:
@@ -290,7 +294,7 @@ class LocalRLRunner:
         print(f"Loaded RL config: {parsed.config_path}")
 
         if skyrl_overrides:
-            hydra_args.extend(skyrl_overrides)
+            hydra_args = dedupe_hydra_args(hydra_args + skyrl_overrides)
 
         self._write_resolved_config(entrypoint, hydra_args, parsed.config_path)
 

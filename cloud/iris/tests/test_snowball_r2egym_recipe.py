@@ -214,6 +214,20 @@ def test_dedupe_collapses_the_golden_duplicates_to_their_last_value(golden, pars
     assert parse_hydra_overrides(deduped)["trainer.logger"] == "wandb"
 
 
+def test_a_cli_override_that_repeats_a_config_key_collapses_to_one_argument(golden):
+    """The composition the training driver relies on when it splices overrides in.
+
+    The driver appends every ``--skyrl_override`` after the config-derived block.
+    Hydra was always going to apply the override's value, so collapsing the pair
+    changes nothing except that the recorded argument list stops claiming both.
+    """
+    rendered = _render(golden)
+    spliced = dedupe_hydra_args(rendered + ["trainer.logger=console"])
+
+    assert [arg for arg in spliced if arg.startswith("trainer.logger=")] == ["trainer.logger=console"]
+    assert len(spliced) == len(rendered)
+
+
 def test_hf_overrides_renders_as_one_dict_argument(golden):
     """RoPE widening is an opaque passthrough, not one Hydra key per HF field."""
     rendered = _render(golden)
