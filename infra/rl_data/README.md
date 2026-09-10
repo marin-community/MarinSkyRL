@@ -95,17 +95,13 @@ The DAPO adapter streams by default and stops after 20,000 unique prompts unless
 regressions that collapse the dataset to a shared instruction prefix. MATH-500 is rejected as
 a training source unless `--allow-train-on-test` is explicit.
 
-`gretel_text_to_sql` (`gretelai/synthetic_text_to_sql`, Apache-2.0) is a single-turn text-to-SQL
-source on the `text_to_sql` verifier. The prompt carries the question and the `CREATE TABLE`
-schema only; the seed `INSERT`s and the reference query travel in `reward_model.ground_truth` as
-a JSON object. The verifier rebuilds an in-memory SQLite database from that DDL and scores
-result-set equivalence — column count and column order compared, column aliases ignored, row
-order compared only when the reference has a top-level `ORDER BY` — on the seeded database and on
-a copy with every third row deleted, so a query returning a hard-coded literal fails the second
-grade. The candidate query runs read-only under a single-statement check, a keyword blocklist,
-and a SQLite authorizer. The source transform is static: rows with a non-`SELECT`, multi-statement,
-clock/RNG-dependent, or schema-qualified-DDL reference, or with no `INSERT`s, are dropped during
-conversion. Whether the reference query actually executes is checked once per row by the
-contract's two-sided `validate_example` preflight against the reference itself and `SELECT 1` —
-unlike the code sources, this one can run that preflight because the "program" is a `SELECT`
-over an ephemeral in-memory database with no filesystem or network.
+`gretel_text_to_sql` (`gretelai/synthetic_text_to_sql`, Apache-2.0) is a single-turn source on the
+two-sided `text_to_sql` verifier contract, which rebuilds an in-memory SQLite database from each
+row's DDL and scores a candidate query by result-set equivalence on the seeded database and on a
+copy with every third row removed. The prompt carries the question and `CREATE TABLE` schema; the
+seed `INSERT`s and reference query travel in `reward_model.ground_truth`. `sql_complexity`,
+`sql_task_type`, `domain`, and whether the reference has a top-level `ORDER BY` are retained in
+`extra_info`. The static transform drops rows whose reference is not a single deterministic
+`SELECT` or whose context lacks unqualified `CREATE TABLE` and `INSERT` statements. Unlike the
+code sources, `validate_example` runs the reference here — a `SELECT` over an ephemeral database
+has no filesystem or network — so every emitted row has an executing reference query.

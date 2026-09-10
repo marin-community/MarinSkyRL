@@ -16,6 +16,7 @@ import numpy as np
 import reasoning_gym
 import requests
 from skyrl_gym.envs.aime.utils import last_boxed_only_string, remove_boxed
+from skyrl_gym.envs.text_to_sql import scoring as t2s
 
 from infra.rl_data.contracts import VerifierDataContract
 
@@ -682,8 +683,6 @@ def _prepare_gretel_text_to_sql(
 ) -> PreparedRow:
     """Static transform only. Whether the reference query actually executes is checked once, by the
     contract's two-sided ``validate_example`` preflight — not in bulk here."""
-    from skyrl_gym.envs.text_to_sql import scoring as t2s
-
     source = gretel_text_to_sql_source()
     question = example.get("sql_prompt")
     context = example.get("sql_context")
