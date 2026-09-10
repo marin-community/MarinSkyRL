@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import ray
@@ -39,7 +40,10 @@ def fixture_plan():
     catalogue = tuple(
         ReplicaCatalogue(
             row.rank,
-            (ReplicaTensor(f"expert{row.ep}", (16,), "bfloat16", True), ReplicaTensor("dense", (4,), "float32", False)),
+            (
+                ReplicaTensor(f"expert{row.ep}", (139,), "bfloat16", True),
+                ReplicaTensor("dense", (4,), "float32", False),
+            ),
         )
         for row in trainers
     )
@@ -52,7 +56,7 @@ class ReplicaActor:
         self.borrowed = borrowed
         ep = rank % 2
         self.sources = {
-            f"expert{ep}": torch.arange(16, dtype=torch.bfloat16) + ep,
+            f"expert{ep}": torch.arange(139, dtype=torch.bfloat16) + ep,
             "dense": torch.tensor([0, -2147483648, 2143289345, 1065353216], dtype=torch.int32).view(torch.float32),
         }
         self.original = {name: value.view(torch.uint8).clone() for name, value in self.sources.items()}
@@ -111,9 +115,17 @@ class ReplicaActor:
             # Both DP copies in EP1 agree, so only the cross-EP dense proof bites.
             self.sources["dense"].view(torch.uint8)[3] ^= 128
         before = {name: value.view(torch.uint8).clone() for name, value in self.sources.items()}
-        result = self.comparator(self.sources, "manifest", 7, self.rank)
+        native_broadcast = dist.broadcast
+        broadcast_sizes = []
+
+        def measured_broadcast(tensor, *args, **kwargs):
+            broadcast_sizes.append(tensor.numel())
+            return native_broadcast(tensor, *args, **kwargs)
+
+        with patch.object(dist, "broadcast", side_effect=measured_broadcast):
+            result = self.comparator(self.sources, "manifest", 7, self.rank)
         assert all(torch.equal(value.view(torch.uint8), before[name]) for name, value in self.sources.items())
-        return result, self.comparator.last_receipt
+        return result, {**self.comparator.last_receipt, "observed_broadcast_sizes": broadcast_sizes}
 
     def close(self):
         for group in reversed(tuple(self.groups.values())):
@@ -139,8 +151,11 @@ def actors(tmp_path_factory, request):
 @pytest.mark.parametrize("fault", ["none", "expert", "dense"])
 def test_actual_custom_groups_compare_every_source_bit_without_mutation(actors, fault):
     results = ray.get([actor.compare.remote(fault) for actor in actors], timeout=60)
-    assert all(proof.compared_bytes == proof.expected_bytes == 48 for proof, _ in results)
+    assert all(proof.compared_bytes == proof.expected_bytes == 294 for proof, _ in results)
     assert all(len(receipt["groups"]) == 2 for _, receipt in results)
+    # 278 expert bytes use five 64-byte transfers; dense 16-byte storage is
+    # compared once in each group. The 17-byte bool scratch only chunks compares.
+    assert all(sorted(receipt["observed_broadcast_sizes"]) == [16, 16, 22, 64, 64, 64, 64] for _, receipt in results)
     if fault == "none":
         assert all(proof.mismatches == 0 for proof, _ in results)
     elif fault == "expert":

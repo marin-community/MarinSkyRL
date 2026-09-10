@@ -183,7 +183,9 @@ class FullReplicaComparator:
         if self.transfer.is_cuda:
             torch.cuda.synchronize(self.transfer.device)
         rows, unique_bytes, total_mismatches = [], 0, 0
-        count = min(self.transfer.numel(), self.comparison.numel())
+        # Network chunks use the existing transfer workspace. The local byte
+        # comparator independently splits each received chunk by bool scratch.
+        count = self.transfer.numel()
         for item in self.plan.groups:
             if rank not in item.members:
                 continue
