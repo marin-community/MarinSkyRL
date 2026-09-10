@@ -151,3 +151,29 @@ def test_pending_native_send_event_prevents_complete_receipt(cuda_boundary, monk
     monkeypatch.setattr(cuda_boundary.event_type, "query", lambda event: False)
     with pytest.raises(RuntimeError, match="remains pending"):
         sender.finish()
+
+
+@pytest.mark.parametrize("slot_count", [2, 3])
+def test_ring_slots_preserve_bytes_across_wraparound_and_join_every_send(cuda_boundary, slot_count):
+    tensor = torch.arange(40, dtype=torch.bfloat16).reshape(10, 2, 2)
+    manifest = build_manifest([TensorSpec("weight", (10, 2, 2), "bfloat16", True)], bucket_bytes=16)
+    buffers = tuple(torch.empty(16, dtype=torch.uint8) for _ in range(slot_count))
+    sender = StreamingBucketSender(manifest, iter([("weight", tensor)]), buffers)
+    chunks = []
+    for bucket in range(manifest.bucket_count):
+        chunks.append(sender.pack_next_bucket().clone())
+        sender.mark_bucket_sent(bucket)
+    receipt = sender.finish()
+    assert torch.equal(torch.cat(chunks), tensor.view(torch.uint8).flatten())
+    assert receipt["wire_bytes"] == 80 and receipt["send_completion_joined"]
+    for event in range(slot_count, 2 * slot_count):
+        assert ("join", event) in cuda_boundary.log
+    for reused_slot in range(min(slot_count, manifest.bucket_count - slot_count)):
+        event = slot_count + reused_slot
+        assert cuda_boundary.log.index(("record", "caller", event)) < cuda_boundary.log.index(("wait", "pack", event))
+
+
+def test_three_slot_ring_rejects_alias_of_last_slot(cuda_boundary):
+    manifest, sources, buffers = fixture_parts()
+    with pytest.raises(ValueError, match="must not alias"):
+        StreamingBucketSender(manifest, iter(sources.items()), (*buffers, buffers[1]))

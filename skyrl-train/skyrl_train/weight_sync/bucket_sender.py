@@ -18,10 +18,10 @@ class BucketSenderSlots:
     def __init__(
         self,
         manifest: PublicationManifest,
-        buffers: tuple[torch.Tensor, torch.Tensor],
+        buffers: tuple[torch.Tensor, ...],
     ):
-        if not manifest.entries or len(buffers) != 2:
-            raise ValueError("Streaming sender requires a nonempty manifest and two buffers")
+        if not manifest.entries or len(buffers) not in (2, 3):
+            raise ValueError("Streaming sender requires a nonempty manifest and two or three buffers")
         device = buffers[0].device
         for buffer in buffers:
             if (
@@ -31,14 +31,14 @@ class BucketSenderSlots:
                 or buffer.device != device
             ):
                 raise ValueError("Sender buffers must match the manifest capacity and device")
-        if buffers[0].untyped_storage().data_ptr() == buffers[1].untyped_storage().data_ptr():
+        if len({buffer.untyped_storage().data_ptr() for buffer in buffers}) != len(buffers):
             raise ValueError("Sender buffers must not alias")
         self.manifest = manifest
         self.buffers = buffers
         self.device = device
         self.pack_stream = torch.cuda.Stream(device=device)
-        self.pack_events = (torch.cuda.Event(), torch.cuda.Event())
-        self.sent_events = (torch.cuda.Event(), torch.cuda.Event())
+        self.pack_events = tuple(torch.cuda.Event() for _ in buffers)
+        self.sent_events = tuple(torch.cuda.Event() for _ in buffers)
         self.next_bucket = 0
         self.sent_bucket = -1
         self.finished = False
@@ -49,14 +49,14 @@ class BucketSenderSlots:
         if self.sent_bucket != self.next_bucket - 1:
             raise ValueError("The preceding bucket must be submitted before packing another")
         bucket = self.next_bucket
-        slot = bucket % 2
-        if bucket >= 2:
+        slot = bucket % len(self.buffers)
+        if bucket >= len(self.buffers):
             self.pack_stream.wait_event(self.sent_events[slot])
         buffer = self.buffers[slot]
         return bucket, buffer
 
     def ready_bucket(self, nbytes: int):
-        slot = self.next_bucket % 2
+        slot = self.next_bucket % len(self.buffers)
         self.pack_events[slot].record(self.pack_stream)
         torch.cuda.current_stream(self.device).wait_event(self.pack_events[slot])
         self.next_bucket += 1
@@ -66,13 +66,13 @@ class BucketSenderSlots:
         """Record after broadcast is enqueued on the caller's current stream."""
         if type(bucket) is not int or bucket != self.sent_bucket + 1 or bucket != self.next_bucket - 1:
             raise ValueError("Send acknowledgements must follow the packed manifest order")
-        self.sent_events[bucket % 2].record(torch.cuda.current_stream(self.device))
+        self.sent_events[bucket % len(self.buffers)].record(torch.cuda.current_stream(self.device))
         self.sent_bucket = bucket
 
     def finish_slots(self):
         if self.finished or self.sent_bucket != self.manifest.bucket_count - 1:
             raise ValueError("Every manifest bucket must be sent exactly once")
-        for event in self.sent_events[: min(2, self.manifest.bucket_count)]:
+        for event in self.sent_events[: min(len(self.buffers), self.manifest.bucket_count)]:
             event.synchronize()
             if not event.query():
                 raise RuntimeError("Sender transfer completion event remains pending")
@@ -109,7 +109,7 @@ class StreamingBucketSender(BucketSenderSlots):
         ):
             raise ValueError("Export tensor order, shape, dtype or device differs from manifest")
         if any(source.untyped_storage().data_ptr() == buffer.untyped_storage().data_ptr() for buffer in self.buffers):
-            raise ValueError("Export source must not alias either transfer buffer")
+            raise ValueError("Export source must not alias any transfer buffer")
         self.current_name = name
         self.current_source = source
         self.source_count += 1
@@ -129,7 +129,7 @@ class StreamingBucketSender(BucketSenderSlots):
         return self.ready_bucket(entries[-1].offset + entries[-1].nbytes)
 
     def finish(self):
-        """Join both send slots and reject missing or unexpected exported tensors."""
+        """Join every send slot and reject missing or unexpected exported tensors."""
         self.finish_slots()
         self.source_copied.synchronize()
         self.current_source = None
