@@ -1363,7 +1363,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     if cfg.trainer.strategy == "megatron":
         # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
         # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
-        env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        env_vars.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
         if cfg.trainer.flash_attn:
             # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
             # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916

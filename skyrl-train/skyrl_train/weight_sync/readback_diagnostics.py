@@ -14,6 +14,9 @@ from skyrl_train.io.io import read_bytes, write_bytes_atomic
 HASH_CHUNK_BYTES = 1 << 20
 RECEIPT_CHUNK_BYTES = 3072
 ENVIRONMENT_KEYS = (
+    "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY",
+    "CUDA_DEVICE_MAX_CONNECTIONS",
+    "NCCL_CUMEM_ENABLE",
     "NCCL_DEBUG",
     "NCCL_DEBUG_SUBSYS",
     "NCCL_DEBUG_FILE",

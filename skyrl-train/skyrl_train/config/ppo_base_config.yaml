@@ -38,6 +38,7 @@ checkpoint_export:
   hf_upload_mode: latest
 
 trainer:
+  cuda_device_max_connections: null  # Experimental process-wide override; 8 requires Megatron TP1 bucket sync.
   debug_mode: "off"
   weight_sync_nccl_diagnostics: false
   weight_sync_readback_output: null

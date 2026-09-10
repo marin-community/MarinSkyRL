@@ -84,6 +84,24 @@ DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
 ENV_VAR_SPECS = (
+    EnvVarSpec(
+        "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY",
+        "trainer.cuda_device_max_connections",
+        EnvVarSource.DERIVED,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
+    ),
+    EnvVarSpec(
+        "CUDA_DEVICE_MAX_CONNECTIONS",
+        "trainer.cuda_device_max_connections",
+        EnvVarSource.CONFIG,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
+    ),
+    EnvVarSpec(
+        "NCCL_CUMEM_ENABLE",
+        "generator.weight_sync_backend",
+        EnvVarSource.DERIVED,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
+    ),
     EnvVarSpec(DEBUG_MODE_ENV, "trainer.debug_mode", EnvVarSource.CONFIG, ALL_RUNTIME_SCOPES),
     EnvVarSpec(DEBUG_ARTIFACT_DIR_ENV, "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("NCCL_DEBUG", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
@@ -232,7 +250,6 @@ _RUNTIME_BOUNDARIES = {
     "AWS_ENDPOINT_URL",
     "AWS_REGION",
     "AWS_S3_ADDRESSING_STYLE",
-    "CUDA_DEVICE_MAX_CONNECTIONS",
     "CUDA_DEVICE_ORDER",
     "CUDA_MODULE_LOADING",
     "CUDA_VISIBLE_DEVICES",
@@ -248,7 +265,6 @@ _RUNTIME_BOUNDARIES = {
     "MASTER_ADDR",
     "MASTER_PORT",
     "MLFLOW_TRACKING_URI",
-    "NCCL_CUMEM_ENABLE",
     "NCCL_DEBUG",
     "NCCL_DEBUG_SUBSYS",
     "NCCL_NVLS_ENABLE",
@@ -353,6 +369,45 @@ def _safe_component(value: str) -> str:
     return cleaned or "run"
 
 
+def cuda_connection_environment(config: Any) -> dict[str, str]:
+    """Qualify the explicit process-wide connection override before worker launch."""
+    count = _config_value(config, "trainer.cuda_device_max_connections", None)
+    if count is None:
+        return {}
+    if type(count) is not int or count not in (1, 8):
+        raise ValueError("trainer.cuda_device_max_connections must be null, 1 or 8")
+    if _config_value(config, "trainer.strategy", None) != "megatron":
+        raise ValueError("Explicit CUDA connection count requires Megatron")
+    if count == 1:
+        return {"CUDA_DEVICE_MAX_CONNECTIONS": "1"}
+    for role in ("policy", "ref"):
+        prefix = f"trainer.{role}.megatron_config"
+        overrides = _config_value(config, prefix + ".transformer_config_kwargs", {})
+        tp = overrides.get(
+            "tensor_model_parallel_size", _config_value(config, prefix + ".tensor_model_parallel_size", None)
+        )
+        expert_tp = overrides.get(
+            "expert_tensor_parallel_size", _config_value(config, prefix + ".expert_tensor_parallel_size", None)
+        )
+        if (
+            _config_value(config, prefix + ".tensor_model_parallel_size", None) != 1
+            or tp != 1
+            or expert_tp not in (None, 1)
+            or overrides.get("sequence_parallel", False)
+        ):
+            raise ValueError("CUDA connections 8 requires policy/reference TP1, expert TP1 and no sequence parallelism")
+    if (
+        _config_value(config, "generator.backend", None) != "vllm"
+        or not _config_value(config, "generator.run_engines_locally", False)
+        or _config_value(config, "generator.inference_engine_tensor_parallel_size", None) != 1
+        or _config_value(config, "generator.weight_sync_backend", None) != "nccl"
+        or _config_value(config, "generator.weight_sync_timing_mode", None) != "bucket"
+        or _config_value(config, "trainer.algorithm.batch_invariant", False)
+    ):
+        raise ValueError("CUDA connections 8 requires local vLLM TP1 NCCL bucket sync with batch invariance off")
+    return {"CUDA_DEVICE_MAX_CONNECTIONS": "8", "NCCL_CUMEM_ENABLE": "0", "VLLM_BATCH_INVARIANT": "0"}
+
+
 class EnvVarManager:
     """Resolve managed variables once and project them into runtime scopes."""
 
@@ -365,7 +420,13 @@ class EnvVarManager:
     @classmethod
     def from_config(cls, config: Any, *, environ: Mapping[str, str] | None = None) -> "EnvVarManager":
         ambient = os.environ if environ is None else environ
-        values = {}
+        values = cuda_connection_environment(config)
+        if values.get("CUDA_DEVICE_MAX_CONNECTIONS") == "8":
+            names = {
+                name.strip() for name in ambient.get("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "").split(",") if name.strip()
+            }
+            names.add("CUDA_DEVICE_MAX_CONNECTIONS")
+            values["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"] = ",".join(sorted(names))
         passthrough_names = (
             LD_LIBRARY_PATH_ENV,
             NVRTC_HOME_ENV,
