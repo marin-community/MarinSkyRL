@@ -32,6 +32,12 @@ def test_native_groups_deliver_every_byte_from_alternating_pp_roots(tmp_path, na
     assert markers == [(count, count, 0)]
     assert len(result["ready"]) == len(result["groups"]) == len(result["cleanup"]) == count
     assert len({row["pid"] for row in result["ready"]}) == count
+    assert all(row["workspace_bytes"] == 257 for row in result["ready"])
+    for row in result["groups"]:
+        assert row["readiness"]["phase"] == "groups-ready"
+        assert row["readiness"]["new_explicit_tensor_storage_bytes"] == 0
+        assert row["readiness"]["groups"][0]["members"] == row["members"]
+        assert row["readiness"]["groups"][0]["payload_bytes"] == 4
     for index, item in enumerate(schedule.broadcasts):
         rows = [row for row in result["broadcasts"] if row["index"] == index]
         assert {row["rank"] for row in rows} == set(schedule.groups[item.group_ep].members)
@@ -113,3 +119,52 @@ def test_measurement_marker_lookup_fails_closed_on_storage_error(tmp_path, monke
     monkeypatch.setattr("skyrl_train.entrypoints.probe_shard_groups.find_files", unavailable)
     with pytest.raises(PermissionError):
         require_unmeasured(str(tmp_path))
+
+
+@pytest.mark.parametrize("ready", [True, False])
+def test_native_entrypoint_persists_warmup_failure_before_interpretation(tmp_path, monkeypatch, capsys, ready):
+    import json
+    import sys
+    from skyrl_train.entrypoints import probe_shard_groups as entry
+
+    monkeypatch.setenv("IRIS_ATTEMPT_UID", "0123456789abcdef")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "probe",
+            "--durable-prefix",
+            str(tmp_path / "durable"),
+            "--output",
+            str(tmp_path / "local"),
+            "--source-commit",
+            "a" * 40,
+        ],
+    )
+    monkeypatch.setattr(entry.ray, "init", lambda **kwargs: None)
+    monkeypatch.setattr(entry.ray, "shutdown", lambda: None)
+    calls = []
+
+    def run(schedule, backend, output, marker, *, two_hosts):
+        assert backend == "nccl" and two_hosts
+        calls.append(len(schedule.receiver_global_ranks))
+        result = {
+            "ready": [],
+            "groups": [{"readiness": {"phase": "groups-ready" if ready else "missing"}}],
+            "error": None,
+        }
+        marker(result)
+        return result
+
+    monkeypatch.setattr(entry, "run_group_probe", run)
+    if ready:
+        entry.main()
+        assert calls == [2, 4]
+        assert "K10_TINY_NATIVE_GROUP_PASS senders=2 receivers=2,4 hosts=2 warmup=true" in capsys.readouterr().out
+    else:
+        with pytest.raises(RuntimeError, match="omitted acknowledged"):
+            entry.main()
+        assert calls == [2]
+        result = json.loads((tmp_path / "durable/attempts/0123456789abcdef/receivers-2.json").read_bytes())
+        assert "omitted acknowledged" in result["error"]
+        assert not (tmp_path / "durable/attempts/0123456789abcdef/complete.json").exists()

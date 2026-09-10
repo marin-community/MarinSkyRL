@@ -10,6 +10,7 @@ import os
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 import socket
 import time
 
@@ -19,6 +20,8 @@ import torch
 import torch.distributed as dist
 
 from skyrl_train.distributed.utils import get_free_port, init_custom_process_group
+from skyrl_train.weight_sync.shard_group_ready import warm_owned_groups
+from skyrl_train.weight_sync.shard_memory import device_memory
 from skyrl_train.weight_sync.readback_diagnostics import ENVIRONMENT_KEYS, network_log_readback
 from skyrl_train.weight_sync.shard_group_schedule import (
     ExpertEntry,
@@ -81,7 +84,16 @@ class ShardProbeRank:
         self.output.parent.mkdir(parents=True, exist_ok=True)
         if backend == "nccl":
             torch.cuda.set_device(self.device)
-        self.record("before_default_group")
+        self.workspace_before = device_memory(self.device)
+        self.workspace = torch.empty(
+            max(item.nbytes for item in schedule.broadcasts), dtype=torch.uint8, device=self.device
+        )
+        self.record(
+            "before_default_group",
+            workspace_bytes=self.workspace.numel(),
+            workspace_before=self.workspace_before,
+            workspace_after=device_memory(self.device),
+        )
         dist.init_process_group(
             backend,
             init_method=f"tcp://127.0.0.1:{get_free_port()}",
@@ -123,6 +135,8 @@ class ShardProbeRank:
             address=ray.util.get_node_ip_address(),
             port=get_free_port(),
             counters=port_counters(),
+            workspace_bytes=self.workspace.numel(),
+            allocation=device_memory(self.device),
         )
 
     def initialize(self, ep: int, address: str, port: int) -> dict:
@@ -136,13 +150,28 @@ class ShardProbeRank:
             group_name=f"shard-probe-ep{ep}",
             timeout=timedelta(seconds=30),
         )
-        return self.record("group_ready", ep=ep, members=group.members, group_rank=local_rank)
+        name = f"shard-probe-ep{ep}"
+        readiness = warm_owned_groups(
+            SimpleNamespace(
+                rank=self.rank, completed=False, manifest_id=None, scratch=self.workspace, sources={}, parameters={}
+            ),
+            {name: self.groups[ep]},
+            {name: group.members},
+        )
+        return self.record(
+            "group_ready",
+            ep=ep,
+            members=group.members,
+            group_rank=local_rank,
+            readiness=readiness,
+            allocation=device_memory(self.device),
+        )
 
     def transfer(self, index: int) -> dict:
         item = self.schedule.broadcasts[index]
         members = self.schedule.groups[item.group_ep].members
         group_root = members.index(item.root)
-        tensor = torch.empty(item.nbytes, dtype=torch.uint8, device=self.device)
+        tensor = self.workspace.narrow(0, 0, item.nbytes)
         value = (index * 17 + 3) % 251
         tensor.fill_(value if self.rank == item.root else 255)
         if self.backend == "nccl":

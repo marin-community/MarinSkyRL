@@ -72,11 +72,13 @@ def main() -> None:
                 two_hosts=True,
             )
             result.update(identity)
+            if any(row.get("readiness", {}).get("phase") != "groups-ready" for row in result["groups"]):
+                result["error"] = "Native expert group omitted acknowledged preparation warmup"
             receipts.append(persist(prefix + f"/receivers-{receivers}.json", result))
             if result["error"] is not None or "cleanup_error" in result:
                 raise RuntimeError(result.get("error") or result["cleanup_error"])
         persist(prefix + "/complete.json", {**identity, "receipts": receipts})
-        print("K10_TINY_NATIVE_GROUP_PASS senders=2 receivers=2,4 hosts=2", flush=True)
+        print("K10_TINY_NATIVE_GROUP_PASS senders=2 receivers=2,4 hosts=2 warmup=true", flush=True)
     finally:
         ray.shutdown()
 
