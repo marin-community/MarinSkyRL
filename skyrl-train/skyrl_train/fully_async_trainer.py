@@ -1518,10 +1518,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if trace_publication:
             self._record_publication_inflight("after_resume")
             await self._record_publication_requests("after_resume")
-            # Derived paused-time overhead, not an independently measured learner-idle span.
-            self.all_timings["publication_stall_seconds"] = max(
-                0.0, weight_update_timer.duration - self.all_timings["weight_broadcast/nccl_send"]
-            )
+            if self.cfg.generator.weight_sync_timing_mode == "off":
+                # Derived paused-time overhead, not an independently measured learner-idle span.
+                self.all_timings["publication_stall_seconds"] = max(
+                    0.0, weight_update_timer.duration - self.all_timings["weight_broadcast/nccl_send"]
+                )
+            else:
+                # Prepared reference/bucket installs have versioned receipts instead of
+                # the legacy NCCL stage cache. Do not invent an unmeasured send duration
+                # or reuse a derived value from an earlier publication.
+                self.all_timings.pop("publication_stall_seconds", None)
         self._log_weight_update_completed(reason=reason, duration_seconds=weight_update_timer.duration)
 
     async def _record_publication_requests(

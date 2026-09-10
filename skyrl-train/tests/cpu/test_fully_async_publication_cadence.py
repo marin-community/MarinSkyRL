@@ -770,16 +770,23 @@ async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(m
     trainer.all_timings.clear()
     trainer.cfg.generator.publication_stage_timing = True
     trainer.global_step = 1
+    trainer.inference_engine_client = TimedInferenceService()
+    if not fail_replay:
+        trainer.all_timings["publication_stall_seconds"] = 999
     if fail_replay:
         with pytest.raises(ValueError, match="native full-byte replay failed"):
-            await trainer.async_sync_policy_weights_to_inference_engines()
+            await trainer._publish_policy_weights(reason="training_step", timing_name="sync_weights")
         assert trainer._published_policy_version == 0
     else:
-        await trainer.async_sync_policy_weights_to_inference_engines()
+        await trainer._publish_policy_weights(reason="training_step", timing_name="sync_weights")
         assert trainer._published_policy_version == 1
     assert trainer.all_timings["weight_broadcast"] == 7
     assert trainer.all_timings["bucket_sync_begin"] == 3
     assert trainer.all_timings["bucket_full_byte_replay"] == 103
+    assert "publication_stall_seconds" not in trainer.all_timings
+    if not fail_replay:
+        assert trainer.all_timings["sync_weights"] == 113
+        assert not trainer.inference_engine_client.generation_paused_event.is_set()
     assert calls == [
         ("broadcast_to_inference_engines", ()),
         ("prepare_reference_timing" if mode == "reference" else "prepare_bucket_timing", ()),
