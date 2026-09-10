@@ -13,13 +13,15 @@ from pathlib import Path
 from types import SimpleNamespace
 import socket
 import time
+import uuid
 
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import torch
 import torch.distributed as dist
 
-from skyrl_train.distributed.utils import get_free_port, init_custom_process_group
+from skyrl_train.weight_sync.shard_group_factory import prepare_rank_groups
+from skyrl_train.weight_sync.shard_rendezvous import OwnedShardStore, ReservedEndpointFactory
 from skyrl_train.weight_sync.shard_group_ready import warm_owned_groups
 from skyrl_train.weight_sync.shard_memory import device_memory
 from skyrl_train.weight_sync.readback_diagnostics import ENVIRONMENT_KEYS, network_log_readback
@@ -96,7 +98,7 @@ class ShardProbeRank:
         )
         dist.init_process_group(
             backend,
-            init_method=f"tcp://127.0.0.1:{get_free_port()}",
+            store=dist.HashStore(),
             rank=0,
             world_size=1,
             timeout=timedelta(seconds=30),
@@ -109,6 +111,8 @@ class ShardProbeRank:
             "rank": self.rank,
             "pid": os.getpid(),
             "physical_node": os.environ.get("IRIS_NODE_NAME"),
+            "task_id": os.environ.get("IRIS_TASK_ID"),
+            "attempt_uid": os.environ.get("IRIS_ATTEMPT_UID"),
             "host": socket.gethostname(),
             "ray_node_id": ray.get_runtime_context().get_node_id(),
             "monotonic": time.monotonic(),
@@ -133,24 +137,18 @@ class ShardProbeRank:
             torch_version=torch.__version__,
             cuda_version=torch.version.cuda,
             address=ray.util.get_node_ip_address(),
-            port=get_free_port(),
             counters=port_counters(),
             workspace_bytes=self.workspace.numel(),
             allocation=device_memory(self.device),
         )
 
-    def initialize(self, ep: int, address: str, port: int) -> dict:
+    def initialize(self, ep: int, endpoint) -> dict:
         group = self.schedule.groups[ep]
+        if endpoint.members != group.members or endpoint.backend != self.backend or not endpoint.store_namespace:
+            raise ValueError("Probe endpoint differs from the reserved schedule")
         local_rank = group.members.index(self.rank)
-        self.groups[ep] = init_custom_process_group(
-            backend=self.backend,
-            init_method=f"tcp://{address}:{port}",
-            world_size=len(group.members),
-            rank=local_rank,
-            group_name=f"shard-probe-ep{ep}",
-            timeout=timedelta(seconds=30),
-        )
-        name = f"shard-probe-ep{ep}"
+        self.groups[ep] = prepare_rank_groups(self.rank, (endpoint,))[endpoint.name]
+        name = endpoint.name
         readiness = warm_owned_groups(
             SimpleNamespace(
                 rank=self.rank, completed=False, manifest_id=None, scratch=self.workspace, sources={}, parameters={}
@@ -161,6 +159,7 @@ class ShardProbeRank:
         return self.record(
             "group_ready",
             ep=ep,
+            endpoint=asdict(endpoint),
             members=group.members,
             group_rank=local_rank,
             readiness=readiness,
@@ -234,6 +233,8 @@ def run_group_probe(
         raise ValueError("The native NCCL fixture requires explicit two-host placement")
     result = {"schedule": asdict(schedule), "ready": [], "groups": [], "broadcasts": [], "cleanup": [], "error": None}
     actors = []
+    owner = None
+    preparation_id = "tiny-" + uuid.uuid4().hex
     try:
         actor_type = ray.remote(num_cpus=1, num_gpus=1 if backend == "nccl" else 0)(ShardProbeRank)
         trainer_count = len(schedule.trainer_global_ranks)
@@ -263,13 +264,20 @@ def run_group_probe(
             raise ValueError("Communicator environments differ")
         if ready[0]["environment"]["VLLM_BATCH_INVARIANT"] not in (None, "0"):
             raise ValueError("Native timing requires batch invariance off")
+        owner = (
+            ray.remote(num_cpus=0, max_restarts=0, max_task_retries=0)(OwnedShardStore)
+            .options(scheduling_strategy=NodeAffinitySchedulingStrategy(ready[0]["ray_node_id"], soft=False))
+            .remote(preparation_id, 30)
+        )
+        listening = ray.get(owner.describe.remote(), timeout=30)
+        if listening["ray_node_id"] != ready[0]["ray_node_id"] or listening["phase"] != "listening":
+            raise ValueError("Reserved probe store is not listening on the selected sender node")
+        result["rendezvous"] = listening
+        endpoints = ReservedEndpointFactory(preparation_id, listening["address"], listening["port"], backend, 30)
         for group in schedule.groups:
-            root = ready[group.members[0]]
+            endpoint = endpoints(f"shard-probe-ep{group.ep}", group.members)
             result["groups"].extend(
-                ray.get(
-                    [actors[rank].initialize.remote(group.ep, root["address"], root["port"]) for rank in group.members],
-                    timeout=60,
-                )
+                ray.get([actors[rank].initialize.remote(group.ep, endpoint) for rank in group.members], timeout=60)
             )
         if measurement_started is not None:
             measurement_started(result)
@@ -288,6 +296,13 @@ def run_group_probe(
             result["cleanup_error"] = f"{type(error).__name__}: {error}"
         for actor in actors:
             ray.kill(actor, no_restart=True)
+        if owner is not None:
+            try:
+                result["rendezvous_cleanup"] = ray.get(owner.close.remote(preparation_id), timeout=30)
+            except Exception as error:
+                result["rendezvous_cleanup_error"] = f"{type(error).__name__}: {error}"
+            finally:
+                ray.kill(owner, no_restart=True)
         Path(output).mkdir(parents=True, exist_ok=True)
         Path(output, "result.json").write_text(json.dumps(result, sort_keys=True))
     return result

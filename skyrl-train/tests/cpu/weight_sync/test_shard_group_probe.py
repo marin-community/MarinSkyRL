@@ -32,6 +32,13 @@ def test_native_groups_deliver_every_byte_from_alternating_pp_roots(tmp_path, na
     assert markers == [(count, count, 0)]
     assert len(result["ready"]) == len(result["groups"]) == len(result["cleanup"]) == count
     assert len({row["pid"] for row in result["ready"]}) == count
+    assert result["rendezvous"]["phase"] == "listening"
+    assert result["rendezvous_cleanup"]["phase"] == "closed"
+    assert result["rendezvous_cleanup"]["state_was_present"]
+    assert result["rendezvous_cleanup"]["closed_monotonic"] >= max(row["monotonic"] for row in result["cleanup"])
+    assert len({row["endpoint"]["store_namespace"] for row in result["groups"]}) == ep
+    assert all(row["endpoint"]["store_namespace"].startswith("shard/tiny-") for row in result["groups"])
+    assert len({row["endpoint"]["init_method"] for row in result["groups"]}) == 1
     assert all(row["workspace_bytes"] == 257 for row in result["ready"])
     for row in result["groups"]:
         assert row["readiness"]["phase"] == "groups-ready"
