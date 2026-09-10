@@ -2,12 +2,12 @@ import asyncio
 import json
 import math
 import os
+import pickle
 import shutil
 import threading
 import time
 from typing import Any, List, Optional, Dict, Tuple, Union
 from jaxtyping import Float
-from pathlib import Path
 import ray
 from ray import ObjectRef
 import torch
@@ -1776,9 +1776,10 @@ class RayPPOTrainer:
         """
         Dump data to pickle file
         """
-        data_save_dir = Path(self.cfg.trainer.export_path) / "dumped_data"
-        data_save_dir.mkdir(parents=True, exist_ok=True)
-        data.save(data_save_dir / f"{file_name}.pkl")
+        data_save_dir = os.path.join(self.cfg.trainer.export_path, "dumped_data")
+        io.makedirs(data_save_dir, exist_ok=True)
+        with io.open_file(os.path.join(data_save_dir, f"{file_name}.pkl"), "wb") as destination:
+            pickle.dump(data, destination)
 
     def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
         """Pad the batch to be divisible by dp size"""
