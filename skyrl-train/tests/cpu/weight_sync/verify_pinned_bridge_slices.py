@@ -19,6 +19,8 @@ import zipfile
 import torch
 
 from skyrl_train.weight_sync.frozen_source_views import local_source_slices, source_view
+from skyrl_train.weight_sync.shard_group_schedule import TrainerRank
+from skyrl_train.weight_sync.shard_source_inventory import expert_source_view, local_shard_inventory
 
 
 def compile_function(node, namespace, filename):
@@ -93,6 +95,46 @@ def verify(receipt_path):
         torch.equal(source_view(item, sources).view(torch.uint8), expected[item.hf_name].reshape(-1).view(torch.uint8))
         for item in slices
     )
+    expert_tasks = []
+    expert_expected = {}
+    for expert_id in range(settings.num_moe_experts):
+        for projection, shape in (("fc1", (8, 3)), ("fc2", (3, 4))):
+            weights = torch.arange(shape[0] * shape[1], dtype=torch.bfloat16).reshape(shape) + 32 * expert_id
+            kind = "GrugStackedGatedExpertMapping" if projection == "fc1" else "GrugStackedExpertMapping"
+            resolved = type(kind, (), {})()
+            prefix = "model.layers.0.mlp.experts."
+            resolved.hf_param = (
+                {"gate": prefix + "gate_proj.weight", "up": prefix + "up_proj.weight"}
+                if projection == "fc1"
+                else prefix + "down_proj.weight"
+            )
+            key = f"decoder.layers.0.mlp.experts.linear_{projection}.weight{expert_id}"
+            expert_tasks.append(SimpleNamespace(param_weight=weights, global_param_name=key, mapping=resolved))
+            if projection == "fc1":
+                resolved.tp_size = 1
+                resolved.is_expert = False  # The pure split is the same; distributed gather is outside this CPU proof.
+                resolved.broadcast_from_pp_rank = lambda tensor, **kwargs: tensor
+                resolved.maybe_dequantize = lambda tensor: tensor
+                split_parts = native_gated(resolved, weights, None)
+                expert_expected[key] = torch.cat([split_parts[resolved.hf_param[part]] for part in ("gate", "up")])
+            else:
+                expert_expected[key] = weights.clone()
+    expert_slices, expert_sources = local_source_slices(expert_tasks, settings)
+    inventory = local_shard_inventory(
+        expert_slices,
+        expert_sources,
+        TrainerRank(0, 0, 0, 0),
+        layers=(0,),
+        num_experts=4,
+        expert_parallel_size=1,
+        hidden_size=3,
+        intermediate_size=4,
+    )
+    assert len(inventory.experts) == 8
+    for item in inventory.experts:
+        view = expert_source_view(item, expert_sources)
+        assert view.data_ptr() == expert_sources[item.source_key].data_ptr()
+        assert torch.equal(view.view(torch.uint8), expert_expected[item.source_key].view(torch.uint8))
     bridge_tree = ast.parse(texts["model_bridge.py"])
     global_node = next(
         node
@@ -119,6 +161,8 @@ def verify(receipt_path):
         "source_sha256": {name: hashlib.sha256(text.encode()).hexdigest() for name, text in texts.items()},
         "qkv_every_byte": True,
         "gated_every_byte": True,
+        "complete_expert_inventory_matrices": len(inventory.experts),
+        "expert_inventory_matches_locked_split": True,
         "global_layer_and_expert_numbering": actual_name,
         "cuda_initialized": False,
         "scope": "exact locked wheel pure split/numbering functions; synthetic task mapping objects; no native layout or collective claim",
