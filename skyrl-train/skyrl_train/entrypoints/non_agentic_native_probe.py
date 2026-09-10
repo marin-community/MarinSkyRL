@@ -23,6 +23,7 @@ from vllm.inputs import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints.non_agentic_probe_inputs import reward_extras
 from skyrl_train.entrypoints.non_agentic_probe_primitives import final_advantage_checks, threshold_checks
 from skyrl_train.entrypoints.non_agentic_probe_timing import TimedNonAgenticTokenProcessor, timing_receipts
 from skyrl_train.inference_engines.non_agentic_logits_processor import NonAgenticTokenProcessor
@@ -284,7 +285,7 @@ async def run(config: dict):
             runner = SkyRLGymTrajectoryRunner(
                 cfg.generator, cfg.environment.skyrl_gym, None, tokenizer, model_client=client
             )
-            extras = [{"reward_spec": row["reward_spec"]} for row in rows]
+            extras = [reward_extras(row) for row in rows]
             start = time.time_ns()
             batch = await runner.run(
                 {
