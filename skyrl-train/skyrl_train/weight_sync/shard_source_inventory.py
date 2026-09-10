@@ -145,8 +145,12 @@ def expert_destination_view(item: LocalExpertSource, parameters, expert_maps, *,
     if parameter.ndim != 3 or parameter.shape[0] != len(owned):
         raise ValueError("Receiver expert inventory differs from actual expert map")
     view = parameter[mapping[item.expert]]
-    if (tuple(view.shape) != expected_shape or view.dtype != torch.bfloat16 or not view.is_contiguous()
-            or view.numel() * view.element_size() != item.nbytes):
+    if (
+        tuple(view.shape) != expected_shape
+        or view.dtype != torch.bfloat16
+        or not view.is_contiguous()
+        or view.numel() * view.element_size() != item.nbytes
+    ):
         raise ValueError("Receiver expert matrix differs from scheduled bytes or dtype")
     return view
 
@@ -183,11 +187,15 @@ def dense_stream_plan(rows, receivers, expected_shapes, *, expert_parallel_size)
     by_coord = {(row.trainer.dp, row.trainer.pp, row.trainer.ep): row for row in rows}
     dp_count = len({row.trainer.dp for row in rows})
     pp_count = len({row.trainer.pp for row in rows})
-    if len(by_coord) != len(rows) or set(by_coord) != set(product(range(dp_count), range(pp_count), range(expert_parallel_size))):
+    if len(by_coord) != len(rows) or set(by_coord) != set(
+        product(range(dp_count), range(pp_count), range(expert_parallel_size))
+    ):
         raise ValueError("Dense stream trainer topology is incomplete")
     replica_count = len({row.replica for row in receivers})
     by_receiver = {(row.replica, row.ep): row for row in receivers}
-    if len(by_receiver) != len(receivers) or set(by_receiver) != set(product(range(replica_count), range(expert_parallel_size))):
+    if len(by_receiver) != len(receivers) or set(by_receiver) != set(
+        product(range(replica_count), range(expert_parallel_size))
+    ):
         raise ValueError("Dense stream receiver topology is incomplete")
     canonical = []
     for pp in range(pp_count):
@@ -220,7 +228,10 @@ def dense_stream_plan(rows, receivers, expected_shapes, *, expert_parallel_size)
             ep = len(plan) % expert_parallel_size
             owner = by_coord[pp % dp_count, pp, ep].trainer.rank
             landings = tuple(by_receiver[replica, ep].rank for replica in range(replica_count))
-            fanout = tuple(tuple(by_receiver[replica, local_ep].rank for local_ep in range(expert_parallel_size)) for replica in range(replica_count))
+            fanout = tuple(
+                tuple(by_receiver[replica, local_ep].rank for local_ep in range(expert_parallel_size))
+                for replica in range(replica_count)
+            )
             plan.append(DenseTransfer(item, owner, ep, landings, fanout))
         if cursor != expected_numel:
             raise ValueError("Dense stream does not cover all installed elements")
