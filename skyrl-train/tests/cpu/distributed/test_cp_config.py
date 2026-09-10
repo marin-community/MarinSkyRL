@@ -105,6 +105,10 @@ ADDITIVE_GENERATOR_FIELDS = {
     "r3_transport": "decentral",
     "r3_dispatch_put_timeout_seconds": 600,
     "gdn_backend": "torch",
+    # Fork additions (default off => no-op): cap OpenAI-path completions at
+    # max_generate_length; zero the loss mask of length-stopped samples.
+    "openai_max_tokens_cap": False,
+    "mask_length_stops": False,
 }
 ADDITIVE_TEACHER_FIELDS = {
     "engine_init_timeout_seconds": "${generator.engine_init_timeout_seconds}",
@@ -222,7 +226,9 @@ def test_diff_is_exactly_the_additive_fsdp_keys_x_three_roles():
             assert cur_fsdp[k] == v
     # Only explicitly additive top-level trainer keys may differ from the golden.
     added_trainer = set(current["trainer"]) - set(golden["trainer"])
-    expected_trainer_fields = STAGE2_TRAINER_FIELDS | DEBUG_MODE_TRAINER_FIELDS | RUNTIME_CONFIG_TRAINER_FIELDS
+    expected_trainer_fields = (
+        STAGE2_TRAINER_FIELDS | DEBUG_MODE_TRAINER_FIELDS | DIAG_TRAINER_FIELDS | RUNTIME_CONFIG_TRAINER_FIELDS
+    )
     assert added_trainer == set(expected_trainer_fields), (
         f"trainer added top-level keys {sorted(added_trainer)}, expected {sorted(expected_trainer_fields)}"
     )
