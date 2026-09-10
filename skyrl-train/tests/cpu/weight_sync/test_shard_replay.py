@@ -77,6 +77,9 @@ async def test_complete_replay_detects_fault_without_rewriting_installed_bytes(r
             for row in results[4:]
         )
         assert all(row["memory_after"]["cuda_measured"] is False for row in results)
+        assert all(row["inter_group_collective_payload_bytes"] == 112 for row in results)
+        assert [row["local_fanout_collective_payload_bytes"] for row in results] == [0, 0, 0, 0, 40, 40]
+        assert all(row["physical_nic_bytes"] is None for row in results)
         assert results[5]["mismatches"] == 0
         assert results[4]["mismatches"] == (0 if fault is None else 1)
         assert results[4]["phase"] == ("verified" if fault is None else "failed")

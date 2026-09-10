@@ -83,7 +83,7 @@ class ShardReplay:
             if self.receiver
             else None
         )
-        compared = mismatches = wire_bytes = 0
+        compared = mismatches = wire_bytes = local_bytes = 0
         observed = ReceiverByteCoverage(runner.parameters) if self.receiver else None
         rows = []
         for index, item in enumerate(runner.schedule.broadcasts):
@@ -135,6 +135,7 @@ class ShardReplay:
                     local_members = tuple(runner.receiver_to_global[rank] for rank in item.replica_fanout[replica])
                     landing = runner.receiver_to_global[item.landing_native_ranks[replica]]
                     runner._broadcast(wire, members=local_members, root=landing, group=runner.local_group)
+                    local_bytes += nbytes
                     installed = self.dense_destination(item)
                     if (
                         dtype == torch.bfloat16
@@ -176,7 +177,9 @@ class ShardReplay:
             "mismatches": mismatches,
             "coverage": 1.0,
             "replay_seconds": time.monotonic() - self.started,
-            "logical_group_payload_bytes": wire_bytes,
+            "inter_group_collective_payload_bytes": wire_bytes,
+            "local_fanout_collective_payload_bytes": local_bytes,
+            "payload_scope": "Sum of payload sizes for collectives this rank participates in; not per-receiver ingress or NIC traffic",
             "physical_nic_bytes": None,
             "memory_before": self.memory_before,
             "memory_after": after,

@@ -10,6 +10,7 @@ import torch.distributed as dist
 from skyrl_train.weight_sync.byte_replay import ReceiverByteCoverage
 from skyrl_train.weight_sync.frozen_source_views import local_source_slices
 from skyrl_train.weight_sync.shard_group_factory import prepare_rank_groups
+from skyrl_train.weight_sync.shard_group_ready import warm_owned_groups
 from skyrl_train.weight_sync.shard_replica_proof import FullReplicaComparator, local_replica_catalogue
 from skyrl_train.weight_sync.shard_session import bind_worker_shard_stream
 from skyrl_train.weight_sync.shard_stream import ShardStreamRank
@@ -125,6 +126,7 @@ def prepare_native_shard_worker(
             local[0] if local else None,
             dense_chunk_bytes=dense_chunk_bytes,
         )
+        group_ready = warm_owned_groups(runner, groups, required)
         runner.replica_plan_id = replica_plan.identity
         comparator = (
             FullReplicaComparator(
@@ -152,6 +154,7 @@ def prepare_native_shard_worker(
             "manifest_id": manifest_id,
             "replica_plan_id": replica_plan.identity,
             "group_memberships": {name: required[name] for name in groups},
+            "group_readiness": group_ready,
             "dense_chunk_bytes": dense_chunk_bytes,
             "expected_receiver_bytes": expected_receiver_bytes,
             "transfer_workspace_bytes": transfer_workspace.numel(),

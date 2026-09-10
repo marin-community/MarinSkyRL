@@ -82,7 +82,15 @@ def test_native_factory_binds_actual_groups_and_complete_replica_comparator(tmp_
         actors = [cls.remote(rank, payload, str(tmp_path)) for rank in range(6)]
         catalogue = ray.get([actor.catalogue.remote() for actor in actors[:4]], timeout=60)
         plan = build_replica_plan(trainers, schedule, tuple(catalogue))
+        before = ray.get([actor.inspect.remote() for actor in actors], timeout=30)
         prepared = ray.get([actor.prepare.remote(plan) for actor in actors], timeout=60)
+        assert ray.get([actor.inspect.remote() for actor in actors], timeout=30) == before
+        for row in prepared:
+            readiness = row["group_readiness"]
+            assert readiness["phase"] == "groups-ready" and readiness["cuda_measured"] is False
+            assert [group["name"] for group in readiness["groups"]] == list(row["group_memberships"])
+            assert all(group["payload_bytes"] == 4 and group["seconds"] >= 0 for group in readiness["groups"])
+            assert readiness["new_explicit_tensor_storage_bytes"] == 0
         assert len({row["manifest_id"] for row in prepared}) == 1
         manifest = prepared[0]["manifest_id"]
         assert [row["expected_receiver_bytes"] for row in prepared[4:]] == [120, 120]
