@@ -653,13 +653,17 @@ def test_initial_eval_recipe_composes_and_validates(overrides, expected):
 
 
 class TimedLearnerService(LearnerService):
+    def __init__(self, *, omit_send=False):
+        super().__init__()
+        self.omit_send = omit_send
+
     def async_run_ray_method(self, dispatch, method):
         if method != "read_publication_timing":
             return super().async_run_ray_method(dispatch, method)
 
         async def remote_receipt():
             return {
-                "trainer": [{"rank": 0, "stages": {"nccl_send": {"wall_seconds": 0.00001}}}],
+                "trainer": [{"rank": 0, "stages": {} if self.omit_send else {"nccl_send": {"wall_seconds": 0.00001}}}],
                 "receiver": [[{"rank": 0, "stages": {"apply": {"wall_seconds": 0.00002}}}]],
             }
 
@@ -726,6 +730,22 @@ async def test_publication_trace_reaches_step_metrics_without_batch_dispatch(mon
         "final",
     }
     assert all(json.loads(event[1]["receipt_json"])["request_accounting"] == {"active_ids": []} for event in receipts)
+
+
+@pytest.mark.asyncio
+async def test_ordinary_publication_rejects_missing_native_send_timing():
+    trainer = make_driver(interval=1, age=0, steps=1)
+    trainer.cfg.generator.publication_stage_timing = True
+    assert trainer.cfg.generator.weight_sync_timing_mode == "off"
+    trainer.policy_model = TimedLearnerService(omit_send=True)
+    engine = TimedInferenceService()
+    trainer.inference_engine_client = engine
+    trainer.trajectory_runner.engine = engine
+    with pytest.raises(KeyError, match="weight_broadcast/nccl_send"):
+        await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert engine.publications == [0, 1]
+    assert not engine.generation_paused_event.is_set()
+    assert "publication_stall_seconds" not in trainer.all_timings
 
 
 @pytest.mark.asyncio
