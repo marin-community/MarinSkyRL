@@ -817,13 +817,27 @@ async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(m
 
 
 @pytest.mark.asyncio
-async def test_bucket_timing_driver_finalizes_last_proven_weight_version():
-    trainer = make_driver(interval=2, age=1, steps=3)
-    trainer.cfg.generator.weight_sync_timing_mode = "bucket"
+@pytest.mark.parametrize("mode", ["bucket", "reference"])
+async def test_bucket_timing_driver_finalizes_last_proven_weight_version(mode):
+    events = []
 
-    class BucketLearner(LearnerService):
+    class VersionedRunner(Runner):
+        async def run(self, request, **kwargs):
+            batch = await super().run(request, **kwargs)
+            batch["policy_versions_at_first_token"] = [self.engine.installed_update] * len(batch["response_ids"])
+            if request["batch_metadata"].training_phase == "eval":
+                events.append(("eval", self.engine.installed_update))
+            return batch
+
+    trainer = make_driver(interval=1, age=0, steps=20, eval_steps=20, runner_type=VersionedRunner)
+    trainer.cfg.generator.weight_sync_timing_mode = mode
+    trainer.cfg.generator.publication_stage_timing = True
+    trainer.cfg.generator.weight_sync_wire_inventory = True
+    trainer.cfg.trainer.fully_async.first_token_admission = True
+
+    class BucketLearner(TimedLearnerService):
         def async_run_ray_method(self, dispatch, method, *args):
-            if "timing" in method:
+            if method != "read_publication_timing" and "timing" in method:
                 return [self.async_run_method(dispatch, method, *args)]
             return super().async_run_ray_method(dispatch, method, *args)
 
@@ -836,7 +850,7 @@ async def test_bucket_timing_driver_finalizes_last_proven_weight_version():
         async def async_run_method(self, dispatch, method, engine, version=None):
             if method == "broadcast_to_inference_engines":
                 return await super().async_run_method(dispatch, method, engine)
-            if method == "prepare_bucket_timing":
+            if method == ("prepare_reference_timing" if mode == "reference" else "prepare_bucket_timing"):
                 assert self.phase is None
                 self.phase = "ready"
             elif method == "begin_bucket_timing":
@@ -854,16 +868,41 @@ async def test_bucket_timing_driver_finalizes_last_proven_weight_version():
                 self.proven.append(version)
             elif method == "close_bucket_timing":
                 assert self.phase == "proven" and version == self.proven[-1]
+                assert events[-1] == ("eval", 20)
                 self.closed = version
+                events.append(("close", version))
             else:
                 raise AssertionError(method)
 
+    class FinalDrainInference(TimedInferenceService):
+        async def read_publication_request_state(
+            self, initial_policy_version=None, drain_accounting=False, terminal_timeout_seconds=None
+        ):
+            if terminal_timeout_seconds is not None:
+                assert trainer.policy_model.closed == 20
+                assert events[-1] == ("close", 20)
+                events.append(("drain", self.installed_update))
+            return await super().read_publication_request_state(
+                initial_policy_version, drain_accounting, terminal_timeout_seconds
+            )
+
     trainer.policy_model = BucketLearner()
+    engine = FinalDrainInference()
+    trainer.inference_engine_client = engine
+    trainer.trajectory_runner.engine = engine
     await asyncio.wait_for(trainer._train_loop(), timeout=10)
-    assert trainer.inference_engine_client.publications == [0, 2, 3]
-    assert trainer.policy_model.proven == [2, 3]
-    assert trainer.policy_model.closed == 3
-    assert trainer._bucket_timing_prepared is False
+    assert engine.publications == list(range(21))
+    assert trainer.policy_model.proven == list(range(1, 21))
+    assert trainer.policy_model.closed == 20
+    assert trainer.trajectory_runner.evaluations == [(0, 0), (20, 20)]
+    assert events == [("eval", 0), ("eval", 20), ("close", 20), ("drain", 20)]
+    rows = [(step, metrics) for step, metrics in trainer.tracker.rows if "trainer/global_step" in metrics]
+    assert [step for step, _ in rows] == list(range(1, 21))
+    for _, metrics in rows:
+        assert metrics["timing/weight_broadcast"] > 0
+        assert metrics["timing/bucket_sync_begin"] > 0
+        assert metrics["timing/bucket_full_byte_replay"] > 0
+        assert "timing/publication_stall_seconds" not in metrics
 
 
 @pytest.mark.asyncio

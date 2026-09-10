@@ -586,7 +586,7 @@ def test_execute_job_rejects_overwriting_terminal_manifest(tmp_path: Path, runti
         execute_job(envelope, mode=LaunchMode.PREPARE)
 
 
-def test_materialize_model_export_copies_and_validates_hf_directory(tmp_path: Path) -> None:
+def test_materialize_model_export_copies_and_validates_hf_directory(tmp_path: Path, capsys, monkeypatch) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "config.json").write_text("{}")
@@ -594,7 +594,23 @@ def test_materialize_model_export_copies_and_validates_hf_directory(tmp_path: Pa
     (source / "tokenizer.json").write_text("{}")
     destination = tmp_path / "destination"
 
+    monkeypatch.setenv("IRIS_TASK_ID", "/test/staging/2:0")
+    monkeypatch.setenv("IRIS_ATTEMPT_UID", "staging-attempt")
+    monkeypatch.setenv("IRIS_NUM_TASKS", "5")
+    monkeypatch.setenv("IRIS_NODE_NAME", "staging-node")
     materialize_model_export(source.as_uri(), str(destination), "sft-step@abc123")
+    lines = [line for line in capsys.readouterr().out.splitlines() if "MODEL_STAGING_RECEIPT " in line]
+    assert len(lines) == 1
+    receipt = json.loads(lines[0].split("MODEL_STAGING_RECEIPT ", 1)[1])
+    assert receipt["schema"] == "model-staging-v1"
+    assert receipt["task_id"] == "/test/staging/2:0"
+    assert receipt["attempt_uid"] == "staging-attempt"
+    assert receipt["rank"] == 2 and receipt["num_tasks"] == 5
+    assert receipt["physical_node"] == "staging-node"
+    assert receipt["source_identity"] == "sft-step@abc123"
+    assert receipt["source_uri"] == source.as_uri()
+    assert receipt["file_count"] == 3
+    assert receipt["seconds"] >= 0
 
     assert (destination / "model.safetensors").read_bytes() == b"weights"
     manifest = json.loads((destination / ".marinskyrl-source.json").read_text())
