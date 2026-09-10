@@ -741,6 +741,11 @@ async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(m
     calls = []
 
     class BucketLearner(LearnerService):
+        def async_run_ray_method(self, dispatch, method, *args):
+            if "timing" in method:
+                return [self.async_run_method(dispatch, method, *args)]
+            return super().async_run_ray_method(dispatch, method, *args)
+
         async def async_run_method(self, dispatch, method, engine, *args):
             calls.append((method, args))
             if method == "broadcast_to_inference_engines":
@@ -790,6 +795,11 @@ async def test_bucket_timing_driver_finalizes_last_proven_weight_version():
     trainer.cfg.generator.weight_sync_timing_mode = "bucket"
 
     class BucketLearner(LearnerService):
+        def async_run_ray_method(self, dispatch, method, *args):
+            if "timing" in method:
+                return [self.async_run_method(dispatch, method, *args)]
+            return super().async_run_ray_method(dispatch, method, *args)
+
         def __init__(self):
             super().__init__()
             self.phase = None
@@ -841,6 +851,11 @@ async def test_timing_mode_structured_composition_selects_native_startup(mode):
     prepared = []
 
     class ModeLearner(LearnerService):
+        def async_run_ray_method(self, dispatch, method, *args):
+            if "timing" in method:
+                return [self.async_run_method(dispatch, method, *args)]
+            return super().async_run_ray_method(dispatch, method, *args)
+
         async def async_run_method(self, dispatch, method, engine, *args):
             if method == "broadcast_to_inference_engines":
                 return await super().async_run_method(dispatch, method, engine)
@@ -853,3 +868,54 @@ async def test_timing_mode_structured_composition_selects_native_startup(mode):
     assert prepared == (
         [] if mode == "off" else ["prepare_reference_timing" if mode == "reference" else "prepare_bucket_timing"]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method",
+    [
+        "prepare_bucket_timing",
+        "prepare_reference_timing",
+        "begin_bucket_timing",
+        "install_bucket_timing",
+        "replay_bucket_timing",
+        "close_bucket_timing",
+    ],
+)
+async def test_timing_receipts_use_actual_raw_actor_dispatch_and_reject_batch_collector(method):
+    from skyrl_train.workers.worker import PPORayActorGroup
+
+    calls = []
+    receipts = [{"schema": "bucket-timing-v1", "rank": rank, "nested": {"method": method}} for rank in range(2)]
+
+    class RemoteBoundary:
+        def __init__(self, rank):
+            self.rank = rank
+
+        def remote(self, *args):
+            calls.append((self.rank, args))
+
+            async def result():
+                await asyncio.sleep(0)
+                return receipts[self.rank]
+
+            return result()
+
+    group = PPORayActorGroup.__new__(PPORayActorGroup)
+    group.cfg = SimpleNamespace(generator=SimpleNamespace(r3_transport="by_value", r3_dispatch_put_timeout_seconds=0))
+    group.actor_infos = [
+        SimpleNamespace(
+            handle=SimpleNamespace(**{method: RemoteBoundary(rank)}),
+            rank=SimpleNamespace(dp=rank, dp_size=2, is_collection_dp_rank=lambda: True),
+        )
+        for rank in range(2)
+    ]
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.policy_model = group
+    actual = await trainer._run_bucket_timing_rpc(method, "engine", 7)
+    assert actual == receipts and all(left is right for left, right in zip(actual, receipts, strict=True))
+    assert calls == [(0, ("engine", 7)), (1, ("engine", 7))]
+    # This is the actual production failure: PassThroughDispatch.async_collect
+    # delegates non-None dictionary receipts to TrainingOutputBatch.cat.
+    with pytest.raises(ValueError, match="Unsupported type.*str.*schema"):
+        await group.async_run_method("pass_through", method, "engine", 7)

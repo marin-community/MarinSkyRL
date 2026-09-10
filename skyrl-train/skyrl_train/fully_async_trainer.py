@@ -1652,10 +1652,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await self._publish_policy_weights(reason="final", timing_name="final_weight_sync")
         await super()._finalize_training(completed_step=completed_step, epoch=epoch)
         if getattr(self, "_bucket_timing_prepared", False):
-            await self.policy_model.async_run_method(
-                "pass_through", "close_bucket_timing", self.inference_engine_client, self._bucket_timing_last_version
+            await self._run_bucket_timing_rpc(
+                "close_bucket_timing", self.inference_engine_client, self._bucket_timing_last_version
             )
             self._bucket_timing_prepared = False
+
+    async def _run_bucket_timing_rpc(self, method: str, *args):
+        # Timing methods return per-rank diagnostic dictionaries. The standard
+        # pass-through collector concatenates TrainingOutputBatch values instead.
+        refs = self.policy_model.async_run_ray_method("pass_through", method, *args)
+        return await asyncio.gather(*refs)
 
     async def async_sync_policy_weights_to_inference_engines(self):
         # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the
@@ -1679,13 +1685,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         prepared = bucket_timing and getattr(self, "_bucket_timing_prepared", False)
         if prepared:
             with Timer("bucket_sync_begin", self.all_timings):
-                await self.policy_model.async_run_method(
-                    "pass_through", "begin_bucket_timing", self.inference_engine_client, self.global_step
-                )
+                await self._run_bucket_timing_rpc("begin_bucket_timing", self.inference_engine_client, self.global_step)
         with Timer("weight_broadcast", self.all_timings):
             if prepared:
-                result = await self.policy_model.async_run_method(
-                    "pass_through", "install_bucket_timing", self.inference_engine_client, self.global_step
+                result = await self._run_bucket_timing_rpc(
+                    "install_bucket_timing", self.inference_engine_client, self.global_step
                 )
             else:
                 publication = self._weight_change_probe_publication()
@@ -1707,14 +1711,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     self._weight_change_probe_committed(publication, time.perf_counter() - started)
         if prepared:
             with Timer("bucket_full_byte_replay", self.all_timings):
-                await self.policy_model.async_run_method(
-                    "pass_through", "replay_bucket_timing", self.inference_engine_client, self.global_step
+                await self._run_bucket_timing_rpc(
+                    "replay_bucket_timing", self.inference_engine_client, self.global_step
                 )
             self._bucket_timing_last_version = self.global_step
         elif bucket_timing:
             with Timer("bucket_one_time_preparation", self.all_startup_timings):
-                await self.policy_model.async_run_method(
-                    "pass_through",
+                await self._run_bucket_timing_rpc(
                     "prepare_reference_timing" if timing_mode == "reference" else "prepare_bucket_timing",
                     self.inference_engine_client,
                 )
