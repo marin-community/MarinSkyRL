@@ -25,6 +25,8 @@ backend:
     connect_timeout_sec: 120
     # Scrollback re-read budget; harbor default 45,000 was sized for the old 50 kB worker cap.
     tmux_capture_budget_chars: 400000
+    # Daytona's tmux keeps 2,000 lines; the same cap on apptainer keeps both backends equal.
+    tmux_capture_max_window_lines: 2000
     # No overlay: the migration venv carries harbor itself, and an overlay on PYTHONPATH
     # would shadow it. That is the thing this smoke exists to verify.
     overlay_pythonpath: null

@@ -513,6 +513,11 @@ _BACKEND_RUNTIME_ENV = {
     # cap, 400,000 lets a full test log through as head+tail instead of tail-only
     # (1 % of turns, 12 % of trials on the 2026-09-10 smoke).
     "tmux_capture_budget_chars": "HARBOR_TMUX_CAPTURE_BUDGET_CHARS",
+    # Lines of scrollback the window may grow to. Daytona task images ship a tmux that
+    # keeps 2,000 lines and ignores harbor's history-limit; pinning the same cap on
+    # apptainer means the model can never read more history there than it could on
+    # Daytona (Luke, 2026-09-10).
+    "tmux_capture_max_window_lines": "HARBOR_TMUX_CAPTURE_MAX_WINDOW_LINES",
     "history_think": "HARBOR_TERMINUS2_HISTORY_THINK",
     # The launcher PREPENDS this to PYTHONPATH; it is not PYTHONPATH itself.
     "overlay_pythonpath": "HARBOR_OVERLAY_PYTHONPATH",

@@ -462,6 +462,7 @@ def test_a_daytona_recipe_renders_its_proxy_and_key_file_into_the_environment():
     assert env["PROXYCHAINS_SOCKS5_PRESET_PORT"] == "1080"
     assert env["HARBOR_OPENAI_CONNECT_TIMEOUT_SEC"] == "120"
     assert env["HARBOR_TMUX_CAPTURE_BUDGET_CHARS"] == "400000"
+    assert env["HARBOR_TMUX_CAPTURE_MAX_WINDOW_LINES"] == "2000"
     # Left unset on purpose so snapshot names stay region-less.
     assert "DAYTONA_TARGET" not in env
 

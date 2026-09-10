@@ -15,6 +15,8 @@ backend:
     connect_timeout_sec: 120
     # Scrollback re-read budget; harbor default 45,000 was sized for the old 50 kB worker cap.
     tmux_capture_budget_chars: 400000
+    # Daytona's tmux keeps 2,000 lines; the same cap on apptainer keeps both backends equal.
+    tmux_capture_max_window_lines: 2000
     # No apptainer bridge here, and no harbor overlay: the Daytona image carries harbor.
     overlay_pythonpath: null
     overlay_commit: null
