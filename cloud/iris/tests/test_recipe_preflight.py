@@ -524,6 +524,44 @@ def test_every_failure_is_reported_at_once(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The command line
+# ---------------------------------------------------------------------------
+
+
+def test_the_preflight_command_prints_every_check_and_exits_zero(capsys):
+    from cloud.iris.recipe_preflight import main
+
+    exit_code = main(["--recipe", str(_RECIPE), "--num-nodes", "40", "--no-check-paths"])
+    printed = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "PASS  geometry closes" in printed
+    # The settings with no Hydra key must be visible before a launch, not after.
+    assert "env APPTAINER_BRIDGE_URL=http://10.128.1.2:9922" in printed
+    assert "env HARBOR_TERMINUS2_HISTORY_THINK=keep" in printed
+
+
+def test_the_preflight_command_exits_nonzero_on_a_broken_recipe(tmp_path, capsys):
+    from cloud.iris.recipe_preflight import main
+
+    path = _recipe(tmp_path, ("    policy_num_nodes: 16\n", "    policy_num_nodes: 12\n"))
+    exit_code = main(["--recipe", str(path), "--num-nodes", "40", "--no-check-paths"])
+
+    assert exit_code == 1
+    assert "FAIL  geometry does not close" in capsys.readouterr().out
+
+
+def test_the_preflight_command_can_print_the_rendered_arguments(capsys):
+    from cloud.iris.recipe_preflight import main
+
+    main(["--recipe", str(_RECIPE), "--num-nodes", "40", "--no-check-paths", "--print-args"])
+    printed = capsys.readouterr().out
+
+    assert "++terminal_bench_config.harbor.environment_type=apptainer" in printed
+    assert "trainer.placement.policy_num_nodes=16" in printed
+
+
+# ---------------------------------------------------------------------------
 # Wired into the launch path
 # ---------------------------------------------------------------------------
 

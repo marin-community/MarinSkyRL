@@ -15,7 +15,13 @@ Three blocks beyond the usual sections:
 - `probe:` overlays the fields a probe changes. It uses the same section names as the rest of the
   file, so it reads as a diff; a null value deletes the arm's key rather than setting it to null.
 
-`cloud/iris/recipe_preflight.py` refuses to launch when any of the couplings below is broken.
+`cloud/iris/recipe_preflight.py` refuses to launch when any of the couplings below is broken. Run it
+directly to see every check, the rendered environment block and, with `--print-args`, the full
+argument list:
+
+```bash
+python -m cloud.iris.recipe_preflight --recipe snowball_r2egym_arm_a --num-nodes 40
+```
 
 ## Backend
 

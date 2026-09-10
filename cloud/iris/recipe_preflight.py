@@ -24,6 +24,8 @@ from cloud.iris.rl_config_translation import (
     BackendKind,
     ParsedRLConfig,
     RecipeMode,
+    build_skyrl_hydra_args,
+    parse_rl_config,
     render_backend_env,
 )
 
@@ -460,3 +462,58 @@ def preflight_recipe(
     if raise_on_failure:
         report.raise_for_failures()
     return report
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Render one recipe and print every check, without launching anything.
+
+    ``python -m cloud.iris.recipe_preflight --recipe <path> --num-nodes 40``
+    """
+    import argparse  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(description="Validate an Iris RL recipe before launching it.")
+    parser.add_argument("--recipe", required=True, help="Path or bundled name of the recipe YAML")
+    parser.add_argument("--mode", choices=[item.value for item in RecipeMode], help="Override the recipe's own mode")
+    parser.add_argument("--num-nodes", type=int, required=True, help="Nodes the launch will request")
+    parser.add_argument("--gpus-per-node", type=int, default=4, help="GPUs on each node")
+    parser.add_argument("--model-path", help="Checkpoint under test; defaults to the recipe's policy path")
+    parser.add_argument(
+        "--no-check-paths",
+        action="store_true",
+        help="Skip filesystem checks, for rendering a recipe away from its task trees",
+    )
+    parser.add_argument("--print-args", action="store_true", help="Also print the rendered Hydra arguments")
+    args = parser.parse_args(argv)
+
+    parsed = parse_rl_config(args.recipe, mode=args.mode)
+    exp_args: Dict[str, Any] = {"num_nodes": args.num_nodes, "gpus_per_node": args.gpus_per_node}
+    if args.model_path:
+        exp_args["model_path"] = args.model_path
+
+    report = preflight_recipe(
+        parsed,
+        exp_args,
+        gpus_per_node=args.gpus_per_node,
+        check_paths=not args.no_check_paths,
+        raise_on_failure=False,
+    )
+    print(f"recipe: {parsed.config_path}  mode: {parsed.mode.value}")
+    print(report.render())
+    for name, value in sorted(render_backend_env(parsed, exp_args).items()):
+        print(f"      env {name}={value}")
+    if args.print_args:
+        # Nothing should ride into an arm unseen.
+        for arg in build_skyrl_hydra_args(parsed, exp_args, _GpusPerNode(args.gpus_per_node)):
+            print(f"      {arg}")
+    return 1 if report.failures else 0
+
+
+@dataclass(frozen=True)
+class _GpusPerNode:
+    """The minimal HPCGeometry the argument builder needs."""
+
+    gpus_per_node: int
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
