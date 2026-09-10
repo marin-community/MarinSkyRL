@@ -26,6 +26,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig, OmegaConf
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_train.non_agentic_evaluation import METRIC_VERSION, request_endpoint
 from skyrl_gym.envs.thinking_contract import THINKING_CONTRACT_VERSION, score_thinking_contract
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
@@ -65,6 +66,9 @@ class WholeTrajectoryCollector:
 
     async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False):
         agent_loop = self._runner.agent_loop
+        endpoint = request_endpoint(request, getattr(self._runner, "parser_protocol", None))
+        if endpoint is not None:
+            agent_loop = partial(agent_loop, non_agentic_evaluation_endpoint=endpoint)
         if self._runner.trajectory_runner_cfg.get("seed_by_trajectory", False):
             metadata = request.get("batch_metadata")
             if metadata is None:
@@ -249,6 +253,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         trajectory_id: Optional[TrajectoryID] = None,
         global_step_fn: Optional[Callable[[], int]] = None,
         sampling_policy_version: int | None = None,
+        non_agentic_evaluation_endpoint: str | None = None,
     ) -> AgentLoopOutput:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -346,11 +351,16 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 env_metrics=env_metrics,
             )
 
+        if non_agentic_evaluation_endpoint not in (None, "package_on", "common_off"):
+            raise ValueError("Unknown non-agentic evaluation endpoint")
+        if non_agentic_evaluation_endpoint is not None and self.parser_protocol != THINKING_CONTRACT_VERSION:
+            raise ValueError("Evaluation endpoint requires the corrected parser")
+        token_intervention = None if non_agentic_evaluation_endpoint == "common_off" else self.token_intervention
         loss_mask = []  # this excludes the prompt
         current_sampling_params = (
             sampling_params if sampling_params is not None else self.trajectory_runner_cfg.sampling_params
         )
-        if self.token_intervention is not None:
+        if token_intervention is not None:
             current_sampling_params = (
                 OmegaConf.to_container(current_sampling_params, resolve=True)
                 if OmegaConf.is_config(current_sampling_params)
@@ -359,7 +369,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             extra_args = current_sampling_params.setdefault("extra_args", {})
             if "non_agentic_intervention" in extra_args:
                 raise ValueError("Request cannot silently override the frozen token intervention")
-            extra_args["non_agentic_intervention"] = asdict(self.token_intervention)
+            extra_args["non_agentic_intervention"] = asdict(token_intervention)
             sampling_params = current_sampling_params
         collect_logprobs = current_sampling_params.get("logprobs", None) is not None
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
@@ -425,13 +435,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
             if collect_logprobs and response_logprobs is None:
                 rollout_logprobs = None
-            if self.token_intervention is not None:
+            if token_intervention is not None:
                 if token_provenance != TokenProvenance.ENGINE or response_logprobs is None:
                     raise ValueError("Token intervention requires native IDs and actual aligned logprobs")
-                trace = intervention_trace(output_ids, self.token_intervention)
+                trace = intervention_trace(output_ids, token_intervention)
                 intervention_engine_ids = tuple(output_ids)
                 trace["original_engine_stop_reason"] = original_engine_stop_reason
-                trace["configuration"] = asdict(self.token_intervention)
+                trace["configuration"] = asdict(token_intervention)
                 sampling_evidence["non_agentic_intervention"] = trace
                 if trace["repetition_stopped"]:
                     stop_reason = "repetition"
@@ -476,7 +486,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 if env_step_output["reward"] != verdict.legacy_full_text_reward:
                     raise ValueError("Native reward differs from the declared unshaped verifier")
                 contract = asdict(verdict)
-                if self.token_intervention is not None:
+                contract["metric_protocol"] = METRIC_VERSION
+                if non_agentic_evaluation_endpoint is not None:
+                    contract["evaluation_endpoint"] = non_agentic_evaluation_endpoint
+                if token_intervention is not None:
                     contract["intervention"] = sampling_evidence["non_agentic_intervention"]
                 sampling_evidence["non_agentic_contract"] = contract
                 env_step_output = {
@@ -586,7 +599,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 rollout_logprobs = rollout_logprobs[: len(response_ids)]
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
-        if self.token_intervention is not None:
+        if token_intervention is not None:
             if tuple(response_ids) != intervention_engine_ids:
                 raise ValueError("Intervention output was retokenized after native generation")
             for position in sampling_evidence["non_agentic_intervention"]["forced_positions"]:

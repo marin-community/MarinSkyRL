@@ -1,3 +1,4 @@
+from skyrl_train.non_agentic_evaluation import evaluate_endpoints
 import asyncio
 import json
 import math
@@ -266,6 +267,8 @@ class RayPPOTrainer:
         Returns:
             A dictionary of evaluation metrics.
         """
+        if self.cfg.trainer.step_wise_training and self.cfg.generator.get("non_agentic_eval_endpoints"):
+            raise ValueError("Non-agentic endpoints require single-turn evaluation")
         requested_step = self.global_step if eval_step is None else eval_step
         if self.cfg.trainer.step_wise_training:
             eval_metrics = await evaluate_step_wise(
@@ -278,7 +281,8 @@ class RayPPOTrainer:
                 dump_namespace=dump_namespace,
             )
         else:
-            eval_metrics = await evaluate(
+            eval_metrics = await evaluate_endpoints(
+                evaluate,
                 eval_dataloader=self.eval_dataloader,
                 trajectory_runner=self.trajectory_runner,
                 cfg=self.cfg,
