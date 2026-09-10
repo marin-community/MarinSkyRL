@@ -76,3 +76,61 @@ def test_invalid_checkpoint_staging_fails_before_any_ray_process_starts(tmp_path
     assert not process_marker.exists()
     assert not destination.exists()
     assert not list(tmp_path.glob(".node-checkpoint.staging-*"))
+
+
+@pytest.mark.parametrize("failures", [1, 3])
+def test_model_staging_retries_timed_out_file_without_recopying_completed_files(tmp_path, monkeypatch, failures):
+    from pathlib import Path
+    from fsspec.exceptions import FSTimeoutError
+    from cloud.iris import artifacts
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a-config.json").write_bytes(b"configuration")
+    (source / "b-weights").write_bytes(b"complete weights")
+    destination = tmp_path / "materialized"
+    original = LocalFileSystem.get_file
+    calls = []
+
+    def download(filesystem, source_path, local_path, **kwargs):
+        name = Path(source_path).name
+        calls.append(name)
+        if name == "b-weights" and calls.count(name) <= failures:
+            assert not Path(local_path).exists()
+            Path(local_path).write_bytes(b"partial")
+            raise FSTimeoutError("multipart read timed out")
+        return original(filesystem, source_path, local_path, **kwargs)
+
+    monkeypatch.setattr(LocalFileSystem, "get_file", download)
+    waits = []
+    monkeypatch.setattr(artifacts.time, "sleep", waits.append)
+    request = artifacts.ArtifactSource(source.as_uri(), "immutable-test", str(destination))
+    if failures == 3:
+        with pytest.raises(FSTimeoutError):
+            artifacts.materialize(request)
+        assert not destination.exists()
+        assert not list(tmp_path.glob(".materialized.staging-*"))
+        assert waits == [2, 4]
+    else:
+        result = artifacts.materialize(request)
+        assert (destination / "b-weights").read_bytes() == b"complete weights"
+        assert len(result.files) == 2
+        assert waits == [2]
+        assert (destination / artifacts.SOURCE_MANIFEST_FILENAME).is_file()
+    assert calls.count("a-config.json") == 1
+    assert calls.count("b-weights") == min(failures + 1, 3)
+
+
+def test_s3_staging_uses_longer_read_timeout_and_virtual_addressing(monkeypatch):
+    from cloud.iris import artifacts
+
+    sentinel = object()
+
+    def resolve(uri, *, storage_options):
+        assert uri == "s3://bucket/model"
+        assert storage_options["config_kwargs"] == {"s3": {"addressing_style": "virtual"}, "read_timeout": 180}
+        return sentinel, None, ["bucket/model"]
+
+    monkeypatch.delenv(artifacts.S3_ADDRESSING_STYLE_ENV, raising=False)
+    monkeypatch.setattr(artifacts.fsspec, "get_fs_token_paths", resolve)
+    assert artifacts.fs_and_path("s3://bucket/model") == (sentinel, "bucket/model")
