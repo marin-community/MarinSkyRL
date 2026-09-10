@@ -59,7 +59,11 @@ class PromptDataset:
         prompt_key = self.prompt_key
         self.dataframe = self.dataframe.filter(
             lambda doc: (
-                len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
+                len(
+                    tokenizer.apply_chat_template(
+                        doc[prompt_key], add_generation_prompt=True, tokenize=True, return_dict=False
+                    )
+                )
                 <= self.max_prompt_length
             ),
             num_proc=self.num_workers,
