@@ -468,6 +468,11 @@ class WorkerWrap:
 
         return read_publication_receiver_state(self)
 
+    def shard_metadata_rpc(self, method, payload):
+        from skyrl_train.weight_sync.shard_wire import execute_shard_rpc
+
+        return execute_shard_rpc(self, method, payload)
+
     def collect_shard_receiver_preparation(self, preparation_id, geometry, replica):
         from skyrl_train.weight_sync.shard_worker_preparation import collect_receiver
 
@@ -2198,11 +2203,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await self._get_engine().collective_rpc("begin_publication_timing", args=(step,))
 
     async def collect_shard_receiver_preparation(self, preparation_id, geometry, replica):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
         if not await self.is_paused():
             raise RuntimeError("Shard preparation requires the native idle acknowledgement")
-        return await call_all_receiver_workers(
+        return await call_all_shard_workers(
             self._get_engine(),
             "collect_shard_receiver_preparation",
             args=(
@@ -2215,11 +2220,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
 
     async def bind_shard_receiver_preparation(self, plan, output_uri):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
         if not await self.is_paused():
             raise RuntimeError("Shard preparation requires the native idle acknowledgement")
-        return await call_all_receiver_workers(
+        return await call_all_shard_workers(
             self._get_engine(),
             "bind_shard_receiver_preparation",
             args=(
@@ -2231,9 +2236,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
 
     async def close_shard_receiver_preparation(self, preparation_id):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
-        return await call_all_receiver_workers(
+        return await call_all_shard_workers(
             self._get_engine(),
             "close_shard_receiver_preparation",
             args=(preparation_id,),
@@ -2242,11 +2247,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
 
     async def prepare_shard_replay(self, manifest_id, publication_id, output_uri):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
         if not await self.is_paused():
             raise RuntimeError("Shard replay requires native idle acknowledgement")
-        return await call_all_receiver_workers(
+        return await call_all_shard_workers(
             self._get_engine(),
             "prepare_shard_replay",
             args=(manifest_id, publication_id, output_uri),
@@ -2255,11 +2260,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
 
     async def replay_shard_stream(self, manifest_id, publication_id, output_uri):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
         if not await self.is_paused():
             raise RuntimeError("Shard replay requires native idle acknowledgement")
-        return await call_all_receiver_workers(
+        return await call_all_shard_workers(
             self._get_engine(),
             "replay_shard_stream",
             args=(manifest_id, publication_id, output_uri),
@@ -2268,27 +2273,27 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
 
     async def begin_shard_stream(self, manifest_id: str, publication_id: int):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
         if not await self.is_paused():
             raise RuntimeError("Native shard publication requires scheduler-idle acknowledgement")
-        return await call_all_receiver_workers(
+        return await call_all_shard_workers(
             self._get_engine(), "begin_shard_stream", args=(manifest_id, publication_id), kwargs=None, settle_calls=True
         )
 
     async def run_shard_stream(self, manifest_id: str, publication_id: int):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
         if not await self.is_paused():
             raise RuntimeError("Native shard publication requires scheduler-idle acknowledgement")
-        return await call_all_receiver_workers(
+        return await call_all_shard_workers(
             self._get_engine(), "run_shard_stream", args=(manifest_id, publication_id), kwargs=None, settle_calls=True
         )
 
     async def read_weight_sync_observations(self, observation_id, output_uri):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
-        return await call_all_receiver_workers(
+        return await call_all_shard_workers(
             self._get_engine(),
             "read_weight_sync_observations",
             args=(observation_id, output_uri),
@@ -2297,9 +2302,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
 
     async def finish_shard_stream(self, manifest_id: str, publication_id: int):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
-        return await call_all_receiver_workers(
+        return await call_all_shard_workers(
             self._get_engine(),
             "finish_shard_stream",
             args=(manifest_id, publication_id),
@@ -2308,9 +2313,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
 
     async def close_shard_stream(self, manifest_id: str, publication_id: int):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
-        return await call_all_receiver_workers(
+        return await call_all_shard_workers(
             self._get_engine(), "close_shard_stream", args=(manifest_id, publication_id), kwargs=None, settle_calls=True
         )
 

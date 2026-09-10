@@ -17,7 +17,7 @@ from tests.cpu.weight_sync.test_shard_preparation import metadata_fixture, endpo
 
 RECEIVER = {"collect_shard_receiver_preparation", "bind_shard_receiver_preparation", "close_shard_receiver_preparation"}
 POLICY = {"collect_shard_policy_preparation", "bind_shard_policy_preparation", "close_shard_policy_preparation"}
-Worker = actual_methods("inference_engines/vllm/vllm_engine.py", "WorkerWrap", RECEIVER)
+Worker = actual_methods("inference_engines/vllm/vllm_engine.py", "WorkerWrap", RECEIVER | {"shard_metadata_rpc"})
 Engine = actual_methods("inference_engines/vllm/vllm_engine.py", "AsyncVLLMInferenceEngine", RECEIVER | {"is_paused"})
 Policy = actual_methods("workers/megatron/megatron_worker.py", "MegatronPolicyWorkerBase", POLICY)
 

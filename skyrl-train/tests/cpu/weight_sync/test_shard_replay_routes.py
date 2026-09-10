@@ -234,8 +234,11 @@ async def test_replay_rpc_joins_failed_and_held_siblings_before_return(layer, me
             core_engines = [index.to_bytes(2, "little") for index in (0, 1)]
 
             async def _call_utility_async(self, utility, name, timeout, args, kwargs, *, engine):
-                assert utility == "collective_rpc" and name == method
-                assert args == ("manifest", 9, "destination")
+                from skyrl_train.weight_sync.shard_wire import decode_shard_metadata
+
+                assert utility == "collective_rpc" and name == "shard_metadata_rpc"
+                assert args[0] == method
+                assert decode_shard_metadata(args[1]) == ("manifest", 9, "destination")
                 return await invoke(int.from_bytes(engine, "little"))
 
         native = SimpleNamespace(
@@ -260,8 +263,8 @@ async def test_replay_rpc_joins_failed_and_held_siblings_before_return(layer, me
 
         target = Engine()
     task = asyncio.create_task(getattr(target, method)("manifest", 9, "destination"))
-    await failed.wait()
-    await entered.wait()
+    await asyncio.wait_for(failed.wait(), timeout=5)
+    await asyncio.wait_for(entered.wait(), timeout=5)
     try:
         for _ in range(3):
             if cancel:

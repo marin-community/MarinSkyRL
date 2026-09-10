@@ -60,7 +60,9 @@ def actual_methods(path, class_name, names):
     return namespace["ActualMethods"]
 
 
-WorkerMethods = actual_methods("inference_engines/vllm/vllm_engine.py", "WorkerWrap", RECEIVER_METHODS)
+WorkerMethods = actual_methods(
+    "inference_engines/vllm/vllm_engine.py", "WorkerWrap", RECEIVER_METHODS | {"shard_metadata_rpc"}
+)
 EngineMethods = actual_methods(
     "inference_engines/vllm/vllm_engine.py", "AsyncVLLMInferenceEngine", RECEIVER_METHODS | {"is_paused"}
 )
@@ -525,7 +527,10 @@ async def test_failed_native_sibling_is_joined_before_aggregate_returns(layer, m
             core_engines = [index.to_bytes(2, "little") for index in (0, 1)]
 
             async def _call_utility_async(self, utility, name, timeout, args, kwargs, *, engine):
-                assert utility == "collective_rpc" and name == method and args == ("manifest", 9)
+                from skyrl_train.weight_sync.shard_wire import decode_shard_metadata
+
+                assert utility == "collective_rpc" and name == "shard_metadata_rpc"
+                assert args[0] == method and decode_shard_metadata(args[1]) == ("manifest", 9)
                 return await call(int.from_bytes(engine, "little"))
 
         native = SimpleNamespace(
@@ -551,8 +556,8 @@ async def test_failed_native_sibling_is_joined_before_aggregate_returns(layer, m
         invocation = getattr(Engine(), method)("manifest", 9)
 
     task = asyncio.create_task(invocation)
-    await failed.wait()
-    await entered.wait()
+    await asyncio.wait_for(failed.wait(), timeout=5)
+    await asyncio.wait_for(entered.wait(), timeout=5)
     try:
         for _ in range(3):
             await asyncio.sleep(0)
