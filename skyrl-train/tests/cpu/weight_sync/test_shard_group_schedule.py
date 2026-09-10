@@ -15,8 +15,10 @@ from skyrl_train.weight_sync.shard_group_schedule import (
 
 
 def fixture(dp=2, pp=2, ep=8, replicas=1, layers=26, experts=256):
-    trainers = tuple(TrainerRank(i, data, stage, expert)
-        for i, (stage, data, expert) in enumerate(product(range(pp), range(dp), range(ep))))
+    trainers = tuple(
+        TrainerRank(i, data, stage, expert)
+        for i, (stage, data, expert) in enumerate(product(range(pp), range(dp), range(ep)))
+    )
     receivers = tuple(ReceiverRank(i, *coordinate) for i, coordinate in enumerate(product(range(replicas), range(ep))))
     layer_groups = tuple(tuple(range(stage * layers // pp, (stage + 1) * layers // pp)) for stage in range(pp))
     entries = tuple(
@@ -26,8 +28,15 @@ def fixture(dp=2, pp=2, ep=8, replicas=1, layers=26, experts=256):
         for expert in range(experts)
         for projection, nbytes in (("fc1", 2 * 1280 * 2560 * 2), ("fc2", 1280 * 2560 * 2))
     )
-    return dict(trainers=trainers, receivers=receivers, entries=entries, trainer_ep=ep, receiver_ep=ep,
-                layers_by_pp=layer_groups, num_experts=experts)
+    return dict(
+        trainers=trainers,
+        receivers=receivers,
+        entries=entries,
+        trainer_ep=ep,
+        receiver_ep=ep,
+        layers_by_pp=layer_groups,
+        num_experts=experts,
+    )
 
 
 @pytest.mark.parametrize("dp,replicas", [(2, 1), (2, 2), (1, 3)])
@@ -36,9 +45,9 @@ def test_required_snowball_matrix_all_members_roots_and_byte_coverage(dp, replic
     schedule = build_shard_group_schedule(**args)
     assert len(schedule.groups) == 8 and len(schedule.broadcasts) == 26 * 256 * 2
     for group in schedule.groups:
-        assert group.members == tuple(r.rank for r in sorted(args["trainers"], key=lambda row: (row.dp, row.pp)) if r.ep == group.ep) + tuple(
-            len(args["trainers"]) + r.rank for r in args["receivers"] if r.ep == group.ep
-        )
+        assert group.members == tuple(
+            r.rank for r in sorted(args["trainers"], key=lambda row: (row.dp, row.pp)) if r.ep == group.ep
+        ) + tuple(len(args["trainers"]) + r.rank for r in args["receivers"] if r.ep == group.ep)
         assert len(group.members) == 2 * dp + replicas
         expected_calls = tuple(item for item in schedule.broadcasts if item.group_ep == group.ep)
         for member in group.members:
@@ -84,7 +93,10 @@ def test_named_unequal_ep_error_before_building_schedule():
         build_shard_group_schedule(**args)
 
 
-@pytest.mark.parametrize("fault", ["missing_rank", "duplicate_rank", "missing_entry", "duplicate_entry", "wrong_pp", "wrong_expert", "bad_bytes"])
+@pytest.mark.parametrize(
+    "fault",
+    ["missing_rank", "duplicate_rank", "missing_entry", "duplicate_entry", "wrong_pp", "wrong_expert", "bad_bytes"],
+)
 def test_invalid_native_topology_and_manifest_rejected(fault):
     args = fixture(dp=1, pp=2, ep=2, replicas=3, layers=2, experts=4)
     if fault == "missing_rank":
