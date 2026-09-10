@@ -298,6 +298,7 @@ trainer:
     eval_mode: blocking
 
     num_parallel_generation_workers: 768
+    max_buffered_groups: null
     admission_order: fifo
     injected_delay_max_steps: 0
     admission_stall_timeout: 21600
