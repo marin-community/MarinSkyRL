@@ -731,8 +731,7 @@ def _prepare_gretel_text_to_sql(
         "table_names": sorted(table_names),
     }
     problem = f"{question.strip()}\n\nDatabase schema (SQLite):\n{ground_truth['schema_sql']}"
-    normalized = contract.normalize_ground_truth(ground_truth)
-    verified = contract.validate_example(normalized, f"<solution>{reference_sql}</solution>", "SELECT 1")
+    verified = contract.validate_example(ground_truth, f"<solution>{reference_sql}</solution>", "SELECT 1")
     return {
         "data_source": source.dataset_id,
         "prompt": [{"role": "user", "content": problem + contract.prompt_instruction}],

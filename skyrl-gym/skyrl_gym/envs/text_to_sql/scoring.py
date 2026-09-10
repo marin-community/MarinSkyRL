@@ -329,6 +329,40 @@ def guard_candidate_sql(sql: str) -> tuple[bool, str]:
     return True, stmts[0]
 
 
+def _clone_db(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Page-level copy of a built in-memory database, so the seed inserts run only once per grade."""
+    clone = sqlite3.connect(":memory:")
+    clone.text_factory = str
+    conn.backup(clone)
+    return clone
+
+
+def _compare_on(
+    conn: sqlite3.Connection, reference_sql: str, candidate_stmt: str, order_significant: bool, label: str
+) -> tuple[int | str, str] | None:
+    """Run the reference and the candidate on ``conn`` and compare their result sets.
+
+    Returns a ``(verdict, detail)`` tuple when the pass is decisive — ``INFRA`` for a broken reference,
+    ``0`` for a candidate error or a result-set mismatch — and ``None`` when the two agree.
+    """
+    try:
+        reference = run_reference(conn, reference_sql)
+    except sqlite3.Error as exc:
+        return INFRA, f"reference query failed on {label} db: {exc}"
+    if len(reference[1]) > _MAX_RESULT_ROWS:
+        return INFRA, f"reference result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
+    try:
+        candidate = run_candidate(conn, candidate_stmt)
+    except sqlite3.Error as exc:
+        return 0, f"candidate query failed on {label} db: {exc}"
+    if len(candidate[1]) > _MAX_RESULT_ROWS:
+        return 0, f"candidate result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
+    equal, detail = results_equivalent(reference, candidate, order_significant=order_significant)
+    if not equal:
+        return 0, f"{label} db: {detail}"
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # public API                                                                   #
 # --------------------------------------------------------------------------- #
@@ -401,31 +435,27 @@ def grade(ground_truth: Any, candidate_sql: str) -> tuple[int | str, str]:
     order_significant = bool(spec["order_significant"])
     tables = [str(t) for t in spec.get("table_names") or []]
 
-    for label, do_perturb in (("seeded", False), ("perturbed", True)):
+    try:
+        seeded = build_db(create_stmts, insert_stmts)
+    except sqlite3.Error as exc:
+        return INFRA, f"could not rebuild database: {exc}"
+    try:
+        verdict = _compare_on(seeded, reference_sql, candidate_stmt, order_significant, "seeded")
+        if verdict is not None:
+            return verdict
         try:
-            conn = build_db(create_stmts, insert_stmts)
+            perturbed = _clone_db(seeded)
         except sqlite3.Error as exc:
-            return INFRA, f"could not rebuild database ({label}): {exc}"
+            return INFRA, f"could not build the perturbed database: {exc}"
         try:
-            if do_perturb:
-                perturb_db(conn, tables)
-            try:
-                reference = run_reference(conn, reference_sql)
-            except sqlite3.Error as exc:
-                return INFRA, f"reference query failed on {label} db: {exc}"
-            if len(reference[1]) > _MAX_RESULT_ROWS:
-                return INFRA, f"reference result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
-            try:
-                candidate = run_candidate(conn, candidate_stmt)
-            except sqlite3.Error as exc:
-                return 0, f"candidate query failed on {label} db: {exc}"
-            if len(candidate[1]) > _MAX_RESULT_ROWS:
-                return 0, f"candidate result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
-            equal, detail = results_equivalent(reference, candidate, order_significant=order_significant)
-            if not equal:
-                return 0, f"{label} db: {detail}"
+            perturb_db(perturbed, tables)
+            verdict = _compare_on(perturbed, reference_sql, candidate_stmt, order_significant, "perturbed")
+            if verdict is not None:
+                return verdict
         finally:
-            conn.close()
+            perturbed.close()
+    finally:
+        seeded.close()
     return 1, "result sets match on seeded and perturbed databases"
 
 
