@@ -145,6 +145,7 @@ def prepare_native_shard_worker(
             policy_access=policy_access,
             replica_verifier=comparator,
             owned_groups=tuple(groups.values()),
+            retained_proof_workspace_bytes=comparison_workspace.numel() if trainer else 0,
         )
         return {
             "rank": rank,

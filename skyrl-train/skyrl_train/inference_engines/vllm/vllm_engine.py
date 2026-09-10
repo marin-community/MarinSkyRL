@@ -483,6 +483,16 @@ class WorkerWrap:
 
         return close_preparation(self, preparation_id)
 
+    def prepare_shard_replay(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.shard_replay_rpc import replay_worker_call
+
+        return replay_worker_call(self, "prepare_replay", manifest_id, publication_id, output_uri)
+
+    def replay_shard_stream(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.shard_replay_rpc import replay_worker_call
+
+        return replay_worker_call(self, "replay", manifest_id, publication_id, output_uri)
+
     def begin_shard_stream(self, manifest_id: str, publication_id: int):
         from skyrl_train.weight_sync.shard_session import worker_shard_call
 
@@ -2217,6 +2227,32 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             self._get_engine(),
             "close_shard_receiver_preparation",
             args=(preparation_id,),
+            kwargs=None,
+            settle_calls=True,
+        )
+
+    async def prepare_shard_replay(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        if not await self.is_paused():
+            raise RuntimeError("Shard replay requires native idle acknowledgement")
+        return await call_all_receiver_workers(
+            self._get_engine(),
+            "prepare_shard_replay",
+            args=(manifest_id, publication_id, output_uri),
+            kwargs=None,
+            settle_calls=True,
+        )
+
+    async def replay_shard_stream(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        if not await self.is_paused():
+            raise RuntimeError("Shard replay requires native idle acknowledgement")
+        return await call_all_receiver_workers(
+            self._get_engine(),
+            "replay_shard_stream",
+            args=(manifest_id, publication_id, output_uri),
             kwargs=None,
             settle_calls=True,
         )

@@ -1687,6 +1687,30 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             capture=capture,
         )
 
+    async def replay_shard_diagnostic(
+        self,
+        manifest_id,
+        publication_id,
+        *,
+        policy_ranks,
+        expected_receiver_bytes,
+        expected_device_type,
+        output_uri,
+        capture,
+    ):
+        from skyrl_train.weight_sync.shard_replay_rpc import replay_prepared_shards
+
+        return await replay_prepared_shards(
+            self,
+            manifest_id,
+            publication_id,
+            policy_ranks=policy_ranks,
+            expected_receiver_bytes=expected_receiver_bytes,
+            expected_device_type=expected_device_type,
+            output_uri=output_uri,
+            capture=capture,
+        )
+
     async def diagnostic_shard_publication(
         self, manifest_id, publication_id, *, replay, policy_ranks, receiver_ranks, expected_receiver_bytes
     ):

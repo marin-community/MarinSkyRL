@@ -13,6 +13,8 @@ from threading import Lock
 
 import torch.distributed as dist
 
+from skyrl_train.weight_sync.shard_replay import ShardReplay
+
 
 class ShardPhase(StrEnum):
     PREPARED = "prepared"
@@ -20,6 +22,8 @@ class ShardPhase(StrEnum):
     VERIFIED = "verified"
     RUNNING = "running"
     INSTALLED = "installed"
+    REPLAY_READY = "replay-ready"
+    REPLAYING = "replaying"
     FAILED = "failed"
     CLOSED = "closed"
 
@@ -63,7 +67,7 @@ class SourceReplicaProof:
 
 
 class ShardSession:
-    def __init__(self, runner, *, policy_access, replica_verifier, owned_groups):
+    def __init__(self, runner, *, policy_access, replica_verifier, owned_groups, retained_proof_workspace_bytes=0):
         if runner.completed or runner.manifest_id is not None:
             raise ValueError("Only an unused stream runner may be bound")
         self.runner = runner
@@ -77,6 +81,9 @@ class ShardSession:
         self.versions = None
         self.lock = Lock()
         self.proof = None
+        self.installed_versions = None
+        self.replay_state = None
+        self.retained_proof_workspace_bytes = retained_proof_workspace_bytes
         if runner.rank in runner.trainers and (policy_access is None or replica_verifier is None):
             raise ValueError("Trainer stream requires an enforceable lease and exact replica verifier")
         if runner.rank in runner.receivers and (policy_access is not None or replica_verifier is not None):
@@ -180,12 +187,64 @@ class ShardSession:
             raise
         with self.lock:
             self.phase = ShardPhase.INSTALLED
+            self.installed_versions = storage_versions(self.runner.parameters)
         return {**self.receipt(), "stream": result}
+
+    def prepare_replay(self, manifest_id, publication_id):
+        with self.lock:
+            self.identity(manifest_id, publication_id)
+            if self.phase is not ShardPhase.INSTALLED or storage_versions(self.runner.sources) != self.versions:
+                raise ValueError("Replay requires the unchanged installed publication")
+            if storage_versions(self.runner.parameters) != self.installed_versions:
+                raise ValueError("Installed storage changed before replay preparation")
+            try:
+                self.replay_state = ShardReplay(
+                    self.runner, retained_proof_workspace_bytes=self.retained_proof_workspace_bytes
+                )
+            except BaseException:
+                self.phase = ShardPhase.FAILED
+                raise
+            self.phase = ShardPhase.REPLAY_READY
+            return {
+                **self.receipt(),
+                "expected_bytes": self.replay_state.expected_bytes,
+                "memory_before": self.replay_state.memory_before,
+            }
+
+    def replay(self, manifest_id, publication_id):
+        with self.lock:
+            self.identity(manifest_id, publication_id)
+            if self.phase is not ShardPhase.REPLAY_READY:
+                raise ValueError("Replay requires complete prechecked receiver inventory")
+            if (
+                storage_versions(self.runner.sources) != self.versions
+                or storage_versions(self.runner.parameters) != self.installed_versions
+            ):
+                raise ValueError("Frozen source or installed storage changed before replay")
+            self.phase = ShardPhase.REPLAYING
+        try:
+            result = self.replay_state.run()
+            if (
+                storage_versions(self.runner.sources) != self.versions
+                or storage_versions(self.runner.parameters) != self.installed_versions
+            ):
+                raise ValueError("Replay modified source or installed storage")
+        except BaseException:
+            with self.lock:
+                self.phase = ShardPhase.FAILED
+            raise
+        with self.lock:
+            self.phase = (
+                ShardPhase.VERIFIED
+                if result["mismatches"] == 0 and result["replay_memory_within_limit"] is not False
+                else ShardPhase.FAILED
+            )
+        return {**self.receipt(), **result}
 
     def close(self, manifest_id, publication_id):
         with self.lock:
             self.identity(manifest_id, publication_id)
-            if self.phase in (ShardPhase.RUNNING, ShardPhase.CLOSED):
+            if self.phase in (ShardPhase.RUNNING, ShardPhase.REPLAYING, ShardPhase.CLOSED):
                 raise ValueError("Cannot close a running or already closed shard session")
             closed_from = self.phase.value
             if self.publication_id is None:
@@ -208,11 +267,17 @@ class ShardSession:
             return result
 
 
-def bind_worker_shard_stream(worker, runner, *, policy_access, replica_verifier, owned_groups):
+def bind_worker_shard_stream(
+    worker, runner, *, policy_access, replica_verifier, owned_groups, retained_proof_workspace_bytes=0
+):
     if getattr(worker, "_shard_stream_session", None) is not None:
         raise ValueError("Close the previous shard worker session before binding another")
     worker._shard_stream_session = ShardSession(
-        runner, policy_access=policy_access, replica_verifier=replica_verifier, owned_groups=owned_groups
+        runner,
+        policy_access=policy_access,
+        replica_verifier=replica_verifier,
+        owned_groups=owned_groups,
+        retained_proof_workspace_bytes=retained_proof_workspace_bytes,
     )
     return worker._shard_stream_session.manifest_id
 

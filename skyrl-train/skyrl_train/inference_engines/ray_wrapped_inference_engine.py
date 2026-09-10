@@ -218,6 +218,12 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def close_shard_receiver_preparation(self, preparation_id):
         return await self.inference_engine_actor.close_shard_receiver_preparation.remote(preparation_id)
 
+    async def prepare_shard_replay(self, manifest_id, publication_id, output_uri):
+        return await self.inference_engine_actor.prepare_shard_replay.remote(manifest_id, publication_id, output_uri)
+
+    async def replay_shard_stream(self, manifest_id, publication_id, output_uri):
+        return await self.inference_engine_actor.replay_shard_stream.remote(manifest_id, publication_id, output_uri)
+
     async def begin_shard_stream(self, manifest_id: str, publication_id: int):
         return await self.inference_engine_actor.begin_shard_stream.remote(
             manifest_id=manifest_id, publication_id=publication_id

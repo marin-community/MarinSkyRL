@@ -915,6 +915,20 @@ class InferenceEngineClient(InferenceEngineInterface):
             raise RuntimeError("Shard cleanup requires every configured receiver actor")
         return await self._run_on_all_engines("close_shard_receiver_preparation", preparation_id, _settle_calls=True)
 
+    async def prepare_shard_replay(self, manifest_id, publication_id, output_uri):
+        if self._dead_engines or not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard replay requires every receiver and client idle acknowledgement")
+        return await self._run_on_all_engines(
+            "prepare_shard_replay", manifest_id, publication_id, output_uri, _settle_calls=True
+        )
+
+    async def replay_shard_stream(self, manifest_id, publication_id, output_uri):
+        if self._dead_engines or not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard replay requires every receiver and client idle acknowledgement")
+        return await self._run_on_all_engines(
+            "replay_shard_stream", manifest_id, publication_id, output_uri, _settle_calls=True
+        )
+
     async def begin_shard_stream(self, manifest_id: str, publication_id: int):
         if self._dead_engines:
             raise RuntimeError("Shard collectives require every configured inference engine")

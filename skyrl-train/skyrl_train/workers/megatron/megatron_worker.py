@@ -864,6 +864,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return await asyncio.to_thread(close_preparation, self, preparation_id)
 
+    async def prepare_shard_publication_replay(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.shard_replay_rpc import replay_worker_call
+
+        return await asyncio.to_thread(
+            replay_worker_call, self, "prepare_replay", manifest_id, publication_id, output_uri
+        )
+
+    async def replay_shard_publication(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.shard_replay_rpc import replay_worker_call
+
+        return await asyncio.to_thread(replay_worker_call, self, "replay", manifest_id, publication_id, output_uri)
+
     async def begin_shard_publication(self, manifest_id: str, publication_id: int):
         from skyrl_train.weight_sync.shard_session import worker_shard_call
 
