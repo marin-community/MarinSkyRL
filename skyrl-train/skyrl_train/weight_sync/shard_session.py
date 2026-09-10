@@ -143,7 +143,11 @@ class ShardSession:
                 raise ValueError("Exact source-replica proof is incomplete, stale or mismatched")
             self.proof = proof
             self.phase = ShardPhase.VERIFIED
-            return {**self.receipt(), "proof": asdict(proof), "replica_groups": getattr(self.replica_verifier, "last_receipt", None)}
+            return {
+                **self.receipt(),
+                "proof": asdict(proof),
+                "replica_groups": getattr(self.replica_verifier, "last_receipt", None),
+            }
 
     def run(self, manifest_id, publication_id):
         with self.lock:
