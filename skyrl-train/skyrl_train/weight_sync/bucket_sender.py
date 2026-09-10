@@ -36,7 +36,8 @@ class BucketSenderSlots:
         self.manifest = manifest
         self.buffers = buffers
         self.device = device
-        self.pack_stream = torch.cuda.Stream(device=device)
+        self.pack_streams = tuple(torch.cuda.Stream(device=device) for _ in buffers)
+        self.pack_stream = self.pack_streams[0]
         self.pack_events = tuple(torch.cuda.Event() for _ in buffers)
         self.sent_events = tuple(torch.cuda.Event() for _ in buffers)
         self.next_bucket = 0
@@ -50,6 +51,11 @@ class BucketSenderSlots:
             raise ValueError("The preceding bucket must be submitted before packing another")
         bucket = self.next_bucket
         slot = bucket % len(self.buffers)
+        self.pack_stream = self.pack_streams[slot]
+        if bucket:
+            # The latest source-copy event must also cover preceding copies
+            # before a Bridge exporter can release or reuse its source storage.
+            self.pack_stream.wait_event(self.pack_events[(bucket - 1) % len(self.buffers)])
         if bucket >= len(self.buffers):
             self.pack_stream.wait_event(self.sent_events[slot])
         buffer = self.buffers[slot]

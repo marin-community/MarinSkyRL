@@ -38,14 +38,19 @@ def cuda_boundary(monkeypatch):
         def query(self):
             return self.joined
 
-    pack, caller = Stream("pack"), Stream("caller")
+    packs, caller = [], Stream("caller")
+
+    def make_pack(device):
+        pack = Stream("pack" if not packs else f"pack{len(packs)}")
+        packs.append(pack)
+        return pack
 
     @contextmanager
     def stream_context(stream):
-        assert stream is pack
+        assert stream in packs
         yield
 
-    monkeypatch.setattr(torch.cuda, "Stream", lambda device: pack)
+    monkeypatch.setattr(torch.cuda, "Stream", make_pack)
     monkeypatch.setattr(torch.cuda, "current_stream", lambda device: caller)
     monkeypatch.setattr(torch.cuda, "Event", Event)
     monkeypatch.setattr(torch.cuda, "stream", stream_context)
@@ -166,11 +171,16 @@ def test_ring_slots_preserve_bytes_across_wraparound_and_join_every_send(cuda_bo
     receipt = sender.finish()
     assert torch.equal(torch.cat(chunks), tensor.view(torch.uint8).flatten())
     assert receipt["wire_bytes"] == 80 and receipt["send_completion_joined"]
+    assert len({id(stream) for stream in sender.pack_streams}) == slot_count
+    for slot in range(1, slot_count):
+        assert ("wait", f"pack{slot}", slot - 1) in cuda_boundary.log
     for event in range(slot_count, 2 * slot_count):
         assert ("join", event) in cuda_boundary.log
     for reused_slot in range(min(slot_count, manifest.bucket_count - slot_count)):
         event = slot_count + reused_slot
-        assert cuda_boundary.log.index(("record", "caller", event)) < cuda_boundary.log.index(("wait", "pack", event))
+        assert cuda_boundary.log.index(("record", "caller", event)) < cuda_boundary.log.index(
+            ("wait", "pack" if reused_slot == 0 else f"pack{reused_slot}", event)
+        )
 
 
 def test_three_slot_ring_rejects_alias_of_last_slot(cuda_boundary):
