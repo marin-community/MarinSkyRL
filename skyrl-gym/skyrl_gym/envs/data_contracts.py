@@ -118,10 +118,6 @@ TEXT_TO_SQL_PROMPT_INSTRUCTION = (
 )
 
 
-def _text_to_sql_is_correct(response: str, ground_truth: str) -> bool:
-    return text_to_sql_scoring.is_correct(response, ground_truth)
-
-
 # ---------------------------------------------------------------------------
 # MCQ (multiple choice exact letter match via \boxed{X})
 # ---------------------------------------------------------------------------
@@ -199,7 +195,7 @@ CONTRACTS = {
     "text_to_sql": VerifierDataContract(
         env_id="text_to_sql",
         normalize_ground_truth=text_to_sql_scoring.normalize_ground_truth,
-        is_correct=_text_to_sql_is_correct,
+        is_correct=text_to_sql_scoring.is_correct,
         prompt_instruction=TEXT_TO_SQL_PROMPT_INSTRUCTION,
     ),
 }

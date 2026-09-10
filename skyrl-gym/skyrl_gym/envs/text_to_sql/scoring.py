@@ -7,7 +7,7 @@ The reward model's ``ground_truth`` is a JSON object::
       "insert_sql":        "<INSERT INTO ...; ...>",
       "reference_sql":     "<single SELECT>",
       "order_significant": bool,          # reference has a top-level ORDER BY
-      "table_names":       ["t1", "t2"]   # for the perturbation
+      "table_names":       ["t1", "t2"]   # informational; the perturbation reads sqlite_master directly
     }
 
 ``grade`` rebuilds an in-memory SQLite database from that DDL and compares the
@@ -20,10 +20,11 @@ single-statement check, a keyword blocklist matched against comment/string
 stripped text, and a SQLite authorizer that permits only read operations. A
 progress handler bounds runaway queries.
 
-``grade`` returns ``1`` / ``0`` / ``INFRA``. ``INFRA`` marks a broken task or a
-verifier fault (missing keys, un-loadable schema, a reference query that will
-not run) — the dataset-preparation contract rejects those rows up front, and the
-rollout environment scores them ``0`` without crashing a worker.
+``grade`` returns a ``GradeOutcome`` — ``MATCH`` / ``MISMATCH`` / ``INFRA``.
+``INFRA`` marks a broken task or a verifier fault (missing keys, un-loadable
+schema, a reference query that will not run) — the dataset-preparation contract
+rejects those rows up front, and the rollout environment scores them ``0``
+without crashing a worker.
 """
 
 from __future__ import annotations
@@ -33,11 +34,20 @@ import math
 import re
 import sqlite3
 import time
+from enum import StrEnum
 from typing import Any
 
-INFRA = "infra"
-_QUERY_DEADLINE_SEC = 5.0
+
+class GradeOutcome(StrEnum):
+    MATCH = "match"
+    MISMATCH = "mismatch"
+    INFRA = "infra"  # broken task or a reference that will not run
+
+
+INFRA = GradeOutcome.INFRA  # re-exported for callers and tests that only care about the sentinel
+_QUERY_DEADLINE = 5.0
 _MAX_RESULT_ROWS = 100_000
+_PROGRESS_HANDLER_OPS = 100_000  # SQLite VM instructions between deadline checks
 
 _STRING_RE = re.compile(r"'(?:[^']|'')*'")
 _LINE_COMMENT_RE = re.compile(r"--[^\n]*")
@@ -216,15 +226,22 @@ def build_db(create_stmts: list[str], insert_stmts: list[str]) -> sqlite3.Connec
     return conn
 
 
-def perturb_db(conn: sqlite3.Connection, tables: list[str], *, stride: int = 3) -> int:
-    """Delete every ``stride``-th row of the whole database (table name, then rowid order), in place."""
+def perturb_db(conn: sqlite3.Connection, *, stride: int = 3) -> int:
+    """Delete every ``stride``-th row of the whole database (table name, then rowid order), in place.
+
+    Table names come from ``sqlite_master`` rather than a caller-supplied list, so a stale or empty
+    ``table_names`` in the ground truth cannot silently turn the anti-hardcoding pass into a no-op.
+    """
     cur = conn.cursor()
+    table_names = [
+        row[0]
+        for row in cur.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+    ]
     catalog: list[tuple[str, int]] = []
-    for t in sorted(tables):
-        try:
-            catalog.extend((t, r[0]) for r in cur.execute(f'SELECT rowid FROM "{t}" ORDER BY rowid'))
-        except sqlite3.OperationalError:
-            continue
+    for t in table_names:
+        catalog.extend((t, r[0]) for r in cur.execute(f'SELECT rowid FROM "{t}" ORDER BY rowid'))
     victims = catalog[stride - 1 :: stride]
     by_table: dict[str, list[int]] = {}
     for t, rid in victims:
@@ -247,8 +264,11 @@ def _read_only_authorizer(action, _a1, _a2, _db, _src):
     return sqlite3.SQLITE_OK if action in _ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
 
 
-def run_reference(conn: sqlite3.Connection, sql: str) -> tuple[int, list[tuple]]:
-    conn.set_progress_handler(_deadline_handler(time.monotonic() + _QUERY_DEADLINE_SEC), 100_000)
+def _run_query(conn: sqlite3.Connection, sql: str, *, read_only: bool) -> tuple[int, list[tuple]]:
+    """Execute ``sql`` under the deadline handler; ``read_only`` adds the authorizer for candidate queries."""
+    if read_only:
+        conn.set_authorizer(_read_only_authorizer)
+    conn.set_progress_handler(_deadline_handler(time.monotonic() + _QUERY_DEADLINE), _PROGRESS_HANDLER_OPS)
     try:
         cur = conn.cursor()
         cur.execute(sql)
@@ -256,20 +276,8 @@ def run_reference(conn: sqlite3.Connection, sql: str) -> tuple[int, list[tuple]]
         ncols = len(cur.description) if cur.description else 0
     finally:
         conn.set_progress_handler(None, 0)
-    return ncols, rows
-
-
-def run_candidate(conn: sqlite3.Connection, sql: str) -> tuple[int, list[tuple]]:
-    conn.set_authorizer(_read_only_authorizer)
-    conn.set_progress_handler(_deadline_handler(time.monotonic() + _QUERY_DEADLINE_SEC), 100_000)
-    try:
-        cur = conn.cursor()
-        cur.execute(sql)
-        rows = [tuple(r) for r in cur.fetchmany(_MAX_RESULT_ROWS + 1)]
-        ncols = len(cur.description) if cur.description else 0
-    finally:
-        conn.set_authorizer(None)
-        conn.set_progress_handler(None, 0)
+        if read_only:
+            conn.set_authorizer(None)
     return ncols, rows
 
 
@@ -339,27 +347,27 @@ def _clone_db(conn: sqlite3.Connection) -> sqlite3.Connection:
 
 def _compare_on(
     conn: sqlite3.Connection, reference_sql: str, candidate_stmt: str, order_significant: bool, label: str
-) -> tuple[int | str, str] | None:
+) -> tuple[GradeOutcome, str] | None:
     """Run the reference and the candidate on ``conn`` and compare their result sets.
 
-    Returns a ``(verdict, detail)`` tuple when the pass is decisive — ``INFRA`` for a broken reference,
-    ``0`` for a candidate error or a result-set mismatch — and ``None`` when the two agree.
+    Returns a ``(outcome, detail)`` tuple when the pass is decisive — ``INFRA`` for a broken reference,
+    ``MISMATCH`` for a candidate error or a result-set mismatch — and ``None`` when the two agree.
     """
     try:
-        reference = run_reference(conn, reference_sql)
+        reference = _run_query(conn, reference_sql, read_only=False)
     except sqlite3.Error as exc:
-        return INFRA, f"reference query failed on {label} db: {exc}"
+        return GradeOutcome.INFRA, f"reference query failed on {label} db: {exc}"
     if len(reference[1]) > _MAX_RESULT_ROWS:
-        return INFRA, f"reference result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
+        return GradeOutcome.INFRA, f"reference result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
     try:
-        candidate = run_candidate(conn, candidate_stmt)
+        candidate = _run_query(conn, candidate_stmt, read_only=True)
     except sqlite3.Error as exc:
-        return 0, f"candidate query failed on {label} db: {exc}"
+        return GradeOutcome.MISMATCH, f"candidate query failed on {label} db: {exc}"
     if len(candidate[1]) > _MAX_RESULT_ROWS:
-        return 0, f"candidate result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
+        return GradeOutcome.MISMATCH, f"candidate result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
     equal, detail = results_equivalent(reference, candidate, order_significant=order_significant)
     if not equal:
-        return 0, f"{label} db: {detail}"
+        return GradeOutcome.MISMATCH, f"{label} db: {detail}"
     return None
 
 
@@ -420,53 +428,52 @@ def normalize_ground_truth(ground_truth: Any) -> str:
     return json.dumps(canonical, sort_keys=True)
 
 
-def grade(ground_truth: Any, candidate_sql: str) -> tuple[int | str, str]:
-    """Return ``(1 | 0 | INFRA, detail)``."""
+def grade(ground_truth: Any, candidate_sql: str) -> tuple[GradeOutcome, str]:
+    """Return ``(GradeOutcome, detail)`` — ``MATCH`` / ``MISMATCH`` / ``INFRA``."""
     spec = parse_ground_truth(ground_truth)
     if spec is None:
-        return INFRA, "unusable ground_truth"
+        return GradeOutcome.INFRA, "unusable ground_truth"
     ok, payload = guard_candidate_sql(candidate_sql)
     if not ok:
-        return 0, f"guard rejected candidate query: {payload}"
+        return GradeOutcome.MISMATCH, f"guard rejected candidate query: {payload}"
     candidate_stmt = payload
     create_stmts = split_statements(spec["schema_sql"])
     insert_stmts = split_statements(spec["insert_sql"])
     reference_sql = spec["reference_sql"]
     order_significant = bool(spec["order_significant"])
-    tables = [str(t) for t in spec.get("table_names") or []]
 
     try:
         seeded = build_db(create_stmts, insert_stmts)
     except sqlite3.Error as exc:
-        return INFRA, f"could not rebuild database: {exc}"
+        return GradeOutcome.INFRA, f"could not rebuild database: {exc}"
     try:
-        verdict = _compare_on(seeded, reference_sql, candidate_stmt, order_significant, "seeded")
-        if verdict is not None:
-            return verdict
+        outcome = _compare_on(seeded, reference_sql, candidate_stmt, order_significant, "seeded")
+        if outcome is not None:
+            return outcome
         try:
             perturbed = _clone_db(seeded)
         except sqlite3.Error as exc:
-            return INFRA, f"could not build the perturbed database: {exc}"
+            return GradeOutcome.INFRA, f"could not build the perturbed database: {exc}"
         try:
-            perturb_db(perturbed, tables)
-            verdict = _compare_on(perturbed, reference_sql, candidate_stmt, order_significant, "perturbed")
-            if verdict is not None:
-                return verdict
+            perturb_db(perturbed)
+            outcome = _compare_on(perturbed, reference_sql, candidate_stmt, order_significant, "perturbed")
+            if outcome is not None:
+                return outcome
         finally:
             perturbed.close()
     finally:
         seeded.close()
-    return 1, "result sets match on seeded and perturbed databases"
+    return GradeOutcome.MATCH, "result sets match on seeded and perturbed databases"
 
 
 def score(ground_truth: Any, response: str) -> tuple[float, dict[str, Any]]:
     """Rollout-time reward: ``1.0`` for a match, ``0.0`` otherwise (INFRA also scores 0 and is flagged)."""
-    verdict, detail = grade(ground_truth, extract_sql(response))
-    if verdict == INFRA:
+    outcome, detail = grade(ground_truth, extract_sql(response))
+    if outcome is GradeOutcome.INFRA:
         return 0.0, {"verifier_error": detail}
-    return (1.0 if verdict == 1 else 0.0), {"detail": detail}
+    return (1.0 if outcome is GradeOutcome.MATCH else 0.0), {"detail": detail}
 
 
 def is_correct(response: str, normalized_ground_truth: str) -> bool:
     """Contract preflight check: does ``response`` satisfy the (already normalized) verifier input?"""
-    return grade(normalized_ground_truth, extract_sql(response))[0] == 1
+    return grade(normalized_ground_truth, extract_sql(response))[0] is GradeOutcome.MATCH
