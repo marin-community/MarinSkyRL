@@ -1,8 +1,8 @@
 """
 OpenAI-compatible HTTP endpoint using InferenceEngineClient as backend.
 
-This module provides a FastAPI-based HTTP endpoint that exposes OpenAI's chat completion API
-while routing requests to our internal InferenceEngineClient system.
+This module provides a FastAPI-based HTTP endpoint that exposes OpenAI's completion APIs and
+vLLM-compatible chat tokenization while routing requests to InferenceEngineClient.
 
 Main functions:
 - serve(): Start the HTTP endpoint.
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 _ResponseT = TypeVar("_ResponseT")
 
 
-class CompletionBackend(Protocol):
+class InferenceHTTPBackend(Protocol):
     """What this endpoint needs of the engine client it serves.
 
     InferenceEngineClient satisfies it. It is a protocol rather than that concrete type
@@ -51,9 +51,11 @@ class CompletionBackend(Protocol):
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
+    def tokenize(self, request_payload: Dict[str, Any]) -> list[int]: ...
+
 
 # Global state to hold the inference engine client and backend
-_global_inference_engine_client: Optional[CompletionBackend] = None
+_global_inference_engine_client: Optional[InferenceHTTPBackend] = None
 _global_uvicorn_server: Optional[uvicorn.Server] = None
 
 
@@ -69,7 +71,23 @@ class ErrorResponse(BaseModel):
     error: ErrorInfo
 
 
-def set_global_state(inference_engine_client: CompletionBackend, uvicorn_server: uvicorn.Server):
+class TokenizeRequest(BaseModel):
+    model: Optional[str] = None
+    messages: list[Dict[str, Any]]
+    add_generation_prompt: bool = True
+    continue_final_message: bool = False
+    add_special_tokens: bool = False
+    chat_template: Optional[str] = None
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
+    tools: Optional[list[Dict[str, Any]]] = None
+
+
+class TokenizeResponse(BaseModel):
+    tokens: list[int]
+    count: int
+
+
+def set_global_state(inference_engine_client: InferenceHTTPBackend, uvicorn_server: uvicorn.Server):
     """Set the global inference engine client."""
     global _global_inference_engine_client
     global _global_uvicorn_server
@@ -319,6 +337,45 @@ async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stat
         )
 
 
+async def handle_tokenize_request(request: TokenizeRequest, bridge_stats: HTTPBridgeStatsAccumulator) -> JSONResponse:
+    """Render chat messages with the tokenizer used by the inference client."""
+    endpoint = "/tokenize"
+    backend = _global_inference_engine_client
+    if backend is None:
+        error_response = ErrorResponse(
+            error=ErrorInfo(
+                message="Inference engine client not initialized",
+                type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            )
+        )
+        return _json_response(
+            error_response.model_dump(),
+            endpoint=endpoint,
+            bridge_stats=bridge_stats,
+            status_code=error_response.error.code,
+        )
+
+    if request.model is not None and request.model != backend.model_name:
+        error_response = ErrorResponse(
+            error=ErrorInfo(
+                message=f"Model name mismatch: loaded model name {backend.model_name} != model name in request {request.model}",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            )
+        )
+        return _json_response(
+            error_response.model_dump(),
+            endpoint=endpoint,
+            bridge_stats=bridge_stats,
+            status_code=error_response.error.code,
+        )
+
+    token_ids = await asyncio.to_thread(backend.tokenize, request.model_dump(exclude_none=True))
+    response = TokenizeResponse(tokens=token_ids, count=len(token_ids))
+    return _json_response(response.model_dump(), endpoint=endpoint, bridge_stats=bridge_stats)
+
+
 def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds: int = 30) -> None:
     """Shutdown the server.
 
@@ -480,6 +537,11 @@ def create_app(
         """
         return await handle_openai_request(raw_request, endpoint="/completions", bridge_stats=bridge_stats)
 
+    @app.post("/tokenize")
+    async def tokenize(request: TokenizeRequest):
+        """Render chat messages to token IDs with vLLM-compatible request fields."""
+        return await handle_tokenize_request(request, bridge_stats)
+
     # Health check endpoint
     # All inference engine replicas are initialized before creating `InferenceEngineClient`, and thus
     # we can start receiving requests as soon as the FastAPI server starts
@@ -509,7 +571,7 @@ def create_app(
 
 
 def serve(
-    inference_engine_client: CompletionBackend,
+    inference_engine_client: InferenceHTTPBackend,
     host: str = "0.0.0.0",
     port: int = 8000,
     log_level: str = "info",
