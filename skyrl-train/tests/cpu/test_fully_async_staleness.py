@@ -779,6 +779,16 @@ def test_delayed_group_terminal_emits_delay_once_and_default_wire_is_unchanged(m
     for group in [delayed, delayed, normal]:
         trainer._record_group_terminal(group, "consumed")
     assert events == [
-        ("rollout_group_outcome", {"call_id": "delayed-call", "tokens": 2, "injected_delay_steps": 2}),
+        (
+            "rollout_group_outcome",
+            {
+                "call_id": "delayed-call",
+                "tokens": 2,
+                "injected_delay_steps": 2,
+                "uid": delayed.uid,
+                "admission_model_step": delayed.earliest_model_step,
+                "release_step": delayed.release_step,
+            },
+        ),
         ("rollout_group_outcome", {"call_id": "normal-call", "tokens": 2}),
     ]

@@ -345,6 +345,7 @@ def record_group_outcome(
     attempt_id: str | None = None,
     admitted_at: float | None = None,
     injected_delay: int | None = None,
+    delayed_identity: dict[str, str | int] | None = None,
 ) -> None:
     attributes = {"role": TRAINER_ROLE, "step": str(step), "outcome": outcome}
     group_count.add(1, attributes=attributes)
@@ -356,4 +357,6 @@ def record_group_outcome(
         body = {"call_id": attempt_id, "tokens": tokens}
         if injected_delay is not None:
             body["injected_delay_steps"] = injected_delay
+            if delayed_identity is not None:
+                body.update(delayed_identity)
         record_event("rollout_group_outcome", body, attributes=attributes)

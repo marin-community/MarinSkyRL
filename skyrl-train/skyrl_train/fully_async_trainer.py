@@ -1735,6 +1735,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             admitted_at=group.admitted_at,
             attempt_id=group.telemetry_attempt_id,
             injected_delay=group.injected_delay_steps if group.release_step is not None else None,
+            delayed_identity=(
+                {
+                    "uid": group.uid,
+                    "admission_model_step": group.earliest_model_step,
+                    "release_step": group.release_step,
+                }
+                if group.release_step is not None
+                else None
+            ),
         )
         group.telemetry_finished = True
 
