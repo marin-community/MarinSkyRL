@@ -2,12 +2,17 @@ import asyncio
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
+from omegaconf import OmegaConf
 
+from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils import measurement_guard
 from tests.cpu.test_data_order import SyncSourceOrderDriver, resolve_cpu_actor_results
 from tests.cpu.test_fully_async_publication_cadence import DriverWithCpuLearner, StartupLearnerService, make_driver
+from tests.cpu.test_fully_async_n2 import n2_driver
 
 
 URI = "s3://marin-us-east-02a/qualification/measurement-start.json"
@@ -140,3 +145,114 @@ def test_actual_preboundary_startup_failure_does_not_claim(store, monkeypatch, d
         asyncio.run(asyncio.wait_for(trainer._train_loop(), timeout=10))
     assert store.objects == {}
     assert trainer.trajectory_runner.evaluations == trainer.trajectory_runner.generations == []
+
+
+@pytest.mark.parametrize("step", [None, 0, -1, True, 1.0, "1", 2])
+def test_continuation_guard_rejects_missing_or_wrong_resume_step_before_claim(store, step):
+    trainer = SimpleNamespace(
+        cfg=OmegaConf.create(
+            {
+                "trainer": {
+                    "measurement_guard_uri": URI,
+                    "measurement_guard_resume_step": step,
+                    "resume_path": "/bound/global_step_1",
+                }
+            }
+        ),
+        resume_mode=ResumeMode.FROM_PATH,
+        global_step=1,
+    )
+    with pytest.raises(ValueError):
+        RayPPOTrainer._claim_measurement_boundary(trainer)
+    assert store.objects == {}
+
+
+@pytest.mark.parametrize(
+    "mode,path,uri",
+    [
+        (ResumeMode.LATEST, "/bound/global_step_1", URI),
+        (ResumeMode.NONE, "/bound/global_step_1", URI),
+        (ResumeMode.FROM_PATH, None, URI),
+        (ResumeMode.FROM_PATH, "", URI),
+        (ResumeMode.FROM_PATH, "/bound/global_step_1", None),
+    ],
+)
+def test_continuation_requires_explicit_path_mode_and_own_marker(store, mode, path, uri):
+    trainer = SimpleNamespace(
+        cfg=OmegaConf.create(
+            {"trainer": {"measurement_guard_uri": uri, "measurement_guard_resume_step": 1, "resume_path": path}}
+        ),
+        resume_mode=mode,
+        global_step=1,
+    )
+    with pytest.raises(ValueError):
+        RayPPOTrainer._claim_measurement_boundary(trainer)
+    assert store.objects == {}
+
+
+@pytest.mark.asyncio
+async def test_actual_n2_continuation_claim_keeps_saved_partition_and_blocks_duplicate(store, tmp_path, monkeypatch):
+    trainer = n2_driver(stop_step=1, save_step=1)
+    trainer.cfg.trainer.ckpt_path = str(tmp_path)
+    try:
+        await asyncio.wait_for(trainer._train_loop(), timeout=15)
+    finally:
+        await trainer._cancel_trajectory_tasks()
+
+    def continuation():
+        resumed = n2_driver()
+        resumed.resume_mode = ResumeMode.FROM_PATH
+        resumed.cfg.trainer.resume_path = str(tmp_path / "global_step_1")
+        resumed.cfg.trainer.measurement_guard_uri = URI
+        resumed.cfg.trainer.measurement_guard_resume_step = 1
+        return resumed
+
+    resumed = continuation()
+    original_claim = measurement_guard.claim_measurement
+    claims = []
+
+    def claim(uri):
+        assert resumed.global_step == 1
+        assert resumed.inference_engine_client.publications == [1]
+        assert resumed.trajectory_runner.evaluations == resumed.trajectory_runner.generations == []
+        claims.append(uri)
+        return original_claim(uri)
+
+    monkeypatch.setattr(measurement_guard, "claim_measurement", claim)
+    try:
+        await asyncio.wait_for(resumed._train_loop(), timeout=15)
+    finally:
+        await resumed._cancel_trajectory_tasks()
+    assert claims == [URI]
+    assert [step for step, _ in resumed.preparations] == [3]
+    assert resumed.inputs[0]["action_log_probs"].unique().tolist() == pytest.approx([-0.1])
+    assert resumed.inputs[0].metadata["async_cohort_update_index"] == 1
+    monkeypatch.setattr(measurement_guard, "claim_measurement", original_claim)
+    duplicate = continuation()
+    try:
+        with pytest.raises(FileExistsError):
+            await asyncio.wait_for(duplicate._train_loop(), timeout=15)
+    finally:
+        await duplicate._cancel_trajectory_tasks()
+    assert duplicate.trajectory_runner.evaluations == duplicate.trajectory_runner.generations == []
+    assert duplicate.inputs == []
+
+
+def test_native_checkpoint_loader_selects_explicit_seven_instead_of_latest_eight(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "global_step_7"
+    checkpoint.mkdir()
+    (tmp_path / "latest_ckpt_global_step.txt").write_text("8")
+    trainer = SimpleNamespace(
+        cfg=OmegaConf.create({"trainer": {"resume_path": str(checkpoint), "ckpt_path": str(tmp_path)}}),
+        resume_mode=ResumeMode.FROM_PATH,
+    )
+    observed = []
+
+    def exists(path):
+        observed.append(path)
+        return path == str(checkpoint)
+
+    monkeypatch.setattr("skyrl_train.trainer.io.exists", exists)
+    with pytest.raises(FileNotFoundError, match="Trainer state file not found"):
+        RayPPOTrainer.load_checkpoints(trainer)
+    assert observed == [str(checkpoint), str(checkpoint / "trainer_state.pt")]

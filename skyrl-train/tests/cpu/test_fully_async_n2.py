@@ -89,6 +89,9 @@ async def test_actual_n2_a0_prepares_once_per_cohort_and_publishes_each_update(m
     ages = [body for name, body, _ in events if name == "cohort_consumption"]
     assert len(ages) == 8
     assert all(body["admission_age"] == 0 and body["consume_age"] == body["within_cohort_lag"] for body in ages)
+    prepared = [body for name, body, _ in events if name == "cohort_prepared"]
+    assert [body["admission_step"] for body in prepared] == [1, 3]
+    assert all(body["groups"] == 4 and body["sequences"] == 8 and body["updates"] == 2 for body in prepared)
 
 
 @pytest.mark.asyncio

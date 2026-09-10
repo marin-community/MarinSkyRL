@@ -649,12 +649,25 @@ class RayPPOTrainer:
 
     def _claim_measurement_boundary(self):
         uri = self.cfg.trainer.get("measurement_guard_uri")
+        resume_step = self.cfg.trainer.get("measurement_guard_resume_step")
         if uri is None:
+            if resume_step is not None:
+                raise ValueError("Measurement continuation requires its own measurement guard URI")
             return
         if not isinstance(uri, str) or not uri:
             raise ValueError("measurement_guard_uri must be a nonempty S3 object URI or null")
-        if self.resume_mode != ResumeMode.NONE or self.global_step != 0:
-            raise ValueError("Measurement guard supports fresh measurements only, without checkpoint resumption")
+        if resume_step is None:
+            if self.resume_mode != ResumeMode.NONE or self.global_step != 0:
+                raise ValueError("Measurement guard supports fresh measurements only, without checkpoint resumption")
+        elif (
+            type(resume_step) is not int
+            or resume_step < 1
+            or self.resume_mode != ResumeMode.FROM_PATH
+            or self.global_step != resume_step
+            or not isinstance(self.cfg.trainer.resume_path, str)
+            or not self.cfg.trainer.resume_path
+        ):
+            raise ValueError("Measurement continuation requires an explicit checkpoint and its exact completed step")
         from skyrl_train.utils.measurement_guard import claim_measurement
 
         receipt = claim_measurement(uri)

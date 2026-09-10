@@ -40,6 +40,8 @@ checkpoint_export:
 trainer:
   # Optional S3 claim before initial evaluation/training; blocks remeasurement after an Iris retry.
   measurement_guard_uri: null
+  # Explicit mechanism continuation only; null preserves the fresh-only guard.
+  measurement_guard_resume_step: null
   debug_mode: "off"
   weight_sync_nccl_diagnostics: false
   weight_sync_readback_output: null

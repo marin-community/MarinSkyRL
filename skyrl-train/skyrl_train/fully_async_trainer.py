@@ -1080,6 +1080,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                         self.cfg.generator.n_samples_per_prompt,
                                     )
                                 )
+                                if self._training_metrics_enabled:
+                                    record_event(
+                                        "cohort_prepared",
+                                        {
+                                            "admission_step": self.global_step,
+                                            "groups": self.cohort_size,
+                                            "sequences": len(full_input),
+                                            "updates": self.updates_per_cohort,
+                                            "dp_size": generation_queues.prepared_cohort.dp_size,
+                                        },
+                                        attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
+                                    )
                             cohort = generation_queues.prepared_cohort
                             training_input = cohort.partition(self.global_step)
                             cur_generation_group_mini_batch = [cohort.groups[i] for i in cohort.group_indices()]
