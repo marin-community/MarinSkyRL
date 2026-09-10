@@ -23,6 +23,8 @@ backend:
     # 30 s (the arm's) manufactured masked samples and a 3.6 steps/h collapse; 120 is the
     # fixed default, which this run uses.
     connect_timeout_sec: 120
+    # Scrollback re-read budget; harbor default 45,000 was sized for the old 50 kB worker cap.
+    tmux_capture_budget_chars: 400000
     # No overlay: the migration venv carries harbor itself, and an overlay on PYTHONPATH
     # would shadow it. That is the thing this smoke exists to verify.
     overlay_pythonpath: null

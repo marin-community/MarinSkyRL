@@ -508,6 +508,11 @@ _BACKEND_HARBOR_INJECTIONS = {
 # identical Hydra args and different values here are not comparable.
 _BACKEND_RUNTIME_ENV = {
     "connect_timeout_sec": "HARBOR_OPENAI_CONNECT_TIMEOUT_SEC",
+    # Chars of scrollback terminus-2 may re-read to align a turn's output. Harbor's
+    # 45,000 default was sized for the old 50 kB apptainer worker cap; with the 2 MB
+    # cap, 400,000 lets a full test log through as head+tail instead of tail-only
+    # (1 % of turns, 12 % of trials on the 2026-09-10 smoke).
+    "tmux_capture_budget_chars": "HARBOR_TMUX_CAPTURE_BUDGET_CHARS",
     "history_think": "HARBOR_TERMINUS2_HISTORY_THINK",
     # The launcher PREPENDS this to PYTHONPATH; it is not PYTHONPATH itself.
     "overlay_pythonpath": "HARBOR_OVERLAY_PYTHONPATH",
