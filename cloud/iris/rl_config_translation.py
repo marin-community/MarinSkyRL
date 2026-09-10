@@ -37,6 +37,20 @@ RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
 RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 
 
+class RecipeMode(StrEnum):
+    """How one RL recipe is rendered: a training arm, or an eval-only probe."""
+
+    ARM = "arm"
+    PROBE = "probe"
+
+
+class BackendKind(StrEnum):
+    """Sandbox backend a terminal-bench recipe runs its trials on."""
+
+    APPTAINER = "apptainer"
+    DAYTONA = "daytona"
+
+
 class RLEntrypoint(StrEnum):
     """Execution modes supported by Iris RL configurations."""
 
@@ -473,6 +487,277 @@ def validate_engine_init_kwargs(
         )
 
 
+# =============================================================================
+# Recipe extensions: `mode`, `probe:` and the first-class `backend:` block
+# =============================================================================
+# A recipe is an ordinary Iris RL config that additionally declares which sandbox
+# backend it runs on and, optionally, an eval-only `probe:` overlay. Only one
+# backend setting reaches Hydra (harbor.environment_type, plus Daytona's
+# auto_snapshot); the rest describes bridges, fleets, proxies and key files that
+# live in the launcher's environment block and have no Hydra key at all.
+
+# Backend fields injected into terminal_bench.harbor, per backend kind. Declaring
+# any of them by hand while a `backend:` block is present is an error: two places
+# to set one value is how a Daytona run silently loses auto_snapshot.
+_BACKEND_HARBOR_INJECTIONS = {
+    BackendKind.APPTAINER: (("environment_type", "kind"),),
+    BackendKind.DAYTONA: (("environment_type", "kind"), ("auto_snapshot", "auto_snapshot")),
+}
+
+# Harbor runtime settings that change results but have NO Hydra key. Two runs with
+# identical Hydra args and different values here are not comparable.
+_BACKEND_RUNTIME_ENV = {
+    "connect_timeout_sec": "HARBOR_OPENAI_CONNECT_TIMEOUT_SEC",
+    "history_think": "HARBOR_TERMINUS2_HISTORY_THINK",
+    # The launcher PREPENDS this to PYTHONPATH; it is not PYTHONPATH itself.
+    "overlay_pythonpath": "HARBOR_OVERLAY_PYTHONPATH",
+    "overlay_commit": "HARBOR_OVERLAY_COMMIT",
+}
+
+_BACKEND_KIND_ENV = {
+    BackendKind.APPTAINER: {
+        "bridge_url": "APPTAINER_BRIDGE_URL",
+        "tmux_batch_exec_timeout_margin_sec": "HARBOR_TMUX_BATCH_EXEC_TIMEOUT_MARGIN_SEC",
+    },
+    BackendKind.DAYTONA: {
+        # A path to a key file, never the key itself.
+        "api_key_file": "DAYTONA_API_KEY_FILE",
+        "socks_host": "PROXYCHAINS_SOCKS5_PRESET_HOST",
+        "socks_port": "PROXYCHAINS_SOCKS5_PRESET_PORT",
+        "socks_auth_file": "PROXYCHAINS_SOCKS5_PRESET_AUTH",
+        # DAYTONA_TARGET stays unset unless a region is declared, so snapshot names
+        # stay region-less and match how they were prebuilt.
+        "region": "DAYTONA_TARGET",
+    },
+}
+
+
+@dataclass(frozen=True)
+class RecipeBackend:
+    """The sandbox backend one recipe targets, and its out-of-Hydra settings."""
+
+    kind: BackendKind
+    runtime: Dict[str, Any] = field(default_factory=dict)
+    options: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def fleet(self) -> Dict[str, Any]:
+        """Apptainer's CPU worker fleet description (empty for other backends)."""
+        return dict(self.options.get("fleet") or {})
+
+    @property
+    def required_mask_exceptions(self) -> List[str]:
+        """Exception names this backend needs masked so infra failures do not score zero."""
+        return list(self.options.get("required_mask_exceptions") or [])
+
+
+def _deep_merge(base: Dict[str, Any], overlay: Mapping[str, Any]) -> Dict[str, Any]:
+    """Merge ``overlay`` into ``base``; a mapping recurses, any other value replaces.
+
+    A ``None`` in the overlay replaces rather than deletes, which is what the probe
+    overlay wants: ``_flatten_dict`` already drops ``None`` leaves, so setting
+    ``trainer.resume_path: null`` removes it from the rendered arguments.
+
+    Deliberately not ``OmegaConf.merge``, which agrees with this on every case our
+    recipes produce (checked against the ``probe:`` overlay and a whole-file ``base:``
+    merge, key order included). Going through ``OmegaConf.create`` would additionally
+    read a ``${...}`` recipe value as an interpolation to resolve here, when such a
+    value belongs to Hydra downstream and must round-trip as the literal string.
+    """
+    merged = copy.deepcopy(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def load_recipe_raw(path: Path, _extends: tuple[Path, ...] = ()) -> Dict[str, Any]:
+    """Read one recipe, folded over the recipe its ``base:`` names.
+
+    ``base:`` is a path relative to the recipe's own directory. The current file is
+    deep-merged over it with the same machinery the ``probe:`` overlay uses, so a
+    variant recipe (a smoke of an arm, a backend swap) states only its deltas. Copying
+    the parent instead is how two files that claim to be the same recipe drift apart in
+    a key nobody re-read.
+    """
+    if path in _extends:
+        chain = " -> ".join(str(item) for item in (*_extends, path))
+        raise ValueError(f"{path}: `base:` chain is circular: {chain}")
+    with open(path) as source:
+        raw = yaml.safe_load(source) or {}
+
+    reference = raw.pop("base", None)
+    if reference is None:
+        return raw
+    if not isinstance(reference, str):
+        raise ValueError(f"{path}: `base:` must be a path relative to this recipe, got {type(reference).__name__}")
+    base_path = (path.parent / reference).resolve()
+    if not base_path.is_file():
+        raise FileNotFoundError(f"{path}: `base:` recipe not found: {base_path}")
+    return _deep_merge(load_recipe_raw(base_path, (*_extends, path)), raw)
+
+
+def resolve_recipe_mode(raw: Dict[str, Any], mode: str | None, config_path: Path) -> RecipeMode:
+    """Resolve the render mode from the CLI override, else the recipe's own ``mode:``."""
+    value = mode if mode is not None else raw.get("mode", RecipeMode.ARM)
+    try:
+        return RecipeMode(value)
+    except ValueError as error:
+        choices = ", ".join(item.value for item in RecipeMode)
+        raise ValueError(f"{config_path}: mode must be one of ({choices}); got {value!r}") from error
+
+
+def _apply_probe_overlay(raw: Dict[str, Any], mode: RecipeMode, config_path: Path) -> Dict[str, Any]:
+    """Fold the recipe's ``probe:`` overlay in when rendering a probe, and drop it."""
+    overlay = raw.pop("probe", None)
+    if mode is not RecipeMode.PROBE:
+        return raw
+    if overlay is None:
+        raise ValueError(f"{config_path}: mode: probe requires a `probe:` overlay block")
+    if not isinstance(overlay, dict):
+        raise ValueError(f"{config_path}: `probe:` must be a mapping, got {type(overlay).__name__}")
+    return _deep_merge(raw, overlay)
+
+
+def parse_recipe_backend(raw: Dict[str, Any], config_path: Path) -> Optional[RecipeBackend]:
+    """Parse the optional ``backend:`` block into its typed form.
+
+    Configs written before the backend block simply declare
+    ``terminal_bench.harbor.environment_type`` themselves and get ``None`` here.
+    """
+    block = raw.get("backend")
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        raise ValueError(f"{config_path}: `backend:` must be a mapping, got {type(block).__name__}")
+
+    raw_kind = block.get("kind")
+    try:
+        kind = BackendKind(raw_kind)
+    except ValueError as error:
+        choices = ", ".join(item.value for item in BackendKind)
+        raise ValueError(f"{config_path}: backend.kind must be one of ({choices}); got {raw_kind!r}") from error
+
+    unknown = set(block) - {"kind", "runtime", *(item.value for item in BackendKind)}
+    if unknown:
+        raise ValueError(f"{config_path}: unknown backend fields: {', '.join(sorted(unknown))}")
+
+    runtime = block.get("runtime") or {}
+    unknown_runtime = set(runtime) - set(_BACKEND_RUNTIME_ENV)
+    if unknown_runtime:
+        raise ValueError(f"{config_path}: unknown backend.runtime fields: {', '.join(sorted(unknown_runtime))}")
+
+    return RecipeBackend(kind=kind, runtime=dict(runtime), options=dict(block.get(kind.value) or {}))
+
+
+def _apply_backend_to_terminal_bench(
+    raw: Dict[str, Any],
+    backend: RecipeBackend,
+    config_path: Path,
+) -> None:
+    """Inject the backend's Hydra-visible settings into ``terminal_bench.harbor``.
+
+    Mutates ``raw`` in place, before the context budget is materialized, so the
+    injected keys keep a stable position in the rendered argument list.
+    """
+    terminal_bench = raw.get("terminal_bench")
+    if terminal_bench is None:
+        raise ValueError(f"{config_path}: `backend:` requires a `terminal_bench:` section")
+    harbor = terminal_bench.setdefault("harbor", {})
+
+    injections = {}
+    for harbor_key, source_key in _BACKEND_HARBOR_INJECTIONS[backend.kind]:
+        if harbor_key in harbor:
+            raise ValueError(
+                f"{config_path}: terminal_bench.harbor.{harbor_key} is derived from the "
+                f"`backend:` block and must not be declared directly."
+            )
+        value = backend.kind.value if source_key == "kind" else backend.options.get(source_key)
+        if value is None:
+            raise ValueError(f"{config_path}: backend.{backend.kind.value}.{source_key} is required")
+        injections[harbor_key] = value
+
+    # Place the injected keys immediately after `name`, where a human would write
+    # them, so the rendered argument order matches a hand-written config.
+    rebuilt: Dict[str, Any] = {}
+    for key, value in harbor.items():
+        rebuilt[key] = value
+        if key == "name":
+            rebuilt.update(injections)
+    for key, value in injections.items():
+        rebuilt.setdefault(key, value)
+    terminal_bench["harbor"] = rebuilt
+
+
+def render_backend_env(parsed: "ParsedRLConfig", exp_args: Mapping[str, Any] | None = None) -> Dict[str, str]:
+    """Render the launcher environment block a recipe implies.
+
+    These settings have no Hydra key, so the Slurm and Iris launchers must export
+    them themselves. Derived from the same recipe fields as the Hydra arguments, so
+    ``preflight_recipe`` can assert the two agree instead of trusting a hand-cloned
+    sbatch.
+    """
+    env: Dict[str, str] = {}
+    backend = parsed.backend
+    if backend is not None:
+        for key, name in _BACKEND_RUNTIME_ENV.items():
+            value = backend.runtime.get(key)
+            if value is not None:
+                env[name] = str(value)
+        for key, name in _BACKEND_KIND_ENV[backend.kind].items():
+            value = backend.options.get(key)
+            if value is not None:
+                env[name] = str(value)
+        harbor_src = backend.fleet.get("harbor_src")
+        if harbor_src:
+            # Without this the apptainer worker fleet dies within seconds.
+            env["HARBOR_SRC"] = str(harbor_src)
+
+    # Geometry and identity, derived rather than re-typed: the golden arm's sbatch
+    # exported NUM_INFERENCE_ENGINES=160 / POLICY_NUM_NODES=40 / a WANDB_PROJECT that
+    # all disagreed with its own Hydra arguments.
+    engines = parsed.generator.get("num_inference_engines")
+    if engines is not None:
+        env["NUM_INFERENCE_ENGINES"] = str(engines)
+    policy_nodes = (parsed.trainer.get("placement") or {}).get("policy_num_nodes")
+    if policy_nodes is None and exp_args:
+        policy_nodes = exp_args.get("policy_num_nodes") or exp_args.get("num_nodes")
+    if policy_nodes is not None:
+        env["POLICY_NUM_NODES"] = str(policy_nodes)
+    project_name = parsed.trainer.get("project_name")
+    if project_name:
+        env["WANDB_PROJECT"] = str(project_name)
+
+    for key, value in (parsed.raw.get("extra_env") or {}).items():
+        if value is None:
+            continue
+        if key in env and str(value) != env[key]:
+            raise ValueError(f"extra_env.{key}={value!r} contradicts the backend-derived value {env[key]!r}")
+        env[key] = str(value)
+    return env
+
+
+def dedupe_hydra_args(args: List[str]) -> List[str]:
+    """Collapse repeated Hydra keys to their last value, keeping the last position.
+
+    Hydra is last-wins, and the Slurm launcher appends ``--skyrl_override`` verbatim
+    after the YAML-derived block without deduplicating, so a golden config carries
+    keys twice. Rendering emits each key once; this makes that explicit for callers
+    that still splice in overrides.
+    """
+    seen: set[str] = set()
+    kept: List[str] = []
+    for arg in reversed(args):
+        key = _override_key(arg)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(arg)
+    return list(reversed(kept))
+
+
 @dataclass
 class ParsedRLConfig:
     """Result of parsing an RL configuration YAML file."""
@@ -481,6 +766,8 @@ class ParsedRLConfig:
     raw: Dict[str, Any]
     context_budget: ContextBudget
     entrypoint: str
+    mode: RecipeMode = RecipeMode.ARM
+    backend: Optional[RecipeBackend] = None
     config_groups: Dict[str, str] = field(default_factory=dict)
     trainer: Dict[str, Any] = field(default_factory=dict)
     generator: Dict[str, Any] = field(default_factory=dict)
@@ -583,17 +870,26 @@ def materialize_rl_config(
 def parse_rl_config(
     config_path: str,
     model_override: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> ParsedRLConfig:
     """Parse an RL config YAML and extract all settings.
+
+    ``mode`` overrides the recipe's own ``mode:``; ``probe`` folds in the recipe's
+    ``probe:`` overlay so one file renders both an arm and its eval-only probe.
 
     Raises:
         FileNotFoundError: If config file cannot be found.
         yaml.YAMLError: If config file is not valid YAML.
     """
     path = resolve_rl_config_path(config_path)
+    raw = load_recipe_raw(path)
 
-    with open(path) as f:
-        raw = yaml.safe_load(f) or {}
+    recipe_mode = resolve_recipe_mode(raw, mode, path)
+    raw = _apply_probe_overlay(raw, recipe_mode, path)
+
+    backend = parse_recipe_backend(raw, path)
+    if backend is not None:
+        _apply_backend_to_terminal_bench(raw, backend, path)
 
     context_budget = resolve_context_budget(raw, path)
 
@@ -633,6 +929,8 @@ def parse_rl_config(
         raw=materialized_raw,
         context_budget=context_budget,
         entrypoint=entrypoint,
+        mode=recipe_mode,
+        backend=backend,
         config_groups=config_groups,
         trainer=trainer,
         generator=generator,
@@ -652,8 +950,7 @@ def parse_checkpoint_export_config(
 ) -> ParsedCheckpointExportConfig:
     """Read policy configuration without validating or materializing rollout settings."""
     path = resolve_rl_config_path(config_path)
-    with path.open() as source:
-        raw = yaml.safe_load(source) or {}
+    raw = load_recipe_raw(path)
 
     trainer = resolve_paths_in_dict(copy.deepcopy(raw.get("trainer", {})), skip_keys={"policy.model.path"})
     trainer.setdefault("policy", {}).setdefault("model", {})["path"] = model_override
@@ -697,7 +994,14 @@ def extract_terminal_bench_agent_env(parsed: ParsedRLConfig) -> tuple:
     return agent_name, harbor_env
 
 
-def _flatten_dict(d: Dict[str, Any], prefix: str = "", leaf_key_suffixes: tuple = ("rope_scaling",)) -> Dict[str, Any]:
+def _flatten_dict(
+    d: Dict[str, Any],
+    prefix: str = "",
+    # hf_overrides, like rope_scaling, is an opaque passthrough whose keys are
+    # arbitrary HF config fields; recursing would emit one Hydra override per field
+    # against a node the base config does not declare.
+    leaf_key_suffixes: tuple = ("rope_scaling", "hf_overrides"),
+) -> Dict[str, Any]:
     """Flatten a nested dictionary to dotted keys.
 
     Dicts whose key ends with a suffix in ``leaf_key_suffixes`` are kept as whole
