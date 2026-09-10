@@ -5,21 +5,7 @@ import httpx
 import pytest
 import uvicorn
 
-from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
 from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator, IntervalReadMode
-
-
-class _Backend:
-    model_name = "test-model"
-
-    async def chat_completion(self, _request):
-        return {"choices": [{"message": {"content": "ok"}}]}
-
-    async def completion(self, _request):
-        return {"choices": [{"text": "ok"}]}
-
-    async def chat_completion_stream(self, _request):
-        yield "data: [DONE]\n\n"
 
 
 async def _wait_until_started(server: uvicorn.Server) -> None:
@@ -28,10 +14,12 @@ async def _wait_until_started(server: uvicorn.Server) -> None:
 
 
 @pytest.mark.asyncio
-async def test_real_uvicorn_bridge_records_96_concurrent_requests():
+async def test_real_uvicorn_bridge_records_96_concurrent_requests(endpoint_app):
     accumulator = HTTPBridgeStatsAccumulator()
-    set_global_state(_Backend(), None)
-    app = create_app(accumulator, event_loop_lag_interval_seconds=0.001)
+    app = endpoint_app(
+        app_kwargs={"bridge_stats": accumulator, "event_loop_lag_interval_seconds": 0.001},
+        model_name="test-model",
+    )
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="on"))
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))

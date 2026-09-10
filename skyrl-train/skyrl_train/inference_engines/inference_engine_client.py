@@ -60,6 +60,19 @@ class InferenceEngineClient(InferenceEngineInterface):
         if hasattr(full_config.generator, "engine_init_kwargs"):
             served_model_name = getattr(full_config.generator.engine_init_kwargs, "served_model_name", None)
         self.model_name = served_model_name if served_model_name else full_config.trainer.policy.model.path
+        # Chat-render settings of the OpenAI serving path, mirrored here so the HTTP
+        # endpoint's `/tokenize` route renders exactly what the engines serve (harbor's TITO
+        # transport feeds those ids straight back as the next prompt). Both are vLLM serving
+        # knobs popped inside the engine wrapper, so read them from the same config it does.
+        engine_init_kwargs = getattr(full_config.generator, "engine_init_kwargs", None) or {}
+        self.chat_template_content_format = engine_init_kwargs.get("chat_template_content_format", None)
+        self.max_model_len = engine_init_kwargs.get("max_model_len", None)
+        custom_chat_template_path = engine_init_kwargs.get("custom_chat_template_chat_completion_path", None)
+        self.custom_chat_template: Optional[str] = None
+        if custom_chat_template_path:
+            with open(custom_chat_template_path, "r") as f:
+                self.custom_chat_template = f.read()
+            logger.info(f"InferenceEngineClient read the serving chat template from: {custom_chat_template_path}")
         self.backend = full_config.generator.backend
         self.enable_http_endpoint = full_config.generator.enable_http_endpoint
         self.http_endpoint_host = full_config.generator.http_endpoint_host
