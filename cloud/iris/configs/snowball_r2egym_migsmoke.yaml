@@ -1,0 +1,87 @@
+# Snowball R2E-Gym migration smoke — the declarative form of
+# `snowball_ttband_migsmoke_v2_b`, the 6-node run that checks the new stack end to end
+# before an arm is spent on it.
+#
+# It IS arm A, extended: `base:` loads the arm and this file is deep-merged over it, so
+# everything below is the whole of the smoke-minus-arm delta and every scientific setting
+# — algorithm, context budget, sampling, harbor policy — is arm A's by construction. A
+# copy of the arm would let the two drift apart in a key nobody re-read; the point of a
+# smoke is that only the size differs.
+#
+# What differs: the run is shrunk (4 steps on 6 nodes instead of 200 on 40), it reads the
+# tt-v2 split instead of the band, it starts from base rather than the arm's step-36
+# checkpoint, and it applies the two false-zero fixes the arm only acknowledges.
+#
+# Rationale for every coupled setting: .agents/ops/snowball-r2egym-config.md
+# Render gate: cloud/iris/tests/test_snowball_r2egym_recipe.py compares this file's
+# rendered Hydra args against the frozen smoke config.
+
+base: snowball_r2egym_arm_a.yaml
+
+backend:
+  runtime:
+    # 30 s (the arm's) manufactured masked samples and a 3.6 steps/h collapse; 120 is the
+    # fixed default, which this run uses.
+    connect_timeout_sec: 120
+    # No overlay: the migration venv carries harbor itself, and an overlay on PYTHONPATH
+    # would shadow it. That is the thing this smoke exists to verify.
+    overlay_pythonpath: null
+    overlay_commit: null
+
+data:
+  train_data: ["/e/fscratch/reformo/lee27/tasks/r2egym-tt-v2-train-x16"]
+  val_data: ["/e/fscratch/reformo/lee27/tasks/r2egym-tt-v2-topup"]
+
+trainer:
+  # Four steps is enough to cross every stage boundary the migration can break:
+  # rollout, weight sync, and the staleness-2 pipeline that only exists after step 1.
+  max_steps: 4
+  train_batch_size: 16
+  policy_mini_batch_size: 16
+
+  # From base, not from the arm's step-36 checkpoint: a smoke tests the stack, and
+  # resuming would test the checkpoint's compatibility with it at the same time.
+  resume_mode: none
+  resume_path: null
+
+  policy:
+    fsdp_config:
+      # 4 policy nodes x 4 GPUs. Preflight asserts the identity.
+      fsdp_size: 16
+
+  ref:
+    fsdp_config:
+      fsdp_size: 16
+
+  placement:
+    # 6 nodes = 4 policy + 2 generator; preflight asserts the geometry closes.
+    policy_num_nodes: 4
+    ref_num_nodes: 4
+
+generator:
+  # The smoke's val pass exists to prove eval runs at all, not to measure pass@8.
+  eval_n_samples_per_prompt: 2
+  # Derived: (6 - 4) nodes * 4 GPUs / (4 dp * 1 tp). Pinned as an assertion.
+  num_inference_engines: 2
+
+trajectory_runner:
+  process_pool:
+    # 128 / 24 = 5 trials per coordinator, far under the 66 ceiling.
+    num_coordinators: 24
+
+terminal_bench:
+  harbor:
+    n_concurrent_trials: 128
+    # 150 s (the arm's) produced 4-14 %/step false zeros under load; 2400 is the fixed
+    # floor that preflight enforces for an arm.
+    verifier_override_timeout_sec: 2400
+    # Harbor defaults this to true, which is the other half of the false-zero mode:
+    # a timed-out trial keeps its logprobs and scores zero instead of being masked.
+    preserve_logprobs_on_timeout: false
+
+# A smoke has no eval-only variant: it is already the smallest thing that runs.
+probe: null
+
+# No acknowledged deviations: the two the arm acknowledges (the 150 s verifier budget,
+# the 30 s connect timeout) are exactly what this smoke fixes.
+overrides: []

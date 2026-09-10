@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 
 import pytest
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
@@ -37,6 +38,7 @@ from cloud.iris.rl_config_translation import (  # noqa: E402
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "snowball_r2egym"
 _RECIPE = _REPO_ROOT / "cloud/iris/configs/snowball_r2egym_arm_a.yaml"
+_SMOKE_RECIPE = _REPO_ROOT / "cloud/iris/configs/snowball_r2egym_migsmoke.yaml"
 
 # Arguments the MarinSkyRL translator emits that the OpenThoughts-Agent launcher
 # which produced the golden config does not. Each is a deliberate contract of this
@@ -85,6 +87,11 @@ def band_root() -> Dict[str, Any]:
     return _load("band_r3_s0_rl_config.json")
 
 
+@pytest.fixture(scope="module")
+def migsmoke() -> Dict[str, Any]:
+    return _load("migsmoke_b_rl_config.json")
+
+
 def _exp_args(config: Dict[str, Any]) -> Dict[str, Any]:
     """The launch arguments that produced one frozen config."""
     return {
@@ -96,9 +103,13 @@ def _exp_args(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _render(config: Dict[str, Any], *, mode: str | None = None) -> List[str]:
-    parsed = parse_rl_config(str(_RECIPE), mode=mode)
+def _render_recipe(recipe: Path, config: Dict[str, Any], *, mode: str | None = None) -> List[str]:
+    parsed = parse_rl_config(str(recipe), mode=mode)
     return build_skyrl_hydra_args(parsed, _exp_args(config), _HPCStub(gpus_per_node=config["gpus_per_node"]))
+
+
+def _render(config: Dict[str, Any], *, mode: str | None = None) -> List[str]:
+    return _render_recipe(_RECIPE, config, mode=mode)
 
 
 def _normalize(
@@ -409,3 +420,145 @@ def test_probe_mode_requires_a_probe_overlay(tmp_path):
 
     with pytest.raises(ValueError, match="requires a `probe:` overlay"):
         parse_rl_config(str(recipe), mode="probe")
+
+
+# ---------------------------------------------------------------------------
+# The `base:` overlay
+# ---------------------------------------------------------------------------
+
+
+def _overlay(tmp_path: Path, overlay: Dict[str, Any], *, base: Path = _RECIPE, name: str = "variant.yaml") -> Path:
+    """A recipe that is ``base`` plus the given deltas, and nothing else."""
+    path = tmp_path / name
+    path.write_text(yaml.safe_dump({"base": str(base), **overlay}))
+    return path
+
+
+def test_a_base_overlay_states_only_its_deltas(golden, tmp_path, parse_hydra_overrides):
+    """Everything the overlay is silent about comes from the recipe it extends."""
+    variant = _overlay(tmp_path, {"trainer": {"max_steps": 4}})
+    arm = parse_hydra_overrides(_render(golden))
+    rendered = parse_hydra_overrides(_render_recipe(variant, golden))
+
+    assert set(rendered) == set(arm)
+    assert {key for key in arm if arm[key] != rendered[key]} == {"trainer.max_steps"}
+    assert rendered["trainer.max_steps"] == 4
+
+
+def test_a_null_in_a_base_overlay_deletes_the_key(golden, tmp_path, parse_hydra_overrides):
+    """Same rule the probe overlay relies on: _flatten_dict drops None leaves."""
+    variant = _overlay(tmp_path, {"trainer": {"resume_mode": "none", "resume_path": None}})
+
+    rendered = parse_hydra_overrides(_render_recipe(variant, golden))
+
+    assert "trainer.resume_path" not in rendered
+
+
+def test_a_base_chain_resolves_through_every_file_in_it(golden, tmp_path, parse_hydra_overrides):
+    middle = _overlay(tmp_path, {"trainer": {"max_steps": 4}}, name="middle.yaml")
+    leaf = _overlay(tmp_path, {"trainer": {"train_batch_size": 16}}, base=middle, name="leaf.yaml")
+
+    rendered = parse_hydra_overrides(_render_recipe(leaf, golden))
+
+    assert rendered["trainer.max_steps"] == 4
+    assert rendered["trainer.train_batch_size"] == 16
+
+
+def test_a_circular_base_chain_is_rejected(tmp_path):
+    first, second = tmp_path / "first.yaml", tmp_path / "second.yaml"
+    first.write_text(f"base: {second}\n")
+    second.write_text(f"base: {first}\n")
+
+    with pytest.raises(ValueError, match="`base:` chain is circular"):
+        parse_rl_config(str(first))
+
+
+def test_a_base_that_does_not_exist_is_rejected(tmp_path):
+    recipe = tmp_path / "orphan.yaml"
+    recipe.write_text("base: nowhere.yaml\n")
+
+    with pytest.raises(FileNotFoundError, match="`base:` recipe not found"):
+        parse_rl_config(str(recipe))
+
+
+# ---------------------------------------------------------------------------
+# The migration-smoke gate
+# ---------------------------------------------------------------------------
+#
+# `snowball_r2egym_migsmoke.yaml` is the same claim at a smaller size: it is the
+# declarative form of `snowball_ttband_migsmoke_v2_b`, the 6-node run that proves the new
+# stack end to end before an arm is spent on it.
+#
+# That the smoke is arm A shrunk, rather than a second recipe that has drifted, is
+# guaranteed by the file: it declares `base: snowball_r2egym_arm_a.yaml` and carries only
+# its deltas, so there is no assertion left to make about which keys may differ. What still
+# needs a gate is that the deltas it does carry reproduce the run it claims to be.
+
+
+def test_migration_smoke_renders_every_frozen_argument(migsmoke, parse_hydra_overrides):
+    """Set gate: the smoke recipe reproduces the frozen smoke's Hydra arguments exactly."""
+    rendered = _normalize(_render_recipe(_SMOKE_RECIPE, migsmoke), parse_hydra_overrides, job_name=migsmoke["job_name"])
+    expected = _normalize(migsmoke["skyrl_hydra_args"], parse_hydra_overrides, job_name=migsmoke["job_name"])
+
+    missing = {key: expected[key] for key in sorted(set(expected) - set(rendered))}
+    extra = {key: rendered[key] for key in sorted(set(rendered) - set(expected) - _TRANSLATOR_ONLY_KEYS)}
+    differing = {
+        key: {"frozen": expected[key], "rendered": rendered[key]}
+        for key in sorted(set(expected) & set(rendered))
+        if expected[key] != rendered[key]
+    }
+
+    assert not missing, f"frozen arguments the recipe does not render: {json.dumps(missing, indent=2, default=str)}"
+    assert not extra, (
+        f"arguments the recipe renders that the frozen config lacks: {json.dumps(extra, indent=2, default=str)}"
+    )
+    assert not differing, f"value mismatches: {json.dumps(differing, indent=2, default=str)}"
+
+
+def test_migration_smoke_adds_only_the_documented_translator_arguments(migsmoke, parse_hydra_overrides):
+    """The same allowance set as the arm: both frozen configs came from the same launcher,
+    so the smoke may not need one extra exception."""
+    rendered = _normalize(_render_recipe(_SMOKE_RECIPE, migsmoke), parse_hydra_overrides, job_name=migsmoke["job_name"])
+    expected = _normalize(migsmoke["skyrl_hydra_args"], parse_hydra_overrides, job_name=migsmoke["job_name"])
+
+    assert set(rendered) - set(expected) == _TRANSLATOR_ONLY_KEYS
+
+
+def test_migration_smoke_carries_no_harbor_overlay(migsmoke):
+    """The overlay is the point of the migration: the venv now holds the right harbor, and
+    an overlay on PYTHONPATH would shadow it. The arm declares one; the smoke must not."""
+    parsed = parse_rl_config(str(_SMOKE_RECIPE))
+    env = render_backend_env(parsed, _exp_args(migsmoke))
+
+    assert "HARBOR_OVERLAY_PYTHONPATH" not in env
+    assert "HARBOR_OVERLAY_COMMIT" not in env
+    assert env["HARBOR_OPENAI_CONNECT_TIMEOUT_SEC"] == "120"
+
+
+def test_migration_smoke_env_geometry_is_derived_not_inherited(migsmoke):
+    """The frozen smoke's own sbatch exported NUM_INFERENCE_ENGINES=160 and
+    POLICY_NUM_NODES=40 — the arm's numbers, left behind by a hand-cloned launcher while
+    its Hydra arguments said 2 and 4. Deriving both from the recipe is what stops that."""
+    parsed = parse_rl_config(str(_SMOKE_RECIPE))
+    env = render_backend_env(parsed, _exp_args(migsmoke))
+
+    assert env["NUM_INFERENCE_ENGINES"] == "2"
+    assert env["POLICY_NUM_NODES"] == "4"
+
+
+def test_migration_smoke_passes_preflight(migsmoke):
+    """The recipe launches: geometry closes on 6 nodes, seats cover the trials, and the
+    arm-mode timeout policy is satisfied without a single acknowledged override."""
+    from cloud.iris.recipe_preflight import preflight_recipe  # noqa: PLC0415
+
+    parsed = parse_rl_config(str(_SMOKE_RECIPE))
+    report = preflight_recipe(
+        parsed,
+        _exp_args(migsmoke),
+        gpus_per_node=migsmoke["gpus_per_node"],
+        check_paths=False,
+        raise_on_failure=False,
+    )
+
+    assert not report.failures, report.render()
+    assert not parsed.raw.get("overrides")

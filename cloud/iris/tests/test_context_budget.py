@@ -40,6 +40,7 @@ _CONFIGS = {
     "opencode_smoke_literal.yaml": (32768, 4096, 30),
     "snowball_megatron_full.yaml": (9216, 8192, 1),
     "snowball_r2egym_arm_a.yaml": (65536, 16384, 999999),
+    "snowball_r2egym_migsmoke.yaml": (65536, 16384, 999999),
     "snowball_megatron_smoke.yaml": (2048, 512, 1),
     "tasktrove_dq_sweep_30b.yaml": (131072, 16384, 90),
     "tasktrove_dq_sweep_30b_cp6.yaml": (131072, 16384, 90),

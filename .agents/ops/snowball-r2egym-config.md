@@ -6,8 +6,12 @@ which reasoning applies to an arm and which to a probe.
 
 ## What a recipe adds to an ordinary RL config
 
-Three blocks beyond the usual sections:
+Four blocks beyond the usual sections:
 
+- `base:` names another recipe, relative to this one, that this file extends. The base is loaded
+  first and this file is deep-merged over it, so a variant recipe carries only its deltas and
+  cannot drift from what it extends in a key nobody re-read. A null deletes a base key, as in
+  `probe:`. `snowball_r2egym_migsmoke.yaml` is arm A this way.
 - `backend:` names the sandbox backend and everything that distinguishes one from another. Only the
   environment type, and Daytona's automatic snapshot flag, reach Hydra. The rest describes bridges,
   worker fleets, proxies and key files, which the launcher exports as environment variables.
@@ -15,8 +19,9 @@ Three blocks beyond the usual sections:
 - `probe:` overlays the fields a probe changes. It uses the same section names as the rest of the
   file, so it reads as a diff; a null value deletes the arm's key rather than setting it to null.
 
-`cloud/iris/recipe_preflight.py` refuses to launch when any of the couplings below is broken. Run it
-directly to see every check, the rendered environment block and, with `--print-args`, the full
+`cloud/iris/recipe_preflight.py` refuses to launch when any of the couplings below is broken. The
+training driver runs it for every config carrying a `backend:` block before the run claims a GPU, so
+a broken recipe fails at launch rather than seventeen minutes in. Run it directly to see every check, the rendered environment block and, with `--print-args`, the full
 argument list:
 
 ```bash
