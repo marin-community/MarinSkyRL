@@ -488,7 +488,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if cfg.trainer.offload_optimizer_during_rollouts:
             raise ValueError("Fully async training requires trainer.offload_optimizer_during_rollouts=false")
         validate_fully_async_cfg(cfg)
-        if type(cfg.trainer.fully_async.get("first_token_admission", False)) is not bool:
+        if type(cfg.trainer.fully_async.get("first_token_admission", True)) is not bool:
             raise ValueError("trainer.fully_async.first_token_admission must be boolean")
         self._async_observations_enabled = bool(cfg.trainer.get("async_spans", False))
         self._published_policy_version = 0
@@ -653,6 +653,24 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 f"Checkpoint contains {len(buffer_state.admitted_groups)} admitted groups, exceeding mini-batch size "
                 f"{self.mini_batch_size}"
             )
+        if self.cfg.trainer.fully_async.get("first_token_admission", True):
+            for group in [*buffer_state.completed_groups, *buffer_state.admitted_groups]:
+                batch = group.trajectory_batch
+                if not any(batch["response_ids"]):
+                    continue
+                versions = batch.get("policy_versions_at_first_token")
+                version = (
+                    earliest_sampled_policy_version(batch["response_ids"], versions) if versions is not None else None
+                )
+                if (
+                    version is None
+                    or batch.get("first_token_model_step") != version + 1
+                    or group.earliest_model_step != version + 1
+                ):
+                    raise ValueError(
+                        "Checkpoint pending groups lack matching first-token admission evidence; "
+                        "resume with trainer.fully_async.first_token_admission=false to retain legacy submission stamps"
+                    )
         self.async_train_dataloader.reserve_pending_uids(buffer_state.pending_uids())
         for item in buffer_state.completed_groups:
             queues.completed.put_nowait(item)
@@ -818,7 +836,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             with Timer("policy_startup_drain", self.all_startup_timings):
                 await self._drain_policy_event_loops()
         if self.cfg.generator.publication_stage_timing or self.cfg.trainer.fully_async.get(
-            "first_token_admission", False
+            "first_token_admission", True
         ):
             await self._record_publication_requests("initial", initial_policy_version=self._published_policy_version)
         # Startup weight sync runs before producers exist and does not pause inference.
@@ -1355,7 +1373,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 if first_token_version is not None and first_token_version > self._published_policy_version:
                     raise RuntimeError("Sampled first-token version is newer than the installed policy")
                 first_token_step = first_token_version + 1 if first_token_version is not None else None
-                first_token_admission = self.cfg.trainer.fully_async.get("first_token_admission", False)
+                first_token_admission = self.cfg.trainer.fully_async.get("first_token_admission", True)
                 sampled_tokens = sum(len(ids) for ids in cur_trajectory_batch["response_ids"])
                 if first_token_admission and sampled_tokens and first_token_step is None:
                     raise RuntimeError("First-token admission requires native version evidence for every sampled row")
@@ -1508,7 +1526,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 with Timer("policy_post_sync_drain", self.all_timings):
                     await self._drain_policy_event_loops()
                 with Timer("weight_resume", self.all_timings):
-                    if trace_publication or self.cfg.trainer.fully_async.get("first_token_admission", False):
+                    if trace_publication or self.cfg.trainer.fully_async.get("first_token_admission", True):
                         await self.inference_engine_client.resume_generation(
                             policy_version=self._published_policy_version
                         )

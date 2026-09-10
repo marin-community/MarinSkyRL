@@ -295,7 +295,8 @@ trainer:
       min_lr_scale: 0.1
 
   fully_async:
-    first_token_admission: false
+    # Async admission uses the earliest sampled-token version; false retains legacy submission stamps.
+    first_token_admission: true
     max_staleness_steps: 4
     # Completed learner updates between publications; requires at least interval - 1 allowed age.
     weight_sync_interval: 1

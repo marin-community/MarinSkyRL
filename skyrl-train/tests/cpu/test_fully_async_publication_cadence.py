@@ -211,9 +211,11 @@ def make_driver(
     runner_type=Runner,
     dynamic_sampling_type=None,
     driver_type=DriverWithCpuLearner,
+    first_token_admission=False,
 ):
     cfg = get_default_config()
     updates = {
+        # This cadence fixture emits legacy submission stamps; native token evidence has its own producer tests.
         "trainer.fully_async.weight_sync_interval": interval,
         "trainer.fully_async.max_staleness_steps": age,
         "trainer.fully_async.num_parallel_generation_workers": 2,
@@ -237,6 +239,8 @@ def make_driver(
         "generator.n_samples_per_prompt": 2,
         "generator.eval_n_samples_per_prompt": 1,
     }
+    if first_token_admission is not None:
+        updates["trainer.fully_async.first_token_admission"] = first_token_admission
     if interval is None:
         del updates["trainer.fully_async.weight_sync_interval"]
     for path, value in updates.items():
@@ -726,3 +730,35 @@ async def test_publication_trace_reaches_step_metrics_without_batch_dispatch(mon
         "final",
     }
     assert all(json.loads(event[1]["receipt_json"])["request_accounting"] == {"active_ids": []} for event in receipts)
+
+
+class FirstTokenRunner(Runner):
+    async def run(self, request, **kwargs):
+        batch = await super().run(request, **kwargs)
+        batch["policy_versions_at_first_token"] = [ids[0] - 10 for ids in batch["response_ids"]]
+        return batch
+
+
+@pytest.mark.asyncio
+async def test_default_first_token_driver_consumes_native_stamps_and_publishes_versions(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        "skyrl_train.fully_async_trainer.record_event",
+        lambda name, fields, **kwargs: events.append((name, fields)),
+    )
+    trainer = make_driver(interval=1, age=0, steps=2, runner_type=FirstTokenRunner, first_token_admission=None)
+    engine = TimedInferenceService()
+    trainer.inference_engine_client = engine
+    trainer.trajectory_runner.engine = engine
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert trainer.policy_model.completed_update == 2
+    assert engine.publications == [0, 1, 2]
+    assert engine.version_resumes == [1, 2]
+    stamps = [fields for name, fields in events if name == "rollout_admission_stamp"]
+    assert stamps and all(
+        fields["first_token_admission"] and fields["first_token_evidence_complete"] for fields in stamps
+    )
+    assert all(fields["admission_model_step"] == fields["first_token_model_step"] for fields in stamps)
+    rows = [metrics for _, metrics in trainer.tracker.rows if "trainer/global_step" in metrics]
+    assert len(rows) == 2 and all(row["async/staleness_max"] == 0 for row in rows)
+    assert sum(row["consumed/sequences"] for row in rows) == 8

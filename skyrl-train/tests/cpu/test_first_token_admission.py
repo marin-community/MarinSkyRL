@@ -12,11 +12,15 @@ from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer, _GroupFresh
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("enabled,versions,expected", [(True, [2, 3], 3), (False, [2, 3], 1), (True, [None, 3], None)])
+@pytest.mark.parametrize(
+    "enabled,versions,expected",
+    [(None, [2, 3], 3), (None, [None, 3], None), (True, [2, 3], 3), (False, [2, 3], 1), (True, [None, 3], None)],
+)
 async def test_actual_producer_uses_earliest_sampled_version_and_logs_both(monkeypatch, enabled, versions, expected):
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.cfg = get_default_config()
-    OmegaConf.update(trainer.cfg, "trainer.fully_async.first_token_admission", enabled)
+    if enabled is not None:
+        OmegaConf.update(trainer.cfg, "trainer.fully_async.first_token_admission", enabled)
     trainer.cfg.generator.n_samples_per_prompt = 2
     trainer.global_step = 4
     trainer._published_policy_version = 0

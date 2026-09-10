@@ -6,10 +6,12 @@ Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_buffer
 import asyncio
 import os
 import tempfile
+from types import SimpleNamespace
 import pytest
 import torch
 from omegaconf import OmegaConf
 
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.callbacks.builtin import BufferCheckpointCallback
 from skyrl_train.async_rollout_state import GeneratedOutputGroup
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer, _GenerationQueues
@@ -264,3 +266,57 @@ async def test_no_trainer_in_kwargs():
     cb = BufferCheckpointCallback()
     with pytest.raises(RuntimeError, match="requires trainer context"):
         await cb.on_save_async(_FakeState(1), _FakeControl())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["completed", "admitted"])
+@pytest.mark.parametrize(
+    "evidence",
+    ["missing", "wrong_stamp", "wrong_group_stamp", "partial_earliest", "partial_missing", "valid", "legacy_disabled"],
+)
+async def test_restore_preserves_admission_semantics_before_reserving_work(tmp_path, location, evidence):
+    item = _make_item("pending", step=5)
+    if evidence in {"valid", "wrong_stamp", "wrong_group_stamp", "partial_earliest", "partial_missing"}:
+        item.trajectory_batch["policy_versions_at_first_token"] = [4]
+        item.trajectory_batch["first_token_model_step"] = 4 if evidence == "wrong_stamp" else 5
+        item.trajectory_batch["submission_model_step"] = 2
+    if evidence == "wrong_group_stamp":
+        item.earliest_model_step = 6
+    if evidence in {"partial_earliest", "partial_missing"}:
+        item.trajectory_batch["response_ids"] = [[4, 5, 6], [7]]
+        item.trajectory_batch["policy_versions_at_first_token"] = [4, None if evidence == "partial_missing" else 6]
+    saved_queue = asyncio.Queue(maxsize=4)
+    saved = _FakeTrainer(str(tmp_path), saved_queue)
+    if location == "completed":
+        saved_queue.put_nowait(item)
+    else:
+        saved._generation_queues.record_admitted([item])
+    checkpoint = tmp_path / "global_step_5"
+    checkpoint.mkdir()
+    callback = BufferCheckpointCallback()
+    callback.bind_queues(saved._generation_queues)
+    await callback.on_save_async(_FakeState(5), _FakeControl(), trainer=saved)
+
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = get_default_config()
+    if evidence == "legacy_disabled":
+        trainer.cfg.trainer.fully_async.first_token_admission = False
+    trainer.global_step = 5
+    trainer.mini_batch_size = 4
+    trainer._async_observations_enabled = False
+    reserved = set()
+    trainer.async_train_dataloader = SimpleNamespace(reserve_pending_uids=reserved.update)
+    trainer._staleness_manager = SimpleNamespace(_stat=SimpleNamespace(accepted=0, submitted=0))
+    queues = _GenerationQueues(
+        completed=asyncio.Queue(maxsize=4), retries=asyncio.Queue(), condition=asyncio.Condition()
+    )
+    if evidence in {"missing", "wrong_stamp", "wrong_group_stamp", "partial_missing"}:
+        with pytest.raises(ValueError, match="pending groups lack matching first-token admission evidence"):
+            trainer._restore_buffer_from_checkpoint(queues, str(checkpoint))
+        assert not reserved and queues.completed.empty() and not queues.admitted_groups
+    else:
+        trainer._restore_buffer_from_checkpoint(queues, str(checkpoint))
+        restored = queues.completed.get_nowait() if location == "completed" else queues.admitted_groups[0]
+        assert reserved == {"pending"}
+        assert restored.earliest_model_step == 5
+        assert restored.trajectory_batch == item.trajectory_batch
