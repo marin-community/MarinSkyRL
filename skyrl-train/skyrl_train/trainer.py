@@ -257,7 +257,9 @@ class RayPPOTrainer:
         return None
 
     @torch.no_grad()
-    async def eval(self, *, dump_namespace: str | None = None, eval_step: int | None = None) -> Dict[str, float]:
+    async def eval(
+        self, *, dump_namespace: str | None = None, eval_step: int | None = None, policy_version: int | None = None
+    ) -> Dict[str, float]:
         """
         Run generation and scoring on the evaluation dataset.
 
@@ -283,6 +285,7 @@ class RayPPOTrainer:
         else:
             eval_metrics = await evaluate_endpoints(
                 evaluate,
+                policy_version=requested_step if policy_version is None else policy_version,
                 eval_dataloader=self.eval_dataloader,
                 trajectory_runner=self.trajectory_runner,
                 cfg=self.cfg,
