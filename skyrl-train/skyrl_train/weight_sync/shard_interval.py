@@ -5,6 +5,11 @@ from enum import StrEnum
 import time
 
 
+class GenerationBoundary(StrEnum):
+    INTERVAL = "interval"
+    DRIVER = "driver"
+
+
 class ShardLifecycle(StrEnum):
     CLOSE = "close"
     RETAIN = "retain"
@@ -71,6 +76,8 @@ async def run_shard_interval(
     receiver_ranks,
     expected_receiver_bytes,
     lifecycle=ShardLifecycle.CLOSE,
+    generation_boundary=GenerationBoundary.INTERVAL,
+    capture=None,
 ):
     """Pause, freeze, prove, install and replay before releasing publication ownership.
 
@@ -79,7 +86,10 @@ async def run_shard_interval(
     installation leaves inference paused; the caller must terminate or recover
     the diagnostic job, never continue generation with unverified weights.
     """
+    if capture is not None and not callable(capture):
+        raise ValueError("Shard interval capture must be callable")
     lifecycle = ShardLifecycle(lifecycle)
+    generation_boundary = GenerationBoundary(generation_boundary)
     if not callable(replay) or not policy_ranks or not receiver_ranks:
         raise ValueError("Shard interval requires explicit complete proof and rank coverage")
     # Snapshot independently prepared installed storage counts before any RPC.
@@ -110,7 +120,10 @@ async def run_shard_interval(
     installed_and_verified = False
     primary = None
     try:
-        await measured("pause", settled(client.pause_generation(settle_native_calls=True)))
+        if generation_boundary is GenerationBoundary.INTERVAL:
+            await measured("pause", settled(client.pause_generation(settle_native_calls=True)))
+        elif not client.generation_paused_event.is_set():
+            raise ValueError("Driver-owned shard publication requires paused inference")
         result["policy_begin"] = validate_rows(
             await measured("freeze", policy("begin_shard_publication")),
             manifest_id,
@@ -139,6 +152,15 @@ async def run_shard_interval(
         result["receiver_install"] = validate_rows(
             installed[1], manifest_id, publication_id, receiver_ranks, "installed"
         )
+        if capture is not None:
+            capture(
+                {
+                    "phase": "installed-before-replay",
+                    "manifest_id": manifest_id,
+                    "publication_id": publication_id,
+                    "result": result,
+                }
+            )
         proof = (await measured("full_byte_replay", settled(replay(manifest_id, publication_id))))[0]
         proof_rows = validate_rows(proof, manifest_id, publication_id, receiver_ranks, "verified")
         if any(
@@ -176,7 +198,7 @@ async def run_shard_interval(
                 result["receiver_close"] = validate_rows(
                     cleanup[1], manifest_id, publication_id, receiver_ranks, "closed"
                 )
-            if installed_and_verified:
+            if installed_and_verified and generation_boundary is GenerationBoundary.INTERVAL:
                 await measured(
                     "resume", settled(client.resume_generation(policy_version=publication_id, settle_native_calls=True))
                 )

@@ -146,3 +146,15 @@ async def test_unqualified_source_sample_cannot_enter_bucket_interval(diagnostic
         await qualification.run_bucket_qualification(diagnostic, str(tmp_path), _geometry())
     assert diagnostic.calls == ["init", "reference-sync", "drain"]
     assert not (tmp_path / "bucket-measurement-started.json").exists()
+
+
+def test_shard_measurement_marker_preserves_original_attempt(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_ATTEMPT_UID", "original-shard-attempt")
+    result = qualification.mark_measurement_once(str(tmp_path), component="shard")
+    path = Path(result["uri"])
+    original = path.read_bytes()
+    assert json.loads(original)["attempt_uid"] == "original-shard-attempt"
+    monkeypatch.setenv("IRIS_ATTEMPT_UID", "replacement-shard-attempt")
+    with pytest.raises(ValueError, match="previous attempt"):
+        qualification.mark_measurement_once(str(tmp_path), component="shard")
+    assert path.read_bytes() == original

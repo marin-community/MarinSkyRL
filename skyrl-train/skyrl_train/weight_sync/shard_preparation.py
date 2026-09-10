@@ -394,9 +394,20 @@ def _allocation_state(device):
     }
 
 
-def validate_live_inventory(worker, state):
+def validate_live_inventory(worker, state, publication_id=None, *, minimum_free_bytes=0):
     """Resolve the actual model again under the publication lease before reuse."""
+    device = next(iter(state.sources.values() if state.sources else state.parameters.values())).device
+    before = _allocation_state(device)
+    if device.type == "cuda" and before["free_bytes"] < minimum_free_bytes:
+        raise ValueError("Current publication free memory is below the configured headroom")
+    completed_update = None
     if state.metadata["role"] == "policy":
+        completed_update = getattr(worker, "_completed_update", None)
+        if publication_id is not None and not (
+            (completed_update is None and publication_id == 0)
+            or (type(completed_update) is int and completed_update == publication_id)
+        ):
+            raise ValueError("Shard publication version differs from the actual completed learner update")
         slices, sources = local_source_slices(worker.bridge.get_conversion_tasks(worker.actor_module), worker.provider)
         trainer, geometry = state.metadata["trainer"], state.geometry
         inventory = local_shard_inventory(
@@ -415,6 +426,12 @@ def validate_live_inventory(worker, state):
         parameters, maps, _ = native_receiver_sources(worker)
         if maps != state.expert_maps or storage_versions(parameters) != storage_versions(state.parameters):
             raise ValueError("Live receiver inventory differs from prepared destinations")
+    return {
+        "allocation_before": before,
+        "allocation_after": _allocation_state(device),
+        "minimum_free_bytes": minimum_free_bytes,
+        "completed_update": completed_update,
+    }
 
 
 def bind_live_preparation(worker, plan, parallel_state, capture, *, proof_capture=None):
@@ -485,7 +502,9 @@ def bind_live_preparation(worker, plan, parallel_state, capture, *, proof_captur
             borrowed_groups=groups,
             borrowed_source_ranks=roots,
             proof_capture=proof_capture,
-            inventory_validator=partial(validate_live_inventory, worker, state),
+            inventory_validator=partial(
+                validate_live_inventory, worker, state, minimum_free_bytes=plan.options.minimum_free_bytes
+            ),
         )
         receipt.update(bound, phase="prepared")
         if storage_versions(state.sources) != state.source_versions:

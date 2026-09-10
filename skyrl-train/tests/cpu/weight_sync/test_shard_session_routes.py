@@ -6,6 +6,7 @@ Ray calls, custom Gloo collectives, source proof and full byte replay execute.
 
 import ast
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +25,13 @@ from tests.cpu.weight_sync.test_shard_stream import StreamActor, fixture_plan
 
 
 ROOT = Path(__file__).parents[3] / "skyrl_train"
-RECEIVER_METHODS = {"begin_shard_stream", "run_shard_stream", "close_shard_stream", "finish_shard_stream"}
+RECEIVER_METHODS = {
+    "begin_shard_stream",
+    "run_shard_stream",
+    "close_shard_stream",
+    "finish_shard_stream",
+    "read_weight_sync_observations",
+}
 # Independent fixture inventory: two layers, BF16 expert matrices (12+6),
 # BF16 Q projection (4), FP32 router weight (2), FP32 router bias (2).
 EXPECTED_RECEIVER_BYTES = {rank: 2 * ((12 + 6 + 4) * 2 + (2 + 2) * 4) for rank in (2, 3)}
@@ -58,6 +65,9 @@ EngineMethods = actual_methods(
     "inference_engines/vllm/vllm_engine.py", "AsyncVLLMInferenceEngine", RECEIVER_METHODS | {"is_paused"}
 )
 PolicyMethods = actual_methods("workers/megatron/megatron_worker.py", "MegatronPolicyWorkerBase", POLICY_METHODS)
+PolicyObservationMethods = actual_methods(
+    "workers/megatron/megatron_worker.py", "MegatronPolicyWorkerBase", {"read_weight_sync_observations"}
+)
 
 
 class CoreTransport:
@@ -93,11 +103,16 @@ class SessionActor(StreamActor, EngineMethods, PolicyMethods):
     def __init__(self, rank, payload, directory):
         StreamActor.__init__(self, rank, payload, directory)
         self.worker = WorkerMethods()
+        self.worker.device = torch.device("cpu")
         self.paused = False
         self.mode = "pass"
         self._policy_weight_access = PolicyWeightAccess()
         if rank >= len(payload[0]):
             self.native = NativeEngine(self, rank - len(payload[0]))
+
+    async def policy_observations(self, observation_id, output_uri):
+        self.actor_module = [SimpleNamespace(parameters=lambda: iter(self.sources.values()))]
+        return await PolicyObservationMethods.read_weight_sync_observations(self, observation_id, output_uri)
 
     def initialize_session(self):
         StreamActor.initialize(self)
@@ -539,3 +554,23 @@ async def test_failed_native_sibling_is_joined_before_aggregate_returns(layer, m
         assert any("initiating native sibling" in note for note in caught.value.__notes__)
     else:
         assert "initiating native sibling" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_actual_policy_and_receiver_routes_persist_physical_observations(boundary, tmp_path):
+    driver, actors, manifest_id = boundary
+    rows = await driver.inference_engine_client.read_weight_sync_observations("reference-1-before", str(tmp_path))
+    from skyrl_train.weight_sync.shard_interval import receipt_rows
+
+    rows = receipt_rows(rows)
+    assert len(rows) == 2
+    policies = await asyncio.gather(
+        *[actor.policy_observations.remote("reference-1-before", str(tmp_path)) for actor in actors[:2]]
+    )
+    assert {row["identity"]["role"] for row in policies} == {"policy"}
+    assert {row["identity"]["role"] for row in rows} == {"receiver"}
+    for row in rows + policies:
+        saved = json.loads(Path(row["durable_receipt"]["uri"]).read_text())
+        assert saved["observation_id"] == "reference-1-before"
+        assert saved["memory"]["cuda_measured"] is False
+        assert saved["ports"]["attribution"] == "shared-port, not process"

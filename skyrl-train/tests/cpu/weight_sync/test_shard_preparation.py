@@ -398,3 +398,17 @@ def test_live_inventory_accepts_updated_values_but_rejects_replaced_bridge_stora
             preparation.validate_live_inventory(worker, state)
     finally:
         preparation.close_live_preparation(worker, "actual")
+
+
+@pytest.mark.parametrize("completed, publication", [(None, 1), (1, 2), (True, 1)])
+def test_live_inventory_rejects_claimed_publication_without_actual_completed_update(
+    monkeypatch, completed, publication
+):
+    worker, geometry, parallel = policy_worker(monkeypatch)
+    preparation.collect_policy_preparation(worker, "actual", geometry, parallel, {"rank": 0}, lambda row: None)
+    worker._completed_update = completed
+    try:
+        with pytest.raises(ValueError, match="actual completed learner update"):
+            preparation.validate_live_inventory(worker, worker._shard_preparation, publication)
+    finally:
+        preparation.close_live_preparation(worker, "actual")

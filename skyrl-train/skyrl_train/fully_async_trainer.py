@@ -806,7 +806,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Initialize weight sync state
         with Timer("init_weight_sync_state", self.all_startup_timings):
-            self.init_weight_sync_state()
+            if getattr(self.cfg.generator, "weight_sync_timing_mode", "off") != "shard":
+                self.init_weight_sync_state()
 
         # sync weights to inference engines
         with Timer("sync_weights_to_inference_engines", self.all_startup_timings) as weight_update_timer:
@@ -816,6 +817,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             with Timer("policy_startup_drain", self.all_startup_timings):
                 await self._drain_policy_event_loops()
+            if getattr(self.cfg.generator, "weight_sync_timing_mode", "off") == "shard":
+                await self.inference_engine_client.resume_generation(
+                    policy_version=self._published_policy_version, settle_native_calls=True
+                )
         if self.cfg.generator.publication_stage_timing or self.cfg.trainer.fully_async.get(
             "first_token_admission", False
         ):
@@ -1505,7 +1510,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 publication_error = error
                 raise
             finally:
-                if self.inference_engine_client.generation_paused_event.is_set():
+                if self.inference_engine_client.generation_paused_event.is_set() and (
+                    publication_error is None
+                    or getattr(self.cfg.generator, "weight_sync_timing_mode", "off") != "shard"
+                ):
                     try:
                         await self.inference_engine_client.resume_generation()
                     except BaseException:
@@ -1648,9 +1656,23 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
         self.global_step = completed_step
-        await self._drain_background_evaluations(wait=True)
-        await self._publish_policy_weights(reason="final", timing_name="final_weight_sync")
-        await super()._finalize_training(completed_step=completed_step, epoch=epoch)
+        primary = None
+        try:
+            await self._drain_background_evaluations(wait=True)
+            await self._publish_policy_weights(reason="final", timing_name="final_weight_sync")
+            await super()._finalize_training(completed_step=completed_step, epoch=epoch)
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            shard_publication = getattr(self, "_shard_training_publication", None)
+            if shard_publication is not None:
+                try:
+                    await shard_publication.close()
+                except BaseException as error:
+                    if primary is None:
+                        raise
+                    primary.add_note(f"Shard finalization cleanup: {type(error).__name__}: {error}")
         if getattr(self, "_bucket_timing_prepared", False):
             await self._run_bucket_timing_rpc(
                 "close_bucket_timing", self.inference_engine_client, self._bucket_timing_last_version
@@ -1742,6 +1764,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             expected_receiver_bytes=expected_receiver_bytes,
         )
 
+    async def _read_reference_physical_observations(self, moment):
+        from skyrl_train.weight_sync.shard_interval import settled
+
+        observation_id = f"reference-{self.global_step}-{moment}"
+        output_uri = self.cfg.trainer.weight_sync_readback_output
+        return await settled(
+            self._run_bucket_timing_rpc("read_weight_sync_observations", observation_id, output_uri),
+            self.inference_engine_client.read_weight_sync_observations(observation_id, output_uri),
+        )
+
     async def _run_bucket_timing_rpc(self, method: str, *args):
         # Timing methods return per-rank diagnostic dictionaries. The standard
         # pass-through collector concatenates TrainingOutputBatch values instead.
@@ -1762,8 +1794,28 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with Timer("policy_pre_sync_drain", self.all_timings):
             await self._drain_policy_event_loops()
         timing_mode = getattr(self.cfg.generator, "weight_sync_timing_mode", "off")
-        if timing_mode not in ("off", "bucket", "reference"):
-            raise ValueError("weight_sync_timing_mode must be off, bucket or reference")
+        if timing_mode not in ("off", "bucket", "reference", "shard"):
+            raise ValueError("weight_sync_timing_mode must be off, bucket, reference or shard")
+        if timing_mode == "shard":
+            from skyrl_train.weight_sync.shard_training import ShardTrainingPublication
+
+            if self._weight_change_probe_publication() is not None:
+                raise ValueError("Shard publication cannot overlap the independent wire-change probe")
+            publication = getattr(self, "_shard_training_publication", None)
+            if publication is None:
+                publication = ShardTrainingPublication(self)
+                self._shard_training_publication = publication
+            result = await publication.publish(self.global_step)
+            self.all_timings.update(
+                {f"shard_sync/{name}": seconds for name, seconds in result["phase_seconds"].items()}
+            )
+            self.all_timings["weight_broadcast"] = result["phase_seconds"]["install"]
+            self.all_timings["shard_sync/total_including_proof"] = result["total_seconds_including_proof"]
+            self._published_policy_version = self.global_step
+            return result
+        physical_observations = getattr(self.cfg.generator, "weight_sync_physical_observations", False)
+        if physical_observations and timing_mode != "reference":
+            raise ValueError("Physical reference endpoints require reference timing mode")
         bucket_timing = timing_mode != "off"
         if bucket_timing and self._weight_change_probe_publication() is not None:
             raise ValueError("Bucket timing cannot overlap the independent wire-change probe")
@@ -1771,6 +1823,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if prepared:
             with Timer("bucket_sync_begin", self.all_timings):
                 await self._run_bucket_timing_rpc("begin_bucket_timing", self.inference_engine_client, self.global_step)
+        if prepared and physical_observations:
+            await self._read_reference_physical_observations("before")
         with Timer("weight_broadcast", self.all_timings):
             if prepared:
                 result = await self._run_bucket_timing_rpc(
@@ -1794,6 +1848,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         "pass_through", "finish_weight_change_probe", publication["publication_id"]
                     )
                     self._weight_change_probe_committed(publication, time.perf_counter() - started)
+        if prepared and physical_observations:
+            await self._read_reference_physical_observations("after")
         if prepared:
             with Timer("bucket_full_byte_replay", self.all_timings):
                 await self._run_bucket_timing_rpc(

@@ -947,6 +947,13 @@ class InferenceEngineClient(InferenceEngineInterface):
             "run_shard_stream", manifest_id=manifest_id, publication_id=publication_id, _settle_calls=True
         )
 
+    async def read_weight_sync_observations(self, observation_id, output_uri):
+        if self._dead_engines:
+            raise RuntimeError("Physical weight-sync observations require every inference engine")
+        return await self._run_on_all_engines(
+            "read_weight_sync_observations", observation_id=observation_id, output_uri=output_uri, _settle_calls=True
+        )
+
     async def finish_shard_stream(self, manifest_id: str, publication_id: int):
         if self._dead_engines:
             raise RuntimeError("Shard collectives require every configured inference engine")

@@ -15,7 +15,7 @@ from skyrl_train.weight_sync.shard_group_factory import GroupEndpoint
 from skyrl_train.weight_sync.shard_native_factory import prepare_native_shard_worker, required_group_memberships
 from skyrl_train.weight_sync.shard_replica_proof import ReplicaCatalogue, ReplicaTensor, build_replica_plan
 from skyrl_train.weight_sync.shard_session import worker_shard_call
-from skyrl_train.weight_sync.shard_interval import ShardLifecycle, run_shard_interval
+from skyrl_train.weight_sync.shard_interval import GenerationBoundary, ShardLifecycle, run_shard_interval
 from tests.cpu.weight_sync.test_shard_stream import StreamActor, fixture_plan
 
 
@@ -213,13 +213,18 @@ async def exercise_persistent_coordinator(actors, trainer_count, manifest, prepa
             ]
 
     class Client:
-        paused = False
+        def __init__(self):
+            self.generation_paused_event = asyncio.Event()
+
+        @property
+        def paused(self):
+            return self.generation_paused_event.is_set()
 
         async def pause_generation(self, **kwargs):
-            self.paused = True
+            self.generation_paused_event.set()
 
         async def resume_generation(self, **kwargs):
-            self.paused = False
+            self.generation_paused_event.clear()
 
         async def phase(self, phase, manifest_id, publication_id):
             return await asyncio.gather(
@@ -239,7 +244,7 @@ async def exercise_persistent_coordinator(actors, trainer_count, manifest, prepa
             return await self.phase("close", *args)
 
     async def replay(manifest_id, version):
-        if version == 7:
+        if version == 8:
             raise ValueError("Injected replay boundary failure")
         await asyncio.gather(
             *[actor.versioned_phase.remote("prepare_replay", manifest_id, version) for actor in actors]
@@ -260,8 +265,12 @@ async def exercise_persistent_coordinator(actors, trainer_count, manifest, prepa
     assert not client.paused and "policy_close" not in result
     assert all(row["groups_retained"] for row in result["policy_finish"] + result["receiver_finish"])
     assert result["phase_seconds"]["install"] >= 0 and result["phase_seconds"]["full_byte_replay"] >= 0
+    await client.pause_generation()
+    await run_shard_interval(driver, manifest, 7, generation_boundary=GenerationBoundary.DRIVER, **arguments)
+    assert client.paused
+    await client.resume_generation()
     with pytest.raises(ValueError, match="Injected replay boundary failure"):
-        await run_shard_interval(driver, manifest, 7, **arguments)
+        await run_shard_interval(driver, manifest, 8, **arguments)
     assert client.paused
     # Cleanup has released every learner lease even after a failed publication.
     await asyncio.gather(*[actor.update_sources.remote() for actor in actors[:trainer_count]])

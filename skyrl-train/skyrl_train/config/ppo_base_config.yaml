@@ -400,7 +400,23 @@ generator:
   publication_stage_timing: false
   weight_sync_wire_inventory: false
   # Gate-only: cached buffers, measured install, untimed full replay after every sync.
-  weight_sync_timing_mode: "off"  # off | bucket | reference
+  weight_sync_timing_mode: "off"  # off | bucket | reference | shard
+  weight_sync_physical_observations: false  # Matched reference endpoints, outside its broadcast timer.
+  shard_sync:
+    preparation_id: null
+    output_uri: null
+    policy_ranks: null
+    receiver_replicas: null
+    expert_parallel_size: null
+    layers_by_pp: null
+    num_experts: null
+    hidden_size: null
+    intermediate_size: null
+    transfer_bytes: 1073741824
+    comparison_bytes: 65536
+    dense_chunk_bytes: 67108864
+    minimum_free_bytes: 268435456
+    timeout_seconds: 600
   publication_pause_timeout_seconds: 30.0
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024

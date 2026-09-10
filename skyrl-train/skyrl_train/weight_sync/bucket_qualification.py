@@ -14,11 +14,13 @@ from skyrl_train.weight_sync.readback_diagnostics import persist_readback
 from skyrl_train.weight_sync.worker_bucket_protocol import BUCKET_BYTES, MAX_REPLAY_EXTRA_BYTES
 
 
-def mark_measurement_once(output_uri: str) -> dict:
+def mark_measurement_once(output_uri: str, *, component="bucket") -> dict:
     """Startup retries may proceed; a recorded measurement is never repeated."""
-    uri = f"{output_uri.rstrip('/')}/bucket-measurement-started.json"
+    if component not in ("bucket", "shard"):
+        raise ValueError("Unknown weight-sync measurement component")
+    uri = f"{output_uri.rstrip('/')}/{component}-measurement-started.json"
     if exists(uri):
-        raise ValueError("A previous attempt already entered bucket measurement")
+        raise ValueError(f"A previous attempt already entered {component} measurement")
     attempt = os.environ["IRIS_ATTEMPT_UID"]
     if not attempt:
         raise ValueError("Measurement requires native attempt identity")

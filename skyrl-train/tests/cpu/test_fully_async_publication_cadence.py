@@ -736,9 +736,17 @@ async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(m
 
     trainer = make_driver(interval=1, age=0, steps=2)
     trainer.cfg.generator.weight_sync_timing_mode = mode
+    trainer.cfg.generator.weight_sync_physical_observations = mode == "reference"
     clock = [0.0]
     monkeypatch.setattr(timer_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     calls = []
+    observations = []
+
+    async def observe(moment):
+        observations.append(moment)
+        clock[0] += 1009
+
+    monkeypatch.setattr(trainer, "_read_reference_physical_observations", observe)
 
     class BucketLearner(LearnerService):
         def async_run_ray_method(self, dispatch, method, *args):
@@ -780,6 +788,7 @@ async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(m
     assert trainer.all_timings["weight_broadcast"] == 7
     assert trainer.all_timings["bucket_sync_begin"] == 3
     assert trainer.all_timings["bucket_full_byte_replay"] == 103
+    assert observations == (["before", "after"] if mode == "reference" else [])
     assert calls == [
         ("broadcast_to_inference_engines", ()),
         ("prepare_reference_timing" if mode == "reference" else "prepare_bucket_timing", ()),
@@ -919,3 +928,104 @@ async def test_timing_receipts_use_actual_raw_actor_dispatch_and_reject_batch_co
     # delegates non-None dictionary receipts to TrainingOutputBatch.cat.
     with pytest.raises(ValueError, match="Unsupported type.*str.*schema"):
         await group.async_run_method("pass_through", method, "engine", 7)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", [None, "proof", "post_drain"])
+async def test_shard_publication_keeps_generation_paused_until_verified_driver_barrier(monkeypatch, failure_stage):
+    trainer = make_driver()
+    trainer.cfg.generator.weight_sync_timing_mode = "shard"
+    trainer.global_step = 1
+    trainer._published_policy_version = 0
+    trainer.policy_model.completed_update = 1
+    engine = trainer.inference_engine_client
+    drains = []
+
+    class Publication:
+        async def publish(self, version):
+            assert engine.generation_paused_event.is_set()
+            engine.installed_update = version
+            if failure_stage == "proof":
+                raise ValueError("native shard proof failure")
+            return {"phase_seconds": {"install": 7, "full_byte_replay": 103}, "total_seconds_including_proof": 113}
+
+    async def drain():
+        drains.append(engine.generation_paused_event.is_set())
+        if failure_stage == "post_drain" and len(drains) == 2:
+            raise ValueError("native shard post_drain failure")
+
+    trainer._shard_training_publication = Publication()
+    monkeypatch.setattr(trainer, "_drain_policy_event_loops", drain)
+    if failure_stage is not None:
+        with pytest.raises(ValueError, match="native shard"):
+            await trainer.eval()
+        assert engine.generation_paused_event.is_set()
+        assert not engine.ready.is_set()
+        assert trainer.trajectory_runner.evaluations == []
+        assert trainer._published_policy_version == (0 if failure_stage == "proof" else 1)
+    else:
+        await trainer.eval()
+        assert drains == [True, True]
+        assert not engine.generation_paused_event.is_set()
+        assert trainer.trajectory_runner.evaluations == [(1, 1)]
+        assert trainer.all_timings["weight_broadcast"] == 7
+        assert trainer.all_timings["shard_sync/full_byte_replay"] == 103
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_eval_failure", [False, True])
+async def test_configured_shard_mode_trains_evaluates_final_weights_and_closes_context(monkeypatch, final_eval_failure):
+    from skyrl_train.weight_sync import shard_training
+
+    trainer = make_driver(interval=2, age=1, steps=3)
+    trainer.cfg.generator.weight_sync_timing_mode = "shard"
+    engine = trainer.inference_engine_client
+    closed = []
+    original_resume = engine.resume_generation
+
+    async def resume(*, policy_version=None, settle_native_calls=False):
+        if policy_version is not None:
+            assert policy_version == engine.installed_update
+        await original_resume()
+
+    class ShardService:
+        """Remote tensor transport boundary; the configured training loop is actual."""
+
+        def __init__(self, driver):
+            assert driver is trainer
+
+        async def publish(self, publication_id):
+            if not engine.publications:
+                await engine.pause_generation()
+            assert engine.generation_paused_event.is_set()
+            assert publication_id == trainer.policy_model.completed_update
+            engine.installed_update = publication_id
+            engine.publications.append(publication_id)
+            return {"phase_seconds": {"install": 7, "full_byte_replay": 103}, "total_seconds_including_proof": 113}
+
+        async def close(self):
+            assert trainer.trajectory_runner.evaluations[-1] == (3, 3)
+            assert not trainer._active_trajectory_tasks
+            closed.append(engine.installed_update)
+
+    monkeypatch.setattr(shard_training, "ShardTrainingPublication", ShardService)
+    monkeypatch.setattr(engine, "resume_generation", resume)
+    original_eval = trainer.eval
+
+    async def evaluate():
+        result = await original_eval()
+        if final_eval_failure and trainer.global_step == 3:
+            raise ValueError("Final evaluation failed after installation")
+        return result
+
+    monkeypatch.setattr(trainer, "eval", evaluate)
+    if final_eval_failure:
+        with pytest.raises(ValueError, match="Final evaluation failed"):
+            await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    else:
+        await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert engine.publications == [0, 2, 3]
+    assert trainer.trajectory_runner.evaluations == [(0, 0), (3, 3)]
+    assert [step for step, _ in trainer.policy_model.consumed] == [1, 2, 3]
+    assert closed == [3]
+    assert engine.ready.is_set() and not engine.generation_paused_event.is_set()

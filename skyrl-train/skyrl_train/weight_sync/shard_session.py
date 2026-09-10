@@ -11,7 +11,11 @@ import hashlib
 import json
 from threading import Lock
 
+import torch
 import torch.distributed as dist
+
+from skyrl_train.weight_sync.shard_memory import device_memory
+from skyrl_train.weight_sync.shard_observations import port_counters
 
 from skyrl_train.weight_sync.shard_replay import ShardReplay
 
@@ -136,8 +140,7 @@ class ShardSession:
             if self.policy_access is not None and self.token is None:
                 self.token = self.policy_access.acquire("shard-publication")
             try:
-                if self.inventory_validator is not None:
-                    self.inventory_validator()
+                inventory = self.inventory_validator(publication_id) if self.inventory_validator is not None else None
                 current = storage_versions(self.runner.sources)
                 if {name: value[:-1] for name, value in current.items()} != self.source_layout:
                     raise ValueError("Prepared learner source storage changed between publications")
@@ -152,7 +155,7 @@ class ShardSession:
                 raise
             self.publication_id = publication_id
             self.phase = ShardPhase.FROZEN
-            return self.receipt()
+            return {**self.receipt(), "live_inventory": inventory}
 
     def verify_replicas(self, manifest_id, publication_id):
         with self.lock:
@@ -200,7 +203,14 @@ class ShardSession:
                 raise ValueError("Shard install requires unchanged frozen weights and completed replica proof")
             self.phase = ShardPhase.RUNNING
         try:
+            device = self.runner.scratch.device
+            memory_before = device_memory(device)
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+            ports_before = port_counters()
             result = self.runner.run(manifest_id=manifest_id, publication_id=publication_id)
+            ports_after = port_counters()
+            memory_after = device_memory(device)
             if storage_versions(self.runner.sources) != self.versions:
                 raise ValueError("Learner source changed during shard installation")
         except BaseException:
@@ -210,7 +220,17 @@ class ShardSession:
         with self.lock:
             self.phase = ShardPhase.INSTALLED
             self.installed_versions = storage_versions(self.runner.parameters)
-        return {**self.receipt(), "stream": result}
+        return {
+            **self.receipt(),
+            "stream": result,
+            "install_observations": {
+                "ports_before": ports_before,
+                "ports_after": ports_after,
+                "memory_before": memory_before,
+                "memory_after": memory_after,
+                "memory_scope": "Torch allocator peak plus device-free endpoints; external allocator peak unmeasured",
+            },
+        }
 
     def prepare_replay(self, manifest_id, publication_id):
         with self.lock:

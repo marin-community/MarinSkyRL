@@ -503,6 +503,11 @@ class WorkerWrap:
 
         return worker_shard_call(self, "run", manifest_id, publication_id)
 
+    def read_weight_sync_observations(self, observation_id, output_uri):
+        from skyrl_train.weight_sync.shard_observations import observe_worker
+
+        return observe_worker(self, self.device, "receiver", observation_id, output_uri)
+
     def finish_shard_stream(self, manifest_id: str, publication_id: int):
         from skyrl_train.weight_sync.shard_session import worker_shard_call
 
@@ -2278,6 +2283,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             raise RuntimeError("Native shard publication requires scheduler-idle acknowledgement")
         return await call_all_receiver_workers(
             self._get_engine(), "run_shard_stream", args=(manifest_id, publication_id), kwargs=None, settle_calls=True
+        )
+
+    async def read_weight_sync_observations(self, observation_id, output_uri):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(),
+            "read_weight_sync_observations",
+            args=(observation_id, output_uri),
+            kwargs=None,
+            settle_calls=True,
         )
 
     async def finish_shard_stream(self, manifest_id: str, publication_id: int):

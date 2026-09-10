@@ -24,6 +24,7 @@ from skyrl_train.weight_sync.shard_group_factory import prepare_rank_groups
 from skyrl_train.weight_sync.shard_rendezvous import OwnedShardStore, ReservedEndpointFactory
 from skyrl_train.weight_sync.shard_group_ready import warm_owned_groups
 from skyrl_train.weight_sync.shard_memory import device_memory
+from skyrl_train.weight_sync.shard_observations import port_counters
 from skyrl_train.weight_sync.readback_diagnostics import ENVIRONMENT_KEYS, network_log_readback
 from skyrl_train.weight_sync.shard_group_schedule import (
     ExpertEntry,
@@ -51,27 +52,6 @@ def tiny_schedule(receiver_replicas: int, payload_bytes: int, *, ep: int = 1) ->
     return build_shard_group_schedule(
         trainers, receivers, entries, trainer_ep=ep, receiver_ep=ep, layers_by_pp=((0,), (1,)), num_experts=ep
     )
-
-
-def port_counters(root: Path = Path("/sys/class/infiniband")) -> dict:
-    """Read the standard IB data counters, whose units are four octets.
-
-    Each process retains all visible ports. Shared-port observations must be
-    deduplicated by physical host/device/port; they cannot establish per-sender
-    egress without an independently verified exclusive process-to-HCA binding.
-    """
-    rows = []
-    for directory in sorted(root.glob("*/ports/*/counters")):
-        row = {"device": directory.parents[2].name, "port": directory.parent.name}
-        try:
-            row.update(
-                {name: int((directory / name).read_text().strip()) for name in ("port_xmit_data", "port_rcv_data")}
-            )
-            row["counter_unit_bytes"] = 4
-        except (OSError, ValueError) as error:
-            row["error"] = f"{type(error).__name__}: {error}"
-        rows.append(row)
-    return {"ports": rows, "attribution": "shared-port, not process", "observed_monotonic": time.monotonic()}
 
 
 class ShardProbeRank:
