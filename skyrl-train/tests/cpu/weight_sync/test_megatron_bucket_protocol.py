@@ -143,6 +143,14 @@ def gate(request, monkeypatch, tmp_path):
 
         async def receive_diagnostic_weight_sync_bucket(self, bucket_id, replay=False, **identity):
             self.receives += 1
+
+            # Real receiver actors block in another process. Let this single-process
+            # fixture wait for posted transport without blocking the driver's loop.
+            def transport_ready():
+                with condition:
+                    assert condition.wait_for(lambda: bool(wire), timeout=5)
+
+            await asyncio.to_thread(transport_ready)
             result = case.worker.receive_diagnostic_weight_sync_bucket(bucket_id, replay=replay, **identity)
             if replay and self.restart_after_install:
                 result["identity"]["pid"] += 1
@@ -503,9 +511,10 @@ async def test_pipeline_packs_next_bucket_while_receiver_receipt_is_held(gate, m
     pack = protocol.StreamingBucketSender.pack_next_bucket
 
     async def held_receive(bucket_id, replay=False, **identity):
-        result = await receive(bucket_id, replay=replay, **identity)
         if bucket_id == 0 and not replay:
             held.set()
+        result = await receive(bucket_id, replay=replay, **identity)
+        if bucket_id == 0 and not replay:
             await release.wait()
         return result
 
@@ -541,14 +550,14 @@ async def test_pipeline_prefetch_failure_joins_held_receiver_before_cleanup(gate
     pack = protocol.StreamingBucketSender.pack_next_bucket
 
     async def held_receive(bucket_id, replay=False, **identity):
-        result = await receive(bucket_id, replay=replay, **identity)
         if bucket_id == 0 and not replay:
             held.set()
             try:
+                await receive(bucket_id, replay=replay, **identity)
                 await asyncio.Event().wait()
             finally:
                 joined.set()
-        return result
+        return await receive(bucket_id, replay=replay, **identity)
 
     def failed_prefetch(sender):
         if sender.next_bucket == 1:
@@ -571,4 +580,59 @@ async def test_reference_timing_rejects_bucket_pipeline_before_preparation(gate)
     with pytest.raises(ValueError, match="Bucket pipeline requires bucket timing mode"):
         await gate.policy.prepare_reference_timing(gate.client)
     assert not gate.client.entered.is_set()
+    assert gate.policy._policy_weight_access.owner is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_posts_each_receiver_before_advancing_its_export(gate, monkeypatch):
+    gate.policy.cfg.generator.weight_sync_bucket_pipeline = True
+    posted = []
+    create = asyncio.create_task
+    pack = protocol.StreamingBucketSender.pack_next_bucket
+
+    def observed_create(coro, **kwargs):
+        if coro.cr_code.co_name == "receive_diagnostic_weight_sync_bucket":
+            posted.append(coro.cr_frame.f_locals["bucket_id"])
+        return create(coro, **kwargs)
+
+    def observed_pack(sender):
+        assert posted and posted[-1] == sender.next_bucket
+        return pack(sender)
+
+    monkeypatch.setattr(asyncio, "create_task", observed_create)
+    monkeypatch.setattr(protocol.StreamingBucketSender, "pack_next_bucket", observed_pack)
+    result = await gate.policy.diagnostic_bucket_install_and_replay(gate.client)
+    assert result["phases"]["replay"]["receivers"][0]["mismatches"] == 0
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_joins_native_send_before_releasing_policy(gate, monkeypatch):
+    gate.policy.cfg.generator.weight_sync_bucket_pipeline = True
+    from threading import Event
+
+    entered, release = Event(), Event()
+    original = torch.distributed.broadcast
+
+    def held_broadcast(tensor, src, group=None):
+        if group == "native-custom-group" and current_thread() is not main_thread():
+            entered.set()
+            assert release.wait(timeout=5)
+        return original(tensor, src, group=group)
+
+    monkeypatch.setattr(torch.distributed, "broadcast", held_broadcast)
+    task = asyncio.create_task(gate.policy.diagnostic_bucket_install_and_replay(gate.client))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.05)
+        assert not task.done()
+        assert gate.policy._policy_weight_access.owner == "bucket-install-and-replay"
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=10)
     assert gate.policy._policy_weight_access.owner is None

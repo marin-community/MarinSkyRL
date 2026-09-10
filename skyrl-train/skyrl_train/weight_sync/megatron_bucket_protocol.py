@@ -210,6 +210,17 @@ async def prepare_bucket_transfer(worker, client, *, source_owners):
     )
 
 
+async def join_native_work(tasks):
+    """Keep buffers alive until uncancellable native dispatch and RPC cleanup settle."""
+    waiter = asyncio.gather(*tasks, return_exceptions=True)
+    while not waiter.done():
+        try:
+            await asyncio.shield(waiter)
+        except asyncio.CancelledError:
+            continue
+    return waiter.result()
+
+
 async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, start_update, publication_id=None):
     manifest = prepared.manifest
     source_plan = prepared.source_plan
@@ -244,55 +255,72 @@ async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, 
     if pipeline:
         sender.export_stream = torch.cuda.Stream(device=device)
     pending_buffer = None
+    pending_receive = None
+    issued_receives = []
+    native_sends = []
+
+    def post_receive(bucket):
+        task = asyncio.create_task(client.receive_diagnostic_weight_sync_bucket(bucket, replay=replay, **sync_identity))
+        issued_receives.append(task)
+        return task
+
     per_bucket = []
-    for bucket in range(manifest.bucket_count):
-        buffer = sender.pack_next_bucket() if pending_buffer is None else pending_buffer
-        pending_buffer = None
-        if rank == 0:
-            receive_task = asyncio.create_task(
-                client.receive_diagnostic_weight_sync_bucket(bucket, replay=replay, **sync_identity)
-            )
-            send_stream = torch.cuda.current_stream(device)
+    try:
+        for bucket in range(manifest.bucket_count):
+            if rank == 0 and pipeline:
+                receive_task = pending_receive if pending_receive is not None else post_receive(bucket)
+                pending_receive = None
+            buffer = sender.pack_next_bucket() if pending_buffer is None else pending_buffer
+            pending_buffer = None
+            if rank == 0:
+                if not pipeline:
+                    receive_task = post_receive(bucket)
+                send_stream = torch.cuda.current_stream(device)
 
-            def broadcast():
-                # Preserve the same stream even when NCCL dispatch occurs
-                # on a helper thread, while the actor loop services RPCs.
-                with torch.cuda.device(device), torch.cuda.stream(send_stream):
-                    torch.distributed.broadcast(buffer, 0, group=worker._model_update_group)
+                def broadcast():
+                    # Keep dispatch on the caller's stream while the actor loop services RPCs.
+                    with torch.cuda.device(device), torch.cuda.stream(send_stream):
+                        torch.distributed.broadcast(buffer, 0, group=worker._model_update_group)
 
-            try:
-                await asyncio.to_thread(broadcast)
+                send_task = asyncio.create_task(asyncio.to_thread(broadcast))
+                native_sends.append(send_task)
+                await asyncio.shield(send_task)
+                sender.mark_bucket_sent(bucket)
+                if pipeline and bucket + 1 < manifest.bucket_count:
+                    # Queue the receiver before advancing Bridge exports, preserving their
+                    # collective order while NCCL and the previous receiver load progress.
+                    pending_receive = post_receive(bucket + 1)
+                    pending_buffer = sender.pack_next_bucket()
+                rows, _ = receiver_rows(
+                    await receive_task,
+                    engine_count=engine_count,
+                    ranks_per_engine=ranks_per_engine,
+                    data_parallel_size=generator.inference_engine_data_parallel_size,
+                    expected=receiver_identities,
+                )
+                if any(row["bucket_id"] != bucket or not row["load_completion_event_recorded"] for row in rows):
+                    raise ValueError("Receiver bucket sequence or load event receipt is incomplete")
+                per_bucket.append(
+                    {
+                        "bucket_id": bucket,
+                        "wire_bytes": buffer.numel(),
+                        "receiver_bytes": [row["compared_bytes" if replay else "installed_bytes"] for row in rows],
+                        "mismatches": [row["mismatches"] for row in rows] if replay else None,
+                    }
+                )
+            else:
+                # All policy ranks preserve the same complete Bridge export order.
                 sender.mark_bucket_sent(bucket)
                 if pipeline and bucket + 1 < manifest.bucket_count:
                     pending_buffer = sender.pack_next_bucket()
-            except BaseException:
-                receive_task.cancel()
-                await asyncio.gather(receive_task, return_exceptions=True)
-                raise
-            rows, _ = receiver_rows(
-                await receive_task,
-                engine_count=engine_count,
-                ranks_per_engine=ranks_per_engine,
-                data_parallel_size=generator.inference_engine_data_parallel_size,
-                expected=receiver_identities,
-            )
-            if any(row["bucket_id"] != bucket or not row["load_completion_event_recorded"] for row in rows):
-                raise ValueError("Receiver bucket sequence or load event receipt is incomplete")
-            per_bucket.append(
-                {
-                    "bucket_id": bucket,
-                    "wire_bytes": buffer.numel(),
-                    "receiver_bytes": [row["compared_bytes" if replay else "installed_bytes"] for row in rows],
-                    "mismatches": [row["mismatches"] for row in rows] if replay else None,
-                }
-            )
-        else:
-            # All policy ranks currently perform the complete bridge
-            # export/pack; only rank zero uses the update communicator.
-            sender.mark_bucket_sent(bucket)
-            if pipeline and bucket + 1 < manifest.bucket_count:
-                pending_buffer = sender.pack_next_bucket()
-        torch.distributed.barrier()
+            torch.distributed.barrier()
+    except BaseException:
+        await join_native_work(native_sends)
+        for task in issued_receives:
+            if not task.done():
+                task.cancel()
+        await join_native_work(issued_receives)
+        raise
     sender_receipt = sender.finish()
     receivers = None
     if rank == 0:
