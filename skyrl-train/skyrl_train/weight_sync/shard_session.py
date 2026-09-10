@@ -27,6 +27,8 @@ class ShardPhase(StrEnum):
 def shard_manifest_id(runner):
     payload = {
         "schema": 1,
+        "dense_chunk_bytes": runner.dense_chunk_bytes,
+        "replica_plan_id": getattr(runner, "replica_plan_id", None),
         "schedule": asdict(runner.schedule),
         "experts": [asdict(value) for _, value in sorted(runner.expert_views.items())],
         "dense": [asdict(value) for value in runner.dense_plan],
@@ -141,7 +143,7 @@ class ShardSession:
                 raise ValueError("Exact source-replica proof is incomplete, stale or mismatched")
             self.proof = proof
             self.phase = ShardPhase.VERIFIED
-            return {**self.receipt(), "proof": asdict(proof)}
+            return {**self.receipt(), "proof": asdict(proof), "replica_groups": getattr(self.replica_verifier, "last_receipt", None)}
 
     def run(self, manifest_id, publication_id):
         with self.lock:

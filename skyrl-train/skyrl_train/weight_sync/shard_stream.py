@@ -5,6 +5,8 @@ owned by the enclosing native session. This runner performs blocking broadcasts
 and synchronizes CUDA before returning; gate replay remains a separate phase.
 """
 
+from dataclasses import replace
+
 import torch
 import torch.distributed as dist
 
@@ -14,12 +16,27 @@ from skyrl_train.weight_sync.shard_source_inventory import expert_destination_vi
 
 class ShardStreamRank:
     def __init__(
-        self, rank, schedule, expert_views, dense_plan, sources, parameters, expert_maps, scratch, groups, local_group
+        self,
+        rank,
+        schedule,
+        expert_views,
+        dense_plan,
+        sources,
+        parameters,
+        expert_maps,
+        scratch,
+        groups,
+        local_group,
+        *,
+        dense_chunk_bytes=None,
     ):
         self.rank = rank
         self.schedule = schedule
         self.expert_views = {item.entry.name: item for item in expert_views}
         self.dense_plan = dense_plan
+        self.dense_chunk_bytes = scratch.numel() if dense_chunk_bytes is None else dense_chunk_bytes
+        if type(self.dense_chunk_bytes) is not int or not 4 <= self.dense_chunk_bytes <= scratch.numel():
+            raise ValueError("Dense chunk capacity must be explicit, at least one FP32 element and within workspace")
         self.sources = sources
         self.parameters = parameters
         self.expert_maps = expert_maps
@@ -44,7 +61,10 @@ class ShardStreamRank:
                 raise ValueError("Expert view bytes differ from scheduled collective")
         if scratch.dtype != torch.uint8 or scratch.ndim != 1 or not scratch.is_contiguous():
             raise ValueError("Stream scratch must be contiguous uint8 storage")
-        largest = max([item.nbytes for item in schedule.broadcasts] + [self._dense_bytes(item) for item in dense_plan])
+        largest = max(
+            [item.nbytes for item in schedule.broadcasts]
+            + [min(self.dense_chunk_bytes, self._dense_bytes(item)) for item in dense_plan]
+        )
         if scratch.numel() < largest:
             raise ValueError("Existing stream workspace cannot hold the largest scheduled transfer")
         left, right = scratch.data_ptr(), scratch.data_ptr() + scratch.numel()
@@ -143,52 +163,81 @@ class ShardStreamRank:
                 role = "scratch"
             self._broadcast(tensor, members=members, root=item.root, group=self.groups[item.group_ep])
             rows.append({"phase": "expert", "index": index, "role": role, "bytes": item.nbytes})
-        for index, item in enumerate(self.dense_plan):
-            group = self.schedule.groups[item.group_ep]
-            root = self.native_to_global[item.root_native_rank]
-            nbytes = self._dense_bytes(item)
-            dtype = getattr(torch, item.source.wire_dtype)
-            if self.rank == root:
-                tensor = source_view(item.source, self.sources)
-            else:
-                tensor = self._workspace(nbytes, dtype)
-            if self.rank in group.members:
-                self._broadcast(tensor, members=group.members, root=root, group=self.groups[item.group_ep])
-            if self.rank in self.receivers:
-                native_rank = self.receivers[self.rank]
-                replica = next(i for i, local_ranks in enumerate(item.replica_fanout) if native_rank in local_ranks)
-                local_members = tuple(self.receiver_to_global[r] for r in item.replica_fanout[replica])
-                landing = self.receiver_to_global[item.landing_native_ranks[replica]]
-                self._broadcast(tensor, members=local_members, root=landing, group=self.local_group)
-                installed = (
-                    self.parameters[item.source.hf_name].view(-1).narrow(0, item.source.hf_offset, item.source.numel)
-                )
-                widening = (
-                    item.source.hf_name.endswith(".mlp.router.weight")
-                    and dtype == torch.bfloat16
-                    and installed.dtype == torch.float32
-                )
-                if installed.dtype != dtype and not widening:
-                    raise ValueError("Dense installed dtype differs from the qualified wire conversion")
-                with torch.no_grad():
-                    installed.copy_(tensor)
-                rows.append(
-                    {
-                        "phase": "dense",
-                        "index": index,
-                        "role": "installed",
-                        "bytes": installed.numel() * installed.element_size(),
-                    }
-                )
-            elif self.rank in group.members:
-                rows.append(
-                    {
-                        "phase": "dense",
-                        "index": index,
-                        "role": "source" if self.rank == root else "scratch",
-                        "bytes": nbytes,
-                    }
-                )
+        for index, descriptor in enumerate(self.dense_plan):
+            for item in dense_chunks(descriptor, self.dense_chunk_bytes):
+                group = self.schedule.groups[item.group_ep]
+                root = self.native_to_global[item.root_native_rank]
+                nbytes = self._dense_bytes(item)
+                dtype = getattr(torch, item.source.wire_dtype)
+                if self.rank == root:
+                    tensor = source_view(item.source, self.sources)
+                else:
+                    tensor = self._workspace(nbytes, dtype)
+                if self.rank in group.members:
+                    self._broadcast(tensor, members=group.members, root=root, group=self.groups[item.group_ep])
+                if self.rank in self.receivers:
+                    native_rank = self.receivers[self.rank]
+                    replica = next(i for i, local_ranks in enumerate(item.replica_fanout) if native_rank in local_ranks)
+                    local_members = tuple(self.receiver_to_global[r] for r in item.replica_fanout[replica])
+                    landing = self.receiver_to_global[item.landing_native_ranks[replica]]
+                    self._broadcast(tensor, members=local_members, root=landing, group=self.local_group)
+                    installed = (
+                        self.parameters[item.source.hf_name]
+                        .view(-1)
+                        .narrow(0, item.source.hf_offset, item.source.numel)
+                    )
+                    widening = (
+                        item.source.hf_name.endswith(".mlp.router.weight")
+                        and dtype == torch.bfloat16
+                        and installed.dtype == torch.float32
+                    )
+                    if installed.dtype != dtype and not widening:
+                        raise ValueError("Dense installed dtype differs from the qualified wire conversion")
+                    with torch.no_grad():
+                        installed.copy_(tensor)
+                    rows.append(
+                        {
+                            "phase": "dense",
+                            "index": index,
+                            "hf_offset": item.source.hf_offset,
+                            "numel": item.source.numel,
+                            "wire_dtype": item.source.wire_dtype,
+                            "wire_bytes": nbytes,
+                            "role": "installed",
+                            "bytes": installed.numel() * installed.element_size(),
+                        }
+                    )
+                elif self.rank in group.members:
+                    rows.append(
+                        {
+                            "phase": "dense",
+                            "index": index,
+                            "hf_offset": item.source.hf_offset,
+                            "numel": item.source.numel,
+                            "wire_dtype": item.source.wire_dtype,
+                            "wire_bytes": nbytes,
+                            "role": "source" if self.rank == root else "scratch",
+                            "bytes": nbytes,
+                        }
+                    )
         if self.scratch.is_cuda:
             torch.cuda.synchronize(self.scratch.device)
         return {"rank": self.rank, "manifest_id": manifest_id, "publication_id": publication_id, "rows": rows}
+
+
+def dense_chunks(item, capacity_bytes):
+    """Preserve exact source/destination ranges while bounding dense landing storage."""
+    if type(capacity_bytes) is not int or capacity_bytes < 4:
+        raise ValueError("Dense chunks require at least one FP32 element")
+    width = {"bfloat16": 2, "float32": 4}.get(item.source.wire_dtype)
+    if width is None or item.source.numel <= 0:
+        raise ValueError("Dense chunk descriptor has unqualified dtype or empty range")
+    elements = capacity_bytes // width
+    for offset in range(0, item.source.numel, elements):
+        source = replace(
+            item.source,
+            source_offset=item.source.source_offset + offset,
+            hf_offset=item.source.hf_offset + offset,
+            numel=min(elements, item.source.numel - offset),
+        )
+        yield replace(item, source=source)
