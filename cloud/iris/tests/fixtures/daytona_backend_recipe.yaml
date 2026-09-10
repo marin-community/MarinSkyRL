@@ -1,0 +1,30 @@
+# A Daytona recipe, for the preflight tests that exercise the Daytona branch.
+#
+# It is arm A with the backend swapped: `base:` supplies every unrelated section, so this
+# file is the whole of the Daytona-minus-apptainer delta and cannot drift from the shipped
+# recipe it borrows its geometry, harbor policy and acknowledged overrides from.
+#
+# The inherited `backend.apptainer` block stays where it is and is simply not read: a
+# recipe's options are the ones under its own `kind`.
+
+base: ../../configs/snowball_r2egym_arm_a.yaml
+
+backend:
+  kind: daytona
+  runtime:
+    connect_timeout_sec: 120
+    # No apptainer bridge here, and no harbor overlay: the Daytona image carries harbor.
+    overlay_pythonpath: null
+    overlay_commit: null
+  daytona:
+    # Without it harbor builds each sandbox from the Dockerfile, which the eval org rejects.
+    auto_snapshot: true
+    # A path to a key file, never the key itself.
+    api_key_file: /etc/daytona/rl_org.key
+    socks_host: 127.0.0.1
+    socks_port: 1080
+    # Preflight asserts these appear in terminal_bench.harbor.mask_exceptions, which the
+    # base already lists, so infrastructure failures are masked rather than scored zero.
+    required_mask_exceptions:
+      - EnvironmentStartTimeoutError
+      - VerifierInfrastructureError

@@ -33,6 +33,7 @@ from typing import Any, Dict, Iterator, List
 
 from cloud.iris.artifacts import fs_and_path
 from cloud.iris.paths import PROJECT_ROOT
+from cloud.iris.recipe_preflight import preflight_recipe
 from cloud.iris.rl_config_translation import (
     apply_context_budget_overrides,
     build_checkpoint_export_hydra_args,
@@ -41,6 +42,7 @@ from cloud.iris.rl_config_translation import (
     materialize_rl_config,
     parse_checkpoint_export_config,
     parse_rl_config,
+    ParsedRLConfig,
     write_resolved_context_budget,
 )
 from cloud.iris.rl_data import (
@@ -230,6 +232,22 @@ class LocalRLRunner:
             return 0
         return self._run_skyrl(CHECKPOINT_EXPORT_ENTRYPOINT, hydra_args)
 
+    def _preflight_recipe(self, parsed: ParsedRLConfig, exp_args: Dict[str, Any]) -> None:
+        """Validate a recipe before the run claims a single GPU.
+
+        A ``backend:`` block is what makes a config a recipe, and only a recipe carries
+        the declarations preflight reads. Older configs, which state their harbor
+        environment type by hand, are left alone. Every check raises here because its
+        absence has already cost a run: a relative task tree reads zero tasks and dies
+        seventeen minutes in, a misspelled harbor key is dropped with a warning and the
+        run finishes with the setting never applied.
+        """
+        if parsed.backend is None:
+            return
+        report = preflight_recipe(parsed, exp_args, gpus_per_node=self._gpus_per_node())
+        print(f"\nRecipe preflight ({parsed.config_path.name}, mode: {parsed.mode.value}):")
+        print(report.render())
+
     def _resolve_data_inputs(self, data_kind: str, exp_args: Dict[str, Any]) -> None:
         for role, attribute in (("train", "train_data"), ("validation", "val_data")):
             values = getattr(self.config, attribute)
@@ -265,6 +283,7 @@ class LocalRLRunner:
         entrypoint = self.config.entrypoint or parsed.entrypoint
         self.config.tensor_parallel_size = parsed.tensor_parallel_size
         self._resolve_data_inputs(parsed.data_kind, exp_args)
+        self._preflight_recipe(parsed, exp_args)
         hydra_args = build_skyrl_hydra_args(parsed, exp_args, hpc_stub)
         self._record_context_budget(parsed, skyrl_overrides)
 
