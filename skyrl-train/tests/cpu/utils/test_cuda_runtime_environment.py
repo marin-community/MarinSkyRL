@@ -9,22 +9,26 @@ from tests.cpu.util import example_dummy_config
 
 
 def test_ray_workers_inherit_frozen_cuda_library_path(monkeypatch):
-    cuda_libraries = "/app/.venv/lib/python3.12/site-packages/nvidia/cuda_runtime/lib"
-    nvrtc_home = "/app/.venv/lib/python3.12/site-packages/nvidia/cuda_nvrtc"
+    cuda_libraries = "/app/.venv/lib/python3.12/site-packages/nvidia/cu13/lib"
+    nvrtc_home = "/app/.venv/lib/python3.12/site-packages/nvidia/cu13"
     monkeypatch.setenv("LD_LIBRARY_PATH", cuda_libraries)
     monkeypatch.setenv("NVRTC_HOME", nvrtc_home)
+    monkeypatch.setenv("CUDA_HOME", nvrtc_home)
+    monkeypatch.setenv("LIBRARY_PATH", "/app/.venv/lib")
     monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: True)
 
     runtime_environment = prepare_runtime_environment(example_dummy_config())
 
     assert runtime_environment["LD_LIBRARY_PATH"] == cuda_libraries
     assert runtime_environment["NVRTC_HOME"] == nvrtc_home
+    assert runtime_environment["CUDA_HOME"] == nvrtc_home
+    assert runtime_environment["LIBRARY_PATH"] == "/app/.venv/lib"
 
 
 def test_frozen_cuda_runtime_resolves_one_nvrtc_home_and_all_library_directories(tmp_path):
-    site_packages = tmp_path / "site-packages"
-    runtime_library = site_packages / "nvidia" / "cuda_runtime" / "lib"
-    nvrtc_library = site_packages / "nvidia" / "cuda_nvrtc" / "lib"
+    site_packages = tmp_path / "lib" / "python3.12" / "site-packages"
+    runtime_library = site_packages / "nvidia" / "nccl" / "lib"
+    nvrtc_library = site_packages / "nvidia" / "cu13" / "lib"
     runtime_library.mkdir(parents=True)
     nvrtc_library.mkdir(parents=True)
 
@@ -35,6 +39,8 @@ def test_frozen_cuda_runtime_resolves_one_nvrtc_home_and_all_library_directories
     assert environment == {
         "LD_LIBRARY_PATH": f"{nvrtc_library}:{runtime_library}",
         "NVRTC_HOME": str(nvrtc_library.parent),
+        "CUDA_HOME": str(nvrtc_library.parent),
+        "LIBRARY_PATH": str(tmp_path / "lib"),
     }
 
 
@@ -63,8 +69,7 @@ def test_frozen_cuda_runtime_rejects_multiple_nvrtc_homes(tmp_path):
     site_packages = []
     for name in ("first", "second"):
         root = tmp_path / name
-        (root / "nvidia" / "cuda_runtime" / "lib").mkdir(parents=True)
-        (root / "nvidia" / "cuda_nvrtc" / "lib").mkdir(parents=True)
+        (root / "nvidia" / "cu13" / "lib").mkdir(parents=True)
         site_packages.append(str(root))
 
     with pytest.raises(RuntimeError, match="exactly one NVRTC home"):

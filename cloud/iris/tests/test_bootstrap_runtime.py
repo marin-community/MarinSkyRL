@@ -40,8 +40,7 @@ def _fake_frozen_runtime(
         "harbor/models/trial",
         "harbor/trial",
         "harbor/utils",
-        "nvidia/cuda_runtime/lib",
-        "nvidia/cuda_nvrtc/lib",
+        "nvidia/cu13/lib",
         "quack",
         "skyrl_train/models",
         "transformer_engine/common",
@@ -70,9 +69,9 @@ def _fake_frozen_runtime(
     _write_module(site_packages, "quack/activation.py")
     _write_module(site_packages, "flash_attn.py", "__version__ = '2.8.3'\n")
     _write_module(site_packages, "memray.py")
-    _write_module(site_packages, "torch.py", "__version__ = '2.11.0+cu129'\n")
+    _write_module(site_packages, "torch.py", "__version__ = '2.13.0+cu132'\n")
     _write_module(site_packages, "vllm/__init__.py", "__version__ = 'test'\n")
-    _write_module(site_packages, "vllm/_C.py")
+    _write_module(site_packages, "vllm/_C_stable_libtorch.py")
     _write_module(site_packages, "vllm/cumem_allocator.py")
     _write_module(
         site_packages,

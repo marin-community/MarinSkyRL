@@ -75,6 +75,8 @@ WANDB_ENTITY_ENV = "WANDB_ENTITY"
 HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
 LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
+CUDA_HOME_ENV = "CUDA_HOME"
+LIBRARY_PATH_ENV = "LIBRARY_PATH"
 RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
 NUMA_AFFINITY_ENV = "SKYRL_ENABLE_NUMA_AFFINITY"
 TELEMETRY_ENDPOINT_ENV = "SKYRL_TELEMETRY_ENDPOINT"
@@ -145,6 +147,18 @@ ENV_VAR_SPECS = (
     ),
     EnvVarSpec(
         NVRTC_HOME_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        CUDA_HOME_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        LIBRARY_PATH_ENV,
         "runtime.bootstrap",
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
@@ -369,6 +383,8 @@ class EnvVarManager:
         passthrough_names = (
             LD_LIBRARY_PATH_ENV,
             NVRTC_HOME_ENV,
+            CUDA_HOME_ENV,
+            LIBRARY_PATH_ENV,
             TELEMETRY_ENDPOINT_ENV,
             RUN_ID_ENV,
             EXECUTION_UID_ENV,
@@ -410,14 +426,21 @@ class EnvVarManager:
         """Resolve Python-wheel CUDA library paths for task and Ray worker processes."""
         nvidia_roots = [Path(root) / "nvidia" for root in site_packages if (Path(root) / "nvidia").is_dir()]
         library_paths = sorted(path for root in nvidia_roots for path in root.glob("*/lib") if path.is_dir())
-        nvrtc_homes = [root / "cuda_nvrtc" for root in nvidia_roots if (root / "cuda_nvrtc" / "lib").is_dir()]
+        nvrtc_homes = [root / "cu13" for root in nvidia_roots if (root / "cu13" / "lib").is_dir()]
         if not library_paths:
             raise RuntimeError("The frozen GPU runtime has no Python-wheel CUDA library directories")
         if len(nvrtc_homes) != 1:
             raise RuntimeError(f"The frozen GPU runtime must have exactly one NVRTC home; found {nvrtc_homes}")
 
         library_path = os.pathsep.join(str(path) for path in library_paths)
-        return cls({LD_LIBRARY_PATH_ENV: library_path, NVRTC_HOME_ENV: str(nvrtc_homes[0])})
+        return cls(
+            {
+                LD_LIBRARY_PATH_ENV: library_path,
+                NVRTC_HOME_ENV: str(nvrtc_homes[0]),
+                CUDA_HOME_ENV: str(nvrtc_homes[0]),
+                LIBRARY_PATH_ENV: str(nvrtc_homes[0].parents[3]),
+            }
+        )
 
     def write_shell_activation(self, path: Path, scope: EnvVarScope) -> None:
         """Write managed values as a sourceable shell activation file."""

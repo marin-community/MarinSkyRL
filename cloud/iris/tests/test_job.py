@@ -663,6 +663,7 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
     system_python = fake_bin / "python3.12"
     system_python.symlink_to(sys.executable)
     (environment / "bin").mkdir(parents=True)
+    (environment / "lib").mkdir()
     cuda_library_path = tmp_path / "cuda" / "lib"
     cuda_library_path.mkdir(parents=True)
     nvrtc_home = tmp_path / "cuda" / "nvrtc"
@@ -675,8 +676,8 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
     fake_python.write_text(
         "#!/bin/sh\n"
         'case "$2" in\n'
-        '  write-frozen-cuda-runtime) printf "export LD_LIBRARY_PATH=%s\\nexport NVRTC_HOME=%s\\n" '
-        '"$FAKE_CUDA_LIBRARY_PATH" "$FAKE_NVRTC_HOME" > "$3" ;;\n'
+        '  write-frozen-cuda-runtime) printf "export LD_LIBRARY_PATH=%s\\nexport NVRTC_HOME=%s\\nexport CUDA_HOME=%s\\n" '
+        '"$FAKE_CUDA_LIBRARY_PATH" "$FAKE_NVRTC_HOME" "$FAKE_NVRTC_HOME" > "$3" ;;\n'
         "  *) exit 0 ;;\n"
         "esac\n"
     )
