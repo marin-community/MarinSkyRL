@@ -59,19 +59,6 @@ def test_harbor_reads_the_engines_max_model_len(endpoint_client):
     assert _harbor_reads_max_model_len(_models(client)) == 32768
 
 
-def test_reported_length_matches_the_tokenize_route(endpoint_client):
-    """Both routes answer harbor about the same server, so they must not disagree: `/tokenize`
-    feeds terminus-2's token counter and `/v1/models` feeds the context guard that counter is
-    checked against."""
-    client = endpoint_client(tokenizer=StubTokenizer(40960), max_model_len=32768)
-
-    models_len = _models(client)["data"][0]["max_model_len"]
-    tokenize_response = client.post("/tokenize", json={"model": MODEL_NAME, "prompt": "hi"})
-
-    assert tokenize_response.status_code == HTTPStatus.OK.value, tokenize_response.text
-    assert tokenize_response.json()["max_model_len"] == models_len
-
-
 def test_served_model_name_is_the_id(endpoint_client):
     """RL checkpoints are served under a hashed `served_model_name`; that is the id harbor and
     litellm address the endpoint with, so it is the id reported here."""

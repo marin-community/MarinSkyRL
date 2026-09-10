@@ -1,8 +1,8 @@
 """
 OpenAI-compatible HTTP endpoint using InferenceEngineClient as backend.
 
-This module provides a FastAPI-based HTTP endpoint that exposes OpenAI's chat completion API
-while routing requests to our internal InferenceEngineClient system.
+This module provides a FastAPI-based HTTP endpoint that exposes OpenAI's completion APIs and
+vLLM-compatible chat tokenization while routing requests to InferenceEngineClient.
 
 Main functions:
 - serve(): Start the HTTP endpoint.
@@ -18,7 +18,7 @@ import requests
 import traceback
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Any, Coroutine, Dict, List, Optional, Protocol, Sequence, TypeVar
+from typing import Any, Coroutine, Dict, Optional, Protocol, TypeVar
 
 import fastapi
 import uvicorn
@@ -33,9 +33,26 @@ from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator
 logger = logging.getLogger(__name__)
 
 _ResponseT = TypeVar("_ResponseT")
+TOKENIZE_ENDPOINT = "/tokenize"
+MODELS_ENDPOINT = "/v1/models"
+_SERVER_CREATED_TIME = int(time.time())
+# HF sets ``model_max_length`` to a sentinel (VERY_LARGE_INTEGER, 1e30) for tokenizers that
+# declare no limit; anything that large is "unknown", not a context length.
+_MAX_MODEL_LEN_SENTINEL = 10**12
 
 
-class CompletionBackend(Protocol):
+def _resolve_max_model_len(tokenizer: Any) -> Optional[int]:
+    """The context length to report, or ``None`` when nothing trustworthy is available."""
+    for source in (
+        getattr(_global_inference_engine_client, "max_model_len", None),
+        getattr(tokenizer, "model_max_length", None),
+    ):
+        if isinstance(source, int) and 0 < source < _MAX_MODEL_LEN_SENTINEL:
+            return source
+    return None
+
+
+class InferenceHTTPBackend(Protocol):
     """What this endpoint needs of the engine client it serves.
 
     InferenceEngineClient satisfies it. It is a protocol rather than that concrete type
@@ -51,13 +68,11 @@ class CompletionBackend(Protocol):
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
+    def tokenize(self, request: "TokenizeRequest") -> list[int]: ...
 
-# `created` for the served model, in the OpenAI sense: when this server started serving it.
-# vLLM stamps the same value for the life of the process, so it is read once here.
-_SERVER_CREATED_TIME = int(time.time())
 
 # Global state to hold the inference engine client and backend
-_global_inference_engine_client: Optional[CompletionBackend] = None
+_global_inference_engine_client: Optional[InferenceHTTPBackend] = None
 _global_uvicorn_server: Optional[uvicorn.Server] = None
 
 
@@ -73,33 +88,23 @@ class ErrorResponse(BaseModel):
     error: ErrorInfo
 
 
-def _error_response(message: str, status: HTTPStatus) -> ErrorResponse:
-    """One error body for every route: the message, and the status in both its forms."""
-    return ErrorResponse(error=ErrorInfo(message=message, type=status.phrase, code=status.value))
+class TokenizeRequest(BaseModel):
+    model: Optional[str] = None
+    messages: list[Dict[str, Any]]
+    add_generation_prompt: bool = True
+    continue_final_message: bool = False
+    add_special_tokens: bool = False
+    chat_template: Optional[str] = None
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
+    tools: Optional[list[Dict[str, Any]]] = None
 
 
-def _model_name_error(request_json: Dict[str, Any], endpoint: str) -> Optional[ErrorResponse]:
-    """Reject a request that does not name the model this endpoint serves.
-
-    One policy for every route. ``served_model_name`` (supported in
-    ``generator.engine_init_kwargs``, and used by both vllm_engine.py and
-    InferenceEngineClient for Harbor/LiteLLM compatibility) is the name callers address
-    this endpoint with, so a request naming anything else is talking to the wrong server
-    whichever route it arrived on.
-    See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
-    """
-    if "model" not in request_json:
-        return _error_response(f"The field `model` is required in your `{endpoint}` request.", HTTPStatus.BAD_REQUEST)
-    served = getattr(_global_inference_engine_client, "model_name", None)
-    if served != request_json["model"]:
-        return _error_response(
-            f"Model name mismatch: loaded model name {served} != model name in request {request_json['model']}",
-            HTTPStatus.BAD_REQUEST,
-        )
-    return None
+class TokenizeResponse(BaseModel):
+    tokens: list[int]
+    count: int
 
 
-def set_global_state(inference_engine_client: CompletionBackend, uvicorn_server: uvicorn.Server):
+def set_global_state(inference_engine_client: InferenceHTTPBackend, uvicorn_server: uvicorn.Server):
     """Set the global inference engine client."""
     global _global_inference_engine_client
     global _global_uvicorn_server
@@ -107,28 +112,69 @@ def set_global_state(inference_engine_client: CompletionBackend, uvicorn_server:
     _global_uvicorn_server = uvicorn_server
 
 
+def _validate_backend_model(model: Optional[str]) -> Optional[ErrorResponse]:
+    if _global_inference_engine_client is None:
+        return ErrorResponse(
+            error=ErrorInfo(
+                message="Inference engine client not initialized",
+                type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
+                code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            ),
+        )
+    if model is not None and _global_inference_engine_client.model_name != model:
+        # `served_model_name` is supported in generator.engine_init_kwargs. Both
+        # vllm_engine.py and InferenceEngineClient use it for Harbor/LiteLLM compatibility.
+        return ErrorResponse(
+            error=ErrorInfo(
+                message=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} "
+                f"!= model name in request {model}",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
+    return None
+
+
 def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Optional[ErrorResponse]:
     """Common validation for /chat/completions and /completions endpoints."""
     assert endpoint in ["/completions", "/chat/completions"]
 
-    if _global_inference_engine_client is None:
-        return _error_response("Inference engine client not initialized", HTTPStatus.INTERNAL_SERVER_ERROR)
-    model_error = _model_name_error(request_json, endpoint)
-    if model_error is not None:
-        return model_error
+    backend_error = _validate_backend_model(request_json.get("model"))
+    if backend_error is not None:
+        return backend_error
+    if "model" not in request_json:
+        return ErrorResponse(
+            error=ErrorInfo(
+                message=f"The field `model` is required in your `{endpoint}` request.",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
+        )
     if endpoint == "/completions" and "n" in request_json and request_json["n"] > 1:
         # TODO(Charlie): this constraint can be removed when we leave DP routing to
         # inference frameworks. Or we could try to resolve it when needed.
-        return _error_response(
-            "n is not supported in SkyRL for /completions request yet, please set n to 1.", HTTPStatus.BAD_REQUEST
+        return ErrorResponse(
+            error=ErrorInfo(
+                message="n is not supported in SkyRL for /completions request yet, please set n to 1.",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
         )
     if endpoint == "/chat/completions" and "messages" not in request_json:
-        return _error_response(
-            "The field `messages` is required in your `/chat/completions` request.", HTTPStatus.BAD_REQUEST
+        return ErrorResponse(
+            error=ErrorInfo(
+                message="The field `messages` is required in your `/chat/completions` request.",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
         )
     if endpoint == "/chat/completions" and request_json["messages"] == []:
-        return _error_response(
-            "The field `messages` in `/chat/completions` cannot be an empty list.", HTTPStatus.BAD_REQUEST
+        return ErrorResponse(
+            error=ErrorInfo(
+                message="The field `messages` in `/chat/completions` cannot be an empty list.",
+                type=HTTPStatus.BAD_REQUEST.phrase,
+                code=HTTPStatus.BAD_REQUEST.value,
+            ),
         )
     return None
 
@@ -315,278 +361,22 @@ async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stat
         )
 
 
-# ─────────────────────────── POST /tokenize (vLLM-compatible) ────────────────────────────
-#
-# vLLM serves `/tokenize` at the SERVER ROOT (not under `/v1`), and harbor talks to it in
-# two places:
-#
-#   * `harbor.llms.vllm_tokenization.tokenize_chat` — the TITO (token-in-token-out)
-#     transport (harbor #111 / #117). It POSTs
-#     ``{"model", "messages", "add_generation_prompt", **template_options}`` (where
-#     template_options carries any of ``chat_template`` / ``chat_template_kwargs`` /
-#     ``tools``) and reads ``tokens``. It has NO fallback: without this route every
-#     rollout dies on ``HTTPStatusError: 404 Not Found for url .../tokenize`` (job
-#     1738272 on Jupiter, 877 occurrences, every trial failed).
-#   * `Terminus2._count_total_tokens` — the per-turn context-budget probe. It POSTs
-#     ``{"model", "messages"}`` and reads ``count``; on a non-200 it falls back to
-#     litellm's local tiktoken counter (27 % of the RolloutCoordinator's CPU at 45k
-#     contexts), so serving this route also takes that cost off the coordinator.
-#
-# The ids handed back become the PROMPT the engines are then asked to continue, so they
-# must equal what the serving path itself would render. The render therefore mirrors the
-# OpenAI serving path exactly: the engine client's own tokenizer (loaded from
-# ``trainer.policy.model.path``), the engine's custom chat template
-# (``generator.engine_init_kwargs.custom_chat_template_chat_completion_path``) and its
-# pinned ``chat_template_content_format`` — a template can render list-of-parts content
-# differently from a plain string, which is why that knob exists.
-
-# HF sets `model_max_length` to a sentinel (VERY_LARGE_INTEGER, 1e30) for tokenizers that
-# declare no limit. Report `null` rather than that number.
-_MAX_MODEL_LEN_SENTINEL = int(1e12)
-
-_NO_TOKENIZER_MESSAGE = (
-    "This SkyRL inference endpoint was started without a tokenizer, so `/tokenize` cannot "
-    "render prompts. Serve it from an InferenceEngineClient, which carries the policy tokenizer."
-)
-
-
-def _part_text(part: Any) -> str:
-    """Text of one OpenAI content part, as vLLM's ``string`` content format renders it."""
-    if isinstance(part, str):
-        return part
-    if isinstance(part, dict) and part.get("type") in (None, "text"):
-        return part.get("text") or ""
-    return ""
-
-
-def _messages_in_content_format(messages: Sequence[Any], content_format: str) -> List[Any]:
-    """Coerce message content the way vLLM's renderer does for ``content_format``.
-
-    ``string`` flattens list-of-parts content to its concatenated text; ``openai`` wraps a
-    plain string as a single text part. Anything else is passed through untouched.
-    """
-    if content_format not in ("string", "openai"):
-        return list(messages)
-
-    converted: List[Any] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            converted.append(message)
-            continue
-        content = message.get("content")
-        if content_format == "string" and isinstance(content, list):
-            message = {**message, "content": "".join(_part_text(part) for part in content)}
-        elif content_format == "openai" and isinstance(content, str):
-            message = {**message, "content": [{"type": "text", "text": content}]}
-        converted.append(message)
-    return converted
-
-
-def _resolve_content_format(configured: Optional[str], chat_template: Optional[str], tools: Any, tokenizer: Any) -> str:
-    """Resolve the engine's configured content format to a concrete one.
-
-    ``string`` / ``openai`` are already concrete. ``auto`` (vLLM's default) is resolved by
-    vLLM's own template sniffing when vLLM is importable in this process — it is, in a real
-    training run — and otherwise falls back to ``string``, which is what a plain-string
-    conversation (everything harbor sends) renders as either way.
-    """
-    if configured in ("string", "openai"):
-        return configured
-    try:
-        from vllm.entrypoints.chat_utils import resolve_chat_template_content_format
-
-        return resolve_chat_template_content_format(chat_template, tools, "auto", tokenizer)
-    except Exception:
-        return "string"
-
-
-def _resolve_max_model_len(tokenizer: Any) -> Optional[int]:
-    """The context length to report, or ``None`` when nothing trustworthy is available."""
-    for source in (
-        getattr(_global_inference_engine_client, "max_model_len", None),
-        getattr(tokenizer, "model_max_length", None),
-    ):
-        if isinstance(source, int) and 0 < source < _MAX_MODEL_LEN_SENTINEL:
-            return source
-    return None
-
-
-def _render_tokenize_ids(request_json: Dict[str, Any], tokenizer: Any) -> List[int]:
-    """Render one `/tokenize` request body to token ids (blocking; call off the event loop)."""
-    if "prompt" in request_json:
-        # Completion form: vLLM defaults add_special_tokens to True here.
-        return list(
-            tokenizer.encode(
-                request_json["prompt"], add_special_tokens=bool(request_json.get("add_special_tokens", True))
-            )
-        )
-
-    # Chat form. Request-level chat_template wins over the engine's, as in vLLM
-    # (`request.chat_template or self.chat_template`).
-    chat_template = request_json.get("chat_template") or getattr(
-        _global_inference_engine_client, "custom_chat_template", None
-    )
-    tools = request_json.get("tools")
-    content_format = _resolve_content_format(
-        getattr(_global_inference_engine_client, "chat_template_content_format", None),
-        chat_template,
-        tools,
-        tokenizer,
-    )
-    messages = _messages_in_content_format(request_json["messages"], content_format)
-
-    rendered = tokenizer.apply_chat_template(
-        messages,
-        chat_template=chat_template,
-        tools=tools,
-        add_generation_prompt=bool(request_json.get("add_generation_prompt", True)),
-        continue_final_message=bool(request_json.get("continue_final_message", False)),
-        tokenize=False,
-        **(request_json.get("chat_template_kwargs") or {}),
-    )
-    # vLLM renders to text and then encodes, with add_special_tokens defaulting to False for
-    # the chat form (the template already emits them). Encoding the rendered string — rather
-    # than `tokenize=True` — is what keeps that flag meaningful.
-    return list(tokenizer.encode(rendered, add_special_tokens=bool(request_json.get("add_special_tokens", False))))
-
-
-def _validate_tokenize_request(request_json: Dict[str, Any], tokenizer: Any) -> Optional[ErrorResponse]:
-    """Reject bodies vLLM's TokenizeRequest union would reject, before any rendering."""
-    if _global_inference_engine_client is None:
-        return _error_response("Inference engine client not initialized", HTTPStatus.INTERNAL_SERVER_ERROR)
-    if tokenizer is None:
-        return _error_response(_NO_TOKENIZER_MESSAGE, HTTPStatus.NOT_IMPLEMENTED)
-    if not isinstance(request_json, dict):
-        return _error_response("The body of a `/tokenize` request must be a JSON object.", HTTPStatus.BAD_REQUEST)
-
-    model_error = _model_name_error(request_json, "/tokenize")
-    if model_error is not None:
-        return model_error
-
-    has_prompt = "prompt" in request_json
-    has_messages = "messages" in request_json
-    if has_prompt == has_messages:
-        return _error_response(
-            "Exactly one of `prompt` or `messages` is required in your `/tokenize` request.",
-            HTTPStatus.BAD_REQUEST,
-        )
-    if has_prompt and not isinstance(request_json["prompt"], str):
-        return _error_response("The field `prompt` must be a string.", HTTPStatus.BAD_REQUEST)
-    if has_messages:
-        messages = request_json["messages"]
-        if not isinstance(messages, list):
-            return _error_response("The field `messages` must be a list.", HTTPStatus.BAD_REQUEST)
-        if not messages:
-            # HF's apply_chat_template indexes conversation[0] before its own empty guard.
-            return _error_response(
-                "The field `messages` in `/tokenize` cannot be an empty list.", HTTPStatus.BAD_REQUEST
-            )
-        if request_json.get("add_generation_prompt") and request_json.get("continue_final_message"):
-            return _error_response(
-                "Cannot set both `add_generation_prompt` and `continue_final_message`.", HTTPStatus.BAD_REQUEST
-            )
-    return None
-
-
-async def handle_tokenize_request(
-    raw_request: Request,
-    *,
-    bridge_stats: HTTPBridgeStatsAccumulator,
-) -> JSONResponse:
-    """Serve vLLM's ``POST /tokenize`` contract against this endpoint's tokenizer.
-
-    Accepts either the completion form (``prompt``) or the chat form (``messages``) and
-    answers ``{"count", "max_model_len", "tokens", "token_strs"}``.
-    """
-    endpoint = "/tokenize"
-    tokenizer = getattr(_global_inference_engine_client, "tokenizer", None)
-    try:
-        request_json = await raw_request.json()
-    except Exception as e:
-        error_response = _error_response(f"Invalid JSON error: {str(e)}", HTTPStatus.BAD_REQUEST)
-        return _json_response(
-            error_response.model_dump(),
-            endpoint=endpoint,
-            bridge_stats=bridge_stats,
-            status_code=error_response.error.code,
-        )
-
-    error_response = _validate_tokenize_request(request_json, tokenizer)
+async def handle_tokenize_request(request: TokenizeRequest, bridge_stats: HTTPBridgeStatsAccumulator) -> JSONResponse:
+    """Render chat messages with the tokenizer used by the inference client."""
+    error_response = _validate_backend_model(request.model)
     if error_response is not None:
         return _json_response(
             error_response.model_dump(),
-            endpoint=endpoint,
+            endpoint=TOKENIZE_ENDPOINT,
             bridge_stats=bridge_stats,
             status_code=error_response.error.code,
         )
 
-    try:
-        # Tokenization is CPU-bound and this loop also serves every rollout's completions,
-        # so it renders on a worker thread (HF's fast tokenizers drop the GIL).
-        token_ids = await asyncio.to_thread(_render_tokenize_ids, request_json, tokenizer)
-    except Exception as e:
-        # A template/encoding failure is deterministic: the same body can never succeed, so
-        # answer 400 (non-retryable for harbor/litellm) rather than 500.
-        logger.warning(f"Error when handling /tokenize request in SkyRL: {traceback.format_exc()}")
-        error_response = _error_response(
-            f"Error when handling /tokenize request in SkyRL: {str(e)}", HTTPStatus.BAD_REQUEST
-        )
-        return _json_response(
-            error_response.model_dump(),
-            endpoint=endpoint,
-            bridge_stats=bridge_stats,
-            status_code=error_response.error.code,
-        )
-
-    token_strs = None
-    if request_json.get("return_token_strs"):
-        token_strs = tokenizer.convert_ids_to_tokens(token_ids)
-
-    return _json_response(
-        {
-            "count": len(token_ids),
-            "max_model_len": _resolve_max_model_len(tokenizer),
-            "tokens": token_ids,
-            "token_strs": token_strs,
-        },
-        endpoint=endpoint,
-        bridge_stats=bridge_stats,
-    )
-
-
-async def handle_models_request(
-    *,
-    bridge_stats: HTTPBridgeStatsAccumulator,
-    created: Optional[int] = None,
-) -> JSONResponse:
-    """Serve vLLM's ``GET /v1/models`` contract against this endpoint.
-
-    harbor's context guard reads the served context length from here
-    (``lite_llm.LiteLLM._get_vllm_max_model_len``: the first entry in ``data`` with a truthy
-    ``max_model_len``). Without the route the probe fails and harbor falls back to litellm's
-    model registry, which for an RL checkpoint served under a hashed ``served_model_name`` has no
-    entry at all and yields a 1e6 limit — i.e. the prompt-fits guard silently disables itself and
-    the engine rejects the oversized prompt instead. The length reported here is the one
-    ``/tokenize`` reports, which is the engine's own ``max_model_len``.
-    """
-    tokenizer = getattr(_global_inference_engine_client, "tokenizer", None)
-    model_name = getattr(_global_inference_engine_client, "model_name", None)
-    return _json_response(
-        {
-            "object": "list",
-            "data": [
-                {
-                    "id": model_name,
-                    "object": "model",
-                    "created": created if created is not None else _SERVER_CREATED_TIME,
-                    "owned_by": "skyrl",
-                    "max_model_len": _resolve_max_model_len(tokenizer),
-                }
-            ],
-        },
-        endpoint="/v1/models",
-        bridge_stats=bridge_stats,
-    )
+    backend = _global_inference_engine_client
+    assert backend is not None
+    token_ids = await asyncio.to_thread(backend.tokenize, request)
+    response = TokenizeResponse(tokens=token_ids, count=len(token_ids))
+    return _json_response(response.model_dump(), endpoint=TOKENIZE_ENDPOINT, bridge_stats=bridge_stats)
 
 
 def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds: int = 30) -> None:
@@ -665,16 +455,47 @@ async def _monitor_event_loop_lag(
         raise
 
 
+async def handle_models_request(
+    *,
+    bridge_stats: HTTPBridgeStatsAccumulator,
+    created: Optional[int] = None,
+) -> JSONResponse:
+    """Serve vLLM's ``GET /v1/models`` contract against this endpoint.
+
+    harbor's context guard reads the served context length from here
+    (``lite_llm.LiteLLM._get_vllm_max_model_len``: the first entry in ``data`` with a truthy
+    ``max_model_len``). Without the route the probe fails and harbor falls back to litellm's
+    model registry, which for an RL checkpoint served under a hashed ``served_model_name`` has no
+    entry at all and yields a 1e6 limit — i.e. the prompt-fits guard silently disables itself and
+    the engine rejects the oversized prompt instead. The length reported here is the engine's own
+    ``max_model_len`` when the client carries it, else the tokenizer's.
+    """
+    tokenizer = getattr(_global_inference_engine_client, "tokenizer", None)
+    model_name = getattr(_global_inference_engine_client, "model_name", None)
+    return _json_response(
+        {
+            "object": "list",
+            "data": [
+                {
+                    "id": model_name,
+                    "object": "model",
+                    "created": created if created is not None else _SERVER_CREATED_TIME,
+                    "owned_by": "skyrl",
+                    "max_model_len": _resolve_max_model_len(tokenizer),
+                }
+            ],
+        },
+        endpoint=MODELS_ENDPOINT,
+        bridge_stats=bridge_stats,
+    )
+
+
 def create_app(
     bridge_stats: HTTPBridgeStatsAccumulator | None = None,
     *,
     event_loop_lag_interval_seconds: float = 0.5,
 ) -> fastapi.FastAPI:
-    """Create the FastAPI application.
-
-    `/tokenize` renders with the backend's own tokenizer (``InferenceEngineClient.
-    tokenizer``) and answers 501 if the backend has none.
-    """
+    """Create the FastAPI application."""
     bridge_stats = bridge_stats or HTTPBridgeStatsAccumulator()
 
     @asynccontextmanager
@@ -754,24 +575,12 @@ def create_app(
         """
         return await handle_openai_request(raw_request, endpoint="/completions", bridge_stats=bridge_stats)
 
-    @app.post("/tokenize")
-    async def tokenize(raw_request: Request):
-        """
-        Takes in vLLM's `TokenizeRequest` and returns vLLM's `TokenizeResponse`.
+    @app.post(TOKENIZE_ENDPOINT)
+    async def tokenize(request: TokenizeRequest):
+        """Render chat messages to token IDs with vLLM-compatible request fields."""
+        return await handle_tokenize_request(request, bridge_stats)
 
-        Served at the server root, not under `/v1`, exactly where vLLM serves it — that is
-        where harbor's TITO transport and terminus-2's token counter look for it. The body
-        is either `{"model", "prompt", "add_special_tokens"?}` or `{"model", "messages",
-        "add_generation_prompt"?, "continue_final_message"?, "add_special_tokens"?,
-        "chat_template"?, "chat_template_kwargs"?, "tools"?}`, and the response is
-        `{"count", "max_model_len", "tokens", "token_strs"}`.
-
-        API reference:
-        - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
-        """
-        return await handle_tokenize_request(raw_request, bridge_stats=bridge_stats)
-
-    @app.get("/v1/models")
+    @app.get(MODELS_ENDPOINT)
     async def models(raw_request: Request):
         """
         Returns vLLM's `ModelList`: the served model id plus the `max_model_len` it enforces.
@@ -814,7 +623,7 @@ def create_app(
 
 
 def serve(
-    inference_engine_client: CompletionBackend,
+    inference_engine_client: InferenceHTTPBackend,
     host: str = "0.0.0.0",
     port: int = 8000,
     log_level: str = "info",
