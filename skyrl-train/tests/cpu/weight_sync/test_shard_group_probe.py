@@ -175,3 +175,28 @@ def test_native_entrypoint_persists_warmup_failure_before_interpretation(tmp_pat
         result = json.loads((tmp_path / "durable/attempts/0123456789abcdef/receivers-2.json").read_bytes())
         assert "omitted acknowledged" in result["error"]
         assert not (tmp_path / "durable/attempts/0123456789abcdef/complete.json").exists()
+
+
+@pytest.mark.parametrize("torch_prefix", ["", "GPU-"])
+@pytest.mark.parametrize("smi_prefix", ["", "GPU-"])
+def test_hardware_identity_joins_gpu_uuid_forms_and_preserves_raw_values(
+    monkeypatch, tmp_path, torch_prefix, smi_prefix
+):
+    from types import SimpleNamespace
+    import torch
+    from skyrl_train.weight_sync import shard_observations
+
+    uuid = "542c1f09-68d0-491f-a21f-18ae1b09f467"
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(uuid=torch_prefix + uuid))
+    monkeypatch.setattr(
+        shard_observations.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout=f"GPU-other-device, 00000000:19:00.0\n{smi_prefix}{uuid}, 00000000:81:00.0\n"
+        ),
+    )
+    result = shard_observations.hardware_identity(torch.device("cuda:0"), tmp_path)
+    assert result["gpu_uuid"] == torch_prefix + uuid
+    assert result["gpu_nvidia_smi_uuid"] == smi_prefix + uuid
+    assert result["gpu_pci_bus_id"] == "00000000:81:00.0"
+    assert "gpu_pci_error" not in result

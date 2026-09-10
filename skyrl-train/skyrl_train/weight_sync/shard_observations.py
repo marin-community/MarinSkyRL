@@ -62,8 +62,13 @@ def hardware_identity(device, root=Path("/sys/class/infiniband")):
                 check=True,
                 timeout=10,
             ).stdout
-            rows = {uuid.strip(): bus.strip() for uuid, bus in csv.reader(io.StringIO(output))}
-            result["gpu_pci_bus_id"] = rows[result["gpu_uuid"]]
+            rows = {
+                uuid.strip().removeprefix("GPU-"): (uuid.strip(), bus.strip())
+                for uuid, bus in csv.reader(io.StringIO(output))
+            }
+            raw_uuid, bus = rows[result["gpu_uuid"].removeprefix("GPU-")]
+            result["gpu_nvidia_smi_uuid"] = raw_uuid
+            result["gpu_pci_bus_id"] = bus
         except (OSError, subprocess.SubprocessError, KeyError, ValueError) as error:
             result["gpu_pci_error"] = f"{type(error).__name__}: {error}"
     return result
