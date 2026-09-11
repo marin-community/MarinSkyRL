@@ -287,6 +287,22 @@ terminal_bench:
       # Raw OpenAI transport errors that escape harbor's retry layer.
       - APIConnectionError
       - BadRequestError
+      # 2026-09-11 (arm C-b step 1): harbor persists the raw transport exception names for LLM
+      # transport failures (httpx ConnectTimeout / ReadError); unlisted names fall to the zero
+      # default and were trained as reward 0. Mask the transport family and harbor's wrappers.
+      - ConnectTimeout
+      - ReadTimeout
+      - WriteTimeout
+      - PoolTimeout
+      - ReadError
+      - WriteError
+      - ConnectError
+      - RemoteProtocolError
+      - TimeoutException
+      - TransportError
+      - OpenAITransportConnectTimeoutError
+      - LLMRequestTimeoutError
+      - APITimeoutError
     # Unlisted, unclassified errors score 0 and are trained on.
     default_error_treatment: zero
     # harbor main (#137) replaced TmuxSessionLostError with typed errors it classifies as
