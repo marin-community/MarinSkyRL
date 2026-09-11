@@ -26,7 +26,7 @@ case "$mode" in
         train_data="/app/marinskyrl/skyrl-train/ci/opencode_smoke/tasks/boundary-mix"
         gate_spec="skyrl-train/ci/marin_nightly/specs/opencode-compaction-stress.json"
         extra_overrides=(
-            context_budget.request_window_tokens=8192
+            context_budget.request_window_tokens=12288
             context_budget.max_new_tokens_per_turn=1024
             context_budget.max_turns=12
             terminal_bench_config.harbor.opencode_config.compaction.auto=true
@@ -40,7 +40,7 @@ case "$mode" in
         train_data="/app/marinskyrl/skyrl-train/ci/opencode_smoke/tasks/boundary-mix"
         gate_spec="skyrl-train/ci/marin_nightly/specs/opencode-overflow-stress.json"
         extra_overrides=(
-            context_budget.request_window_tokens=8192
+            context_budget.request_window_tokens=12288
             context_budget.max_new_tokens_per_turn=1024
             context_budget.max_turns=12
             terminal_bench_config.harbor.opencode_config.compaction.auto=false
