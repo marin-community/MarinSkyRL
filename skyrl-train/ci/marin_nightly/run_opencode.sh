@@ -63,7 +63,7 @@ if ((${#extra_overrides[@]})); then
 fi
 
 cleanup() {
-    iris --cluster marin job cancel "$job_path" >/dev/null 2>&1 || true
+    uv run --frozen iris --cluster marin job cancel "$job_path" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -93,9 +93,9 @@ PYTHONPATH=. uv run --frozen python -m cloud.iris.iris_backend \
     ${skyrl_override_args[@]+"${skyrl_override_args[@]}"}
 
 set +e
-iris --cluster marin job wait "$job_path"
+uv run --frozen iris --cluster marin job wait "$job_path"
 wait_status=$?
-iris --cluster marin job logs "$job_path" --max-lines 50000 >"$log_path"
+uv run --frozen iris --cluster marin job logs "$job_path" --max-lines 50000 >"$log_path"
 logs_status=$?
 set -e
 
