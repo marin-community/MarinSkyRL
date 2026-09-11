@@ -287,9 +287,13 @@ terminal_bench:
       # Raw OpenAI transport errors that escape harbor's retry layer.
       - APIConnectionError
       - BadRequestError
-    # Unlisted, unclassified errors score 0 and are trained on. TmuxSessionLostError lands
-    # here on purpose: the model ended its own shell.
+    # Unlisted, unclassified errors score 0 and are trained on.
     default_error_treatment: zero
+    # harbor main (#137) replaced TmuxSessionLostError with typed errors it classifies as
+    # infrastructure (masked). A shell the model ended is the model's failure (Luke, 2026-09-10),
+    # so it is scored 0 here; the protocol and command errors stay masked.
+    zero_exceptions:
+      - TmuxSessionEndedError
     passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
