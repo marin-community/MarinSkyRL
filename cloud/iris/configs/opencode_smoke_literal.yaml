@@ -189,6 +189,9 @@ generator:
 
 extra_env:
   NCCL_DEBUG: WARN
+  # Stress gates match outcomes by task ID. Ray's cross-worker log deduplication
+  # can otherwise replace those distinct lines with one arbitrary representative.
+  RAY_DEDUP_LOGS: "0"
 
 data:
   train_data: []
