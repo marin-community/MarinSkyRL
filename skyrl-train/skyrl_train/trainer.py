@@ -57,6 +57,7 @@ from skyrl_train.utils.loss_reduction import (
     build_think_weighted_loss_mask,
     compute_global_loss_denom,
     compute_prompt_mean_advantage_scale,
+    count_nonzero_advantage_seqs,
 )
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
@@ -1620,6 +1621,18 @@ class RayPPOTrainer:
         avg_advantages: float = valid_advantages.mean().item()
         avg_advantages_abs: float = valid_advantages.abs().mean().item()
 
+        # Rows that actually carry gradient this step: a non-zero advantage on at least one
+        # trainable token. Zero-variance groups, baseline-excluded samples and loss-masked
+        # trajectories (TITO decline, alignment failure, masked error treatment) contribute 0
+        # to the loss but still count in the fixed per-rank micro-batch divisor under
+        # sequence_mean, so the realised step size is lr * this fraction. Logged so the
+        # effective learning rate is visible instead of drifting silently with the batch.
+        batch_advantages = data["advantages"][: num_samples - pad_size, ...]
+        if "loss_mask" in data.keys() and data["loss_mask"] is not None:
+            batch_advantages = batch_advantages * data["loss_mask"][: num_samples - pad_size, ...]
+        nonzero_advantage_seqs = count_nonzero_advantage_seqs(batch_advantages)
+        nonzero_advantage_seq_fraction = nonzero_advantage_seqs / max(num_samples - pad_size, 1)
+
         if "metrics" not in data.metadata:
             data.metadata["metrics"] = {}
         data.metadata["metrics"].update(
@@ -1637,6 +1650,8 @@ class RayPPOTrainer:
                 "loss/avg_final_rewards": avg_rewards,
                 "loss/avg_raw_advantages": avg_advantages,
                 "loss/avg_raw_advantages_abs": avg_advantages_abs,
+                "loss/nonzero_advantage_seqs": nonzero_advantage_seqs,
+                "loss/nonzero_advantage_seq_fraction": nonzero_advantage_seq_fraction,
             }
         )
         return data

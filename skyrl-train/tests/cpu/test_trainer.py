@@ -1457,3 +1457,59 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     # Pass: ref disabled -> requirement reduces to policy_dp. With policy_dp=2, tbs=2 is valid.
     cfg = create_config(train_batch_size=2, policy_dp=2, ref_dp=3, include_ref=False)
     validate_batch_sizes(cfg)
+
+
+def test_nonzero_advantage_seq_fraction_counts_rows_that_carry_gradient():
+    """loss/nonzero_advantage_seq_fraction: rows with a non-zero advantage on a trainable token.
+
+    Two groups of two. Group A (rewards 1 / 0) gets non-zero advantages; group B (0 / 0) is
+    zero-variance and gets none. One of group A's rows is fully loss-masked, so exactly one
+    of the four rows carries gradient.
+    """
+    response_length = 8
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "step_wise_training": False,
+                "algorithm": {
+                    "advantage_estimator": "grpo",
+                    "gamma": 1.0,
+                    "lambd": 1.0,
+                    "grpo_norm_by_std": True,
+                    "policy_loss_type": "regular",
+                    "loss_reduction": "sequence_mean",
+                    "eps_clip_low": 0.2,
+                    "eps_clip_high": 0.2,
+                    "use_tis": False,
+                    "max_seq_len": response_length,
+                },
+            }
+        }
+    )
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=2)
+    trainer.all_metrics = {}
+    rewards = torch.zeros(4, response_length)
+    rewards[0, -1] = 1.0  # group A: row 0 wins, row 1 loses
+    response_mask = torch.ones(4, response_length)
+    loss_mask = torch.ones(4, response_length)
+    loss_mask[0] = 0  # group A's winner is fully masked (e.g. TITO decline)
+    data = TrainingInputBatch(
+        {
+            "rewards": rewards,
+            "response_mask": response_mask,
+            "loss_mask": loss_mask,
+            "values": None,
+        }
+    )
+    data.metadata = {
+        "uids": ["group-a", "group-a", "group-b", "group-b"],
+        "avg_response_length": float(response_length),
+    }
+
+    result = trainer.compute_advantages_and_returns(data)
+
+    assert result["advantages"][1].abs().sum() > 0  # group A's loser still carries gradient
+    assert torch.equal(result["advantages"][2:], torch.zeros(2, response_length))  # zero-variance group
+    assert trainer.all_metrics["loss/nonzero_advantage_seqs"] == 1
+    assert trainer.all_metrics["loss/nonzero_advantage_seq_fraction"] == pytest.approx(0.25)
