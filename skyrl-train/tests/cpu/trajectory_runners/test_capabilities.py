@@ -53,12 +53,12 @@ def test_harbor_behavior_logprobs_reject_unsupported_agents(agent_name):
         validate_trajectory_runner_capabilities(_harbor_config(agent_name), TrajectoryRunnerMode.HARBOR)
 
 
-@pytest.mark.parametrize("agent_name", ["terminus-2", "terminus_2"])
+@pytest.mark.parametrize("agent_name", ["terminus-2", "terminus_2", "terminus-kira", "terminus_kira"])
 def test_harbor_behavior_logprobs_accept_terminus_with_rollout_details(agent_name):
     validate_trajectory_runner_capabilities(_harbor_config(agent_name), TrajectoryRunnerMode.HARBOR)
 
 
-@pytest.mark.parametrize("agent_name", ["terminus-2", "pi"])
+@pytest.mark.parametrize("agent_name", ["terminus-2", "terminus-kira", "pi"])
 def test_harbor_behavior_logprobs_require_rollout_details(agent_name):
     with pytest.raises(ValueError, match="collect_rollout_details=true"):
         validate_trajectory_runner_capabilities(
@@ -132,6 +132,7 @@ def test_behavior_logprobs_reject_multiturn_custom_template_retokenization():
     [
         (TrajectoryRunnerMode.SKYRL_GYM, None, None, "SkyRL Gym"),
         (TrajectoryRunnerMode.HARBOR, "opencode", "1.18.2", "Harbor opencode"),
+        (TrajectoryRunnerMode.HARBOR, "terminus-kira", None, "Harbor terminus-kira"),
     ],
 )
 def test_explicit_full_tito_rejects_runners_without_exact_continuation(mode, agent_name, version, expected_runner):

@@ -9,6 +9,7 @@ from marinskyrl.harbor_agent_names import (
     DEFAULT_HARBOR_AGENT_NAME,
     OPENCODE_HARBOR_AGENT_NAME,
     PI_HARBOR_AGENT_NAME,
+    TERMINUS_KIRA_HARBOR_AGENT_NAME,
 )
 
 SUPPORTED_OPENCODE_LITERAL_VERSION = "1.18.2"
@@ -63,13 +64,19 @@ _EXACT_HARBOR_EVIDENCE = _HarborEvidenceProfile(
     full_context_continuation=EvidenceFidelity.EXACT,
     action_tokens=ActionTokenHandling.EXACT,
 )
+_EXACT_COMPLETION_ONLY_HARBOR_EVIDENCE = _HarborEvidenceProfile(
+    sampled_completion=EvidenceFidelity.EXACT,
+    full_context_continuation=EvidenceFidelity.UNAVAILABLE,
+    action_tokens=ActionTokenHandling.EXACT,
+)
 _HARBOR_EVIDENCE_PROFILES = {
     DEFAULT_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
-    OPENCODE_HARBOR_AGENT_NAME: _HarborEvidenceProfile(
-        sampled_completion=EvidenceFidelity.EXACT,
-        full_context_continuation=EvidenceFidelity.UNAVAILABLE,
-        action_tokens=ActionTokenHandling.EXACT,
-    ),
+    # Native tool results change the structured chat history between model
+    # turns. Harbor captures each sampled completion exactly, but currently
+    # re-renders the next prompt after those tool messages instead of extending
+    # the prior literal token prefix.
+    TERMINUS_KIRA_HARBOR_AGENT_NAME: _EXACT_COMPLETION_ONLY_HARBOR_EVIDENCE,
+    OPENCODE_HARBOR_AGENT_NAME: _EXACT_COMPLETION_ONLY_HARBOR_EVIDENCE,
     PI_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
 }
 
