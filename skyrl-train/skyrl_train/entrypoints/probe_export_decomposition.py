@@ -107,7 +107,7 @@ def checkpoint_inventory(path: Path):
     entries = []
     for filename in sorted(set(index["weight_map"].values())):
         with safe_open(str(path / filename), framework="pt", device="cpu") as handle:
-            for name in handle:
+            for name in handle.keys():  # noqa: SIM118  safe_open handles are not Mappings
                 view = handle.get_slice(name)
                 entries.append((name, list(view.get_shape()), names[view.get_dtype()]))
     return sorted(entries)
