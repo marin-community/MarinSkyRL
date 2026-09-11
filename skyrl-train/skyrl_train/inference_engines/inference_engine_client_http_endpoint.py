@@ -247,17 +247,20 @@ async def _await_with_disconnect(raw_request: Request, backend_request: Coroutin
 
 
 async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stats: HTTPBridgeStatsAccumulator):
-    """Handle /completions or /chat/completions request.
+    """Handle a request implemented by the policy model's serving backend.
 
     Returns ``StreamingResponse`` for ``stream:true`` chat-completions and
     ``JSONResponse`` for everything else (byte-identical to pre-streaming behavior).
     """
-    assert endpoint in ["/completions", "/chat/completions"]
+    assert endpoint in ["/completions", "/chat/completions", TOKENIZE_ENDPOINT]
     try:
         request_json = await raw_request.json()
 
         # SkyRL-side validation
-        error_response = _validate_openai_request(request_json, endpoint=endpoint)
+        if endpoint == TOKENIZE_ENDPOINT:
+            error_response = _validate_backend_model(request_json.get("model"))
+        else:
+            error_response = _validate_openai_request(request_json, endpoint=endpoint)
         if error_response is not None:
             return _json_response(
                 error_response.model_dump(),
@@ -284,8 +287,10 @@ async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stat
         # Non-streaming requests stay attached to the client until completion.
         if endpoint == "/chat/completions":
             backend_request = _global_inference_engine_client.chat_completion(payload)
-        else:
+        elif endpoint == "/completions":
             backend_request = _global_inference_engine_client.completion(payload)
+        else:
+            backend_request = _global_inference_engine_client.tokenize(payload)
         response = await _await_with_disconnect(raw_request, backend_request)
 
         if "error" in response or response.get("object", "") == "error":
@@ -324,66 +329,6 @@ async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stat
         return _json_response(
             error_response.model_dump(),
             endpoint=endpoint,
-            bridge_stats=bridge_stats,
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-        )
-
-
-async def handle_tokenize_request(raw_request: Request, bridge_stats: HTTPBridgeStatsAccumulator) -> JSONResponse:
-    """Forward a tokenization request to the policy model's native serving renderer."""
-    try:
-        request_json = await raw_request.json()
-        backend = _global_inference_engine_client
-        if backend is None:
-            error_response = _validate_backend_model(request_json.get("model"))
-            assert error_response is not None
-            return _json_response(
-                error_response.model_dump(),
-                endpoint=TOKENIZE_ENDPOINT,
-                bridge_stats=bridge_stats,
-                status_code=error_response.error.code,
-            )
-
-        payload = {
-            "json": request_json,
-            "headers": dict(raw_request.headers) if hasattr(raw_request, "headers") else {},
-        }
-        response = await _await_with_disconnect(raw_request, backend.tokenize(payload))
-        if "error" in response:
-            return _json_response(
-                response,
-                endpoint=TOKENIZE_ENDPOINT,
-                bridge_stats=bridge_stats,
-                status_code=response["error"]["code"],
-            )
-        return _json_response(response, endpoint=TOKENIZE_ENDPOINT, bridge_stats=bridge_stats)
-    except json.JSONDecodeError as e:
-        error_response = ErrorResponse(
-            error=ErrorInfo(
-                message=f"Invalid JSON error: {str(e)}",
-                type=HTTPStatus.BAD_REQUEST.phrase,
-                code=HTTPStatus.BAD_REQUEST.value,
-            ),
-        )
-        return _json_response(
-            error_response.model_dump(),
-            endpoint=TOKENIZE_ENDPOINT,
-            bridge_stats=bridge_stats,
-            status_code=HTTPStatus.BAD_REQUEST.value,
-        )
-    except Exception as e:
-        tb = traceback.format_exc()
-        logger.error(f"Error when handling {TOKENIZE_ENDPOINT} request in SkyRL:\n{tb}")
-        error_response = ErrorResponse(
-            error=ErrorInfo(
-                message=f"Error when handling {TOKENIZE_ENDPOINT} request in SkyRL: {str(e)}\n\nTraceback:\n{tb}",
-                type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-            ),
-        )
-        return _json_response(
-            error_response.model_dump(),
-            endpoint=TOKENIZE_ENDPOINT,
             bridge_stats=bridge_stats,
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
         )
@@ -553,7 +498,7 @@ def create_app(
     @app.post(TOKENIZE_ENDPOINT)
     async def tokenize(raw_request: Request):
         """Delegate chat tokenization to the inference backend's serving renderer."""
-        return await handle_tokenize_request(raw_request, bridge_stats)
+        return await handle_openai_request(raw_request, endpoint=TOKENIZE_ENDPOINT, bridge_stats=bridge_stats)
 
     # Health check endpoint
     # All inference engine replicas are initialized before creating `InferenceEngineClient`, and thus

@@ -73,7 +73,12 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle terminal-bench tokenization when the serving backend supports it."""
+        """Tokenize through the serving backend when supported.
+
+        ``request_payload`` contains the JSON request body under ``json`` and
+        serialized HTTP headers under ``headers``. Implementations return the
+        backend's native tokenization or error response as a plain dictionary.
+        """
         raise NotImplementedError()
 
     @abstractmethod

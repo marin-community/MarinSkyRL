@@ -120,6 +120,17 @@ class InferenceEngineClient(InferenceEngineInterface):
             raise RuntimeError("All inference engines have died")
         return fallback
 
+    async def _call_engine_with_fallback(self, engine_idx: int, method_name: str, *args: Any) -> Any:
+        """Call one actor and retry once on another actor if the first dies."""
+        try:
+            return await getattr(self.engines[engine_idx], method_name)(*args)
+        except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
+            self._mark_engine_dead(engine_idx, e)
+            fallback = self._pick_fallback_engine(engine_idx)
+            if fallback is None:
+                raise RuntimeError("All inference engines have died") from e
+            return await getattr(self.engines[fallback], method_name)(*args)
+
     # ----------------------------
     # Load-aware session routing
     # ----------------------------
@@ -613,14 +624,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             ).model_dump()
 
         engine_idx = self._resolve_engine_idx(random.randint(0, len(self.engines) - 1))
-        try:
-            return await self.engines[engine_idx].tokenize(request_payload)
-        except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
-            self._mark_engine_dead(engine_idx, e)
-            fallback = self._pick_fallback_engine(engine_idx)
-            if fallback is None:
-                raise RuntimeError("All inference engines have died") from e
-            return await self.engines[fallback].tokenize(request_payload)
+        return await self._call_engine_with_fallback(engine_idx, "tokenize", request_payload)
 
     async def chat_completion_stream(self, request_payload: Dict[str, Any]):
         """Streaming chat completion — yields SSE-formatted strings.

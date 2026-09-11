@@ -1679,6 +1679,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         tool_parser = wrapper_kwargs.pop("tool_parser", None)
 
         openai_serving_render = None
+        self.openai_serving_tokenization = None
         try:
             from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
@@ -2049,7 +2050,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await self._handle_openai_request(request_payload, endpoint="/chat/completions")
 
     async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle Harbor tokenization with vLLM's chat serving renderer."""
+        """Return vLLM's native chat-tokenization response."""
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
         try:
@@ -2057,14 +2058,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         except Exception as e:
             return _build_error_response(str(e), HTTPStatus.BAD_REQUEST.phrase, HTTPStatus.BAD_REQUEST.value)
 
-        try:
-            response = await self.openai_serving_tokenization.create_tokenize(request, _MinimalRequest(headers))
-            assert isinstance(response, (TokenizeResponse, ErrorResponse))
-            return response.model_dump()
-        except Exception as e:
-            return _build_error_response(
-                str(e), HTTPStatus.INTERNAL_SERVER_ERROR.phrase, HTTPStatus.INTERNAL_SERVER_ERROR.value
-            )
+        if self.openai_serving_tokenization is None:
+            raise RuntimeError("The configured vLLM version does not expose the shared rendering service")
+        response = await self.openai_serving_tokenization.create_tokenize(request, _MinimalRequest(headers))
+        assert isinstance(response, (TokenizeResponse, ErrorResponse))
+        return response.model_dump()
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/completions` in Python vLLM engine.
