@@ -49,6 +49,9 @@ except ImportError:
         CompletionResponse,
     )
 
+from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest, TokenizeResponse
+from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+
 try:
     from vllm.v1.metrics.loggers import LoggingStatLogger
 except ImportError:
@@ -1676,6 +1679,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         tool_parser = wrapper_kwargs.pop("tool_parser", None)
 
         openai_serving_render = None
+        self.openai_serving_tokenization = None
         try:
             from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
@@ -1718,6 +1722,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 enable_auto_tools=enable_auto_tools,
                 tool_parser=tool_parser,
                 **wrapper_kwargs,
+            )
+            self.openai_serving_tokenization = OpenAIServingTokenization(
+                engine_client=engine,
+                models=models,
+                openai_serving_render=openai_serving_render,
+                request_logger=None,
+                chat_template=custom_chat_template_content,
+                chat_template_content_format="auto",
             )
         else:
             try:
@@ -2036,6 +2048,21 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         in vllm.entrypoints.openai.protocol.
         """
         return await self._handle_openai_request(request_payload, endpoint="/chat/completions")
+
+    async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Return vLLM's native chat-tokenization response."""
+        body = request_payload.get("json", {})
+        headers = request_payload.get("headers", {})
+        try:
+            request = TokenizeChatRequest(**body)
+        except Exception as e:
+            return _build_error_response(str(e), HTTPStatus.BAD_REQUEST.phrase, HTTPStatus.BAD_REQUEST.value)
+
+        if self.openai_serving_tokenization is None:
+            raise RuntimeError("The configured vLLM version does not expose the shared rendering service")
+        response = await self.openai_serving_tokenization.create_tokenize(request, _MinimalRequest(headers))
+        assert isinstance(response, (TokenizeResponse, ErrorResponse))
+        return response.model_dump()
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/completions` in Python vLLM engine.

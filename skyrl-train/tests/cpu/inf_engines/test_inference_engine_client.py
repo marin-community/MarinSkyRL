@@ -765,6 +765,50 @@ async def test_chat_completion_retry_resends_original_when_no_tokens_generated_y
 
 
 # -------------------------------------------
+# tests for terminal-bench tokenization
+# --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tokenize_returns_native_serving_response_without_local_rendering():
+    class NativeRenderingEngine:
+        def __init__(self):
+            self.request_payload = None
+
+        async def tokenize(self, request_payload):
+            self.request_payload = request_payload
+            return {
+                "tokens": [7, 8, 9],
+                "count": 3,
+                "max_model_len": 4096,
+                "token_strs": ["typed", "content", "parts"],
+            }
+
+    engine = NativeRenderingEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    request_payload = {
+        "json": {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+            "continue_final_message": True,
+            "add_generation_prompt": False,
+            "return_token_strs": True,
+        },
+        "headers": {"x-request-id": "continuation-1"},
+    }
+
+    response = await client.tokenize(deepcopy(request_payload))
+
+    assert response == {
+        "tokens": [7, 8, 9],
+        "count": 3,
+        "max_model_len": 4096,
+        "token_strs": ["typed", "content", "parts"],
+    }
+    assert engine.request_payload == request_payload
+
+
+# -------------------------------------------
 # tests for InferenceEngineClient.generate retry logic
 # --------------------------------------------
 

@@ -12,7 +12,6 @@ from skyrl_train.inference_engines.vllm.stats import (
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorResponse,
     ErrorInfo,
-    TokenizeRequest,
 )
 from transformers import PreTrainedTokenizerBase
 import asyncio
@@ -31,6 +30,7 @@ from loguru import logger
 import random
 import ray.exceptions
 from dataclasses import dataclass, field
+from http import HTTPStatus
 
 ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
 
@@ -120,6 +120,17 @@ class InferenceEngineClient(InferenceEngineInterface):
         if fallback is None:
             raise RuntimeError("All inference engines have died")
         return fallback
+
+    async def _call_engine_with_fallback(self, engine_idx: int, method_name: str, *args: Any) -> Any:
+        """Call one actor and retry once on another actor if the first dies."""
+        try:
+            return await getattr(self.engines[engine_idx], method_name)(*args)
+        except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
+            self._mark_engine_dead(engine_idx, e)
+            fallback = self._pick_fallback_engine(engine_idx)
+            if fallback is None:
+                raise RuntimeError("All inference engines have died") from e
+            return await getattr(self.engines[fallback], method_name)(*args)
 
     # ----------------------------
     # Load-aware session routing
@@ -315,30 +326,6 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
-        )
-
-    def tokenize(self, request: TokenizeRequest) -> List[int]:
-        """Return token IDs for a validated vLLM-compatible chat request."""
-        add_generation_prompt = request.add_generation_prompt
-        continue_final_message = request.continue_final_message
-        if add_generation_prompt and continue_final_message:
-            raise ValueError("Cannot set both `continue_final_message` and `add_generation_prompt` to True.")
-
-        template_kwargs = dict(request.chat_template_kwargs or {})
-        template_kwargs["add_generation_prompt"] = add_generation_prompt
-        template_kwargs["continue_final_message"] = continue_final_message
-        if request.tools is not None:
-            template_kwargs["tools"] = request.tools
-
-        prompt = self.tokenizer.apply_chat_template(
-            request.messages,
-            chat_template=request.chat_template,
-            tokenize=False,
-            **template_kwargs,
-        )
-        return self.tokenizer.encode(
-            prompt,
-            add_special_tokens=request.add_special_tokens,
         )
 
     async def _generate_single_with_retry(
@@ -625,6 +612,20 @@ class InferenceEngineClient(InferenceEngineInterface):
             return await self._chat_completion_with_retry(engine_idx, request_payload)
         finally:
             self._dec_inflight(engine_idx)
+
+    async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Delegate terminal-bench tokenization to a live vLLM serving actor."""
+        if self.backend != "vllm":
+            return ErrorResponse(
+                error=ErrorInfo(
+                    message=f"The /tokenize endpoint requires the vLLM backend, got {self.backend}.",
+                    type=HTTPStatus.BAD_REQUEST.phrase,
+                    code=HTTPStatus.BAD_REQUEST.value,
+                )
+            ).model_dump()
+
+        engine_idx = self._resolve_engine_idx(random.randint(0, len(self.engines) - 1))
+        return await self._call_engine_with_fallback(engine_idx, "tokenize", request_payload)
 
     async def chat_completion_stream(self, request_payload: Dict[str, Any]):
         """Streaming chat completion — yields SSE-formatted strings.
