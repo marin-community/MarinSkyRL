@@ -26,6 +26,7 @@ from skyrl_train.config.utils import get_default_config
 from skyrl_train.entrypoints.non_agentic_probe_inputs import reward_extras
 from skyrl_train.entrypoints.non_agentic_probe_primitives import final_advantage_checks, threshold_checks
 from skyrl_train.entrypoints.non_agentic_probe_timing import TimedNonAgenticTokenProcessor, timing_receipts
+from skyrl_train.entrypoints.non_agentic_probe_worker import PROBE_WORKER_EXTENSION, WORKER_MEMORY
 from skyrl_train.inference_engines.non_agentic_logits_processor import NonAgenticTokenProcessor
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.trajectory_runners.non_agentic_interventions import INTERVENTION_VERSION, TokenIntervention
@@ -72,27 +73,13 @@ def write_json(uri: str, value) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def worker_memory(worker) -> dict:
-    """Read actual allocated, reserved and free CUDA bytes inside each worker."""
-    free, total = torch.cuda.mem_get_info()
-    return {
-        "pid": os.getpid(),
-        "device": str(worker.device),
-        "gpu_uuid": str(torch.cuda.get_device_properties(worker.device).uuid),
-        "data_parallel_rank": worker.vllm_config.parallel_config.data_parallel_rank,
-        "allocated": torch.cuda.memory_allocated(),
-        "reserved": torch.cuda.memory_reserved(),
-        "peak_allocated": torch.cuda.max_memory_allocated(),
-        "free": free,
-        "total": total,
-    }
-
-
 async def all_worker_memory(engine) -> list[dict]:
     """Retain all eight DP-core responses and distinct physical GPU identities."""
     identities = list(engine.engine_core.core_engines)
     assert len(identities) == len(set(identities)) == 8
-    workers = await asyncio.wait_for(read_all_receiver_workers(engine, worker_memory), timeout=30)
+    workers = await asyncio.wait_for(
+        read_all_receiver_workers(engine, "read_probe_worker", (WORKER_MEMORY,)), timeout=30
+    )
     assert len(workers) == 8
     assert {worker["data_parallel_rank"] for worker in workers} == set(range(8))
     assert len({worker["gpu_uuid"] for worker in workers}) == 8
@@ -124,6 +111,7 @@ def engine_arguments(config: dict) -> dict:
         "trust_remote_code": False,
         "logprobs_mode": "raw_logprobs",
         "logits_processors": [TIMED_PROCESSOR],
+        "worker_extension_cls": PROBE_WORKER_EXTENSION,
     }
 
 

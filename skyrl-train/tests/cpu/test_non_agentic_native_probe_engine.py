@@ -33,9 +33,6 @@ def native_probe(monkeypatch):
     stub("vllm.v1.sample.logits_processor.interface", BatchUpdate=Placeholder)
     stub("vllm.v1.sample.metadata", SamplingMetadata=Placeholder)
     stub("vllm.v1.sample.sampler", Sampler=Placeholder)
-    for name in [m for m in sys.modules if m.startswith("skyrl_train.entrypoints.non_agentic_")]:
-        monkeypatch.delitem(sys.modules, name)
-    monkeypatch.delitem(sys.modules, "skyrl_train.inference_engines.non_agentic_logits_processor", raising=False)
     return importlib.import_module("skyrl_train.entrypoints.non_agentic_native_probe")
 
 

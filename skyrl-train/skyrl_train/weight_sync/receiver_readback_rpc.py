@@ -3,22 +3,25 @@
 import asyncio
 
 
-async def read_all_receiver_workers(engine, method: str):
+async def read_all_receiver_workers(engine, method: str, args: tuple = ()):
     """Avoid DPLBAsyncMPClient's deliberate first-core-only utility return.
 
     The pinned vLLM client dispatches collective_rpc to all cores but its public
     call_utility_async returns result[0]. Readbacks need each original result.
     This uses the same per-core dispatch without changing any worker operation.
     """
+    if not isinstance(method, str):
+        # The utility codec carries plain data only; a callable fails in enc_hook.
+        raise TypeError("Receiver readback takes a worker method name, not a callable")
     dp_size = engine.vllm_config.parallel_config.data_parallel_size
     if dp_size == 1:
-        return await engine.collective_rpc(method)
+        return await engine.collective_rpc(method, args=args)
     core = engine.engine_core
     if len(core.core_engines) != dp_size:
         raise ValueError("Receiver readback requires every configured DP core")
     per_core = await asyncio.gather(
         *[
-            core._call_utility_async("collective_rpc", method, None, (), None, engine=identity)
+            core._call_utility_async("collective_rpc", method, None, args, None, engine=identity)
             for identity in core.core_engines
         ]
     )
