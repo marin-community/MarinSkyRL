@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 _ResponseT = TypeVar("_ResponseT")
 TOKENIZE_ENDPOINT = "/tokenize"
+MODELS_ENDPOINT = "/v1/models"
+_SERVER_CREATED_TIME = int(time.time())
 
 
 class InferenceHTTPBackend(Protocol):
@@ -45,6 +47,7 @@ class InferenceHTTPBackend(Protocol):
     """
 
     model_name: str
+    max_model_len: Optional[int]
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
@@ -70,6 +73,24 @@ class ErrorInfo(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorInfo
+
+
+class ModelCard(BaseModel):
+    id: str
+    object: str = "model"
+    created: int
+    owned_by: str = "skyrl"
+    max_model_len: Optional[int]
+
+
+class ModelList(BaseModel):
+    object: str = "list"
+    data: list[ModelCard]
+
+
+def is_engine_error_response(response: Dict[str, Any]) -> bool:
+    """Recognize the error response shapes returned by vLLM and SGLang."""
+    return "error" in response or response.get("object", "") == "error"
 
 
 def set_global_state(inference_engine_client: InferenceHTTPBackend, uvicorn_server: uvicorn.Server):
@@ -293,7 +314,7 @@ async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stat
             backend_request = _global_inference_engine_client.tokenize(payload)
         response = await _await_with_disconnect(raw_request, backend_request)
 
-        if "error" in response or response.get("object", "") == "error":
+        if is_engine_error_response(response):
             # former is vllm format, latter is sglang format
             error_code = response["error"]["code"] if "error" in response else response["code"]
             return _json_response(response, endpoint=endpoint, bridge_stats=bridge_stats, status_code=error_code)
@@ -410,6 +431,29 @@ async def _monitor_event_loop_lag(
         raise
 
 
+async def handle_models_request(
+    *,
+    bridge_stats: HTTPBridgeStatsAccumulator,
+) -> JSONResponse:
+    """Return the served model name and live engine context limit."""
+    backend = _global_inference_engine_client
+    assert backend is not None
+    response = ModelList(
+        data=[
+            ModelCard(
+                id=backend.model_name,
+                created=_SERVER_CREATED_TIME,
+                max_model_len=backend.max_model_len,
+            )
+        ]
+    )
+    return _json_response(
+        response.model_dump(),
+        endpoint=MODELS_ENDPOINT,
+        bridge_stats=bridge_stats,
+    )
+
+
 def create_app(
     bridge_stats: HTTPBridgeStatsAccumulator | None = None,
     *,
@@ -499,6 +543,11 @@ def create_app(
     async def tokenize(raw_request: Request):
         """Delegate chat tokenization to the inference backend's serving renderer."""
         return await handle_openai_request(raw_request, endpoint=TOKENIZE_ENDPOINT, bridge_stats=bridge_stats)
+
+    @app.get(MODELS_ENDPOINT)
+    async def models():
+        """Return the served model identity and configured context limit."""
+        return await handle_models_request(bridge_stats=bridge_stats)
 
     # Health check endpoint
     # All inference engine replicas are initialized before creating `InferenceEngineClient`, and thus

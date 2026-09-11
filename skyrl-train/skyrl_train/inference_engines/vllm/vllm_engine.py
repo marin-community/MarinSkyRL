@@ -1051,6 +1051,10 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Get the underlying engine for RPC calls."""
         return self.llm.engine if hasattr(self.llm, "engine") else self.llm
 
+    def get_model_max_len(self) -> int:
+        """Return the context limit resolved by vLLM's model configuration."""
+        return self._get_engine().model_config.max_model_len
+
     def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
         """Check if this is a LoRA disk loading request."""
         is_lora = request["names"][0] == "lora_disk_load"
