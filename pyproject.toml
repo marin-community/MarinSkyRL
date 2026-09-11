@@ -73,6 +73,7 @@ deepspeed = [
 ]
 fsdp = [
     "flash-attn==2.8.3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch==2.13.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchtitan ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 vllm = [
@@ -160,6 +161,7 @@ required-version = ">=0.8.10"
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }],
     [{ extra = "cpu" }, { extra = "deepspeed" }],
+    [{ extra = "cpu" }, { extra = "fsdp" }],
     [{ extra = "cpu" }, { extra = "megatron" }],
     [{ extra = "cpu" }, { extra = "vllm" }],
 ]
@@ -204,6 +206,7 @@ torch = [
     { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { index = "pytorch-cu132", extra = "cuda" },
     { index = "pytorch-cu132", extra = "deepspeed" },
+    { index = "pytorch-cu132", extra = "fsdp" },
     { index = "pytorch-cu132", extra = "megatron" },
     { index = "pytorch-cu132", extra = "vllm" },
 ]
