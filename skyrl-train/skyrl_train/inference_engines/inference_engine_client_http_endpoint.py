@@ -36,20 +36,6 @@ _ResponseT = TypeVar("_ResponseT")
 TOKENIZE_ENDPOINT = "/tokenize"
 MODELS_ENDPOINT = "/v1/models"
 _SERVER_CREATED_TIME = int(time.time())
-# HF sets ``model_max_length`` to a sentinel (VERY_LARGE_INTEGER, 1e30) for tokenizers that
-# declare no limit; anything that large is "unknown", not a context length.
-_MAX_MODEL_LEN_SENTINEL = 10**12
-
-
-def _resolve_max_model_len(tokenizer: Any) -> Optional[int]:
-    """The context length to report, or ``None`` when nothing trustworthy is available."""
-    for source in (
-        getattr(_global_inference_engine_client, "max_model_len", None),
-        getattr(tokenizer, "model_max_length", None),
-    ):
-        if isinstance(source, int) and 0 < source < _MAX_MODEL_LEN_SENTINEL:
-            return source
-    return None
 
 
 class InferenceHTTPBackend(Protocol):
@@ -61,6 +47,7 @@ class InferenceHTTPBackend(Protocol):
     """
 
     model_name: str
+    max_model_len: Optional[int]
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
@@ -86,6 +73,24 @@ class ErrorInfo(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorInfo
+
+
+class ModelCard(BaseModel):
+    id: str
+    object: str = "model"
+    created: int
+    owned_by: str = "skyrl"
+    max_model_len: Optional[int]
+
+
+class ModelList(BaseModel):
+    object: str = "list"
+    data: list[ModelCard]
+
+
+def is_engine_error_response(response: Dict[str, Any]) -> bool:
+    """Recognize the error response shapes returned by vLLM and SGLang."""
+    return "error" in response or response.get("object", "") == "error"
 
 
 def set_global_state(inference_engine_client: InferenceHTTPBackend, uvicorn_server: uvicorn.Server):
@@ -309,7 +314,7 @@ async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stat
             backend_request = _global_inference_engine_client.tokenize(payload)
         response = await _await_with_disconnect(raw_request, backend_request)
 
-        if "error" in response or response.get("object", "") == "error":
+        if is_engine_error_response(response):
             # former is vllm format, latter is sglang format
             error_code = response["error"]["code"] if "error" in response else response["code"]
             return _json_response(response, endpoint=endpoint, bridge_stats=bridge_stats, status_code=error_code)
@@ -429,33 +434,21 @@ async def _monitor_event_loop_lag(
 async def handle_models_request(
     *,
     bridge_stats: HTTPBridgeStatsAccumulator,
-    created: Optional[int] = None,
 ) -> JSONResponse:
-    """Serve vLLM's ``GET /v1/models`` contract against this endpoint.
-
-    harbor's context guard reads the served context length from here
-    (``lite_llm.LiteLLM._get_vllm_max_model_len``: the first entry in ``data`` with a truthy
-    ``max_model_len``). Without the route the probe fails and harbor falls back to litellm's
-    model registry, which for an RL checkpoint served under a hashed ``served_model_name`` has no
-    entry at all and yields a 1e6 limit — i.e. the prompt-fits guard silently disables itself and
-    the engine rejects the oversized prompt instead. The length reported here is the engine's own
-    ``max_model_len`` when the client carries it, else the tokenizer's.
-    """
-    tokenizer = getattr(_global_inference_engine_client, "tokenizer", None)
-    model_name = getattr(_global_inference_engine_client, "model_name", None)
+    """Return the served model name and live engine context limit."""
+    backend = _global_inference_engine_client
+    assert backend is not None
+    response = ModelList(
+        data=[
+            ModelCard(
+                id=backend.model_name,
+                created=_SERVER_CREATED_TIME,
+                max_model_len=backend.max_model_len,
+            )
+        ]
+    )
     return _json_response(
-        {
-            "object": "list",
-            "data": [
-                {
-                    "id": model_name,
-                    "object": "model",
-                    "created": created if created is not None else _SERVER_CREATED_TIME,
-                    "owned_by": "skyrl",
-                    "max_model_len": _resolve_max_model_len(tokenizer),
-                }
-            ],
-        },
+        response.model_dump(),
         endpoint=MODELS_ENDPOINT,
         bridge_stats=bridge_stats,
     )
@@ -552,17 +545,8 @@ def create_app(
         return await handle_openai_request(raw_request, endpoint=TOKENIZE_ENDPOINT, bridge_stats=bridge_stats)
 
     @app.get(MODELS_ENDPOINT)
-    async def models(raw_request: Request):
-        """
-        Returns vLLM's `ModelList`: the served model id plus the `max_model_len` it enforces.
-
-        harbor probes this to learn the served context length (see `handle_models_request`);
-        without it, the caller falls back to a model-registry limit that can disagree with the
-        engine's real one.
-
-        API reference:
-        - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
-        """
+    async def models():
+        """Return the served model identity and configured context limit."""
         return await handle_models_request(bridge_stats=bridge_stats)
 
     # Health check endpoint

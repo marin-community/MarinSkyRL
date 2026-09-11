@@ -80,6 +80,23 @@ def _validate_installed_vllm_for_model(pretrain: str) -> None:
     validate_grug_vllm_support(hf_config, ModelRegistry.get_supported_archs())
 
 
+def resolve_engine_max_model_len(engine_init_kwargs: Dict[str, Any], rope_scaling: Dict[str, Any] | None) -> int | None:
+    """Resolve the context limit passed to the inference engine."""
+    configured_limit = engine_init_kwargs.get("max_model_len")
+    if configured_limit is not None:
+        return configured_limit
+    if not rope_scaling:
+        return None
+
+    rope_factor = rope_scaling.get("factor")
+    rope_max_pos = rope_scaling.get("original_max_position_embeddings")
+    assert rope_factor is not None, "Please provide rope scaling `factor` to compute model max length"
+    assert rope_max_pos is not None, (
+        "Please provide rope `original_max_position_embeddings` to compute model max length"
+    )
+    return int(rope_factor * rope_max_pos)
+
+
 def _qwen3_5_vlm_engine_kwargs(pretrain: str) -> Dict[str, Any]:
     """vLLM EngineArgs overrides for the Qwen3.5/3.6 VLM-shell rollout (tmax Stage 2).
 
@@ -148,7 +165,12 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     This class implements the InferenceEngineInterface by delegating calls to the remote actor.
     """
 
-    def __init__(self, inference_engine_actor: ActorHandle, *, weight_sync_relative_rank_offset: int | None = None):
+    def __init__(
+        self,
+        inference_engine_actor: ActorHandle,
+        *,
+        weight_sync_relative_rank_offset: int | None = None,
+    ):
         self.inference_engine_actor = inference_engine_actor
         self.weight_sync_relative_rank_offset = weight_sync_relative_rank_offset
 
@@ -239,6 +261,15 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET):
         """Return throughput, latency, cache, token, and request statistics."""
         return await self.inference_engine_actor.get_stats.remote(read_mode=read_mode)
+
+
+def populate_engine_max_model_lens(engines: List["RayWrappedInferenceEngine"], *, timeout_seconds: float) -> None:
+    """Record each serving actor's resolved context limit on its local wrapper."""
+    actor_handles = [engine.inference_engine_actor for engine in engines]
+    limit_refs = [actor.get_model_max_len.remote() for actor in actor_handles]
+    wait_for_inference_engine_startup(limit_refs, actor_handles, timeout_seconds=timeout_seconds)
+    for engine, max_model_len in zip(engines, ray.get(limit_refs), strict=True):
+        engine.max_model_len = max_model_len
 
 
 def create_ray_wrapped_inference_engines(
@@ -507,13 +538,7 @@ def create_ray_wrapped_inference_engines(
             if rope_scaling:
                 rope_engine_kwargs["rope_scaling"] = rope_scaling
                 if "max_model_len" not in engine_init_kwargs:
-                    rope_factor = rope_scaling.get("factor", None)
-                    rope_max_pos = rope_scaling.get("original_max_position_embeddings", None)
-                    assert rope_factor is not None, "Please provide rope scaling `factor` to compute model max length"
-                    assert rope_max_pos is not None, (
-                        "Please provide rope `original_max_position_embeddings` to compute model max length"
-                    )
-                    rope_engine_kwargs["max_model_len"] = int(rope_factor * rope_max_pos)
+                    rope_engine_kwargs["max_model_len"] = resolve_engine_max_model_len(engine_init_kwargs, rope_scaling)
             if rope_theta is not None:
                 rope_engine_kwargs["rope_theta"] = rope_theta
 
@@ -702,7 +727,10 @@ def create_ray_wrapped_inference_engines(
             weight_sync_relative_rank_offsets.append(i * per_engine_gpu_count)
 
     engines = [
-        RayWrappedInferenceEngine(actor_handle, weight_sync_relative_rank_offset=rank_offset)
+        RayWrappedInferenceEngine(
+            actor_handle,
+            weight_sync_relative_rank_offset=rank_offset,
+        )
         for actor_handle, rank_offset in zip(inference_engine_actors, weight_sync_relative_rank_offsets, strict=True)
     ]
 
@@ -749,6 +777,8 @@ def create_ray_wrapped_inference_engines(
             [engine.inference_engine_actor for engine in engines],
             timeout_seconds=engine_init_timeout_seconds,
         )
+
+    populate_engine_max_model_lens(engines, timeout_seconds=engine_init_timeout_seconds)
 
     return engines
 

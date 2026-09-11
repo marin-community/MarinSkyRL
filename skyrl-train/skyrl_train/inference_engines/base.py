@@ -43,6 +43,11 @@ class NamedWeightsUpdateRequest(TypedDict):
 
 class InferenceEngineInterface(ABC):
     weight_sync_relative_rank_offset: int | None = None
+    max_model_len: int | None = None
+
+    def get_model_max_len(self) -> int | None:
+        """Return the context limit resolved by the live serving backend."""
+        return self.max_model_len
 
     @abstractmethod
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
