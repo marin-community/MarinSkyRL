@@ -1,6 +1,5 @@
 from pathlib import Path
-
-from harbor_config.models.task.config import TaskConfig
+import tomllib
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -8,12 +7,13 @@ SMOKE_CORPUS = REPO_ROOT / "skyrl-train/ci/opencode_smoke/tasks/exact-continuati
 STRESS_CORPUS = REPO_ROOT / "skyrl-train/ci/opencode_smoke/tasks/boundary-mix"
 
 
-def _assert_corpus_tasks(corpus: Path) -> list[TaskConfig]:
+def _assert_corpus_tasks(corpus: Path) -> list[dict]:
     task_paths = sorted(corpus.glob("case-*/task.toml"))
-    configs = [TaskConfig.model_validate_toml(path.read_text()) for path in task_paths]
+    configs = [tomllib.loads(path.read_text()) for path in task_paths]
     assert len(configs) == 8
-    assert len({config.task.name for config in configs}) == len(configs)
+    assert len({config["task"]["name"] for config in configs}) == len(configs)
     for path, config in zip(task_paths, configs, strict=True):
+        assert config["version"] == "1.0"
         task_root = path.parent
         instruction = task_root / "instruction.md"
         assert instruction.is_file()
@@ -23,7 +23,7 @@ def _assert_corpus_tasks(corpus: Path) -> list[TaskConfig]:
         dockerfile_text = dockerfile.read_text()
         assert "opencode-ai@1.18.2" in dockerfile_text
         assert not any(line.endswith("\\\\") for line in dockerfile_text.splitlines())
-        assert config.environment.allow_internet is False
+        assert config["environment"]["allow_internet"] is False
         assert (task_root / "tests/test.sh").is_file()
     return configs
 
@@ -34,7 +34,7 @@ def test_opencode_smoke_corpus_is_valid_and_has_eight_unique_tasks() -> None:
 
 def test_opencode_boundary_corpus_is_valid_and_covers_requested_stressors() -> None:
     configs = _assert_corpus_tasks(STRESS_CORPUS)
-    names = {config.task.name for config in configs}
+    names = {config["task"]["name"] for config in configs}
     assert any("garbage-bytes" in name for name in names)
     assert any("summarization" in name for name in names)
     assert any("single-turn-output-overflow" in name for name in names)
