@@ -457,18 +457,6 @@ generator:
   rope_scaling: ${trainer.rope_scaling}
   rope_theta: ${trainer.rope_theta}
 
-teacher:
-  model_path: null
-  top_k_logprobs: 256
-  num_inference_engines: 1
-  inference_engine_tensor_parallel_size: 1
-  inference_engine_pipeline_parallel_size: 1
-  gpu_memory_utilization: 0.9
-  enforce_eager: false
-  backend: vllm
-  engine_init_timeout_seconds: ${generator.engine_init_timeout_seconds}
-  engine_init_kwargs: {}
-
 environment:
   env_class: "gsm8k"
 
