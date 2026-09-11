@@ -72,6 +72,10 @@ class InferenceEngineInterface(ABC):
         """
         raise NotImplementedError()
 
+    async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle terminal-bench tokenization when the serving backend supports it."""
+        raise NotImplementedError()
+
     @abstractmethod
     async def wake_up(self, *args: Any, **kwargs: Any):
         raise NotImplementedError()

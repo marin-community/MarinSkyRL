@@ -49,6 +49,9 @@ except ImportError:
         CompletionResponse,
     )
 
+from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest, TokenizeResponse
+from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+
 try:
     from vllm.v1.metrics.loggers import LoggingStatLogger
 except ImportError:
@@ -1719,6 +1722,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 tool_parser=tool_parser,
                 **wrapper_kwargs,
             )
+            self.openai_serving_tokenization = OpenAIServingTokenization(
+                engine_client=engine,
+                models=models,
+                openai_serving_render=openai_serving_render,
+                request_logger=None,
+                chat_template=custom_chat_template_content,
+                chat_template_content_format="auto",
+            )
         else:
             try:
                 self.openai_serving_chat = OpenAIServingChat(
@@ -2036,6 +2047,24 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         in vllm.entrypoints.openai.protocol.
         """
         return await self._handle_openai_request(request_payload, endpoint="/chat/completions")
+
+    async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle Harbor tokenization with vLLM's chat serving renderer."""
+        body = request_payload.get("json", {})
+        headers = request_payload.get("headers", {})
+        try:
+            request = TokenizeChatRequest(**body)
+        except Exception as e:
+            return _build_error_response(str(e), HTTPStatus.BAD_REQUEST.phrase, HTTPStatus.BAD_REQUEST.value)
+
+        try:
+            response = await self.openai_serving_tokenization.create_tokenize(request, _MinimalRequest(headers))
+            assert isinstance(response, (TokenizeResponse, ErrorResponse))
+            return response.model_dump()
+        except Exception as e:
+            return _build_error_response(
+                str(e), HTTPStatus.INTERNAL_SERVER_ERROR.phrase, HTTPStatus.INTERNAL_SERVER_ERROR.value
+            )
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/completions` in Python vLLM engine.
