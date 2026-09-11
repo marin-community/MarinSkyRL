@@ -1,0 +1,359 @@
+# Snowball R2E-Gym arm B — the next arm, fresh from base on the current harness.
+# Arm A (`snowball_r2egym_arm_a.yaml`) is the frozen reproduction of the 2026-09-09 golden
+# run and must not change; this file is arm A plus the fixes new arms must carry
+# (2026-09-10 stability audit, ai_memory/active/snowball-r2egym/research/2026-09-10_stability_bug_audit.md):
+#   - error policy: the TITO prefix-mismatch ValueError and raw OpenAI transport errors are
+#     masked instead of trained at reward 0; TmuxSessionLostError is scored 0 (Luke,
+#     2026-09-10: every shell death is the agent's); the dead ContextLengthExceededError
+#     mask entry is gone (passthrough wins). Bare RuntimeError stays masked: on Daytona and
+#     the bridge nearly every bare RuntimeError is sandbox infrastructure.
+#   - verifier budget 2400 s, connect timeout 120 s, preserve_logprobs_on_timeout off: the
+#     three "new arms must use" values acknowledged as deviations in arm A.
+#   - resume_mode latest with no pinned checkpoint: a chain restart continues the arm.
+# Set before launch (still arm A's values here): data.train_data (the current-harness band),
+# backend.runtime.overlay_* (drop the golden arm's harbor overlay on the marin stack),
+# backend.apptainer.bridge_url and fleet.
+# Not gated by the golden render test. Rationale for the coupled settings:
+# .agents/ops/snowball-r2egym-config.md
+#
+# `mode: probe` swaps in the `probe:` overlay at the bottom for an eval-only pass@K
+# probe of an exported checkpoint.
+
+entrypoint: terminal_bench
+mode: arm
+
+config_groups:
+  terminal_bench_config: terminal_bench
+
+# 65536 - 16384 = 49152 -> max_input_length, max_prompt_length, model_info.max_input_tokens.
+# 65536 exceeds the model's 32768 max_position_embeddings, hence the hf_overrides widening
+# declared under generator.engine_init_kwargs.
+# Model facts preflight checks against: TP must divide the head count, and the RoPE
+# widening above is required exactly because the window exceeds max_position_embeddings.
+model_num_attention_heads: 32
+model_max_position_embeddings: 32768
+
+context_budget:
+  request_window_tokens: 65536
+  max_new_tokens_per_turn: 16384
+  max_turns: 999999
+
+# The sandbox backend. `kind` is the only thing that reaches Hydra
+# (terminal_bench.harbor.environment_type); everything else renders into the launcher
+# environment block via render_backend_env().
+backend:
+  kind: apptainer
+
+  # Backend-independent harbor runtime settings that have no Hydra key at all.
+  # Two runs with identical Hydra args but different values here are NOT comparable.
+  runtime:
+    # 30 s manufactured masked samples and a 3.6 steps/h collapse (2026-09-07 A/B).
+    connect_timeout_sec: 120
+    # keep = prior think spans stay in history. Dropping them makes the model stop
+    # thinking (self-imitation) for a delta touching zero.
+    history_think: keep
+    # The golden arm ran overlay 26c307fc while the venv held f8f9651a.
+    overlay_pythonpath: /e/project1/transfernetx/lee27/code/harbor_overlay/26c307fc
+    overlay_commit: 26c307fc
+
+  apptainer:
+    bridge_url: http://10.128.1.2:9922
+    tmux_batch_exec_timeout_margin_sec: 600
+    # Preflight asserts these appear in terminal_bench.harbor.mask_exceptions.
+    required_mask_exceptions:
+      - BridgeOutageError
+      - BridgeOperationError
+      - BridgeOperationTimeoutError
+    fleet:
+      cluster: juwels
+      nodes: 32
+      workers_per_node: 8
+      # Preflight asserts seats >= terminal_bench.harbor.n_concurrent_trials.
+      seats: 1584
+      # Without HARBOR_SRC the fleet dies within seconds.
+      harbor_src: /p/project1/synthlaion/lee27/harbor/src
+
+data:
+  kind: tasks
+  train_data: ["/e/fscratch/reformo/lee27/tasks/r2egym-tt-band60k-clean-x16"]
+  val_data: ["/e/fscratch/reformo/lee27/tasks/r2egym-raw-v3-val"]
+
+trainer:
+  strategy: fsdp2
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: true
+
+  algorithm:
+    advantage_estimator: rloo_n
+    use_kl_loss: true
+    kl_loss_coef: 0.01
+    eps_clip_low: 0.2
+    eps_clip_high: 0.2
+    # seq_mean prevents the token_mean collapse.
+    loss_reduction: sequence_mean
+    use_tis: true
+    tis_imp_ratio_cap: 2.0
+    group_advantage_min_size: 4
+
+  epochs: 10
+  update_epochs_per_batch: 1
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  seed: 42
+
+  hf_hub_private: false
+  hf_hub_revision: main
+
+  diag_group_metrics: true
+  dump_train_rollouts: true
+  # Guardrail: manual DB registration only.
+  enable_db_registration: false
+  log_level: INFO
+  tracker_commit_each_step: true
+  logger: wandb
+  project_name: jupiter-snowball-r2egym
+
+  run_name: null
+  ckpt_path: null
+  export_path: null
+
+  max_steps: 200
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 56
+  # In-run eval off; probes run externally against exported checkpoints.
+  eval_interval: 9999
+  eval_before_train: false
+  ckpt_interval: 6
+  hf_save_interval: 12
+  max_ckpts_to_keep: 2
+  # Fresh arm from base; chain restarts resume the latest checkpoint of this run.
+  resume_mode: latest
+  resume_path: null
+
+  use_sample_packing: false
+  flash_attn: true
+  attn_backend: flash_attention_2
+
+  fully_async:
+    # 1 -> 2 removed the rollout wait (6.0 vs 3.8 updates/h) at unchanged signals.
+    max_staleness_steps: 2
+
+  policy:
+    model:
+      path: /e/fscratch/reformo/lee27/models/snowball-s3-nemotron-terminal-step1888
+    optimizer_config:
+      lr: 5.0e-7
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+      max_grad_norm: 1.0
+      num_warmup_steps: 0
+    fsdp_config:
+      cpu_offload: false
+      reshard_after_forward: true
+      moe_router_replay: false
+      moe_grouped_gemm: false
+      # 5x trainer speedup: policy_train 446 -> 87 s at identical signals.
+      use_grouped_mm: true
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      fsdp_size: 64
+    grug_query_bias_update_mode: frozen
+
+  ref:
+    model:
+      path: /e/fscratch/reformo/lee27/models/snowball-s3-nemotron-terminal-step1888
+    fsdp_config:
+      cpu_offload: true
+      reshard_after_forward: true
+      moe_router_replay: false
+      moe_grouped_gemm: false
+      use_grouped_mm: true
+      expert_model_parallel_size: 1
+      fsdp_size: 64
+
+  placement:
+    colocate_all: false
+    colocate_policy_ref: true
+    policy_num_gpus_per_node: 4
+    ref_num_gpus_per_node: 4
+    critic_num_nodes: 1
+    critic_num_gpus_per_node: 4
+    policy_strict_spread_pg: true
+    policy_per_gpu_bundles: true
+    policy_force_cvd_mask: true
+    # 40 nodes = 16 policy + 24 generator; preflight asserts the geometry closes.
+    policy_num_nodes: 16
+    ref_num_nodes: 16
+
+generator:
+  backend: vllm
+  timeout_multiplier: 1.0
+  model_dtype: bfloat16
+  enforce_eager: false
+  gpu_memory_utilization: 0.85
+  max_num_seqs: 32
+  max_num_batched_tokens: 16384
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  inference_stats_interval: 1
+  append_eos_token_after_stop_str_in_multi_turn: true
+  openai_max_tokens_cap: false
+
+  sampling_params:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+
+  n_samples_per_prompt: 8
+  eval_n_samples_per_prompt: 8
+
+  # A DP group split across nodes hangs; dp * tp must equal ep and fit one node.
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_data_parallel_size: 4
+  inference_engine_expert_parallel_size: 4
+  # Derived: (40 - 16) nodes * 4 GPUs / (4 dp * 1 tp). Pinned as an assertion.
+  num_inference_engines: 24
+
+  engine_init_kwargs:
+    chat_template_content_format: string
+    # RoPE widening: request_window_tokens (65536) exceeds the model's 32768
+    # max_position_embeddings.
+    hf_overrides:
+      max_position_embeddings: 65536
+      max_seq_len: 65536
+
+trajectory_runner:
+  process_pool:
+    num_coordinators: 12
+    cpus_per_coordinator: 8
+
+terminal_bench:
+  trials_dir: null
+
+  harbor:
+    name: terminus-2
+    enable_summarize: false
+    store_all_messages: true
+    trajectory_config:
+      raw_content: true
+    enable_episode_logging: false
+    record_terminal_session: false
+    enable_pane_logging: false
+    strict_json_parser: true
+    interleaved_thinking: false
+    override_timeout_sec: 1800
+    override_cpus: 2
+    override_memory_mb: 4096
+    override_storage_mb: 4096
+    max_retries: 3
+    min_wait_sec: 60.0
+    max_wait_sec: 600.0
+    wait_multiplier: 2.0
+    exclude_exceptions:
+      - VerifierTimeoutError
+      - VerifierRuntimeError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - VerifierOutputParseError
+    log_level: INFO
+    enable_reward_shaping: false
+    # Required true or the TIS / rollout-logprob objectives fail their capability check.
+    collect_rollout_details: true
+    enable_error_classification: true
+    mask_exceptions:
+      - BridgeOutageError
+      - BridgeOperationError
+      - VerifierInfrastructureError
+      - EnvironmentStartTimeoutError
+      - NetworkError
+      - ConnectionError
+      - RewardFileNotFoundError
+      - RewardFileEmptyError
+      - AgentEnvironmentTimeoutError
+      - ConnectionResetError
+      - BridgeOperationTimeoutError
+      - RuntimeError
+      - VerifierTimeoutError
+      - TrialNotScoredError
+      - VerificationNotCompletedError
+      # harbor Chat refuses to record a turn whose served prompt ids are not the exact
+      # continuation (TITO break): a harness failure, not a model failure.
+      - ValueError
+      # Raw OpenAI transport errors that escape harbor's retry layer.
+      - APIConnectionError
+      - BadRequestError
+    # Unlisted, unclassified errors score 0 and are trained on. TmuxSessionLostError lands
+    # here on purpose: the model ended its own shell.
+    default_error_treatment: zero
+    passthrough_exceptions:
+      - AgentTimeoutError
+      - ContextLengthExceededError
+    n_concurrent_trials: 1584
+    extra_body:
+      # SFT-format parity: think markers stay in history.
+      skip_special_tokens: false
+    eval_timeout_override_sec: 1800
+    # 150 s produced 4-14 %/step false zeros under load (2026-09-07); 2400 is the floor.
+    verifier_override_timeout_sec: 2400
+    # A trial whose verifier never returned is masked, never a preserved zero.
+    preserve_logprobs_on_timeout: false
+
+  model_info:
+
+  archiving:
+    enabled: false
+
+  trace_upload:
+    enabled: false
+
+container:
+  artifact_store:
+    enabled: true
+    size: 1T
+    inodes: 50000000
+
+# Overlay applied when the recipe is rendered with `mode: probe`. Same section names
+# as above; a null value deletes the arm's key. Section 2 of the design note lists
+# these as the genuine probe-minus-arm delta.
+probe:
+  trainer:
+    max_steps: 1
+    eval_before_train: true
+    resume_mode: none
+    resume_path: null
+    # Train-only cadence an eval-only pass never reaches; preflight rejects them.
+    ckpt_interval: null
+    hf_save_interval: null
+    eval_interval: 10
+    # ceil(n_tasks / num_coordinators)
+    eval_batch_size: 8
+    algorithm:
+      # Mandatory: a group masked 8/8 by exceptions otherwise raises
+      # "rollout_logprobs are required for every generated group" mid-probe.
+      use_tis: false
+    ref:
+      model:
+        path: null
+  generator:
+    # Unused by an eval-only pass, but must exceed group_advantage_min_size.
+    n_samples_per_prompt: 4
+    # The pass@K.
+    eval_n_samples_per_prompt: 8
+  data:
+    val_data: ["/e/fscratch/reformo/lee27/tasks/r2egym-raw-v3-train-resid2-s0"]
+  terminal_bench:
+    harbor:
+      verifier_override_timeout_sec: 1200
+
+# Acknowledged deviations from the preflight defaults, printed at launch.
+overrides:
+  - key: seats.trials_per_coordinator
+    reason: >-
+      1584 / 12 = 132 seats per coordinator, above the 66 ceiling. The golden arm ran
+      this way.
