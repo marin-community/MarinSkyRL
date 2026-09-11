@@ -45,7 +45,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, Optional, Protocol, Tuple
 
 # The sandbox-facing api_key. The capability token rides in the URL path, so no
 # bearer is needed; but installed OpenAI-compatible agents refuse to start
@@ -652,7 +652,6 @@ class _ParentControllerClient:
         from iris.rpc.compression import IRIS_RPC_COMPRESSIONS
         from iris.rpc.controller_connect import ControllerServiceClientSync, EndpointServiceClientSync
         from rigging.cluster_manifest import AuthProvider, ClusterAuth, IapAuth
-        from rigging.credentials import credentials_for
 
         # Make the parent (marin) IAP credential available to rigging's resolver BEFORE
         # building the client. In-pod on CoreWeave there is no cached `iris login`
@@ -691,7 +690,7 @@ class _ParentControllerClient:
             ),
         )
         cluster_name = getattr(config, "name", None) or "marin"
-        credentials = credentials_for(cluster_name, cluster_auth)
+        credentials = _parent_client_credentials(cluster_name, cluster_auth)
         client_kwargs = {
             "timeout_ms": 30_000,
             "interceptors": credentials.interceptors(),
@@ -756,6 +755,21 @@ PARENT_CONTROLLER_CONFIG_YAML_ENV = "OTAGENT_PARENT_CONTROLLER_CONFIG_YAML"
 # worker can mint at marin. SECRET: it contains a long-lived refresh token, so forwarding
 # is opt-in on the launch side; the pod materializes it to the path load_credentials reads.
 PARENT_CREDENTIALS_JSON_ENV = "OTAGENT_MARIN_CREDENTIALS_JSON"
+# A short-lived IAP ID token minted from ambient service-account credentials on
+# a headless launch host (notably GitHub Actions). Unlike an external-account
+# ADC file, this token is self-contained and remains usable in the CoreWeave pod.
+PARENT_IAP_TOKEN_ENV = "OTAGENT_MARIN_IAP_TOKEN"
+
+
+def _parent_client_credentials(cluster_name: str, cluster_auth: Any):
+    """Resolve parent credentials, preferring a forwarded short-lived IAP token."""
+    from rigging.auth import StaticTokenProvider
+    from rigging.credentials import ClientCredentials, credentials_for
+
+    forwarded_iap_token = os.environ.get(PARENT_IAP_TOKEN_ENV)
+    if forwarded_iap_token:
+        return ClientCredentials(iap_provider=StaticTokenProvider(forwarded_iap_token))
+    return credentials_for(cluster_name, cluster_auth)
 
 
 def materialize_parent_credentials() -> Optional[str]:

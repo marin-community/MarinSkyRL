@@ -29,6 +29,7 @@ from cloud.iris.ingress_utils import (  # noqa: E402
     CapabilityTokenCache,
     FederatedCapabilityTokenCache,
     _ParentControllerClient,
+    _parent_client_credentials,
     build_capability_api_base,
     capability_api_base,
     controller_endpoint_name,
@@ -207,6 +208,16 @@ def test_parent_client_uses_endpoint_service_for_mirror_and_controller_for_mint(
     assert client._endpoint_client.request.prefix == "otagent-job"
     assert client.mint("otagent-job", 1.0) == ("parent-token", 123.0)
     assert client._client.request.endpoint_name == "otagent-job"
+
+
+def test_parent_client_uses_forwarded_iap_token(monkeypatch):
+    from cloud.iris.ingress_utils import PARENT_IAP_TOKEN_ENV
+
+    monkeypatch.setenv(PARENT_IAP_TOKEN_ENV, "forwarded-iap-token")
+
+    credentials = _parent_client_credentials("marin", object())
+
+    assert credentials.headers() == {"proxy-authorization": "Bearer forwarded-iap-token"}
 
 
 def test_materialize_parent_credentials_writes_forwarded_record(tmp_path, monkeypatch):
