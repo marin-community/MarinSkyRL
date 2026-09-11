@@ -228,7 +228,7 @@ mamba-ssm = [
     { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
-harbor-config = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-9551f376157d90104011107dcbf9ca3621228126/harbor_config-0.1.0-py3-none-any.whl" }
+harbor-config = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-952a005353273590631b8f970f4664a121710b32/harbor_config-0.1.0-py3-none-any.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
