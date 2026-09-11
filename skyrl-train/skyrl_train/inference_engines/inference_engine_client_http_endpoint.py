@@ -18,7 +18,7 @@ import requests
 import traceback
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Any, Coroutine, Dict, Optional, Protocol, TypeVar
+from typing import Any, Coroutine, Dict, Optional, TypeVar
 
 import fastapi
 import uvicorn
@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from skyrl_train.inference_engines.inference_http_backend import InferenceHTTPBackend
 from skyrl_train.inference_engines.opencode_continuation import OpenCodeContinuationManager
 from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator
 
@@ -37,26 +38,6 @@ _ResponseT = TypeVar("_ResponseT")
 TOKENIZE_ENDPOINT = "/tokenize"
 MODELS_ENDPOINT = "/v1/models"
 _SERVER_CREATED_TIME = int(time.time())
-
-
-class InferenceHTTPBackend(Protocol):
-    """What this endpoint needs of the engine client it serves.
-
-    InferenceEngineClient satisfies it. It is a protocol rather than that concrete type
-    because the dependency runs the other way: inference_engine_client imports this module
-    for the error types and the server entrypoints below.
-    """
-
-    model_name: str
-    max_model_len: Optional[int]
-
-    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
-
-    async def chat_completion_stream(self, request_payload: Dict[str, Any]): ...
-
-    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
-
-    async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
 
 # Global state to hold the inference engine client and backend

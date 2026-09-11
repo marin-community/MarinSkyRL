@@ -7,10 +7,9 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from skyrl_train.inference_engines.inference_engine_client_http_endpoint import InferenceHTTPBackend
+from skyrl_train.inference_engines.inference_http_backend import InferenceHTTPBackend
 
 
 logger = logging.getLogger(__name__)
@@ -145,7 +144,7 @@ class OpenCodeContinuationLease:
 class OpenCodeContinuationManager:
     """Maintain exact served-token prefixes independently for concurrent trials."""
 
-    def __init__(self, backend: "InferenceHTTPBackend", *, max_trials: int = 4096) -> None:
+    def __init__(self, backend: InferenceHTTPBackend, *, max_trials: int = 4096) -> None:
         self._backend = backend
         self._max_trials = max_trials
         self._states: OrderedDict[str, _ContinuationState] = OrderedDict()

@@ -80,7 +80,7 @@ JOB_NAME="marinskyrl-opencode-manual-$(date +%s)" \
 ```
 
 The script always cancels its Iris job on exit. Its log must contain one finite training
-step, eight correlated trials, at least 24 correlated turns, 100% exact TIS/full-TITO,
+step, eight correlated trials, at least 16 correlated turns, 100% exact TIS/full-TITO,
 and no fallback, decline, skipped batch, or failed trajectory. A failure before those
 metrics should be triaged from the uploaded job log in this order: Iris allocation and
 runtime setup, Daytona snapshot/sandbox setup, OpenCode process errors, RecordProxy

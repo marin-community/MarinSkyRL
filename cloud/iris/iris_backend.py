@@ -81,6 +81,12 @@ from iris.resources.state import JobState
 from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
+from cloud.iris.ingress_utils import (
+    PARENT_CONTROLLER_CONFIG_ENV,
+    PARENT_CONTROLLER_CONFIG_YAML_ENV,
+    PARENT_CREDENTIALS_JSON_ENV,
+    PARENT_IAP_TOKEN_ENV,
+)
 from cloud.iris.ray_storage import (
     DEFAULT_RAY_SPILL_DIR,
     RaySpillBackend,
@@ -1224,20 +1230,23 @@ def validate_controller_ingress_reachability(args: argparse.Namespace) -> None:
         )
 
 
-def prepare_federated_parent_credentials(args: argparse.Namespace) -> str | None:
-    """Validate and return the cached Marin IAP login needed by a federated pod.
+@dataclass(frozen=True)
+class FederatedParentCredentials:
+    """Credential material validated on the launcher and forwarded to the peer task."""
 
-    A CoreWeave task has neither a cached human login nor a Marin-allowlisted service
-    account. Controller ingress therefore cannot mint a parent capability token unless
-    the launcher forwards the operator's cached Marin IAP login record. Mint an IAP
-    token here, before submitting or allocating GPUs, so a stale or absent record fails
-    locally instead of after the endpoint-registration wait in the task.
+    login_record_json: str | None = None
+    iap_token: str | None = None
+
+
+def prepare_federated_parent_credentials(args: argparse.Namespace) -> FederatedParentCredentials | None:
+    """Validate and return credentials needed by a federated pod.
+
+    Prefer the cached Marin login record so the pod can refresh credentials. When the
+    launcher has ambient service-account credentials instead, forward its short-lived
+    IAP token. Both paths mint locally before allocating GPUs.
     """
     if not getattr(args, "target_cluster", None) or getattr(args, "ingress_mode", "direct") != "controller":
         return None
-    from cloud.iris.ingress_utils import PARENT_IAP_TOKEN_ENV
-
-    os.environ.pop(PARENT_IAP_TOKEN_ENV, None)
     if not MARIN_LOGIN_RECORD_PATH.is_file():
         parent_config = getattr(args, "parent_cluster_config", None) or _resolve_parent_cluster_config(
             getattr(args, "cluster_config", None)
@@ -1260,13 +1269,12 @@ def prepare_federated_parent_credentials(args: argparse.Namespace) -> str | None
             ) from exc
         if not token:
             raise SystemExit("[rl-iris] BLOCKED: ambient service-account credentials returned an empty IAP token.")
-        os.environ[PARENT_IAP_TOKEN_ENV] = token
         print(
             "[rl-iris] Federated parent-IAP preflight passed with ambient service-account credentials; "
             "forwarding a short-lived IAP token to the peer task.",
             flush=True,
         )
-        return None
+        return FederatedParentCredentials(iap_token=token)
     try:
         record = json.loads(MARIN_LOGIN_RECORD_PATH.read_text())
     except json.JSONDecodeError as exc:
@@ -1311,7 +1319,7 @@ def prepare_federated_parent_credentials(args: argparse.Namespace) -> str | None
         "[rl-iris] Federated parent-IAP preflight passed; forwarding the cached Marin login record to the peer task.",
         flush=True,
     )
-    return json.dumps(record)
+    return FederatedParentCredentials(login_record_json=json.dumps(record))
 
 
 def _default_secrets_env() -> Optional[str]:
@@ -2235,7 +2243,7 @@ def resolved_launch_args(argv: list[str] | None = None) -> argparse.Namespace:
 def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunchOutcome:
     """Submit a normalized request and, unless detached, wait for its terminal state."""
     workspace = build_runtime_bundle(expected_launcher_commit)
-    parent_credentials_json = prepare_federated_parent_credentials(args)
+    parent_credentials = prepare_federated_parent_credentials(args)
 
     if not args.job_name:
         args.job_name = f"rl-iris-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -2463,17 +2471,10 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     # env so the in-pod _ParentControllerClient can re-mint the IAP OIDC token.
     #
     # The parent config file is not part of the task bundle, so forward its contents for
-    # in-pod materialization. Federated controller ingress always forwards the cached
-    # Marin login record after prepare_federated_parent_credentials() has minted a token
-    # from it locally. Direct submission (no --target-cluster) forwards none of this.
+    # in-pod materialization. The credential preflight returns either a refreshable Marin
+    # login record or a short-lived token minted from ambient service-account credentials.
+    # Direct submission (no --target-cluster) forwards none of this.
     if getattr(args, "target_cluster", None) and getattr(args, "ingress_mode", "direct") == "controller":
-        from cloud.iris.ingress_utils import (
-            PARENT_CONTROLLER_CONFIG_ENV,
-            PARENT_CONTROLLER_CONFIG_YAML_ENV,
-            PARENT_CREDENTIALS_JSON_ENV,
-            PARENT_IAP_TOKEN_ENV,
-        )
-
         parent_cfg = (
             getattr(args, "parent_controller_config_in_pod", None)
             or args.parent_cluster_config
@@ -2500,16 +2501,12 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
             v = os.environ.get(k)
             if v:
                 env_vars[k] = v
-        # A CoreWeave pod has no cached `iris login` and no Marin-allowlisted ambient
-        # service account. Forwarding this validated record is therefore mandatory for
-        # the in-pod parent mint; it remains a secret in the submitted job environment.
-        parent_iap_token = os.environ.get(PARENT_IAP_TOKEN_ENV)
-        if parent_credentials_json is None and not parent_iap_token:
+        if parent_credentials is None:
             raise AssertionError("federated controller ingress must have validated parent credentials")
-        if parent_credentials_json is not None:
-            env_vars[PARENT_CREDENTIALS_JSON_ENV] = parent_credentials_json
-        if parent_iap_token:
-            env_vars[PARENT_IAP_TOKEN_ENV] = parent_iap_token
+        if parent_credentials.login_record_json is not None:
+            env_vars[PARENT_CREDENTIALS_JSON_ENV] = parent_credentials.login_record_json
+        if parent_credentials.iap_token is not None:
+            env_vars[PARENT_IAP_TOKEN_ENV] = parent_credentials.iap_token
 
     # Load the cluster config (pydantic IrisClusterConfig) and build the provider
     # bundle, then discover + tunnel to the controller. This mirrors the marin

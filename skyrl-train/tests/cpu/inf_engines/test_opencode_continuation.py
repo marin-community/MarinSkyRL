@@ -107,7 +107,10 @@ async def test_opencode_continues_from_exact_served_ids_across_tool_turn(caplog)
     assert EXACT_PROMPT_TOKEN_IDS_KEY not in backend.chat_requests[0]["json"]
     assert backend.chat_requests[1]["json"][EXACT_PROMPT_TOKEN_IDS_KEY] == [1, 2, 99, 77, 40, 41]
     assert backend.chat_requests[1]["json"]["session_id"] == "trial-a"
-    assert "OpenCode task-agent response reached output limit: trial_id=trial-a" in caplog.text
+    assert any(
+        record.message == "OpenCode task-agent response reached output limit: trial_id=trial-a"
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

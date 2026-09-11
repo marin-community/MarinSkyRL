@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -51,7 +50,6 @@ def test_federated_parent_auth_requires_the_marin_login_record(tmp_path, monkeyp
 def test_federated_parent_auth_forwards_ambient_service_account_iap_token(tmp_path, monkeypatch):
     import iris.cli.connect
     import iris.cluster.config
-    from cloud.iris.ingress_utils import PARENT_IAP_TOKEN_ENV
 
     monkeypatch.setattr(launcher, "MARIN_LOGIN_RECORD_PATH", tmp_path / "marin.json")
     monkeypatch.setattr(launcher, "_resolve_parent_cluster_config", lambda _config: "/configs/marin.yaml")
@@ -62,8 +60,9 @@ def test_federated_parent_auth_forwards_ambient_service_account_iap_token(tmp_pa
         lambda _config, _cluster: argparse.Namespace(iap_provider=argparse.Namespace(get_token=lambda: "iap-token")),
     )
 
-    assert launcher.prepare_federated_parent_credentials(_args()) is None
-    assert os.environ[PARENT_IAP_TOKEN_ENV] == "iap-token"
+    assert launcher.prepare_federated_parent_credentials(_args()) == launcher.FederatedParentCredentials(
+        iap_token="iap-token"
+    )
 
 
 def test_federated_parent_auth_validates_and_returns_the_record(tmp_path, monkeypatch):
@@ -79,7 +78,9 @@ def test_federated_parent_auth_validates_and_returns_the_record(tmp_path, monkey
             return "iap-token"
 
     monkeypatch.setattr(rigging.auth, "IapRefreshTokenProvider", FakeTokenProvider)
-    assert json.loads(launcher.prepare_federated_parent_credentials(_args()) or "{}") == _record()
+    credentials = launcher.prepare_federated_parent_credentials(_args())
+    assert credentials is not None
+    assert json.loads(credentials.login_record_json or "{}") == _record()
 
 
 def test_federated_parent_auth_rejects_a_non_marin_record(tmp_path, monkeypatch):

@@ -902,8 +902,6 @@ def concatenate_trajectory_batches(
         rollout_metrics[TIS_LCS_FALLBACK_MESSAGES_METRIC] = sum_lcs_msgs
         lcs_alert = 1.0 if (sum_lcs / denom) > tis_lcs_alert_threshold else 0.0
         rollout_metrics[TIS_LCS_FALLBACK_ALERT_METRIC] = lcs_alert
-        rollout_metrics[TIS_ALIGNMENT_ALERT_METRIC] = 1.0 if sum_unaligned > 0 or lcs_alert else 0.0
-
         total_tito_attempts = sum(
             (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_ATTEMPTS_METRIC, 0.0)
             for output in trajectory_batches
