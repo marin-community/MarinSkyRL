@@ -122,8 +122,58 @@ jobs:
           path: ${{ matrix.log }}
           if-no-files-found: ignore
 
+  opencode-gate:
+    name: opencode-h100
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      JOB_NAME: marinskyrl-nightly-opencode-${{ github.run_id }}-${{ github.run_attempt }}
+      TARGET_CLUSTER: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
+      MODEL: Qwen/Qwen3-8B
+      RUNTIME_COMMIT: ${{ github.sha }}
+      LOG_PATH: opencode-nightly.log
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: github-iris@hai-gcp-models.iam.gserviceaccount.com
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT }}
+
+      - name: Install the launcher and Iris client
+        run: |
+          uv sync --frozen --extra cpu
+          uv tool install --prerelease allow "$IRIS_CLIENT_REQUIREMENT"
+          echo "$(uv tool dir)/marin-core/bin" >> "$GITHUB_PATH"
+
+      - name: Run the OpenCode RL gate
+        run: bash skyrl-train/ci/marin_nightly/run_opencode.sh
+
+      - name: Cancel any Iris job the run left behind
+        if: always()
+        run: iris --cluster marin job cancel "/runner/$JOB_NAME" || true
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: opencode-h100-run-log
+          path: ${{ env.LOG_PATH }}
+          if-no-files-found: ignore
+
   report-failure:
-    needs: [gpu-gate]
+    needs: [gpu-gate, opencode-gate]
     if: >-
       always() && github.event_name == 'schedule' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
@@ -135,12 +185,13 @@ jobs:
     steps:
       - uses: marin-community/marin-style/actions/report-failure@5094279da60b47b9a8fa8effaf7f73cd13f1e96f  # v0.4.0
         with:
-          lane: gsm8k-h100-and-grug-vllm-gb200
+          lane: marinskyrl-nightly-gpu-gates
           trigger-token: ${{ secrets.LOOM_TRIGGER_GH_TOKEN }}
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
           triage-notes: >-
-            The nightly runs dense H100 GRPO and a Grug GB200 rollout/train/broadcast
-            cycle through WIF-authenticated Iris jobs. Separate Iris or cluster failures
-            from lock, native-extension, and training regressions. A repository-local PR
-            that fixes the tracked failure must end its body with a Fixes link to this
-            issue. Use Part of only when the PR does not restore the lane.
+            The nightly runs dense H100 GRPO, Grug rollout/train/broadcast gates, and an
+            eight-H100 OpenCode/Daytona/RecordProxy RL step through WIF-authenticated Iris
+            jobs. Separate Iris, cluster, and Daytona failures from lock, continuation,
+            native-extension, and training regressions. A repository-local PR that fixes
+            the tracked failure must end its body with a Fixes link to this issue. Use Part
+            of only when the PR does not restore the lane.

@@ -1,0 +1,42 @@
+{
+  "provenance": {
+    "what": "Gate for one production-shaped OpenCode terminal-bench RL step: eight concurrent Daytona trials, Qwen/Qwen3-8B, RecordProxy literal capture, exact full-TITO assembly, TIS, FSDP2 policy forward/backward, and vLLM weight synchronization on one RNO2A H100x8 node.",
+    "produced_by": "skyrl-train/ci/marin_nightly/run_opencode.sh, submitted by .github/workflows/marin-nightly.yaml",
+    "why_these_thresholds": [
+      "One optimizer step is enough for this infrastructure gate: the signal is whether all eight distinct three-turn tasks traverse OpenCode, Daytona, the controller RecordProxy, full-TITO assembly, TIS, and the policy update without a fallback or masked failure.",
+      "Eight correlated trials proves n_concurrent_trials=8 completed through the CLI literal bridge. At least 24 correlated turns proves every task made the three separate model/tool turns required by the corpus.",
+      "Exact-match and full-TITO success must both be 1.0. LCS fallback, unaligned tokens, full-TITO declines, and TIS batch skips must be exactly zero; accepting approximate recovery here would conceal the regression this lane exists to catch.",
+      "The 2400-second wall-clock budget includes RNO2A allocation, frozen runtime setup, model startup, Daytona snapshot or sandbox startup, eight rollouts, and one optimizer step. Tighten it toward observed p95 after enough scheduled runs exist."
+    ],
+    "cost": "About 2 H100-hours plus eight short-lived Daytona sandboxes per run at a 15-minute observed target; the hard wall-clock allowance is 40 minutes (5.33 H100-hours).",
+    "tightening": "After enough daily runs, lower max_wall_clock_seconds to observed p95. Do not relax any exact-token threshold."
+  },
+  "min_train_steps": 1,
+  "finite_metrics": [
+    "policy/policy_loss",
+    "policy/final_loss",
+    "reward/avg_raw_reward",
+    "generate/failed_trajectory_fraction",
+    "generate/literal_bridge/correlated_trials",
+    "generate/literal_bridge/correlated_turns",
+    "generate/tis/exact_match_fraction",
+    "generate/tis/lcs_fallback_fraction",
+    "generate/tis/unaligned_fraction",
+    "generate/tis/tito_full/success_fraction",
+    "generate/tis/tito_full/decline_count",
+    "tis/skipped_fraction"
+  ],
+  "bounds": {
+    "reward/avg_raw_reward": { "minimum": 0.0, "maximum": 1.0 },
+    "generate/failed_trajectory_fraction": { "minimum": 0.0, "maximum": 0.0 },
+    "generate/literal_bridge/correlated_trials": { "minimum": 8.0, "maximum": 8.0 },
+    "generate/literal_bridge/correlated_turns": { "minimum": 24.0, "maximum": 1000.0 },
+    "generate/tis/exact_match_fraction": { "minimum": 1.0, "maximum": 1.0 },
+    "generate/tis/lcs_fallback_fraction": { "minimum": 0.0, "maximum": 0.0 },
+    "generate/tis/unaligned_fraction": { "minimum": 0.0, "maximum": 0.0 },
+    "generate/tis/tito_full/success_fraction": { "minimum": 1.0, "maximum": 1.0 },
+    "generate/tis/tito_full/decline_count": { "minimum": 0.0, "maximum": 0.0 },
+    "tis/skipped_fraction": { "minimum": 0.0, "maximum": 0.0 }
+  },
+  "max_wall_clock_seconds": 2400
+}

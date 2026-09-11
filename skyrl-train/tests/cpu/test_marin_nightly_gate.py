@@ -11,6 +11,7 @@ import pytest
 from ci.marin_nightly.gate import GateSpec, MetricBound, RewardTrend, check_run, load_spec, parse_metrics
 
 SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b.json"
+OPENCODE_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opencode-qwen3-8b.json"
 
 # What the trainer actually writes: loguru decorates the line, so the payload is embedded
 # rather than anchored at the start. Keep this in the shape the trainer emits it.
@@ -166,3 +167,34 @@ def test_shipped_spec_gates_a_healthy_run():
     """The checked-in spec has to stay loadable by the gate and pass a plausible run."""
     spec = load_spec(SHIPPED_SPEC)
     assert check_run(parse_metrics(healthy_log(steps=spec.min_train_steps)), spec, wall_clock_seconds=600) == []
+
+
+def test_opencode_spec_requires_exact_concurrent_literal_coverage():
+    spec = load_spec(OPENCODE_SPEC)
+    exact_metrics = {
+        "generate/failed_trajectory_fraction": 0.0,
+        "generate/literal_bridge/correlated_trials": 8.0,
+        "generate/literal_bridge/correlated_turns": 24.0,
+        "generate/tis/exact_match_fraction": 1.0,
+        "generate/tis/lcs_fallback_fraction": 0.0,
+        "generate/tis/unaligned_fraction": 0.0,
+        "generate/tis/tito_full/success_fraction": 1.0,
+        "generate/tis/tito_full/decline_count": 0.0,
+        "tis/skipped_fraction": 0.0,
+    }
+    healthy = parse_metrics(mirror_line(1, **exact_metrics))
+    assert check_run(healthy, spec, wall_clock_seconds=900) == []
+
+    approximate = parse_metrics(
+        mirror_line(
+            1,
+            **{
+                **exact_metrics,
+                "generate/tis/exact_match_fraction": 0.99,
+                "generate/tis/lcs_fallback_fraction": 0.01,
+            },
+        )
+    )
+    failures = check_run(approximate, spec, wall_clock_seconds=900)
+    assert any("exact_match_fraction" in failure for failure in failures)
+    assert any("lcs_fallback_fraction" in failure for failure in failures)

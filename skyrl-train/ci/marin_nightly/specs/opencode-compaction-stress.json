@@ -1,0 +1,81 @@
+{
+  "provenance": {
+    "what": "Manual RNO2A OpenCode boundary stress: automatic compaction, invalid UTF-8 tool output, a single-turn output cap, agent timeout, verifier timeout, and normal exact continuations in one concurrent RL batch.",
+    "produced_by": "OPENCODE_MODE=compaction-stress skyrl-train/ci/marin_nightly/run_opencode.sh",
+    "why_these_thresholds": [
+      "The batch must reach a finite optimizer step while recording at least one summarized and one length-truncated trajectory.",
+      "The deliberately short agent and verifier deadlines must surface their typed errors without hanging the other concurrent trials.",
+      "Literal correlation, exact token alignment, full-TITO assembly, and zero skipped TIS batches must survive compaction and malformed terminal bytes."
+    ],
+    "tightening": "The bounds are structural and should remain exact except correlated-turn count, which may vary with model tool-use behavior."
+  },
+  "min_train_steps": 1,
+  "finite_metrics": [
+    "policy/policy_loss",
+    "policy/final_loss",
+    "generate/trajectories_summarized",
+    "generate/trajectories_truncated",
+    "generate/errors/AgentTimeoutError",
+    "generate/errors/VerifierTimeoutError",
+    "generate/literal_bridge/correlated_trials",
+    "generate/literal_bridge/correlated_turns",
+    "generate/tis/exact_match_fraction",
+    "generate/tis/lcs_fallback_fraction",
+    "generate/tis/unaligned_fraction",
+    "generate/tis/tito_full/success_fraction",
+    "generate/tis/tito_full/decline_count",
+    "tis/skipped_fraction"
+  ],
+  "bounds": {
+    "generate/trajectories_summarized": {
+      "minimum": 1,
+      "maximum": 8
+    },
+    "generate/trajectories_truncated": {
+      "minimum": 1,
+      "maximum": 8
+    },
+    "generate/errors/AgentTimeoutError": {
+      "minimum": 1,
+      "maximum": 1
+    },
+    "generate/errors/VerifierTimeoutError": {
+      "minimum": 1,
+      "maximum": 1
+    },
+    "generate/literal_bridge/correlated_trials": {
+      "minimum": 7,
+      "maximum": 8
+    },
+    "generate/literal_bridge/correlated_turns": {
+      "minimum": 12,
+      "maximum": 1000
+    },
+    "generate/tis/exact_match_fraction": {
+      "minimum": 1,
+      "maximum": 1
+    },
+    "generate/tis/lcs_fallback_fraction": {
+      "minimum": 0,
+      "maximum": 0
+    },
+    "generate/tis/unaligned_fraction": {
+      "minimum": 0,
+      "maximum": 0
+    },
+    "generate/tis/tito_full/success_fraction": {
+      "minimum": 1,
+      "maximum": 1
+    },
+    "generate/tis/tito_full/decline_count": {
+      "minimum": 0,
+      "maximum": 0
+    },
+    "tis/skipped_fraction": {
+      "minimum": 0,
+      "maximum": 0
+    }
+  },
+  "max_wall_clock_seconds": 2400
+}
+
