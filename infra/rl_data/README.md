@@ -94,3 +94,14 @@ The DAPO adapter streams by default and stops after 20,000 unique prompts unless
 `--unique-cap` overrides it. DAPO's default minimum of 1,000 unique prompts catches cleanup
 regressions that collapse the dataset to a shared instruction prefix. MATH-500 is rejected as
 a training source unless `--allow-train-on-test` is explicit.
+
+`gretel_text_to_sql` (`gretelai/synthetic_text_to_sql`, Apache-2.0) is a single-turn source on the
+two-sided `text_to_sql` verifier contract, which rebuilds an in-memory SQLite database from each
+row's DDL and scores a candidate query by result-set equivalence on the seeded database and on a
+copy with every third row removed. The prompt carries the question and `CREATE TABLE` schema; the
+seed `INSERT`s and reference query travel in `reward_model.ground_truth`. `sql_complexity`,
+`sql_task_type`, `domain`, and whether the reference has a top-level `ORDER BY` are retained in
+`extra_info`. The static transform drops rows whose reference is not a single deterministic
+`SELECT` or whose context lacks unqualified `CREATE TABLE` and `INSERT` statements. Unlike the
+code sources, `validate_example` runs the reference here — a `SELECT` over an ephemeral database
+has no filesystem or network — so every emitted row has an executing reference query.
