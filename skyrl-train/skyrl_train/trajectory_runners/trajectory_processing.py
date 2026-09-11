@@ -16,6 +16,8 @@ from skyrl_train.trajectory_runners.base import (
 from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
 from skyrl_train.metric_names import (
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
+    LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
+    LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
     TIS_ALIGNED_TOKENS_METRIC,
     TIS_ALIGNMENT_ALERT_METRIC,
     TIS_METRIC_PREFIX,
@@ -902,13 +904,43 @@ def concatenate_trajectory_batches(
         rollout_metrics[TIS_LCS_FALLBACK_ALERT_METRIC] = lcs_alert
         rollout_metrics[TIS_ALIGNMENT_ALERT_METRIC] = 1.0 if sum_unaligned > 0 or lcs_alert else 0.0
 
+        total_tito_attempts = sum(
+            (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_ATTEMPTS_METRIC, 0.0)
+            for output in trajectory_batches
+        )
+        total_tito_successes = sum(
+            (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_SUCCESS_FRACTION_METRIC, 0.0)
+            * (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_ATTEMPTS_METRIC, 0.0)
+            for output in trajectory_batches
+        )
+        rollout_metrics[TIS_TITO_FULL_ATTEMPTS_METRIC] = total_tito_attempts
+        rollout_metrics[TIS_TITO_FULL_SUCCESS_FRACTION_METRIC] = (
+            total_tito_successes / total_tito_attempts if total_tito_attempts else 0.0
+        )
+        total_tito_declines = sum(
+            (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_DECLINE_COUNT_METRIC, 0.0)
+            for output in trajectory_batches
+        )
+        rollout_metrics[TIS_TITO_FULL_DECLINE_COUNT_METRIC] = total_tito_declines
+        rollout_metrics[TIS_ALIGNMENT_ALERT_METRIC] = (
+            1.0 if sum_unaligned > 0 or lcs_alert or total_tito_declines > 0 else 0.0
+        )
+        for reason in TitoFullDeclineReason:
+            name = f"{TIS_TITO_FULL_DECLINE_METRIC_PREFIX}{reason.value}"
+            rollout_metrics[name] = sum(
+                (output.get("rollout_metrics") or {}).get(name, 0.0) for output in trajectory_batches
+            )
+
     rollout_metrics.update(_merge_batch_failure_metrics(trajectory_batches))
 
     # Retention counts per group, and this rebuilds rollout_metrics from responses and rewards, so
     # the per-group counters have to be carried across or the archives are written unobserved.
     for output in trajectory_batches:
         for name, value in (output.get("rollout_metrics") or {}).items():
-            if name.startswith((RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX)):
+            if name.startswith((RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX)) or name in {
+                LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
+                LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
+            }:
                 rollout_metrics[name] = rollout_metrics.get(name, 0.0) + value
 
     result["rollout_metrics"] = rollout_metrics

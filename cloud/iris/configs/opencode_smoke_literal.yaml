@@ -77,8 +77,10 @@ terminal_bench:
 trainer:
   strategy: fsdp2
   algorithm:
-    advantage_estimator: rloo_n
-    group_advantage_min_size: 4
+    # This is an infrastructure gate, not a quality run. One rollout for each of
+    # eight distinct tasks gives the eight-way policy mesh useful work without
+    # multiplying the Daytona load by a group-relative estimator's sample count.
+    advantage_estimator: reinforce++
     use_kl_loss: false
     kl_loss_coef: 0.0
     eps_clip_low: 0.2
@@ -150,8 +152,8 @@ generator:
   inference_engine_tensor_parallel_size: 1
   num_inference_engines: null
 
-  n_samples_per_prompt: 8
-  eval_n_samples_per_prompt: 8
+  n_samples_per_prompt: 1
+  eval_n_samples_per_prompt: 1
 
   gpu_memory_utilization: 0.85
 
