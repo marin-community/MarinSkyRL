@@ -110,7 +110,7 @@ class SkyRLOpenAIServingChat(OpenAIServingChat):
             raise ValueError("Exact OpenCode continuation requires one rendered prompt")
         return conversation, [TokensPrompt(prompt_token_ids=list(exact_ids))]
 
-    async def create_chat_completion_with_token_ids(
+    async def create_chat_completion_with_exact_prompt(
         self,
         request: ChatCompletionRequest,
         raw_request: "_MinimalRequest",
@@ -2040,7 +2040,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 if exact_prompt_token_ids is None:
                     generator = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
                 else:
-                    generator = await self.openai_serving_chat.create_chat_completion_with_token_ids(
+                    generator = await self.openai_serving_chat.create_chat_completion_with_exact_prompt(
                         request, minimal_request, exact_prompt_token_ids
                     )
                 assert isinstance(generator, (ChatCompletionResponse, ErrorResponse))
@@ -2142,7 +2142,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             if exact_prompt_token_ids is None:
                 result = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
             else:
-                result = await self.openai_serving_chat.create_chat_completion_with_token_ids(
+                result = await self.openai_serving_chat.create_chat_completion_with_exact_prompt(
                     request, minimal_request, exact_prompt_token_ids
                 )
 

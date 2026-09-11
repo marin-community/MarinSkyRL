@@ -45,7 +45,11 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Protocol, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Protocol, Tuple
+
+if TYPE_CHECKING:
+    from rigging.cluster_manifest import ClusterAuth
+    from rigging.credentials import ClientCredentials
 
 # The sandbox-facing api_key. The capability token rides in the URL path, so no
 # bearer is needed; but installed OpenAI-compatible agents refuse to start
@@ -761,7 +765,7 @@ PARENT_CREDENTIALS_JSON_ENV = "OTAGENT_MARIN_CREDENTIALS_JSON"
 PARENT_IAP_TOKEN_ENV = "OTAGENT_MARIN_IAP_TOKEN"
 
 
-def _parent_client_credentials(cluster_name: str, cluster_auth: Any):
+def _parent_client_credentials(cluster_name: str, cluster_auth: ClusterAuth) -> ClientCredentials:
     """Resolve parent credentials, preferring a forwarded short-lived IAP token."""
     from rigging.auth import StaticTokenProvider
     from rigging.credentials import ClientCredentials, credentials_for

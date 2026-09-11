@@ -14,8 +14,9 @@ mode="${OPENCODE_MODE:-nightly}"
 job_user="${IRIS_JOB_USER:-${USER:?USER must be set}}"
 job_path="/${job_user}/${job_name}"
 config_dir="$(uv run --frozen python -c 'from pathlib import Path; import iris; print(Path(iris.__file__).parent / "config")')"
+task_root="$(PYTHONPATH=. uv run --frozen python -c 'from cloud.iris.runtime_environment import MARINSKYRL_TASK_ROOT; print(MARINSKYRL_TASK_ROOT)')"
 started_at="$(date +%s)"
-train_data="/app/marinskyrl/skyrl-train/ci/opencode_smoke/tasks/exact-continuation"
+train_data="$task_root/skyrl-train/ci/opencode_smoke/tasks/exact-continuation"
 gate_spec="skyrl-train/ci/marin_nightly/specs/opencode-qwen3-8b.json"
 extra_overrides=()
 
@@ -23,7 +24,7 @@ case "$mode" in
     nightly)
         ;;
     compaction-stress)
-        train_data="/app/marinskyrl/skyrl-train/ci/opencode_smoke/tasks/boundary-mix"
+        train_data="$task_root/skyrl-train/ci/opencode_smoke/tasks/boundary-mix"
         gate_spec="skyrl-train/ci/marin_nightly/specs/opencode-compaction-stress.json"
         extra_overrides=(
             context_budget.request_window_tokens=32768
@@ -37,7 +38,7 @@ case "$mode" in
         )
         ;;
     overflow-stress)
-        train_data="/app/marinskyrl/skyrl-train/ci/opencode_smoke/tasks/boundary-mix"
+        train_data="$task_root/skyrl-train/ci/opencode_smoke/tasks/boundary-mix"
         gate_spec="skyrl-train/ci/marin_nightly/specs/opencode-overflow-stress.json"
         extra_overrides=(
             context_budget.request_window_tokens=16384

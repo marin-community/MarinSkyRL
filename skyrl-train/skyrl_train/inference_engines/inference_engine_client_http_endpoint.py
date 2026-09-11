@@ -598,8 +598,6 @@ def serve(
         bridge_stats: Shared accumulator for HTTP bridge metrics
         enable_opencode_exact_continuation: Preserve exact served token prefixes for terminal-bench OpenCode
     """
-    # Set the backend before constructing optional request-scoped bridge state.
-    set_global_state(inference_engine_client, None)
     app = create_app(
         bridge_stats,
         backend=inference_engine_client,
