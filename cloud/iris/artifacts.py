@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import posixpath
@@ -95,7 +96,11 @@ def _copy_inventory(
             try:
                 filesystem.get_file(source_path, str(local_path))
                 break
-            except TimeoutError:
+            except (TimeoutError, OSError) as error:
+                # s3fs maps HTTP 503 / SlowDown / ServiceUnavailable to OSError(EBUSY); treat
+                # that transient class like a read timeout. Any other OSError still propagates.
+                if not isinstance(error, TimeoutError) and error.errno != errno.EBUSY:
+                    raise
                 # A failed multipart read can leave a partial destination.
                 # Retry this file, retaining earlier verified files in staging.
                 local_path.unlink(missing_ok=True)
