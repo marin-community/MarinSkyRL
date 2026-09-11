@@ -7,6 +7,7 @@ both on the launch host and in the pod.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -55,12 +56,21 @@ _PATH_EXTENSIONS = {
 }
 
 
+_URI_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+
 def looks_like_file_path(value: str) -> bool:
     """Check if a string looks like a file path (not an HF repo ID)."""
     if not isinstance(value, str) or not value:
         return False
 
     if is_hugging_face_repo_id(value):
+        return False
+
+    # A URI with a scheme (s3://, gs://, https://) is an object-store or remote
+    # location, never a repo-relative file. Resolving it against PROJECT_ROOT
+    # produced ``/app/marinskyrl/s3:/bucket/...`` and sent receipts into the pod.
+    if _URI_SCHEME.match(value):
         return False
 
     if value.startswith("/") or value.startswith("~"):
