@@ -43,6 +43,11 @@ class NamedWeightsUpdateRequest(TypedDict):
 
 class InferenceEngineInterface(ABC):
     weight_sync_relative_rank_offset: int | None = None
+    max_model_len: int | None = None
+
+    def get_model_max_len(self) -> int | None:
+        """Return the context limit resolved by the live serving backend."""
+        return self.max_model_len
 
     @abstractmethod
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -69,6 +74,15 @@ class InferenceEngineInterface(ABC):
         Returns a plain dict, either a CompletionResponse or an ErrorResponse.
         The specific fields of the response/request depend on the engine's backend (e.g. for vllm
         these are defined in vllm.entrypoints.openai.protocol).
+        """
+        raise NotImplementedError()
+
+    async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Tokenize through the serving backend when supported.
+
+        ``request_payload`` contains the JSON request body under ``json`` and
+        serialized HTTP headers under ``headers``. Implementations return the
+        backend's native tokenization or error response as a plain dictionary.
         """
         raise NotImplementedError()
 

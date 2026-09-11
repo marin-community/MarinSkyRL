@@ -174,6 +174,66 @@ def _check_completions_outputs(prompts, outputs, test_type, backend):
 
 
 @pytest.mark.vllm
+def test_tokenize_matches_chat_prompt_ids_for_auto_content_format(ray_init_fixture, tmp_path):
+    chat_template = tmp_path / "content-format-sensitive.jinja"
+    chat_template.write_text(
+        "{% for message in messages %}"
+        "{% if message['content'] is string %}STRING:{{ message['content'] }}"
+        "{% else %}OPENAI:{{ message['content'][0]['text'] }}{% endif %}"
+        "{% endfor %}{% if add_generation_prompt %}ASSISTANT:{% endif %}",
+        encoding="utf-8",
+    )
+
+    server_thread = None
+    try:
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
+        cfg.trainer.placement.colocate_all = True
+        cfg.generator.weight_sync_backend = "nccl"
+        cfg.trainer.strategy = "fsdp2"
+        client, _ = init_inference_engines(
+            cfg=cfg,
+            use_local=True,
+            async_engine=True,
+            tp_size=1,
+            colocate_all=True,
+            backend="vllm",
+            model=MODEL,
+            num_inference_engines=1,
+            sleep_level=1,
+            engine_init_kwargs={"custom_chat_template_chat_completion_path": str(chat_template)},
+        )
+
+        def run_server():
+            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
+
+        request_json = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "continue"}],
+            "add_generation_prompt": True,
+        }
+        chat_response = requests.post(
+            f"http://{SERVER_HOST}:{SERVER_PORT}/v1/chat/completions",
+            json={**request_json, "max_tokens": 1, "return_token_ids": True},
+        )
+        tokenize_response = requests.post(
+            f"http://{SERVER_HOST}:{SERVER_PORT}/tokenize",
+            json=request_json,
+        )
+
+        assert chat_response.status_code == HTTPStatus.OK
+        assert tokenize_response.status_code == HTTPStatus.OK
+        assert tokenize_response.json()["tokens"] == chat_response.json()["prompt_token_ids"]
+    finally:
+        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
+            server_thread.join(timeout=5)
+
+
+@pytest.mark.vllm
 def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
     """
     Since /completions endpoint supports both single and batched requests, and we support
