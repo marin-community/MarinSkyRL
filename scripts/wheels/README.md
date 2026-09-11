@@ -25,6 +25,10 @@ to `dist/`, with their SHA-256 digests in `SHA256SUMS`. FlashAttention targets S
 the other projects retain their upstream architecture choices. No aarch64 wheel
 is built by this script.
 
+The source checkout and recursive submodules must be clean. The script rejects
+tracked changes and unexpected untracked files; Git-ignored build outputs remain
+available for cache reuse.
+
 Before publishing a wheel, install its exact bytes in the proposed runtime and
 run its native forward and backward checks on H100. Publish the source commits,
 build environment, and checksums with the wheel assets. Adoption URLs and wheel

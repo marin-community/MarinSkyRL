@@ -48,7 +48,13 @@ if [[ ! -d "$build_dir/source" ]]; then
     git clone --depth 1 --branch "$source_tag" "https://github.com/$repository.git" "$build_dir/source"
 fi
 test "$(git -C "$build_dir/source" rev-parse HEAD)" = "$source_commit"
+if [[ -n "$(git -C "$build_dir/source" status --porcelain --untracked-files=all --ignore-submodules=none)" ]]; then
+    echo "Build source must be clean: $build_dir/source" >&2
+    exit 1
+fi
 git -C "$build_dir/source" submodule update --init --recursive
+git -C "$build_dir/source" submodule foreach --quiet --recursive \
+    'test -z "$(git status --porcelain --untracked-files=all --ignore-submodules=none)"'
 
 export VIRTUAL_ENV="$build_dir/venv"
 export CUDA_HOME="$VIRTUAL_ENV/lib/python3.12/site-packages/nvidia/cu13"
