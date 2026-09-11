@@ -99,7 +99,9 @@ trainer:
   micro_train_batch_size_per_gpu: 1
 
 
-  use_sample_packing: true
+  # The smoke runtime does not install FlashAttention 2, which sample packing
+  # requires. These short trajectories do not benefit from packing.
+  use_sample_packing: false
 
   eval_interval: 999999
   eval_before_train: false
