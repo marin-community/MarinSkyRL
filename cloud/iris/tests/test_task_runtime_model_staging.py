@@ -79,10 +79,22 @@ def test_invalid_checkpoint_staging_fails_before_any_ray_process_starts(tmp_path
 
 
 @pytest.mark.parametrize("failures", [1, 3])
-def test_model_staging_retries_timed_out_file_without_recopying_completed_files(tmp_path, monkeypatch, failures):
+@pytest.mark.parametrize("transient", ["timeout", "service-unavailable"])
+def test_model_staging_retries_timed_out_file_without_recopying_completed_files(
+    tmp_path, monkeypatch, failures, transient
+):
+    import errno
     from pathlib import Path
     from fsspec.exceptions import FSTimeoutError
     from cloud.iris import artifacts
+
+    def transient_error():
+        if transient == "timeout":
+            return FSTimeoutError("multipart read timed out")
+        # s3fs translates HTTP 503 / SlowDown to OSError(EBUSY).
+        return OSError(errno.EBUSY, "Service Unavailable")
+
+    expected_error = FSTimeoutError if transient == "timeout" else OSError
 
     source = tmp_path / "source"
     source.mkdir()
@@ -98,7 +110,7 @@ def test_model_staging_retries_timed_out_file_without_recopying_completed_files(
         if name == "b-weights" and calls.count(name) <= failures:
             assert not Path(local_path).exists()
             Path(local_path).write_bytes(b"partial")
-            raise FSTimeoutError("multipart read timed out")
+            raise transient_error()
         return original(filesystem, source_path, local_path, **kwargs)
 
     monkeypatch.setattr(LocalFileSystem, "get_file", download)
@@ -106,7 +118,7 @@ def test_model_staging_retries_timed_out_file_without_recopying_completed_files(
     monkeypatch.setattr(artifacts.time, "sleep", waits.append)
     request = artifacts.ArtifactSource(source.as_uri(), "immutable-test", str(destination))
     if failures == 3:
-        with pytest.raises(FSTimeoutError):
+        with pytest.raises(expected_error):
             artifacts.materialize(request)
         assert not destination.exists()
         assert not list(tmp_path.glob(".materialized.staging-*"))
