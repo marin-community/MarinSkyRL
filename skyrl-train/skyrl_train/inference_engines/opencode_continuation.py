@@ -175,14 +175,22 @@ class OpenCodeContinuationManager:
         body = request_payload["json"]
         messages = body["messages"]
         prior_count = len(state.messages)
-        if (
-            _render_signature(body) != state.render_signature
-            or len(messages) <= prior_count
-            or messages[:prior_count] != state.messages
-            or not isinstance(messages[prior_count], dict)
-            or messages[prior_count].get("role") != "assistant"
-        ):
-            logger.info("OpenCode continuation reset for rewritten trial context")
+        reset_reason = None
+        if _render_signature(body) != state.render_signature:
+            reset_reason = "render signature changed"
+        elif len(messages) <= prior_count:
+            reset_reason = "history did not grow"
+        elif messages[:prior_count] != state.messages:
+            reset_reason = "history prefix was rewritten"
+        elif not isinstance(messages[prior_count], dict) or messages[prior_count].get("role") != "assistant":
+            reset_reason = "next message was not the served assistant turn"
+        if reset_reason is not None:
+            logger.info(
+                "OpenCode continuation reset: %s (prior_messages=%d, current_messages=%d)",
+                reset_reason,
+                prior_count,
+                len(messages),
+            )
             return None
 
         history_messages = messages[:prior_count]
