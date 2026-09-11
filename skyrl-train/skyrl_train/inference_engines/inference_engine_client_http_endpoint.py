@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from skyrl_train.inference_engines.opencode_continuation import OpenCodeContinuationManager
 from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator
 
 
@@ -93,7 +94,7 @@ def is_engine_error_response(response: Dict[str, Any]) -> bool:
     return "error" in response or response.get("object", "") == "error"
 
 
-def set_global_state(inference_engine_client: InferenceHTTPBackend, uvicorn_server: uvicorn.Server):
+def set_global_state(inference_engine_client: InferenceHTTPBackend, uvicorn_server: uvicorn.Server | None):
     """Set the global inference engine client."""
     global _global_inference_engine_client
     global _global_uvicorn_server
@@ -267,7 +268,12 @@ async def _await_with_disconnect(raw_request: Request, backend_request: Coroutin
         await asyncio.gather(backend_task, disconnect_task, return_exceptions=True)
 
 
-async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stats: HTTPBridgeStatsAccumulator):
+async def handle_openai_request(
+    raw_request: Request,
+    endpoint: str,
+    bridge_stats: HTTPBridgeStatsAccumulator,
+    continuation_manager: OpenCodeContinuationManager | None = None,
+):
     """Handle a request implemented by the policy model's serving backend.
 
     Returns ``StreamingResponse`` for ``stream:true`` chat-completions and
@@ -298,7 +304,10 @@ async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stat
 
         # ── Streaming branch ──────────────────────────────────────────────
         if request_json.get("stream", False) and endpoint == "/chat/completions":
+            lease = await continuation_manager.begin(payload) if continuation_manager is not None else None
             raw_gen = _global_inference_engine_client.chat_completion_stream(payload)
+            if lease is not None:
+                raw_gen = lease.capture(raw_gen)
             return StreamingResponse(
                 content=_safe_sse_stream(raw_gen, endpoint=endpoint, bridge_stats=bridge_stats),
                 media_type="text/event-stream",
@@ -457,10 +466,17 @@ async def handle_models_request(
 def create_app(
     bridge_stats: HTTPBridgeStatsAccumulator | None = None,
     *,
+    backend: InferenceHTTPBackend | None = None,
     event_loop_lag_interval_seconds: float = 0.5,
+    enable_opencode_exact_continuation: bool = False,
 ) -> fastapi.FastAPI:
     """Create the FastAPI application."""
     bridge_stats = bridge_stats or HTTPBridgeStatsAccumulator()
+    continuation_manager = None
+    if enable_opencode_exact_continuation:
+        if backend is None:
+            raise ValueError("OpenCode exact continuation requires an explicit inference backend")
+        continuation_manager = OpenCodeContinuationManager(backend)
 
     @asynccontextmanager
     async def lifespan(app: fastapi.FastAPI):
@@ -513,7 +529,12 @@ def create_app(
         - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
         - https://docs.sglang.ai/basic_usage/openai_api_completions.html
         """
-        return await handle_openai_request(raw_request, endpoint="/chat/completions", bridge_stats=bridge_stats)
+        return await handle_openai_request(
+            raw_request,
+            endpoint="/chat/completions",
+            bridge_stats=bridge_stats,
+            continuation_manager=continuation_manager,
+        )
 
     @app.post("/v1/completions")
     async def completions(raw_request: Request):
@@ -583,6 +604,7 @@ def serve(
     port: int = 8000,
     log_level: str = "info",
     bridge_stats: HTTPBridgeStatsAccumulator | None = None,
+    enable_opencode_exact_continuation: bool = False,
 ):
     """
     Start the HTTP endpoint.
@@ -593,9 +615,15 @@ def serve(
         port: Port to bind to (default: 8000)
         log_level: Logging level (default: "info")
         bridge_stats: Shared accumulator for HTTP bridge metrics
+        enable_opencode_exact_continuation: Preserve exact served token prefixes for terminal-bench OpenCode
     """
-    # Create app
-    app = create_app(bridge_stats)
+    # Set the backend before constructing optional request-scoped bridge state.
+    set_global_state(inference_engine_client, None)
+    app = create_app(
+        bridge_stats,
+        backend=inference_engine_client,
+        enable_opencode_exact_continuation=enable_opencode_exact_continuation,
+    )
 
     # Configure logging
     logging.basicConfig(level=getattr(logging, log_level.upper()))

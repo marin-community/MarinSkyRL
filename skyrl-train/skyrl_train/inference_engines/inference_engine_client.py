@@ -32,6 +32,7 @@ import random
 import ray.exceptions
 from dataclasses import dataclass, field
 from http import HTTPStatus
+from skyrl_train.config.trajectory_runner_capabilities import opencode_exact_continuation_enabled
 
 ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
 ABORT_FINISH_REASON = "abort"
@@ -72,6 +73,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.enable_http_endpoint = full_config.generator.enable_http_endpoint
         self.http_endpoint_host = full_config.generator.http_endpoint_host
         self.http_endpoint_port = full_config.generator.http_endpoint_port
+        self.enable_opencode_exact_continuation = opencode_exact_continuation_enabled(full_config)
         self.generation_paused_event = threading.Event()
         self._dead_engines: set[int] = set()
 
@@ -1011,6 +1013,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 "port": self.http_endpoint_port,
                 "log_level": "warning",
                 "bridge_stats": self._http_bridge_stats,
+                "enable_opencode_exact_continuation": self.enable_opencode_exact_continuation,
             },
             daemon=True,
         )
