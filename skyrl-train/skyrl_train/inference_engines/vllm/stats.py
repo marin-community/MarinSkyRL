@@ -60,6 +60,10 @@ class VLLMCumulativeStats:
     prefix_cache_hits: int = 0
     prefix_cache_queries: int = 0
     preemptions: int = 0
+    # Speculative decoding counters; zero unless the engine was built with a speculative_config.
+    spec_decode_drafts: int = 0
+    spec_decode_draft_tokens: int = 0
+    spec_decode_accepted_tokens: int = 0
     finished_by_reason: Mapping[str, int] = field(default_factory=lambda: {reason: 0 for reason in VLLM_FINISH_REASONS})
 
 
@@ -284,6 +288,9 @@ def snapshot_vllm_prometheus_metrics(metrics: Sequence[Any], engine_index: str) 
             prefix_cache_hits=int(values.get("prefix_cache_hits", 0)),
             prefix_cache_queries=int(values.get("prefix_cache_queries", 0)),
             preemptions=int(values.get("num_preemptions", 0)),
+            spec_decode_drafts=int(values.get("spec_decode_num_drafts", 0)),
+            spec_decode_draft_tokens=int(values.get("spec_decode_num_draft_tokens", 0)),
+            spec_decode_accepted_tokens=int(values.get("spec_decode_num_accepted_tokens", 0)),
             finished_by_reason=finished,
         ),
         histograms=tuple(histograms),
