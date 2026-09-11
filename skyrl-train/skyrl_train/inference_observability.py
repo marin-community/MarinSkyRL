@@ -95,6 +95,13 @@ def _engine_trainer_metrics(engines: tuple[VLLMEngineStatsSnapshot, ...]) -> dic
         "vllm/latency_ttft_p90": max(item.latency_ttft_p90 for item in intervals),
         "vllm/total_finished_requests": float(finished),
         "vllm/total_preempted_reqs": float(sum(item.preempted_reqs for item in intervals)),
+        "vllm/cumulative_spec_decode_drafts": float(sum(engine.cumulative.spec_decode_drafts for engine in engines)),
+        "vllm/cumulative_spec_decode_draft_tokens": float(
+            sum(engine.cumulative.spec_decode_draft_tokens for engine in engines)
+        ),
+        "vllm/cumulative_spec_decode_accepted_tokens": float(
+            sum(engine.cumulative.spec_decode_accepted_tokens for engine in engines)
+        ),
         "vllm/total_samples": float(sum(item.samples for item in intervals)),
         "vllm/total_active_samples": float(sum(item.active_samples for item in intervals)),
     }
@@ -174,6 +181,9 @@ class FinelogInferenceMetricsSink:
             cumulative = engine.cumulative
             counters = (
                 ("num_preemptions_total", cumulative.preemptions, "{request}", {}),
+                ("spec_decode_num_drafts_total", cumulative.spec_decode_drafts, "{draft}", {}),
+                ("spec_decode_num_draft_tokens_total", cumulative.spec_decode_draft_tokens, "{token}", {}),
+                ("spec_decode_num_accepted_tokens_total", cumulative.spec_decode_accepted_tokens, "{token}", {}),
                 ("prefix_cache_hits_total", cumulative.prefix_cache_hits, "{token}", {}),
                 ("prefix_cache_queries_total", cumulative.prefix_cache_queries, "{token}", {}),
                 ("generation_tokens_total", cumulative.generation_tokens, "{token}", {}),
