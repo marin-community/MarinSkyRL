@@ -2305,6 +2305,11 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             preserve_exception_type=preserve_exception_type,
             terminal_exception_type=terminal_exception_type,
         )
+        tito_full_succeeded = bool(alignment_stats and alignment_stats.n_tito_full_successes)
+        logger.info(
+            f"Trajectory {trajectory_id} completed: reward={reward:.3f} stop_reason={stop_reason} "
+            f"literal_turns={literal_bridge_turns} tito_full_succeeded={tito_full_succeeded}"
+        )
         return TerminalBenchAgentOutput(
             evidence=evidence,
             verification=verification,
