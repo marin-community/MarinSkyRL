@@ -177,6 +177,8 @@ def _loss_masks(outputs, responses, runner_cfg: DictConfig, tokenizer):
         loss_masks = apply_overlong_filtering(loss_masks, responses, tokenizer.eos_token_id)
     if bool(runner_cfg.get("mask_length_stops", False)):
         loss_masks = mask_length_stops(loss_masks, outputs)
+    if bool(runner_cfg.get("mask_truncated_turns", False)):
+        loss_masks = mask_truncated_turns(loss_masks, outputs)
     return loss_masks
 
 
@@ -200,10 +202,30 @@ def mask_length_stops(loss_masks: Sequence[Sequence[int]], outputs) -> list[list
     leaves everything else untouched. Rewards are unchanged, so the samples still enter
     the group baseline.
     """
-    return [
-        [0] * len(mask) if is_length_stopped(output) else list(mask)
-        for mask, output in zip(loss_masks, outputs)
-    ]
+    return [[0] * len(mask) if is_length_stopped(output) else list(mask) for mask, output in zip(loss_masks, outputs)]
+
+
+def mask_truncated_turns(loss_masks: Sequence[Sequence[int]], outputs) -> list[list[int]]:
+    """Zero the loss mask over the sampled tokens of turns that hit the per-turn output cap.
+
+    Narrower than ``mask_length_stops``: the rest of the trajectory keeps its mask and its
+    reward, only the capped turn (typically a repetition loop cut at max_generate_length)
+    stops receiving gradient.  The token chain is untouched, so the capped turn still
+    conditions later turns exactly as it did at sampling time.  Spans come from the
+    runner (``truncated_turn_spans``); outputs without spans are returned unchanged.
+    """
+    masked: list[list[int]] = []
+    for mask, output in zip(loss_masks, outputs):
+        spans = getattr(output, "truncated_turn_spans", None)
+        if not spans:
+            masked.append(list(mask))
+            continue
+        new_mask = list(mask)
+        for start, end in spans:
+            for i in range(max(0, start), min(end, len(new_mask))):
+                new_mask[i] = 0
+        masked.append(new_mask)
+    return masked
 
 
 def project_loss_mask(output: TrainableInteraction, response: Sequence[int]) -> list[int]:

@@ -109,6 +109,7 @@ ADDITIVE_GENERATOR_FIELDS = {
     # max_generate_length; zero the loss mask of length-stopped samples.
     "openai_max_tokens_cap": False,
     "mask_length_stops": False,
+    "mask_truncated_turns": False,
 }
 ADDITIVE_TEACHER_FIELDS = {
     "engine_init_timeout_seconds": "${generator.engine_init_timeout_seconds}",

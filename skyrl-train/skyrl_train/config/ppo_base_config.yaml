@@ -472,6 +472,11 @@ generator:
   # sampling_params.max_generate_length, or terminal stop_reason == "length"). Overlong filtering
   # for multi-turn chat templates whose turns do not end in the tokenizer eos id; harbor runner only.
   mask_length_stops: false
+  # Zero the loss mask over only the sampled tokens of turns that hit
+  # sampling_params.max_generate_length (the per-turn output cap), leaving the rest of the
+  # trajectory and its reward untouched. Narrower than mask_length_stops. Spans are verified
+  # against the served ids (full-TITO layout); harbor runner only.
+  mask_truncated_turns: false
 
   rope_scaling: ${trainer.rope_scaling}
   rope_theta: ${trainer.rope_theta}

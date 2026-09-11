@@ -23,6 +23,7 @@ from skyrl_train.trajectory_runners.projections import (
     attach_terminal_classifications,
     is_length_stopped,
     mask_length_stops,
+    mask_truncated_turns,
     project_loss_mask,
 )
 from skyrl_train.metric_names import (
@@ -85,7 +86,11 @@ from skyrl_train.trajectory_runners.harbor.identity_aware_reward import (
     IDENTITY_AWARE_SHAPER,
     identity_aware_pass_ratios,
 )
-from skyrl_train.trajectory_runners.harbor.truncation_penalty import apply_truncation_penalty, detect_turn_truncation
+from skyrl_train.trajectory_runners.harbor.truncation_penalty import (
+    apply_truncation_penalty,
+    detect_turn_truncation,
+    truncated_turn_spans,
+)
 
 # Incremental, trial-indexed reader for the shared CLI-agent literal log.
 from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogStore
@@ -242,6 +247,10 @@ class TerminalBenchAgentOutput:
     # per-turn output cap), independent of the penalty. generator.mask_length_stops
     # zeroes the loss mask of such samples (projections._loss_masks).
     turn_truncated: bool = False
+    # Response-id spans [(start, end), ...] of the turns that hit the per-turn cap,
+    # verified against the served ids. generator.mask_truncated_turns zeroes the loss
+    # mask over exactly these spans and leaves the rest of the trajectory trainable.
+    truncated_turn_spans: Optional[List[Tuple[int, int]]] = None
     error_treatment: str | None = None
 
 
@@ -592,6 +601,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         loss_masks = [project_loss_mask(output, list(output.evidence.response_token_ids)) for output in outputs]
         if bool(self.trajectory_runner_cfg.get("mask_length_stops", False)):
             loss_masks = mask_length_stops(loss_masks, outputs)
+        if bool(self.trajectory_runner_cfg.get("mask_truncated_turns", False)):
+            loss_masks = mask_truncated_turns(loss_masks, outputs)
         return loss_masks
 
     def _record_step_time(self) -> None:
@@ -1225,7 +1236,9 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 len(declared) / num_successful if num_successful > 0 else 0.0
             )
             rollout_metrics["generate/reward_given_done"] = (
-                sum(float(o.reward_result.unshaped_reward or 0.0) for o in declared) / len(declared) if declared else 0.0
+                sum(float(o.reward_result.unshaped_reward or 0.0) for o in declared) / len(declared)
+                if declared
+                else 0.0
             )
             num_length_stopped = sum(1 for o in successful_outputs if is_length_stopped(o))
             rollout_metrics["generate/length_stopped"] = num_length_stopped
@@ -1234,6 +1247,16 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             )
             rollout_metrics["generate/truncation_penalty_applied"] = sum(
                 1 for o in successful_outputs if o.truncation_penalized
+            )
+            # Per-turn view of the cap: how many turns were cut at max_generate_length this
+            # step, how many sampled tokens they hold, and how many of those tokens
+            # generator.mask_truncated_turns removed from the loss.
+            capped_spans = [s for o in successful_outputs for s in (o.truncated_turn_spans or [])]
+            rollout_metrics["generate/truncated_turns"] = len(capped_spans)
+            capped_tokens = sum(end - start for start, end in capped_spans)
+            rollout_metrics["generate/truncated_turn_tokens"] = capped_tokens
+            rollout_metrics["generate/truncated_turn_tokens_masked"] = (
+                capped_tokens if bool(self.trajectory_runner_cfg.get("mask_truncated_turns", False)) else 0
             )
             # Output-length percentiles and their ratio: a healthy arm's
             # p90/p25 widens as it lengthens; a collapsing arm's narrows
@@ -2216,6 +2239,17 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         max_gen_len = self.trajectory_runner_cfg.sampling_params.max_generate_length
         per_turn_counts = [len(t) for t in assistant_token_ids] if assistant_token_ids else None
         turn_truncated = detect_turn_truncation(per_turn_counts, max_gen_len)
+        capped_turn_spans = (
+            truncated_turn_spans(
+                assistant_token_ids,
+                assistant_prompt_token_ids,
+                initial_prompt_length,
+                response_ids,
+                max_gen_len,
+            )
+            if turn_truncated
+            else []
+        )
 
         truncation_penalized = False
         reward, truncation_penalized = apply_truncation_penalty(
@@ -2349,5 +2383,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             response_span_tags=response_span_tags,
             truncation_penalized=truncation_penalized,
             turn_truncated=bool(turn_truncated),
+            truncated_turn_spans=capped_turn_spans or None,
             error_treatment=None if terminal_error_treatment is None else terminal_error_treatment.value,
         )
