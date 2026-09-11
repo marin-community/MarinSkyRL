@@ -9,6 +9,7 @@ target_cluster="${TARGET_CLUSTER:-cw-rno2a}"
 runtime_commit="${RUNTIME_COMMIT:-$(git rev-parse HEAD)}"
 model="${MODEL:-Qwen/Qwen3-8B}"
 log_path="${LOG_PATH:-opencode-nightly.log}"
+secrets_env="${SECRETS_ENV:-/dev/null}"
 mode="${OPENCODE_MODE:-nightly}"
 job_user="${IRIS_JOB_USER:-${USER:?USER must be set}}"
 job_path="/${job_user}/${job_name}"
@@ -83,7 +84,7 @@ PYTHONPATH=. uv run --frozen python -m cloud.iris.iris_backend \
     --max-retries 0 \
     --timeout 2400 \
     --no-wait \
-    --secrets-env /dev/null \
+    --secrets-env "$secrets_env" \
     --skyrl_override trainer.max_steps=1 \
     --skyrl_override trainer.logger=console \
     --skyrl_override trainer.algorithm.tito_full=true \

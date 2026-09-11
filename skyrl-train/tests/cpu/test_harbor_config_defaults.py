@@ -133,3 +133,12 @@ def test_daytona_ttl_reaches_harbor_environment_config():
 
     assert trial_config.environment.kwargs["ttl_minutes"] == 90
     assert "ttl_minutes" in get_exposed_harbor_fields()["environment"]
+
+
+def test_daytona_network_policy_reaches_harbor_environment_config():
+    policy = {"mode": "domain_allow_list", "value": "iris.oa.dev"}
+
+    trial_config = _trial_config({"env_network_policy": policy})
+
+    assert trial_config.environment.kwargs["network_policy"] == policy
+    assert "env_network_policy" in get_exposed_harbor_fields()["environment"]
