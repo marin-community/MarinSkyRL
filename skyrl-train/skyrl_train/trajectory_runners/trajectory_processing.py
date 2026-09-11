@@ -1755,8 +1755,14 @@ def _assemble_response_ids_tito_full(
     if len(assistant_prompt_token_ids) != n_turns:
         return TitoFullAssemblyResult(decline_reason=TitoFullDeclineReason.TURN_COUNT_MISMATCH)
     assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
-    if len(assistant_msgs) != n_turns:
+    if len(assistant_msgs) < n_turns:
         return TitoFullAssemblyResult(decline_reason=TitoFullDeclineReason.ASSISTANT_MESSAGE_COUNT_MISMATCH)
+    # A continuation segment can begin after OpenCode compacts or otherwise
+    # rewrites its context. Earlier assistant messages are already represented in
+    # the first exact prompt stream and are therefore masked context, not sampled
+    # actions in this segment. Only the trailing messages correspond to the
+    # completion streams selected from the proxy log.
+    assistant_msgs = assistant_msgs[-n_turns:]
     # Every turn must carry non-empty prompt + completion id streams.
     for t in range(n_turns):
         p = assistant_prompt_token_ids[t]

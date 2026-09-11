@@ -91,6 +91,7 @@ class OpenCodeContinuationLease:
         buffer = b""
         completed = False
         valid = True
+        reached_output_limit = False
         try:
             async for chunk in stream:
                 yield chunk
@@ -116,8 +117,14 @@ class OpenCodeContinuationLease:
                     if prompt_ids is None and chunk_prompt is not None:
                         prompt_ids = chunk_prompt
                     completion_ids.extend(chunk_completion)
+                    reached_output_limit = reached_output_limit or any(
+                        isinstance(choice, dict) and choice.get("finish_reason") == "length"
+                        for choice in parsed.get("choices") or []
+                    )
         finally:
             try:
+                if completed and reached_output_limit:
+                    logger.info("OpenCode task-agent response reached output limit: trial_id=%s", self._trial_id)
                 if completed and valid and prompt_ids and completion_ids:
                     expected_prompt = self._request_body.get(EXACT_PROMPT_TOKEN_IDS_KEY)
                     if expected_prompt is not None and prompt_ids != expected_prompt:

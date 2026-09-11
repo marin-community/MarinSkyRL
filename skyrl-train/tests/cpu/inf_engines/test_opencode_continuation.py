@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 
 import httpx
 import pytest
@@ -74,7 +75,8 @@ class _ContinuationBackend:
 
 
 @pytest.mark.asyncio
-async def test_opencode_continues_from_exact_served_ids_across_tool_turn():
+async def test_opencode_continues_from_exact_served_ids_across_tool_turn(caplog):
+    caplog.set_level(logging.INFO)
     backend = _ContinuationBackend()
     set_global_state(backend, None)
     app = create_app(backend=backend, enable_opencode_exact_continuation=True)
@@ -105,6 +107,7 @@ async def test_opencode_continues_from_exact_served_ids_across_tool_turn():
     assert EXACT_PROMPT_TOKEN_IDS_KEY not in backend.chat_requests[0]["json"]
     assert backend.chat_requests[1]["json"][EXACT_PROMPT_TOKEN_IDS_KEY] == [1, 2, 99, 77, 40, 41]
     assert backend.chat_requests[1]["json"]["session_id"] == "trial-a"
+    assert "OpenCode task-agent response reached output limit: trial_id=trial-a" in caplog.text
 
 
 @pytest.mark.asyncio
