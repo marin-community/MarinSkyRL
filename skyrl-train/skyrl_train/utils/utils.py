@@ -596,6 +596,10 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    if "teacher" in cfg:
+        raise ValueError(
+            "teacher configuration is unsupported until teacher scores are connected to a validated training objective"
+        )
     resolve_dynamic_sampling_criteria(
         cfg.trainer.algorithm.dynamic_sampling.informative_on,
         float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),

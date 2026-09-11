@@ -139,7 +139,6 @@
     "++terminal_bench_config.harbor.n_concurrent_trials=128",
     "++generator.engine_init_kwargs.hf_overrides={max_position_embeddings:65536,max_seq_len:65536}",
     "++terminal_bench_config.harbor.extra_body.skip_special_tokens=false",
-    "++generator.engine_init_kwargs.chat_template_content_format=string",
     "++terminal_bench_config.harbor.eval_timeout_override_sec=1800",
     "++terminal_bench_config.harbor.verifier_override_timeout_sec=2400",
     "trainer.max_steps=4",

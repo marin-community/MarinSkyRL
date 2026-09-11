@@ -12,7 +12,7 @@ from skyrl_train.inference_engines.vllm.stats import (
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorResponse,
     ErrorInfo,
-    TokenizeRequest,
+    is_engine_error_response,
 )
 from transformers import PreTrainedTokenizerBase
 import asyncio
@@ -31,8 +31,10 @@ from loguru import logger
 import random
 import ray.exceptions
 from dataclasses import dataclass, field
+from http import HTTPStatus
 
 ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
+ABORT_FINISH_REASON = "abort"
 
 # Cap on the session -> engine memo so it cannot grow unbounded across a long run.
 # Sessions are evicted LRU once the cap is exceeded (a re-appearing evicted session
@@ -65,19 +67,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         if hasattr(full_config.generator, "engine_init_kwargs"):
             served_model_name = getattr(full_config.generator.engine_init_kwargs, "served_model_name", None)
         self.model_name = served_model_name if served_model_name else full_config.trainer.policy.model.path
-        # Chat-render settings of the OpenAI serving path, mirrored here so the HTTP
-        # endpoint's `/tokenize` route renders exactly what the engines serve (harbor's TITO
-        # transport feeds those ids straight back as the next prompt). Both are vLLM serving
-        # knobs popped inside the engine wrapper, so read them from the same config it does.
-        engine_init_kwargs = getattr(full_config.generator, "engine_init_kwargs", None) or {}
-        self.chat_template_content_format = engine_init_kwargs.get("chat_template_content_format", None)
-        self.max_model_len = engine_init_kwargs.get("max_model_len", None)
-        custom_chat_template_path = engine_init_kwargs.get("custom_chat_template_chat_completion_path", None)
-        self.custom_chat_template: Optional[str] = None
-        if custom_chat_template_path:
-            with open(custom_chat_template_path, "r") as f:
-                self.custom_chat_template = f.read()
-            logger.info(f"InferenceEngineClient read the serving chat template from: {custom_chat_template_path}")
+        self.max_model_len = next((getattr(engine, "max_model_len", None) for engine in engines), None)
         self.backend = full_config.generator.backend
         self.enable_http_endpoint = full_config.generator.enable_http_endpoint
         self.http_endpoint_host = full_config.generator.http_endpoint_host
@@ -133,6 +123,21 @@ class InferenceEngineClient(InferenceEngineInterface):
         if fallback is None:
             raise RuntimeError("All inference engines have died")
         return fallback
+
+    async def _call_engine_with_fallback(self, engine_idx: int, method_name: str, *args: Any) -> tuple[Any, int]:
+        """Call an actor, returning its response and index, with one actor-death retry.
+
+        A fallback waits for generation to resume before entering another engine.
+        """
+        try:
+            return await getattr(self.engines[engine_idx], method_name)(*args), engine_idx
+        except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
+            self._mark_engine_dead(engine_idx, e)
+            fallback = self._pick_fallback_engine(engine_idx)
+            if fallback is None:
+                raise RuntimeError("All inference engines have died") from e
+            await self._wait_for_generation_to_resume()
+            return await getattr(self.engines[fallback], method_name)(*args), fallback
 
     # ----------------------------
     # Load-aware session routing
@@ -283,7 +288,7 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # 2.1. Handle engine deaths: retry failed tasks on fallback engines
+        # Retry tasks whose engine died on an available fallback.
         for i, result in enumerate(results):
             if isinstance(result, (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError)):
                 self._mark_engine_dead(task_engine_idxs[i], result)
@@ -330,30 +335,6 @@ class InferenceEngineClient(InferenceEngineInterface):
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
         )
 
-    def tokenize(self, request: TokenizeRequest) -> List[int]:
-        """Return token IDs for a validated vLLM-compatible chat request."""
-        add_generation_prompt = request.add_generation_prompt
-        continue_final_message = request.continue_final_message
-        if add_generation_prompt and continue_final_message:
-            raise ValueError("Cannot set both `continue_final_message` and `add_generation_prompt` to True.")
-
-        template_kwargs = dict(request.chat_template_kwargs or {})
-        template_kwargs["add_generation_prompt"] = add_generation_prompt
-        template_kwargs["continue_final_message"] = continue_final_message
-        if request.tools is not None:
-            template_kwargs["tools"] = request.tools
-
-        prompt = self.tokenizer.apply_chat_template(
-            request.messages,
-            chat_template=request.chat_template,
-            tokenize=False,
-            **template_kwargs,
-        )
-        return self.tokenizer.encode(
-            prompt,
-            add_special_tokens=request.add_special_tokens,
-        )
-
     async def _generate_single_with_retry(
         self, engine_idx: int, original_prompt_ids: List[int], sampling_params: Optional[Dict[str, Any]]
     ) -> InferenceEngineOutput:
@@ -395,14 +376,14 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 2. Initialize fields we want to accumulate or update in each loop iteration
         accum_response_ids: List[int] = []
         accum_response_logprobs: List[float] = []
-        stop_reason: str = "abort"
+        stop_reason: str = ABORT_FINISH_REASON
 
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
         text_response: Optional[str] = None
         num_turns = 0
 
         # 3. Loop until geneartion is completed.
-        while stop_reason == "abort":
+        while stop_reason == ABORT_FINISH_REASON:
             await self._wait_for_generation_to_resume()
 
             # 3.1. Prepare the request payload.
@@ -431,7 +412,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_response_ids = []
                 accum_response_logprobs = []
                 num_turns = 0
-                stop_reason = "abort"
+                stop_reason = ABORT_FINISH_REASON
                 continue
 
             # 3.3. Parse the partial response.
@@ -445,7 +426,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 new_response_logprobs = new_response_logprobs_list[0]
 
             # 3.4 Aborted without generating tokens, so partial_response is useless.
-            if stop_reason == "abort" and len(new_response_ids) == 0:
+            if stop_reason == ABORT_FINISH_REASON and len(new_response_ids) == 0:
                 continue
 
             # 3.5 Accumulate outputs
@@ -520,12 +501,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         orig_max_tokens: Optional[int] = original_request_json.get(max_key) if max_key else None
 
         # Fields to be updated in each loop iteration
-        finish_reason: str = "abort"
+        finish_reason: str = ABORT_FINISH_REASON
         stop_reason: Optional[str] = None
         response_role: Optional[str] = None
 
         # 1. Loop until the generation is completed.
-        while finish_reason == "abort":
+        while finish_reason == ABORT_FINISH_REASON:
             await self._wait_for_generation_to_resume()
 
             # 1.1. Prepare the request payload.
@@ -553,12 +534,12 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum = AccumulatedResponse()
                 base_response = None
                 response_role = None
-                finish_reason = "abort"
+                finish_reason = ABORT_FINISH_REASON
                 continue
 
             # 1.2.1. Check for error response from vLLM/sglang.
             # Error responses have "error" key (vLLM) or "object"="error" (sglang), not "choices".
-            if "error" in partial_response or partial_response.get("object", "") == "error":
+            if is_engine_error_response(partial_response):
                 error_info = partial_response.get("error", partial_response)
                 error_msg = (
                     error_info.get("message", str(error_info)) if isinstance(error_info, dict) else str(error_info)
@@ -602,7 +583,7 @@ class InferenceEngineClient(InferenceEngineInterface):
 
             # 1.5. Update base response if it is the first non-empty response
             if base_response is None:
-                if finish_reason != "abort":
+                if finish_reason != ABORT_FINISH_REASON:
                     # If we only made one request and it is not aborted, return the partial result directly.
                     # This is the codepath that will hit when we do not use `pause_generation()` or `resume_generation()`.
                     return partial_response
@@ -638,6 +619,21 @@ class InferenceEngineClient(InferenceEngineInterface):
             return await self._chat_completion_with_retry(engine_idx, request_payload)
         finally:
             self._dec_inflight(engine_idx)
+
+    async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Delegate terminal-bench tokenization to a live vLLM serving actor."""
+        if self.backend != "vllm":
+            return ErrorResponse(
+                error=ErrorInfo(
+                    message=f"The /tokenize endpoint requires the vLLM backend, got {self.backend}.",
+                    type=HTTPStatus.BAD_REQUEST.phrase,
+                    code=HTTPStatus.BAD_REQUEST.value,
+                )
+            ).model_dump()
+
+        engine_idx = self._resolve_engine_idx(random.randint(0, len(self.engines) - 1))
+        response, _ = await self._call_engine_with_fallback(engine_idx, "tokenize", request_payload)
+        return response
 
     async def chat_completion_stream(self, request_payload: Dict[str, Any]):
         """Streaming chat completion — yields SSE-formatted strings.
@@ -686,42 +682,11 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def _single_completion_with_pause_retry(
         self, engine_idx: int, request_json: Dict[str, Any], headers: Dict[str, str]
     ) -> Dict[str, Any]:
-        """Issue a single-prompt `/completions` request across a weight-sync pause.
-
-        Two things go wrong at a pause boundary, and this mirrors how `_chat_completion_with_retry`
-        answers each:
-        1. A request that ARRIVES during the pause must not enter the engine — it waits at the
-           weight-sync barrier first, for the same reason `_chat_completion_with_retry` and
-           `chat_completion_stream` do: a request registered in the vLLM scheduler after
-           `pause_generation()` drained the engine would have the next engine step run a forward
-           pass against params the layerwise reload has moved to the `meta` device
-           (`EngineDeadError`).
-        2. A request that is IN FLIGHT when the pause starts comes back with
-           `finish_reason == "abort"` (the abort-mode scheduler pause returns the tokens generated
-           so far). The chat path resumes such a generation with `continue_final_message`; the
-           `/completions` protocol has no equivalent, so we re-issue the request from the start
-           instead, once, after waiting out the pause.
-
-        Once and not a loop: because a re-issue restarts generation rather than continuing it, an
-        unbounded loop could livelock a long generation under frequent weight syncs. A second abort
-        is returned to the caller as-is (a partial completion with `finish_reason == "abort"`),
-        which is what the caller would have received before this handling existed.
-
-        A dead engine fails over once per attempt, mirroring the batched path's failover, and the
-        retry then goes to whichever engine actually served.
-        """
+        """Issue a single-prompt completion, retrying one pause-aborted response."""
+        payload = {"json": request_json, "headers": headers}
         for attempt in (0, 1):
             await self._wait_for_generation_to_resume()
-            try:
-                result = await self.engines[engine_idx].completion({"json": request_json, "headers": headers})
-            except (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError) as e:
-                self._mark_engine_dead(engine_idx, e)
-                fallback = self._pick_fallback_engine(engine_idx)
-                if fallback is None:
-                    raise RuntimeError("All inference engines have died") from e
-                engine_idx = fallback
-                await self._wait_for_generation_to_resume()
-                result = await self.engines[engine_idx].completion({"json": request_json, "headers": headers})
+            result, engine_idx = await self._call_engine_with_fallback(engine_idx, "completion", payload)
 
             if not _completion_response_was_aborted(result):
                 return result
@@ -745,11 +710,9 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         Regardless, the order will be maintained, i.e. `output["choices"][i]` corresponds to `request["prompt"][i]`.
 
-        The SINGLE-prompt case is pause-safe: it waits out a weight-sync pause instead of erroring,
-        and re-issues once if a pause aborted the generation mid-flight (see
-        `_single_completion_with_pause_retry`). This is the path harbor drives for terminus-2's
-        token-in-token-out transport, so a weight sync must not surface to it as an error. The
-        BATCHED path has no such handling and still raises while generation is paused.
+        Single-prompt requests wait out a weight-sync pause and retry once if a pause aborts
+        generation mid-flight. Batched requests still reject a pause because their fan-out cannot
+        be resumed atomically.
         """
         body = request_payload.get("json", {})
 
@@ -779,11 +742,6 @@ class InferenceEngineClient(InferenceEngineInterface):
             session_ids=session_id_list,
         )
 
-        # 2. Generate responses concurrently (with failover for dead engines)
-        tasks: list[asyncio.Task] = []
-        indices_list: list[list[int]] = []  # the original prompt indices that each task works on
-        task_engine_idxs: list[int] = []  # engine idx for each task (for failover)
-
         # Reroute prompts away from known-dead engines before dispatching
         rerouted_mapping: dict[int, list[int]] = {}
         for engine_idx, prompt_ids in engine_idx_to_prompt_ids.items():
@@ -800,11 +758,25 @@ class InferenceEngineClient(InferenceEngineInterface):
             error_response = _completion_engine_error_response([result])
             return error_response if error_response is not None else result
 
+        return await self._batched_completion(body, prompt, rerouted_mapping, headers)
+
+    async def _batched_completion(
+        self,
+        body: Dict[str, Any],
+        prompt: Union[List[List[int]], List[str]],
+        engine_idx_to_prompt_ids: dict[int, list[int]],
+        headers: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """Fan out a batched completion request and restore prompt order."""
+
         # Batched: no pause handling exists for a fan-out request, so a pause is still an error.
         if self.generation_paused_event.is_set():
             raise RuntimeError("pause_generation is unsupported for batched /completions requests.")
 
-        for engine_idx, prompt_ids in rerouted_mapping.items():
+        tasks: list[asyncio.Task] = []
+        indices_list: list[list[int]] = []
+        task_engine_idxs: list[int] = []
+        for engine_idx, prompt_ids in engine_idx_to_prompt_ids.items():
             cur_prompt = [prompt[i] for i in prompt_ids]
             cur_json = dict(body)
             cur_json["prompt"] = cur_prompt
@@ -815,7 +787,7 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # 2.1. Handle engine deaths: retry failed tasks on fallback engines
+        # Retry tasks whose engine died on an available fallback.
         for i, result in enumerate(results):
             if isinstance(result, (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError)):
                 self._mark_engine_dead(task_engine_idxs[i], result)
@@ -829,14 +801,11 @@ class InferenceEngineClient(InferenceEngineInterface):
             elif isinstance(result, BaseException):
                 raise result
 
-        # 3. Check for errors.
-        # results can be ErrorResponse or CompletionResponse. If one of the sub-requests fails, we
-        # return an error response. That is, there is no partial success, following vLLM and SGLang's behavior.
         error_response = _completion_engine_error_response(results)
         if error_response is not None:
             return error_response
 
-        # 4. Combine choices and preserve original order.
+        # Combine choices and preserve original order.
         # If there is only one result, we return it directly.
         if len(results) == 1:
             return results[0]
@@ -848,7 +817,7 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         # Aggregate choices. TODO(Charlie): improve logic when we need to support n > 1
         # vLLM sets index positions per sub-batch, so we reset indices to be 0..n-1 for the combined response.
-        combined_choices: list[Dict[str, Any]] = [None] * num_prompts
+        combined_choices: list[Dict[str, Any]] = [None] * len(prompt)
         for indices, result in zip(indices_list, results):
             # indices are the original prompt indices that the task's response corresponds to
             for local_idx, original_idx in enumerate(indices):
@@ -949,22 +918,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             await asyncio.sleep(0.5)
 
     async def pause_generation(self) -> None:
-        """
-        Pauses generation for all engines, intended for in-flight weight updates and partial rollouts.
+        """Pause engine schedulers for an in-flight weight update.
 
-        Supported for `/chat/completions` and for SINGLE-prompt `/completions` (which waits at the
-        barrier and re-issues once on abort, see `_single_completion_with_pause_retry`). Not
-        supported for batched `/completions` or `generate()`.
-
-        Both in-flight and incoming requests will be blocked until `resume_generation` is called.
-        1. Set the paused event to avoid new requests from being submitted while aborting requests.
-        2. Wait for a grace period to ensure all in-flight requests have entered the engine's
-           scheduler and hence can be aborted. Otherwise, there can be requests already submitted
-           but not yet entered the scheduler, which can miss the abort request.
-        3. Finally, pause each engine scheduler in abort mode. This causes requests sent from
-           InferenceEngineClient to `InferenceEngineClient.engines` to return the already-generated tokens.
-           The request to `InferenceEngineClient` will not yet return until requests are completed with
-           stop reason that is not `abort`.
+        Chat and single-prompt completion requests wait for resume. ``generate()`` and batched
+        completions do not support the pause boundary.
         """
         if self.generation_paused_event.is_set():
             raise RuntimeError("Generation is already paused, cannot pause again.")
@@ -1146,16 +1103,11 @@ def _prepare_retry_request(
 
 
 def _completion_response_was_aborted(response: Dict[str, Any]) -> bool:
-    """Whether a `/completions` response was cut short by `pause_generation()`.
-
-    Same signal the chat path reads (`choices[0]["finish_reason"] == "abort"`, set when the
-    abort-mode scheduler pause returns the tokens generated so far). Engine error payloads carry no
-    `choices`, so they are never mistaken for an abort — they are handled as errors instead.
-    """
-    if "error" in response or response.get("object", "") == "error":
+    """Return whether the first completion choice has an abort finish reason."""
+    if is_engine_error_response(response):
         return False
     choices = response.get("choices") or []
-    return bool(choices) and choices[0].get("finish_reason") == "abort"
+    return bool(choices) and choices[0].get("finish_reason") == ABORT_FINISH_REASON
 
 
 def _completion_engine_error_response(results: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -1165,9 +1117,8 @@ def _completion_engine_error_response(results: List[Dict[str, Any]]) -> Optional
     vLLM's and SGLang's behavior.
     """
     for result in results:
-        if "error" in result or result.get("object", "") == "error":
-            # former is vllm format, latter is sglang format
-            error_details = result.get("error", result)  # resolves vllm/sglang format difference
+        if is_engine_error_response(result):
+            error_details = result.get("error", result)
             return ErrorResponse(
                 error=ErrorInfo(
                     message=f"In one of the engines that SkyRL manages, an error occurred: {error_details['message']}",
@@ -1203,7 +1154,7 @@ def _parse_partial_response_and_inplace_update_accum(
         assert response_role == choice["message"]["role"], "response_role must be the same across retries"
 
     # If aborted without generating tokens, ignore this partial response.
-    aborted_without_generating = finish_reason == "abort" and new_completion_tokens == 0
+    aborted_without_generating = finish_reason == ABORT_FINISH_REASON and new_completion_tokens == 0
     if not aborted_without_generating:
         accum.content += new_content
         logprobs = choice.get("logprobs")

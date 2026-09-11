@@ -28,6 +28,7 @@ from omegaconf import OmegaConf
 import asyncio
 import pytest
 import random
+import ray.exceptions
 from copy import deepcopy
 
 
@@ -501,6 +502,22 @@ def _make_min_cfg():
     )
 
 
+@pytest.mark.parametrize(
+    "engine_limit,expected",
+    [
+        (65536, 65536),
+        (None, None),
+    ],
+)
+def test_client_context_limit_comes_from_live_engine(engine_limit, expected):
+    configured = _make_min_cfg()
+    engines = [] if engine_limit is None else [type("Engine", (), {"max_model_len": engine_limit})()]
+
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=configured)
+
+    assert client.max_model_len == expected
+
+
 @pytest.mark.asyncio
 async def test_chat_completion_retry_accumulates_and_sends_continuations():
     """
@@ -762,6 +779,50 @@ async def test_chat_completion_retry_resends_original_when_no_tokens_generated_y
     # Since finish_reason != abort on the second call and base_response was None,
     # client should return the second response directly (no accumulation)
     assert out == engines[0].responses[1]
+
+
+# -------------------------------------------
+# tests for terminal-bench tokenization
+# --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tokenize_returns_native_serving_response_without_local_rendering():
+    class NativeRenderingEngine:
+        def __init__(self):
+            self.request_payload = None
+
+        async def tokenize(self, request_payload):
+            self.request_payload = request_payload
+            return {
+                "tokens": [7, 8, 9],
+                "count": 3,
+                "max_model_len": 4096,
+                "token_strs": ["typed", "content", "parts"],
+            }
+
+    engine = NativeRenderingEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    request_payload = {
+        "json": {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+            "continue_final_message": True,
+            "add_generation_prompt": False,
+            "return_token_strs": True,
+        },
+        "headers": {"x-request-id": "continuation-1"},
+    }
+
+    response = await client.tokenize(deepcopy(request_payload))
+
+    assert response == {
+        "tokens": [7, 8, 9],
+        "count": 3,
+        "max_model_len": 4096,
+        "token_strs": ["typed", "content", "parts"],
+    }
+    assert engine.request_payload == request_payload
 
 
 # -------------------------------------------
@@ -1077,15 +1138,8 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
 
 
 # -------------------------------------------
-# tests for InferenceEngineClient.completion at the weight-sync pause boundary
+# completion behavior at the weight-sync pause boundary
 # --------------------------------------------
-#
-# harbor >= #111 drives terminus-2 over /v1/completions (its token-in-token-out transport),
-# so every fully-async weight-sync pause used to surface to it as a burst of
-# "pause_generation is unsupported for /completions requests." RuntimeErrors (94 of them in
-# one endpoint on job 1738858). The single-prompt path must behave like /chat/completions
-# instead: wait at the barrier, and re-issue once when a pause aborted a generation
-# mid-flight. Batched /completions keeps raising — nothing supports a paused fan-out.
 
 
 class _MockCompletionEngine:
@@ -1099,7 +1153,10 @@ class _MockCompletionEngine:
     async def completion(self, request_payload):
         self.entered.set()
         self.calls.append(deepcopy(request_payload["json"]))
-        return self.responses[min(len(self.calls) - 1, len(self.responses) - 1)]
+        response = self.responses[min(len(self.calls) - 1, len(self.responses) - 1)]
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 def _completion_response(text, finish_reason, *, completion_tokens=None):
@@ -1131,28 +1188,24 @@ SINGLE_PROMPTS = [pytest.param("hello", id="string"), pytest.param([1, 2, 3, 4],
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prompt", SINGLE_PROMPTS)
-async def test_completion_single_prompt_blocks_while_paused_then_resumes(prompt):
-    """A single-prompt /completions request that ARRIVES during a weight-sync pause waits
-    for the resume instead of raising, exactly as `_chat_completion_with_retry` does.
-
-    It must not reach the engine while paused: a request registered in the vLLM scheduler
-    after `pause_generation()` drained the engine makes the next engine step run a forward
-    pass against meta-device params (EngineDeadError).
-    """
+async def test_completion_single_prompt_blocks_while_paused_then_resumes(prompt, monkeypatch):
     engines = [_MockCompletionEngine([_completion_response("done", "stop")])]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+    barrier_entered = asyncio.Event()
+    resume = asyncio.Event()
 
-    # Simulate the weight-sync pause directly (as the chat_completion_stream tests do).
-    client.generation_paused_event.set()
+    async def _wait_for_resume():
+        barrier_entered.set()
+        await resume.wait()
+
+    monkeypatch.setattr(client, "_wait_for_generation_to_resume", _wait_for_resume)
 
     task = asyncio.create_task(client.completion(_completion_payload(prompt)))
-
-    # Past the 0.5s poll interval in _wait_for_generation_to_resume, so a miss is decisive.
-    await asyncio.sleep(0.6)
+    await asyncio.wait_for(barrier_entered.wait(), timeout=1)
     assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
     assert not task.done()
 
-    client.generation_paused_event.clear()
+    resume.set()
     result = await asyncio.wait_for(task, timeout=5)
 
     assert engines[0].entered.is_set()
@@ -1191,9 +1244,7 @@ async def test_completion_single_prompt_reissues_once_after_a_midflight_abort(pr
 
 
 @pytest.mark.asyncio
-async def test_completion_single_prompt_reissue_waits_for_a_pause_that_is_still_on():
-    """The re-issue goes through the same barrier: if generation is still paused when the
-    abort comes back, the retry waits rather than re-entering a drained engine."""
+async def test_completion_single_prompt_reissue_waits_for_a_pause_that_is_still_on(monkeypatch):
     engines = [
         _MockCompletionEngine(
             [
@@ -1204,22 +1255,25 @@ async def test_completion_single_prompt_reissue_waits_for_a_pause_that_is_still_
     ]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
-    # The abort is delivered and the pause is STILL in effect when the retry is decided.
-    original_completion = engines[0].completion
+    retry_waiting = asyncio.Event()
+    resume_retry = asyncio.Event()
+    barrier_calls = 0
 
-    async def _pause_on_first_call(request_payload):
-        if not engines[0].calls:
-            client.generation_paused_event.set()
-        return await original_completion(request_payload)
+    async def _wait_for_resume():
+        nonlocal barrier_calls
+        barrier_calls += 1
+        if barrier_calls == 2:
+            retry_waiting.set()
+            await resume_retry.wait()
 
-    engines[0].completion = _pause_on_first_call
+    monkeypatch.setattr(client, "_wait_for_generation_to_resume", _wait_for_resume)
 
     task = asyncio.create_task(client.completion(_completion_payload([1, 2, 3, 4])))
-    await asyncio.sleep(0.6)
+    await asyncio.wait_for(retry_waiting.wait(), timeout=1)
     assert len(engines[0].calls) == 1, "the retry entered the engine while generation was paused"
     assert not task.done()
 
-    client.generation_paused_event.clear()
+    resume_retry.set()
     result = await asyncio.wait_for(task, timeout=5)
 
     assert result["choices"][0]["finish_reason"] == "stop"
@@ -1238,6 +1292,30 @@ async def test_completion_single_prompt_returns_a_second_abort_as_is():
 
     assert result["choices"][0]["finish_reason"] == "abort"
     assert len(engines[0].calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_completion_pause_retry_stays_on_failover_engine():
+    engines = [
+        _MockCompletionEngine([ray.exceptions.RayActorError()]),
+        _MockCompletionEngine(
+            [
+                _completion_response("partial", "abort", completion_tokens=2),
+                _completion_response("complete", "stop"),
+            ]
+        ),
+    ]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    result = await client._single_completion_with_pause_retry(
+        0,
+        _completion_payload([1, 2, 3, 4])["json"],
+        {"Content-Type": "application/json"},
+    )
+
+    assert result["choices"][0]["text"] == "complete"
+    assert len(engines[0].calls) == 1
+    assert len(engines[1].calls) == 2
 
 
 @pytest.mark.asyncio

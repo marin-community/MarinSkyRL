@@ -221,7 +221,6 @@ generator:
   num_inference_engines: 24
 
   engine_init_kwargs:
-    chat_template_content_format: string
     # RoPE widening: request_window_tokens (65536) exceeds the model's 32768
     # max_position_embeddings.
     hf_overrides:

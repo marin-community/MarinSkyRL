@@ -49,6 +49,9 @@ except ImportError:
         CompletionResponse,
     )
 
+from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest, TokenizeResponse
+from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+
 try:
     from vllm.v1.metrics.loggers import LoggingStatLogger
 except ImportError:
@@ -1051,6 +1054,10 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Get the underlying engine for RPC calls."""
         return self.llm.engine if hasattr(self.llm, "engine") else self.llm
 
+    def get_model_max_len(self) -> int:
+        """Return the context limit resolved by vLLM's model configuration."""
+        return self._get_engine().model_config.max_model_len
+
     def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
         """Check if this is a LoRA disk loading request."""
         is_lora = request["names"][0] == "lora_disk_load"
@@ -1525,7 +1532,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             )
         # TODO (erictang000): potentially enable log requests for a debugging mode
         custom_chat_template_path = kwargs.pop("custom_chat_template_chat_completion_path", None)
-        chat_template_content_format = wrapper_kwargs.pop("chat_template_content_format", "auto")
         # Use factory to inject engine ID into stat logger
         stat_loggers = [self._create_stat_logger_factory()]
 
@@ -1683,6 +1689,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         tool_parser = wrapper_kwargs.pop("tool_parser", None)
 
         openai_serving_render = None
+        self.openai_serving_tokenization = None
         try:
             from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
@@ -1692,7 +1699,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 model_registry=models.registry,
                 request_logger=None,
                 chat_template=custom_chat_template_content,
-                chat_template_content_format=chat_template_content_format,
+                chat_template_content_format="auto",
                 enable_auto_tools=enable_auto_tools,
                 tool_parser=tool_parser,
             )
@@ -1721,10 +1728,18 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 openai_serving_render=openai_serving_render,
                 request_logger=None,
                 chat_template=custom_chat_template_content,
-                chat_template_content_format=chat_template_content_format,
+                chat_template_content_format="auto",
                 enable_auto_tools=enable_auto_tools,
                 tool_parser=tool_parser,
                 **wrapper_kwargs,
+            )
+            self.openai_serving_tokenization = OpenAIServingTokenization(
+                engine_client=engine,
+                models=models,
+                openai_serving_render=openai_serving_render,
+                request_logger=None,
+                chat_template=custom_chat_template_content,
+                chat_template_content_format="auto",
             )
         else:
             try:
@@ -1734,7 +1749,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     response_role="assistant",
                     request_logger=None,
                     chat_template=custom_chat_template_content,
-                    chat_template_content_format=chat_template_content_format,
+                    chat_template_content_format="auto",
                     **wrapper_kwargs,
                 )
             except TypeError:
@@ -1745,7 +1760,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     response_role="assistant",
                     request_logger=None,
                     chat_template=custom_chat_template_content,
-                    chat_template_content_format=chat_template_content_format,
+                    chat_template_content_format="auto",
                     **wrapper_kwargs,
                 )
 
@@ -2068,6 +2083,21 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         in vllm.entrypoints.openai.protocol.
         """
         return await self._handle_openai_request(request_payload, endpoint="/chat/completions")
+
+    async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Return vLLM's native chat-tokenization response."""
+        body = request_payload.get("json", {})
+        headers = request_payload.get("headers", {})
+        try:
+            request = TokenizeChatRequest(**body)
+        except Exception as e:
+            return _build_error_response(str(e), HTTPStatus.BAD_REQUEST.phrase, HTTPStatus.BAD_REQUEST.value)
+
+        if self.openai_serving_tokenization is None:
+            raise RuntimeError("The configured vLLM version does not expose the shared rendering service")
+        response = await self.openai_serving_tokenization.create_tokenize(request, _MinimalRequest(headers))
+        assert isinstance(response, (TokenizeResponse, ErrorResponse))
+        return response.model_dump()
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/completions` in Python vLLM engine.

@@ -111,9 +111,6 @@ ADDITIVE_GENERATOR_FIELDS = {
     "mask_length_stops": False,
     "mask_truncated_turns": False,
 }
-ADDITIVE_TEACHER_FIELDS = {
-    "engine_init_timeout_seconds": "${generator.engine_init_timeout_seconds}",
-}
 ADDITIVE_POLICY_MODEL_FIELDS = {
     "source_uri": None,
     "source_identity": None,
@@ -190,8 +187,6 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         container["trainer"]["algorithm"].pop("group_admission")
     for k in ADDITIVE_GENERATOR_FIELDS:
         container["generator"].pop(k, None)
-    for k in ADDITIVE_TEACHER_FIELDS:
-        container["teacher"].pop(k, None)
     for k in ADDITIVE_POLICY_MODEL_FIELDS:
         container["trainer"]["policy"]["model"].pop(k, None)
     for k in ADDITIVE_POLICY_FIELDS:

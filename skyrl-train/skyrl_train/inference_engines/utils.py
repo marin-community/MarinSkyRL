@@ -128,14 +128,7 @@ def route_prompts_to_engines(
 
 
 def is_single_completion_prompt(prompt: Union[List[int], List[List[int]], List[str], str]) -> bool:
-    """Whether a `/completions` ``prompt`` field carries ONE prompt rather than a batch.
-
-    The single/batched split is the one `postprocess_completion_request` applies (and the
-    OpenAI schema implies): a raw string, or a flat list of token ids, is a single prompt;
-    a list of strings or a list of id-lists is batched, even at length 1. Exposed on its
-    own because the pause/abort handling in `InferenceEngineClient.completion` has to know
-    which shape it is BEFORE the prompt is normalised to a list.
-    """
+    """Return whether a completion prompt is one string or one flat token-ID list."""
     return isinstance(prompt, str) or _is_list_of_ints(prompt)
 
 

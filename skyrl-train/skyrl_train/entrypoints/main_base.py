@@ -10,7 +10,7 @@ from ray.util.placement_group import placement_group, PlacementGroup
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from ray.remote_function import RemoteFunction
 
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase
 from omegaconf import OmegaConf, DictConfig
 from pathlib import Path
 import ray
@@ -168,61 +168,6 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         engine_kwargs["rope_theta"] = rope_theta
 
     return create_ray_wrapped_inference_engines(**engine_kwargs)
-
-
-def create_teacher_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
-    """Create vLLM inference engines for the teacher model (distillation).
-
-    Unlike the student engines, teacher engines:
-    - Use the teacher model path (not policy model path)
-    - Set max_logprobs to top_k_logprobs (not 1)
-    - Don't enable sleep mode (teacher doesn't share GPU with training)
-    - Don't set up weight sync (teacher weights are static)
-
-    Also loads the teacher's own tokenizer for cross-model distillation.
-
-    Returns:
-        Tuple of (engines, teacher_tokenizer).
-    """
-    from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
-
-    teacher_cfg = cfg.teacher
-
-    # Load teacher's own tokenizer for cross-model retokenization.
-    # The teacher vLLM engine uses its own tokenizer internally for vocab
-    # validation, so we must send it token IDs in its own vocabulary.
-    teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_cfg.model_path, trust_remote_code=True)
-    logger.info(f"Loaded teacher tokenizer: {teacher_cfg.model_path} (vocab_size={teacher_tokenizer.vocab_size})")
-
-    engine_kwargs = {
-        "num_inference_engines": teacher_cfg.num_inference_engines,
-        "tensor_parallel_size": teacher_cfg.inference_engine_tensor_parallel_size,
-        "pipeline_parallel_size": teacher_cfg.inference_engine_pipeline_parallel_size,
-        "model_dtype": "auto",
-        "pretrain": teacher_cfg.model_path,
-        "seed": cfg.trainer.seed,
-        "vllm_v1_disable_multiproc": False,
-        "enable_prefix_caching": False,
-        "enforce_eager": teacher_cfg.enforce_eager,
-        "engine_init_timeout_seconds": teacher_cfg.engine_init_timeout_seconds,
-        "expert_parallel_size": 1,
-        "data_parallel_size": 1,
-        "shared_pg": None,  # teacher gets its own placement group
-        "gpu_memory_utilization": teacher_cfg.gpu_memory_utilization,
-        "inference_engine_enable_sleep": False,  # teacher doesn't share GPU
-        "async_engine": False,
-        "max_num_batched_tokens": None,
-        "max_num_seqs": None,
-        "tokenizer": teacher_tokenizer,
-        "backend": teacher_cfg.backend,
-        "engine_init_kwargs": {
-            **OmegaConf.to_container(teacher_cfg.engine_init_kwargs, resolve=True),
-        },
-        "max_logprobs": teacher_cfg.top_k_logprobs,
-    }
-
-    engines = create_ray_wrapped_inference_engines(**engine_kwargs)
-    return engines, teacher_tokenizer
 
 
 def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):

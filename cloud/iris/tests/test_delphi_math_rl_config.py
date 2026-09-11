@@ -37,9 +37,8 @@ class _HPCStub:
 def test_delphi_config_parses_to_main_base_non_agentic():
     parsed = parse_rl_config(_CONFIG)
     assert parsed.entrypoint == "skyrl_train.entrypoints.main_base"
-    # Non-agentic: no terminal_bench / teacher sections.
+    # Non-agentic: no terminal_bench section.
     assert parsed.terminal_bench is None
-    assert parsed.teacher is None
     # env_class routed via the `environment` section (default_env_class fallback).
     assert parsed.environment.get("env_class") == "aime"
     # Parquet data kind is popped out of `data` (must not reach Hydra).
