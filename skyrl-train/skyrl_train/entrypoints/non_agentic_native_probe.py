@@ -36,7 +36,10 @@ from skyrl_train.weight_sync.receiver_readback_rpc import read_all_receiver_work
 
 
 BASE_PROCESSOR = "skyrl_train.inference_engines.non_agentic_logits_processor.NonAgenticTokenProcessor"
-TIMED_PROCESSOR = "skyrl_train.entrypoints.non_agentic_probe_timing.TimedNonAgenticTokenProcessor"
+# vLLM loads a string logits processor with `module_path, qualname = value.split(":")`;
+# the dotted form above is the runner's config contract (skyrl_gym.py) and is never
+# handed to vLLM by this probe. The engine constructor value must use the colon.
+TIMED_PROCESSOR = "skyrl_train.entrypoints.non_agentic_probe_timing:TimedNonAgenticTokenProcessor"
 PACKAGES = ("baseline", "force_close", "repetition_stop", "soft_overlong")
 
 
