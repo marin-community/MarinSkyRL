@@ -4,9 +4,10 @@ import asyncio
 import json
 import logging
 from collections import OrderedDict
+from collections.abc import AsyncIterator
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client_http_endpoint import InferenceHTTPBackend
@@ -148,7 +149,15 @@ class OpenCodeContinuationManager:
         headers = request_payload.get("headers", {})
         trial_id = headers.get(TRIAL_ID_HEADER)
         body = request_payload.get("json", {})
-        if not isinstance(trial_id, str) or not trial_id or not isinstance(body.get("messages"), list):
+        if (
+            not isinstance(trial_id, str)
+            or not trial_id
+            or not isinstance(body.get("messages"), list)
+            # OpenCode's title and compaction agents share the trial header but call
+            # the model with no tools. They are auxiliary generations, not turns in
+            # the task agent's causal action chain, and must not replace its state.
+            or not body.get("tools")
+        ):
             return None
 
         lock = self._locks.setdefault(trial_id, asyncio.Lock())

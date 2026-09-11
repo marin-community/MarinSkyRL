@@ -1,15 +1,16 @@
-import json
 import asyncio
+import json
 
 import httpx
 import pytest
-
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
 from skyrl_train.inference_engines.opencode_continuation import (
     EXACT_PROMPT_TOKEN_IDS_KEY,
-    OpenCodeContinuationManager,
     TRIAL_ID_HEADER,
+    OpenCodeContinuationManager,
 )
+
+TOOLS = [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
 
 
 class _ContinuationBackend:
@@ -84,7 +85,7 @@ async def test_opencode_continues_from_exact_served_ids_across_tool_turn():
         first = await client.post(
             "/v1/chat/completions",
             headers=headers,
-            json={"model": backend.model_name, "messages": first_messages, "stream": True},
+            json={"model": backend.model_name, "messages": first_messages, "tools": TOOLS, "stream": True},
         )
         assert first.status_code == 200
 
@@ -96,7 +97,7 @@ async def test_opencode_continues_from_exact_served_ids_across_tool_turn():
         second = await client.post(
             "/v1/chat/completions",
             headers=headers,
-            json={"model": backend.model_name, "messages": second_messages, "stream": True},
+            json={"model": backend.model_name, "messages": second_messages, "tools": TOOLS, "stream": True},
         )
         assert second.status_code == 200
 
@@ -117,12 +118,22 @@ async def test_opencode_compaction_restarts_exact_continuation_segment():
         await client.post(
             "/v1/chat/completions",
             headers=headers,
-            json={"model": backend.model_name, "messages": [{"role": "user", "content": "original"}], "stream": True},
+            json={
+                "model": backend.model_name,
+                "messages": [{"role": "user", "content": "original"}],
+                "tools": TOOLS,
+                "stream": True,
+            },
         )
         await client.post(
             "/v1/chat/completions",
             headers=headers,
-            json={"model": backend.model_name, "messages": [{"role": "user", "content": "summary"}], "stream": True},
+            json={
+                "model": backend.model_name,
+                "messages": [{"role": "user", "content": "summary"}],
+                "tools": TOOLS,
+                "stream": True,
+            },
         )
 
     assert EXACT_PROMPT_TOKEN_IDS_KEY not in backend.chat_requests[1]["json"]
@@ -158,7 +169,12 @@ async def test_concurrent_trial_histories_remain_isolated():
             await client.post(
                 "/v1/chat/completions",
                 headers={TRIAL_ID_HEADER: trial},
-                json={"model": backend.model_name, "messages": [{"role": "user", "content": initial}], "stream": True},
+                json={
+                    "model": backend.model_name,
+                    "messages": [{"role": "user", "content": initial}],
+                    "tools": TOOLS,
+                    "stream": True,
+                },
             )
         for trial, initial in (("trial-a", "alpha"), ("trial-b", "beta")):
             await client.post(
@@ -171,6 +187,7 @@ async def test_concurrent_trial_histories_remain_isolated():
                         {"role": "assistant", "content": "tool call"},
                         {"role": "tool", "content": "result"},
                     ],
+                    "tools": TOOLS,
                     "stream": True,
                 },
             )
@@ -185,7 +202,12 @@ async def test_cancelled_stream_releases_trial_for_timeout_retry():
     manager = OpenCodeContinuationManager(backend)
     payload = {
         "headers": {TRIAL_ID_HEADER: "trial-timeout"},
-        "json": {"model": backend.model_name, "messages": [{"role": "user", "content": "slow"}], "stream": True},
+        "json": {
+            "model": backend.model_name,
+            "messages": [{"role": "user", "content": "slow"}],
+            "tools": TOOLS,
+            "stream": True,
+        },
     }
     lease = await manager.begin(payload)
     assert lease is not None
@@ -207,3 +229,48 @@ async def test_cancelled_stream_releases_trial_for_timeout_retry():
 async def _empty_stream():
     if False:
         yield ""
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_generation_does_not_replace_agent_continuation_state():
+    backend = _ContinuationBackend(
+        prompt_ids=[[1, 2], [7, 8], [1, 2, 99, 77, 40, 41]],
+        completion_ids=[[99], [9], [100]],
+    )
+    set_global_state(backend, None)
+    app = create_app(backend=backend, enable_opencode_exact_continuation=True)
+    headers = {TRIAL_ID_HEADER: "trial-with-title"}
+    first_messages = [{"role": "user", "content": "run it"}]
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={"model": backend.model_name, "messages": first_messages, "tools": TOOLS, "stream": True},
+        )
+        await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": backend.model_name,
+                "messages": [{"role": "user", "content": "Generate a title"}],
+                "stream": True,
+            },
+        )
+        await client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": backend.model_name,
+                "messages": [
+                    *first_messages,
+                    {"role": "assistant", "content": "tool call"},
+                    {"role": "tool", "content": "result"},
+                ],
+                "tools": TOOLS,
+                "stream": True,
+            },
+        )
+
+    assert "session_id" not in backend.chat_requests[1]["json"]
+    assert backend.chat_requests[2]["json"][EXACT_PROMPT_TOKEN_IDS_KEY] == [1, 2, 99, 77, 40, 41]

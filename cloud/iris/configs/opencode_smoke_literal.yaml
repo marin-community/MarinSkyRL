@@ -56,6 +56,7 @@ terminal_bench:
       - EnvironmentStartTimeoutError
       - NetworkError
       - ConnectionError
+      - VerifierTimeoutError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - AgentEnvironmentTimeoutError
