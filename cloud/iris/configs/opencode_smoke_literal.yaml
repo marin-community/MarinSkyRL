@@ -57,6 +57,7 @@ terminal_bench:
       - NetworkError
       - ConnectionError
       - VerifierTimeoutError
+      - NonZeroAgentExitCodeError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - AgentEnvironmentTimeoutError
