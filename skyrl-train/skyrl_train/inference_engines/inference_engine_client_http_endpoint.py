@@ -1,8 +1,8 @@
 """
 OpenAI-compatible HTTP endpoint using InferenceEngineClient as backend.
 
-This module provides a FastAPI-based HTTP endpoint that exposes OpenAI's chat completion API
-while routing requests to our internal InferenceEngineClient system.
+This module provides a FastAPI-based HTTP endpoint that exposes OpenAI's completion APIs and
+vLLM-compatible chat tokenization while routing requests to InferenceEngineClient.
 
 Main functions:
 - serve(): Start the HTTP endpoint.
@@ -33,9 +33,12 @@ from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator
 logger = logging.getLogger(__name__)
 
 _ResponseT = TypeVar("_ResponseT")
+TOKENIZE_ENDPOINT = "/tokenize"
+MODELS_ENDPOINT = "/v1/models"
+_SERVER_CREATED_TIME = int(time.time())
 
 
-class CompletionBackend(Protocol):
+class InferenceHTTPBackend(Protocol):
     """What this endpoint needs of the engine client it serves.
 
     InferenceEngineClient satisfies it. It is a protocol rather than that concrete type
@@ -44,6 +47,7 @@ class CompletionBackend(Protocol):
     """
 
     model_name: str
+    max_model_len: Optional[int]
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
@@ -51,9 +55,11 @@ class CompletionBackend(Protocol):
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
 
+    async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
+
 
 # Global state to hold the inference engine client and backend
-_global_inference_engine_client: Optional[CompletionBackend] = None
+_global_inference_engine_client: Optional[InferenceHTTPBackend] = None
 _global_uvicorn_server: Optional[uvicorn.Server] = None
 
 
@@ -69,7 +75,25 @@ class ErrorResponse(BaseModel):
     error: ErrorInfo
 
 
-def set_global_state(inference_engine_client: CompletionBackend, uvicorn_server: uvicorn.Server):
+class ModelCard(BaseModel):
+    id: str
+    object: str = "model"
+    created: int
+    owned_by: str = "skyrl"
+    max_model_len: Optional[int]
+
+
+class ModelList(BaseModel):
+    object: str = "list"
+    data: list[ModelCard]
+
+
+def is_engine_error_response(response: Dict[str, Any]) -> bool:
+    """Recognize the error response shapes returned by vLLM and SGLang."""
+    return "error" in response or response.get("object", "") == "error"
+
+
+def set_global_state(inference_engine_client: InferenceHTTPBackend, uvicorn_server: uvicorn.Server):
     """Set the global inference engine client."""
     global _global_inference_engine_client
     global _global_uvicorn_server
@@ -77,10 +101,7 @@ def set_global_state(inference_engine_client: CompletionBackend, uvicorn_server:
     _global_uvicorn_server = uvicorn_server
 
 
-def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Optional[ErrorResponse]:
-    """Common validation for /chat/completions and /completions endpoints."""
-    assert endpoint in ["/completions", "/chat/completions"]
-
+def _validate_backend_model(model: Optional[str]) -> Optional[ErrorResponse]:
     if _global_inference_engine_client is None:
         return ErrorResponse(
             error=ErrorInfo(
@@ -89,21 +110,31 @@ def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Opt
                 code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             ),
         )
-    if "model" not in request_json:
+    if model is not None and _global_inference_engine_client.model_name != model:
+        # `served_model_name` is supported in generator.engine_init_kwargs. Both
+        # vllm_engine.py and InferenceEngineClient use it for Harbor/LiteLLM compatibility.
         return ErrorResponse(
             error=ErrorInfo(
-                message=f"The field `model` is required in your `{endpoint}` request.",
+                message=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} "
+                f"!= model name in request {model}",
                 type=HTTPStatus.BAD_REQUEST.phrase,
                 code=HTTPStatus.BAD_REQUEST.value,
             ),
         )
-    if _global_inference_engine_client.model_name != request_json["model"]:
-        # NOTE: `served_model_name` config is now supported in generator.engine_init_kwargs.
-        # Both vllm_engine.py and InferenceEngineClient use it for Harbor/LiteLLM compatibility.
-        # See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
+    return None
+
+
+def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Optional[ErrorResponse]:
+    """Common validation for /chat/completions and /completions endpoints."""
+    assert endpoint in ["/completions", "/chat/completions"]
+
+    backend_error = _validate_backend_model(request_json.get("model"))
+    if backend_error is not None:
+        return backend_error
+    if "model" not in request_json:
         return ErrorResponse(
             error=ErrorInfo(
-                message=f"Model name mismatch: loaded model name {_global_inference_engine_client.model_name} != model name in request {request_json['model']}",
+                message=f"The field `model` is required in your `{endpoint}` request.",
                 type=HTTPStatus.BAD_REQUEST.phrase,
                 code=HTTPStatus.BAD_REQUEST.value,
             ),
@@ -237,17 +268,20 @@ async def _await_with_disconnect(raw_request: Request, backend_request: Coroutin
 
 
 async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stats: HTTPBridgeStatsAccumulator):
-    """Handle /completions or /chat/completions request.
+    """Handle a request implemented by the policy model's serving backend.
 
     Returns ``StreamingResponse`` for ``stream:true`` chat-completions and
     ``JSONResponse`` for everything else (byte-identical to pre-streaming behavior).
     """
-    assert endpoint in ["/completions", "/chat/completions"]
+    assert endpoint in ["/completions", "/chat/completions", TOKENIZE_ENDPOINT]
     try:
         request_json = await raw_request.json()
 
         # SkyRL-side validation
-        error_response = _validate_openai_request(request_json, endpoint=endpoint)
+        if endpoint == TOKENIZE_ENDPOINT:
+            error_response = _validate_backend_model(request_json.get("model"))
+        else:
+            error_response = _validate_openai_request(request_json, endpoint=endpoint)
         if error_response is not None:
             return _json_response(
                 error_response.model_dump(),
@@ -274,11 +308,13 @@ async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stat
         # Non-streaming requests stay attached to the client until completion.
         if endpoint == "/chat/completions":
             backend_request = _global_inference_engine_client.chat_completion(payload)
-        else:
+        elif endpoint == "/completions":
             backend_request = _global_inference_engine_client.completion(payload)
+        else:
+            backend_request = _global_inference_engine_client.tokenize(payload)
         response = await _await_with_disconnect(raw_request, backend_request)
 
-        if "error" in response or response.get("object", "") == "error":
+        if is_engine_error_response(response):
             # former is vllm format, latter is sglang format
             error_code = response["error"]["code"] if "error" in response else response["code"]
             return _json_response(response, endpoint=endpoint, bridge_stats=bridge_stats, status_code=error_code)
@@ -395,6 +431,29 @@ async def _monitor_event_loop_lag(
         raise
 
 
+async def handle_models_request(
+    *,
+    bridge_stats: HTTPBridgeStatsAccumulator,
+) -> JSONResponse:
+    """Return the served model name and live engine context limit."""
+    backend = _global_inference_engine_client
+    assert backend is not None
+    response = ModelList(
+        data=[
+            ModelCard(
+                id=backend.model_name,
+                created=_SERVER_CREATED_TIME,
+                max_model_len=backend.max_model_len,
+            )
+        ]
+    )
+    return _json_response(
+        response.model_dump(),
+        endpoint=MODELS_ENDPOINT,
+        bridge_stats=bridge_stats,
+    )
+
+
 def create_app(
     bridge_stats: HTTPBridgeStatsAccumulator | None = None,
     *,
@@ -480,6 +539,16 @@ def create_app(
         """
         return await handle_openai_request(raw_request, endpoint="/completions", bridge_stats=bridge_stats)
 
+    @app.post(TOKENIZE_ENDPOINT)
+    async def tokenize(raw_request: Request):
+        """Delegate chat tokenization to the inference backend's serving renderer."""
+        return await handle_openai_request(raw_request, endpoint=TOKENIZE_ENDPOINT, bridge_stats=bridge_stats)
+
+    @app.get(MODELS_ENDPOINT)
+    async def models():
+        """Return the served model identity and configured context limit."""
+        return await handle_models_request(bridge_stats=bridge_stats)
+
     # Health check endpoint
     # All inference engine replicas are initialized before creating `InferenceEngineClient`, and thus
     # we can start receiving requests as soon as the FastAPI server starts
@@ -509,7 +578,7 @@ def create_app(
 
 
 def serve(
-    inference_engine_client: CompletionBackend,
+    inference_engine_client: InferenceHTTPBackend,
     host: str = "0.0.0.0",
     port: int = 8000,
     log_level: str = "info",

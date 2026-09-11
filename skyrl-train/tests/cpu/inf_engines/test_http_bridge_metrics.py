@@ -4,13 +4,15 @@ import socket
 import httpx
 import pytest
 import uvicorn
-
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
 from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator, IntervalReadMode
 
 
+TEST_MODEL_NAME = "test-model"
+
+
 class _Backend:
-    model_name = "test-model"
+    model_name = TEST_MODEL_NAME
 
     async def chat_completion(self, _request):
         return {"choices": [{"message": {"content": "ok"}}]}
@@ -21,10 +23,87 @@ class _Backend:
     async def chat_completion_stream(self, _request):
         yield "data: [DONE]\n\n"
 
+    async def tokenize(self, _request):
+        raise AssertionError("tokenization is not expected in this test")
+
+
+class _NativeTokenizationBackend(_Backend):
+    def __init__(self):
+        self.request_payload = None
+
+    async def tokenize(self, request_payload):
+        self.request_payload = request_payload
+        return {
+            "tokens": [41, 42, 43],
+            "count": 3,
+            "max_model_len": 32768,
+            "token_strs": ["openai", "content", "parts"],
+        }
+
+
+class _RejectingTokenizationBackend(_Backend):
+    async def tokenize(self, _request_payload):
+        return {
+            "error": {
+                "message": "invalid tokenize request",
+                "type": "Bad Request",
+                "code": 400,
+            }
+        }
+
 
 async def _wait_until_started(server: uvicorn.Server) -> None:
     while not server.started:
         await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_tokenize_preserves_harbor_request_and_native_vllm_response():
+    backend = _NativeTokenizationBackend()
+    set_global_state(backend, None)
+    transport = httpx.ASGITransport(app=create_app())
+    request_json = {
+        "model": TEST_MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": [{"type": "text", "text": "continue"}]},
+        ],
+        "add_generation_prompt": False,
+        "continue_final_message": True,
+        "chat_template": "custom-template",
+        "chat_template_kwargs": {"enable_thinking": True},
+        "media_io_kwargs": {"image": {"num_crops": 4}},
+        "tools": [{"type": "function", "function": {"name": "shell"}}],
+        "return_token_strs": True,
+    }
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/tokenize", json=request_json)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "tokens": [41, 42, 43],
+        "count": 3,
+        "max_model_len": 32768,
+        "token_strs": ["openai", "content", "parts"],
+    }
+    assert backend.request_payload["json"] == request_json
+
+
+@pytest.mark.asyncio
+async def test_tokenize_preserves_native_vllm_validation_error():
+    set_global_state(_RejectingTokenizationBackend(), None)
+    transport = httpx.ASGITransport(app=create_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/tokenize", json={"messages": "not-a-message-list"})
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": {
+            "message": "invalid tokenize request",
+            "type": "Bad Request",
+            "code": 400,
+        }
+    }
 
 
 @pytest.mark.asyncio

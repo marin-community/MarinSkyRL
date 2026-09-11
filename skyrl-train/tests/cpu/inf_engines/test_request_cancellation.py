@@ -40,9 +40,10 @@ class RemoteMethod:
 
 
 class InferenceActor:
-    def __init__(self, chat_completion_result, stream_result=None):
+    def __init__(self, chat_completion_result, stream_result=None, tokenize_result=None):
         self.chat_completion = RemoteMethod(chat_completion_result)
         self.chat_completion_stream = RemoteMethod(stream_result)
+        self.tokenize = RemoteMethod(tokenize_result)
 
 
 @pytest.fixture
@@ -59,6 +60,20 @@ async def test_cancelled_chat_completion_cancels_ray_actor_task(record_ray_cance
     engine = RayWrappedInferenceEngine(InferenceActor(reference))
 
     request = asyncio.create_task(engine.chat_completion({"json": {}}))
+    await reference.started.wait()
+    request.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert reference.cancelled
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tokenization_cancels_ray_actor_task(record_ray_cancellation):
+    reference = PendingReference()
+    engine = RayWrappedInferenceEngine(InferenceActor(PendingReference(), tokenize_result=reference))
+
+    request = asyncio.create_task(engine.tokenize({"json": {"messages": []}}))
     await reference.started.wait()
     request.cancel()
 

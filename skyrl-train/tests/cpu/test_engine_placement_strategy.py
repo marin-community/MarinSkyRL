@@ -14,12 +14,25 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/test_engine_placement
 
 import pytest
 
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import resolve_engine_max_model_len
 from skyrl_train.utils.placement_geometry import colocated_engine_bundle_indices
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.utils.utils import (
     use_per_engine_strict_pack_pg,
 )
 from tests.cpu.util import example_dummy_config
+
+
+@pytest.mark.parametrize(
+    "engine_kwargs,rope_scaling,expected",
+    [
+        ({"max_model_len": 16384}, {"factor": 4, "original_max_position_embeddings": 8192}, 16384),
+        ({}, {"factor": 4, "original_max_position_embeddings": 8192}, 32768),
+        ({}, None, None),
+    ],
+)
+def test_resolve_engine_max_model_len(engine_kwargs, rope_scaling, expected):
+    assert resolve_engine_max_model_len(engine_kwargs, rope_scaling) == expected
 
 
 @pytest.mark.parametrize(

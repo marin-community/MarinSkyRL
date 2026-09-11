@@ -25,6 +25,7 @@ from skyrl_gym.envs.lcb.livecodebench import (
 from skyrl_gym.envs.reasoning_gym.scoring import normalize_ground_truth as normalize_reasoning_gym_ground_truth
 from skyrl_gym.envs.reasoning_gym.scoring import score_response as score_reasoning_gym_response
 from skyrl_gym.envs.registration import spec
+from skyrl_gym.envs.text_to_sql import scoring as text_to_sql_scoring
 from skyrl_gym.verification import RolloutEvidence
 
 NormalizeGroundTruth = Callable[[Any], str]
@@ -108,6 +109,16 @@ def _code_is_correct(response: str, ground_truth: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# text_to_sql (result-set equivalence on a rebuilt in-memory SQLite DB)
+# ---------------------------------------------------------------------------
+
+TEXT_TO_SQL_PROMPT_INSTRUCTION = (
+    "\nTarget dialect is SQLite. Write exactly one SELECT statement (a leading WITH is allowed) that "
+    "answers the question. Return only the query, inside <solution></solution>."
+)
+
+
+# ---------------------------------------------------------------------------
 # MCQ (multiple choice exact letter match via \boxed{X})
 # ---------------------------------------------------------------------------
 
@@ -180,6 +191,12 @@ CONTRACTS = {
         env_id="preference",
         normalize_ground_truth=_normalize_preference,
         is_correct=_preference_is_correct,
+    ),
+    "text_to_sql": VerifierDataContract(
+        env_id="text_to_sql",
+        normalize_ground_truth=text_to_sql_scoring.normalize_ground_truth,
+        is_correct=text_to_sql_scoring.is_correct,
+        prompt_instruction=TEXT_TO_SQL_PROMPT_INSTRUCTION,
     ),
 }
 
