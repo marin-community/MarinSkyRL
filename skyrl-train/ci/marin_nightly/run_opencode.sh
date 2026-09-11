@@ -56,9 +56,11 @@ case "$mode" in
 esac
 
 skyrl_override_args=()
-for override in "${extra_overrides[@]}"; do
-    skyrl_override_args+=(--skyrl_override "$override")
-done
+if ((${#extra_overrides[@]})); then
+    for override in "${extra_overrides[@]}"; do
+        skyrl_override_args+=(--skyrl_override "$override")
+    done
+fi
 
 cleanup() {
     iris --cluster marin job cancel "$job_path" >/dev/null 2>&1 || true
@@ -88,7 +90,7 @@ PYTHONPATH=. uv run --frozen python -m cloud.iris.iris_backend \
     --skyrl_override trainer.max_steps=1 \
     --skyrl_override trainer.logger=console \
     --skyrl_override trainer.algorithm.tito_full=true \
-    "${skyrl_override_args[@]}"
+    ${skyrl_override_args[@]+"${skyrl_override_args[@]}"}
 
 set +e
 iris --cluster marin job wait "$job_path"
