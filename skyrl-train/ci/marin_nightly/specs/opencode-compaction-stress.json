@@ -1,0 +1,39 @@
+{
+  "provenance": {
+    "what": "Manual RNO2A OpenCode boundary stress: automatic compaction, invalid UTF-8 tool output, a single-turn output cap, agent timeout, verifier timeout, and normal exact continuations in one concurrent rollout batch.",
+    "produced_by": "OPENCODE_MODE=compaction-stress skyrl-train/ci/marin_nightly/run_opencode.sh",
+    "why_these_thresholds": [
+      "The daily OpenCode lane owns the optimizer/checkpoint assertion. This mixed negative-path suite intentionally masks timeout samples that cannot carry behavior logprobs.",
+      "The compaction case must visibly contract or rewrite history, resume, pass its verifier, and preserve exact full-TITO for the post-summary segment.",
+      "Malformed terminal bytes must survive through a verified exact-TITO trajectory, while output, agent, and verifier deadlines remain independently visible."
+    ],
+    "tightening": "These are structural log contracts calibrated against the RNO2A production path; add bounded metrics only when the runner emits them independently of optimizer admission."
+  },
+  "min_train_steps": 0,
+  "finite_metrics": [],
+  "bounds": {},
+  "required_log_patterns": {
+    "clean_shutdown": {"pattern": "Training done!", "minimum": 1},
+    "compaction_boundary": {
+      "pattern": "OpenCode continuation reset: (?:history did not grow|history prefix was rewritten)",
+      "minimum": 1
+    },
+    "compaction_case_exact": {
+      "pattern": "Trajectory TrajectoryID\\(instance_id='case-04'.*completed: reward=1\\.000.*tito_full_succeeded=True",
+      "minimum": 1,
+      "maximum": 1
+    },
+    "garbage_bytes_case_exact": {
+      "pattern": "Trajectory TrajectoryID\\(instance_id='case-03'.*completed: reward=1\\.000.*tito_full_succeeded=True",
+      "minimum": 1,
+      "maximum": 1
+    },
+    "single_turn_output_limit": {
+      "pattern": "OpenCode task-agent response reached output limit:",
+      "minimum": 1
+    },
+    "agent_timeout": {"pattern": "TrajectoryID\\(instance_id='case-07'.*AgentTimeoutError", "minimum": 1},
+    "verifier_timeout": {"pattern": "TrajectoryID\\(instance_id='case-08'.*VerifierTimeoutError", "minimum": 1}
+  },
+  "max_wall_clock_seconds": 2400
+}

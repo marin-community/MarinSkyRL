@@ -1,0 +1,26 @@
+version = "1.0"
+
+[task]
+name = "marinskyrl/opencode-boundary-summarization"
+authors = [{ name = "Marin" }]
+keywords = ["opencode", "continuation", "stress"]
+
+[verifier]
+timeout_sec = 30.0
+
+[agent]
+timeout_sec = 180.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 2048
+gpus = 0
+allow_internet = false
+mcp_servers = []
+
+[verifier.env]
+
+[solution.env]
+

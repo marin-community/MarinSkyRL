@@ -61,6 +61,7 @@ from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
 import warnings
+from contextvars import ContextVar
 
 
 from skyrl_train.inference_engines.base import (
@@ -69,6 +70,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.inference_engines.opencode_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
@@ -90,6 +92,35 @@ from skyrl_train.inference_engines.vllm.stats import (
 from skyrl_train.utils import get_tcp_url, str_to_torch_dtype, torch_dtype_to_str
 import time
 from packaging import version
+
+
+_exact_chat_prompt_token_ids: ContextVar[list[int] | None] = ContextVar("exact_chat_prompt_token_ids", default=None)
+
+
+class SkyRLOpenAIServingChat(OpenAIServingChat):
+    """Substitute exact prompt token IDs while retaining vLLM's chat response parser."""
+
+    async def render_chat_request(self, request):
+        rendered = await super().render_chat_request(request)
+        exact_ids = _exact_chat_prompt_token_ids.get()
+        if exact_ids is None or not isinstance(rendered, tuple):
+            return rendered
+        conversation, engine_inputs = rendered
+        if len(engine_inputs) != 1:
+            raise ValueError("Exact OpenCode continuation requires one rendered prompt")
+        return conversation, [TokensPrompt(prompt_token_ids=list(exact_ids))]
+
+    async def create_chat_completion_with_exact_prompt(
+        self,
+        request: ChatCompletionRequest,
+        raw_request: "_MinimalRequest",
+        prompt_token_ids: list[int],
+    ) -> ChatCompletionResponse | ErrorResponse | AsyncGenerator[str, None]:
+        token = _exact_chat_prompt_token_ids.set(prompt_token_ids)
+        try:
+            return await super().create_chat_completion(request, raw_request)
+        finally:
+            _exact_chat_prompt_token_ids.reset(token)
 
 
 def _parse_vllm_version() -> version.Version:
@@ -1715,7 +1746,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             # well-formed ``<tool_call>`` output returned as plain CONTENT (never parsed
             # into ``tool_calls``) -> the agent executes nothing (tool_use=0). Pass them
             # to OpenAIServingChat too so the auto-tool path actually engages.
-            self.openai_serving_chat = OpenAIServingChat(
+            self.openai_serving_chat = SkyRLOpenAIServingChat(
                 engine_client=engine,
                 models=models,
                 response_role="assistant",
@@ -1737,7 +1768,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             )
         else:
             try:
-                self.openai_serving_chat = OpenAIServingChat(
+                self.openai_serving_chat = SkyRLOpenAIServingChat(
                     engine_client=engine,
                     models=models,
                     response_role="assistant",
@@ -1747,7 +1778,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                     **wrapper_kwargs,
                 )
             except TypeError:
-                self.openai_serving_chat = OpenAIServingChat(
+                self.openai_serving_chat = SkyRLOpenAIServingChat(
                     engine_client=engine,
                     model_config=model_config,
                     models=models,
@@ -1984,6 +2015,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
+        exact_prompt_token_ids = body.pop(EXACT_PROMPT_TOKEN_IDS_KEY, None)
 
         # Apply configured sampling params from generator config.
         # Harbor requests may include their own sampling params; we override
@@ -2005,7 +2037,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             # Create a minimal request-like object with attributes used by vLLM
             minimal_request = _MinimalRequest(headers)
             if endpoint == "/chat/completions":
-                generator = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
+                if exact_prompt_token_ids is None:
+                    generator = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
+                else:
+                    generator = await self.openai_serving_chat.create_chat_completion_with_exact_prompt(
+                        request, minimal_request, exact_prompt_token_ids
+                    )
                 assert isinstance(generator, (ChatCompletionResponse, ErrorResponse))
             else:
                 generator = await self.openai_serving_completion.create_completion(request, minimal_request)
@@ -2093,6 +2130,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
+        exact_prompt_token_ids = body.pop(EXACT_PROMPT_TOKEN_IDS_KEY, None)
 
         apply_openai_sampling(body, self._openai_sampling_params, self._validate_rollout_logprob_sampling)
         body["stream"] = True
@@ -2101,7 +2139,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         try:
             request = ChatCompletionRequest(**body)
             minimal_request = _MinimalRequest(headers)
-            result = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
+            if exact_prompt_token_ids is None:
+                result = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
+            else:
+                result = await self.openai_serving_chat.create_chat_completion_with_exact_prompt(
+                    request, minimal_request, exact_prompt_token_ids
+                )
 
             if isinstance(result, ErrorResponse):
                 err = result.model_dump()

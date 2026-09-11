@@ -29,6 +29,9 @@ terminal_bench:
     override_storage_mb: 2048
 
     auto_snapshot: true
+    env_network_policy:
+      mode: domain_allow_list
+      value: iris.oa.dev
 
     max_retries: 3
     min_wait_sec: 60.0
@@ -53,6 +56,8 @@ terminal_bench:
       - EnvironmentStartTimeoutError
       - NetworkError
       - ConnectionError
+      - VerifierTimeoutError
+      - NonZeroAgentExitCodeError
       - RewardFileNotFoundError
       - RewardFileEmptyError
       - AgentEnvironmentTimeoutError
@@ -77,8 +82,10 @@ terminal_bench:
 trainer:
   strategy: fsdp2
   algorithm:
-    advantage_estimator: rloo_n
-    group_advantage_min_size: 4
+    # This is an infrastructure gate, not a quality run. One rollout for each of
+    # eight distinct tasks gives the eight-way policy mesh useful work without
+    # multiplying the Daytona load by a group-relative estimator's sample count.
+    advantage_estimator: reinforce++
     use_kl_loss: false
     kl_loss_coef: 0.0
     eps_clip_low: 0.2
@@ -99,7 +106,9 @@ trainer:
   micro_train_batch_size_per_gpu: 1
 
 
-  use_sample_packing: true
+  # The smoke runtime does not install FlashAttention 2, which sample packing
+  # requires. These short trajectories do not benefit from packing.
+  use_sample_packing: false
 
   eval_interval: 999999
   eval_before_train: false
@@ -148,8 +157,8 @@ generator:
   inference_engine_tensor_parallel_size: 1
   num_inference_engines: null
 
-  n_samples_per_prompt: 8
-  eval_n_samples_per_prompt: 8
+  n_samples_per_prompt: 1
+  eval_n_samples_per_prompt: 1
 
   gpu_memory_utilization: 0.85
 
@@ -180,6 +189,9 @@ generator:
 
 extra_env:
   NCCL_DEBUG: WARN
+  # Stress gates match outcomes by task ID. Ray's cross-worker log deduplication
+  # can otherwise replace those distinct lines with one arbitrary representative.
+  RAY_DEDUP_LOGS: "0"
 
 data:
   train_data: []
