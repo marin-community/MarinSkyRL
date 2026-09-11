@@ -805,10 +805,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             )
 
         # Initialize weight sync state
+        shard_timing = getattr(self.cfg.generator, "weight_sync_timing_mode", "off") == "shard"
         with Timer("init_weight_sync_state", self.all_startup_timings):
-            if getattr(self.cfg.generator, "weight_sync_timing_mode", "off") != "shard":
+            if not shard_timing:
                 self.init_weight_sync_state()
 
+        # The "initial" readback is where the engine initializes request accounting and
+        # records the version boundary for the startup weights; it must be the first
+        # boundary the engine sees, and it must run before any generation.
+        trace_initial_publication = self.cfg.generator.publication_stage_timing or self.cfg.trainer.fully_async.get(
+            "first_token_admission", False
+        )
         # sync weights to inference engines
         with Timer("sync_weights_to_inference_engines", self.all_startup_timings) as weight_update_timer:
             await self.async_sync_policy_weights_to_inference_engines()
@@ -817,13 +824,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             with Timer("policy_startup_drain", self.all_startup_timings):
                 await self._drain_policy_event_loops()
-            if getattr(self.cfg.generator, "weight_sync_timing_mode", "off") == "shard":
-                await self.inference_engine_client.resume_generation(
-                    policy_version=self._published_policy_version, settle_native_calls=True
-                )
-        if self.cfg.generator.publication_stage_timing or self.cfg.trainer.fully_async.get(
-            "first_token_admission", False
-        ):
+            if shard_timing:
+                # Shard preparation pauses every engine, so the startup release happens
+                # here. A versioned resume records its own boundary, which the "initial"
+                # readback rejects as a pre-existing one: initialize accounting while the
+                # engines are still idle, then release them without a second boundary.
+                if trace_initial_publication:
+                    await self._record_publication_requests(
+                        "initial", initial_policy_version=self._published_policy_version
+                    )
+                    await self.inference_engine_client.resume_generation(settle_native_calls=True)
+                else:
+                    await self.inference_engine_client.resume_generation(
+                        policy_version=self._published_policy_version, settle_native_calls=True
+                    )
+        if trace_initial_publication and not shard_timing:
             await self._record_publication_requests("initial", initial_policy_version=self._published_policy_version)
         # Startup weight sync runs before producers exist and does not pause inference.
         await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)

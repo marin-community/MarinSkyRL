@@ -1075,3 +1075,94 @@ async def test_configured_shard_mode_trains_evaluates_final_weights_and_closes_c
     assert [step for step, _ in trainer.policy_model.consumed] == [1, 2, 3]
     assert closed == [3]
     assert engine.ready.is_set() and not engine.generation_paused_event.is_set()
+
+
+class GuardedInferenceService(InferenceService):
+    """Mirror the vLLM engine's request-accounting precondition, not just its return shape.
+
+    AsyncVLLMInferenceEngine.read_publication_request_state(initial_policy_version=...)
+    is the initialization: it rejects an engine that already holds accounting or any
+    version boundary, and resume_generation(policy_version=...) records a boundary.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.accounting = None
+        self.boundaries = []
+        self.calls = []
+
+    async def resume_generation(self, policy_version=None, *, settle_native_calls=False):
+        if policy_version is not None:
+            assert self.generation_paused_event.is_set()
+            self.boundaries.append(policy_version)
+        self.calls.append(("resume", policy_version))
+        await super().resume_generation()
+
+    async def read_publication_request_state(
+        self, initial_policy_version=None, drain_accounting=False, terminal_timeout_seconds=None
+    ):
+        self.calls.append(("read", initial_policy_version, terminal_timeout_seconds is not None))
+        if initial_policy_version is not None:
+            if self.accounting is not None or self.boundaries:
+                raise ValueError("request accounting must initialize before any generation")
+            self.accounting = {"active_ids": []}
+            self.boundaries.append(initial_policy_version)
+        elif terminal_timeout_seconds is not None and self.accounting is None:
+            raise ValueError("terminal acknowledgement requires initialized request accounting")
+        return [
+            {
+                "shared_time_and_uts_namespaces": True,
+                "paused": self.generation_paused_event.is_set(),
+                "request_accounting": None if self.accounting is None else dict(self.accounting),
+            }
+            for _ in range(2)
+        ]
+
+    def publication_inflight_snapshot(self):
+        return (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_shard_startup_initializes_request_accounting_before_releasing_generation(monkeypatch):
+    """Shard preparation pauses the engines; first-token admission must still see a clean initial read."""
+    from skyrl_train.weight_sync import shard_training
+
+    class FirstTokenRunner(Runner):
+        async def run(self, request, **kwargs):
+            batch = await super().run(request, **kwargs)
+            batch["policy_versions_at_first_token"] = [self.engine.installed_update] * len(batch["response_ids"])
+            return batch
+
+    trainer = make_driver(interval=2, age=1, steps=3, runner_type=FirstTokenRunner)
+    trainer.cfg.generator.weight_sync_timing_mode = "shard"
+    trainer.cfg.trainer.fully_async.first_token_admission = True
+    engine = GuardedInferenceService()
+    trainer.inference_engine_client = engine
+    trainer.trajectory_runner.engine = engine
+
+    class ShardService:
+        """Remote tensor transport boundary; preparation pauses generation on first use."""
+
+        def __init__(self, driver):
+            assert driver is trainer
+
+        async def publish(self, publication_id):
+            if not engine.publications:
+                await engine.pause_generation()
+            assert engine.generation_paused_event.is_set()
+            engine.installed_update = publication_id
+            engine.publications.append(publication_id)
+            return {"phase_seconds": {"install": 7, "full_byte_replay": 103}, "total_seconds_including_proof": 113}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(shard_training, "ShardTrainingPublication", ShardService)
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    # The initial read initializes accounting while the engines are still paused, and
+    # the startup release records no second boundary for the same version.
+    # Shard mode forbids publication_stage_timing, so no other readback happens.
+    assert engine.calls == [("read", 0, False), ("resume", None), ("resume", 2), ("resume", 3)]
+    assert engine.boundaries == [0, 2, 3]
+    assert engine.publications == [0, 2, 3]
+    assert engine.ready.is_set() and not engine.generation_paused_event.is_set()
