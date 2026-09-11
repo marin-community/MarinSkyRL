@@ -68,7 +68,8 @@ closure; see `docs/grug-megatron-training.md` for what each test guards.
 The OpenCode lane is deliberately a real federated RL launch rather than a mocked agent
 test. It provisions one RNO2A H100x8 node, creates eight air-gapped Daytona sandboxes,
 runs the pinned OpenCode 1.18.2 CLI at concurrency eight, captures every served token via
-RecordProxy, and completes one policy step. It runs daily with the other gates. A healthy
+RecordProxy, and completes one policy step. Run it manually with the RL-specific Daytona
+credential until the GitHub Iris service account can read the canonical secret. A healthy
 run targets about 15 minutes, or roughly 2 H100-hours plus eight short-lived Daytona
 sandboxes; its 40-minute hard allowance is a hang backstop, not the expected cost.
 
@@ -108,7 +109,7 @@ agent and verifier timeouts run beside normal trials. The second disables compac
 requires the same oversized tool result to become exactly one typed
 `ContextLengthExceededError`, with no retry storm. These mixed negative-path batches do
 not require an optimizer step: timeout and overflow samples without behavior logprobs
-are deliberately masked, while the daily positive-path lane owns the real policy-update
+are deliberately masked, while the positive-path gate owns the real policy-update
 and checkpoint contract. Instead, the stress specs require named log evidence for every
 boundary and a clean workflow shutdown. Update a threshold only from a cited real run,
 never merely to make a local fixture pass.
