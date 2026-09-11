@@ -51,60 +51,66 @@ cpu = [
     "torchdata",
 ]
 cuda = [
+    "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux'",
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "harbor-config ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
     "tensordict ; sys_platform == 'linux'",
-    "torch==2.11.0 ; sys_platform == 'linux'",
+    "torch==2.13.0 ; sys_platform == 'linux'",
     "torchdata ; sys_platform == 'linux'",
-    "torchvision==0.26.0 ; sys_platform == 'linux'",
+    "torchvision==0.28.0 ; sys_platform == 'linux'",
 ]
 deepspeed = [
+    "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux'",
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "deepspeed==0.17.6 ; sys_platform == 'linux'",
     "harbor-config ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
     "tensordict ; sys_platform == 'linux'",
-    "torch==2.11.0 ; sys_platform == 'linux'",
+    "torch==2.13.0 ; sys_platform == 'linux'",
     "torchdata ; sys_platform == 'linux'",
-    "torchvision==0.26.0 ; sys_platform == 'linux'",
+    "torchvision==0.28.0 ; sys_platform == 'linux'",
 ]
 fsdp = [
-    "flash-attn==2.8.3 ; sys_platform == 'linux'",
-    "torchtitan ; sys_platform == 'linux'",
+    "flash-attn==2.8.3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchtitan ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 vllm = [
-    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
-    "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
-    "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
-    "harbor[analysis,datasets,daytona] ; sys_platform == 'linux'",
-    "harbor-config ; sys_platform == 'linux'",
-    "peft>=0.19 ; sys_platform == 'linux'",
-    "quack-kernels==0.5.0 ; sys_platform == 'linux'",
-    "tensordict ; sys_platform == 'linux'",
-    "torch==2.11.0 ; sys_platform == 'linux'",
-    "torchdata ; sys_platform == 'linux'",
-    "torchvision==0.26.0 ; sys_platform == 'linux'",
-    "vllm==0.0.0.dev20260805+marin.fa50698a9a30.cu129 ; sys_platform == 'linux'",
+    # The CPU audio wheel uses Torch for GPU resampling without loading a cu130 extension.
+    "torchaudio==2.11.0+cpu ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchcodec==0.16.0+cu132 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "accelerate>=1.14,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.16.post3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.16.post3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "harbor[analysis,datasets,daytona] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "harbor-config ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "peft>=0.19 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "quack-kernels==0.6.4 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "tensordict ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch==2.13.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchdata ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision==0.28.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "vllm==0.0.0.dev20260827+marin.f0d7cc7f5874 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 megatron = [
-    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
-    "causal-conv1d>=1.5,<2 ; sys_platform == 'linux'",
-    "flash-linear-attention==0.4.2 ; sys_platform == 'linux'",
-    "mamba-ssm>=2.2,<3 ; sys_platform == 'linux'",
-    "megatron-bridge==0.5.0 ; sys_platform == 'linux'",
-    "megatron-core==0.18.0 ; sys_platform == 'linux'",
-    "harbor-config ; sys_platform == 'linux'",
-    "nvidia-modelopt==0.45.0 ; sys_platform == 'linux'",
-    "peft>=0.19 ; sys_platform == 'linux'",
-    "tensordict ; sys_platform == 'linux'",
-    "torch==2.11.0 ; sys_platform == 'linux'",
-    "torchdata ; sys_platform == 'linux'",
-    "torchvision==0.26.0 ; sys_platform == 'linux'",
-    "transformer-engine[pytorch]==2.11.0 ; sys_platform == 'linux'",
-    "transformer-engine-cu12==2.11.0 ; sys_platform == 'linux'",
-    "transformer-engine-torch==2.11.0 ; sys_platform == 'linux'",
+    "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "accelerate>=1.14,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "causal-conv1d>=1.5,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flash-linear-attention==0.4.2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "mamba-ssm>=2.2,<3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "megatron-bridge==0.5.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "megatron-core==0.18.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "harbor-config ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "nvidia-modelopt==0.45.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "peft>=0.19 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "tensordict ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch==2.13.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchdata ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision==0.28.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "transformer-engine[pytorch]==2.11.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "transformer-engine-cu13==2.11.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "transformer-engine-torch==2.11.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 telemetry = [
     "marin-rigging[prometheus]",
@@ -167,15 +173,11 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
-    "transformer-engine-cu13 ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
     "fsspec==2026.4.0",
-    "nvidia-cutlass-dsl>=4.5.2,<4.6 ; sys_platform == 'linux'",
-    "humming-kernels==0.1.4 ; sys_platform == 'linux'",
-    "cuda-tile==1.3.0 ; sys_platform == 'linux'",
-    "flashinfer-python==0.6.12 ; sys_platform == 'linux'",
-    "flashinfer-cubin==0.6.12 ; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.6.12 ; sys_platform == 'linux'",
+    # Megatron Bridge pins an older FlashInfer; share the selected vLLM ABI.
+    "flashinfer-python==0.6.16.post3 ; sys_platform == 'linux'",
+    "flashinfer-cubin==0.6.16.post3 ; sys_platform == 'linux'",
     "opentelemetry-api==1.44.0 ; sys_platform == 'linux'",
     "opentelemetry-api ; sys_platform != 'linux'",
 ]
@@ -192,41 +194,38 @@ transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_to
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
 
 [tool.uv.sources]
+torchaudio = { index = "pytorch-cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
+torchcodec = { index = "pytorch-cu132", extra = "vllm", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
 flash-attn = [
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 harbor = { git = "https://github.com/marin-community/harbor.git" }
 torch = [
     { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { index = "pytorch-cu129", extra = "cuda" },
-    { index = "pytorch-cu129", extra = "deepspeed" },
-    { index = "pytorch-cu129", extra = "megatron" },
-    { index = "pytorch-cu129", extra = "vllm" },
+    { index = "pytorch-cu132", extra = "cuda" },
+    { index = "pytorch-cu132", extra = "deepspeed" },
+    { index = "pytorch-cu132", extra = "megatron" },
+    { index = "pytorch-cu132", extra = "vllm" },
 ]
 torchvision = [
-    { index = "pytorch-cu129", extra = "cuda" },
-    { index = "pytorch-cu129", extra = "deepspeed" },
-    { index = "pytorch-cu129", extra = "megatron" },
-    { index = "pytorch-cu129", extra = "vllm" },
+    { index = "pytorch-cu132", extra = "cuda" },
+    { index = "pytorch-cu132", extra = "deepspeed" },
+    { index = "pytorch-cu132", extra = "megatron" },
+    { index = "pytorch-cu132", extra = "vllm" },
 ]
-flashinfer-jit-cache = { index = "flashinfer-cu129", marker = "sys_platform == 'linux'" }
+flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 vllm = [
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260805-fa50698a9a30/vllm-0.0.0.dev20260805+marin.fa50698a9a30.cu129-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260805-fa50698a9a30/vllm-0.0.0.dev20260805+marin.fa50698a9a30.cu129-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260827-f0d7cc7f5874/vllm-0.0.0.dev20260827+marin.f0d7cc7f5874-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 transformer-engine-torch = [
-    { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/erictang000/TransformerEngine/releases/download/v2.11.0-torch2.11/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 causal-conv1d = [
-    { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/erictang000/causal-conv1d/releases/download/v1.6.1.post4-torch2.11/causal_conv1d-1.6.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 mamba-ssm = [
-    { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 harbor-config = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-280541674a8e684b5bd8e3d19e8c149981a2e186/harbor_config-0.1.0-py3-none-any.whl" }
 
@@ -236,13 +235,13 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [[tool.uv.index]]
-name = "pytorch-cu129"
-url = "https://download.pytorch.org/whl/cu129"
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
 [[tool.uv.index]]
-name = "flashinfer-cu129"
-url = "https://flashinfer.ai/whl/cu129"
+name = "flashinfer"
+url = "https://flashinfer.ai/whl"
 explicit = true
 
 [tool.marin-style]

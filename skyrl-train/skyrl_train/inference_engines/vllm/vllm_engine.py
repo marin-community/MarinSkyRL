@@ -12,6 +12,7 @@ import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.renderers.online_renderer import OnlineRenderer
 
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.config.behavior_logprobs import (
@@ -1632,22 +1633,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
 
-        # vLLM API compatibility via try/except:
-        # - vLLM >= 0.13: model_config removed (obtained internally from engine_client)
-        # - vLLM < 0.13: model_config is required as a parameter
-        # Try newer API first, fall back to older API if TypeError
-        try:
-            models = OpenAIServingModels(
-                engine_client=engine,
-                base_model_paths=base_model_paths,
-            )
-        except TypeError:
-            logger.info(f"vLLM {vllm.__version__}: using legacy API with model_config")
-            models = OpenAIServingModels(
-                engine_client=engine,
-                model_config=model_config,
-                base_model_paths=base_model_paths,
-            )
+        models = OpenAIServingModels(
+            engine_client=engine,
+            base_model_paths=base_model_paths,
+        )
 
         # TODO(Charlie): adding custom chat template for chat completion. Hacky!
         if custom_chat_template_path:
@@ -1659,113 +1648,32 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         else:
             custom_chat_template_content = None
 
-        # vLLM >= 0.20.2rc0 moved chat-template / tool-parsing into a separate
-        # ``OpenAIServingRender`` object that both OpenAIServingChat and
-        # OpenAIServingCompletion now take as a REQUIRED keyword-only
-        # ``openai_serving_render`` arg (and dropped ``model_config``). Build it
-        # lazily here; ``None`` on older vLLM where the class doesn't exist, in
-        # which case the legacy try/except branches below are taken (byte-
-        # identical to the prior behavior on vLLM 0.16 / <0.20.2).
-        #
-        # In vLLM >= 0.20.2rc0 the tool-calling config (``enable_auto_tools``,
-        # ``tool_parser``) lives on the RENDER object, not on ``OpenAIServingChat``.
-        # Pop them from ``wrapper_kwargs`` here and pass to the render constructor.
-        # On the legacy path (no render API), restore them so ``OpenAIServingChat``
-        # receives them as before.
-        enable_auto_tools = wrapper_kwargs.pop("enable_auto_tools", False)
-        tool_parser = wrapper_kwargs.pop("tool_parser", None)
-
-        openai_serving_render = None
-        try:
-            from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-
-            openai_serving_render = OpenAIServingRender(
-                model_config=model_config,
-                renderer=engine.renderer,
-                model_registry=models.registry,
-                request_logger=None,
-                chat_template=custom_chat_template_content,
-                chat_template_content_format="auto",
-                enable_auto_tools=enable_auto_tools,
-                tool_parser=tool_parser,
-            )
-        except ImportError:
-            openai_serving_render = None
-            # Legacy path: OpenAIServingChat owns the tool-calling kwargs
-            wrapper_kwargs["enable_auto_tools"] = enable_auto_tools
-            wrapper_kwargs["tool_parser"] = tool_parser
-
-        # Try the vLLM >= 0.20.2rc0 render API first, then newer (>=0.13, no
-        # model_config), then legacy (<0.13, with model_config).
-        if openai_serving_render is not None:
-            # ``enable_auto_tools``/``tool_parser`` were popped from ``wrapper_kwargs``
-            # above and passed to the RENDER object, but the render API's
-            # OpenAIServingChat STILL gates tool-call parsing on its OWN
-            # ``self.enable_auto_tools``/``self.tool_parser`` (see
-            # ``_should_stream_with_auto_tool_parsing``). Without them here they default
-            # to False/None, so an opencode/agentic request with tools has its
-            # well-formed ``<tool_call>`` output returned as plain CONTENT (never parsed
-            # into ``tool_calls``) -> the agent executes nothing (tool_use=0). Pass them
-            # to OpenAIServingChat too so the auto-tool path actually engages.
-            self.openai_serving_chat = OpenAIServingChat(
-                engine_client=engine,
-                models=models,
-                response_role="assistant",
-                openai_serving_render=openai_serving_render,
-                request_logger=None,
-                chat_template=custom_chat_template_content,
-                chat_template_content_format="auto",
-                enable_auto_tools=enable_auto_tools,
-                tool_parser=tool_parser,
-                **wrapper_kwargs,
-            )
-        else:
-            try:
-                self.openai_serving_chat = OpenAIServingChat(
-                    engine_client=engine,
-                    models=models,
-                    response_role="assistant",
-                    request_logger=None,
-                    chat_template=custom_chat_template_content,
-                    chat_template_content_format="auto",
-                    **wrapper_kwargs,
-                )
-            except TypeError:
-                self.openai_serving_chat = OpenAIServingChat(
-                    engine_client=engine,
-                    model_config=model_config,
-                    models=models,
-                    response_role="assistant",
-                    request_logger=None,
-                    chat_template=custom_chat_template_content,
-                    chat_template_content_format="auto",
-                    **wrapper_kwargs,
-                )
-
-        # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,
-        # `enable_prompt_tokens_details`, `enable_force_include_usage`.
-        # Same three-way API selection as OpenAIServingChat above.
-        if openai_serving_render is not None:
-            self.openai_serving_completion = OpenAIServingCompletion(
-                engine_client=engine,
-                models=models,
-                openai_serving_render=openai_serving_render,
-                request_logger=None,
-            )
-        else:
-            try:
-                self.openai_serving_completion = OpenAIServingCompletion(
-                    engine_client=engine,
-                    models=models,
-                    request_logger=None,
-                )
-            except TypeError:
-                self.openai_serving_completion = OpenAIServingCompletion(
-                    engine_client=engine,
-                    model_config=model_config,
-                    models=models,
-                    request_logger=None,
-                )
+        # The pinned fork shares one renderer between chat and completion serving.
+        online_renderer = OnlineRenderer(
+            model_config=model_config,
+            renderer=engine.renderer,
+            request_logger=None,
+            chat_template=custom_chat_template_content,
+            chat_template_content_format="auto",
+            **wrapper_kwargs,
+        )
+        online_renderer.warmup()
+        self.openai_serving_chat = OpenAIServingChat(
+            engine_client=engine,
+            models=models,
+            response_role="assistant",
+            online_renderer=online_renderer,
+            request_logger=None,
+            chat_template=custom_chat_template_content,
+            chat_template_content_format="auto",
+            **wrapper_kwargs,
+        )
+        self.openai_serving_completion = OpenAIServingCompletion(
+            engine_client=engine,
+            models=models,
+            online_renderer=online_renderer,
+            request_logger=None,
+        )
         return engine
 
     async def _load_lora_from_disk(self, lora_path: str):
