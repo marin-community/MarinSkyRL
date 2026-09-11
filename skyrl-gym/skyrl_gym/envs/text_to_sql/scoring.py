@@ -217,12 +217,16 @@ def _deadline_handler(deadline: float):
 def build_db(create_stmts: list[str], insert_stmts: list[str]) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.text_factory = str
-    cur = conn.cursor()
-    for st in create_stmts:
-        cur.execute(st)
-    for st in insert_stmts:
-        cur.execute(st)
-    conn.commit()
+    try:
+        cur = conn.cursor()
+        for st in create_stmts:
+            cur.execute(st)
+        for st in insert_stmts:
+            cur.execute(st)
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 
@@ -286,11 +290,12 @@ def _norm_value(v: Any) -> tuple:
         return ("~null",)
     if isinstance(v, bool):
         return ("~num", float(v))
-    if isinstance(v, (int, float)):
-        f = float(v)
-        if not math.isfinite(f):
+    if isinstance(v, int):
+        return ("~num", v)
+    if isinstance(v, float):
+        if not math.isfinite(v):
             return ("~nonfinite", repr(v))
-        return ("~num", round(f, 6))
+        return ("~num", round(v, 6))
     if isinstance(v, bytes):
         return ("~bytes", v.hex())
     return ("~str", str(v))
@@ -354,7 +359,7 @@ def _compare_on(
     ``MISMATCH`` for a candidate error or a result-set mismatch — and ``None`` when the two agree.
     """
     try:
-        reference = _run_query(conn, reference_sql, read_only=False)
+        reference = _run_query(conn, reference_sql, read_only=True)
     except sqlite3.Error as exc:
         return GradeOutcome.INFRA, f"reference query failed on {label} db: {exc}"
     if len(reference[1]) > _MAX_RESULT_ROWS:
@@ -376,71 +381,88 @@ def _compare_on(
 # --------------------------------------------------------------------------- #
 
 
-def parse_ground_truth(ground_truth: Any) -> dict[str, Any] | None:
-    """Return the spec dict from a JSON string / mapping, or ``None`` if it cannot be used."""
+def _validated_ground_truth(
+    ground_truth: Any,
+) -> tuple[dict[str, Any], list[str], list[str], str]:
     if isinstance(ground_truth, str):
         try:
             ground_truth = json.loads(ground_truth)
-        except ValueError:
-            return None
+        except ValueError as exc:
+            raise ValueError("text_to_sql ground_truth is not valid JSON.") from exc
     if not isinstance(ground_truth, dict):
+        raise ValueError("text_to_sql ground_truth must be a JSON object.")
+    missing = [key for key in _GROUND_TRUTH_KEYS if key not in ground_truth]
+    if missing:
+        raise ValueError(f"text_to_sql ground_truth missing keys: {missing}.")
+
+    statements: dict[str, list[str]] = {}
+    for field, expected_kind, label in (
+        ("schema_sql", "create_table", "CREATE TABLE"),
+        ("insert_sql", "insert", "INSERT"),
+    ):
+        script = ground_truth[field]
+        if not isinstance(script, str) or not script.strip():
+            raise ValueError(f"text_to_sql {field} must be a non-empty string.")
+        field_statements = split_statements(script)
+        if not field_statements or any(classify_statement(stmt) != expected_kind for stmt in field_statements):
+            raise ValueError(f"text_to_sql {field} must contain only {label} statements.")
+        statements[field] = field_statements
+
+    reference_sql = ground_truth["reference_sql"]
+    if not isinstance(reference_sql, str) or not reference_sql.strip():
+        raise ValueError("text_to_sql reference_sql must be a non-empty string.")
+    valid_reference, reference_or_error = guard_candidate_sql(reference_sql)
+    if not valid_reference:
+        raise ValueError(f"text_to_sql reference_sql is invalid: {reference_or_error}.")
+    if is_nondeterministic(reference_or_error):
+        raise ValueError("text_to_sql reference_sql must be deterministic.")
+    if not isinstance(ground_truth["order_significant"], bool):
+        raise ValueError("text_to_sql order_significant must be a boolean.")
+
+    table_names = ground_truth.get("table_names", [])
+    if not isinstance(table_names, list) or not all(isinstance(table, str) for table in table_names):
+        raise ValueError("text_to_sql table_names must be a list of strings.")
+    return ground_truth, statements["schema_sql"], statements["insert_sql"], reference_or_error
+
+
+def parse_ground_truth(ground_truth: Any) -> dict[str, Any] | None:
+    """Return a statically safe spec dict, or ``None`` if it cannot be used."""
+    try:
+        spec, _, _, _ = _validated_ground_truth(ground_truth)
+    except ValueError:
         return None
-    if any(key not in ground_truth for key in _GROUND_TRUTH_KEYS):
-        return None
-    return ground_truth
+    return spec
 
 
 def normalize_ground_truth(ground_truth: Any) -> str:
     """Canonical verifier input for one row. Raises ``ValueError`` for a row the verifier cannot run."""
-    spec = ground_truth
-    if isinstance(spec, str):
-        try:
-            spec = json.loads(spec)
-        except ValueError as exc:
-            raise ValueError("text_to_sql ground_truth is not valid JSON.") from exc
-    if not isinstance(spec, dict):
-        raise ValueError("text_to_sql ground_truth must be a JSON object.")
-    missing = [key for key in _GROUND_TRUTH_KEYS if key not in spec]
-    if missing:
-        raise ValueError(f"text_to_sql ground_truth missing keys: {missing}.")
-    if not isinstance(spec["schema_sql"], str) or not spec["schema_sql"].strip():
-        raise ValueError("text_to_sql schema_sql must be a non-empty string.")
-    if not isinstance(spec["insert_sql"], str) or not spec["insert_sql"].strip():
-        raise ValueError("text_to_sql insert_sql must be a non-empty string.")
-    if not isinstance(spec["reference_sql"], str) or not spec["reference_sql"].strip():
-        raise ValueError("text_to_sql reference_sql must be a non-empty string.")
-    create_stmts = [s for s in split_statements(spec["schema_sql"]) if classify_statement(s) == "create_table"]
-    insert_stmts = [s for s in split_statements(spec["insert_sql"]) if classify_statement(s) == "insert"]
-    if not create_stmts or not insert_stmts:
-        raise ValueError("text_to_sql schema_sql/insert_sql must contain CREATE TABLE and INSERT statements.")
+    spec, create_stmts, insert_stmts, reference_sql = _validated_ground_truth(ground_truth)
     try:
         conn = build_db(create_stmts, insert_stmts)
     except sqlite3.Error as exc:
         raise ValueError(f"text_to_sql seed DDL does not load in SQLite: {exc}.") from exc
     conn.close()
     canonical = {
-        "schema_sql": spec["schema_sql"],
-        "insert_sql": spec["insert_sql"],
-        "reference_sql": spec["reference_sql"],
-        "order_significant": bool(spec["order_significant"]),
-        "table_names": sorted(str(t) for t in spec.get("table_names") or []),
+        "schema_sql": ";\n".join(create_stmts) + ";",
+        "insert_sql": ";\n".join(insert_stmts) + ";",
+        "reference_sql": reference_sql,
+        "order_significant": spec["order_significant"],
+        "table_names": sorted(spec.get("table_names", [])),
     }
     return json.dumps(canonical, sort_keys=True)
 
 
 def grade(ground_truth: Any, candidate_sql: str) -> tuple[GradeOutcome, str]:
     """Return ``(GradeOutcome, detail)`` — ``MATCH`` / ``MISMATCH`` / ``INFRA``."""
-    spec = parse_ground_truth(ground_truth)
-    if spec is None:
-        return GradeOutcome.INFRA, "unusable ground_truth"
+    try:
+        spec, create_stmts, insert_stmts, reference_sql = _validated_ground_truth(ground_truth)
+    except ValueError as exc:
+        return GradeOutcome.INFRA, str(exc)
     ok, payload = guard_candidate_sql(candidate_sql)
     if not ok:
         return GradeOutcome.MISMATCH, f"guard rejected candidate query: {payload}"
     candidate_stmt = payload
-    create_stmts = split_statements(spec["schema_sql"])
-    insert_stmts = split_statements(spec["insert_sql"])
-    reference_sql = spec["reference_sql"]
-    order_significant = bool(spec["order_significant"])
+    order_significant = spec["order_significant"]
 
     try:
         seeded = build_db(create_stmts, insert_stmts)
@@ -455,7 +477,10 @@ def grade(ground_truth: Any, candidate_sql: str) -> tuple[GradeOutcome, str]:
         except sqlite3.Error as exc:
             return GradeOutcome.INFRA, f"could not build the perturbed database: {exc}"
         try:
-            perturb_db(perturbed)
+            try:
+                perturb_db(perturbed)
+            except sqlite3.Error as exc:
+                return GradeOutcome.INFRA, f"could not perturb database: {exc}"
             outcome = _compare_on(perturbed, reference_sql, candidate_stmt, order_significant, "perturbed")
             if outcome is not None:
                 return outcome

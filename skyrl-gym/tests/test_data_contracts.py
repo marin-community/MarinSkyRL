@@ -173,7 +173,11 @@ def test_text_to_sql_contract_normalizes_and_runs_a_two_sided_preflight():
     [
         ({"insert_sql": "x", "reference_sql": "SELECT 1", "order_significant": False}, "missing keys"),
         ({**_T2S_GROUND_TRUTH, "schema_sql": "CREATE TABLE (;"}, "does not load"),
-        ({**_T2S_GROUND_TRUTH, "insert_sql": "SELECT 1"}, "CREATE TABLE and INSERT"),
+        ({**_T2S_GROUND_TRUTH, "insert_sql": "SELECT 1"}, "only INSERT"),
+        (
+            {**_T2S_GROUND_TRUTH, "schema_sql": _T2S_GROUND_TRUTH["schema_sql"] + " PRAGMA user_version;"},
+            "only CREATE TABLE",
+        ),
     ],
 )
 def test_text_to_sql_contract_rejects_unrunnable_specs(ground_truth, error):

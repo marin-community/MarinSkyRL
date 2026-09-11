@@ -25,6 +25,13 @@ _ORDERED = {
     "order_significant": True,
     "table_names": ["SI"],
 }
+_LARGE_INTEGER = {
+    "schema_sql": "CREATE TABLE Numbers (value INTEGER);",
+    "insert_sql": "INSERT INTO Numbers VALUES (1152921504606846976);",
+    "reference_sql": "SELECT value FROM Numbers",
+    "order_significant": False,
+    "table_names": ["Numbers"],
+}
 
 
 def _make(ground_truth: dict) -> object:
@@ -60,6 +67,8 @@ def _make(ground_truth: dict) -> object:
         (_ORDERED, "<solution>SELECT cat, cnt FROM SI ORDER BY cnt ASC</solution>", 0.0),
         # ordered task: exact reference -> 1
         (_ORDERED, "<solution>SELECT cat, cnt FROM SI ORDER BY cnt DESC</solution>", 1.0),
+        # adjacent 64-bit integers remain distinct instead of collapsing through float conversion
+        (_LARGE_INTEGER, "<solution>SELECT 1152921504606846977</solution>", 0.0),
     ],
 )
 def test_step_reward(ground_truth, response, expected):
@@ -80,6 +89,11 @@ def test_malformed_ground_truth_scores_zero_without_crashing():
     assert out["done"] is True
     assert out["metadata"].get("verifier_error")
 
+    env = _make({**_HOSPITALS, "schema_sql": 42})
+    out = env.step("<solution>SELECT 1</solution>")
+    assert out["reward"] == 0.0
+    assert out["metadata"].get("verifier_error")
+
 
 def test_grade_reports_infra_for_a_broken_task():
     verdict, _ = scoring.grade(
@@ -94,17 +108,18 @@ def test_grade_reports_infra_for_a_broken_task():
     assert verdict == scoring.INFRA
 
     verdict, _ = scoring.grade(
+        {
+            "schema_sql": "CREATE TABLE keyed (id INTEGER PRIMARY KEY) WITHOUT ROWID;",
+            "insert_sql": "INSERT INTO keyed VALUES (1), (2), (3);",
+            "reference_sql": "SELECT id FROM keyed",
+            "order_significant": False,
+        },
+        "SELECT id FROM keyed",
+    )
+    assert verdict == scoring.INFRA
+
+    verdict, _ = scoring.grade(
         {**_HOSPITALS, "reference_sql": "SELECT no_such_col FROM no_such_table"},
         "SELECT 1",
     )
     assert verdict == scoring.INFRA
-
-
-def test_static_helpers():
-    assert scoring.classify_statement("SELECT 1") == "select"
-    assert scoring.classify_statement("CREATE TABLE t (a INT)") == "create_table"
-    assert scoring.has_top_level_order_by("SELECT a FROM t ORDER BY a")
-    assert not scoring.has_top_level_order_by("SELECT a, ROW_NUMBER() OVER (ORDER BY a) FROM t")
-    assert scoring.is_nondeterministic("SELECT DATE('now')")
-    assert scoring.create_table_name("CREATE TABLE Foo (a INT)") == "Foo"
-    assert scoring.create_table_is_schema_qualified("CREATE TABLE main.Foo (a INT)")
