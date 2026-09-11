@@ -70,9 +70,6 @@ class Experience:
     info: Optional[dict]
     kl: Optional[Float[torch.Tensor, "batch response_len"]] = None
     metadata: Optional[Dict[str, Any]] = None
-    # Teacher distillation fields
-    teacher_top_k_logprobs: Optional[Float[torch.Tensor, "batch response_len K"]] = None
-    teacher_top_k_indices: Optional[torch.Tensor] = None
     # MoE router-replay (R3) field — present only when moe_router_replay is on.
     rollout_routed_experts: Optional[Integer[torch.Tensor, "batch response_len L K"]] = None
     # Stage D (F7) per-token span tags (SPAN_THINK==1) — present only when the
@@ -99,10 +96,6 @@ class Experience:
             self.action_mask = to(self.action_mask, device)
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = to(self.rollout_logprobs, device)
-        if self.teacher_top_k_logprobs is not None:
-            self.teacher_top_k_logprobs = to(self.teacher_top_k_logprobs, device)
-        if self.teacher_top_k_indices is not None:
-            self.teacher_top_k_indices = to(self.teacher_top_k_indices, device)
         if self.rollout_routed_experts is not None:
             self.rollout_routed_experts = to(self.rollout_routed_experts, device)
         if self.response_span_tags is not None:
@@ -127,10 +120,6 @@ class Experience:
             self.action_mask = self.action_mask.pin_memory()
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = self.rollout_logprobs.pin_memory()
-        if self.teacher_top_k_logprobs is not None:
-            self.teacher_top_k_logprobs = self.teacher_top_k_logprobs.pin_memory()
-        if self.teacher_top_k_indices is not None:
-            self.teacher_top_k_indices = self.teacher_top_k_indices.pin_memory()
         if self.rollout_routed_experts is not None:
             self.rollout_routed_experts = self.rollout_routed_experts.pin_memory()
         if self.response_span_tags is not None:

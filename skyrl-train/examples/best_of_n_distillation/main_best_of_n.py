@@ -4,27 +4,20 @@ Best-of-N Distillation.
 Generates N completions per prompt from the student, selects the best
 completion by reward, and trains the student on selected completions.
 
-Supports two modes:
-- **Without teacher logits**: Pure rejection sampling + SFT on best completion.
-- **With teacher logits**: Additionally uses teacher top-K logprobs for KL-based
-  auxiliary loss on the selected completions.
-
 Config:
 - generator.n_samples_per_prompt=N controls how many completions per prompt.
 - trainer.algorithm.policy_loss_type=sft for pure SFT on best completion.
-- teacher.model_path for optional teacher logit scoring.
 """
 
 import numpy as np
 import torch
 import ray
 from omegaconf import DictConfig
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skyrl_train.entrypoints.main_base import create_teacher_inference_engines_from_config
-from skyrl_train.distillation_trainer import DistillationTrainer
+from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.utils import initialize_ray
+from skyrl_train.utils import initialize_ray, validate_cfg
 from skyrl_train.utils.algorithm_registry import NoGroupAdvantage, register_advantage_estimator, register_policy_loss
 from skyrl_train.utils.loss_reduction import reduce_loss
 from skyrl_train.utils.distillation_utils import best_of_n_select
@@ -32,7 +25,7 @@ import hydra
 from typing import List
 
 
-class BestOfNDistillationTrainer(DistillationTrainer):
+class BestOfNTrainer(RayPPOTrainer):
     """
     Best-of-N distillation trainer.
 
@@ -127,28 +120,14 @@ def compute_uniform_advantage(token_level_rewards: torch.Tensor, **kwargs):
     return ones, ones
 
 
-class BestOfNDistillationExp(BasePPOExp):
+class BestOfNExp(BasePPOExp):
     def get_trainer(self, *args, **kwargs):
-        return BestOfNDistillationTrainer(*args, **kwargs)
-
-    def _setup_trainer(self):
-        """Override to create teacher engines if configured."""
-        trainer = super()._setup_trainer()
-
-        if self.cfg.teacher.model_path is not None:
-            teacher_engines, teacher_tokenizer = create_teacher_inference_engines_from_config(self.cfg, self.tokenizer)
-            trainer.setup_teacher_engine(
-                teacher_engines,
-                student_tokenizer=self.tokenizer,
-                teacher_tokenizer=teacher_tokenizer,
-            )
-
-        return trainer
+        return BestOfNTrainer(*args, **kwargs)
 
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
-    exp = BestOfNDistillationExp(cfg)
+    exp = BestOfNExp(cfg)
     exp.run()
 
 

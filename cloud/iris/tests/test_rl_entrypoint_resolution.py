@@ -9,6 +9,7 @@ from omegaconf import OmegaConf
 from cloud.iris.iris_backend import create_parser, normalize
 from cloud.iris.rl_config_translation import build_skyrl_hydra_args, parse_rl_config
 from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.utils import validate_cfg
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -72,6 +73,14 @@ teacher:
 
     with pytest.raises(ValueError, match="teacher configuration is not supported"):
         parse_rl_config(str(config))
+
+
+def test_packaged_entrypoints_reject_ad_hoc_teacher_configuration():
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=["+teacher.model_path=Qwen/Qwen3-4B"])
+
+    with pytest.raises(ValueError, match="teacher configuration is unsupported"):
+        validate_cfg(cfg)
 
 
 def test_terminal_bench_config_group_is_packaged_with_the_trainer():
