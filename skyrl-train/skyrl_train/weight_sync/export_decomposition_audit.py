@@ -20,16 +20,19 @@ REQUIRED_ENVIRONMENT = {
     "NCCL_DEBUG": "INFO",
     "NCCL_DEBUG_SUBSYS": "INIT,NET",
 }
-# CUDA-bracketed sub-stages; every one of them runs inside the sender's ``export`` bracket.
-CUDA_SUBSTAGES = (
+# CUDA-bracketed sub-stages that run inside the sender's ``export`` bracket.
+CONTAINED_SUBSTAGES = (
     "task_build",
     "pp_broadcast",
     "pp_broadcast_obj",
     "ep_gather",
     "expert_stack",
     "wire_cast",
-    "next_source",
 )
+# ``_next_source`` wraps the export bracket: its host source-release wait precedes the bracket,
+# so each call encloses one export span rather than sitting inside it.
+ENCLOSING_SUBSTAGES = ("next_source",)
+CUDA_SUBSTAGES = (*CONTAINED_SUBSTAGES, *ENCLOSING_SUBSTAGES)
 # Host-only wait that precedes the export bracket and is otherwise only a gap.
 HOST_SUBSTAGES = ("source_release_wait",)
 EXPERT_NAME_FRAGMENT = ".mlp.experts."
@@ -81,8 +84,13 @@ def validate_pass(record, arm, layers):
         assert len(detail["bytes"]) == detail["calls"]
         _finite_ordered(detail["host_intervals"])
         assert all(layer is None or 0 <= layer < layers for layer in detail["layers"])
-        inside = overlap_seconds(cuda, export)
-        assert inside >= _union_seconds(cuda) - _CONTAINMENT_TOLERANCE, f"{stage} escapes the export bracket"
+        if stage in ENCLOSING_SUBSTAGES:
+            assert detail["calls"] == len(export), f"{stage} must wrap every export span once"
+            enclosed = overlap_seconds(export, cuda)
+            assert enclosed >= _union_seconds(export) - _CONTAINMENT_TOLERANCE, f"export escapes {stage}"
+        else:
+            inside = overlap_seconds(cuda, export)
+            assert inside >= _union_seconds(cuda) - _CONTAINMENT_TOLERANCE, f"{stage} escapes the export bracket"
     for stage in HOST_SUBSTAGES:
         detail = substages[stage]
         assert detail["calls"] == len(detail["host_intervals"])
@@ -90,14 +98,14 @@ def validate_pass(record, arm, layers):
     assert record["peak_extra_bytes"] >= 0
     expert_calls = substages["expert_stack"]["calls"]
     gather_calls = substages["ep_gather"]["calls"]
-    _pp, ep = ARM_PARALLELISM[arm]
     assert substages["pp_broadcast"]["calls"] > 0 and substages["wire_cast"]["calls"] > 0
     assert substages["next_source"]["calls"] > 0 and substages["task_build"]["calls"] == 1
+    # The Bridge calls gather_from_ep_ranks and the grouped accumulate for every expert task at any
+    # EP width (1,536 calls at EP1 on the v2 run); the width shows in seconds, not in counts.
     if arm.endswith("-nonexpert"):
         assert expert_calls == 0 and gather_calls == 0, "The remainder arm must not touch expert tasks"
     else:
-        assert expert_calls > 0
-        assert (gather_calls > 0) == (ep > 1)
+        assert expert_calls > 0 and gather_calls > 0
 
 
 def validate_arm_rows(rows, arm, layers=LAYERS):
@@ -155,8 +163,10 @@ def validate_receipt_set(cells, source_commit, layers=LAYERS):
 def fold_costs(cells, layers=LAYERS):
     """Per arm, rank and sub-stage: calls, bytes, CUDA union seconds split into fixed and per-layer parts.
 
-    Only non-warm-up passes are folded. Fixed cost is the share attributed to tensors outside
-    any decoder layer plus whatever the sub-stages leave unattributed inside the export bracket;
+    Only non-warm-up passes are folded. The decomposed union covers the contained sub-stages
+    only; an enclosing stage is reported but never counted against the export bracket. Fixed
+    cost is the share attributed to tensors outside any decoder layer plus whatever the contained
+    sub-stages leave unattributed inside the export bracket;
     per-layer cost is the mean over decoder layers. Two layers under-amortise fixed cost, so both
     parts are reported rather than a single total.
     """
@@ -174,7 +184,7 @@ def fold_costs(cells, layers=LAYERS):
             for record in kept:
                 intervals = record["timing"]["intervals"]
                 export_union += _union_seconds(intervals["export"])
-                all_cuda = [span for stage in CUDA_SUBSTAGES for span in intervals.get(stage, [])]
+                all_cuda = [span for stage in CONTAINED_SUBSTAGES for span in intervals.get(stage, [])]
                 substage_union += _union_seconds(all_cuda)
                 release_wait += sum(e - s for s, e in record["substages"]["source_release_wait"]["host_intervals"])
                 peak_extra = max(peak_extra, record["peak_extra_bytes"])
@@ -205,6 +215,7 @@ def fold_costs(cells, layers=LAYERS):
             stages = {}
             for stage, entry in per_stage.items():
                 stages[stage] = {
+                    "share_of_export_union": entry["cuda_seconds"] / export_union if export_union else 0.0,
                     "calls_per_pass": entry["calls"] / count,
                     "bytes_per_pass": entry["bytes"] / count,
                     "cuda_seconds_per_pass": entry["cuda_seconds"] / count,

@@ -16,7 +16,8 @@ from skyrl_train.weight_sync.export_decomposition_audit import (
     validate_receipt_set,
 )
 
-EXPORT = [[0.0, 10.0]]
+# One export span per yielded tensor; ``next_source`` wraps each with the preceding release wait.
+SPAN = 10.0
 FULL_INVENTORY = [
     ["model.embed_tokens.weight", [4, 8], "bfloat16"],
     ["model.layers.0.mlp.experts.down_proj.weight", [2, 3, 4], "bfloat16"],
@@ -35,19 +36,20 @@ def _detail(intervals, layers, byte=8):
 
 
 def export_pass(arm, pass_index):
-    _pp, ep = ARM_PARALLELISM[arm]
     nonexpert = arm.endswith("-nonexpert")
     inventory = NONEXPERT_INVENTORY if nonexpert else FULL_INVENTORY
+    spans = len(inventory)
     cuda = {
-        "task_build": _detail([[0.0, 0.5]], [None]),
+        "task_build": _detail([[0.6, 1.0]], [None]),
         "pp_broadcast": _detail([[1.0, 1.2], [2.0, 2.2], [3.0, 3.2], [4.0, 4.2]], [None, 0, 1, None]),
         "pp_broadcast_obj": _detail([[1.2, 1.3], [2.2, 2.3]], [0, 1], byte=0),
-        "ep_gather": _detail([[5.0, 5.5], [6.0, 6.5]], [0, 1]) if ep > 1 else _detail([], []),
+        "ep_gather": _detail([], []) if nonexpert else _detail([[5.0, 5.5], [6.0, 6.5]], [0, 1]),
         "expert_stack": _detail([], []) if nonexpert else _detail([[7.0, 7.5], [8.0, 8.5]], [0, 1]),
         "wire_cast": _detail([[8.6, 8.7], [8.8, 8.9], [9.0, 9.1]], [None, 0, 1], byte=0),
-        "next_source": _detail([[0.6, 0.9], [1.5, 4.5], [5.5, 9.5]][: len(inventory)], [None, 0, 1][: len(inventory)]),
+        "next_source": _detail([[SPAN * k + 0.2, SPAN * k + 9.8] for k in range(spans)], [None, 0, 1][:spans]),
     }
-    intervals = {"export": copy.deepcopy(EXPORT), "pack": [[10.0, 11.0]]}
+    export = [[SPAN * k + 0.5, SPAN * k + 9.5] for k in range(spans)]
+    intervals = {"export": export, "pack": [[SPAN * spans, SPAN * spans + 1.0]]}
     intervals.update(
         {stage: copy.deepcopy(detail["host_intervals"]) for stage, detail in cuda.items() if detail["calls"]}
     )
@@ -114,6 +116,8 @@ def test_accepts_complete_synthetic_arms():
         "missing_arm",
         "duplicate_arm",
         "substage_outside_export",
+        "export_outside_next_source",
+        "next_source_call_per_export_span",
         "incomplete_events",
         "reused_pid",
         "inventory_mismatch",
@@ -134,7 +138,12 @@ def test_rejects_corrupt_receipt_set(failure):
     elif failure == "duplicate_arm":
         cells[2] = copy.deepcopy(cells[0])
     elif failure == "substage_outside_export":
-        timed["timing"]["intervals"]["pp_broadcast"][0] = [9.9, 10.5]
+        timed["timing"]["intervals"]["pp_broadcast"][0] = [9.4, 9.7]
+    elif failure == "export_outside_next_source":
+        timed["timing"]["intervals"]["export"][0] = [0.1, 9.5]
+    elif failure == "next_source_call_per_export_span":
+        # Two export spans under one next_source call: still enclosed, but not one bracket per source.
+        timed["timing"]["intervals"]["export"][0:1] = [[0.5, 4.5], [4.9, 9.5]]
     elif failure == "incomplete_events":
         timed["timing"]["events_complete"] = False
     elif failure == "reused_pid":
@@ -164,6 +173,15 @@ def test_rejects_corrupt_receipt_set(failure):
         validate_receipt_set(cells, "frozen")
 
 
+def test_accepts_release_wait_adjacent_to_the_export_bracket():
+    rows = arm_rows("pp1ep2")
+    timed = rows[0]["passes"][1]
+    # A long host wait before the bracket stretches next_source without moving the export span.
+    timed["timing"]["intervals"]["next_source"][1] = [10.05, 19.8]
+    timed["substages"]["next_source"]["host_intervals"][1] = [10.05, 19.8]
+    validate_arm_rows(rows, "pp1ep2")
+
+
 def test_accepts_yield_order_that_differs_from_the_state_dict():
     rows = arm_rows("pp2ep1")
     assert rows[0]["yielded_inventory"] != rows[0]["expected_inventory"]
@@ -178,14 +196,17 @@ def test_fold_separates_fixed_from_per_layer_cost_and_skips_warmup():
     assert set(summaries) == {(arm, rank) for arm in ARMS for rank in (0, 1)}
     first = summaries[("pp1ep2", 0)]
     assert first["timed_passes"] == PASSES - 1
-    assert first["export_union_seconds_per_pass"] == pytest.approx(10.0)
-    assert first["substage_union_seconds_per_pass"] == pytest.approx(8.6)
-    assert first["unattributed_export_seconds_per_pass"] == pytest.approx(1.4)
+    assert first["export_union_seconds_per_pass"] == pytest.approx(27.0)
+    assert first["substage_union_seconds_per_pass"] == pytest.approx(3.7)
+    assert first["unattributed_export_seconds_per_pass"] == pytest.approx(23.3)
+    assert first["stages"]["next_source"]["cuda_seconds_per_pass"] == pytest.approx(28.8)
+    assert first["stages"]["next_source"]["share_of_export_union"] == pytest.approx(28.8 / 27.0)
     assert first["source_release_wait_seconds_per_pass"] == pytest.approx(0.12)
     assert first["peak_extra_bytes"] == 123
     broadcast = first["stages"]["pp_broadcast"]
     assert broadcast["calls_per_pass"] == 4
     assert broadcast["cuda_seconds_per_pass"] == pytest.approx(0.8)
+    assert broadcast["share_of_export_union"] == pytest.approx(0.8 / 27.0)
     assert broadcast["fixed_seconds_per_pass"] == pytest.approx(0.4)
     assert broadcast["per_layer_seconds_per_pass"] == pytest.approx(0.2)
     assert broadcast["layer_seconds_per_pass"] == pytest.approx([0.2, 0.2])
@@ -193,3 +214,4 @@ def test_fold_separates_fixed_from_per_layer_cost_and_skips_warmup():
     remainder = summaries[("pp2ep1-nonexpert", 1)]
     assert remainder["stages"]["expert_stack"]["calls_per_pass"] == 0
     assert remainder["stages"]["ep_gather"]["cuda_seconds_per_pass"] == 0
+    assert summaries[("pp2ep1", 0)]["stages"]["ep_gather"]["calls_per_pass"] == 2
