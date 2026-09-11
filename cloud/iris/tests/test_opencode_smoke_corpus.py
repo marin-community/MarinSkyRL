@@ -14,8 +14,11 @@ def test_opencode_smoke_corpus_is_valid_and_has_eight_unique_tasks() -> None:
 
     assert len(configs) == 8
     assert len({config.task.name for config in configs}) == len(configs)
-    for path in task_paths:
+    for path, config in zip(task_paths, configs, strict=True):
         task_root = path.parent
         assert (task_root / "instruction.md").is_file()
-        assert (task_root / "environment/Dockerfile").is_file()
+        dockerfile = task_root / "environment/Dockerfile"
+        assert dockerfile.is_file()
+        assert "opencode-ai@1.18.2" in dockerfile.read_text()
+        assert config.environment.allow_internet is False
         assert (task_root / "tests/test.sh").is_file()
