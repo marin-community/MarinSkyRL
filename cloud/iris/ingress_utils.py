@@ -650,7 +650,7 @@ class _ParentControllerClient:
     def __init__(self, parent_config_path: str) -> None:
         from iris.cluster.config import load_config
         from iris.rpc.compression import IRIS_RPC_COMPRESSIONS
-        from iris.rpc.controller_connect import ControllerServiceClientSync
+        from iris.rpc.controller_connect import ControllerServiceClientSync, EndpointServiceClientSync
         from rigging.cluster_manifest import AuthProvider, ClusterAuth, IapAuth
         from rigging.credentials import credentials_for
 
@@ -692,19 +692,22 @@ class _ParentControllerClient:
         )
         cluster_name = getattr(config, "name", None) or "marin"
         credentials = credentials_for(cluster_name, cluster_auth)
-        self._endpoint_cm = None
-        self._client = ControllerServiceClientSync(
-            iap.url,
-            timeout_ms=30_000,
-            interceptors=credentials.interceptors(),
-            accept_compression=IRIS_RPC_COMPRESSIONS,
-            send_compression=None,
-        )
+        client_kwargs = {
+            "timeout_ms": 30_000,
+            "interceptors": credentials.interceptors(),
+            "accept_compression": IRIS_RPC_COMPRESSIONS,
+            "send_compression": None,
+        }
+        # Iris split endpoint registry RPCs from the controller service. Mirror
+        # discovery uses the endpoint client; capability minting remains on the
+        # controller client.
+        self._endpoint_client = EndpointServiceClientSync(iap.url, **client_kwargs)
+        self._client = ControllerServiceClientSync(iap.url, **client_kwargs)
 
     def is_mirrored(self, endpoint_name: str) -> bool:
         from iris.rpc import controller_pb2
 
-        resp = self._client.list_endpoints(
+        resp = self._endpoint_client.list_endpoints(
             controller_pb2.Controller.ListEndpointsRequest(prefix=endpoint_name, exact=True)
         )
         # A mirrored (federated) row carries a non-empty peer_id; a purely-local
@@ -725,13 +728,12 @@ class _ParentControllerClient:
         return resp.token, resp.expires_at.epoch_ms / 1000.0
 
     def close(self) -> None:
-        # No SSH tunnel to tear down (IAP is direct HTTPS); best-effort close the RPC
-        # client if it exposes one.
-        for closer in (self._endpoint_cm, getattr(self._client, "close", None)):
+        # No SSH tunnel to tear down (IAP is direct HTTPS); best-effort close both RPC clients.
+        for closer in (getattr(self._endpoint_client, "close", None), getattr(self._client, "close", None)):
             if closer is None:
                 continue
             try:
-                closer.__exit__(None, None, None) if closer is self._endpoint_cm else closer()
+                closer()
             except Exception:  # noqa: BLE001
                 pass
 
