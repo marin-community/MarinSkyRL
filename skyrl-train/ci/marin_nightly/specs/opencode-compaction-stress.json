@@ -1,81 +1,39 @@
 {
   "provenance": {
-    "what": "Manual RNO2A OpenCode boundary stress: automatic compaction, invalid UTF-8 tool output, a single-turn output cap, agent timeout, verifier timeout, and normal exact continuations in one concurrent RL batch.",
+    "what": "Manual RNO2A OpenCode boundary stress: automatic compaction, invalid UTF-8 tool output, a single-turn output cap, agent timeout, verifier timeout, and normal exact continuations in one concurrent rollout batch.",
     "produced_by": "OPENCODE_MODE=compaction-stress skyrl-train/ci/marin_nightly/run_opencode.sh",
     "why_these_thresholds": [
-      "The batch must reach a finite optimizer step while recording at least one summarized and one length-truncated trajectory.",
-      "The deliberately short agent and verifier deadlines must surface their typed errors without hanging the other concurrent trials.",
-      "Literal correlation, exact token alignment, full-TITO assembly, and zero skipped TIS batches must survive compaction and malformed terminal bytes."
+      "The daily OpenCode lane owns the optimizer/checkpoint assertion. This mixed negative-path suite intentionally masks timeout samples that cannot carry behavior logprobs.",
+      "The compaction case must visibly contract or rewrite history, resume, pass its verifier, and preserve exact full-TITO for the post-summary segment.",
+      "Malformed terminal bytes must survive through a verified exact-TITO trajectory, while output, agent, and verifier deadlines remain independently visible."
     ],
-    "tightening": "The bounds are structural and should remain exact except correlated-turn count, which may vary with model tool-use behavior."
+    "tightening": "These are structural log contracts calibrated against the RNO2A production path; add bounded metrics only when the runner emits them independently of optimizer admission."
   },
-  "min_train_steps": 1,
-  "finite_metrics": [
-    "policy/policy_loss",
-    "policy/final_loss",
-    "generate/trajectories_summarized",
-    "generate/trajectories_truncated",
-    "generate/errors/AgentTimeoutError",
-    "generate/errors/VerifierTimeoutError",
-    "generate/literal_bridge/correlated_trials",
-    "generate/literal_bridge/correlated_turns",
-    "generate/tis/exact_match_fraction",
-    "generate/tis/lcs_fallback_fraction",
-    "generate/tis/unaligned_fraction",
-    "generate/tis/tito_full/success_fraction",
-    "generate/tis/tito_full/decline_count",
-    "tis/skipped_fraction"
-  ],
-  "bounds": {
-    "generate/trajectories_summarized": {
-      "minimum": 1,
-      "maximum": 8
+  "min_train_steps": 0,
+  "finite_metrics": [],
+  "bounds": {},
+  "required_log_patterns": {
+    "clean_shutdown": {"pattern": "Training done!", "minimum": 1},
+    "compaction_boundary": {
+      "pattern": "OpenCode continuation reset: (?:history did not grow|history prefix was rewritten)",
+      "minimum": 1
     },
-    "generate/trajectories_truncated": {
-      "minimum": 1,
-      "maximum": 8
-    },
-    "generate/errors/AgentTimeoutError": {
+    "compaction_case_exact": {
+      "pattern": "Trajectory TrajectoryID\\(instance_id='case-04'.*completed: reward=1\\.000.*tito_full_succeeded=True",
       "minimum": 1,
       "maximum": 1
     },
-    "generate/errors/VerifierTimeoutError": {
+    "garbage_bytes_case_exact": {
+      "pattern": "Trajectory TrajectoryID\\(instance_id='case-03'.*completed: reward=1\\.000.*tito_full_succeeded=True",
       "minimum": 1,
       "maximum": 1
     },
-    "generate/literal_bridge/correlated_trials": {
-      "minimum": 7,
-      "maximum": 8
+    "single_turn_output_limit": {
+      "pattern": "OpenCode task-agent response reached output limit:",
+      "minimum": 1
     },
-    "generate/literal_bridge/correlated_turns": {
-      "minimum": 12,
-      "maximum": 1000
-    },
-    "generate/tis/exact_match_fraction": {
-      "minimum": 1,
-      "maximum": 1
-    },
-    "generate/tis/lcs_fallback_fraction": {
-      "minimum": 0,
-      "maximum": 0
-    },
-    "generate/tis/unaligned_fraction": {
-      "minimum": 0,
-      "maximum": 0
-    },
-    "generate/tis/tito_full/success_fraction": {
-      "minimum": 1,
-      "maximum": 1
-    },
-    "generate/tis/tito_full/decline_count": {
-      "minimum": 0,
-      "maximum": 0
-    },
-    "tis/skipped_fraction": {
-      "minimum": 0,
-      "maximum": 0
-    }
+    "agent_timeout": {"pattern": "TrajectoryID\\(instance_id='case-07'.*AgentTimeoutError", "minimum": 1},
+    "verifier_timeout": {"pattern": "TrajectoryID\\(instance_id='case-08'.*VerifierTimeoutError", "minimum": 1}
   },
   "max_wall_clock_seconds": 2400
 }
-

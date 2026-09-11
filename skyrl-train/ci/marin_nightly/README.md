@@ -103,13 +103,15 @@ OPENCODE_MODE=overflow-stress \
 ```
 
 The first mode requires automatic summarization to preserve an exact post-compaction
-training chain while invalid UTF-8 tool bytes, a capped single-turn response, and agent
-and verifier timeouts run beside normal trials. The second disables compaction and
+training segment while invalid UTF-8 tool bytes, a capped single-turn response, and
+agent and verifier timeouts run beside normal trials. The second disables compaction and
 requires the same oversized tool result to become exactly one typed
-`ContextLengthExceededError`, with no retry storm. Both must still complete a finite
-policy step from the usable trajectories. Their checked-in specs are production-smoke
-contracts; update a threshold only from a cited real run, never merely to make a local
-fixture pass.
+`ContextLengthExceededError`, with no retry storm. These mixed negative-path batches do
+not require an optimizer step: timeout and overflow samples without behavior logprobs
+are deliberately masked, while the daily positive-path lane owns the real policy-update
+and checkpoint contract. Instead, the stress specs require named log evidence for every
+boundary and a clean workflow shutdown. Update a threshold only from a cited real run,
+never merely to make a local fixture pass.
 
 To exercise the whole path — provision, train, gate, tear down — trigger the workflow:
 

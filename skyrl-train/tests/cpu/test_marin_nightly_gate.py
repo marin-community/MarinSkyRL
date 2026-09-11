@@ -4,11 +4,21 @@ Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_marin_
 """
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from ci.marin_nightly.gate import GateSpec, MetricBound, RewardTrend, check_run, load_spec, parse_metrics
+from ci.marin_nightly.gate import (
+    GateSpec,
+    LogPatternBound,
+    MetricBound,
+    RewardTrend,
+    check_log_patterns,
+    check_run,
+    load_spec,
+    parse_metrics,
+)
 
 SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b.json"
 OPENCODE_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opencode-qwen3-8b.json"
@@ -135,6 +145,21 @@ def test_run_over_the_wall_clock_budget_fails(spec):
     failures = check_run(parse_metrics(healthy_log()), spec, wall_clock_seconds=901)
     assert len(failures) == 1
     assert "budget" in failures[0]
+
+
+def test_required_log_patterns_have_named_inclusive_bounds(spec):
+    spec = replace(
+        spec,
+        required_log_patterns={
+            "compaction": LogPatternBound(r"history (?:did not grow|was rewritten)", 1, 2),
+            "timeout": LogPatternBound(r"AgentTimeoutError", 1, 1),
+        },
+    )
+    log = "history did not grow\nAgentTimeoutError\nhistory was rewritten\n"
+
+    assert check_log_patterns(log, spec) == []
+    failures = check_log_patterns(log + "AgentTimeoutError\n", spec)
+    assert failures == ["log pattern 'timeout' occurred 2 times, expected at most 1"]
 
 
 def test_eval_payloads_do_not_count_as_training_steps(spec):

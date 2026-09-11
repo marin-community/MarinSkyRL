@@ -65,6 +65,15 @@ class RewardTrend:
 
 
 @dataclass(frozen=True)
+class LogPatternBound:
+    """The inclusive occurrence range for one regex in the complete job log."""
+
+    pattern: str
+    minimum: int
+    maximum: int | None = None
+
+
+@dataclass(frozen=True)
 class GateSpec:
     """What a healthy run looks like. See the shipped specs for the recorded values."""
 
@@ -73,6 +82,7 @@ class GateSpec:
     bounds: dict[str, MetricBound]
     max_wall_clock_seconds: float
     reward_trend: RewardTrend | None = None
+    required_log_patterns: dict[str, LogPatternBound] | None = None
 
 
 def load_spec(path: Path) -> GateSpec:
@@ -84,6 +94,10 @@ def load_spec(path: Path) -> GateSpec:
         bounds={k: MetricBound(v["minimum"], v["maximum"]) for k, v in raw["bounds"].items()},
         max_wall_clock_seconds=raw["max_wall_clock_seconds"],
         reward_trend=RewardTrend(trend["metric"], trend["window"], trend["min_improvement"]) if trend else None,
+        required_log_patterns={
+            name: LogPatternBound(value["pattern"], value["minimum"], value.get("maximum"))
+            for name, value in raw.get("required_log_patterns", {}).items()
+        },
     )
 
 
@@ -145,6 +159,19 @@ def check_run(steps: list[StepMetrics], spec: GateSpec, wall_clock_seconds: floa
     return failures
 
 
+def check_log_patterns(log_text: str, spec: GateSpec) -> list[str]:
+    """Check named, production-observable events that do not belong to trainer metrics."""
+    failures = []
+    clean_log = ANSI_ESCAPE.sub("", log_text)
+    for name, bound in (spec.required_log_patterns or {}).items():
+        count = len(re.findall(bound.pattern, clean_log))
+        if count < bound.minimum:
+            failures.append(f"log pattern {name!r} occurred {count} times, expected at least {bound.minimum}")
+        if bound.maximum is not None and count > bound.maximum:
+            failures.append(f"log pattern {name!r} occurred {count} times, expected at most {bound.maximum}")
+    return failures
+
+
 def _reward_trend_failure(train_steps: list[StepMetrics], trend: RewardTrend) -> str | None:
     """Return a message if the metric did not climb by ``min_improvement`` from the first
     ``window`` steps to the last, or None if it did (or there are too few steps to judge, which
@@ -177,8 +204,10 @@ def main() -> int:
     args = parser.parse_args()
 
     spec = load_spec(args.spec)
-    steps = parse_metrics(args.log.read_text())
+    log_text = args.log.read_text()
+    steps = parse_metrics(log_text)
     failures = check_run(steps, spec, args.wall_clock_seconds)
+    failures.extend(check_log_patterns(log_text, spec))
 
     train_steps = [s for s in steps if s.kind == TRAIN]
     print(f"parsed {len(train_steps)} training steps from {args.log} in {args.wall_clock_seconds:.0f}s")

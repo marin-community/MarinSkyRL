@@ -1,81 +1,35 @@
 {
   "provenance": {
-    "what": "Manual RNO2A OpenCode boundary stress with compaction disabled, proving served context overflow, invalid UTF-8 tool output, output truncation, agent timeout, and verifier timeout remain typed and bounded inside a concurrent RL workflow.",
+    "what": "Manual RNO2A OpenCode boundary stress with compaction disabled, proving served context overflow, invalid UTF-8 tool output, output truncation, agent timeout, and verifier timeout remain typed and bounded inside a concurrent RL rollout workflow.",
     "produced_by": "OPENCODE_MODE=overflow-stress skyrl-train/ci/marin_nightly/run_opencode.sh",
     "why_these_thresholds": [
-      "The large-output task must become one ContextLengthExceededError rather than retrying forever or crashing the rollout worker.",
-      "The separate output, agent, and verifier limits must remain independently observable.",
-      "The remaining trajectories must carry enough exact literal/TIS evidence for a finite optimizer step."
+      "The daily OpenCode lane owns the optimizer/checkpoint assertion. This mixed negative-path suite intentionally masks errors that cannot carry behavior logprobs.",
+      "The large-output case must become one typed context-length failure rather than retrying forever or crashing the rollout worker.",
+      "Malformed bytes must still produce a verified exact-TITO trajectory, and output, agent, and verifier limits must remain independently visible."
     ],
-    "tightening": "Keep typed error counts exact after production vetting; correlated-turn count may vary with tool-use behavior."
+    "tightening": "Keep the context-overflow case exact after production vetting; other event counts may vary with model tool-use behavior."
   },
-  "min_train_steps": 1,
-  "finite_metrics": [
-    "policy/policy_loss",
-    "policy/final_loss",
-    "generate/trajectories_truncated",
-    "generate/errors/ContextLengthExceededError",
-    "generate/errors/AgentTimeoutError",
-    "generate/errors/VerifierTimeoutError",
-    "generate/literal_bridge/correlated_trials",
-    "generate/literal_bridge/correlated_turns",
-    "generate/tis/exact_match_fraction",
-    "generate/tis/lcs_fallback_fraction",
-    "generate/tis/unaligned_fraction",
-    "generate/tis/tito_full/success_fraction",
-    "generate/tis/tito_full/decline_count",
-    "tis/skipped_fraction"
-  ],
-  "bounds": {
-    "generate/trajectories_truncated": {
-      "minimum": 1,
-      "maximum": 8
-    },
-    "generate/errors/ContextLengthExceededError": {
+  "min_train_steps": 0,
+  "finite_metrics": [],
+  "bounds": {},
+  "required_log_patterns": {
+    "clean_shutdown": {"pattern": "Training done!", "minimum": 1},
+    "context_overflow": {
+      "pattern": "TrajectoryID\\(instance_id='case-04'.*ContextLengthExceededError",
       "minimum": 1,
       "maximum": 1
     },
-    "generate/errors/AgentTimeoutError": {
+    "garbage_bytes_case_exact": {
+      "pattern": "Trajectory TrajectoryID\\(instance_id='case-03'.*completed: reward=1\\.000.*tito_full_succeeded=True",
       "minimum": 1,
       "maximum": 1
     },
-    "generate/errors/VerifierTimeoutError": {
-      "minimum": 1,
-      "maximum": 1
+    "single_turn_output_limit": {
+      "pattern": "OpenCode task-agent response reached output limit:",
+      "minimum": 1
     },
-    "generate/literal_bridge/correlated_trials": {
-      "minimum": 6,
-      "maximum": 8
-    },
-    "generate/literal_bridge/correlated_turns": {
-      "minimum": 10,
-      "maximum": 1000
-    },
-    "generate/tis/exact_match_fraction": {
-      "minimum": 1,
-      "maximum": 1
-    },
-    "generate/tis/lcs_fallback_fraction": {
-      "minimum": 0,
-      "maximum": 0
-    },
-    "generate/tis/unaligned_fraction": {
-      "minimum": 0,
-      "maximum": 0
-    },
-    "generate/tis/tito_full/success_fraction": {
-      "minimum": 1,
-      "maximum": 1
-    },
-    "generate/tis/tito_full/decline_count": {
-      "minimum": 0,
-      "maximum": 0
-    },
-    "tis/skipped_fraction": {
-      "minimum": 0,
-      "maximum": 0
-    }
+    "agent_timeout": {"pattern": "TrajectoryID\\(instance_id='case-07'.*AgentTimeoutError", "minimum": 1},
+    "verifier_timeout": {"pattern": "TrajectoryID\\(instance_id='case-08'.*VerifierTimeoutError", "minimum": 1}
   },
   "max_wall_clock_seconds": 2400
 }
-
