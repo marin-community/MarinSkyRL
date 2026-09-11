@@ -206,6 +206,10 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         actor_task = self.inference_engine_actor.chat_completion.remote(request_payload)
         return await _await_actor_task(actor_task)
 
+    async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        actor_task = self.inference_engine_actor.tokenize.remote(request_payload)
+        return await _await_actor_task(actor_task)
+
     async def chat_completion_stream(self, request_payload: Dict[str, Any]):
         """Stream SSE chunks from the Ray actor via ``num_returns="streaming"``.
 
