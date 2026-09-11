@@ -19,6 +19,8 @@ def test_opencode_smoke_corpus_is_valid_and_has_eight_unique_tasks() -> None:
         assert (task_root / "instruction.md").is_file()
         dockerfile = task_root / "environment/Dockerfile"
         assert dockerfile.is_file()
-        assert "opencode-ai@1.18.2" in dockerfile.read_text()
+        dockerfile_text = dockerfile.read_text()
+        assert "opencode-ai@1.18.2" in dockerfile_text
+        assert not any(line.endswith("\\\\") for line in dockerfile_text.splitlines())
         assert config.environment.allow_internet is False
         assert (task_root / "tests/test.sh").is_file()
