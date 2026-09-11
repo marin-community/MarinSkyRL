@@ -14,6 +14,7 @@ from vllm.v1.sample.sampler import Sampler
 from skyrl_train.inference_engines.non_agentic_logits_processor import NonAgenticTokenProcessor
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.utils.policy_math import normalize_advantages_dict
 from skyrl_train.trajectory_runners.non_agentic_interventions import (
     INTERVENTION_VERSION,
     TokenIntervention,
@@ -77,25 +78,37 @@ def threshold_checks(device: torch.device, thinking_end_id: int, eos_id: int) ->
     return results
 
 
+def expected_final_advantages(tensors: dict, cap: float) -> torch.Tensor:
+    """Derive the expectation from the production normalizer on the same device, then cap independently."""
+    normalized = normalize_advantages_dict(TrainingInputBatch({k: v.clone() for k, v in tensors.items()}))["advantages"]
+    override = tensors["non_agentic_truncated"].bool()[:, None] & tensors["loss_mask"].bool()
+    return torch.where(override, normalized.clamp(max=cap), normalized)
+
+
 def final_advantage_checks(device: torch.device) -> dict:
     """Invoke the production normalization, cap, and dispatch cleanup on tensors."""
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = OmegaConf.create(
         {"trainer": {"algorithm": {"advantage_batch_normalize": True, "non_agentic_truncated_advantage_cap": -1.0}}}
     )
-    data = TrainingInputBatch(
-        {
-            "advantages": torch.tensor([[3.0, 3.0], [-3.0, -3.0]], device=device),
-            "response_mask": torch.ones(2, 2, device=device),
-            "loss_mask": torch.tensor([[1.0, 0.0], [1.0, 1.0]], device=device),
-            "rewards": torch.tensor([[0.0, 1.0], [0.0, 0.0]], device=device),
-            "non_agentic_truncated": torch.tensor([True, False], device=device),
-        }
-    )
+    tensors = {
+        "advantages": torch.tensor([[3.0, 3.0], [-3.0, -3.0]], device=device),
+        "response_mask": torch.ones(2, 2, device=device),
+        "loss_mask": torch.tensor([[1.0, 0.0], [1.0, 1.0]], device=device),
+        "rewards": torch.tensor([[0.0, 1.0], [0.0, 0.0]], device=device),
+        "non_agentic_truncated": torch.tensor([True, False], device=device),
+    }
+    data = TrainingInputBatch({k: v.clone() for k, v in tensors.items()})
     data.metadata = {"uids": ["synthetic-truncated", "synthetic-completed"]}
     before = data["advantages"].tolist()
     result = trainer.finalize_advantages_for_training(data)
-    assert torch.equal(result["advantages"], torch.tensor([[-1.0, 1.0], [-1.0, -1.0]], device=device))
+    assert torch.equal(result["advantages"], expected_final_advantages(tensors, -1.0))
+    # Analytic value: mean 0, rstd 1/3, cap at the truncated forced position. The
+    # normalizer's rsqrt is the one inexact op and CUDA's rsqrtf may sit an ulp
+    # from CPU's rounded value, so the analytic check carries a tolerance while
+    # the exact check above tracks the estimator bit for bit.
+    analytic = torch.tensor([[-1.0, 1.0], [-1.0, -1.0]], device=device)
+    torch.testing.assert_close(result["advantages"], analytic)
     assert "rewards" not in result and "uids" not in result.metadata
     return {
         "device": str(device),
@@ -103,6 +116,8 @@ def final_advantage_checks(device: torch.device) -> dict:
         "production_method": "RayPPOTrainer.finalize_advantages_for_training",
         "before_normalization": before,
         "after_finalization": result["advantages"].tolist(),
+        "analytic_expectation": analytic.tolist(),
+        "max_abs_deviation_from_analytic": (result["advantages"] - analytic).abs().max().item(),
         "response_evidence": result.metadata["non_agentic_advantage_override"],
         "forced_position_keeps_normalized_advantage_but_is_masked": True,
     }
