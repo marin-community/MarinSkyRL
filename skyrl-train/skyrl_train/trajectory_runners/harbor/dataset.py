@@ -17,7 +17,6 @@ class TerminalBenchTaskDataset:
     def __init__(self, data_files: Sequence[str | Mapping[str, Any]]):
         self.data_files = data_files
         self._items = self._load_data_files()
-        self.task_paths = [item for item in self._items if isinstance(item, Path)]
         logger.info(f"TerminalBenchTaskDataset initialized with {len(self._items)} tasks")
 
     def _directory_tasks(self, source_path: Path) -> list[Path]:
@@ -40,17 +39,16 @@ class TerminalBenchTaskDataset:
 
     def _packed_tasks(self, source: TaskTroveParquetSource) -> list[PackedTaskReference]:
         summary = select_task_references(source, dataset_path=source.resolved_path())
-        if source.selected_count is not None and source.selected_count != len(summary.references):
+        if source.snapshot is None:
+            return list(summary.references)
+        if source.snapshot.count != len(summary.references):
             raise ValueError(
-                f"TaskTrove selection count changed: launch selected {source.selected_count}, "
+                f"TaskTrove selection count changed: launch selected {source.snapshot.count}, "
                 f"Ray selected {len(summary.references)}"
             )
-        if source.selection_digest is not None and source.selection_digest != summary.digest:
+        if source.snapshot.digest != summary.digest:
             raise ValueError("TaskTrove selection digest changed between launch and Ray")
-        if (
-            source.distinct_environment_count is not None
-            and source.distinct_environment_count != summary.distinct_environment_count
-        ):
+        if source.snapshot.distinct_environment_count != summary.distinct_environment_count:
             raise ValueError("TaskTrove environment count changed between launch and Ray")
         return list(summary.references)
 
@@ -101,10 +99,6 @@ class TerminalBenchTaskDataset:
     def __iter__(self):
         for index in range(len(self)):
             yield self[index]
-
-    def get_task_paths(self) -> list[Path]:
-        """Return directory-backed task paths; packed tasks have no path before rollout."""
-        return self.task_paths.copy()
 
     def collate_fn(self, item_list):
         return item_list

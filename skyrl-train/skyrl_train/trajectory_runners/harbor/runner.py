@@ -60,7 +60,7 @@ from skyrl_train.utils.span_tagger import tag_response_spans
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
 from omegaconf import DictConfig
 from pathlib import Path
-from marinskyrl.packed_tasks import PackedTaskMaterializer, packed_task_reference
+from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference
 
 # Harbor orchestrator and trial imports.
 # QueueOrchestrator + OrchestratorEvent come through a compat shim because
@@ -90,6 +90,23 @@ from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogSt
 
 # Maximum restart attempts for orchestrator recovery
 MAX_ORCHESTRATOR_RESTART_ATTEMPTS = 3
+PACKED_TASK_CACHE_ROOT = Path("/tmp/marinskyrl/packed_tasks")
+
+
+def _materialized_prompts(
+    input_batch: TrajectoryRequestBatch,
+    materializer: PackedTaskMaterializer,
+) -> list[str]:
+    references = {
+        index: PackedTaskReference(**extras["packed_task"])
+        for index, extras in enumerate(input_batch["env_extras"] or [])
+        if isinstance(extras, dict) and "packed_task" in extras
+    }
+    materialized = materializer.materialize_batch(tuple(references.values()))
+    return [
+        str(materialized[references[index]]) if index in references else prompt
+        for index, prompt in enumerate(input_batch["prompts"])
+    ]
 
 
 def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str) -> List[Dict[str, Any]]:
@@ -424,7 +441,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Schema-driven Harbor config builder
         # Automatically maps YAML fields to Harbor's TrialConfig with validation
         self._harbor_config_builder = HarborConfigBuilder(terminal_bench_cfg)
-        self._packed_task_materializer = PackedTaskMaterializer(Path("/tmp/marinskyrl/packed_tasks"))
+        self._packed_task_materializer = PackedTaskMaterializer(PACKED_TASK_CACHE_ROOT)
 
         # Configure Harbor log level (default WARNING to reduce noise)
         harbor_log_level = self._harbor_config_builder.get_log_level(default="WARNING")
@@ -986,17 +1003,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Convert HuggingFace-style "org/model" to just "model" for the alias.
         model_alias = self.model_name.split("/")[-1] if "/" in self.model_name else self.model_name
 
-        packed_references = {
-            i: packed_task_reference(extras["packed_task"])
-            for i, extras in enumerate(input_batch["env_extras"] or [])
-            if isinstance(extras, dict) and "packed_task" in extras
-        }
-        materialized_tasks = self._packed_task_materializer.materialize_batch(tuple(packed_references.values()))
-
-        for i in range(num_trials):
-            prompt = input_batch["prompts"][i]
-            if i in packed_references:
-                prompt = str(materialized_tasks[packed_references[i]])
+        prompts = _materialized_prompts(input_batch, self._packed_task_materializer)
+        for i, prompt in enumerate(prompts):
             trajectory_id = input_batch["trajectory_ids"][i]
 
             # Generate session_id for sticky routing to inference engines

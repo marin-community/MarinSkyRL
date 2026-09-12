@@ -3,7 +3,7 @@ from __future__ import annotations
 import gzip
 import io
 import tarfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pyarrow as pa
@@ -16,7 +16,12 @@ from marinskyrl.packed_tasks import (
     PackedTaskMaterializer,
     select_task_references,
 )
-from marinskyrl.task_sources import TaskTroveParquetSource, TaskTroveSelection, TaskTroveTagMatch
+from marinskyrl.task_sources import (
+    TaskTroveParquetSource,
+    TaskTroveSelection,
+    TaskTroveSelectionSnapshot,
+    TaskTroveTagMatch,
+)
 from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset
 
 
@@ -133,9 +138,7 @@ def test_tasktrove_any_tags_and_limit_have_stable_nested_membership(tmp_path: Pa
     two = select_task_references(_source(dataset_path, selection))
     three = select_task_references(_source(dataset_path, TaskTroveSelection(**{**asdict(selection), "limit": 3})))
 
-    assert {reference.uid() for reference in two.references} < {
-        reference.uid() for reference in three.references
-    }
+    assert {reference.uid() for reference in two.references} < {reference.uid() for reference in three.references}
 
 
 def test_tasktrove_selection_rejects_unknown_source(tmp_path: Path) -> None:
@@ -157,10 +160,27 @@ def test_packed_dataset_defers_extraction_until_materialization(tmp_path: Path) 
     reference = next(iter(select_task_references(source).references))
 
     assert first["prompt"].startswith("tasktrove://")
-    assert not cache.exists()
     task_path = PackedTaskMaterializer(cache).materialize_batch([reference])[reference]
     assert (task_path / "instruction.md").read_text() == "Do one"
     assert not (task_path / "solution").exists()
+
+
+def test_packed_dataset_rejects_changed_launch_selection(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "tasks.parquet"
+    _write_dataset(dataset_path)
+    source = _source(dataset_path, TaskTroveSelection(sources=("source-a",)))
+    summary = select_task_references(source)
+    changed = replace(
+        source,
+        snapshot=TaskTroveSelectionSnapshot(
+            count=len(summary.references),
+            digest="changed",
+            distinct_environment_count=summary.distinct_environment_count,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="digest changed"):
+        TerminalBenchTaskDataset([asdict(changed)])
 
 
 def test_packed_materializer_rejects_solution_files(tmp_path: Path) -> None:

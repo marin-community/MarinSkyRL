@@ -24,4 +24,4 @@ def test_terminal_bench_dataset_orders_tasks_by_path(tmp_path: Path, monkeypatch
 
     dataset = TerminalBenchTaskDataset([str(tmp_path)])
 
-    assert dataset.get_task_paths() == sorted(expected)
+    assert [Path(item["prompt"]) for item in dataset] == sorted(expected)

@@ -49,6 +49,20 @@ class TaskTroveSelection:
 
 
 @dataclass(frozen=True)
+class TaskTroveSelectionSnapshot:
+    count: int
+    digest: str
+    distinct_environment_count: int
+
+
+def _resolved_path(local_path: str, relative_path: str) -> str:
+    relative = Path(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"Data relative_path must stay below its source root: {relative_path!r}")
+    return os.path.join(local_path, *relative.parts)
+
+
+@dataclass(frozen=True)
 class DirectoryDataSource:
     uri: str
     identity: str
@@ -57,10 +71,7 @@ class DirectoryDataSource:
     kind: Literal[DataSourceKind.DIRECTORY] = DataSourceKind.DIRECTORY
 
     def resolved_path(self) -> str:
-        relative = Path(self.relative_path)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError(f"Data relative_path must stay below its source root: {self.relative_path!r}")
-        return os.path.join(self.local_path, *relative.parts)
+        return _resolved_path(self.local_path, self.relative_path)
 
 
 @dataclass(frozen=True)
@@ -71,16 +82,11 @@ class TaskTroveParquetSource:
     relative_path: str
     verifier_ref: str
     selection: TaskTroveSelection
-    selected_count: int | None = None
-    selection_digest: str | None = None
-    distinct_environment_count: int | None = None
+    snapshot: TaskTroveSelectionSnapshot | None = None
     kind: Literal[DataSourceKind.TASKTROVE_PARQUET] = DataSourceKind.TASKTROVE_PARQUET
 
     def resolved_path(self) -> str:
-        relative = Path(self.relative_path)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError(f"Data relative_path must stay below its source root: {self.relative_path!r}")
-        return os.path.join(self.local_path, *relative.parts)
+        return _resolved_path(self.local_path, self.relative_path)
 
 
 DataSource: TypeAlias = DirectoryDataSource | TaskTroveParquetSource
@@ -102,4 +108,11 @@ def data_source(value: Mapping[str, Any]) -> DataSource:
     selection_fields["tags"] = tuple(selection_fields.get("tags", ()))
     selection_fields["modes"] = tuple(selection_fields.get("modes", ()))
     selection_fields["tag_match"] = TaskTroveTagMatch(selection_fields.get("tag_match", "all"))
-    return TaskTroveParquetSource(kind=kind, selection=TaskTroveSelection(**selection_fields), **fields)
+    snapshot_value = fields.pop("snapshot", None)
+    snapshot = TaskTroveSelectionSnapshot(**snapshot_value) if snapshot_value is not None else None
+    return TaskTroveParquetSource(
+        kind=kind,
+        selection=TaskTroveSelection(**selection_fields),
+        snapshot=snapshot,
+        **fields,
+    )

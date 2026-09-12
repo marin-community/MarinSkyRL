@@ -139,8 +139,8 @@ def job_spec(value: dict[str, Any]) -> SkyRLJobSpec:
                 profile=RuntimeProfile(request["runtime"]["profile"]),
             ),
             model=ModelLocator(**request["model"]),
-            train_data=tuple(data_source(locator) for locator in request["train_data"]),
-            validation_data=tuple(data_source(locator) for locator in request["validation_data"]),
+            train_data=tuple(data_source(source) for source in request["train_data"]),
+            validation_data=tuple(data_source(source) for source in request["validation_data"]),
             topology=SkyRLTopology(
                 num_nodes=request["topology"]["num_nodes"],
                 gpus_per_node=request["topology"]["gpus_per_node"],

@@ -23,7 +23,7 @@ from cloud.iris.artifacts import (
 from marinskyrl.checkpoint_paths import policy_export_path
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from marinskyrl.packed_tasks import select_task_references
-from marinskyrl.task_sources import DataSource, TaskTroveParquetSource
+from marinskyrl.task_sources import DataSource, TaskTroveParquetSource, TaskTroveSelectionSnapshot
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome
 from cloud.iris.protocol import (
@@ -138,9 +138,11 @@ def _preflight_tasktrove_sources(sources: tuple[DataSource, ...]) -> tuple[DataS
         prepared.append(
             replace(
                 source,
-                selected_count=len(summary.references),
-                selection_digest=summary.digest,
-                distinct_environment_count=summary.distinct_environment_count,
+                snapshot=TaskTroveSelectionSnapshot(
+                    count=len(summary.references),
+                    digest=summary.digest,
+                    distinct_environment_count=summary.distinct_environment_count,
+                ),
             )
         )
     return tuple(prepared)

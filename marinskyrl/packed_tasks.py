@@ -12,17 +12,17 @@ import tarfile
 import tempfile
 from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
 from urllib.parse import quote
 
-import fsspec
 import pyarrow as pa
 import pyarrow.parquet as pq
 from filelock import FileLock
 
-from marinskyrl.task_sources import TaskTroveParquetSource, TaskTroveTagMatch
+from cloud.iris.artifacts import fs_and_path
+from marinskyrl.task_sources import TaskTroveParquetSource, TaskTroveSelection, TaskTroveTagMatch
 
 _METADATA_COLUMNS = ("source", "tags", "mode", "path", "dockerfile_id")
 _REQUIRED_TYPES = {
@@ -34,6 +34,7 @@ _REQUIRED_TYPES = {
     "task_binary": pa.binary(),
 }
 _REQUIRED_TASK_FILES = ("instruction.md", "task.toml", "environment/Dockerfile")
+_COMPLETE_MARKER_FILENAME = ".marinskyrl-complete"
 
 
 class TaskTroveSchemaError(ValueError):
@@ -51,9 +52,7 @@ class PackedTaskArchiveError(ValueError):
 @dataclass(frozen=True)
 class PackedTaskReference:
     dataset_path: str
-    dataset_uri: str
     dataset_identity: str
-    verifier_ref: str
     row_group: int
     row: int
     source: str
@@ -88,7 +87,7 @@ def _validate_schema(schema: pa.Schema) -> None:
             raise TaskTroveSchemaError(f"TaskTrove column {name!r} must have type {expected}, found {actual}")
 
 
-def _row_matches(source: str, tags: tuple[str, ...], mode: str, selection) -> bool:
+def _row_matches(source: str, tags: tuple[str, ...], mode: str, selection: TaskTroveSelection) -> bool:
     if selection.sources and source not in selection.sources:
         return False
     if selection.modes and mode not in selection.modes:
@@ -126,14 +125,8 @@ def _selection_digest(references: Iterable[PackedTaskReference]) -> str:
 
 @contextmanager
 def _parquet_file(path: str):
-    if "://" not in path or path.startswith("file://"):
-        yield pq.ParquetFile(path.removeprefix("file://"))
-        return
-    storage_options = {}
-    if path.startswith(("s3://", "s3a://")):
-        style = os.environ.get("OT_AGENT_S3_ADDRESSING_STYLE", "virtual")
-        storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
-    with fsspec.open(path, "rb", **storage_options) as handle:
+    filesystem, storage_path = fs_and_path(path)
+    with filesystem.open(storage_path, "rb") as handle:
         yield pq.ParquetFile(handle)
 
 
@@ -162,9 +155,7 @@ def select_task_references(
                 references.append(
                     PackedTaskReference(
                         dataset_path=path,
-                        dataset_uri=source.uri,
                         dataset_identity=source.identity,
-                        verifier_ref=source.verifier_ref,
                         row_group=row_group,
                         row=row_index,
                         source=row_source,
@@ -192,10 +183,6 @@ def select_task_references(
         digest=_selection_digest(result),
         distinct_environment_count=len({reference.dockerfile_id for reference in result}),
     )
-
-
-def packed_task_reference(value: dict) -> PackedTaskReference:
-    return PackedTaskReference(**value)
 
 
 def _safe_archive_files(blob: bytes) -> dict[str, tuple[bytes, int]]:
@@ -246,11 +233,11 @@ class PackedTaskMaterializer:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(content)
                 destination.chmod(mode & 0o777)
-            (staging / ".marinskyrl-complete").write_text("1\n")
+            (staging / _COMPLETE_MARKER_FILENAME).write_text("1\n")
             try:
                 os.replace(staging, target)
             except OSError:
-                if not (target / ".marinskyrl-complete").is_file():
+                if not (target / _COMPLETE_MARKER_FILENAME).is_file():
                     raise
         finally:
             if staging.exists():
@@ -262,18 +249,24 @@ class PackedTaskMaterializer:
         pending: dict[tuple[str, int], list[PackedTaskReference]] = defaultdict(list)
         for reference in dict.fromkeys(references):
             target = self._task_path(reference)
-            if (target / ".marinskyrl-complete").is_file():
+            if (target / _COMPLETE_MARKER_FILENAME).is_file():
                 results[reference] = target
             else:
                 pending[(reference.dataset_path, reference.row_group)].append(reference)
 
         for (dataset_path, row_group), group in pending.items():
-            lock_path = self.cache_root / "locks" / hashlib.sha256(
-                f"{group[0].dataset_identity}\0{row_group}".encode()
-            ).hexdigest()
+            lock_path = (
+                self.cache_root
+                / "locks"
+                / hashlib.sha256(f"{group[0].dataset_identity}\0{row_group}".encode()).hexdigest()
+            )
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             with FileLock(lock_path.with_suffix(".lock")):
-                remaining = [reference for reference in group if not (self._task_path(reference) / ".marinskyrl-complete").is_file()]
+                remaining = [
+                    reference
+                    for reference in group
+                    if not (self._task_path(reference) / _COMPLETE_MARKER_FILENAME).is_file()
+                ]
                 if remaining:
                     rows = pq.ParquetFile(dataset_path).read_row_group(
                         row_group,
