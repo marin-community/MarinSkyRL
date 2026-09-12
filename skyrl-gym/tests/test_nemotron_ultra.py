@@ -16,6 +16,7 @@ from skyrl_gym.envs.nemotron_ultra.instruction_following import grade_instructio
 from skyrl_gym.envs.nemotron_ultra.jailbreak import grade_jailbreak
 from skyrl_gym.envs.nemotron_ultra.judge_verifiers import grade_abstention, grade_multichallenge
 from skyrl_gym.envs.nemotron_ultra.lean import verify_lean_attempt
+from skyrl_gym.envs.nemotron_ultra import math_with_judge
 from skyrl_gym.envs.nemotron_ultra.math_with_judge import grade_math
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
 from skyrl_gym.envs.nemotron_ultra.nvarc import grade_nvarc, parse_grid
@@ -262,6 +263,22 @@ def test_math_reward_accepts_symbolically_equivalent_answers_without_a_judge():
 
     assert reward == 1.0
     assert details["library_reward"] == 1.0
+
+
+def test_math_reward_avoids_forking_the_multithreaded_worker(monkeypatch):
+    requested_methods = []
+    get_context = math_with_judge.mp.get_context
+
+    def recording_get_context(method):
+        requested_methods.append(method)
+        return get_context(method)
+
+    monkeypatch.setattr(math_with_judge.mp, "get_context", recording_get_context)
+
+    reward, _ = math_with_judge.symbolic_math_reward(r"\frac{1}{2}", r"The answer is \boxed{0.5}.")
+
+    assert reward == 1.0
+    assert requested_methods == ["forkserver"]
 
 
 class _Judge:

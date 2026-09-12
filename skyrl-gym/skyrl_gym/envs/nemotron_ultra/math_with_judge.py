@@ -65,9 +65,9 @@ def _library_child(expected: str, generated: str, connection) -> None:
 
 
 def symbolic_math_reward(expected: str, generated: str, *, timeout_seconds: float = 10.0) -> tuple[float, str | None]:
-    # NVIDIA uses fork in production so each verification does not have to
-    # import SymPy and math-verify into a fresh interpreter.
-    context = mp.get_context("fork")
+    # Verification runs from Ray worker threads. A fork server preserves
+    # subprocess isolation without forking the multithreaded worker itself.
+    context = mp.get_context("forkserver")
     receiving, sending = context.Pipe(duplex=False)
     process = context.Process(target=_library_child, args=(expected, generated, sending))
     process.start()
