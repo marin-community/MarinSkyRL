@@ -74,12 +74,29 @@ def test_tiny_two_sender_two_or_four_receiver_schedule(replicas):
     args = fixture(dp=1, pp=1, ep=2, replicas=replicas, layers=2, experts=4)
     result = build_shard_group_schedule(**args)
     assert len(result.trainer_global_ranks) == 2 and len(result.receiver_global_ranks) == 2 * replicas
-    assert all(len(group.members) == 1 + replicas for group in result.groups)
+    destinations = ((2,), (3,)) if replicas == 1 else ((2, 4), (3, 5))
+    assert tuple(group.members for group in result.groups) == tuple(
+        (sender, *destinations[sender]) for sender in range(2)
+    )
+    # Two layers, two experts per sender, BF16 fc1 [2I,H] and fc2 [H,I].
+    sender_bytes = 2 * 2 * 3 * 1280 * 2560 * 2
+    assert dict(result.logical_root_bytes) == {0: sender_bytes, 1: sender_bytes}
+    assert dict(result.logical_receiver_bytes) == {rank: sender_bytes for rank in range(2, 2 + 2 * replicas)}
+    for entry, broadcast in zip(args["entries"], result.broadcasts, strict=True):
+        owner = 0 if entry.expert < 2 else 1
+        assert broadcast.root == broadcast.group_ep == owner
+        assert broadcast.receiver_destinations == destinations[owner]
 
 
 def test_fewer_sending_replicas_do_not_multiply_logical_root_payload():
-    one = build_shard_group_schedule(**fixture(dp=1, replicas=1))
-    three = build_shard_group_schedule(**fixture(dp=1, replicas=3))
+    # Unequal PP stage sizes expose sender misaccounting that preserves total bytes.
+    one = build_shard_group_schedule(**fixture(dp=1, replicas=1, layers=3))
+    three = build_shard_group_schedule(**fixture(dp=1, replicas=3, layers=3))
+    block_layer_bytes = 32 * 3 * 1280 * 2560 * 2
+    assert dict(three.logical_root_bytes) == {
+        **dict.fromkeys(range(8), block_layer_bytes),
+        **dict.fromkeys(range(8, 16), 2 * block_layer_bytes),
+    }
     assert one.logical_root_bytes == three.logical_root_bytes
     assert len(three.receiver_global_ranks) == 24
     # This is a collective-input invariant, not a claim about NIC egress.
