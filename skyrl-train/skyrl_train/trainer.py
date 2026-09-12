@@ -79,8 +79,10 @@ from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.checkpoint_paths import (
     GLOBAL_STEP_PREFIX,
     LATEST_CHECKPOINT_FILE,
+    SPECULATOR_CHECKPOINT_SUBDIRECTORY,
     speculator_export_path,
 )
+from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import (
@@ -776,12 +778,14 @@ class RayPPOTrainer:
             active["path"],
         )
 
-    async def _restore_speculator_checkpoint(self) -> None:
+    async def _restore_speculator_checkpoint(self, checkpoint_path: str | None) -> None:
         """Restore and install the draft paired with a resumed policy checkpoint."""
         speculative_decoding = getattr(self, "speculative_decoding", None)
         if speculative_decoding is None or self.global_step == 0:
             return
-        source = speculator_export_path(self.cfg.trainer.ckpt_path, self.global_step)
+        if checkpoint_path is None:
+            raise RuntimeError("A resumed online EAGLE policy must include its loaded checkpoint path")
+        source = join_resource_path(checkpoint_path, SPECULATOR_CHECKPOINT_SUBDIRECTORY)
         restored_path = self._speculator_scratch_path("resume")
         results = await self.inference_engine_client.restore_online_eagle_speculator(source, restored_path)
         manifest = _single_active_online_eagle_result(results, "checkpoint restore")
@@ -868,11 +872,12 @@ class RayPPOTrainer:
             self.policy_model.backload_to_gpu()
 
         # Load checkpoint state if resumption is enabled.
+        loaded_checkpoint_path = None
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints", self.all_startup_timings):
-                self.global_step, _ = self.load_checkpoints()
+                self.global_step, loaded_checkpoint_path = self.load_checkpoints()
 
-        await self._restore_speculator_checkpoint()
+        await self._restore_speculator_checkpoint(loaded_checkpoint_path)
 
         await self._sync_policy_for_rollouts(reason="initial")
 

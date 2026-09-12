@@ -264,11 +264,11 @@ def test_online_speculator_checkpoint_pairs_exact_served_target_and_draft():
         )
     ]
 
-    asyncio.run(trainer._restore_speculator_checkpoint())
+    asyncio.run(trainer._restore_speculator_checkpoint("/source/checkpoints/global_step_2"))
 
     assert trainer.inference_engine_client.restores == [
         (
-            "/checkpoints/global_step_2/speculator",
+            "/source/checkpoints/global_step_2/speculator",
             "/tmp/marinskyrl-online-eagle/process-id/resume",
         )
     ]
@@ -292,7 +292,7 @@ def test_online_speculator_restore_rejects_a_different_initial_source() -> None:
     )
 
     with pytest.raises(RuntimeError, match="source lineage mismatch"):
-        asyncio.run(trainer._restore_speculator_checkpoint())
+        asyncio.run(trainer._restore_speculator_checkpoint("/source/checkpoints/global_step_2"))
 
 
 def test_sync_group_admission_exhaustion_raises_typed_error():
