@@ -21,6 +21,7 @@ marinskyrl/__init__.py
 marinskyrl/checkpoint_paths.py
 marinskyrl/harbor_agent_names.py
 marinskyrl/hf_model.py
+marinskyrl/iris_harbor_environment.py
 marinskyrl/packed_tasks.py
 marinskyrl/resource_locator.py
 marinskyrl/runtime_options.py
