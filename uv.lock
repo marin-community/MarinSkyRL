@@ -3024,7 +3024,7 @@ requires-dist = [
     { name = "memray", marker = "sys_platform == 'linux' and extra == 'telemetry'" },
     { name = "ninja" },
     { name = "nvidia-ml-py" },
-    { name = "nvidia-modelopt", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.45.0" },
+    { name = "nvidia-modelopt", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.46.1" },
     { name = "omegaconf" },
     { name = "pandas" },
     { name = "peft", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = ">=0.19" },
@@ -4155,7 +4155,7 @@ wheels = [
 
 [[package]]
 name = "nvidia-modelopt"
-version = "0.45.0"
+version = "0.46.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ninja", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -4175,7 +4175,7 @@ dependencies = [
     { name = "tqdm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/93/d8/98d102b6f6be2b43e24f84fd4c57760f4ddbbce68f0801e5932b8dc55b4f/nvidia_modelopt-0.45.0-py3-none-any.whl", hash = "sha256:04e1d787898e44e7281022f4772ee57bf59d1224cbcdd10d9487c2a110687a30", size = 1902420, upload-time = "2026-07-06T07:00:28.879Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/eb/384b9e9a50fc9172c554cca8f0fa2c09739ce78cf36a7803c8ac325cd488/nvidia_modelopt-0.46.1-py3-none-any.whl", hash = "sha256:908e1a3fdaad265950c9091adafda8879971fc1e70e3f8b2b07005caed972bfa", size = 2111503, upload-time = "2026-09-09T17:08:51.652Z" },
 ]
 
 [[package]]

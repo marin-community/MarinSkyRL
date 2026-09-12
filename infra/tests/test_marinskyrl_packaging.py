@@ -103,6 +103,7 @@ def test_megatron_extra_has_native_wheels_for_linux_x86_64() -> None:
     assert extras["megatron"]
     assert any(requirement.startswith("megatron-core") for requirement in extras["megatron"])
     assert any(requirement.startswith("megatron-bridge==0.6.0") for requirement in extras["megatron"])
+    assert any(requirement.startswith("nvidia-modelopt==0.46.1") for requirement in extras["megatron"])
     hadamard = next(requirement for requirement in overrides if requirement.name == "fast-hadamard-transform")
     assert hadamard.marker is not None
     assert not hadamard.marker.evaluate({"sys_platform": "linux"})

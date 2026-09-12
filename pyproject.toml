@@ -106,7 +106,7 @@ megatron = [
     "megatron-bridge==0.6.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "megatron-core==0.18.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "harbor-config ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "nvidia-modelopt==0.45.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "nvidia-modelopt==0.46.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "peft>=0.19 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "tensordict ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torch==2.13.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
