@@ -3,6 +3,7 @@ import json
 import pytest
 
 from infra.rl_data.nemotron_ultra_sample import BlendSampleSpec, _range_rows, sample_raw_generator_rows
+from infra.rl_data.nemotron_ultra_swe import SWEProxyKey
 from infra.rl_data.sources import NEMOTRON_ULTRA_SWE_AGENT, nemotron_ultra_rlvr1_source
 
 
@@ -69,7 +70,14 @@ def test_sampler_chooses_only_swe_rows_with_exact_tasktrove_proxies(monkeypatch)
 
     monkeypatch.setattr("infra.rl_data.nemotron_ultra_sample._range_rows", lambda url, offset: [row(2), row(3)])
     proxies = {
-        ("7", 3, 1, 3, "owner__repo-a", "opencode"): {
+        SWEProxyKey(
+            trajectory_id="7",
+            step=3,
+            turn=1,
+            depth=3,
+            instance_id="owner__repo-a",
+            agent_cls="opencode",
+        ): {
             "path": "proxy-state-7-3.tar.gz",
             "task_binary": b"unused",
         }
