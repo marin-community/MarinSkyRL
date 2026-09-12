@@ -77,6 +77,12 @@ def test_aime_aggregation_rejects_missing_budget_diagnostics():
         AIMEEnv.aggregate_metrics([{"acc": True}])
 
 
+@pytest.mark.parametrize("protocol", [None, "unknown-v2"])
+def test_aime_aggregation_rejects_mixed_parser_diagnostics(protocol):
+    with pytest.raises(ValueError, match="one declared parser protocol"):
+        AIMEEnv.aggregate_metrics([{"parser_protocol": "post-thinking-native-v1"}, {"parser_protocol": protocol}])
+
+
 def test_aime_verifier_marks_missing_answer_unparseable():
     env = skyrl_gym.make(
         "aime",
