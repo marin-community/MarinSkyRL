@@ -65,11 +65,13 @@ UV_PROJECT_ENVIRONMENT="$environment" uv sync --quiet \
 python="$environment/bin/python"
 "$python" "$project_root/cloud/iris/env_vars.py" write-frozen-cuda-runtime "$runtime_file"
 source "$runtime_file"
+# Keep the development linker name in this environment, outside uv's package cache.
+ln -sf "$CUDA_HOME/lib/libcudart.so.13" "$environment/lib/libcudart.so"
 if [[ "$profile" == fsdp || "$profile" == fsdp-export ]]; then
   "$python" -c "import flash_attn, flash_attn_2_cuda"
 fi
 if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then
-  "$python" -c "import transformer_engine.common"
+  "$python" -c "import transformer_engine.common; from megatron.bridge import AutoBridge"
 fi
 if [[ "$profile" == *-export ]]; then
   "$python" -c "import ray, torch; from skyrl_train.checkpoint_exporter import CheckpointExporter"
@@ -93,4 +95,4 @@ from harbor.trial.queue import TrialQueue
 from harbor.utils.logger import logger
 from harbor.utils.traces_utils import normalize_message
 PY
-"$python" -c "import quack.activation, torch, vllm; import vllm._C, vllm.cumem_allocator; from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE; from vllm.model_executor.models import ModelRegistry; assert GRUG_MOE_ARCHITECTURE in ModelRegistry.get_supported_archs(); print('[rl-iris] frozen runtime ready:', torch.__version__, vllm.__version__)"
+"$python" -c "import quack.activation, torch, vllm; import vllm._C_stable_libtorch, vllm.cumem_allocator; from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE; from vllm.model_executor.models import ModelRegistry; assert GRUG_MOE_ARCHITECTURE in ModelRegistry.get_supported_archs(); print('[rl-iris] frozen runtime ready:', torch.__version__, vllm.__version__)"
