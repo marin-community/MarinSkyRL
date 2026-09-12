@@ -767,3 +767,449 @@ async def test_default_first_token_driver_consumes_native_stamps_and_publishes_v
     rows = [metrics for _, metrics in trainer.tracker.rows if "trainer/global_step" in metrics]
     assert len(rows) == 2 and all(row["async/staleness_max"] == 0 for row in rows)
     assert sum(row["consumed/sequences"] for row in rows) == 8
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_replay", [False, True])
+@pytest.mark.parametrize("mode", ["bucket", "reference"])
+async def test_actual_driver_bucket_timer_excludes_preparation_and_full_replay(monkeypatch, fail_replay, mode):
+    from skyrl_train.utils import utils as timer_module
+
+    trainer = make_driver(interval=1, age=0, steps=2)
+    trainer.cfg.generator.weight_sync_timing_mode = mode
+    trainer.cfg.generator.weight_sync_physical_observations = mode == "reference"
+    clock = [0.0]
+    monkeypatch.setattr(timer_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    calls = []
+    observations = []
+
+    async def observe(moment):
+        observations.append(moment)
+        clock[0] += 1009
+
+    monkeypatch.setattr(trainer, "_read_reference_physical_observations", observe)
+
+    class BucketLearner(LearnerService):
+        def async_run_ray_method(self, dispatch, method, *args):
+            if "timing" in method:
+                return [self.async_run_method(dispatch, method, *args)]
+            return super().async_run_ray_method(dispatch, method, *args)
+
+        async def async_run_method(self, dispatch, method, engine, *args):
+            calls.append((method, args))
+            if method == "broadcast_to_inference_engines":
+                clock[0] += 11
+                return await super().async_run_method(dispatch, method, engine)
+            durations = {
+                "prepare_bucket_timing": 101,
+                "prepare_reference_timing": 101,
+                "begin_bucket_timing": 3,
+                "install_bucket_timing": 7,
+                "replay_bucket_timing": 103,
+            }
+            clock[0] += durations[method]
+            if method == "replay_bucket_timing" and fail_replay:
+                raise ValueError("native full-byte replay failed")
+
+    trainer.policy_model = BucketLearner()
+    trainer.global_step = 0
+    await trainer.async_sync_policy_weights_to_inference_engines()
+    assert trainer.all_timings["weight_broadcast"] == 11
+    assert trainer.all_startup_timings["bucket_one_time_preparation"] == 101
+    trainer.all_timings.clear()
+    trainer.cfg.generator.publication_stage_timing = True
+    trainer.global_step = 1
+    trainer.inference_engine_client = TimedInferenceService()
+    if not fail_replay:
+        trainer.all_timings["publication_stall_seconds"] = 999
+    if fail_replay:
+        with pytest.raises(ValueError, match="native full-byte replay failed"):
+            await trainer._publish_policy_weights(reason="training_step", timing_name="sync_weights")
+        assert trainer._published_policy_version == 0
+    else:
+        await trainer._publish_policy_weights(reason="training_step", timing_name="sync_weights")
+        assert trainer._published_policy_version == 1
+    assert trainer.all_timings["weight_broadcast"] == 7
+    assert trainer.all_timings["bucket_sync_begin"] == 3
+    assert trainer.all_timings["bucket_full_byte_replay"] == 103
+    assert observations == (["before", "after"] if mode == "reference" else [])
+    assert "publication_stall_seconds" not in trainer.all_timings
+    if not fail_replay:
+        assert trainer.all_timings["sync_weights"] == 113 + (2018 if mode == "reference" else 0)
+        assert not trainer.inference_engine_client.generation_paused_event.is_set()
+    assert calls == [
+        ("broadcast_to_inference_engines", ()),
+        ("prepare_reference_timing" if mode == "reference" else "prepare_bucket_timing", ()),
+        ("begin_bucket_timing", (1,)),
+        ("install_bucket_timing", (1,)),
+        ("replay_bucket_timing", (1,)),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["bucket", "reference"])
+async def test_bucket_timing_driver_finalizes_last_proven_weight_version(mode):
+    events = []
+
+    class VersionedRunner(Runner):
+        async def run(self, request, **kwargs):
+            batch = await super().run(request, **kwargs)
+            batch["policy_versions_at_first_token"] = [self.engine.installed_update] * len(batch["response_ids"])
+            if request["batch_metadata"].training_phase == "eval":
+                events.append(("eval", self.engine.installed_update))
+            return batch
+
+    trainer = make_driver(interval=1, age=0, steps=20, eval_steps=20, runner_type=VersionedRunner)
+    trainer.cfg.generator.weight_sync_timing_mode = mode
+    trainer.cfg.generator.publication_stage_timing = True
+    trainer.cfg.generator.weight_sync_wire_inventory = True
+    trainer.cfg.trainer.fully_async.first_token_admission = True
+
+    class BucketLearner(TimedLearnerService):
+        def async_run_ray_method(self, dispatch, method, *args):
+            if method != "read_publication_timing" and "timing" in method:
+                return [self.async_run_method(dispatch, method, *args)]
+            return super().async_run_ray_method(dispatch, method, *args)
+
+        def __init__(self):
+            super().__init__()
+            self.phase = None
+            self.proven = []
+            self.closed = None
+
+        async def async_run_method(self, dispatch, method, engine, version=None):
+            if method == "broadcast_to_inference_engines":
+                return await super().async_run_method(dispatch, method, engine)
+            if method == ("prepare_reference_timing" if mode == "reference" else "prepare_bucket_timing"):
+                assert self.phase is None
+                self.phase = "ready"
+            elif method == "begin_bucket_timing":
+                assert self.phase in ("ready", "proven") and engine.generation_paused_event.is_set()
+                self.phase = "begun"
+            elif method == "install_bucket_timing":
+                assert self.phase == "begun" and engine.generation_paused_event.is_set()
+                assert version == self.completed_update
+                engine.installed_update = version
+                engine.publications.append(version)
+                self.phase = "installed"
+            elif method == "replay_bucket_timing":
+                assert self.phase == "installed" and engine.generation_paused_event.is_set()
+                self.phase = "proven"
+                self.proven.append(version)
+            elif method == "close_bucket_timing":
+                assert self.phase == "proven" and version == self.proven[-1]
+                assert events[-1] == ("eval", 20)
+                self.closed = version
+                events.append(("close", version))
+            else:
+                raise AssertionError(method)
+
+    class FinalDrainInference(TimedInferenceService):
+        async def read_publication_request_state(
+            self, initial_policy_version=None, drain_accounting=False, terminal_timeout_seconds=None
+        ):
+            if terminal_timeout_seconds is not None:
+                assert trainer.policy_model.closed == 20
+                assert events[-1] == ("close", 20)
+                events.append(("drain", self.installed_update))
+            return await super().read_publication_request_state(
+                initial_policy_version, drain_accounting, terminal_timeout_seconds
+            )
+
+    trainer.policy_model = BucketLearner()
+    engine = FinalDrainInference()
+    trainer.inference_engine_client = engine
+    trainer.trajectory_runner.engine = engine
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert engine.publications == list(range(21))
+    assert trainer.policy_model.proven == list(range(1, 21))
+    assert trainer.policy_model.closed == 20
+    assert trainer.trajectory_runner.evaluations == [(0, 0), (20, 20)]
+    assert events == [("eval", 0), ("eval", 20), ("close", 20), ("drain", 20)]
+    rows = [(step, metrics) for step, metrics in trainer.tracker.rows if "trainer/global_step" in metrics]
+    assert [step for step, _ in rows] == list(range(1, 21))
+    for _, metrics in rows:
+        assert metrics["timing/weight_broadcast"] > 0
+        assert metrics["timing/bucket_sync_begin"] > 0
+        assert metrics["timing/bucket_full_byte_replay"] > 0
+        assert "timing/publication_stall_seconds" not in metrics
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["off", "bucket", "reference"])
+async def test_timing_mode_structured_composition_selects_native_startup(mode):
+    overrides = [] if mode == "off" else [f"generator.weight_sync_timing_mode={mode}"]
+    with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
+        cfg = compose(config_name=DEFAULT_CONFIG_NAME, overrides=overrides)
+    assert cfg.generator.weight_sync_timing_mode == mode
+    trainer = make_driver(interval=1, age=0, steps=1)
+    trainer.cfg.generator.weight_sync_timing_mode = cfg.generator.weight_sync_timing_mode
+    prepared = []
+
+    class ModeLearner(LearnerService):
+        def async_run_ray_method(self, dispatch, method, *args):
+            if "timing" in method:
+                return [self.async_run_method(dispatch, method, *args)]
+            return super().async_run_ray_method(dispatch, method, *args)
+
+        async def async_run_method(self, dispatch, method, engine, *args):
+            if method == "broadcast_to_inference_engines":
+                return await super().async_run_method(dispatch, method, engine)
+            prepared.append(method)
+
+    trainer.policy_model = ModeLearner()
+    trainer.global_step = 0
+    await trainer.async_sync_policy_weights_to_inference_engines()
+    assert trainer.inference_engine_client.publications == [0]
+    assert prepared == (
+        [] if mode == "off" else ["prepare_reference_timing" if mode == "reference" else "prepare_bucket_timing"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method",
+    [
+        "prepare_bucket_timing",
+        "prepare_reference_timing",
+        "begin_bucket_timing",
+        "install_bucket_timing",
+        "replay_bucket_timing",
+        "close_bucket_timing",
+    ],
+)
+async def test_timing_receipts_use_actual_raw_actor_dispatch_and_reject_batch_collector(method):
+    from skyrl_train.workers.worker import PPORayActorGroup
+
+    calls = []
+    receipts = [{"schema": "bucket-timing-v1", "rank": rank, "nested": {"method": method}} for rank in range(2)]
+
+    class RemoteBoundary:
+        def __init__(self, rank):
+            self.rank = rank
+
+        def remote(self, *args):
+            calls.append((self.rank, args))
+
+            async def result():
+                await asyncio.sleep(0)
+                return receipts[self.rank]
+
+            return result()
+
+    group = PPORayActorGroup.__new__(PPORayActorGroup)
+    group.cfg = SimpleNamespace(generator=SimpleNamespace(r3_transport="by_value", r3_dispatch_put_timeout_seconds=0))
+    group.actor_infos = [
+        SimpleNamespace(
+            handle=SimpleNamespace(**{method: RemoteBoundary(rank)}),
+            rank=SimpleNamespace(dp=rank, dp_size=2, is_collection_dp_rank=lambda: True),
+        )
+        for rank in range(2)
+    ]
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.policy_model = group
+    actual = await trainer._run_bucket_timing_rpc(method, "engine", 7)
+    assert actual == receipts and all(left is right for left, right in zip(actual, receipts, strict=True))
+    assert calls == [(0, ("engine", 7)), (1, ("engine", 7))]
+    # This is the actual production failure: PassThroughDispatch.async_collect
+    # delegates non-None dictionary receipts to TrainingOutputBatch.cat.
+    with pytest.raises(ValueError, match="Unsupported type.*str.*schema"):
+        await group.async_run_method("pass_through", method, "engine", 7)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", [None, "proof", "post_drain"])
+async def test_shard_publication_keeps_generation_paused_until_verified_driver_barrier(monkeypatch, failure_stage):
+    trainer = make_driver()
+    trainer.cfg.generator.weight_sync_timing_mode = "shard"
+    trainer.global_step = 1
+    trainer._published_policy_version = 0
+    trainer.policy_model.completed_update = 1
+    engine = trainer.inference_engine_client
+    drains = []
+
+    class Publication:
+        async def publish(self, version):
+            assert engine.generation_paused_event.is_set()
+            engine.installed_update = version
+            if failure_stage == "proof":
+                raise ValueError("native shard proof failure")
+            return {"phase_seconds": {"install": 7, "full_byte_replay": 103}, "total_seconds_including_proof": 113}
+
+    async def drain():
+        drains.append(engine.generation_paused_event.is_set())
+        if failure_stage == "post_drain" and len(drains) == 2:
+            raise ValueError("native shard post_drain failure")
+
+    trainer._shard_training_publication = Publication()
+    monkeypatch.setattr(trainer, "_drain_policy_event_loops", drain)
+    if failure_stage is not None:
+        with pytest.raises(ValueError, match="native shard"):
+            await trainer.eval()
+        assert engine.generation_paused_event.is_set()
+        assert not engine.ready.is_set()
+        assert trainer.trajectory_runner.evaluations == []
+        assert trainer._published_policy_version == (0 if failure_stage == "proof" else 1)
+    else:
+        await trainer.eval()
+        assert drains == [True, True]
+        assert not engine.generation_paused_event.is_set()
+        assert trainer.trajectory_runner.evaluations == [(1, 1)]
+        assert trainer.all_timings["weight_broadcast"] == 7
+        assert trainer.all_timings["shard_sync/full_byte_replay"] == 103
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_eval_failure", [False, True])
+async def test_configured_shard_mode_trains_evaluates_final_weights_and_closes_context(monkeypatch, final_eval_failure):
+    from skyrl_train.weight_sync import shard_training
+
+    trainer = make_driver(interval=2, age=1, steps=3)
+    trainer.cfg.generator.weight_sync_timing_mode = "shard"
+    engine = trainer.inference_engine_client
+    closed = []
+    original_resume = engine.resume_generation
+
+    async def resume(*, policy_version=None, settle_native_calls=False):
+        if policy_version is not None:
+            assert policy_version == engine.installed_update
+        await original_resume()
+
+    class ShardService:
+        """Remote tensor transport boundary; the configured training loop is actual."""
+
+        def __init__(self, driver):
+            assert driver is trainer
+
+        async def publish(self, publication_id):
+            if not engine.publications:
+                await engine.pause_generation()
+            assert engine.generation_paused_event.is_set()
+            assert publication_id == trainer.policy_model.completed_update
+            engine.installed_update = publication_id
+            engine.publications.append(publication_id)
+            return {"phase_seconds": {"install": 7, "full_byte_replay": 103}, "total_seconds_including_proof": 113}
+
+        async def close(self):
+            assert trainer.trajectory_runner.evaluations[-1] == (3, 3)
+            assert not trainer._active_trajectory_tasks
+            closed.append(engine.installed_update)
+
+    monkeypatch.setattr(shard_training, "ShardTrainingPublication", ShardService)
+    monkeypatch.setattr(engine, "resume_generation", resume)
+    original_eval = trainer.eval
+
+    async def evaluate():
+        result = await original_eval()
+        if final_eval_failure and trainer.global_step == 3:
+            raise ValueError("Final evaluation failed after installation")
+        return result
+
+    monkeypatch.setattr(trainer, "eval", evaluate)
+    if final_eval_failure:
+        with pytest.raises(ValueError, match="Final evaluation failed"):
+            await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    else:
+        await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert engine.publications == [0, 2, 3]
+    assert trainer.trajectory_runner.evaluations == [(0, 0), (3, 3)]
+    assert [step for step, _ in trainer.policy_model.consumed] == [1, 2, 3]
+    assert closed == [3]
+    assert engine.ready.is_set() and not engine.generation_paused_event.is_set()
+
+
+class GuardedInferenceService(InferenceService):
+    """Mirror the vLLM engine's request-accounting precondition, not just its return shape.
+
+    AsyncVLLMInferenceEngine.read_publication_request_state(initial_policy_version=...)
+    is the initialization: it rejects an engine that already holds accounting or any
+    version boundary, and resume_generation(policy_version=...) records a boundary.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.accounting = None
+        self.boundaries = []
+        self.calls = []
+
+    async def resume_generation(self, policy_version=None, *, settle_native_calls=False):
+        if policy_version is not None:
+            assert self.generation_paused_event.is_set()
+            self.boundaries.append(policy_version)
+        self.calls.append(("resume", policy_version))
+        await super().resume_generation()
+
+    async def read_publication_request_state(
+        self, initial_policy_version=None, drain_accounting=False, terminal_timeout_seconds=None
+    ):
+        self.calls.append(("read", initial_policy_version, terminal_timeout_seconds is not None))
+        if initial_policy_version is not None:
+            if self.accounting is not None or self.boundaries:
+                raise ValueError("request accounting must initialize before any generation")
+            self.accounting = {"active_ids": []}
+            self.boundaries.append(initial_policy_version)
+        elif terminal_timeout_seconds is not None and self.accounting is None:
+            raise ValueError("terminal acknowledgement requires initialized request accounting")
+        return [
+            {
+                "shared_time_and_uts_namespaces": True,
+                "paused": self.generation_paused_event.is_set(),
+                "request_accounting": None if self.accounting is None else dict(self.accounting),
+            }
+            for _ in range(2)
+        ]
+
+    def publication_inflight_snapshot(self):
+        return (0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_token_admission", [None, True])
+async def test_shard_startup_initializes_request_accounting_before_releasing_generation(
+    monkeypatch, first_token_admission
+):
+    """Shard preparation pauses the engines; first-token admission must still see a clean initial read."""
+    from skyrl_train.weight_sync import shard_training
+
+    class FirstTokenRunner(Runner):
+        async def run(self, request, **kwargs):
+            batch = await super().run(request, **kwargs)
+            batch["policy_versions_at_first_token"] = [self.engine.installed_update] * len(batch["response_ids"])
+            return batch
+
+    trainer = make_driver(
+        interval=2, age=1, steps=3, runner_type=FirstTokenRunner, first_token_admission=first_token_admission
+    )
+    trainer.cfg.generator.weight_sync_timing_mode = "shard"
+    if first_token_admission is None:
+        del trainer.cfg.trainer.fully_async.first_token_admission
+    engine = GuardedInferenceService()
+    trainer.inference_engine_client = engine
+    trainer.trajectory_runner.engine = engine
+
+    class ShardService:
+        """Remote tensor transport boundary; preparation pauses generation on first use."""
+
+        def __init__(self, driver):
+            assert driver is trainer
+
+        async def publish(self, publication_id):
+            if not engine.publications:
+                await engine.pause_generation()
+            assert engine.generation_paused_event.is_set()
+            engine.installed_update = publication_id
+            engine.publications.append(publication_id)
+            return {"phase_seconds": {"install": 7, "full_byte_replay": 103}, "total_seconds_including_proof": 113}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(shard_training, "ShardTrainingPublication", ShardService)
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    # The initial read initializes accounting while the engines are still paused, and
+    # the startup release records no second boundary for the same version.
+    # Shard mode forbids publication_stage_timing, so no other readback happens.
+    assert engine.calls == [("read", 0, False), ("resume", None), ("resume", 2), ("resume", 3)]
+    assert engine.boundaries == [0, 2, 3]
+    assert engine.publications == [0, 2, 3]
+    assert engine.ready.is_set() and not engine.generation_paused_event.is_set()

@@ -61,11 +61,13 @@ from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWra
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
 from skyrl_train.weight_sync.publication_timing import PublicationStageTimer, record_receiver_publication_stages
+from skyrl_train.weight_sync.wire_inventory import WireInventory
 from skyrl_train.telemetry import record_event
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode, weight_sync_dtype
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 from skyrl_train.weight_change_probe import WirePublicationObserver
 from skyrl_train.weight_sync.readback_diagnostics import environment_readback, parameter_digests
+from skyrl_train.weight_sync.policy_weight_access import PolicyWeightAccess
 
 
 class _MegatronInitMode(StrEnum):
@@ -500,6 +502,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # A checkpoint can be restored after init_model, so the initial version is
         # unknown until this worker has completed an update with explicit metadata.
         self._completed_update: int | None = None
+        self._policy_weight_access = PolicyWeightAccess()
         self._optimizer_state_observer = OptimizerStateObserver(
             enabled=self.cfg.trainer.optimizer_state_metrics, rank=self._rank
         )
@@ -670,30 +673,33 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     # are shared with the ordinary worker through backend-neutral utilities.
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
-        timing = MegatronTrainTimings(
-            enabled=bool(OmegaConf.select(self.cfg, "trainer.policy_train_spans", default=False))
-        )
-        outcome = "failure"
-        try:
-            with self._memory.span(
-                "ppo_forward_backward_update", step=int(train_data.metadata["global_step"]), step_kind="target_update"
-            ):
-                output = self._ppo_train_with_timings(train_data, timing)
-            self._completed_update = int(train_data.metadata["global_step"])
-            outcome = "success"
-            return output
-        finally:
+        with self._policy_weight_access.hold("ppo"):
+            timing = MegatronTrainTimings(
+                enabled=bool(OmegaConf.select(self.cfg, "trainer.policy_train_spans", default=False))
+            )
+            outcome = "failure"
             try:
-                observations = timing.finish()
-                if observations:
-                    publish_megatron_train_timings(
-                        observations,
-                        step=int(train_data.metadata["global_step"]),
-                        rank=torch.distributed.get_rank(),
-                        outcome=outcome,
-                    )
-            except Exception as error:
-                logger.warning("Could not publish Megatron policy timings: {}", error)
+                with self._memory.span(
+                    "ppo_forward_backward_update",
+                    step=int(train_data.metadata["global_step"]),
+                    step_kind="target_update",
+                ):
+                    output = self._ppo_train_with_timings(train_data, timing)
+                self._completed_update = int(train_data.metadata["global_step"])
+                outcome = "success"
+                return output
+            finally:
+                try:
+                    observations = timing.finish()
+                    if observations:
+                        publish_megatron_train_timings(
+                            observations,
+                            step=int(train_data.metadata["global_step"]),
+                            rank=torch.distributed.get_rank(),
+                            outcome=outcome,
+                        )
+                except Exception as error:
+                    logger.warning("Could not publish Megatron policy timings: {}", error)
 
     def _ppo_train_with_timings(self, train_data, timing: MegatronTrainTimings) -> "TrainingOutputBatch":
         dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
@@ -848,6 +854,122 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         output.metadata = {"train_status": status_mean, "train_status_by_update": status_by_update}
         return output
 
+    async def collect_shard_policy_preparation(self, preparation_id, geometry, output_uri):
+        from skyrl_train.weight_sync.shard_worker_preparation import collect_policy
+
+        return await asyncio.to_thread(collect_policy, self, preparation_id, geometry, output_uri)
+
+    async def bind_shard_policy_preparation(self, plan, output_uri):
+        from skyrl_train.weight_sync.shard_worker_preparation import bind_policy
+
+        return await asyncio.to_thread(bind_policy, self, plan, output_uri)
+
+    async def close_shard_policy_preparation(self, preparation_id):
+        from skyrl_train.weight_sync.shard_worker_preparation import close_preparation
+
+        return await asyncio.to_thread(close_preparation, self, preparation_id)
+
+    async def prepare_shard_publication_replay(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.shard_replay_rpc import replay_worker_call
+
+        return await asyncio.to_thread(
+            replay_worker_call, self, "prepare_replay", manifest_id, publication_id, output_uri
+        )
+
+    async def replay_shard_publication(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.shard_replay_rpc import replay_worker_call
+
+        return await asyncio.to_thread(replay_worker_call, self, "replay", manifest_id, publication_id, output_uri)
+
+    async def begin_shard_publication(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return await asyncio.to_thread(worker_shard_call, self, "begin", manifest_id, publication_id)
+
+    async def verify_shard_publication(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return await asyncio.to_thread(worker_shard_call, self, "verify_replicas", manifest_id, publication_id)
+
+    async def run_shard_publication(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return await asyncio.to_thread(worker_shard_call, self, "run", manifest_id, publication_id)
+
+    async def read_weight_sync_observations(self, observation_id, output_uri):
+        from skyrl_train.weight_sync.shard_observations import observe_worker
+
+        device = next(self.actor_module[0].parameters()).device
+        return await asyncio.to_thread(observe_worker, self, device, "policy", observation_id, output_uri)
+
+    async def finish_shard_publication(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return await asyncio.to_thread(worker_shard_call, self, "finish", manifest_id, publication_id)
+
+    async def close_shard_publication(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return await asyncio.to_thread(worker_shard_call, self, "close", manifest_id, publication_id)
+
+    async def prepare_bucket_timing(self, inference_engine_client):
+        from skyrl_train.weight_sync.bucket_timing_session import prepare_timing
+
+        return await prepare_timing(
+            self,
+            inference_engine_client,
+            source_owners={
+                "dense_owner": mpu.get_data_parallel_rank() == 0,
+                "expert_owner": mpu.get_expert_data_parallel_rank() == 0,
+            },
+        )
+
+    async def prepare_reference_timing(self, inference_engine_client):
+        from skyrl_train.weight_sync.bucket_timing_session import prepare_timing
+
+        return await prepare_timing(
+            self,
+            inference_engine_client,
+            mode="reference",
+            source_owners={
+                "dense_owner": mpu.get_data_parallel_rank() == 0,
+                "expert_owner": mpu.get_expert_data_parallel_rank() == 0,
+            },
+        )
+
+    async def begin_bucket_timing(self, inference_engine_client, publication_id):
+        from skyrl_train.weight_sync.bucket_timing_session import begin_timing
+
+        return await begin_timing(self, inference_engine_client, publication_id)
+
+    async def install_bucket_timing(self, inference_engine_client, publication_id):
+        from skyrl_train.weight_sync.bucket_timing_session import install_timing
+
+        return await install_timing(self, inference_engine_client, publication_id)
+
+    async def replay_bucket_timing(self, inference_engine_client, publication_id):
+        from skyrl_train.weight_sync.bucket_timing_session import replay_timing
+
+        return await replay_timing(self, inference_engine_client, publication_id)
+
+    async def close_bucket_timing(self, inference_engine_client, publication_id):
+        from skyrl_train.weight_sync.bucket_timing_session import close_timing
+
+        return await close_timing(self, inference_engine_client, publication_id)
+
+    async def diagnostic_bucket_install_and_replay(self, inference_engine_client):
+        from skyrl_train.weight_sync.megatron_bucket_protocol import install_and_replay
+
+        with self._policy_weight_access.hold("bucket-install-and-replay"):
+            return await install_and_replay(
+                self,
+                inference_engine_client,
+                source_owners={
+                    "dense_owner": mpu.get_data_parallel_rank() == 0,
+                    "expert_owner": mpu.get_expert_data_parallel_rank() == 0,
+                },
+            )
+
     async def broadcast_to_inference_engines(self, inference_engine_client, *, publication=None):
         # Enclose extraction as well as transfer: gathering/conversion can peak
         # before the first tensor reaches the publication communicator.
@@ -884,6 +1006,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             raise ValueError("publication stage tracing currently requires non-colocated NCCL broadcast")
         rank = torch.distributed.get_rank()
         step = self._completed_update or 0
+        wire_enabled = bool(self.cfg.generator.get("weight_sync_wire_inventory", False))
+        if wire_enabled and self.use_cuda_ipc:
+            raise ValueError("Wire inventory requires native non-colocated tensor broadcasts")
+        wire_inventory = WireInventory() if wire_enabled and rank == 0 else None
+        if wire_enabled:
+            self._weight_sync_wire_receipt = None
         if timing.enabled and rank == 0:
             await inference_engine_client.begin_publication_timing(step)
 
@@ -951,6 +1079,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 if torch.distributed.get_rank() == 0:
                     with timing.span("rpc_wait"):
                         await update_weight_task
+                    if wire_inventory is not None:
+                        wire_inventory.observe(name, tensor)
                 with timing.span("barrier"):
                     torch.distributed.barrier()
 
@@ -1031,6 +1161,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 receivers = await inference_engine_client.read_publication_timing()
                 record_receiver_publication_stages(receivers, step=step)
                 self._publication_timing_receipt = {"trainer": ranks, "receiver": receivers}
+        if wire_inventory is not None:
+            self._weight_sync_wire_receipt = wire_inventory.finish(completed_update=self._completed_update)
+        return None
+
+    def read_weight_sync_wire_inventory(self):
+        if not self.cfg.generator.get("weight_sync_wire_inventory", False):
+            raise ValueError("Wire inventory was not enabled for this run")
+        if torch.distributed.get_rank() == 0:
+            if self._weight_sync_wire_receipt is None:
+                raise ValueError("No complete successful native wire inventory is available")
+            return self._weight_sync_wire_receipt
         return None
 
     def read_publication_timing(self):

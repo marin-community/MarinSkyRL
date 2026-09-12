@@ -57,7 +57,7 @@ class WeightSyncReadbackExp(AsyncPPOExp):
                     "enable_expert_parallel": generator.inference_engine_expert_parallel_size > 1,
                 },
             }
-            receipt = asyncio.run(run_initial_readback(trainer, cfg.trainer.weight_sync_readback_output, geometry))
+            receipt = asyncio.run(self.collect_readback(trainer, geometry))
             receipt["run_id"] = self.cfg.trainer.completion.run_id
             receipt["attempt_id"] = self.cfg.trainer.completion.attempt_id
             durable = persist_readback(self.cfg.trainer.weight_sync_readback_output, "complete", receipt)
@@ -76,7 +76,12 @@ class WeightSyncReadbackExp(AsyncPPOExp):
             finally:
                 if self.tracker is not None:
                     self.tracker.finish(exit_code=exit_code)
-        print("SNOWBALL_ZERO_UPDATE_READBACK_PASS updates=0 initial_syncs=1", flush=True)
+        print(self.pass_line, flush=True)
+
+    pass_line = "SNOWBALL_ZERO_UPDATE_READBACK_PASS updates=0 initial_syncs=1"
+
+    async def collect_readback(self, trainer, geometry):
+        return await run_initial_readback(trainer, self.cfg.trainer.weight_sync_readback_output, geometry)
 
 
 @ray.remote(num_cpus=1, max_retries=1)

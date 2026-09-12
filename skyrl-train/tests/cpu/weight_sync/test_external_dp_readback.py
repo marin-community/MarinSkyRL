@@ -6,7 +6,7 @@ import pytest
 
 from skyrl_train.weight_sync.initial_readback import validate_initial_readback
 from tests.cpu.weight_sync.test_readback_diagnostics import _readbacks
-from skyrl_train.weight_sync.receiver_readback_rpc import group_external_dp_workers, read_all_receiver_workers
+from skyrl_train.weight_sync.receiver_readback_rpc import group_external_dp_workers, call_all_receiver_workers
 from tests.cpu.test_engine_placement_strategy import inference_scheduler as inference_scheduler
 
 
@@ -41,7 +41,7 @@ async def test_actual_factory_external_dp_actors_retain_all_eight_worker_origins
                 )
             ),
         )
-        actor_rows.append(await read_all_receiver_workers(engine, "read_weight_sync_environment"))
+        actor_rows.append(await call_all_receiver_workers(engine, "read_weight_sync_environment"))
     geometry = {"receiver_engines": 1, "receiver_ranks_per_engine": 8, "receiver_parallel": {"data_parallel_size": 8}}
     rows = group_external_dp_workers(actor_rows, geometry)
     assert len(rows) == 1 and [row["rank"] for row in rows[0]] == list(range(8))

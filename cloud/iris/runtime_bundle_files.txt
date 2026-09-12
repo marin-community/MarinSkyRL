@@ -8,6 +8,8 @@ cloud/iris/ingress_utils.py
 cloud/iris/literal_proxy_utils.py
 cloud/iris/model_paths.py
 cloud/iris/paths.py
+cloud/iris/local_probe_receipts.py
+cloud/iris/local_probe_runtime.py
 cloud/iris/ray_membership.py
 cloud/iris/ray_storage.py
 cloud/iris/rl_config_translation.py

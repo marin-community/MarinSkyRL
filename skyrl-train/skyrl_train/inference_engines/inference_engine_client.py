@@ -190,7 +190,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             if 0 <= engine_idx < len(self._engine_inflight) and self._engine_inflight[engine_idx] > 0:
                 self._engine_inflight[engine_idx] -= 1
 
-    async def _run_on_all_engines(self, method_name: str, *args, **kwargs):
+    async def _run_on_all_engines(self, method_name: str, *args, _settle_calls: bool = False, **kwargs):
         """
         Call a method on all live engines concurrently and gather the results.
         """
@@ -199,6 +199,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             raise RuntimeError("All inference engines have died")
 
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in live_engines]
+        if _settle_calls:
+            from skyrl_train.weight_sync.shard_interval import settled
+
+            return await settled(*awaitables)
         return await asyncio.gather(*awaitables)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -879,6 +883,137 @@ class InferenceEngineClient(InferenceEngineInterface):
             kwargs["terminal_timeout_seconds"] = terminal_timeout_seconds
         return await self._run_on_all_engines("read_publication_request_state", **kwargs)
 
+    async def _run_diagnostic_bucket_rpc(self, method_name: str, **kwargs):
+        if self._dead_engines:
+            raise RuntimeError("Bucket collectives require every configured inference engine")
+        return await self._run_on_all_engines(method_name, **kwargs)
+
+    async def collect_shard_receiver_preparation(self, preparation_id, geometry):
+        from skyrl_train.weight_sync.shard_interval import settled
+
+        expected = geometry.receiver_replicas * geometry.expert_parallel_size
+        if self._dead_engines or len(self.engines) != expected:
+            raise RuntimeError("Shard preparation requires every external-DP receiver actor")
+        if not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard preparation requires the client idle acknowledgement")
+        return await settled(
+            *(
+                engine.collect_shard_receiver_preparation(
+                    preparation_id, geometry, index // geometry.expert_parallel_size
+                )
+                for index, engine in enumerate(self.engines)
+            )
+        )
+
+    async def bind_shard_receiver_preparation(self, plan, output_uri):
+        if self._dead_engines or not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard preparation requires all receivers and the client idle acknowledgement")
+        return await self._run_on_all_engines("bind_shard_receiver_preparation", plan, output_uri, _settle_calls=True)
+
+    async def close_shard_receiver_preparation(self, preparation_id):
+        if self._dead_engines:
+            raise RuntimeError("Shard cleanup requires every configured receiver actor")
+        return await self._run_on_all_engines("close_shard_receiver_preparation", preparation_id, _settle_calls=True)
+
+    async def prepare_shard_replay(self, manifest_id, publication_id, output_uri):
+        if self._dead_engines or not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard replay requires every receiver and client idle acknowledgement")
+        return await self._run_on_all_engines(
+            "prepare_shard_replay", manifest_id, publication_id, output_uri, _settle_calls=True
+        )
+
+    async def replay_shard_stream(self, manifest_id, publication_id, output_uri):
+        if self._dead_engines or not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard replay requires every receiver and client idle acknowledgement")
+        return await self._run_on_all_engines(
+            "replay_shard_stream", manifest_id, publication_id, output_uri, _settle_calls=True
+        )
+
+    async def begin_shard_stream(self, manifest_id: str, publication_id: int):
+        if self._dead_engines:
+            raise RuntimeError("Shard collectives require every configured inference engine")
+        if not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard publication requires the client idle acknowledgement")
+        return await self._run_on_all_engines(
+            "begin_shard_stream", manifest_id=manifest_id, publication_id=publication_id, _settle_calls=True
+        )
+
+    async def run_shard_stream(self, manifest_id: str, publication_id: int):
+        if self._dead_engines:
+            raise RuntimeError("Shard collectives require every configured inference engine")
+        if not self.generation_paused_event.is_set():
+            raise RuntimeError("Shard publication requires the client idle acknowledgement")
+        return await self._run_on_all_engines(
+            "run_shard_stream", manifest_id=manifest_id, publication_id=publication_id, _settle_calls=True
+        )
+
+    async def read_weight_sync_observations(self, observation_id, output_uri):
+        if self._dead_engines:
+            raise RuntimeError("Physical weight-sync observations require every inference engine")
+        return await self._run_on_all_engines(
+            "read_weight_sync_observations", observation_id=observation_id, output_uri=output_uri, _settle_calls=True
+        )
+
+    async def finish_shard_stream(self, manifest_id: str, publication_id: int):
+        if self._dead_engines:
+            raise RuntimeError("Shard collectives require every configured inference engine")
+        return await self._run_on_all_engines(
+            "finish_shard_stream", manifest_id=manifest_id, publication_id=publication_id, _settle_calls=True
+        )
+
+    async def close_shard_stream(self, manifest_id: str, publication_id: int):
+        if self._dead_engines:
+            raise RuntimeError("Shard collectives require every configured inference engine")
+        return await self._run_on_all_engines(
+            "close_shard_stream", manifest_id=manifest_id, publication_id=publication_id, _settle_calls=True
+        )
+
+    async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+        return await self._run_diagnostic_bucket_rpc(
+            "prepare_diagnostic_weight_sync_buckets", payload=payload, manifest_id=manifest_id
+        )
+
+    async def begin_diagnostic_weight_sync(self, manifest_id: str, publication_id: int):
+        return await self._run_diagnostic_bucket_rpc(
+            "begin_diagnostic_weight_sync", manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def begin_reference_bucket_sync(self, manifest_id, publication_id):
+        return await self._run_diagnostic_bucket_rpc(
+            "begin_reference_bucket_sync", manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def finish_reference_bucket_sync(self, manifest_id, publication_id):
+        return await self._run_diagnostic_bucket_rpc(
+            "finish_reference_bucket_sync", manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def receive_diagnostic_weight_sync_bucket(
+        self, bucket_id: int, *, replay: bool = False, manifest_id: str | None = None, publication_id: int | None = None
+    ):
+        return await self._run_diagnostic_bucket_rpc(
+            "receive_diagnostic_weight_sync_bucket",
+            bucket_id=bucket_id,
+            replay=replay,
+            manifest_id=manifest_id,
+            publication_id=publication_id,
+        )
+
+    async def finish_diagnostic_weight_sync_install(self, manifest_id=None, publication_id=None):
+        return await self._run_diagnostic_bucket_rpc(
+            "finish_diagnostic_weight_sync_install", manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def finish_diagnostic_weight_sync_replay(self, manifest_id=None, publication_id=None):
+        return await self._run_diagnostic_bucket_rpc(
+            "finish_diagnostic_weight_sync_replay", manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    async def close_diagnostic_weight_sync_buckets(self, manifest_id=None, publication_id=None):
+        return await self._run_diagnostic_bucket_rpc(
+            "close_diagnostic_weight_sync_buckets", manifest_id=manifest_id, publication_id=publication_id
+        )
+
     async def read_publication_receiver_state(self):
         return await self._run_on_all_engines("read_publication_receiver_state")
 
@@ -941,7 +1076,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 with self._routing_lock:
                     self._generation_resume_waiters.discard(waiter)
 
-    async def pause_generation(self) -> None:
+    async def pause_generation(self, *, settle_native_calls: bool = False) -> None:
         """Block submissions, abort native schedulers, then verify every engine is paused.
 
         Calls already delivered after the native abort may remain queued until resume.
@@ -952,21 +1087,23 @@ class InferenceEngineClient(InferenceEngineInterface):
                 raise RuntimeError("Generation is already paused, cannot pause again.")
             self.generation_paused_event.set()
         async with asyncio.timeout(self._publication_pause_timeout):
-            await self._run_on_all_engines("pause_generation")
+            await self._run_on_all_engines("pause_generation", _settle_calls=settle_native_calls)
             while True:
-                states = await self._run_on_all_engines("is_paused")
+                states = await self._run_on_all_engines("is_paused", _settle_calls=settle_native_calls)
                 if len(states) == len(self.engines) and all(value is True for value in states):
                     break
         logger.info("publication_pause_ack queued_or_returning_requests={}", sum(self.publication_inflight_snapshot()))
 
-    async def resume_generation(self, policy_version: int | None = None) -> None:
+    async def resume_generation(self, policy_version: int | None = None, *, settle_native_calls: bool = False) -> None:
         """Release every native scheduler before waking local and HTTP-loop waiters."""
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Generation is not paused, cannot resume.")
         if policy_version is None:
-            await self._run_on_all_engines("resume_generation")
+            await self._run_on_all_engines("resume_generation", _settle_calls=settle_native_calls)
         else:
-            await self._run_on_all_engines("resume_generation", policy_version=policy_version)
+            await self._run_on_all_engines(
+                "resume_generation", policy_version=policy_version, _settle_calls=settle_native_calls
+            )
         with self._routing_lock:
             self.generation_paused_event.clear()
             waiters = tuple(self._generation_resume_waiters)

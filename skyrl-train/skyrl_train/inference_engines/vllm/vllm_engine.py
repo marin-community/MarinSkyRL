@@ -468,6 +468,103 @@ class WorkerWrap:
 
         return read_publication_receiver_state(self)
 
+    def shard_metadata_rpc(self, method, payload):
+        from skyrl_train.weight_sync.shard_wire import execute_shard_rpc
+
+        return execute_shard_rpc(self, method, payload)
+
+    def collect_shard_receiver_preparation(self, preparation_id, geometry, replica):
+        from skyrl_train.weight_sync.shard_worker_preparation import collect_receiver
+
+        return collect_receiver(self, preparation_id, geometry, replica)
+
+    def bind_shard_receiver_preparation(self, plan, output_uri):
+        from skyrl_train.weight_sync.shard_worker_preparation import bind_receiver
+
+        return bind_receiver(self, plan, output_uri)
+
+    def close_shard_receiver_preparation(self, preparation_id):
+        from skyrl_train.weight_sync.shard_worker_preparation import close_preparation
+
+        return close_preparation(self, preparation_id)
+
+    def prepare_shard_replay(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.shard_replay_rpc import replay_worker_call
+
+        return replay_worker_call(self, "prepare_replay", manifest_id, publication_id, output_uri)
+
+    def replay_shard_stream(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.shard_replay_rpc import replay_worker_call
+
+        return replay_worker_call(self, "replay", manifest_id, publication_id, output_uri)
+
+    def begin_shard_stream(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return worker_shard_call(self, "begin", manifest_id, publication_id)
+
+    def run_shard_stream(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return worker_shard_call(self, "run", manifest_id, publication_id)
+
+    def read_weight_sync_observations(self, observation_id, output_uri):
+        from skyrl_train.weight_sync.shard_observations import observe_worker
+
+        return observe_worker(self, self.device, "receiver", observation_id, output_uri)
+
+    def finish_shard_stream(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return worker_shard_call(self, "finish", manifest_id, publication_id)
+
+    def close_shard_stream(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_session import worker_shard_call
+
+        return worker_shard_call(self, "close", manifest_id, publication_id)
+
+    def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+        from skyrl_train.weight_sync.worker_bucket_protocol import prepare_worker_buckets
+
+        return prepare_worker_buckets(self, payload, manifest_id)
+
+    def begin_diagnostic_weight_sync(self, manifest_id, publication_id):
+        from skyrl_train.weight_sync.worker_bucket_protocol import begin_worker_bucket_sync
+
+        return begin_worker_bucket_sync(self, manifest_id, publication_id)
+
+    def begin_reference_bucket_sync(self, manifest_id, publication_id):
+        from skyrl_train.weight_sync.reference_bucket_protocol import begin_reference_sync
+
+        return begin_reference_sync(self, manifest_id, publication_id)
+
+    def finish_reference_bucket_sync(self, manifest_id, publication_id):
+        from skyrl_train.weight_sync.reference_bucket_protocol import finish_reference_sync
+
+        return finish_reference_sync(self, manifest_id, publication_id)
+
+    def receive_diagnostic_weight_sync_bucket(self, bucket_id, replay=False, manifest_id=None, publication_id=None):
+        from skyrl_train.weight_sync.worker_bucket_protocol import receive_worker_bucket
+
+        return receive_worker_bucket(
+            self, bucket_id, replay=replay, manifest_id=manifest_id, publication_id=publication_id
+        )
+
+    def finish_diagnostic_weight_sync_replay(self, manifest_id=None, publication_id=None):
+        from skyrl_train.weight_sync.worker_bucket_protocol import finish_worker_replay
+
+        return finish_worker_replay(self, manifest_id=manifest_id, publication_id=publication_id)
+
+    def finish_diagnostic_weight_sync_install(self, manifest_id=None, publication_id=None):
+        from skyrl_train.weight_sync.worker_bucket_protocol import finish_worker_install
+
+        return finish_worker_install(self, manifest_id=manifest_id, publication_id=publication_id)
+
+    def close_diagnostic_weight_sync_buckets(self, manifest_id=None, publication_id=None):
+        from skyrl_train.weight_sync.worker_bucket_protocol import close_worker_buckets
+
+        return close_worker_buckets(self, manifest_id=manifest_id, publication_id=publication_id)
+
     def read_weight_sync_environment(self):
         from skyrl_train.weight_sync.readback_diagnostics import environment_readback
 
@@ -721,6 +818,10 @@ class WorkerWrap:
             # Immediate mode (default): load right away
             with self._publication_timer.span("load"):
                 load_weights_into_vllm(self.model_runner.model, weight_list)
+            if getattr(self, "_diagnostic_bucket_state", {}).get("reference_active", False):
+                from skyrl_train.weight_sync.reference_bucket_protocol import observe_reference_load
+
+                observe_reference_load(self, weight_list)
             for weight in weight_list:
                 del weight
 
@@ -2101,15 +2202,202 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def begin_publication_timing(self, step: int):
         return await self._get_engine().collective_rpc("begin_publication_timing", args=(step,))
 
-    async def read_publication_receiver_state(self):
-        from skyrl_train.weight_sync.receiver_readback_rpc import read_all_receiver_workers
+    async def collect_shard_receiver_preparation(self, preparation_id, geometry, replica):
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
-        return await read_all_receiver_workers(self._get_engine(), "read_publication_receiver_state")
+        if not await self.is_paused():
+            raise RuntimeError("Shard preparation requires the native idle acknowledgement")
+        return await call_all_shard_workers(
+            self._get_engine(),
+            "collect_shard_receiver_preparation",
+            args=(
+                preparation_id,
+                geometry,
+                replica,
+            ),
+            kwargs=None,
+            settle_calls=True,
+        )
+
+    async def bind_shard_receiver_preparation(self, plan, output_uri):
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
+
+        if not await self.is_paused():
+            raise RuntimeError("Shard preparation requires the native idle acknowledgement")
+        return await call_all_shard_workers(
+            self._get_engine(),
+            "bind_shard_receiver_preparation",
+            args=(
+                plan,
+                output_uri,
+            ),
+            kwargs=None,
+            settle_calls=True,
+        )
+
+    async def close_shard_receiver_preparation(self, preparation_id):
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
+
+        return await call_all_shard_workers(
+            self._get_engine(),
+            "close_shard_receiver_preparation",
+            args=(preparation_id,),
+            kwargs=None,
+            settle_calls=True,
+        )
+
+    async def prepare_shard_replay(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
+
+        if not await self.is_paused():
+            raise RuntimeError("Shard replay requires native idle acknowledgement")
+        return await call_all_shard_workers(
+            self._get_engine(),
+            "prepare_shard_replay",
+            args=(manifest_id, publication_id, output_uri),
+            kwargs=None,
+            settle_calls=True,
+        )
+
+    async def replay_shard_stream(self, manifest_id, publication_id, output_uri):
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
+
+        if not await self.is_paused():
+            raise RuntimeError("Shard replay requires native idle acknowledgement")
+        return await call_all_shard_workers(
+            self._get_engine(),
+            "replay_shard_stream",
+            args=(manifest_id, publication_id, output_uri),
+            kwargs=None,
+            settle_calls=True,
+        )
+
+    async def begin_shard_stream(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
+
+        if not await self.is_paused():
+            raise RuntimeError("Native shard publication requires scheduler-idle acknowledgement")
+        return await call_all_shard_workers(
+            self._get_engine(), "begin_shard_stream", args=(manifest_id, publication_id), kwargs=None, settle_calls=True
+        )
+
+    async def run_shard_stream(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
+
+        if not await self.is_paused():
+            raise RuntimeError("Native shard publication requires scheduler-idle acknowledgement")
+        return await call_all_shard_workers(
+            self._get_engine(), "run_shard_stream", args=(manifest_id, publication_id), kwargs=None, settle_calls=True
+        )
+
+    async def read_weight_sync_observations(self, observation_id, output_uri):
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
+
+        return await call_all_shard_workers(
+            self._get_engine(),
+            "read_weight_sync_observations",
+            args=(observation_id, output_uri),
+            kwargs=None,
+            settle_calls=True,
+        )
+
+    async def finish_shard_stream(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
+
+        return await call_all_shard_workers(
+            self._get_engine(),
+            "finish_shard_stream",
+            args=(manifest_id, publication_id),
+            kwargs=None,
+            settle_calls=True,
+        )
+
+    async def close_shard_stream(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
+
+        return await call_all_shard_workers(
+            self._get_engine(), "close_shard_stream", args=(manifest_id, publication_id), kwargs=None, settle_calls=True
+        )
+
+    async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(), "prepare_diagnostic_weight_sync_buckets", args=(payload, manifest_id), kwargs=None
+        )
+
+    async def begin_diagnostic_weight_sync(self, manifest_id: str, publication_id: int):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(), "begin_diagnostic_weight_sync", args=(manifest_id, publication_id), kwargs=None
+        )
+
+    async def begin_reference_bucket_sync(self, manifest_id, publication_id):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(), "begin_reference_bucket_sync", args=(manifest_id, publication_id), kwargs=None
+        )
+
+    async def finish_reference_bucket_sync(self, manifest_id, publication_id):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(), "finish_reference_bucket_sync", args=(manifest_id, publication_id), kwargs=None
+        )
+
+    async def receive_diagnostic_weight_sync_bucket(
+        self, bucket_id: int, *, replay: bool = False, manifest_id: str | None = None, publication_id: int | None = None
+    ):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(),
+            "receive_diagnostic_weight_sync_bucket",
+            args=(bucket_id,),
+            kwargs={"replay": replay, "manifest_id": manifest_id, "publication_id": publication_id},
+        )
+
+    async def finish_diagnostic_weight_sync_install(self, manifest_id=None, publication_id=None):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(),
+            "finish_diagnostic_weight_sync_install",
+            args=(),
+            kwargs={"manifest_id": manifest_id, "publication_id": publication_id},
+        )
+
+    async def finish_diagnostic_weight_sync_replay(self, manifest_id=None, publication_id=None):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(),
+            "finish_diagnostic_weight_sync_replay",
+            args=(),
+            kwargs={"manifest_id": manifest_id, "publication_id": publication_id},
+        )
+
+    async def close_diagnostic_weight_sync_buckets(self, manifest_id=None, publication_id=None):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(
+            self._get_engine(),
+            "close_diagnostic_weight_sync_buckets",
+            args=(),
+            kwargs={"manifest_id": manifest_id, "publication_id": publication_id},
+        )
+
+    async def read_publication_receiver_state(self):
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+
+        return await call_all_receiver_workers(self._get_engine(), "read_publication_receiver_state")
 
     async def read_weight_sync_environment(self):
-        from skyrl_train.weight_sync.receiver_readback_rpc import read_all_receiver_workers
+        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 
-        return await read_all_receiver_workers(self._get_engine(), "read_weight_sync_environment")
+        return await call_all_receiver_workers(self._get_engine(), "read_weight_sync_environment")
 
     async def read_publication_timing(self):
         return await self._get_engine().collective_rpc("read_publication_timing")

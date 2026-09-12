@@ -57,6 +57,25 @@ def test_native_readback_output_uri_survives_launcher_translation(tmp_path):
     assert cfg.trainer.logger == "console"
 
 
+def test_shard_sync_output_uri_survives_launcher_translation(tmp_path):
+    uri = "s3://marin-us-east-02a/diagnostics/k10/native-readback"
+    config = tmp_path / "shard.yaml"
+    config.write_text(
+        "entrypoint: fully_async\n"
+        "context_budget:\n  request_window_tokens: 2\n  max_new_tokens_per_turn: 1\n  max_turns: 1\n"
+        "generator:\n  weight_sync_timing_mode: shard\n"
+        f"  shard_sync:\n    preparation_id: k10\n    output_uri: {uri}\n"
+    )
+    parsed = parse_rl_config(str(config))
+    assert parsed.generator["shard_sync"]["output_uri"] == uri
+    generated = build_skyrl_hydra_args(parsed, {"num_nodes": 1}, SimpleNamespace(gpus_per_node=8))
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=generated)
+    assert cfg.generator.shard_sync.output_uri == uri
+    assert cfg.generator.shard_sync.preparation_id == "k10"
+    assert cfg.generator.weight_sync_timing_mode == "shard"
+
+
 @pytest.mark.parametrize("ignore_eos", [False, True])
 def test_training_eos_control_composes_with_structured_native_config(tmp_path, ignore_eos):
     config = tmp_path / "rl.yaml"

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import posixpath
 import shutil
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
@@ -44,7 +46,7 @@ def fs_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
     storage_options = None
     if uri.startswith(("s3://", "s3a://")):
         style = os.environ.get(S3_ADDRESSING_STYLE_ENV, "virtual")
-        storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
+        storage_options = {"config_kwargs": {"s3": {"addressing_style": style}, "read_timeout": 180}}
     filesystem, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
     return filesystem, paths[0]
 
@@ -90,7 +92,25 @@ def _copy_inventory(
     for source_path, entry in inventory:
         local_path = destination / entry.path
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        filesystem.get_file(source_path, str(local_path))
+        for attempt in range(1, 4):
+            try:
+                filesystem.get_file(source_path, str(local_path))
+                break
+            except (TimeoutError, OSError) as error:
+                # s3fs maps HTTP 503 / SlowDown / ServiceUnavailable to OSError(EBUSY); treat
+                # that transient class like a read timeout. Any other OSError still propagates.
+                if not isinstance(error, TimeoutError) and error.errno != errno.EBUSY:
+                    raise
+                # A failed multipart read can leave a partial destination.
+                # Retry this file, retaining earlier verified files in staging.
+                local_path.unlink(missing_ok=True)
+                if attempt == 3:
+                    raise
+                print(
+                    "ARTIFACT_STAGING_READ_RETRY " + json.dumps({"path": entry.path, "attempt": attempt, "limit": 3}),
+                    flush=True,
+                )
+                time.sleep(2 * attempt)
         actual_size = local_path.stat().st_size
         if actual_size != entry.size:
             raise ValueError(f"Staging size mismatch for {entry.path}: expected {entry.size}, found {actual_size}")

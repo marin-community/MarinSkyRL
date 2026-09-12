@@ -896,9 +896,17 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             )
 
         # Initialize weight sync state
+        shard_timing = getattr(self.cfg.generator, "weight_sync_timing_mode", "off") == "shard"
         with Timer("init_weight_sync_state", self.all_startup_timings):
-            self.init_weight_sync_state()
+            if not shard_timing:
+                self.init_weight_sync_state()
 
+        # The "initial" readback is where the engine initializes request accounting and
+        # records the version boundary for the startup weights; it must be the first
+        # boundary the engine sees, and it must run before any generation.
+        trace_initial_publication = self.cfg.generator.publication_stage_timing or self.cfg.trainer.fully_async.get(
+            "first_token_admission", True
+        )
         # sync weights to inference engines
         with Timer("sync_weights_to_inference_engines", self.all_startup_timings) as weight_update_timer:
             await self.async_sync_policy_weights_to_inference_engines()
@@ -907,9 +915,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             # async-dispatch wedge fix). See _drain_policy_event_loops.
             with Timer("policy_startup_drain", self.all_startup_timings):
                 await self._drain_policy_event_loops()
-        if self.cfg.generator.publication_stage_timing or self.cfg.trainer.fully_async.get(
-            "first_token_admission", True
-        ):
+            if shard_timing:
+                # Shard preparation pauses every engine, so the startup release happens
+                # here. A versioned resume records its own boundary, which the "initial"
+                # readback rejects as a pre-existing one: initialize accounting while the
+                # engines are still idle, then release them without a second boundary.
+                if trace_initial_publication:
+                    await self._record_publication_requests(
+                        "initial", initial_policy_version=self._published_policy_version
+                    )
+                    await self.inference_engine_client.resume_generation(settle_native_calls=True)
+                else:
+                    await self.inference_engine_client.resume_generation(
+                        policy_version=self._published_policy_version, settle_native_calls=True
+                    )
+        if trace_initial_publication and not shard_timing:
             await self._record_publication_requests("initial", initial_policy_version=self._published_policy_version)
         # Startup weight sync runs before producers exist and does not pause inference.
         await self._staleness_manager.notify_policy_weights_published(self._published_policy_version)
@@ -1680,7 +1700,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 publication_error = error
                 raise
             finally:
-                if self.inference_engine_client.generation_paused_event.is_set():
+                if self.inference_engine_client.generation_paused_event.is_set() and (
+                    publication_error is None
+                    or getattr(self.cfg.generator, "weight_sync_timing_mode", "off") != "shard"
+                ):
                     try:
                         await self.inference_engine_client.resume_generation()
                     except BaseException:
@@ -1693,10 +1716,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if trace_publication:
             self._record_publication_inflight("after_resume")
             await self._record_publication_requests("after_resume")
-            # Derived paused-time overhead, not an independently measured learner-idle span.
-            self.all_timings["publication_stall_seconds"] = max(
-                0.0, weight_update_timer.duration - self.all_timings["weight_broadcast/nccl_send"]
-            )
+            if self.cfg.generator.weight_sync_timing_mode == "off":
+                # Derived paused-time overhead, not an independently measured learner-idle span.
+                self.all_timings["publication_stall_seconds"] = max(
+                    0.0, weight_update_timer.duration - self.all_timings["weight_broadcast/nccl_send"]
+                )
+            else:
+                # Prepared reference/bucket installs have versioned receipts instead of
+                # the legacy NCCL stage cache. Do not invent an unmeasured send duration
+                # or reuse a derived value from an earlier publication.
+                self.all_timings.pop("publication_stall_seconds", None)
         self._log_weight_update_completed(reason=reason, duration_seconds=weight_update_timer.duration)
 
     async def _record_publication_requests(
@@ -1823,9 +1852,129 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _finalize_training(self, *, completed_step: int, epoch: int) -> None:
         self.global_step = completed_step
-        await self._drain_background_evaluations(wait=True)
-        await self._publish_policy_weights(reason="final", timing_name="final_weight_sync")
-        await super()._finalize_training(completed_step=completed_step, epoch=epoch)
+        primary = None
+        try:
+            await self._drain_background_evaluations(wait=True)
+            await self._publish_policy_weights(reason="final", timing_name="final_weight_sync")
+            await super()._finalize_training(completed_step=completed_step, epoch=epoch)
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            shard_publication = getattr(self, "_shard_training_publication", None)
+            if shard_publication is not None:
+                try:
+                    await shard_publication.close()
+                except BaseException as error:
+                    if primary is None:
+                        raise
+                    primary.add_note(f"Shard finalization cleanup: {type(error).__name__}: {error}")
+        if getattr(self, "_bucket_timing_prepared", False):
+            await self._run_bucket_timing_rpc(
+                "close_bucket_timing", self.inference_engine_client, self._bucket_timing_last_version
+            )
+            self._bucket_timing_prepared = False
+
+    def native_prepared_shard_diagnostic(
+        self, preparation_id, geometry, options, *, store_node_id, backend, timeout_seconds, output_uri, capture
+    ):
+        from skyrl_train.weight_sync.shard_rendezvous import native_prepared_shard_diagnostic
+
+        return native_prepared_shard_diagnostic(
+            self,
+            preparation_id,
+            geometry,
+            options,
+            store_node_id=store_node_id,
+            backend=backend,
+            timeout_seconds=timeout_seconds,
+            output_uri=output_uri,
+            capture=capture,
+        )
+
+    def prepared_shard_diagnostic(self, preparation_id, geometry, options, *, endpoint_factory, output_uri, capture):
+        from skyrl_train.weight_sync.shard_coordinator import prepared_shard_diagnostic
+
+        return prepared_shard_diagnostic(
+            self,
+            preparation_id,
+            geometry,
+            options,
+            endpoint_factory=endpoint_factory,
+            output_uri=output_uri,
+            capture=capture,
+        )
+
+    async def replay_shard_diagnostic(
+        self,
+        manifest_id,
+        publication_id,
+        *,
+        policy_ranks,
+        expected_receiver_bytes,
+        expected_device_type,
+        output_uri,
+        capture,
+    ):
+        from skyrl_train.weight_sync.shard_replay_rpc import replay_prepared_shards
+
+        return await replay_prepared_shards(
+            self,
+            manifest_id,
+            publication_id,
+            policy_ranks=policy_ranks,
+            expected_receiver_bytes=expected_receiver_bytes,
+            expected_device_type=expected_device_type,
+            output_uri=output_uri,
+            capture=capture,
+        )
+
+    async def diagnostic_shard_publication(
+        self, manifest_id, publication_id, *, replay, policy_ranks, receiver_ranks, expected_receiver_bytes
+    ):
+        from skyrl_train.weight_sync.shard_interval import run_shard_interval
+
+        return await run_shard_interval(
+            self,
+            manifest_id,
+            publication_id,
+            replay=replay,
+            policy_ranks=policy_ranks,
+            receiver_ranks=receiver_ranks,
+            expected_receiver_bytes=expected_receiver_bytes,
+        )
+
+    async def persistent_shard_publication(
+        self, manifest_id, publication_id, *, replay, policy_ranks, receiver_ranks, expected_receiver_bytes
+    ):
+        from skyrl_train.weight_sync.shard_interval import ShardLifecycle, run_shard_interval
+
+        return await run_shard_interval(
+            self,
+            manifest_id,
+            publication_id,
+            lifecycle=ShardLifecycle.RETAIN,
+            replay=replay,
+            policy_ranks=policy_ranks,
+            receiver_ranks=receiver_ranks,
+            expected_receiver_bytes=expected_receiver_bytes,
+        )
+
+    async def _read_reference_physical_observations(self, moment):
+        from skyrl_train.weight_sync.shard_interval import settled
+
+        observation_id = f"reference-{self.global_step}-{moment}"
+        output_uri = self.cfg.trainer.weight_sync_readback_output
+        return await settled(
+            self._run_bucket_timing_rpc("read_weight_sync_observations", observation_id, output_uri),
+            self.inference_engine_client.read_weight_sync_observations(observation_id, output_uri),
+        )
+
+    async def _run_bucket_timing_rpc(self, method: str, *args):
+        # Timing methods return per-rank diagnostic dictionaries. The standard
+        # pass-through collector concatenates TrainingOutputBatch values instead.
+        refs = self.policy_model.async_run_ray_method("pass_through", method, *args)
+        return await asyncio.gather(*refs)
 
     async def async_sync_policy_weights_to_inference_engines(self):
         # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the
@@ -1840,25 +1989,79 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # async-loop-safe barrier_all (WORLD PG >> the 600s submesh default).
         with Timer("policy_pre_sync_drain", self.all_timings):
             await self._drain_policy_event_loops()
-        with Timer("weight_broadcast", self.all_timings):
-            publication = self._weight_change_probe_publication()
+        timing_mode = getattr(self.cfg.generator, "weight_sync_timing_mode", "off")
+        if timing_mode not in ("off", "bucket", "reference", "shard"):
+            raise ValueError("weight_sync_timing_mode must be off, bucket, reference or shard")
+        if timing_mode == "shard":
+            from skyrl_train.weight_sync.shard_training import ShardTrainingPublication
+
+            if self._weight_change_probe_publication() is not None:
+                raise ValueError("Shard publication cannot overlap the independent wire-change probe")
+            publication = getattr(self, "_shard_training_publication", None)
             if publication is None:
-                result = await self.policy_model.async_run_method(
-                    "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+                publication = ShardTrainingPublication(self)
+                self._shard_training_publication = publication
+            result = await publication.publish(self.global_step)
+            self.all_timings.update(
+                {f"shard_sync/{name}": seconds for name, seconds in result["phase_seconds"].items()}
+            )
+            self.all_timings["weight_broadcast"] = result["phase_seconds"]["install"]
+            self.all_timings["shard_sync/total_including_proof"] = result["total_seconds_including_proof"]
+            self._published_policy_version = self.global_step
+            return result
+        physical_observations = getattr(self.cfg.generator, "weight_sync_physical_observations", False)
+        if physical_observations and timing_mode != "reference":
+            raise ValueError("Physical reference endpoints require reference timing mode")
+        bucket_timing = timing_mode != "off"
+        if bucket_timing and self._weight_change_probe_publication() is not None:
+            raise ValueError("Bucket timing cannot overlap the independent wire-change probe")
+        prepared = bucket_timing and getattr(self, "_bucket_timing_prepared", False)
+        if prepared:
+            with Timer("bucket_sync_begin", self.all_timings):
+                await self._run_bucket_timing_rpc("begin_bucket_timing", self.inference_engine_client, self.global_step)
+        if prepared and physical_observations:
+            await self._read_reference_physical_observations("before")
+        with Timer("weight_broadcast", self.all_timings):
+            if prepared:
+                result = await self._run_bucket_timing_rpc(
+                    "install_bucket_timing", self.inference_engine_client, self.global_step
                 )
             else:
-                result = await self.policy_model.async_run_method(
-                    "pass_through",
-                    "broadcast_to_inference_engines",
+                publication = self._weight_change_probe_publication()
+                if publication is None:
+                    result = await self.policy_model.async_run_method(
+                        "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+                    )
+                else:
+                    result = await self.policy_model.async_run_method(
+                        "pass_through",
+                        "broadcast_to_inference_engines",
+                        self.inference_engine_client,
+                        publication=publication,
+                    )
+                    started = time.perf_counter()
+                    await self.policy_model.async_run_method(
+                        "pass_through", "finish_weight_change_probe", publication["publication_id"]
+                    )
+                    self._weight_change_probe_committed(publication, time.perf_counter() - started)
+        if prepared and physical_observations:
+            await self._read_reference_physical_observations("after")
+        if prepared:
+            with Timer("bucket_full_byte_replay", self.all_timings):
+                await self._run_bucket_timing_rpc(
+                    "replay_bucket_timing", self.inference_engine_client, self.global_step
+                )
+            self._bucket_timing_last_version = self.global_step
+        elif bucket_timing:
+            with Timer("bucket_one_time_preparation", self.all_startup_timings):
+                await self._run_bucket_timing_rpc(
+                    "prepare_reference_timing" if timing_mode == "reference" else "prepare_bucket_timing",
                     self.inference_engine_client,
-                    publication=publication,
                 )
-                started = time.perf_counter()
-                await self.policy_model.async_run_method(
-                    "pass_through", "finish_weight_change_probe", publication["publication_id"]
-                )
-                self._weight_change_probe_committed(publication, time.perf_counter() - started)
-        if self.cfg.generator.publication_stage_timing:
+            self._bucket_timing_prepared = True
+            self._bucket_timing_last_version = None
+        # Packed syncs emit versioned phase receipts, not the old per-tensor stage cache.
+        if self.cfg.generator.publication_stage_timing and not prepared:
             receipts = await asyncio.gather(
                 *self.policy_model.async_run_ray_method("pass_through", "read_publication_timing")
             )

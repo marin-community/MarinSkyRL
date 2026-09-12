@@ -14,9 +14,11 @@ from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer, _Generation
 from skyrl_train.data_order import source_order_checkpoint, validate_source_order_checkpoint
 from skyrl_train.utils.policy_losses import ppo_policy_loss
 from skyrl_train.utils.trainer_utils import ResumeMode
+from skyrl_train.weight_sync import shard_training
 from tests.cpu.test_fully_async_publication_cadence import (
     DriverWithCpuLearner,
     FirstTokenRunner,
+    GuardedInferenceService,
     TimedInferenceService,
     make_driver,
 )
@@ -64,14 +66,43 @@ def n2_driver(driver_type=N2CpuDriver, **kwargs):
     return trainer
 
 
+def use_shard_transport(trainer, monkeypatch):
+    """Substitute the remote transport while retaining driver and cohort execution."""
+    trainer.cfg.generator.weight_sync_timing_mode = "shard"
+    engine = GuardedInferenceService()
+    trainer.inference_engine_client = engine
+    trainer.trajectory_runner.engine = engine
+
+    class ShardTransport:
+        def __init__(self, driver):
+            self.driver = driver
+
+        async def publish(self, version):
+            if not engine.publications:
+                await engine.pause_generation()
+            assert engine.generation_paused_event.is_set()
+            assert version == self.driver.policy_model.completed_update
+            engine.installed_update = version
+            engine.publications.append(version)
+            return {"phase_seconds": {"install": 1}, "total_seconds_including_proof": 1}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(shard_training, "ShardTrainingPublication", ShardTransport)
+
+
 @pytest.mark.asyncio
-async def test_actual_n2_a0_prepares_once_per_cohort_and_publishes_each_update(monkeypatch):
+@pytest.mark.parametrize("transport", ["off", "shard"])
+async def test_actual_n2_a0_prepares_once_per_cohort_and_publishes_each_update(monkeypatch, transport):
     events = []
     monkeypatch.setattr(
         "skyrl_train.fully_async_trainer.record_event",
         lambda name, body, **kwargs: events.append((name, body, kwargs)),
     )
     trainer = n2_driver()
+    if transport == "shard":
+        use_shard_transport(trainer, monkeypatch)
     try:
         await asyncio.wait_for(trainer._train_loop(), timeout=15)
     finally:
@@ -95,14 +126,19 @@ async def test_actual_n2_a0_prepares_once_per_cohort_and_publishes_each_update(m
 
 
 @pytest.mark.asyncio
-async def test_actual_n2_resume_second_partition_keeps_prepared_old_weights(tmp_path):
+@pytest.mark.parametrize("transport", ["off", "shard"])
+async def test_actual_n2_resume_second_partition_keeps_prepared_old_weights(tmp_path, monkeypatch, transport):
     trainer = n2_driver(stop_step=1, save_step=1)
+    if transport == "shard":
+        use_shard_transport(trainer, monkeypatch)
     trainer.cfg.trainer.ckpt_path = str(tmp_path)
     try:
         await asyncio.wait_for(trainer._train_loop(), timeout=15)
     finally:
         await trainer._cancel_trajectory_tasks()
     resumed = n2_driver()
+    if transport == "shard":
+        use_shard_transport(resumed, monkeypatch)
     resumed.resume_mode = ResumeMode.LATEST
     resumed.cfg.trainer.resume_path = str(tmp_path / "global_step_1")
     artifact = tmp_path / "global_step_1" / "generation_buffer_state.pt"

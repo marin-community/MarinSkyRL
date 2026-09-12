@@ -31,6 +31,7 @@ from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_m
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils.type_c_staleness import optimizer_success_counts
 from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.weight_sync.policy_weight_access import PolicyWeightAccess
 from tests.cpu.test_async_prepared_cohort import make_cohort
 
 
@@ -84,6 +85,7 @@ def test_actual_worker_preserves_cohort_index_and_successful_optimizer_clock(mon
     monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
     monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
     worker = native_worker_methods()
+    worker._policy_weight_access = PolicyWeightAccess()
     worker.cfg = get_default_config()
     worker.cfg.trainer.micro_train_batch_size_per_gpu = 32
     worker.cfg.trainer.policy.megatron_config.check_train_eval_parity = False
