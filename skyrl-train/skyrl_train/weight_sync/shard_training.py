@@ -16,6 +16,9 @@ class ShardTrainingPublication:
     def __init__(self, driver):
         self.driver = driver
         config = driver.cfg.generator.shard_sync
+        self.proofs = config.get("proofs", True)
+        if type(self.proofs) is not bool:
+            raise ValueError("generator.shard_sync.proofs must be boolean")
         self.geometry = ShardGeometry(
             config.policy_ranks,
             config.receiver_replicas,
@@ -106,6 +109,7 @@ class ShardTrainingPublication:
                 policy_ranks=tuple(range(self.geometry.policy_ranks)),
                 receiver_ranks=tuple(rank for rank, _ in self.plan.expected_receiver_bytes),
                 expected_receiver_bytes=self.plan.expected_receiver_bytes,
+                proofs=self.proofs,
                 lifecycle=ShardLifecycle.RETAIN,
                 generation_boundary=GenerationBoundary.DRIVER,
                 capture=self.capture,
@@ -114,7 +118,7 @@ class ShardTrainingPublication:
             result["measurement_marker"] = self.measurement_marker
             result["total_seconds_including_proof"] = time.perf_counter() - started
             result["total_scope"] = (
-                "controller preparation on first call and publication through verified finish; "
+                "controller preparation on first call and publication through finish with configured proofs; "
                 "excludes completion receipt and outer driver pause/drain/resume"
             )
             result["durable_receipt"] = self.capture(

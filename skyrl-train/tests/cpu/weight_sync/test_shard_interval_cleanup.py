@@ -64,7 +64,7 @@ async def test_physical_counter_delay_is_outside_complete_native_install_rpc(mon
     events = []
     monkeypatch.setattr(shard_interval.time, "perf_counter", lambda: clock[0])
 
-    async def call(method, rank, manifest, publication):
+    async def call(method, rank, manifest, publication, proofs=True):
         phase = {
             "begin_shard_publication": "frozen",
             "verify_shard_publication": "verified",

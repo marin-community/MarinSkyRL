@@ -498,10 +498,10 @@ class WorkerWrap:
 
         return replay_worker_call(self, "replay", manifest_id, publication_id, output_uri)
 
-    def begin_shard_stream(self, manifest_id: str, publication_id: int):
+    def begin_shard_stream(self, manifest_id: str, publication_id: int, proofs: bool = True):
         from skyrl_train.weight_sync.shard_session import worker_shard_call
 
-        return worker_shard_call(self, "begin", manifest_id, publication_id)
+        return worker_shard_call(self, "begin", manifest_id, publication_id, proofs)
 
     def run_shard_stream(self, manifest_id: str, publication_id: int):
         from skyrl_train.weight_sync.shard_session import worker_shard_call
@@ -2272,13 +2272,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             settle_calls=True,
         )
 
-    async def begin_shard_stream(self, manifest_id: str, publication_id: int):
+    async def begin_shard_stream(self, manifest_id: str, publication_id: int, proofs: bool = True):
         from skyrl_train.weight_sync.shard_wire import call_all_shard_workers
 
         if not await self.is_paused():
             raise RuntimeError("Native shard publication requires scheduler-idle acknowledgement")
         return await call_all_shard_workers(
-            self._get_engine(), "begin_shard_stream", args=(manifest_id, publication_id), kwargs=None, settle_calls=True
+            self._get_engine(),
+            "begin_shard_stream",
+            args=(manifest_id, publication_id, proofs),
+            kwargs=None,
+            settle_calls=True,
         )
 
     async def run_shard_stream(self, manifest_id: str, publication_id: int):

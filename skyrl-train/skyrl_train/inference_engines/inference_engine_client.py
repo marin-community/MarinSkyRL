@@ -929,13 +929,17 @@ class InferenceEngineClient(InferenceEngineInterface):
             "replay_shard_stream", manifest_id, publication_id, output_uri, _settle_calls=True
         )
 
-    async def begin_shard_stream(self, manifest_id: str, publication_id: int):
+    async def begin_shard_stream(self, manifest_id: str, publication_id: int, proofs: bool = True):
         if self._dead_engines:
             raise RuntimeError("Shard collectives require every configured inference engine")
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Shard publication requires the client idle acknowledgement")
         return await self._run_on_all_engines(
-            "begin_shard_stream", manifest_id=manifest_id, publication_id=publication_id, _settle_calls=True
+            "begin_shard_stream",
+            manifest_id=manifest_id,
+            publication_id=publication_id,
+            proofs=proofs,
+            _settle_calls=True,
         )
 
     async def run_shard_stream(self, manifest_id: str, publication_id: int):

@@ -138,8 +138,8 @@ def test_native_factory_binds_actual_groups_and_complete_replica_comparator(tmp_
 
 
 class PersistentFactoryActor(FactoryActor):
-    def versioned_phase(self, name, manifest, version):
-        return worker_shard_call(self, name, manifest, version)
+    def versioned_phase(self, name, manifest, version, *args):
+        return worker_shard_call(self, name, manifest, version, *args)
 
     def update_sources(self):
         if self.access is None:
@@ -174,7 +174,7 @@ def test_persistent_groups_publish_updated_source_bytes_after_verified_finish(tm
             )
             ray.get([actor.versioned_phase.remote("run", manifest, version) for actor in actors], timeout=60)
             for actor in actors:
-                with pytest.raises(ray.exceptions.RayTaskError, match="fully replayed weights"):
+                with pytest.raises(ray.exceptions.RayTaskError, match="unchanged weights and configured proofs"):
                     ray.get(actor.versioned_phase.remote("finish", manifest, version), timeout=30)
             ray.get([actor.versioned_phase.remote("prepare_replay", manifest, version) for actor in actors], timeout=30)
             proof = ray.get([actor.versioned_phase.remote("replay", manifest, version) for actor in actors], timeout=60)
@@ -205,11 +205,12 @@ def test_persistent_groups_publish_updated_source_bytes_after_verified_finish(tm
 
 async def exercise_persistent_coordinator(actors, trainer_count, manifest, prepared):
     class Policy:
-        def async_run_ray_method(self, dispatch, method, manifest_id, publication_id):
+        def async_run_ray_method(self, dispatch, method, manifest_id, publication_id, *args):
             assert dispatch == "pass_through"
             phase = {"verify": "verify_replicas"}.get(method.split("_")[0], method.split("_")[0])
             return [
-                actor.versioned_phase.remote(phase, manifest_id, publication_id) for actor in actors[:trainer_count]
+                actor.versioned_phase.remote(phase, manifest_id, publication_id, *args)
+                for actor in actors[:trainer_count]
             ]
 
     class Client:
@@ -226,9 +227,12 @@ async def exercise_persistent_coordinator(actors, trainer_count, manifest, prepa
         async def resume_generation(self, **kwargs):
             self.generation_paused_event.clear()
 
-        async def phase(self, phase, manifest_id, publication_id):
+        async def phase(self, phase, manifest_id, publication_id, *args):
             return await asyncio.gather(
-                *[actor.versioned_phase.remote(phase, manifest_id, publication_id) for actor in actors[trainer_count:]]
+                *[
+                    actor.versioned_phase.remote(phase, manifest_id, publication_id, *args)
+                    for actor in actors[trainer_count:]
+                ]
             )
 
         async def begin_shard_stream(self, *args):

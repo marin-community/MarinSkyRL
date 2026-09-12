@@ -16,11 +16,13 @@ import ray
 import torch
 
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 from skyrl_train.weight_sync.policy_weight_access import PolicyWeightAccess
 from skyrl_train.weight_sync.shard_session import SourceReplicaProof, bind_worker_shard_stream, storage_versions
 from skyrl_train.weight_sync.shard_stream import ShardStreamRank
+from skyrl_train.weight_sync import shard_training
 from tests.cpu.weight_sync.test_shard_stream import StreamActor, fixture_plan
 
 
@@ -236,6 +238,8 @@ class PolicyDispatch:
 
     def async_run_ray_method(self, dispatch, method, *args):
         assert dispatch == "pass_through"
+        if method == "read_weight_sync_observations":
+            method = "policy_observations"
         return [getattr(actor, method).remote(*args) for actor in self.actors]
 
 
@@ -530,7 +534,8 @@ async def test_failed_native_sibling_is_joined_before_aggregate_returns(layer, m
                 from skyrl_train.weight_sync.shard_wire import decode_shard_metadata
 
                 assert utility == "collective_rpc" and name == "shard_metadata_rpc"
-                assert args[0] == method and decode_shard_metadata(args[1]) == ("manifest", 9)
+                expected = ("manifest", 9, True) if method == "begin_shard_stream" else ("manifest", 9)
+                assert args[0] == method and decode_shard_metadata(args[1]) == expected
                 return await call(int.from_bytes(engine, "little"))
 
         native = SimpleNamespace(
@@ -596,3 +601,115 @@ async def test_actual_policy_and_receiver_routes_persist_physical_observations(b
         assert saved["observation_id"] == "reference-1-before"
         assert saved["memory"]["cuda_measured"] is False
         assert saved["ports"]["attribution"] == "shared-port, not process"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [None, "source_changed", "receiver_missing"])
+async def test_configured_proofs_off_installs_and_finishes_through_actual_worker_routes(
+    boundary, tmp_path, monkeypatch, fault
+):
+    driver, actors, manifest = boundary
+    await asyncio.gather(*(actor.reset_session.remote("proof_failure") for actor in actors))
+    driver.cfg = get_default_config()
+    driver.global_step = 0
+    config = driver.cfg.generator.shard_sync
+    for name, value in {
+        "proofs": False,
+        "policy_ranks": 2,
+        "receiver_replicas": 2,
+        "expert_parallel_size": 1,
+        "layers_by_pp": [[0], [1]],
+        "num_experts": 1,
+        "hidden_size": 3,
+        "intermediate_size": 2,
+        "preparation_id": "proofs-off",
+        "output_uri": str(tmp_path),
+    }.items():
+        config[name] = value
+    monkeypatch.setenv("IRIS_ATTEMPT_UID", "proofs-off-cpu")
+
+    async def forbidden_replay(*args, **kwargs):
+        raise AssertionError("Gate-only replay executed while disabled")
+
+    monkeypatch.setattr(shard_training, "replay_prepared_shards", forbidden_replay)
+    service = shard_training.ShardTrainingPublication(driver)
+
+    # The fixture already prepared real rank-local Gloo sessions. Only CUDA preparation
+    # is omitted; configured publish, RPCs, leases, transport and durable receipts run.
+    class PreparedFixtureContext:
+        async def __aexit__(self, *args):
+            pass  # The module fixture owns native group teardown after the interval closes sessions.
+
+    service.context = PreparedFixtureContext()
+    service.manifest_id = manifest
+    service.plan = SimpleNamespace(expected_receiver_bytes=tuple(EXPECTED_RECEIVER_BYTES.items()))
+    if fault == "source_changed":
+        observe = service.observe
+
+        async def mutate_after_install(version, moment):
+            rows = await observe(version, moment)
+            if moment == "after":
+                await actors[0].mutate_source.remote()
+            return rows
+
+        monkeypatch.setattr(service, "observe", mutate_after_install)
+    if fault == "receiver_missing":
+        install = driver.inference_engine_client.run_shard_stream
+
+        async def lose_receiver_receipt(*args):
+            rows = await install(*args)
+            return rows[:-1]
+
+        monkeypatch.setattr(driver.inference_engine_client, "run_shard_stream", lose_receiver_receipt)
+    for version in (21, 22):
+        await driver.inference_engine_client.pause_generation(settle_native_calls=True)
+        if fault is not None:
+            message = "unchanged weights" if fault == "source_changed" else "missing or duplicates"
+            with pytest.raises((ValueError, ray.exceptions.RayTaskError), match=message):
+                await service.publish(version)
+            assert driver.inference_engine_client.generation_paused_event.is_set()
+            assert all(await asyncio.gather(*(actor.lease_free.remote() for actor in actors[:2])))
+            # Only the fixture recovers after proving failure kept generation paused.
+            await driver.inference_engine_client.resume_generation(settle_native_calls=True)
+            return
+        result = await service.publish(version)
+        assert result["proofs"] is False
+        assert "source_proof" not in result and "replay" not in result
+        assert not {"source_replica_proof", "full_byte_replay"} & result["phase_seconds"].keys()
+        assert {"freeze", "receiver_begin", "install", "finish", "observation_before", "observation_after"} <= result[
+            "phase_seconds"
+        ].keys()
+        for phase in (
+            "policy_begin",
+            "receiver_begin",
+            "policy_install",
+            "receiver_install",
+            "policy_finish",
+            "receiver_finish",
+        ):
+            assert len(result[phase]) == 2
+            assert all(row["publication_id"] == version and row["proofs"] is False for row in result[phase])
+        assert all(row["groups_retained"] for row in result["policy_finish"] + result["receiver_finish"])
+        assert all(await asyncio.gather(*(actor.lease_free.remote() for actor in actors[:2])))
+        # Independent test-only readback checks every installed tensor against its
+        # expected values; the production replay callback above remains forbidden.
+        checks = await asyncio.gather(*(actor.replay.remote(manifest, version) for actor in actors[2:]))
+        assert all(
+            row["mismatches"] == 0 and row["compared_bytes"] == EXPECTED_RECEIVER_BYTES[row["rank"]] for row in checks
+        )
+        assert driver.inference_engine_client.generation_paused_event.is_set()
+        await driver.inference_engine_client.resume_generation(policy_version=version, settle_native_calls=True)
+        saved = json.loads(Path(result["durable_receipt"]["uri"]).read_text())
+        assert (
+            saved["result"]["proofs"] is False
+            and saved["result"]["measurement_marker"]["attempt_uid"] == "proofs-off-cpu"
+        )
+    assert not driver.inference_engine_client.generation_paused_event.is_set()
+
+
+@pytest.mark.parametrize("value", ["false", 0, None])
+def test_configured_proofs_rejects_nonboolean_before_native_preparation(value):
+    cfg = get_default_config()
+    cfg.generator.shard_sync.proofs = value
+    with pytest.raises(ValueError, match="proofs must be boolean"):
+        shard_training.ShardTrainingPublication(SimpleNamespace(cfg=cfg))

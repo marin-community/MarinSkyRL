@@ -125,7 +125,7 @@ class ShardStreamRank:
         self.manifest_id, self.publication_id = manifest_id, publication_id
 
     def reset(self, *, manifest_id, publication_id):
-        """Reuse installed stream metadata only after the owning session verifies replay."""
+        """Reuse installed metadata only after the owning session completes its configured checks."""
         if not self.completed or manifest_id != self.manifest_id or publication_id != self.publication_id:
             raise ValueError("Cannot reset an incomplete or different shard publication")
         self.manifest_id = None

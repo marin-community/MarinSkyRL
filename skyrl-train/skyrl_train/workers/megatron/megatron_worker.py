@@ -881,10 +881,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return await asyncio.to_thread(replay_worker_call, self, "replay", manifest_id, publication_id, output_uri)
 
-    async def begin_shard_publication(self, manifest_id: str, publication_id: int):
+    async def begin_shard_publication(self, manifest_id: str, publication_id: int, proofs: bool = True):
         from skyrl_train.weight_sync.shard_session import worker_shard_call
 
-        return await asyncio.to_thread(worker_shard_call, self, "begin", manifest_id, publication_id)
+        return await asyncio.to_thread(worker_shard_call, self, "begin", manifest_id, publication_id, proofs)
 
     async def verify_shard_publication(self, manifest_id: str, publication_id: int):
         from skyrl_train.weight_sync.shard_session import worker_shard_call

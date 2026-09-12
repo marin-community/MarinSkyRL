@@ -1,8 +1,8 @@
 """Version-bound worker sessions around prepared K10 stream runners.
 
 Native preparation must bind actual rank-local tensors and groups before these
-methods are exposed. Replica verification is an explicit full-byte callback,
-run while the learner lease is held; no digest/count-only default is provided.
+methods are exposed. Optional replica verification is an explicit full-byte
+callback run while the learner lease is held; storage guards remain unconditional.
 """
 
 from dataclasses import asdict, dataclass
@@ -92,6 +92,7 @@ class ShardSession:
         self.versions = None
         self.lock = Lock()
         self.proof = None
+        self.proofs = True
         self.installed_versions = None
         self.replay_state = None
         self.retained_proof_workspace_bytes = retained_proof_workspace_bytes
@@ -126,9 +127,12 @@ class ShardSession:
             "manifest_id": self.manifest_id,
             "publication_id": self.publication_id,
             "phase": self.phase.value,
+            "proofs": self.proofs,
         }
 
-    def begin(self, manifest_id, publication_id):
+    def begin(self, manifest_id, publication_id, proofs=True):
+        if type(proofs) is not bool:
+            raise ValueError("Shard session proofs must be boolean")
         with self.lock:
             self.identity(manifest_id, publication_id)
             if self.phase is not ShardPhase.PREPARED:
@@ -152,6 +156,7 @@ class ShardSession:
                     self.token = None
                 raise
             self.publication_id = publication_id
+            self.proofs = proofs
             self.phase = ShardPhase.FROZEN
             return {**self.receipt(), "live_inventory": inventory}
 
@@ -196,9 +201,9 @@ class ShardSession:
     def run(self, manifest_id, publication_id):
         with self.lock:
             self.identity(manifest_id, publication_id)
-            required = ShardPhase.VERIFIED if self.policy_access is not None else ShardPhase.FROZEN
+            required = ShardPhase.VERIFIED if self.policy_access is not None and self.proofs else ShardPhase.FROZEN
             if self.phase is not required or storage_versions(self.runner.sources) != self.versions:
-                raise ValueError("Shard install requires unchanged frozen weights and completed replica proof")
+                raise ValueError("Shard install requires unchanged frozen weights and configured proof state")
             self.phase = ShardPhase.RUNNING
         try:
             result = self.runner.run(manifest_id=manifest_id, publication_id=publication_id)
@@ -268,17 +273,20 @@ class ShardSession:
         return {**self.receipt(), **result}
 
     def finish(self, manifest_id, publication_id):
-        """Release frozen ownership after replay while retaining warmed groups and buffers."""
+        """Release ownership after the configured checks, retaining warmed groups and buffers."""
         with self.lock:
             self.identity(manifest_id, publication_id)
+            complete = (
+                self.phase is ShardPhase.VERIFIED and self.replay_state is not None and self.replay_state.executed
+                if self.proofs
+                else self.phase is ShardPhase.INSTALLED and self.replay_state is None
+            )
             if (
-                self.phase is not ShardPhase.VERIFIED
-                or self.replay_state is None
-                or not self.replay_state.executed
+                not complete
                 or storage_versions(self.runner.sources) != self.versions
                 or storage_versions(self.runner.parameters) != self.installed_versions
             ):
-                raise ValueError("Persistent publication finish requires unchanged, fully replayed weights")
+                raise ValueError("Persistent publication finish requires unchanged weights and configured proofs")
             self.runner.reset(manifest_id=manifest_id, publication_id=publication_id)
             if self.token is not None:
                 self.policy_access.release(self.token)
@@ -341,12 +349,12 @@ def bind_worker_shard_stream(
     return worker._shard_stream_session.manifest_id
 
 
-def worker_shard_call(worker, method, manifest_id, publication_id):
+def worker_shard_call(worker, method, manifest_id, publication_id, *args):
     state = getattr(worker, "_shard_stream_session", None)
     if state is None:
         raise ValueError("Native shard preparation has not bound a runner")
     identity = native_worker_identity(state.runner.scratch.device)
-    result = getattr(state, method)(manifest_id, publication_id)
+    result = getattr(state, method)(manifest_id, publication_id, *args)
     result["identity"] = identity
     if method == "close":
         del worker._shard_stream_session
