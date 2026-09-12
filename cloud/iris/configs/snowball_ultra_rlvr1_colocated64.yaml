@@ -13,6 +13,7 @@ context_budget:
 terminal_bench:
   harbor:
     name: opencode
+    import_path: marinskyrl.iris_harbor_environment:IrisEnvironment
     version: "1.18.2"
     collect_rollout_details: true
     override_setup_timeout_sec: 600
