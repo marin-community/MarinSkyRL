@@ -583,6 +583,19 @@ def candidate_is_acceptable(
     )
 
 
+def _restore_rng_states(saved_state: Mapping[str, Any], device: torch.device) -> None:
+    """Restore trainer RNG state after a device-mapped checkpoint load."""
+    torch.set_rng_state(saved_state["torch_rng_state"].cpu())
+    cuda_rng_state = saved_state.get("cuda_rng_state")
+    if device.type == "cuda" and cuda_rng_state is not None:
+        # CUDA generator state is represented by a CPU ByteTensor. ``torch.load``
+        # maps it to ``device`` with the optimizer tensors, so move it back first.
+        torch.cuda.set_rng_state(cuda_rng_state.cpu(), device=device)
+    python_rng_state = saved_state.get("python_rng_state")
+    if python_rng_state is not None:
+        random.setstate(python_rng_state)
+
+
 def _save_candidate(
     model,
     optimizer: torch.optim.Optimizer,
@@ -666,11 +679,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
     if prior_trainer_state.exists():
         saved_state = torch.load(prior_trainer_state, map_location=device, weights_only=False)
         optimizer.load_state_dict(saved_state["optimizer"])
-        torch.set_rng_state(saved_state["torch_rng_state"].cpu())
-        if device.type == "cuda" and saved_state.get("cuda_rng_state") is not None:
-            torch.cuda.set_rng_state(saved_state["cuda_rng_state"], device=device)
-        if saved_state.get("python_rng_state") is not None:
-            random.setstate(saved_state["python_rng_state"])
+        _restore_rng_states(saved_state, device)
     incumbent = _evaluate(
         model,
         capture_dir,

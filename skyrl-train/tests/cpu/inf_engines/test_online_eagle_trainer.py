@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import random
 
 import pytest
 from safetensors.torch import save_file
@@ -10,6 +11,7 @@ import torch
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     _load_batch,
     _load_packed_batch,
+    _restore_rng_states,
     candidate_is_acceptable,
     child_cuda_visible_device,
     export_served_speculator_checkpoint,
@@ -17,6 +19,42 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     publish_speculator_checkpoint,
     restore_speculator_checkpoint,
 )
+
+
+def test_rng_restore_moves_device_mapped_generator_states_back_to_cpu(monkeypatch) -> None:
+    class DeviceMappedState:
+        def __init__(self, cpu_state):
+            self.cpu_state = cpu_state
+
+        def cpu(self):
+            return self.cpu_state
+
+    torch_rng_state = torch.tensor([1], dtype=torch.uint8)
+    cuda_rng_state = torch.tensor([2], dtype=torch.uint8)
+    python_rng_state = random.getstate()
+    restored = {}
+    monkeypatch.setattr(torch, "set_rng_state", lambda state: restored.update(torch=state))
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_rng_state",
+        lambda state, *, device: restored.update(cuda=(state, device)),
+    )
+    monkeypatch.setattr(random, "setstate", lambda state: restored.update(python=state))
+
+    _restore_rng_states(
+        {
+            "torch_rng_state": DeviceMappedState(torch_rng_state),
+            "cuda_rng_state": DeviceMappedState(cuda_rng_state),
+            "python_rng_state": python_rng_state,
+        },
+        torch.device("cuda:0"),
+    )
+
+    assert restored == {
+        "torch": torch_rng_state,
+        "cuda": (cuda_rng_state, torch.device("cuda:0")),
+        "python": python_rng_state,
+    }
 
 
 @pytest.mark.parametrize(
