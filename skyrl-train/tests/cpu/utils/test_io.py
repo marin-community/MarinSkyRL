@@ -432,7 +432,9 @@ class TestContextManagers:
             os,
             "posix_fadvise",
             lambda descriptor, offset, length, advice: advice_calls.append((descriptor, offset, length, advice)),
+            raising=False,
         )
+        monkeypatch.setattr(os, "POSIX_FADV_DONTNEED", 4, raising=False)
 
         _release_directory_page_cache(tmp_path)
 
