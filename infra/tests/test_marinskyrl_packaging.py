@@ -97,10 +97,15 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
 
 def test_megatron_extra_has_native_wheels_for_linux_x86_64() -> None:
     extras = PYPROJECT["project"]["optional-dependencies"]
+    overrides = [Requirement(value) for value in PYPROJECT["tool"]["uv"]["override-dependencies"]]
     sources = PYPROJECT["tool"]["uv"]["sources"]
 
     assert extras["megatron"]
     assert any(requirement.startswith("megatron-core") for requirement in extras["megatron"])
+    assert any(requirement.startswith("megatron-bridge==0.6.0") for requirement in extras["megatron"])
+    hadamard = next(requirement for requirement in overrides if requirement.name == "fast-hadamard-transform")
+    assert hadamard.marker is not None
+    assert not hadamard.marker.evaluate({"sys_platform": "linux"})
     for package in ("causal-conv1d", "mamba-ssm", "transformer-engine-torch"):
         urls = sources[package]
         assert any("linux_x86_64.whl" in source["url"] for source in urls)
