@@ -112,6 +112,12 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
     assert output["token_provenance"] == "engine"
 
 
+def test_direct_model_client_omits_empty_tools_from_vllm_request():
+    options = DirectModelClient._chat_options({"tools": [], "temperature": 0.4}, {})
+
+    assert options == {"temperature": 0.4}
+
+
 @pytest.mark.asyncio
 async def test_http_model_client_normalizes_chat_completion():
     requests = []

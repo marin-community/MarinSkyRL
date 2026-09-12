@@ -60,8 +60,10 @@ class DirectModelClient:
     def _chat_options(cls, options: dict[str, Any], sampling_params: dict[str, Any]) -> dict[str, Any]:
         result = dict(options)
         result.pop("input", None)
-        if "tools" in result:
+        if result.get("tools"):
             result["tools"] = cls._chat_tools(result["tools"])
+        else:
+            result.pop("tools", None)
         if "max_output_tokens" in result:
             result["max_completion_tokens"] = result.pop("max_output_tokens")
         if "max_generate_length" in sampling_params:
