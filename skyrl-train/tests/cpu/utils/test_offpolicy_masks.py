@@ -6,11 +6,12 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from skyrl_train.utils.offpolicy_masks import apply_offpolicy_masks
+from skyrl_train.utils.offpolicy_masks import apply_offpolicy_masks, minimal_m2_mask, released_m2_clip_bounds
+from tests.m2po_reference import kpo_clip_harmful_tokens, compute_m2po_policy_loss
 from skyrl_train.utils.policy_losses import compute_policy_objective, LossScaling
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry, rollout_logprobs_required
 from skyrl_train.utils.offpolicy_masks import validate_offpolicy_masks
-from tests.offpolicy_mask_reference import offpolicy_keep_reference
+from tests.offpolicy_mask_reference import minimal_m2_reference, offpolicy_keep_reference
 
 
 def mask_config(**changes):
@@ -38,6 +39,7 @@ def mask_config(**changes):
                 "veto_ratio": 1e-5,
                 "renormalize": False,
             },
+            "m2_mask": {"enabled": False, "ratio": "stale", "tau": 0.04, "mode": "mask", "renormalize": False},
         }
     )
     for key, value in changes.items():
@@ -56,6 +58,22 @@ def transform(config, current, old, rollout, advantages=None, mask=None):
         token_entropy=torch.ones_like(current),
         config=config,
     )
+
+
+def test_m2_transform_removes_harmful_gradient_and_keeps_control():
+    for values, expected in (([1.0, 0.1, 0.0], [0.0, 1.0, 1.0]), ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])):
+        action = torch.tensor([values], dtype=torch.float64, requires_grad=True)
+        result = apply_offpolicy_masks(
+            action_log_probs=action,
+            old_action_log_probs=torch.zeros_like(action),
+            rollout_logprobs=torch.zeros_like(action),
+            advantages=torch.ones_like(action),
+            loss_mask=torch.ones_like(action),
+            token_entropy=torch.ones_like(action),
+            config=mask_config(**{"m2_mask.enabled": True}),
+        )
+        (action * result.advantages).sum().backward()
+        assert action.grad.tolist()[0] == expected
 
 
 def test_disabled_preserves_input_identity_and_stable_zero_schema():
@@ -86,6 +104,39 @@ def test_sequence_veto_removes_whole_selected_row_below_exponent_clip():
     result = transform(mask_config(**{"offpolicy_mask.enabled": True}), delta, delta, zero)
     torch.testing.assert_close(result.advantages, torch.tensor([[0.0, 0.0], [0.0, 1.0]], dtype=torch.float64))
     assert result.metrics["offpolicy_mask/vetoed_sequence_fraction"] == 0.5
+
+
+def test_m2_prefix_selection_does_not_assume_retained_mean_monotonicity():
+    delta = torch.tensor([[4.0, 1.0, -5.0]], dtype=torch.float64)
+    removed, candidates, before, after, unsatisfied = minimal_m2_mask(
+        delta, torch.ones_like(delta), torch.ones_like(delta, dtype=torch.bool), 13.5
+    )
+    # Prefix means are 14, 13, 25. Only the middle prefix satisfies the bound.
+    assert removed.tolist() == [[True, False, False]]
+    assert candidates.tolist() == [[True, True, False]]
+    assert before == 14 and after == 13 and not unsatisfied
+
+
+def test_m2_strict_equality_is_unsatisfied_after_all_harmful_candidates_removed():
+    delta = torch.tensor([[0.5, -0.5]], dtype=torch.float64)
+    removed, _, before, after, unsatisfied = minimal_m2_mask(
+        delta, torch.ones_like(delta), torch.ones_like(delta, dtype=torch.bool), 0.25
+    )
+    assert removed.tolist() == [[True, False]]
+    assert before == after == 0.25
+    assert unsatisfied
+
+
+@pytest.mark.parametrize("seed", [3, 19, 41])
+def test_discrete_clip_bounds_equal_released_m2po(seed):
+    generator = torch.Generator().manual_seed(seed)
+    old = torch.randn((4, 29), generator=generator, dtype=torch.float64)
+    current = old + torch.randn((4, 29), generator=generator, dtype=torch.float64) * 0.7
+    advantages = torch.tensor([[1.0], [-1.0], [1.0], [-1.0]], dtype=torch.float64).expand_as(old)
+    selected = torch.rand((4, 29), generator=generator) > 0.2
+    reference = kpo_clip_harmful_tokens(old, current, advantages, selected, KL2_budget=0.04)
+    actual, _, _, _, _ = released_m2_clip_bounds(current - old, advantages, selected, 0.04)
+    assert actual == pytest.approx(reference[:2], abs=1e-9, rel=0)
 
 
 def objective(config, current, old, rollout, advantages, mask, **kwargs):
@@ -166,14 +217,69 @@ def test_actual_objective_gradient_matches_independent_loss_formula(loss, renorm
         assert not torch.allclose(full_sequence_ratio, selected_sequence_ratio)
 
 
+@pytest.mark.parametrize("ratio_kind", ["stale", "full"])
+@pytest.mark.parametrize("loss", ["regular", "dual_clip"])
+def test_m2_clip_actual_loss_and_gradient_use_released_bounds(ratio_kind, loss):
+    old = torch.full((2, 5), -2.0, dtype=torch.float32)
+    current = (old + torch.tensor([[0.1, 0.2, 0.3, 0.4, 0.5], [-0.1, -0.2, -0.3, -0.4, -0.5]])).requires_grad_()
+    rollout = old - 0.1
+    advantages = torch.tensor([[1.0], [-1.0]], dtype=torch.float32).expand_as(old)
+    mask = torch.ones_like(old)
+    cfg = mask_config(
+        **{"m2_mask.enabled": True, "m2_mask.mode": "clip", "m2_mask.ratio": ratio_kind, "policy_loss_type": loss}
+    )
+    out = objective(cfg, current, old, rollout, advantages, mask)
+    denominator = old if ratio_kind == "stale" else rollout
+    lower, upper, _, _ = kpo_clip_harmful_tokens(denominator, current.detach(), advantages, mask, 0.04)
+    conversion = (rollout - old).exp() if ratio_kind == "full" else 1.0
+    reference = current.detach().clone().requires_grad_()
+    ratio = (reference - old).exp()
+    expected = torch.maximum(-advantages * ratio, -advantages * ratio.clamp(lower * conversion, upper * conversion))
+    if loss == "dual_clip":
+        expected = torch.where(advantages < 0, torch.minimum(expected, -3 * advantages), expected)
+    expected = expected.mean()
+    torch.testing.assert_close(out.policy_loss, expected, atol=1e-12, rtol=0)
+    torch.testing.assert_close(
+        torch.autograd.grad(out.policy_loss, current)[0],
+        torch.autograd.grad(expected, reference)[0],
+        atol=1e-12,
+        rtol=0,
+    )
+    if ratio_kind == "stale" and loss == "regular":
+        released_loss = compute_m2po_policy_loss(
+            old, current, advantages, mask, M2_budget=0.04, miniclip_low=None, miniclip_high=None
+        )[0]
+        torch.testing.assert_close(out.policy_loss, released_loss, atol=1e-9, rtol=0)
+
+
+def test_m2_clip_zero_threshold_reports_actual_postclip_moment():
+    delta = torch.tensor([[0.2, 0.3]], dtype=torch.float64)
+    bounds, _, before, after, threshold = released_m2_clip_bounds(
+        delta, torch.ones_like(delta), torch.ones_like(delta, dtype=torch.bool), 0.01
+    )
+    reference = kpo_clip_harmful_tokens(
+        torch.zeros_like(delta), delta, torch.ones_like(delta), torch.ones_like(delta), 0.01
+    )
+    assert bounds == reference[:2] == (1.0, 1.0) and threshold == 0
+    assert before == reference[3] > 0 and after == 0
+
+
+def test_m2_clip_fails_closed_for_undefined_released_tiny_budget():
+    delta = torch.tensor([[0.2, 0.3]], dtype=torch.float64)
+    with pytest.raises(TypeError):
+        kpo_clip_harmful_tokens(torch.zeros_like(delta), delta, torch.ones_like(delta), torch.ones_like(delta), 1e-20)
+    with pytest.raises(ValueError, match="no tuple result"):
+        released_m2_clip_bounds(delta, torch.ones_like(delta), torch.ones_like(delta, dtype=torch.bool), 1e-20)
+
+
 @pytest.mark.parametrize("loss", ["clip_cov", "kl_cov", "sapo"])
 def test_validation_rejects_non_advantage_linear_objectives(loss):
     with pytest.raises(ValueError, match="advantage-linear"):
         validate_offpolicy_masks(mask_config(**{"offpolicy_mask.enabled": True, "policy_loss_type": loss}))
 
 
-def test_renormalization_rejects_external_global_denominator():
-    field = "offpolicy_mask"
+@pytest.mark.parametrize("field", ["offpolicy_mask", "m2_mask"])
+def test_renormalization_rejects_external_global_denominator(field):
     cfg = mask_config(**{f"{field}.enabled": True, f"{field}.renormalize": True})
     with pytest.raises(ValueError, match="externally fixed"):
         validate_offpolicy_masks(cfg, global_loss_denom=12)
@@ -187,6 +293,8 @@ def test_renormalization_rejects_external_global_denominator():
     [
         ({}, False),
         ({"offpolicy_mask.enabled": True}, True),
+        ({"m2_mask.enabled": True}, False),
+        ({"m2_mask.enabled": True, "m2_mask.ratio": "full"}, True),
     ],
 )
 def test_central_rollout_requirement_covers_correction_ratios(changes, required):
@@ -202,6 +310,17 @@ def test_full_validate_cfg_rejects_mask_with_kl_cov():
     cfg.trainer.algorithm.offpolicy_mask = mask_config(**{"offpolicy_mask.enabled": True}).offpolicy_mask
     with pytest.raises(ValueError, match="advantage-linear"):
         validate_cfg(cfg)
+
+
+def test_m2_minimal_prefix_matches_eight_token_scalar_oracle():
+    delta = torch.tensor([[-0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]], dtype=torch.float64)
+    selected = torch.ones_like(delta, dtype=torch.bool)
+    advantages = torch.ones_like(delta)
+    expected, satisfied = minimal_m2_reference(delta, advantages, selected, 0.22)
+    removed, _, before, after, unsatisfied = minimal_m2_mask(delta, advantages, selected, 0.22)
+    assert removed.tolist() == [[False, True, True, False, False, False, False, False]]
+    assert torch.equal(expected, removed) and satisfied and not unsatisfied
+    assert after < 0.22 <= before
 
 
 @pytest.mark.parametrize("kind", ["mismatch", "full"])
@@ -245,6 +364,9 @@ def test_disabled_actual_objective_is_exactly_existing_loss():
         {"offpolicy_mask.ratio": "stale"},
         {"offpolicy_mask.low": 0.0},
         {"offpolicy_mask.high": float("inf")},
+        {"m2_mask.enabled": True, "m2_mask.ratio": "mismatch"},
+        {"m2_mask.enabled": True, "m2_mask.tau": 0.0},
+        {"m2_mask.enabled": True, "m2_mask.mode": "clip", "policy_loss_type": "gspo"},
         {"use_tis": True, "policy_loss_type": "behavior_clip"},
     ],
 )

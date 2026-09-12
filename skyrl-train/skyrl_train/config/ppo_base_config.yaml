@@ -241,6 +241,12 @@ trainer:
       high: 5.0
       veto_ratio: 1.0e-5
       renormalize: false
+    m2_mask:
+      enabled: false
+      ratio: stale
+      tau: 0.04
+      mode: mask
+      renormalize: false
     use_tis: false
     # Fail closed on missing behavior probabilities instead of degrading TIS for a batch.
     # behavior_clip always requires these probabilities, independently of this flag.
