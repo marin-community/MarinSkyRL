@@ -1,0 +1,135 @@
+# Snowball Ultra-style RLVR phase 2: resume colocated64 at cumulative step 128.
+entrypoint: standard
+
+config_groups:
+  terminal_bench_config: terminal_bench
+
+context_budget:
+  request_window_tokens: 65536
+  max_new_tokens_per_turn: 6528
+  max_turns: 999999
+  generated_budget_fraction: 1.0
+
+terminal_bench:
+  harbor:
+    name: opencode
+    version: "1.18.2"
+    collect_rollout_details: true
+    override_setup_timeout_sec: 600
+    override_timeout_sec: 1800
+    verifier_override_timeout_sec: 300
+    override_cpus: 1
+    override_memory_mb: 4096
+    override_storage_mb: 4096
+    auto_snapshot: false
+    env_network_policy:
+      mode: unrestricted
+    max_retries: 3
+    n_concurrent_trials: 256
+    enable_reward_shaping: false
+    enable_error_classification: true
+    default_error_treatment: zero
+  model_info:
+  archiving:
+    enabled: false
+  trace_upload:
+    enabled: false
+
+trainer:
+  strategy: megatron
+  seed: 42
+  flash_attn: true
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  algorithm:
+    advantage_estimator: grpo
+    advantage_batch_normalize: true
+    eps_clip_low: 0.2
+    eps_clip_high: 0.2
+    use_entropy_loss: false
+    use_kl_loss: false
+    use_kl_in_reward: false
+    loss_reduction: token_mean
+  epochs: 1
+  max_steps: 178
+  update_epochs_per_batch: 1
+  train_batch_size: 512
+  policy_mini_batch_size: 512
+  eval_batch_size: 100
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  use_sample_packing: true
+  eval_before_train: false
+  eval_interval: 10
+  ckpt_interval: 10
+  max_ckpts_to_keep: 2
+  resume_mode: latest
+  restore_dataloader_state: false
+  logger: wandb
+  project_name: snowball-ultra-rlvr
+  policy:
+    optimizer_config:
+      optimizer: AdamW
+      lr: 4.0e-6
+      weight_decay: 0.0
+      max_grad_norm: 0.5
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 8
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      ddp_config:
+        overlap_grad_reduce: true
+        overlap_param_gather: true
+        grad_reduce_in_fp32: false
+  ref:
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 8
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+  placement:
+    colocate_all: true
+    colocate_policy_ref: true
+    policy_num_nodes: 8
+    policy_num_gpus_per_node: 8
+    ref_num_nodes: 8
+    ref_num_gpus_per_node: 8
+
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  vllm_attention_backend: FLASH_ATTN
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  num_inference_engines: 8
+  n_samples_per_prompt: 16
+  eval_n_samples_per_prompt: 1
+  gpu_memory_utilization: 0.8
+  max_num_seqs: 16
+  max_num_batched_tokens: 16384
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  enforce_eager: false
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  sampling_params:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+
+data:
+  kind: parquet
+  train_data: []
+  val_data: []
+  terminal_bench_data: []
+  shuffle: false
+
+extra_env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

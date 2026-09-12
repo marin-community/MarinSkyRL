@@ -605,6 +605,46 @@ def test_load_checkpoints_accepts_trailing_slash_resume_path(dummy_config):
     exists.assert_called_once_with(resume_path.rstrip("/"))
 
 
+class _CursorDataLoader:
+    def __init__(self):
+        self.cursor = 0
+
+    def load_state_dict(self, state):
+        self.cursor = state["cursor"]
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        value = f"row-{self.cursor}"
+        self.cursor += 1
+        return value
+
+
+def test_load_checkpoints_can_restart_a_replacement_dataset(tmp_path, dummy_config):
+    checkpoint_path = tmp_path / "global_step_12"
+    checkpoint_path.mkdir()
+    torch.save({"global_step": 12}, checkpoint_path / "trainer_state.pt")
+    torch.save({"cursor": 7}, checkpoint_path / "data.pt")
+
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+    dummy_config.trainer.restore_dataloader_state = False
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.train_dataloader = _CursorDataLoader()
+    trainer.policy_model = MagicMock()
+    trainer.policy_model.async_run_ray_method.return_value = []
+    trainer.critic_model = None
+
+    with patch("skyrl_train.trainer.ray.get", return_value=None):
+        global_step, loaded_path = trainer.load_checkpoints()
+
+    assert global_step == 12
+    assert loaded_path == str(checkpoint_path)
+    assert next(trainer.train_dataloader) == "row-0"
+
+
 def test_calculate_kl_create_experience_batched(dummy_config, dummy_trajectory_runner):
     trainer = RayPPOTrainer(
         cfg=dummy_config,

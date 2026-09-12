@@ -2285,8 +2285,10 @@ class RayPPOTrainer:
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
 
-        # 2. Load dataloader state if available
-        if io.exists(dataloader_state_path):
+        # 2. Load dataloader state if requested and available
+        if not self.cfg.trainer.restore_dataloader_state:
+            logger.info("Dataloader state restoration disabled; starting the configured dataset from the beginning")
+        elif io.exists(dataloader_state_path):
             try:
                 with io.open_file(dataloader_state_path, "rb") as f:
                     dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
