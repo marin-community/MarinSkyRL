@@ -1931,6 +1931,25 @@ def load_config_policy_chat_template(rl_config_path: str) -> Optional[str]:
     return str(value) if value else None
 
 
+def load_config_terminal_bench_data(rl_config_path: str) -> list[str]:
+    """Return task datasets used by the mixed Gym/Harbor sidechannel.
+
+    These selectors must be visible to the per-node bootstrap before Ray starts;
+    resolving them only in the rank-zero training driver leaves remote rollout
+    workers without the task directories.
+    """
+    raw = _load_rl_config_yaml(rl_config_path)
+    data = raw.get("data")
+    if not isinstance(data, dict):
+        return []
+    values = data.get("terminal_bench_data", [])
+    if values is None:
+        return []
+    if not isinstance(values, list) or not all(isinstance(value, str) and value for value in values):
+        raise ValueError("data.terminal_bench_data must be a list of non-empty dataset selectors")
+    return values
+
+
 def _job_scope_fr_dump_path(prefix: str, job_name: str) -> str:
     """Rewrite a JOB-SCOPED NCCL flight-recorder dump path so its slug segment is the
     ACTUAL job name, e.g. ``/tmp/fr_dumps/<slug>/nccl_fr_rank`` -> ``/tmp/fr_dumps/
@@ -2202,6 +2221,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         controller_cmd.extend(["--val-data", args.val_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
+    terminal_bench_data = load_config_terminal_bench_data(args.rl_config)
+    if terminal_bench_data:
+        controller_cmd.extend(["--terminal-bench-data", json.dumps(terminal_bench_data)])
     # The job name is sanitized, so the pod cannot recover the run id.
     if args.run_id:
         controller_cmd.extend(["--run-id", args.run_id])

@@ -1,0 +1,144 @@
+# One-off, checked-in acceptance run for every generator in both released blends.
+# The dedicated entrypoint replaces the empty data paths with a bounded random
+# sample from NVIDIA's pinned release and constructs the matching Harbor tasks.
+entrypoint: standard
+
+config_groups:
+  terminal_bench_config: terminal_bench
+
+context_budget:
+  request_window_tokens: 32768
+  max_new_tokens_per_turn: 256
+  max_turns: 2
+
+terminal_bench:
+  harbor:
+    name: opencode
+    version: "1.18.2"
+    opencode_config:
+      compaction:
+        auto: true
+        reserved: 4096
+    collect_rollout_details: true
+    override_setup_timeout_sec: 600
+    override_timeout_sec: 240
+    verifier_override_timeout_sec: 120
+    override_cpus: 1
+    override_memory_mb: 4096
+    override_storage_mb: 4096
+    auto_snapshot: false
+    env_network_policy:
+      mode: domain_allow_list
+      value: iris.oa.dev
+    max_retries: 1
+    min_wait_sec: 10.0
+    max_wait_sec: 60.0
+    wait_multiplier: 2.0
+    n_concurrent_trials: 4
+    log_level: INFO
+    enable_reward_shaping: false
+    enable_error_classification: true
+    mask_exceptions: []
+    zero_exceptions: []
+    default_error_treatment: zero
+  model_info:
+  archiving:
+    enabled: false
+  trace_upload:
+    enabled: false
+    repo_org: DCAgent
+    episodes: last
+    dataset_type: SFT
+    cleanup: true
+
+trainer:
+  strategy: fsdp2
+  seed: 1729
+  algorithm:
+    advantage_estimator: reinforce++
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    use_tis: false
+    loss_reduction: sequence_mean
+  epochs: 1
+  max_steps: 1
+  update_epochs_per_batch: 1
+  train_batch_size: 48
+  policy_mini_batch_size: 48
+  micro_forward_batch_size_per_gpu: 2
+  micro_train_batch_size_per_gpu: 1
+  use_sample_packing: false
+  eval_interval: 999999
+  eval_before_train: false
+  resume_mode: none
+  hf_hub_repo_id: null
+  enable_db_registration: false
+  project_name: nemotron-ultra-rlvr-acceptance
+  run_name: null
+  logger: console
+  tracker_commit_each_step: true
+  log_level: INFO
+  policy:
+    optimizer_config:
+      lr: 1.0e-6
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+      max_grad_norm: 1.0
+    fsdp_config:
+      cpu_offload: false
+      reshard_after_forward: true
+  ref:
+    fsdp_config:
+      cpu_offload: false
+      reshard_after_forward: true
+  placement:
+    colocate_all: true
+    policy_num_nodes: null
+    ref_num_nodes: null
+    policy_num_gpus_per_node: null
+    ref_num_gpus_per_node: null
+
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  inference_engine_tensor_parallel_size: 1
+  num_inference_engines: null
+  n_samples_per_prompt: 2
+  eval_n_samples_per_prompt: 1
+  gpu_memory_utilization: 0.8
+  max_num_seqs: 32
+  max_num_batched_tokens: 8192
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  async_engine: true
+  batched: false
+  enable_http_endpoint: true
+  append_eos_token_after_stop_str_in_multi_turn: true
+  sampling_params:
+    temperature: 0.7
+    top_p: 1.0
+    top_k: -1
+  engine_init_kwargs:
+    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
+    served_model_name: Qwen3-8B
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
+
+environment:
+  skyrl_gym:
+    nemotron_ultra:
+      genrm:
+        num_rollouts_per_prompt: 2
+        group_answer_length_penalty_coeff: 0.0
+        group_reasoning_length_penalty_coeff: 0.0
+
+extra_env:
+  NCCL_DEBUG: WARN
+  RAY_DEDUP_LOGS: "0"
+
+data:
+  kind: parquet
+  train_data: []
+  val_data: []

@@ -18,7 +18,11 @@ dependencies = [
     "pandas", 
     "requests",
     "omegaconf",
+    "openapi-schema-validator",
+    "math-verify==0.8.0",
     "reasoning-gym==0.1.25",
+    "verifiable-instructions @ git+https://github.com/abukharin-nv/verifiable-instructions.git@f46a5ac87b1400a4f8973039844b6be9b56e3faf",
+    "xmltodict",
 ]
 
 [project.urls]

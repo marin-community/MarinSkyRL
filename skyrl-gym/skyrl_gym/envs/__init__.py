@@ -61,3 +61,8 @@ register(
     id="reasoning_gym",
     entry_point="skyrl_gym.envs.reasoning_gym.env:ReasoningGymEnv",
 )
+
+register(
+    id="nemotron_ultra",
+    entry_point="skyrl_gym.envs.nemotron_ultra.env:NemotronUltraEnv",
+)

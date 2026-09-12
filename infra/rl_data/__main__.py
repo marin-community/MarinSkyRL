@@ -44,6 +44,11 @@ def _options(args: argparse.Namespace, source_name: str, revision: str) -> Prepa
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--nemotron-ultra-swe-tasks",
+        action="store_true",
+        help="Build the complete Harbor SWE sidechannel for the released RLVR blends.",
+    )
     parser.add_argument("--mixture", type=Path, help="YAML file declaring train and validation source slices.")
     parser.add_argument("--source", choices=sorted(SOURCES))
     parser.add_argument("--revision", help="Immutable Hugging Face revision for the training source.")
@@ -52,8 +57,8 @@ def main() -> None:
     parser.add_argument(
         "--output-dir", type=Path, required=True, help="New local directory for train/validation parquet."
     )
-    parser.add_argument("--tokenizer", required=True, help="Tokenizer used by the planned training run.")
-    parser.add_argument("--max-prompt-tokens", type=int, required=True)
+    parser.add_argument("--tokenizer", help="Tokenizer used by the planned training run.")
+    parser.add_argument("--max-prompt-tokens", type=int)
     parser.add_argument("--minimum-unique-rows", type=int)
     parser.add_argument(
         "--minimum-yield-fraction",
@@ -65,6 +70,27 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--allow-train-on-test", action="store_true")
     args = parser.parse_args()
+
+    if args.nemotron_ultra_swe_tasks:
+        conflicting = (
+            args.mixture,
+            args.source,
+            args.revision,
+            args.validation_source,
+            args.validation_revision,
+            args.tokenizer,
+            args.max_prompt_tokens,
+        )
+        if any(value is not None for value in conflicting):
+            parser.error("--nemotron-ultra-swe-tasks cannot be combined with parquet preparation options.")
+        from infra.rl_data.nemotron_ultra_swe import prepare_swe_task_artifact
+
+        provenance = prepare_swe_task_artifact(args.output_dir)
+        print(provenance)
+        return
+
+    if args.tokenizer is None or args.max_prompt_tokens is None:
+        parser.error("parquet preparation requires --tokenizer and --max-prompt-tokens.")
 
     counter = _token_counter(args.tokenizer)
     if args.mixture is not None:

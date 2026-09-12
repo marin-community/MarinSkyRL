@@ -126,6 +126,10 @@ ADDITIVE_TRAINING_OPTIMIZER_FIELDS = {
 # before the structural-identity comparison against the pre-CP golden.
 ADDITIVE_DATA_FIELDS = {
     "sampling": None,
+    "terminal_bench_data": [],
+}
+ADDITIVE_SKYRL_GYM_FIELDS = {
+    "nemotron_ultra",
 }
 
 
@@ -184,6 +188,8 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         container["generator"]["trajectory_reward_shaping"]["overlong"].pop(k, None)
     for k in ADDITIVE_DATA_FIELDS:
         container["data"].pop(k, None)
+    for k in ADDITIVE_SKYRL_GYM_FIELDS:
+        container["environment"]["skyrl_gym"].pop(k, None)
     container["trainer"]["placement"].pop("enable_numa_affinity", None)
     container["trainer"]["policy"].pop("host_memory_monitor", None)
     container["trainer"]["algorithm"].pop("tis_splice", None)
