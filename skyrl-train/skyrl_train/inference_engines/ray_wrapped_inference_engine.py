@@ -276,6 +276,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def abort_online_eagle_speculator_update(self):
         return await self.inference_engine_actor.abort_online_eagle_speculator_update.remote()
 
+    async def cleanup_online_eagle_scratch(self, scratch_root: str):
+        return await self.inference_engine_actor.cleanup_online_eagle_scratch.remote(scratch_root)
+
     async def install_online_eagle_speculator(self, candidate_dir: str):
         return await self.inference_engine_actor.install_online_eagle_speculator.remote(candidate_dir)
 

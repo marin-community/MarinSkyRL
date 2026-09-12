@@ -31,6 +31,29 @@ _CANDIDATE_FORMAT = "marinskyrl-online-eagle-candidate"
 _CAPTURE_FORMAT = "vllm-online-eagle-capture"
 _SERVED_FORMAT = "marinskyrl-served-speculator"
 _MANIFEST_FILENAME = "manifest.json"
+_MERGED_CAPTURE_DIRECTORY = "merged"
+ONLINE_EAGLE_SCRATCH_ROOT = Path("/tmp/marinskyrl-online-eagle")
+
+
+def capture_rank_directory(capture_root: str | Path, worker_rank: int) -> Path:
+    """Return the shared per-DP-rank capture directory."""
+    return Path(capture_root) / f"rank-{worker_rank:05d}"
+
+
+def remove_online_eagle_scratch(path: str | Path) -> None:
+    """Remove one bounded child of the online-EAGLE scratch root."""
+    allowed_root = ONLINE_EAGLE_SCRATCH_ROOT.resolve()
+    requested = Path(path).resolve()
+    if requested == allowed_root or not requested.is_relative_to(allowed_root):
+        raise ValueError(f"Refusing to remove online EAGLE scratch outside a process tree: {path}")
+    shutil.rmtree(requested, ignore_errors=True)
+
+
+def cleanup_online_eagle_training_job(job: Mapping[str, Any], *, remove_candidate: bool) -> None:
+    """Reclaim one joined or aborted trainer job on its inference node."""
+    remove_online_eagle_scratch(Path(job["capture_dir"]).parent)
+    if remove_candidate:
+        remove_online_eagle_scratch(job["output_dir"])
 
 
 def child_cuda_visible_device(visible_devices: str | None, device_index: int | None) -> str | None:
@@ -401,21 +424,161 @@ def partition_capture_windows(
     return train, holdout
 
 
-def _load_and_validate_capture(capture_dir: Path) -> dict[str, Any]:
+def _load_and_validate_capture(capture_dir: Path, *, verify_digests: bool = True) -> dict[str, Any]:
     manifest_path = capture_dir / _MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("format") != _CAPTURE_FORMAT or not manifest.get("active", False):
         raise ValueError(f"Invalid online EAGLE capture manifest: {manifest_path}")
     for window in manifest["windows"]:
         path = capture_dir / window["path"]
-        if sha256_file(path) != window["sha256"]:
+        if not path.is_file():
+            raise ValueError(f"Captured EAGLE window is missing: {path}")
+        if verify_digests and sha256_file(path) != window["sha256"]:
             raise ValueError(f"Captured EAGLE window digest mismatch: {path}")
     target = manifest["target"]
     for key in ("weights", "config"):
         path = capture_dir / target[f"{key}_path"]
-        if sha256_file(path) != target[f"{key}_sha256"]:
+        if not path.is_file():
+            raise ValueError(f"Captured target {key} is missing: {path}")
+        if verify_digests and sha256_file(path) != target[f"{key}_sha256"]:
             raise ValueError(f"Captured target {key} digest mismatch: {path}")
     return manifest
+
+
+def _hardlink(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    os.link(source, destination)
+
+
+def merge_online_eagle_captures(
+    capture_root: str,
+    *,
+    expected_workers: int,
+    expected_step: int,
+    max_tokens: int,
+    max_sequences_per_prompt_group: int,
+) -> dict[str, Any]:
+    """Merge colocated DP-rank captures into one bounded, immutable trainer input."""
+    root = Path(capture_root)
+    if expected_workers <= 0:
+        raise ValueError("Online EAGLE capture worker count must be positive")
+    if max_tokens <= 0 or max_sequences_per_prompt_group <= 0:
+        raise ValueError("Online EAGLE merged capture bounds must be positive")
+    destination = root / _MERGED_CAPTURE_DIRECTORY
+    if destination.exists():
+        raise FileExistsError(f"Merged online EAGLE capture already exists: {destination}")
+
+    manifests: list[tuple[Path, dict[str, Any]]] = []
+    for worker_rank in range(expected_workers):
+        directory = capture_rank_directory(root, worker_rank)
+        manifest = _load_and_validate_capture(directory, verify_digests=False)
+        if manifest.get("worker_rank") != worker_rank:
+            raise ValueError(
+                "Online EAGLE capture worker-rank mismatch: "
+                f"expected {worker_rank}, got {manifest.get('worker_rank')!r}"
+            )
+        manifests.append((directory, manifest))
+
+    identity_fields = (
+        "format",
+        "format_version",
+        "step",
+        "target_revision",
+        "draft_revision",
+        "aux_layer_ids",
+        "head_input_semantics",
+    )
+    baseline = manifests[0][1]
+    if baseline.get("step") != expected_step:
+        raise ValueError(f"Online EAGLE capture step mismatch: expected {expected_step}, got {baseline.get('step')!r}")
+    baseline_identity = {field: baseline.get(field) for field in identity_fields}
+    baseline_target = baseline["target"]
+    target_identity = {
+        "weights_sha256": baseline_target["weights_sha256"],
+        "config_sha256": baseline_target["config_sha256"],
+        "inventory": baseline_target["inventory"],
+    }
+    candidates: list[tuple[Path, dict[str, Any]]] = []
+    request_ids: set[str] = set()
+    for directory, manifest in manifests:
+        identity = {field: manifest.get(field) for field in identity_fields}
+        if identity != baseline_identity:
+            raise ValueError("Online EAGLE DP captures do not share one target/draft identity")
+        target = manifest["target"]
+        if {
+            "weights_sha256": target["weights_sha256"],
+            "config_sha256": target["config_sha256"],
+            "inventory": target["inventory"],
+        } != target_identity:
+            raise ValueError("Online EAGLE DP captures do not share one target snapshot")
+        for window in manifest["windows"]:
+            request_id = str(window["request_id"])
+            if request_id in request_ids:
+                raise ValueError(f"Duplicate online EAGLE request across DP captures: {request_id}")
+            request_ids.add(request_id)
+            candidates.append((directory, window))
+
+    step = int(baseline["step"])
+    candidates.sort(
+        key=lambda item: hashlib.sha256(
+            f"{step}:{item[1].get('group_id', item[1]['request_id'])}:{item[1]['request_id']}".encode()
+        ).digest()
+    )
+    selected: list[tuple[Path, dict[str, Any]]] = []
+    group_counts: dict[str, int] = {}
+    selected_tokens = 0
+    for directory, window in candidates:
+        group_id = str(window.get("group_id", window["request_id"]))
+        tokens = window.get("tokens")
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
+            raise ValueError(f"Invalid online EAGLE captured-window token count: {tokens!r}")
+        if group_counts.get(group_id, 0) >= max_sequences_per_prompt_group:
+            continue
+        if selected_tokens + tokens > max_tokens:
+            continue
+        selected.append((directory, window))
+        selected_tokens += tokens
+        group_counts[group_id] = group_counts.get(group_id, 0) + 1
+
+    staging = root / f".{_MERGED_CAPTURE_DIRECTORY}.tmp-{uuid4().hex}"
+    staging.mkdir(parents=True, exist_ok=False)
+    try:
+        windows: list[dict[str, Any]] = []
+        for index, (directory, source_window) in enumerate(selected):
+            filename = f"window-{index:06d}.safetensors"
+            _hardlink(directory / source_window["path"], staging / filename)
+            windows.append({**source_window, "path": filename})
+
+        baseline_directory = manifests[0][0]
+        merged_target = dict(baseline_target)
+        for kind in ("weights", "config"):
+            source_name = baseline_target[f"{kind}_path"]
+            destination_name = "target.safetensors" if kind == "weights" else "target-config.json"
+            _hardlink(baseline_directory / source_name, staging / destination_name)
+            merged_target[f"{kind}_path"] = destination_name
+
+        manifest = {
+            **baseline_identity,
+            "active": True,
+            "worker_rank": 0,
+            "worker_ranks": list(range(expected_workers)),
+            "windows": windows,
+            "captured_rows": selected_tokens,
+            "source_captured_rows": sum(int(manifest.get("captured_rows", 0)) for _, manifest in manifests),
+            "source_windows": len(candidates),
+            "dropped_requests": sum(int(manifest.get("dropped_requests", 0)) for _, manifest in manifests),
+            "dropped_windows": sum(int(manifest.get("dropped_windows", 0)) for _, manifest in manifests),
+            "unselected_windows": len(candidates) - len(selected),
+            "target": merged_target,
+        }
+        (staging / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, sort_keys=True))
+        os.replace(staging, destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    for directory, _ in manifests:
+        shutil.rmtree(directory, ignore_errors=True)
+    return {**manifest, "path": str(destination / _MANIFEST_FILENAME)}
 
 
 def _prepare_model(draft_model_dir: Path, capture_dir: Path, device: torch.device):

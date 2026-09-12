@@ -165,6 +165,10 @@ class InferenceEngineInterface(ABC):
         """Terminate an unjoined draft update during exceptional teardown."""
         raise NotImplementedError()
 
+    async def cleanup_online_eagle_scratch(self, scratch_root: str) -> Any:
+        """Remove node-local online-EAGLE scratch when supported."""
+        raise NotImplementedError()
+
     async def install_online_eagle_speculator(self, candidate_dir: str) -> Any:
         """Install a complete draft candidate across the serving engine."""
         raise NotImplementedError()

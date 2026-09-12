@@ -629,6 +629,7 @@ def parse_rl_config(
         entrypoint=entrypoint,
         colocate_all=trainer.get("placement", {}).get("colocate_all", True),
         num_inference_engines=generator.get("num_inference_engines", 1),
+        tensor_parallel_size=generator.get("inference_engine_tensor_parallel_size", 1),
         pipeline_parallel_size=generator.get("inference_engine_pipeline_parallel_size", 1),
         engine_init_kwargs=generator.get("engine_init_kwargs", {}),
         context=f"{path}: generator.speculative_decoding",

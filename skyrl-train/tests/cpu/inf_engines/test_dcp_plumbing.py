@@ -87,6 +87,7 @@ def test_standard_entrypoint_identity_survives_python_module_execution(monkeypat
 
     cfg = get_default_config()
     cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.speculative_decoding = {
         "method": "eagle3",
         "model": {
@@ -128,6 +129,7 @@ def test_online_eagle_training_uses_vllm_synchronous_scheduling(monkeypatch):
     cfg = get_default_config()
     cfg.trainer.placement.colocate_all = False
     cfg.generator.async_engine = True
+    cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.speculative_decoding = {
         "method": "eagle3",
         "model": {

@@ -348,10 +348,7 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     async def seal_online_eagle_capture(self, output_root: str) -> List[Any]:
         """Seal every engine before the target-weight synchronization boundary."""
-        live = [(index, engine) for index, engine in enumerate(self.engines) if index not in self._dead_engines]
-        return await asyncio.gather(
-            *(engine.seal_online_eagle_capture(f"{output_root}/engine-{index}") for index, engine in live)
-        )
+        return await self._run_on_all_engines("seal_online_eagle_capture", output_root)
 
     async def discard_online_eagle_capture(self) -> List[Any]:
         """Discard capture buffers on every live inference engine."""
@@ -372,6 +369,10 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def abort_online_eagle_speculator_update(self) -> List[Any]:
         """Terminate any online update still running during teardown."""
         return await self._run_on_all_engines("abort_online_eagle_speculator_update")
+
+    async def cleanup_online_eagle_scratch(self, scratch_root: str) -> List[Any]:
+        """Remove online-EAGLE scratch on the inference node that owns it."""
+        return await self._run_on_all_engines("cleanup_online_eagle_scratch", scratch_root)
 
     async def publish_online_eagle_speculator(
         self,

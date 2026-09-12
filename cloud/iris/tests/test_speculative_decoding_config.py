@@ -170,6 +170,7 @@ def test_online_speculator_rejects_unsupported_execution_modes(
     ("kwargs", "message"),
     [
         ({"num_inference_engines": 2}, "num_inference_engines=1"),
+        ({"tensor_parallel_size": 2}, "tensor_parallel_size=1"),
         ({"pipeline_parallel_size": 2}, "pipeline_parallel_size=1"),
         ({"engine_init_kwargs": {"async_scheduling": True}}, "async_scheduling"),
     ],

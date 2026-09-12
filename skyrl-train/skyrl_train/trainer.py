@@ -59,6 +59,7 @@ from skyrl_train.distributed.dispatch import (
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    ONLINE_EAGLE_SCRATCH_ROOT,
     OnlineEagleCaptureConfig,
     OnlineEagleTrainingJob,
     OnlineEagleUpdateResult,
@@ -129,7 +130,6 @@ from skyrl_train.hf_export_schema import (
     TRAINER_STATE_FILENAME,
 )
 
-_ONLINE_EAGLE_SCRATCH_ROOT = "/tmp/marinskyrl-online-eagle"
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
 
@@ -139,6 +139,10 @@ def _single_active_online_eagle_result(results: list[Any], operation: str) -> di
     if len(active) != 1:
         raise RuntimeError(f"Expected one active online EAGLE rank for {operation}, got {len(active)}")
     return active[0]
+
+
+def _active_online_eagle_results(results: list[Any]) -> list[dict[str, Any]]:
+    return [item for engine_results in results for item in engine_results if item.get("active", False)]
 
 
 class RayPPOTrainer:
@@ -194,6 +198,7 @@ class RayPPOTrainer:
             else SpeculativeDecodingConfig.from_mapping(raw_speculative_decoding)
         )
         self._speculator_capture_active = False
+        self._speculator_capture_node_id: str | None = None
         self._speculator_process_id = uuid4().hex
         self._served_draft_revision = (
             None if self.speculative_decoding is None else self.speculative_decoding.model.source_identity
@@ -401,6 +406,12 @@ class RayPPOTrainer:
                 label="Online EAGLE trainer shutdown",
             )
             self._speculator_update_inflight = False
+        if getattr(self, "speculative_decoding", None) is not None and self.inference_engine_client is not None:
+            await self._guarded_async(
+                self.inference_engine_client.cleanup_online_eagle_scratch(self._speculator_scratch_path()),
+                timeout=10,
+                label="Online EAGLE scratch cleanup",
+            )
         await self._guarded_async(
             self.inference_engine_client.teardown(),
             timeout=30,
@@ -584,7 +595,7 @@ class RayPPOTrainer:
         )
 
     def _speculator_scratch_path(self, *parts: str) -> str:
-        return os.path.join(_ONLINE_EAGLE_SCRATCH_ROOT, self._speculator_process_id, *parts)
+        return str(ONLINE_EAGLE_SCRATCH_ROOT.joinpath(self._speculator_process_id, *parts))
 
     async def _begin_speculator_capture(self) -> None:
         """Open one capture interval before the first rollout attempt for a step."""
@@ -602,7 +613,29 @@ class RayPPOTrainer:
             draft_revision=self._served_draft_revision,
             reserved_gpu_memory_gib=training.reserved_gpu_memory_gib,
         ).to_mapping()
-        await self.inference_engine_client.begin_online_eagle_capture(capture_config)
+        results = await self.inference_engine_client.begin_online_eagle_capture(capture_config)
+        active_results = _active_online_eagle_results(results)
+        expected_workers = int(self.cfg.generator.inference_engine_data_parallel_size)
+        worker_ranks = {result.get("worker_rank") for result in active_results}
+        node_ids = {result.get("node_id") for result in active_results}
+        try:
+            if len(active_results) != expected_workers or worker_ranks != set(range(expected_workers)):
+                raise RuntimeError(
+                    "Expected one active online EAGLE capture per vLLM DP rank; "
+                    f"expected {expected_workers}, got ranks {sorted(worker_ranks, key=str)}"
+                )
+            if len(node_ids) != 1 or None in node_ids:
+                raise RuntimeError(
+                    "Online EAGLE DP capture requires every vLLM rank on one node; "
+                    f"got node IDs {sorted(node_ids, key=str)}"
+                )
+        except BaseException:
+            try:
+                await self.inference_engine_client.discard_online_eagle_capture()
+            except Exception as error:
+                logger.warning("Failed to discard online EAGLE capture after begin validation: {}", error)
+            raise
+        self._speculator_capture_node_id = next(iter(node_ids))
         self._speculator_capture_active = True
         logger.info(
             "Online EAGLE capture started: step={} target_revision={} draft_revision={}",
@@ -618,29 +651,49 @@ class RayPPOTrainer:
             await self.inference_engine_client.discard_online_eagle_capture()
         finally:
             self._speculator_capture_active = False
+            self._speculator_capture_node_id = None
 
     async def _seal_speculator_capture(self) -> list[Any] | None:
         """Seal and return per-engine manifests, or ``None`` without an active capture."""
         if not self._speculator_capture_active:
             return None
         output_root = self._speculator_scratch_path(f"step-{self.global_step}")
+        capture_node_id = self._speculator_capture_node_id
         try:
             manifests = await self.inference_engine_client.seal_online_eagle_capture(output_root)
         finally:
             self._speculator_capture_active = False
-        active_manifest = _single_active_online_eagle_result(manifests, "capture seal")
-        self._sealed_speculator_capture_dir = os.path.dirname(active_manifest["path"])
+            self._speculator_capture_node_id = None
+        active_manifests = _active_online_eagle_results(manifests)
+        expected_workers = int(self.cfg.generator.inference_engine_data_parallel_size)
+        worker_ranks = {manifest.get("worker_rank") for manifest in active_manifests}
+        if len(active_manifests) != expected_workers or worker_ranks != set(range(expected_workers)):
+            await self.inference_engine_client.cleanup_online_eagle_scratch(output_root)
+            raise RuntimeError(
+                "Expected one active online EAGLE capture per vLLM DP rank; "
+                f"expected {expected_workers}, got ranks {sorted(worker_ranks, key=str)}"
+            )
+        seal_node_ids = {manifest.get("node_id") for manifest in active_manifests}
+        if seal_node_ids != {capture_node_id}:
+            await self.inference_engine_client.cleanup_online_eagle_scratch(output_root)
+            raise RuntimeError(
+                "Online EAGLE DP capture changed node identity between begin and seal; "
+                f"began on {capture_node_id!r}, sealed on {sorted(seal_node_ids, key=str)}"
+            )
+        self._sealed_speculator_capture_dir = output_root
         self.all_metrics.update(
             {
-                "speculator/captured_rows": float(active_manifest.get("captured_rows", 0)),
-                "speculator/captured_windows": float(len(active_manifest.get("windows", ()))),
-                "speculator/dropped_windows": float(active_manifest.get("dropped_windows", 0)),
+                "speculator/sealed_rows": float(sum(item.get("captured_rows", 0) for item in active_manifests)),
+                "speculator/sealed_windows": float(sum(len(item.get("windows", ())) for item in active_manifests)),
+                "speculator/capture_dropped_windows": float(
+                    sum(item.get("dropped_windows", 0) for item in active_manifests)
+                ),
             }
         )
         logger.info(
             "Online EAGLE capture sealed: step={} active_manifests={} output_root={}",
             self.global_step,
-            1,
+            len(active_manifests),
             output_root,
         )
         return manifests
@@ -667,6 +720,14 @@ class RayPPOTrainer:
         ).to_mapping()
         results = await self.inference_engine_client.start_online_eagle_speculator_update(job)
         active = _single_active_online_eagle_result(results, "trainer start")
+        self.all_metrics.update(
+            {
+                "speculator/captured_rows": float(active["captured_rows"]),
+                "speculator/captured_windows": float(active["captured_windows"]),
+                "speculator/dropped_windows": float(active["dropped_windows"]),
+                "speculator/unselected_windows": float(active["unselected_windows"]),
+            }
+        )
         self._speculator_update_inflight = True
         self._sealed_speculator_capture_dir = None
         logger.info(
@@ -677,18 +738,24 @@ class RayPPOTrainer:
         )
 
     async def _finish_speculator_update(self) -> None:
+        """Finish one update; its owner reclaims inference-node capture scratch."""
+        if not self._speculator_update_inflight:
+            return
+        try:
+            await self._finish_speculator_update_and_install()
+        finally:
+            self._speculator_update_inflight = False
+
+    async def _finish_speculator_update_and_install(self) -> None:
         """Join, gate, and collectively install a candidate before target sync."""
         if not self._speculator_update_inflight:
             return
         assert self.speculative_decoding is not None
         training = self.speculative_decoding.training
         assert training is not None
-        try:
-            results = await self.inference_engine_client.finish_online_eagle_speculator_update(
-                training.boundary_wait_seconds
-            )
-        finally:
-            self._speculator_update_inflight = False
+        results = await self.inference_engine_client.finish_online_eagle_speculator_update(
+            training.boundary_wait_seconds
+        )
         result = OnlineEagleUpdateResult.from_mapping(_single_active_online_eagle_result(results, "trainer finish"))
         self.all_metrics.update(
             {

@@ -121,6 +121,7 @@ def create_ray_wrapped_inference_engines_from_config(
         entrypoint=entrypoint,
         colocate_all=cfg.trainer.placement.colocate_all,
         num_inference_engines=cfg.generator.num_inference_engines,
+        tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
         pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
         engine_init_kwargs=OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
     )

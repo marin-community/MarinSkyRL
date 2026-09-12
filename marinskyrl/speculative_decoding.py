@@ -133,8 +133,8 @@ class SpeculatorTrainingConfig:
     """Bounded single-rank online EAGLE update settings."""
 
     interval_steps: int = 1
-    # Leave enough admission headroom for the DP-local trainer capture even
-    # when rollout response lengths vary between steps.
+    # Bound the deterministic all-DP merge while leaving enough admission
+    # headroom for rollout response lengths to vary between steps.
     max_tokens_per_update: int = 16_384
     max_tokens_per_micro_batch: int = 2_048
     max_sequences_per_prompt_group: int = 2
@@ -277,6 +277,7 @@ def parse_speculative_decoding_config(
     entrypoint: str,
     colocate_all: bool,
     num_inference_engines: int = 1,
+    tensor_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
     engine_init_kwargs: Mapping[str, Any] | None = None,
     context: str = "generator.speculative_decoding",
@@ -295,6 +296,10 @@ def parse_speculative_decoding_config(
         raise SpeculativeDecodingConfigError(f"{context}.training is not supported by entrypoint {entrypoint!r}")
     if config.training is not None and num_inference_engines != 1:
         raise SpeculativeDecodingConfigError(f"{context}.training initially requires generator.num_inference_engines=1")
+    if config.training is not None and tensor_parallel_size != 1:
+        raise SpeculativeDecodingConfigError(
+            f"{context}.training initially requires generator.inference_engine_tensor_parallel_size=1"
+        )
     if config.training is not None and pipeline_parallel_size != 1:
         raise SpeculativeDecodingConfigError(
             f"{context}.training initially requires generator.inference_engine_pipeline_parallel_size=1"

@@ -77,6 +77,7 @@ class OnlineEagleActor:
             "start_online_eagle_speculator_update",
             "finish_online_eagle_speculator_update",
             "abort_online_eagle_speculator_update",
+            "cleanup_online_eagle_scratch",
             "install_online_eagle_speculator",
             "publish_online_eagle_speculator",
             "restore_online_eagle_speculator",
@@ -148,6 +149,7 @@ async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
     await engine.start_online_eagle_speculator_update({"step": 3})
     await engine.finish_online_eagle_speculator_update(30)
     await engine.abort_online_eagle_speculator_update()
+    await engine.cleanup_online_eagle_scratch("/tmp/marinskyrl-online-eagle/process")
     await engine.install_online_eagle_speculator("/tmp/candidate")
     await engine.publish_online_eagle_speculator("/tmp/candidate", "s3://bucket/draft", "draft-3", "policy-3")
     await engine.restore_online_eagle_speculator("s3://bucket/draft", "/tmp/restored")
@@ -159,6 +161,7 @@ async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
         ("start_online_eagle_speculator_update", ({"step": 3},)),
         ("finish_online_eagle_speculator_update", (30,)),
         ("abort_online_eagle_speculator_update", ()),
+        ("cleanup_online_eagle_scratch", ("/tmp/marinskyrl-online-eagle/process",)),
         ("install_online_eagle_speculator", ("/tmp/candidate",)),
         (
             "publish_online_eagle_speculator",

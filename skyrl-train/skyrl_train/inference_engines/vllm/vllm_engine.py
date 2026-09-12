@@ -24,8 +24,12 @@ from skyrl_train.config.behavior_logprobs import (
     validate_behavior_logprob_sampling,
 )
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    capture_rank_directory,
     child_cuda_visible_device,
+    cleanup_online_eagle_training_job,
+    merge_online_eagle_captures,
     publish_speculator_checkpoint,
+    remove_online_eagle_scratch,
     restore_speculator_checkpoint,
 )
 
@@ -342,7 +346,11 @@ class WorkerWrap:
     def begin_online_eagle_capture(self, config):
         """Begin bounded verifier-state capture on the resident model runner."""
         resolved = dict(config)
-        resolved["trainer_rank"] = ONLINE_EAGLE_TRAINER_RANK
+        parallel_config = self.model_runner.parallel_config
+        if parallel_config.tensor_parallel_size != 1 or parallel_config.pipeline_parallel_size != 1:
+            raise RuntimeError("Online EAGLE training requires vLLM tensor and pipeline parallel size 1")
+        worker_rank = parallel_config.data_parallel_rank
+        resolved["trainer_rank"] = worker_rank
         reserved_gpu_memory_gib = float(resolved.pop("reserved_gpu_memory_gib"))
         total_memory_gib = torch.cuda.get_device_properties(self.device).total_memory / 2**30
         gpu_memory_utilization = float(self.model_runner.cache_config.gpu_memory_utilization)
@@ -354,11 +362,15 @@ class WorkerWrap:
                 f"{gpu_memory_utilization:.3f} leaves only {unreserved_memory_gib:.2f} GiB "
                 f"on this {total_memory_gib:.2f} GiB device"
             )
-        return self.model_runner.begin_online_eagle_capture(resolved)
+        result = self.model_runner.begin_online_eagle_capture(resolved)
+        return {**result, "node_id": str(ray.get_runtime_context().get_node_id())}
 
     def seal_online_eagle_capture(self, output_dir):
         """Seal verifier-state capture before policy weights are synchronized."""
-        return self.model_runner.seal_online_eagle_capture(output_dir)
+        worker_rank = self.model_runner.parallel_config.data_parallel_rank
+        rank_output_dir = str(capture_rank_directory(output_dir, worker_rank))
+        result = self.model_runner.seal_online_eagle_capture(rank_output_dir)
+        return {**result, "node_id": str(ray.get_runtime_context().get_node_id())}
 
     def discard_online_eagle_capture(self):
         """Discard verifier-state capture after a failed rollout."""
@@ -366,9 +378,12 @@ class WorkerWrap:
 
     def install_online_eagle_speculator(self, candidate_dir, trainer_rank):
         """Install a complete candidate in place on every inference rank."""
+        previous_candidate_dir = getattr(self, "_online_eagle_served_candidate_dir", None)
         result = self.model_runner.install_online_eagle_speculator(candidate_dir, trainer_rank)
         if self.model_runner.parallel_config.data_parallel_rank == trainer_rank:
             self._online_eagle_served_candidate_dir = candidate_dir
+            if previous_candidate_dir is not None and previous_candidate_dir != candidate_dir:
+                remove_online_eagle_scratch(previous_candidate_dir)
         return result
 
     def publish_online_eagle_speculator(
@@ -407,6 +422,15 @@ class WorkerWrap:
         existing = getattr(self, "_online_eagle_trainer_process", None)
         if existing is not None:
             raise RuntimeError("An online EAGLE trainer process has not been joined")
+        training = job["training"]
+        merged_capture = merge_online_eagle_captures(
+            job["capture_dir"],
+            expected_workers=self.model_runner.parallel_config.data_parallel_size,
+            expected_step=int(job["step"]),
+            max_tokens=int(training["max_tokens_per_update"]),
+            max_sequences_per_prompt_group=int(training["max_sequences_per_prompt_group"]),
+        )
+        job = {**job, "capture_dir": os.path.dirname(merged_capture["path"])}
         output_dir = Path(job["output_dir"])
         output_dir.parent.mkdir(parents=True, exist_ok=True)
         job_path = output_dir.with_suffix(".job.json")
@@ -441,6 +465,10 @@ class WorkerWrap:
             "worker_rank": worker_rank,
             "pid": process.pid,
             "log_path": str(log_path),
+            "captured_rows": merged_capture["captured_rows"],
+            "captured_windows": len(merged_capture["windows"]),
+            "dropped_windows": merged_capture["dropped_windows"],
+            "unselected_windows": merged_capture["unselected_windows"],
         }
 
     def finish_online_eagle_speculator_update(self, boundary_wait_seconds):
@@ -450,37 +478,42 @@ class WorkerWrap:
         if process is None:
             return {"active": False, "worker_rank": worker_rank}
         job = self._online_eagle_trainer_job
+        remove_candidate = True
         try:
-            returncode = process.wait(timeout=float(boundary_wait_seconds))
-        except subprocess.TimeoutExpired:
-            process.terminate()
             try:
-                process.wait(timeout=_ONLINE_EAGLE_PROCESS_TERMINATION_GRACE_SECONDS)
+                returncode = process.wait(timeout=float(boundary_wait_seconds))
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            result = {
-                "active": True,
-                "accepted": False,
-                "deferred": True,
-                "error": (f"Online EAGLE trainer exceeded boundary_wait_seconds={boundary_wait_seconds}"),
-            }
-        else:
-            result_path = Path(job["result_path"])
-            if result_path.exists():
-                result = json.loads(result_path.read_text())
-            else:
+                process.terminate()
+                try:
+                    process.wait(timeout=_ONLINE_EAGLE_PROCESS_TERMINATION_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
                 result = {
                     "active": True,
                     "accepted": False,
-                    "error": f"Online EAGLE trainer exited {returncode} without a result",
+                    "deferred": True,
+                    "error": (f"Online EAGLE trainer exceeded boundary_wait_seconds={boundary_wait_seconds}"),
                 }
-            result["returncode"] = returncode
-        result["worker_rank"] = worker_rank
-        result["log_path"] = self._online_eagle_trainer_log
-        self._online_eagle_trainer_process = None
-        self._online_eagle_trainer_job = None
-        return result
+            else:
+                result_path = Path(job["result_path"])
+                if result_path.exists():
+                    result = json.loads(result_path.read_text())
+                else:
+                    result = {
+                        "active": True,
+                        "accepted": False,
+                        "error": f"Online EAGLE trainer exited {returncode} without a result",
+                    }
+                result["returncode"] = returncode
+            result["worker_rank"] = worker_rank
+            result["log_path"] = self._online_eagle_trainer_log
+            remove_candidate = not result.get("accepted", False)
+            return result
+        finally:
+            cleanup_online_eagle_training_job(job, remove_candidate=remove_candidate)
+            self._online_eagle_trainer_process = None
+            self._online_eagle_trainer_job = None
 
     def abort_online_eagle_speculator_update(self):
         """Terminate an unjoined trainer during exceptional teardown."""
@@ -488,6 +521,7 @@ class WorkerWrap:
         worker_rank = self.model_runner.parallel_config.data_parallel_rank
         if process is None:
             return {"active": False, "worker_rank": worker_rank}
+        job = self._online_eagle_trainer_job
         if process.poll() is None:
             process.terminate()
             try:
@@ -497,7 +531,22 @@ class WorkerWrap:
                 process.wait()
         self._online_eagle_trainer_process = None
         self._online_eagle_trainer_job = None
+        cleanup_online_eagle_training_job(job, remove_candidate=True)
         return {"active": True, "worker_rank": worker_rank, "returncode": process.returncode}
+
+    def cleanup_online_eagle_scratch(self, scratch_root):
+        """Remove one process-scoped scratch tree on its owning inference node."""
+        worker_rank = self.model_runner.parallel_config.data_parallel_rank
+        if worker_rank != ONLINE_EAGLE_TRAINER_RANK:
+            return {"active": False, "worker_rank": worker_rank}
+        requested_root = Path(scratch_root).resolve()
+        remove_online_eagle_scratch(requested_root)
+        served_candidate_dir = getattr(self, "_online_eagle_served_candidate_dir", None)
+        if served_candidate_dir is not None:
+            served_candidate = Path(served_candidate_dir).resolve()
+            if served_candidate == requested_root or served_candidate.is_relative_to(requested_root):
+                self._online_eagle_served_candidate_dir = None
+        return {"active": True, "worker_rank": worker_rank, "path": str(requested_root)}
 
     def init_weight_update_communicator(
         self,
@@ -2147,6 +2196,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Terminate an unjoined trainer during exceptional teardown."""
         engine = self._get_engine()
         return await engine.collective_rpc("abort_online_eagle_speculator_update")
+
+    async def cleanup_online_eagle_scratch(self, scratch_root: str):
+        """Remove process-scoped trainer scratch on the inference node."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("cleanup_online_eagle_scratch", args=(scratch_root,))
 
     async def publish_online_eagle_speculator(
         self,
