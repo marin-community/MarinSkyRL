@@ -5,11 +5,11 @@ import tarfile
 import pytest
 
 from infra.rl_data.nemotron_ultra_swe import (
-    SWE_AGENT,
     _tar_bytes,
     collect_swe_instance_ids,
     compose_swe_tasks,
 )
+from infra.rl_data.sources import NEMOTRON_ULTRA_SWE_AGENT
 
 
 def _swegym_row(instance_id: str):
@@ -45,7 +45,7 @@ def _archive_files(blob: bytes) -> dict[str, tuple[bytes, int]]:
 
 def test_collects_only_unique_swe_rows():
     swe = {
-        "agent_ref": {"name": SWE_AGENT},
+        "agent_ref": {"name": NEMOTRON_ULTRA_SWE_AGENT},
         "metadata": {"instance_id": "owner__repo-123"},
     }
     other = {"agent_ref": {"name": "math_with_judge_simple_agent"}, "metadata": {}}

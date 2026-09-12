@@ -18,15 +18,13 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from infra.rl_data.sources import NEMOTRON_ULTRA_REVISION
+from infra.rl_data.sources import NEMOTRON_ULTRA_REVISION, NEMOTRON_ULTRA_RL_DATASET, NEMOTRON_ULTRA_SWE_AGENT
 
-NEMOTRON_ULTRA_DATASET = "nvidia/Nemotron-RL-Ultra-Training-Blends"
 TASKTROVE_DATASET = "open-thoughts/TaskTrove"
 TASKTROVE_REVISION = "131d8a8470c7a81113baac898c0c232db3f5ae31"
 TASKTROVE_SWEGYM_PARQUET = "laion__swegym-tasks-patched-validated-v5/tasks.parquet"
 R2E_GYM_DATASET = "R2E-Gym/R2E-Gym-Subset"
 R2E_GYM_REVISION = "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
-SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
 
 _TASK_TOML = """\
 version = "1.0"
@@ -125,7 +123,7 @@ def collect_swe_instance_ids(rows: Iterable[Mapping[str, Any]]) -> set[str]:
     result: set[str] = set()
     for row in rows:
         agent_ref = row.get("agent_ref")
-        if not isinstance(agent_ref, Mapping) or agent_ref.get("name") != SWE_AGENT:
+        if not isinstance(agent_ref, Mapping) or agent_ref.get("name") != NEMOTRON_ULTRA_SWE_AGENT:
             continue
         metadata = row.get("metadata")
         instance_id = metadata.get("instance_id") if isinstance(metadata, Mapping) else None
@@ -319,7 +317,7 @@ def _load_blend_swe_ids(revision: str) -> set[str]:
     instance_ids: set[str] = set()
     for filename in ("rlvr1.jsonl", "rlvr2.jsonl"):
         path = hf_hub_download(
-            repo_id=NEMOTRON_ULTRA_DATASET,
+            repo_id=NEMOTRON_ULTRA_RL_DATASET,
             repo_type="dataset",
             filename=filename,
             revision=revision,
@@ -365,7 +363,7 @@ def prepare_swe_task_artifact(
     rows, counts = compose_swe_tasks(desired_ids, _tasktrove_rows(tasktrove_revision), r2e_rows)
     provenance = {
         "blend": {
-            "dataset": NEMOTRON_ULTRA_DATASET,
+            "dataset": NEMOTRON_ULTRA_RL_DATASET,
             "revision": blend_revision,
             "files": ["rlvr1.jsonl", "rlvr2.jsonl"],
         },

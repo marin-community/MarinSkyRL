@@ -29,11 +29,15 @@ def expected_coverage() -> set[str]:
 def check_log(log_text: str) -> list[str]:
     failures: list[str] = []
     clean_log = ANSI_ESCAPE.sub("", log_text)
-    manifests = [json.loads(match["manifest"]) for line in clean_log.splitlines() if (match := SAMPLE_LINE.search(line))]
+    manifests = [
+        json.loads(match["manifest"]) for line in clean_log.splitlines() if (match := SAMPLE_LINE.search(line))
+    ]
     if len(manifests) != 1:
         failures.append(f"found {len(manifests)} sample manifests, expected exactly one")
     elif manifests[0].get("rows") != len(expected_coverage()):
-        failures.append(f"sample manifest reports {manifests[0].get('rows')!r} rows, expected {len(expected_coverage())}")
+        failures.append(
+            f"sample manifest reports {manifests[0].get('rows')!r} rows, expected {len(expected_coverage())}"
+        )
 
     train_steps = [step for step in parse_metrics(log_text) if step.kind == TRAIN]
     if len(train_steps) != 1:

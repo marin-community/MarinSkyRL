@@ -5,33 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch
 from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset
+from skyrl_train.trajectory_runners.harbor.execution import HarborRunner
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
-
-
-class _Runner(Protocol):
-    async def startup(self) -> None: ...
-
-    async def shutdown(self) -> None: ...
-
-    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
-
-    def set_trajectory_sink(self, sink: TrajectorySink) -> None: ...
-
-    async def start_eval_session(
-        self,
-        *,
-        run_name: str,
-        eval_step: int,
-        val_set_name: str | None = None,
-        n_concurrent_trials: int | None = None,
-    ) -> None: ...
-
-    async def stop_eval_session(self) -> None: ...
 
 
 def _select_rows(batch: TrajectoryRequestBatch, indices: list[int]) -> TrajectoryRequestBatch:
@@ -119,8 +99,8 @@ class NemotronUltraTrajectoryRouter:
     def __init__(
         self,
         *,
-        gym_runner: _Runner,
-        harbor_runner: _Runner,
+        gym_runner: HarborRunner,
+        harbor_runner: HarborRunner,
         terminal_bench_data: list[str],
         require_rollout_logprobs: bool,
         tis_lcs_alert_threshold: float,

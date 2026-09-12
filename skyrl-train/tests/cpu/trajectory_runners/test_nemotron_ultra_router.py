@@ -66,11 +66,7 @@ async def test_routes_only_swe_to_terminal_bench_and_restores_order(tmp_path):
         "prompts": [[{"role": "user", "content": str(index)}] for index in range(3)],
         "env_classes": ["nemotron_ultra"] * 3,
         "env_extras": [
-            {
-                "extra_info": {
-                    "nemotron_ultra": {"blend": "rlvr1", "agent": "calendar_simple_agent", "route": "gym"}
-                }
-            },
+            {"extra_info": {"nemotron_ultra": {"blend": "rlvr1", "agent": "calendar_simple_agent", "route": "gym"}}},
             {
                 "extra_info": {
                     "nemotron_ultra": {
@@ -81,11 +77,7 @@ async def test_routes_only_swe_to_terminal_bench_and_restores_order(tmp_path):
                     }
                 }
             },
-            {
-                "extra_info": {
-                    "nemotron_ultra": {"blend": "rlvr2", "agent": "calendar_simple_agent", "route": "gym"}
-                }
-            },
+            {"extra_info": {"nemotron_ultra": {"blend": "rlvr2", "agent": "calendar_simple_agent", "route": "gym"}}},
         ],
         "sampling_params": None,
         "trajectory_ids": ids,
@@ -189,9 +181,7 @@ async def test_nvidia_swe_ids_match_lowercase_harbor_task_paths(tmp_path):
         ),
     ],
 )
-async def test_source_instance_ids_resolve_generic_harbor_task_names(
-    tmp_path, metadata_file, metadata, instance_id
-):
+async def test_source_instance_ids_resolve_generic_harbor_task_names(tmp_path, metadata_file, metadata, instance_id):
     _task(tmp_path, "generic-task-0001")
     tests = tmp_path / "generic-task-0001" / "tests"
     tests.mkdir()

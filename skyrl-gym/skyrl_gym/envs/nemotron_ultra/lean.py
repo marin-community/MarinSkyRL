@@ -24,8 +24,10 @@ def verify_lean_attempt(
 ) -> tuple[float, dict[str, Any], str | None]:
     if not generation.strip():
         error = "Empty generation received. Please provide a valid Lean 4 proof."
-        return 0.0, {"proof_status": "empty_generation", "predicted_proof": "", "error_feedback": error}, (
-            build_correction_prompt(proof_attempt="(empty)", error_message=error)
+        return (
+            0.0,
+            {"proof_status": "empty_generation", "predicted_proof": "", "error_feedback": error},
+            (build_correction_prompt(proof_attempt="(empty)", error_message=error)),
         )
 
     predicted_proof = build_lean4_proof(

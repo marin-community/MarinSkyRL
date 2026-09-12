@@ -4,12 +4,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
 
 LOG = logging.getLogger(__name__)
+
 
 def parse_error(log_string: str) -> List[Dict[str, Any]]:
     """Parse Lean4 compiler error messages from log output.
@@ -89,9 +89,7 @@ def get_error_str(code: str, errors: List[Dict[str, Any]], error_thres: int = 8)
         # Show error line(s) with <error> markers
         if start_line < len(code_lines):
             if start_line != end_line:
-                error_code += (
-                    code_lines[start_line][:start_col] + "<error>" + code_lines[start_line][start_col:] + "\n"
-                )
+                error_code += code_lines[start_line][:start_col] + "<error>" + code_lines[start_line][start_col:] + "\n"
                 show_line = 6
                 for j in range(start_line + 1, min(end_line, start_line + show_line)):
                     if j < len(code_lines):

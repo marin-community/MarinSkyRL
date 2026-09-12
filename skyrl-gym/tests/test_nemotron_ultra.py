@@ -166,9 +166,7 @@ def test_structured_output_reward_uses_the_single_named_tool_payload():
         "tool_payload_key": "payload",
     }
     message = {
-        "tool_calls": [
-            {"type": "function", "function": {"name": "submit", "arguments": '{"payload":{"answer":42}}'}}
-        ]
+        "tool_calls": [{"type": "function", "function": {"name": "submit", "arguments": '{"payload":{"answer":42}}'}}]
     }
 
     assert grade_structured_output("", record, message)[0] == 1.0
@@ -214,11 +212,7 @@ def test_code_gen_reward_runs_every_row_unit_test():
 
 
 def test_code_gen_reward_applies_nvidia_reasoning_format_penalty():
-    record = {
-        "verifier_metadata": {
-            "unit_tests": {"inputs": ["2\n"], "outputs": ["4\n"], "fn_name": None}
-        }
-    }
+    record = {"verifier_metadata": {"unit_tests": {"inputs": ["2\n"], "outputs": ["4\n"], "fn_name": None}}}
     valid_code = "```python\nprint(int(input()) * 2)\n```"
 
     reward, details = grade_code(
@@ -286,9 +280,7 @@ def test_abstention_rewards_explicit_idk_without_calling_judge():
 
 
 def test_abstention_uses_three_way_judge_grade():
-    reward, details = grade_abstention(
-        r"\boxed{Paris}", {"question": "capital?", "answer": "Paris"}, _Judge(["A"])
-    )
+    reward, details = grade_abstention(r"\boxed{Paris}", {"question": "capital?", "answer": "Paris"}, _Judge(["A"]))
 
     assert reward == 1.0
     assert details["verdict"] == "correct"

@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from infra.rl_data.mixtures import load_mixture_spec, prepare_mixture
+from infra.rl_data.nemotron_ultra_swe import prepare_swe_task_artifact
 from infra.rl_data.preparation import PreparationOptions, prepare_artifact, write_bundle
 from infra.rl_data.sources import (
     SOURCES,
@@ -83,8 +84,6 @@ def main() -> None:
         )
         if any(value is not None for value in conflicting):
             parser.error("--nemotron-ultra-swe-tasks cannot be combined with parquet preparation options.")
-        from infra.rl_data.nemotron_ultra_swe import prepare_swe_task_artifact
-
         provenance = prepare_swe_task_artifact(args.output_dir)
         print(provenance)
         return

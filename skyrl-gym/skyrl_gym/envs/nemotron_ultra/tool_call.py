@@ -74,9 +74,7 @@ def _compare_arguments(
             if expected != actual:
                 return False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
         else:
-            similarity = (expected_counts & actual_counts).total() / (
-                expected_counts.total() + actual_counts.total()
-            )
+            similarity = (expected_counts & actual_counts).total() / (expected_counts.total() + actual_counts.total())
             if similarity < word_count_similarity_threshold:
                 return False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
         return True, None

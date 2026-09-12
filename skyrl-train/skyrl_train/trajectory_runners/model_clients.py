@@ -1,6 +1,7 @@
 """Model transports used by trajectory runners."""
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import aiohttp
@@ -21,6 +22,16 @@ class ModelClient(Protocol):
     """Transport-neutral model request boundary for trajectory runners."""
 
     async def generate(self, request: InferenceEngineInput) -> ModelClientOutput: ...
+
+
+@dataclass(frozen=True)
+class _ChatResult:
+    prompt_ids: list[int]
+    response_ids: list[int]
+    response_logprobs: list[float] | None
+    text: str
+    stop_reason: str
+    assistant_message: dict[str, Any]
 
 
 class DirectModelClient:
@@ -118,7 +129,7 @@ class DirectModelClient:
             response_logprobs = (
                 [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
             )
-            return prompt_ids, response_ids, response_logprobs, text, choice["finish_reason"], message
+            return _ChatResult(prompt_ids, response_ids, response_logprobs, text, choice["finish_reason"], message)
 
         results = await asyncio.gather(
             *(
@@ -126,15 +137,15 @@ class DirectModelClient:
                 for messages, row_options, session_id in zip(prompts, options, session_ids)
             )
         )
-        logprobs = [result[2] for result in results]
+        logprobs = [result.response_logprobs for result in results]
         return ModelClientOutput(
-            prompt_ids=[result[0] for result in results],
-            response_ids=[result[1] for result in results],
+            prompt_ids=[result.prompt_ids for result in results],
+            response_ids=[result.response_ids for result in results],
             response_logprobs=logprobs if all(value is not None for value in logprobs) else None,
-            responses=[result[3] for result in results],
-            stop_reasons=[result[4] for result in results],
+            responses=[result.text for result in results],
+            stop_reasons=[result.stop_reason for result in results],
             prompt_logprobs=None,
-            assistant_messages=[result[5] for result in results],
+            assistant_messages=[result.assistant_message for result in results],
             token_provenance=TokenProvenance.ENGINE,
         )
 

@@ -12,7 +12,7 @@ from typing import Any
 
 _COLORS = [str(index) for index in range(10)]
 
-_SUBPROCESS_TEMPLATE = r'''
+_SUBPROCESS_TEMPLATE = r"""
 import io
 import json
 import signal
@@ -83,7 +83,7 @@ except Exception as error:
     sys.stdout = original_stdout
     sys.stderr = original_stderr
     print(json.dumps({"success": False, "error": f"{type(error).__name__}: {str(error)[:500]}"}))
-'''
+"""
 
 
 def _strip_thinking(text: str) -> str:

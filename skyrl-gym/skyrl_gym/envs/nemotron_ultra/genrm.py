@@ -8,6 +8,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from loguru import logger
+
 from skyrl_gym.envs.nemotron_ultra.genrm_utils import (
     aggregate_scores,
     extract_output_text,
@@ -65,9 +67,10 @@ def grade_genrm_group(
                     top_p=float(config.get("top_p", 0.95)),
                 )
                 return parse_genrm_output(output, default_score, default_ranking, raise_on_fail=True)
-            except Exception:
+            except Exception as error:
+                logger.warning("GenRM comparison attempt {} failed: {}", attempt + 1, error)
                 if attempt + 1 < attempts:
-                    time.sleep(float(config.get("genrm_parse_retry_sleep_s", 0.2)))
+                    time.sleep(float(config.get("genrm_parse_retry_sleep_seconds", 0.2)))
         return default_score, default_score, default_ranking
 
     with ThreadPoolExecutor(max_workers=len(pairs)) as executor:

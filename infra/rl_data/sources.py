@@ -118,7 +118,7 @@ NEMOTRON_ULTRA_RLVR2_AGENTS = NEMOTRON_ULTRA_RLVR1_AGENTS | {
     "rdkit_chemistry_agent",
     "structured_outputs_v3_simple_agent",
 }
-_NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
+NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
 _NEMOTRON_PLACEHOLDER_KEY = "_hf_question_placeholder"
 _NEMOTRON_DAPO_PREFIX = (
     "Solve the following math problem step by step. The last line of your response "
@@ -230,7 +230,7 @@ def _prepare_nemotron_ultra(
     if not isinstance(agent, str) or agent not in agents:
         raise ValueError(f"Nemotron Ultra row has unsupported agent_ref.name {agent!r}.")
 
-    route = "terminal_bench" if agent == _NEMOTRON_ULTRA_SWE_AGENT else "skyrl_gym"
+    route = "terminal_bench" if agent == NEMOTRON_ULTRA_SWE_AGENT else "skyrl_gym"
     metadata = example.get("metadata")
     instance_id = metadata.get("instance_id") if isinstance(metadata, Mapping) else None
     if route == "terminal_bench" and not isinstance(instance_id, str):
@@ -1079,35 +1079,31 @@ def gretel_text_to_sql_source() -> Source:
     )
 
 
-def nemotron_ultra_rlvr1_source() -> Source:
+def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str) -> Source:
     return Source(
-        "nemotron_ultra_rlvr1",
+        name,
         NEMOTRON_ULTRA_RL_DATASET,
         "nemotron_ultra",
         "train",
         True,
         "row_selected",
         lambda example, index, contract: _prepare_nemotron_ultra(
-            example, index, contract, agents=NEMOTRON_ULTRA_RLVR1_AGENTS, blend="rlvr1"
+            example, index, contract, agents=agents, blend=blend
         ),
         _load_nemotron_ultra_rows,
         deduplicate_by_prompt=False,
     )
 
 
+def nemotron_ultra_rlvr1_source() -> Source:
+    return _nemotron_ultra_source(
+        name="nemotron_ultra_rlvr1", agents=NEMOTRON_ULTRA_RLVR1_AGENTS, blend="rlvr1"
+    )
+
+
 def nemotron_ultra_rlvr2_source() -> Source:
-    return Source(
-        "nemotron_ultra_rlvr2",
-        NEMOTRON_ULTRA_RL_DATASET,
-        "nemotron_ultra",
-        "train",
-        True,
-        "row_selected",
-        lambda example, index, contract: _prepare_nemotron_ultra(
-            example, index, contract, agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2"
-        ),
-        _load_nemotron_ultra_rows,
-        deduplicate_by_prompt=False,
+    return _nemotron_ultra_source(
+        name="nemotron_ultra_rlvr2", agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2"
     )
 
 
@@ -1269,7 +1265,7 @@ def _unwrap_nemotron_answer(raw: Any) -> str:
     ):
         try:
             value = json.loads(stripped)
-        except Exception:
+        except json.JSONDecodeError:
             return stripped
         if isinstance(value, list) and value:
             return str(value[0])

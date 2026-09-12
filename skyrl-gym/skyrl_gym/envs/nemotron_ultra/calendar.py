@@ -14,7 +14,7 @@ def _time_to_minutes(value: str) -> int:
     if "am" in value or "pm" in value:
         suffix = "am" if "am" in value else "pm"
         time = value.replace(suffix, "")
-        hour, minute = (map(int, time.split(":")) if ":" in time else (int(time), 0))
+        hour, minute = map(int, time.split(":")) if ":" in time else (int(time), 0)
         return (hour * 60 if hour != 12 else 0) + minute + (12 * 60 if suffix == "pm" else 0)
     hour, minute = map(int, value.split(":"))
     return hour * 60 + minute

@@ -45,7 +45,7 @@ nemotron_ultra:
     temperature: 1.0
     top_p: 0.95
     genrm_parse_retries: 1
-    genrm_parse_retry_sleep_s: 0.2
+    genrm_parse_retry_sleep_seconds: 0.2
     reasoning_bonus: 0.5
     answer_bonus: 0.5
     top_percentile: 0.2

@@ -13,6 +13,7 @@ import requests
 
 from infra.rl_data.sources import (
     NEMOTRON_ULTRA_REVISION,
+    NEMOTRON_ULTRA_RL_DATASET,
     NEMOTRON_ULTRA_RLVR1_AGENTS,
     NEMOTRON_ULTRA_RLVR2_AGENTS,
     Source,
@@ -21,7 +22,7 @@ from infra.rl_data.sources import (
 )
 
 HUGGING_FACE_RESOLVE_URL = (
-    "https://huggingface.co/datasets/nvidia/Nemotron-RL-Ultra-Training-Blends/resolve/{revision}/{filename}"
+    f"https://huggingface.co/datasets/{NEMOTRON_ULTRA_RL_DATASET}/resolve/{{revision}}/{{filename}}"
 )
 RANGE_BYTES = 1_048_576
 RANGES_PER_BATCH = 24
@@ -146,7 +147,7 @@ def write_generator_sample(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     datasets.Dataset.from_list(prepared_rows).to_parquet(str(output_path))
     return {
-        "dataset": "nvidia/Nemotron-RL-Ultra-Training-Blends",
+        "dataset": NEMOTRON_ULTRA_RL_DATASET,
         "revision": revision,
         "seed": seed,
         "rows": len(prepared_rows),
