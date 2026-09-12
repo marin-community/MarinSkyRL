@@ -55,6 +55,47 @@ _DEFAULT_OPTIMIZER_NAME = "AdamW"
 _MUONH_OPTIMIZER_NAME = "MuonH"
 
 
+def snapshot_shared_state_dict_tensors(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Detach state tensors that share storage from the module being sharded.
+
+    FSDP2 replaces tied parameters while it shards a module. A state-dict view of
+    those parameters otherwise keeps pointing at the storage FSDP2 is replacing,
+    so the subsequent full-state loader can read partially initialized data.
+    Exact aliases reuse one clone; distinct views keep their own shape and offset.
+    Tensors with unshared storage are not copied.
+    """
+    storage_counts: dict[tuple[str, int, int], int] = defaultdict(int)
+    storage_keys: dict[str, tuple[str, int, int] | None] = {}
+    for name, tensor in state_dict.items():
+        if not isinstance(tensor, torch.Tensor) or tensor.device.type == "meta" or tensor.numel() == 0:
+            storage_keys[name] = None
+            continue
+        storage = tensor.untyped_storage()
+        key = (str(tensor.device), storage.data_ptr(), storage.nbytes())
+        storage_keys[name] = key
+        storage_counts[key] += 1
+
+    snapshots: dict[tuple[str, int, int, int, tuple[int, ...], tuple[int, ...], torch.dtype], torch.Tensor] = {}
+    result = copy.copy(state_dict)
+    for name, tensor in state_dict.items():
+        key = storage_keys[name]
+        if key is None or storage_counts[key] < 2:
+            continue
+        view_key = (
+            *key,
+            tensor.storage_offset(),
+            tuple(tensor.shape),
+            tuple(tensor.stride()),
+            tensor.dtype,
+        )
+        snapshot = snapshots.get(view_key)
+        if snapshot is None:
+            snapshot = tensor.detach().clone()
+            snapshots[view_key] = snapshot
+        result[name] = snapshot
+    return result
+
+
 def resolve_fsdp_parameter_storage_dtype(
     optimizer_name: str,
     configured_dtype: str | None,
@@ -412,6 +453,8 @@ class FSDPStrategy(DistributedStrategy):
             }
             module = model.model if is_wrapped else model
             full_state = module.state_dict()
+            if not ep_on and dist.get_rank() == 0:
+                full_state = snapshot_shared_state_dict_tensors(full_state)
             # Stage 4a: shard experts over the "ep" submesh BEFORE the FSDP wrap.
             # torchtitan ExpertParallel's _partition_fn distribute_tensor's the raw
             # expert params onto the "ep" submesh; this must happen while they are
