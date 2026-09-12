@@ -841,6 +841,7 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
         "prompts": prompts,
         "env_extras": env_extras,
         "env_classes": [mock_env_cfg.env_class for _ in prompts],  # Mock environment class for each prompt
+        "trajectory_ids": [TrajectoryID("math-problem", 7)],
     }
 
     trajectory_batch: TrajectoryBatch = await trajectory_runner.run(input_batch)
@@ -854,6 +855,7 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
     assert trajectory_batch["rollout_metrics"]["generate/tis/exact_match_fraction"] == 1.0
     assert trajectory_batch["rollout_metrics"]["generate/tis/lcs_fallback_fraction"] == 0.0
     assert trajectory_batch["rollout_metrics"]["generate/tis/lcs_fallback_alert"] == 0.0
+    assert mock_llm.generate.await_args.args[0]["session_ids"] == ["math-problem"]
 
 
 @pytest.mark.asyncio

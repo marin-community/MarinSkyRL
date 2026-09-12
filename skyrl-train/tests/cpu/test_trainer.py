@@ -13,7 +13,7 @@ import pytest
 from jaxtyping import Float, Integer
 from omegaconf import DictConfig, OmegaConf
 from pytest import approx
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from skyrl_train.distributed.dispatch import MeshRank
@@ -36,12 +36,351 @@ from skyrl_train.models.grug_query_bias import (
     next_loss_free_query_bias,
     next_query_bias,
 )
+from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
 import numpy as np
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
 from tests.grug_training_parity import ORACLE_FIXTURE_DIR
+
+
+class _SpeculatorCaptureClient:
+    def __init__(self):
+        self.begins = []
+        self.seals = []
+        self.discards = 0
+        self.jobs = []
+        self.finish_waits = []
+        self.installs = []
+        self.publishes = []
+        self.restores = []
+        self.cleanups = []
+
+    async def begin_online_eagle_capture(self, config):
+        self.begins.append(config)
+        return [
+            [
+                {"active": True, "worker_rank": 0, "node_id": "inference-node"},
+                {"active": True, "worker_rank": 1, "node_id": "inference-node"},
+            ]
+        ]
+
+    async def seal_online_eagle_capture(self, output_root):
+        self.seals.append(output_root)
+        return [
+            [
+                {
+                    "active": True,
+                    "worker_rank": 0,
+                    "node_id": "inference-node",
+                    "captured_rows": 41,
+                    "dropped_windows": 2,
+                    "windows": [{"path": "window-000000.safetensors"}],
+                    "path": "/tmp/marinskyrl-online-eagle/process-id/step-2/rank-00000/manifest.json",
+                },
+                {
+                    "active": True,
+                    "worker_rank": 1,
+                    "node_id": "inference-node",
+                    "captured_rows": 43,
+                    "dropped_windows": 1,
+                    "windows": [{"path": "window-000000.safetensors"}],
+                    "path": "/tmp/marinskyrl-online-eagle/process-id/step-2/rank-00001/manifest.json",
+                },
+            ]
+        ]
+
+    async def discard_online_eagle_capture(self):
+        self.discards += 1
+
+    async def cleanup_online_eagle_scratch(self, scratch_root):
+        self.cleanups.append(scratch_root)
+        return [[{"active": True, "worker_rank": 0, "path": scratch_root}, {"active": False}]]
+
+    async def start_online_eagle_speculator_update(self, job):
+        self.jobs.append(job)
+        return [
+            [
+                {
+                    "active": True,
+                    "pid": 123,
+                    "log_path": "/tmp/trainer.log",
+                    "captured_rows": 72,
+                    "captured_windows": 2,
+                    "dropped_windows": 4,
+                    "unselected_windows": 1,
+                },
+                {"active": False},
+            ]
+        ]
+
+    async def finish_online_eagle_speculator_update(self, wait_seconds):
+        self.finish_waits.append(wait_seconds)
+        return [
+            [
+                {
+                    "active": True,
+                    "accepted": True,
+                    "candidate_dir": "/tmp/candidate",
+                    "draft_revision": "draft-step-2",
+                    "train_loss": 0.5,
+                    "incumbent_holdout_loss": 0.4,
+                    "candidate_holdout_loss": 0.3,
+                },
+                {"active": False},
+            ]
+        ]
+
+    async def install_online_eagle_speculator(self, candidate_dir):
+        self.installs.append(candidate_dir)
+        return [
+            [
+                {"draft_revision": "draft-step-2", "weights_sha256": "abc"},
+                {"draft_revision": "draft-step-2", "weights_sha256": "abc"},
+            ]
+        ]
+
+    async def publish_online_eagle_speculator(self, *args):
+        self.publishes.append(args)
+        return [[{"active": True, "complete": True, "path": "/checkpoints/speculator/manifest.json"}]]
+
+    async def restore_online_eagle_speculator(self, source, destination):
+        self.restores.append((source, destination))
+        return [
+            [
+                {
+                    "active": True,
+                    "draft_revision": "draft-step-2",
+                    "served_target_revision": "policy-step-2",
+                    "lineage": {
+                        "initial_source_identity": "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
+                    },
+                },
+                {"active": False},
+            ]
+        ]
+
+
+def _online_speculator_trainer(interval_steps=1):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.speculative_decoding = SpeculativeDecodingConfig.from_mapping(
+        {
+            "method": "eagle3",
+            "model": {
+                "path": "/tmp/draft",
+                "source_uri": "hf://laion/snowball-64k-eagle3-draft-r2egym",
+                "source_identity": "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
+            },
+            "num_speculative_tokens": 3,
+            "training": {"interval_steps": interval_steps},
+        }
+    )
+    trainer.global_step = 2
+    trainer._speculator_capture_active = False
+    trainer._speculator_capture_node_id = None
+    trainer._speculator_process_id = "process-id"
+    trainer._served_draft_revision = "draft-step-1"
+    trainer._sealed_speculator_capture_dir = None
+    trainer._served_draft_path = "/tmp/draft"
+    trainer._speculator_update_inflight = False
+    trainer._speculator_update_failures = 0
+    trainer._speculator_boundary_deferrals = 0
+    trainer._speculator_install_count = 0
+    trainer.inference_engine_client = _SpeculatorCaptureClient()
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {"seed": 17, "ckpt_path": "/checkpoints"},
+            "generator": {"inference_engine_data_parallel_size": 2},
+        }
+    )
+    return trainer
+
+
+def test_online_speculator_capture_seals_target_snapshot_before_training_boundary():
+    trainer = _online_speculator_trainer(interval_steps=2)
+
+    asyncio.run(trainer._begin_speculator_capture())
+    manifests = asyncio.run(trainer._seal_speculator_capture())
+
+    assert trainer.inference_engine_client.begins == [
+        {
+            "step": 2,
+            "max_tokens": 16_384,
+            "max_sequences_per_prompt_group": 2,
+            "target_revision": "policy-step-1",
+            "draft_revision": "draft-step-1",
+            "reserved_gpu_memory_gib": 8,
+        }
+    ]
+    assert trainer.inference_engine_client.seals == ["/tmp/marinskyrl-online-eagle/process-id/step-2"]
+    assert manifests is not None
+    assert trainer.all_metrics == {
+        "speculator/sealed_rows": 84.0,
+        "speculator/sealed_windows": 2.0,
+        "speculator/capture_dropped_windows": 3.0,
+    }
+    assert trainer._speculator_capture_active is False
+
+
+def test_online_speculator_capture_cadence_and_discard_are_idempotent():
+    trainer = _online_speculator_trainer(interval_steps=3)
+
+    asyncio.run(trainer._begin_speculator_capture())
+    assert trainer.inference_engine_client.begins == []
+
+    trainer.global_step = 3
+    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._discard_speculator_capture())
+    asyncio.run(trainer._discard_speculator_capture())
+
+    assert len(trainer.inference_engine_client.begins) == 1
+    assert trainer.inference_engine_client.discards == 1
+
+
+def test_online_speculator_update_overlaps_then_installs_at_boundary():
+    trainer = _online_speculator_trainer()
+
+    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._seal_speculator_capture())
+    asyncio.run(trainer._start_speculator_update())
+
+    assert trainer._speculator_update_inflight is True
+    job = trainer.inference_engine_client.jobs[0]
+    assert job["capture_dir"].endswith("/step-2")
+    assert job["draft_model_dir"] == "/tmp/draft"
+    assert job["initial_draft_source_identity"] == "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
+    assert job["failure_artifact_path"] == "/checkpoints/speculator-failures/step-2"
+    assert job["seed"] == 17
+    assert trainer.all_metrics["speculator/captured_rows"] == 72.0
+    assert trainer.all_metrics["speculator/captured_windows"] == 2.0
+    assert trainer.all_metrics["speculator/dropped_windows"] == 4.0
+    assert trainer.all_metrics["speculator/unselected_windows"] == 1.0
+
+    asyncio.run(trainer._finish_speculator_update())
+
+    assert trainer.inference_engine_client.finish_waits == [30.0]
+    assert trainer.inference_engine_client.installs == ["/tmp/candidate"]
+    assert trainer._served_draft_path == "/tmp/candidate"
+    assert trainer._served_draft_revision == "draft-step-2"
+    assert trainer.all_metrics["speculator/install_count"] == 1.0
+    assert trainer.all_metrics["speculator/candidate_accepted"] == 1.0
+
+
+def test_online_speculator_capture_rejects_cross_node_dp_before_rollouts() -> None:
+    trainer = _online_speculator_trainer()
+
+    async def begin_cross_node(_config):
+        return [
+            [
+                {"active": True, "worker_rank": 0, "node_id": "node-a"},
+                {"active": True, "worker_rank": 1, "node_id": "node-b"},
+            ]
+        ]
+
+    trainer.inference_engine_client.begin_online_eagle_capture = begin_cross_node
+
+    with pytest.raises(RuntimeError, match="every vLLM rank on one node"):
+        asyncio.run(trainer._begin_speculator_capture())
+
+    assert trainer.inference_engine_client.discards == 1
+
+
+def test_online_speculator_seal_rejects_missing_dp_rank_without_handoff() -> None:
+    trainer = _online_speculator_trainer()
+    asyncio.run(trainer._begin_speculator_capture())
+    trainer.inference_engine_client.seal_online_eagle_capture = AsyncMock(
+        return_value=[
+            [
+                {
+                    "active": True,
+                    "worker_rank": 0,
+                    "node_id": "inference-node",
+                    "captured_rows": 41,
+                    "windows": [],
+                },
+                {"active": False, "worker_rank": 1, "node_id": "inference-node"},
+            ]
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match=r"got ranks \[0\]"):
+        asyncio.run(trainer._seal_speculator_capture())
+
+    assert trainer.inference_engine_client.cleanups == ["/tmp/marinskyrl-online-eagle/process-id/step-2"]
+
+
+def test_online_speculator_boundary_deferral_keeps_the_incumbent() -> None:
+    trainer = _online_speculator_trainer()
+    trainer._speculator_update_inflight = True
+    trainer.inference_engine_client.finish_online_eagle_speculator_update = AsyncMock(
+        return_value=[
+            [
+                {
+                    "active": True,
+                    "accepted": False,
+                    "deferred": True,
+                    "error": "trainer exceeded boundary",
+                },
+                {"active": False},
+            ]
+        ]
+    )
+
+    asyncio.run(trainer._finish_speculator_update())
+
+    assert trainer._served_draft_revision == "draft-step-1"
+    assert trainer.inference_engine_client.installs == []
+    assert trainer.all_metrics["speculator/update_failures"] == 1.0
+    assert trainer.all_metrics["speculator/boundary_deferrals"] == 1.0
+
+
+def test_online_speculator_checkpoint_pairs_exact_served_target_and_draft():
+    trainer = _online_speculator_trainer()
+
+    asyncio.run(trainer._publish_speculator_checkpoint())
+
+    assert trainer.inference_engine_client.publishes == [
+        (
+            "/tmp/draft",
+            "/checkpoints/global_step_2/speculator",
+            "draft-step-1",
+            "policy-step-2",
+        )
+    ]
+
+    asyncio.run(trainer._restore_speculator_checkpoint("/source/checkpoints/global_step_2"))
+
+    assert trainer.inference_engine_client.restores == [
+        (
+            "/source/checkpoints/global_step_2/speculator",
+            "/tmp/marinskyrl-online-eagle/process-id/resume",
+        )
+    ]
+    assert trainer._served_draft_revision == "draft-step-2"
+    assert trainer._served_draft_path.endswith("/process-id/resume")
+
+
+def test_online_speculator_restore_rejects_a_different_initial_source() -> None:
+    trainer = _online_speculator_trainer()
+    trainer.inference_engine_client.restore_online_eagle_speculator = AsyncMock(
+        return_value=[
+            [
+                {
+                    "active": True,
+                    "draft_revision": "draft-step-2",
+                    "served_target_revision": "policy-step-2",
+                    "lineage": {"initial_source_identity": "different-source"},
+                }
+            ]
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="source lineage mismatch"):
+        asyncio.run(trainer._restore_speculator_checkpoint("/source/checkpoints/global_step_2"))
 
 
 def test_sync_group_admission_exhaustion_raises_typed_error():
@@ -131,6 +470,19 @@ class _ResidencyPolicyGroup:
             self.optimizer_on_gpu = False
         if offload_model:
             self.model_on_gpu = False
+
+
+class _CheckpointResidencyPolicyGroup(_ResidencyPolicyGroup):
+    def __init__(self):
+        super().__init__()
+        self.restore_residencies = []
+
+    def async_run_ray_method(self, dispatch_type, method_name, **kwargs):
+        assert dispatch_type == "pass_through"
+        assert method_name == "load_checkpoint"
+        assert kwargs["load_training_state"]
+        self.restore_residencies.append((self.model_on_gpu, self.optimizer_on_gpu))
+        return []
 
 
 class _ResidencyInferenceClient:
@@ -603,6 +955,33 @@ def test_load_checkpoints_accepts_trailing_slash_resume_path(dummy_config):
             trainer.load_checkpoints()
 
     exists.assert_called_once_with(resume_path.rstrip("/"))
+
+
+def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore(dummy_config, tmp_path, monkeypatch):
+    checkpoint_path = tmp_path / "global_step_12"
+    (checkpoint_path / trainer_module.POLICY_CHECKPOINT_SUBDIRECTORY).mkdir(parents=True)
+    torch.save({"global_step": 12}, checkpoint_path / trainer_module.TRAINER_STATE_FILENAME)
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+    dummy_config.trainer.offload_optimizer_during_rollouts = True
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.colocate_all = False
+    trainer.all_startup_timings = {}
+    trainer.train_dataloader = MagicMock()
+    trainer.policy_model = _CheckpointResidencyPolicyGroup()
+    trainer.policy_model.model_on_gpu = True
+    trainer.policy_model.optimizer_on_gpu = True
+    trainer.critic_model = None
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+
+    global_step, restored_path = trainer.load_checkpoints()
+
+    assert global_step == 12
+    assert restored_path == str(checkpoint_path)
+    assert trainer.policy_model.restore_residencies == [(True, False)]
+    assert "offload_policy_optimizer_before_checkpoint_load" in trainer.all_startup_timings
 
 
 def test_calculate_kl_create_experience_batched(dummy_config, dummy_trajectory_runner):

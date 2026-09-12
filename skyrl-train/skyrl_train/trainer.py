@@ -6,13 +6,14 @@ import shutil
 import threading
 import time
 from typing import Any, List, Optional, Dict, Tuple, Union
+from uuid import uuid4
 from jaxtyping import Float
 from pathlib import Path
 import ray
 from ray import ObjectRef
 import torch
 from loguru import logger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import PlacementGroup, placement_group
 from skyrl_train.utils.progress import tqdm
 from transformers import AutoTokenizer
@@ -57,6 +58,12 @@ from skyrl_train.distributed.dispatch import (
 )
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    ONLINE_EAGLE_SCRATCH_ROOT,
+    OnlineEagleCaptureConfig,
+    OnlineEagleTrainingJob,
+    OnlineEagleUpdateResult,
+)
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import (
     AdmissionRejection,
@@ -70,7 +77,14 @@ from skyrl_train.sync_group_admission import (
     admit_or_collect_replacements,
 )
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
+from marinskyrl.checkpoint_paths import (
+    GLOBAL_STEP_PREFIX,
+    LATEST_CHECKPOINT_FILE,
+    SPECULATOR_CHECKPOINT_SUBDIRECTORY,
+    speculator_export_path,
+)
+from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
@@ -87,6 +101,7 @@ from skyrl_train.utils.utils import (
     policy_per_gpu_bundles_enabled,
     policy_force_cvd_mask_enabled,
 )
+
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
@@ -116,6 +131,18 @@ from skyrl_train.hf_export_schema import (
 )
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
+
+
+def _single_active_online_eagle_result(results: list[Any], operation: str) -> dict[str, Any]:
+    """Return the one DP-rank result that owns online EAGLE state."""
+    active = [item for engine_results in results for item in engine_results if item.get("active", False)]
+    if len(active) != 1:
+        raise RuntimeError(f"Expected one active online EAGLE rank for {operation}, got {len(active)}")
+    return active[0]
+
+
+def _active_online_eagle_results(results: list[Any]) -> list[dict[str, Any]]:
+    return [item for engine_results in results for item in engine_results if item.get("active", False)]
 
 
 class RayPPOTrainer:
@@ -162,6 +189,26 @@ class RayPPOTrainer:
         self._shutdown_complete = False
         self.global_step = 0
         self._last_saved_step: int | None = None
+        raw_speculative_decoding = cfg.generator.get("speculative_decoding")
+        if raw_speculative_decoding is not None:
+            raw_speculative_decoding = OmegaConf.to_container(raw_speculative_decoding, resolve=True)
+        self.speculative_decoding = (
+            None
+            if raw_speculative_decoding is None
+            else SpeculativeDecodingConfig.from_mapping(raw_speculative_decoding)
+        )
+        self._speculator_capture_active = False
+        self._speculator_capture_node_id: str | None = None
+        self._speculator_process_id = uuid4().hex
+        self._served_draft_revision = (
+            None if self.speculative_decoding is None else self.speculative_decoding.model.source_identity
+        )
+        self._sealed_speculator_capture_dir: str | None = None
+        self._served_draft_path = None if self.speculative_decoding is None else self.speculative_decoding.model.path
+        self._speculator_update_inflight = False
+        self._speculator_update_failures = 0
+        self._speculator_boundary_deferrals = 0
+        self._speculator_install_count = 0
 
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
@@ -352,6 +399,19 @@ class RayPPOTrainer:
             label="Trajectory runner shutdown",
         )
         self._guarded_sync(self.trajectory_sink.close, label="Trajectory retention shutdown")
+        if getattr(self, "_speculator_update_inflight", False):
+            await self._guarded_async(
+                self.inference_engine_client.abort_online_eagle_speculator_update(),
+                timeout=10,
+                label="Online EAGLE trainer shutdown",
+            )
+            self._speculator_update_inflight = False
+        if getattr(self, "speculative_decoding", None) is not None and self.inference_engine_client is not None:
+            await self._guarded_async(
+                self.inference_engine_client.cleanup_online_eagle_scratch(self._speculator_scratch_path()),
+                timeout=10,
+                label="Online EAGLE scratch cleanup",
+            )
         await self._guarded_async(
             self.inference_engine_client.teardown(),
             timeout=30,
@@ -452,6 +512,7 @@ class RayPPOTrainer:
             # The interval save may have just written this same step; do not write it twice.
             if self._control.should_save and self._last_saved_step != self.global_step:
                 with Timer("save_checkpoints", self.all_timings):
+                    await self._publish_speculator_checkpoint()
                     await asyncio.to_thread(self.save_checkpoints)
                     logger.info("Saved final checkpoint.")
                 await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
@@ -460,6 +521,7 @@ class RayPPOTrainer:
 
     async def _save_checkpoints_with_residency(self) -> None:
         """Save a checkpoint, swapping colocated training and inference residency when needed."""
+        await self._publish_speculator_checkpoint()
         if not self.colocate_all:
             await asyncio.to_thread(self.save_checkpoints)
             return
@@ -523,6 +585,303 @@ class RayPPOTrainer:
         with Timer("offload_policy_model_to_cpu", self.all_timings):
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
         await self.inference_engine_client.wake_up(tags=["kv_cache"])
+
+    def _should_update_speculator(self) -> bool:
+        config = self.speculative_decoding
+        return (
+            config is not None
+            and config.training is not None
+            and self.global_step % config.training.interval_steps == 0
+        )
+
+    def _speculator_scratch_path(self, *parts: str) -> str:
+        return str(ONLINE_EAGLE_SCRATCH_ROOT.joinpath(self._speculator_process_id, *parts))
+
+    async def _begin_speculator_capture(self) -> None:
+        """Open one capture interval before the first rollout attempt for a step."""
+        if self._speculator_capture_active or not self._should_update_speculator():
+            return
+        assert self.speculative_decoding is not None
+        training = self.speculative_decoding.training
+        assert training is not None
+        assert self._served_draft_revision is not None
+        capture_config = OnlineEagleCaptureConfig(
+            step=self.global_step,
+            max_tokens=training.max_tokens_per_update,
+            max_sequences_per_prompt_group=training.max_sequences_per_prompt_group,
+            target_revision=f"policy-step-{self.global_step - 1}",
+            draft_revision=self._served_draft_revision,
+            reserved_gpu_memory_gib=training.reserved_gpu_memory_gib,
+        ).to_mapping()
+        results = await self.inference_engine_client.begin_online_eagle_capture(capture_config)
+        active_results = _active_online_eagle_results(results)
+        expected_workers = int(self.cfg.generator.inference_engine_data_parallel_size)
+        worker_ranks = {result.get("worker_rank") for result in active_results}
+        node_ids = {result.get("node_id") for result in active_results}
+        try:
+            if len(active_results) != expected_workers or worker_ranks != set(range(expected_workers)):
+                raise RuntimeError(
+                    "Expected one active online EAGLE capture per vLLM DP rank; "
+                    f"expected {expected_workers}, got ranks {sorted(worker_ranks, key=str)}"
+                )
+            if len(node_ids) != 1 or None in node_ids:
+                raise RuntimeError(
+                    "Online EAGLE DP capture requires every vLLM rank on one node; "
+                    f"got node IDs {sorted(node_ids, key=str)}"
+                )
+        except BaseException:
+            try:
+                await self.inference_engine_client.discard_online_eagle_capture()
+            except Exception as error:
+                logger.warning("Failed to discard online EAGLE capture after begin validation: {}", error)
+            raise
+        self._speculator_capture_node_id = next(iter(node_ids))
+        self._speculator_capture_active = True
+        logger.info(
+            "Online EAGLE capture started: step={} target_revision={} draft_revision={}",
+            self.global_step,
+            capture_config["target_revision"],
+            capture_config["draft_revision"],
+        )
+
+    async def _discard_speculator_capture(self) -> None:
+        if not self._speculator_capture_active:
+            return
+        try:
+            await self.inference_engine_client.discard_online_eagle_capture()
+        finally:
+            self._speculator_capture_active = False
+            self._speculator_capture_node_id = None
+
+    async def _seal_speculator_capture(self) -> list[Any] | None:
+        """Seal and return per-engine manifests, or ``None`` without an active capture."""
+        if not self._speculator_capture_active:
+            return None
+        output_root = self._speculator_scratch_path(f"step-{self.global_step}")
+        capture_node_id = self._speculator_capture_node_id
+        try:
+            manifests = await self.inference_engine_client.seal_online_eagle_capture(output_root)
+        finally:
+            self._speculator_capture_active = False
+            self._speculator_capture_node_id = None
+        active_manifests = _active_online_eagle_results(manifests)
+        expected_workers = int(self.cfg.generator.inference_engine_data_parallel_size)
+        worker_ranks = {manifest.get("worker_rank") for manifest in active_manifests}
+        if len(active_manifests) != expected_workers or worker_ranks != set(range(expected_workers)):
+            await self.inference_engine_client.cleanup_online_eagle_scratch(output_root)
+            raise RuntimeError(
+                "Expected one active online EAGLE capture per vLLM DP rank; "
+                f"expected {expected_workers}, got ranks {sorted(worker_ranks, key=str)}"
+            )
+        seal_node_ids = {manifest.get("node_id") for manifest in active_manifests}
+        if seal_node_ids != {capture_node_id}:
+            await self.inference_engine_client.cleanup_online_eagle_scratch(output_root)
+            raise RuntimeError(
+                "Online EAGLE DP capture changed node identity between begin and seal; "
+                f"began on {capture_node_id!r}, sealed on {sorted(seal_node_ids, key=str)}"
+            )
+        self._sealed_speculator_capture_dir = output_root
+        self.all_metrics.update(
+            {
+                "speculator/sealed_rows": float(sum(item.get("captured_rows", 0) for item in active_manifests)),
+                "speculator/sealed_windows": float(sum(len(item.get("windows", ())) for item in active_manifests)),
+                "speculator/capture_dropped_windows": float(
+                    sum(item.get("dropped_windows", 0) for item in active_manifests)
+                ),
+            }
+        )
+        logger.info(
+            "Online EAGLE capture sealed: step={} active_manifests={} output_root={}",
+            self.global_step,
+            len(active_manifests),
+            output_root,
+        )
+        return manifests
+
+    async def _start_speculator_update(self) -> None:
+        """Start the bounded trainer subprocess after the immutable seal exists."""
+        if self._sealed_speculator_capture_dir is None or self._speculator_update_inflight:
+            return
+        assert self.speculative_decoding is not None
+        training = self.speculative_decoding.training
+        assert training is not None
+        assert self._served_draft_path is not None
+        candidate_dir = self._speculator_scratch_path("candidates", f"step-{self.global_step}")
+        job = OnlineEagleTrainingJob(
+            step=self.global_step,
+            capture_dir=self._sealed_speculator_capture_dir,
+            draft_model_dir=self._served_draft_path,
+            initial_draft_source_identity=self.speculative_decoding.model.source_identity,
+            output_dir=candidate_dir,
+            result_path=f"{candidate_dir}.result.json",
+            failure_artifact_path=join_resource_path(
+                self.cfg.trainer.ckpt_path,
+                "speculator-failures",
+                f"step-{self.global_step}",
+            ),
+            num_speculative_tokens=self.speculative_decoding.num_speculative_tokens,
+            seed=int(self.cfg.trainer.seed),
+            training=training,
+        ).to_mapping()
+        results = await self.inference_engine_client.start_online_eagle_speculator_update(job)
+        active = _single_active_online_eagle_result(results, "trainer start")
+        self.all_metrics.update(
+            {
+                "speculator/captured_rows": float(active["captured_rows"]),
+                "speculator/captured_windows": float(active["captured_windows"]),
+                "speculator/dropped_windows": float(active["dropped_windows"]),
+                "speculator/unselected_windows": float(active["unselected_windows"]),
+            }
+        )
+        self._speculator_update_inflight = True
+        self._sealed_speculator_capture_dir = None
+        logger.info(
+            "Online EAGLE update started: step={} pid={} log_path={}",
+            self.global_step,
+            active["pid"],
+            active["log_path"],
+        )
+
+    async def _finish_speculator_update(self) -> None:
+        """Finish one update; its owner reclaims inference-node capture scratch."""
+        if not self._speculator_update_inflight:
+            return
+        try:
+            await self._finish_speculator_update_and_install()
+        finally:
+            self._speculator_update_inflight = False
+
+    async def _finish_speculator_update_and_install(self) -> None:
+        """Join, gate, and collectively install a candidate before target sync."""
+        if not self._speculator_update_inflight:
+            return
+        assert self.speculative_decoding is not None
+        training = self.speculative_decoding.training
+        assert training is not None
+        results = await self.inference_engine_client.finish_online_eagle_speculator_update(
+            training.boundary_wait_seconds
+        )
+        result = OnlineEagleUpdateResult.from_mapping(_single_active_online_eagle_result(results, "trainer finish"))
+        self.all_metrics.update(
+            {
+                "speculator/train_loss": float(result.train_loss if result.train_loss is not None else float("nan")),
+                "speculator/incumbent_holdout_loss": float(
+                    result.incumbent_holdout_loss if result.incumbent_holdout_loss is not None else float("nan")
+                ),
+                "speculator/candidate_holdout_loss": float(
+                    result.candidate_holdout_loss if result.candidate_holdout_loss is not None else float("nan")
+                ),
+                "speculator/incumbent_holdout_agreement": float(
+                    result.incumbent_holdout_agreement
+                    if result.incumbent_holdout_agreement is not None
+                    else float("nan")
+                ),
+                "speculator/candidate_holdout_agreement": float(
+                    result.candidate_holdout_agreement
+                    if result.candidate_holdout_agreement is not None
+                    else float("nan")
+                ),
+                "speculator/holdout_loss_increase": float(
+                    result.holdout_loss_increase if result.holdout_loss_increase is not None else float("nan")
+                ),
+                "speculator/holdout_agreement_decrease": float(
+                    result.holdout_agreement_decrease if result.holdout_agreement_decrease is not None else float("nan")
+                ),
+                "speculator/train_sequences": float(result.train_sequences or 0),
+                "speculator/holdout_sequences": float(result.holdout_sequences or 0),
+                "speculator/train_duration_seconds": float(
+                    result.duration_seconds if result.duration_seconds is not None else float("nan")
+                ),
+                "speculator/candidate_accepted": float(result.accepted),
+            }
+        )
+        if result.deferred:
+            self._speculator_boundary_deferrals += 1
+        if result.error:
+            self._speculator_update_failures += 1
+            logger.error(
+                "Online EAGLE update failed: step={} error={} log_path={} failure_artifact_path={} "
+                "failure_preservation_error={}",
+                self.global_step,
+                result.error,
+                result.log_path,
+                result.failure_artifact_path,
+                result.failure_preservation_error,
+            )
+        if result.accepted:
+            if result.candidate_dir is None or result.draft_revision is None:
+                raise RuntimeError("Accepted online EAGLE result omitted its candidate identity")
+            with Timer("install_speculator", self.all_timings):
+                installs = await self.inference_engine_client.install_online_eagle_speculator(result.candidate_dir)
+            installed = [item for engine_results in installs for item in engine_results]
+            revisions = {item["draft_revision"] for item in installed}
+            digests = {item["weights_sha256"] for item in installed}
+            if revisions != {result.draft_revision} or len(digests) != 1:
+                raise RuntimeError("Online EAGLE ranks reported inconsistent installed revisions or hashes")
+            self._served_draft_revision = result.draft_revision
+            self._served_draft_path = result.candidate_dir
+            self._speculator_install_count += 1
+        self.all_metrics.update(
+            {
+                "speculator/update_failures": float(self._speculator_update_failures),
+                "speculator/boundary_deferrals": float(self._speculator_boundary_deferrals),
+                "speculator/install_count": float(self._speculator_install_count),
+            }
+        )
+
+    async def _publish_speculator_checkpoint(self) -> None:
+        """Publish the exact served draft before the policy completion marker."""
+        speculative_decoding = getattr(self, "speculative_decoding", None)
+        if speculative_decoding is None:
+            return
+        assert self._served_draft_path is not None
+        assert self._served_draft_revision is not None
+        destination = speculator_export_path(self.cfg.trainer.ckpt_path, self.global_step)
+        results = await self.inference_engine_client.publish_online_eagle_speculator(
+            self._served_draft_path,
+            destination,
+            self._served_draft_revision,
+            f"policy-step-{self.global_step}",
+        )
+        active = _single_active_online_eagle_result(results, "checkpoint publication")
+        if not active.get("complete", False):
+            raise RuntimeError(f"Served speculator checkpoint was incomplete: {active}")
+        logger.info(
+            "Published served speculator checkpoint: step={} draft_revision={} path={}",
+            self.global_step,
+            self._served_draft_revision,
+            active["path"],
+        )
+
+    async def _restore_speculator_checkpoint(self, checkpoint_path: str | None) -> None:
+        """Restore and install the draft paired with a resumed policy checkpoint."""
+        speculative_decoding = getattr(self, "speculative_decoding", None)
+        if speculative_decoding is None or self.global_step == 0:
+            return
+        if checkpoint_path is None:
+            raise RuntimeError("A resumed online EAGLE policy must include its loaded checkpoint path")
+        source = join_resource_path(checkpoint_path, SPECULATOR_CHECKPOINT_SUBDIRECTORY)
+        restored_path = self._speculator_scratch_path("resume")
+        results = await self.inference_engine_client.restore_online_eagle_speculator(source, restored_path)
+        manifest = _single_active_online_eagle_result(results, "checkpoint restore")
+        expected_target_revision = f"policy-step-{self.global_step}"
+        if manifest["served_target_revision"] != expected_target_revision:
+            raise RuntimeError(
+                "Resumed target/draft lineage mismatch: expected "
+                f"{expected_target_revision}, got {manifest['served_target_revision']}"
+            )
+        initial_source_identity = manifest.get("lineage", {}).get("initial_source_identity")
+        if initial_source_identity != speculative_decoding.model.source_identity:
+            raise RuntimeError(
+                "Resumed draft source lineage mismatch: expected "
+                f"{speculative_decoding.model.source_identity}, got {initial_source_identity!r}"
+            )
+        installs = await self.inference_engine_client.install_online_eagle_speculator(restored_path)
+        installed = [item for engine_results in installs for item in engine_results]
+        if {item["draft_revision"] for item in installed} != {manifest["draft_revision"]}:
+            raise RuntimeError("Restored online EAGLE ranks installed inconsistent revisions")
+        self._served_draft_revision = manifest["draft_revision"]
+        self._served_draft_path = restored_path
 
     async def _sync_policy_for_rollouts(self, *, reason: str) -> None:
         with Timer("publish_policy_weights", log_events=False) as update_timer:
@@ -588,9 +947,12 @@ class RayPPOTrainer:
             self.policy_model.backload_to_gpu()
 
         # Load checkpoint state if resumption is enabled.
+        loaded_checkpoint_path = None
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints", self.all_startup_timings):
-                self.global_step, _ = self.load_checkpoints()
+                self.global_step, loaded_checkpoint_path = self.load_checkpoints()
+
+        await self._restore_speculator_checkpoint(loaded_checkpoint_path)
 
         await self._sync_policy_for_rollouts(reason="initial")
 
@@ -647,11 +1009,16 @@ class RayPPOTrainer:
                     )
 
                     # 1.1 generation phase
+                    await self._begin_speculator_capture()
                     with (
                         Timer("generate", self.all_timings),
                         critical_phase("rollout_or_inference_wait", self.global_step),
                     ):
-                        trajectory_batch: TrajectoryBatch = await self.generate(trajectory_request)
+                        try:
+                            trajectory_batch: TrajectoryBatch = await self.generate(trajectory_request)
+                        except BaseException:
+                            await self._discard_speculator_capture()
+                            raise
 
                     if self.cfg.trainer.step_wise_training:
                         # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
@@ -676,6 +1043,9 @@ class RayPPOTrainer:
                             # update progress bar for current batch (but not global step)
                             pbar.update(1)
                             continue
+
+                    await self._seal_speculator_capture()
+                    await self._start_speculator_update()
 
                     if self.colocate_all:
                         # if we are not continuing sampling, we sleep the inference engine
@@ -745,6 +1115,7 @@ class RayPPOTrainer:
                     )
 
                     # 5. sync weights to inference engines (must happen before callbacks)
+                    await self._finish_speculator_update()
                     await self._sync_policy_for_rollouts(reason="training_step")
 
                     # 6. Run callback-requested work before closing the inclusive step timer.
@@ -821,6 +1192,7 @@ class RayPPOTrainer:
                 break
 
         # End of training
+        await self._discard_speculator_capture()
         pbar.close()
         await self._finalize_training(
             completed_step=last_completed_step,
@@ -2298,6 +2670,14 @@ class RayPPOTrainer:
             logger.warning(
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
             )
+
+        # Match the optimizer residency used when disaggregated checkpoints are
+        # saved. Megatron initializes restore buffers before reading checkpoint
+        # tensors; leaving the optimizer and gradient buffers on GPU can double
+        # their peak allocation and OOM before the first rollout.
+        if not self.colocate_all and self.cfg.trainer.offload_optimizer_during_rollouts:
+            with Timer("offload_policy_optimizer_before_checkpoint_load", self.all_startup_timings):
+                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
 
         # 3. Load policy checkpoint
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")

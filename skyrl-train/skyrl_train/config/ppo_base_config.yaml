@@ -377,7 +377,11 @@ generator:
   chat_template_kwargs: {}
 
   engine_init_kwargs: {}
-  
+
+  # Managed EAGLE serving and online draft training. The launcher resolves immutable
+  # sources to a node-local model path before vLLM starts.
+  speculative_decoding: null
+
   override_existing_update_group: "auto"
   # Objectives that consume rollout logprobs use processed probabilities and
   # require full-distribution, temperature-only sampling.

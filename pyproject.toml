@@ -91,11 +91,13 @@ vllm = [
     "harbor-config ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
     "quack-kernels==0.5.0 ; sys_platform == 'linux'",
+    "hs-connectors ; sys_platform == 'linux'",
+    "speculators ; sys_platform == 'linux'",
     "tensordict ; sys_platform == 'linux'",
     "torch==2.11.0 ; sys_platform == 'linux'",
     "torchdata ; sys_platform == 'linux'",
     "torchvision==0.26.0 ; sys_platform == 'linux'",
-    "vllm==0.0.0.dev20260805+marin.fa50698a9a30.cu129 ; sys_platform == 'linux'",
+    "vllm==0.0.0.dev20260912+marin.6cf1de831b68.cu129 ; sys_platform == 'linux'",
 ]
 megatron = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
@@ -206,6 +208,8 @@ flash-attn = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 harbor = { git = "https://github.com/marin-community/harbor.git" }
+hs-connectors = { git = "https://github.com/lukedhlee/speculators.git", rev = "6496b4db007de00dd4741349643d23b23e29dce8", subdirectory = "hs_connectors" }
+speculators = { git = "https://github.com/lukedhlee/speculators.git", rev = "6496b4db007de00dd4741349643d23b23e29dce8" }
 torch = [
     { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { index = "pytorch-cu129", extra = "cuda" },
@@ -221,8 +225,8 @@ torchvision = [
 ]
 flashinfer-jit-cache = { index = "flashinfer-cu129", marker = "sys_platform == 'linux'" }
 vllm = [
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260805-fa50698a9a30/vllm-0.0.0.dev20260805+marin.fa50698a9a30.cu129-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260805-fa50698a9a30/vllm-0.0.0.dev20260805+marin.fa50698a9a30.cu129-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260912-6cf1de831b68/vllm-0.0.0.dev20260912+marin.6cf1de831b68.cu129-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260912-6cf1de831b68/vllm-0.0.0.dev20260912+marin.6cf1de831b68.cu129-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 transformer-engine-torch = [

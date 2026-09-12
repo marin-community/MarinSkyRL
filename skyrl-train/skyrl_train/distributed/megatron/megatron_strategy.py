@@ -269,7 +269,7 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler and load_training_state:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
-        with io.local_read_dir(ckpt_dir) as read_dir:
+        with io.node_cached_local_read_dir(ckpt_dir) as read_dir:
             # Load the checkpoint in parallel.
             load_strategy = get_default_load_sharded_strategy(read_dir)
             load_strategy = FullyParallelLoadStrategyWrapper(

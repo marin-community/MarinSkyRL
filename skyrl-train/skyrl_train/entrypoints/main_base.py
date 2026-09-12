@@ -27,6 +27,7 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
+from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -103,8 +104,38 @@ class EntrypointSupervisor:
         return 128 + signum
 
 
-def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
+def create_ray_wrapped_inference_engines_from_config(
+    cfg: DictConfig,
+    colocate_pg,
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    entrypoint: str = STANDARD_TRAINING_ENTRYPOINT,
+):
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+
+    raw_speculative_decoding = cfg.generator.get("speculative_decoding")
+    speculative_decoding = parse_speculative_decoding_config(
+        None if raw_speculative_decoding is None else OmegaConf.to_container(raw_speculative_decoding, resolve=True),
+        backend=cfg.generator.backend,
+        run_engines_locally=cfg.generator.run_engines_locally,
+        entrypoint=entrypoint,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        num_inference_engines=cfg.generator.num_inference_engines,
+        tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+        pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
+        engine_init_kwargs=OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
+    )
+    engine_init_kwargs = {
+        **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
+        "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
+    }
+    if speculative_decoding is not None:
+        engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
+        if speculative_decoding.training is not None:
+            # ``async_engine`` selects SkyRL's actor/API wrapper. vLLM separately
+            # enables its asynchronous scheduler by default, but online EAGLE
+            # capture must reconcile each target forward before the next schedule.
+            engine_init_kwargs["async_scheduling"] = False
 
     engine_kwargs = {
         "num_inference_engines": cfg.generator.num_inference_engines,
@@ -135,10 +166,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         "tokenizer": tokenizer,
         "backend": cfg.generator.backend,
         "vllm_attention_backend": cfg.generator.get("vllm_attention_backend", None),
-        "engine_init_kwargs": {
-            **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
-            "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
-        },
+        "engine_init_kwargs": engine_init_kwargs,
         # Opt-in mp executor backend (Qwen3-Next R3 capture hang workaround; default off).
         "mp_backend": cfg.generator.get("inference_engine_mp_backend", False),
         "placement_group_timeout_seconds": int(cfg.trainer.distributed.placement_group_timeout_seconds),
@@ -217,8 +245,12 @@ class BasePPOExp:
         engine_mode = "local" if self.cfg.generator.run_engines_locally else "remote"
         logger.info("Starting inference engines: mode={}", engine_mode)
         if self.cfg.generator.run_engines_locally:
+            entrypoint = STANDARD_TRAINING_ENTRYPOINT if type(self) is BasePPOExp else type(self).__module__
             inference_engines = create_ray_wrapped_inference_engines_from_config(
-                self.cfg, self.colocate_pg, self.tokenizer
+                self.cfg,
+                self.colocate_pg,
+                self.tokenizer,
+                entrypoint=entrypoint,
             )
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)

@@ -1,13 +1,16 @@
+import json
 import os
 from pathlib import Path
 
 import pytest
+from safetensors.torch import save_file
 import torch
 
 from skyrl_train.checkpoint_exporter import CheckpointExportPlan, CheckpointExporter, RayPolicyExportWorkers
 from skyrl_train.hf_export_schema import HFUploadMode
 from skyrl_train.hf_model_io import verify_hf_model_export
 from skyrl_train.hf_publisher import HuggingFacePublisher
+from skyrl_train.inference_engines.vllm.online_eagle_trainer import publish_speculator_checkpoint
 
 
 class FakePolicyExportWorkers:
@@ -109,6 +112,41 @@ def test_checkpoint_exporter_converts_only_the_policy_model(tmp_path):
     assert workers.export_path == result.export_path
     assert workers.tokenizer is tokenizer
     assert workers.closed
+
+
+def test_checkpoint_export_plan_preserves_cloud_uri_schemes() -> None:
+    plan = CheckpointExportPlan(
+        step=12,
+        checkpoint_path="gs://bucket/checkpoints/global_step_12",
+        export_root="s3://bucket/exports",
+        model_path="org/model",
+    )
+
+    assert plan.policy_checkpoint_path == "gs://bucket/checkpoints/global_step_12/policy"
+    assert plan.speculator_checkpoint_path == "gs://bucket/checkpoints/global_step_12/speculator"
+    assert plan.policy_export_path == "s3://bucket/exports/global_step_12/policy"
+    assert plan.speculator_export_path == "s3://bucket/exports/global_step_12/speculator"
+
+
+def test_checkpoint_exporter_copies_the_paired_served_speculator(tmp_path):
+    plan = _plan(tmp_path)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "config.json").write_text('{"speculators_model_type":"eagle3"}')
+    save_file({"owned.weight": torch.ones(2, 2)}, str(candidate / "model.safetensors"))
+    publish_speculator_checkpoint(
+        str(candidate),
+        plan.speculator_checkpoint_path,
+        draft_revision="draft-step-12",
+        served_target_revision="policy-step-12",
+    )
+
+    result = CheckpointExporter(plan, FakePolicyExportWorkers(), object()).run()
+
+    assert result.speculator_export_path == str(tmp_path / "exports" / "global_step_12" / "speculator")
+    exported = json.loads((Path(result.speculator_export_path) / "manifest.json").read_text())
+    assert exported["draft_revision"] == "draft-step-12"
+    assert exported["served_target_revision"] == "policy-step-12"
 
 
 def test_checkpoint_exporter_rejects_a_mismatched_checkpoint_marker(tmp_path):

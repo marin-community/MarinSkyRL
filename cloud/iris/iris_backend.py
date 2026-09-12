@@ -118,6 +118,7 @@ from marinskyrl.resource_locator import (
     model_source_for_path,
 )
 from marinskyrl.runtime_options import GDNBackend, R3Transport
+from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
 from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
@@ -2105,6 +2106,28 @@ def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
     return model_args
 
 
+def _speculator_bootstrap_args(args: argparse.Namespace) -> list[str]:
+    """Forward the validated immutable draft locator to each task controller."""
+    if _is_checkpoint_export(args):
+        return []
+    raw = _load_rl_config_yaml(args.rl_config)
+    generator = raw.get("generator") or {}
+    if not isinstance(generator, dict):
+        raise ValueError(f"{args.rl_config}: generator must be a mapping")
+    value = generator.get("speculative_decoding")
+    if value is None:
+        return []
+    speculator = SpeculativeDecodingConfig.from_mapping(value)
+    return [
+        "--speculator-source-uri",
+        speculator.model.source_uri,
+        "--speculator-local-path",
+        speculator.model.path,
+        "--speculator-source-identity",
+        speculator.model.source_identity,
+    ]
+
+
 def build_task_command(args: argparse.Namespace) -> List[str]:
     """Build the per-replica command for a resolved RL launch.
 
@@ -2229,6 +2252,7 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if args.run_id:
         controller_cmd.extend(["--run-id", args.run_id])
     controller_cmd.extend(_model_bootstrap_args(args))
+    controller_cmd.extend(_speculator_bootstrap_args(args))
     controller_cmd.append("--")
     controller_cmd.extend(train_cmd)
 
