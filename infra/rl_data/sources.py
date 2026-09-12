@@ -16,6 +16,7 @@ import numpy as np
 import reasoning_gym
 import requests
 from skyrl_gym.envs.aime.utils import last_boxed_only_string, remove_boxed
+from skyrl_gym.envs.text_to_sql import scoring as text_to_sql_scoring
 
 from infra.rl_data.contracts import VerifierDataContract
 
@@ -41,6 +42,7 @@ HH_RLHF_DATASET = "Anthropic/hh-rlhf"
 EURUS2_DATASET = "PRIME-RL/Eurus-2-RL-Data"
 NEMOTRON_DATASET = "nvidia/Llama-Nemotron-Post-Training-Dataset"
 REASONING_GYM_DATASET = "open-thought/reasoning-gym"
+GRETEL_TEXT_TO_SQL_DATASET = "gretelai/synthetic_text_to_sql"
 TEST_ONLY_SOURCE_LABELS = {"aime24": "AIME24", "math500": "MATH-500"}
 TEST_ONLY_SOURCE_NAMES = frozenset(TEST_ONLY_SOURCE_LABELS)
 
@@ -665,6 +667,95 @@ def _prepare_hh_rlhf(example: Mapping[str, Any], index: int, contract: VerifierD
 
 
 # ---------------------------------------------------------------------------
+# Gretel synthetic text-to-SQL (result-set-equivalence verifier)
+# ---------------------------------------------------------------------------
+
+def _ensure_semicolon(stmt: str) -> str:
+    stmt = stmt.strip()
+    return stmt if stmt.endswith(";") else stmt + ";"
+
+
+def _gretel_reference_select(reference_raw: str) -> str:
+    """The single deterministic SELECT a gretel row's ``sql`` field must be, or raise to skip the row."""
+    stmts = [s for s in text_to_sql_scoring.split_statements(reference_raw) if s.strip()]
+    if len(stmts) != 1 or text_to_sql_scoring.classify_statement(stmts[0]) != "select":
+        raise ValueError("gretel text-to-SQL reference is not a single SELECT.")
+    if text_to_sql_scoring.is_nondeterministic(stmts[0]):
+        raise ValueError("gretel text-to-SQL reference depends on the clock or RNG.")
+    return stmts[0]
+
+
+def _split_gretel_context(context: str) -> tuple[list[str], list[str], list[str]]:
+    """Partition ``sql_context`` into (CREATE TABLE, INSERT, table-name) lists, or raise to skip the row."""
+    create_stmts: list[str] = []
+    insert_stmts: list[str] = []
+    table_names: list[str] = []
+    for stmt in text_to_sql_scoring.split_statements(context):
+        kind = text_to_sql_scoring.classify_statement(stmt)
+        if kind == "create_table":
+            if text_to_sql_scoring.create_table_is_schema_qualified(stmt):
+                raise ValueError("gretel text-to-SQL context has a schema-qualified CREATE TABLE.")
+            create_stmts.append(stmt)
+            name = text_to_sql_scoring.create_table_name(stmt)
+            if name:
+                table_names.append(name)
+        elif kind == "insert":
+            insert_stmts.append(stmt)
+        elif kind in ("other_ddl", "dml", "unknown"):
+            raise ValueError(f"gretel text-to-SQL context has an unsupported statement: {kind}.")
+    if not create_stmts:
+        raise ValueError("gretel text-to-SQL context has no CREATE TABLE statements.")
+    if not insert_stmts:
+        raise ValueError("gretel text-to-SQL context has no INSERT statements.")
+    return create_stmts, insert_stmts, table_names
+
+
+def _prepare_gretel_text_to_sql(
+    example: Mapping[str, Any], index: int, contract: VerifierDataContract
+) -> PreparedRow:
+    """Static transform only. Whether the reference query actually executes is checked once, by the
+    contract's two-sided ``validate_example`` preflight — not in bulk here."""
+    source = gretel_text_to_sql_source()
+    question = example.get("sql_prompt")
+    context = example.get("sql_context")
+    reference_raw = example.get("sql")
+    if not isinstance(question, str) or not question.strip():
+        raise TypeError("gretel text-to-SQL row sql_prompt must be a non-empty string.")
+    if not isinstance(context, str) or not context.strip():
+        raise TypeError("gretel text-to-SQL row sql_context must be a non-empty string.")
+    if not isinstance(reference_raw, str) or not reference_raw.strip():
+        raise TypeError("gretel text-to-SQL row sql must be a non-empty string.")
+
+    reference_sql = _gretel_reference_select(reference_raw)
+    create_stmts, insert_stmts, table_names = _split_gretel_context(context)
+
+    ground_truth = {
+        "schema_sql": "\n".join(_ensure_semicolon(s) for s in create_stmts),
+        "insert_sql": "\n".join(_ensure_semicolon(s) for s in insert_stmts),
+        "reference_sql": reference_sql,
+        "order_significant": text_to_sql_scoring.has_top_level_order_by(reference_sql),
+        "table_names": sorted(table_names),
+    }
+    problem = f"{question.strip()}\n\nDatabase schema (SQLite):\n{ground_truth['schema_sql']}"
+    verified = contract.validate_example(ground_truth, f"<solution>{reference_sql}</solution>", "SELECT 1")
+    return {
+        "data_source": source.dataset_id,
+        "prompt": [{"role": "user", "content": problem + contract.prompt_instruction}],
+        "env_class": source.env_id,
+        "reward_model": {"ground_truth": verified},
+        "extra_info": {
+            "split": "train",
+            "index": index,
+            "id": example.get("id"),
+            "domain": example.get("domain"),
+            "sql_complexity": example.get("sql_complexity"),
+            "sql_task_type": example.get("sql_task_type"),
+            "order_significant": ground_truth["order_significant"],
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Source factories
 # ---------------------------------------------------------------------------
 
@@ -783,6 +874,18 @@ def kto_mix_source() -> Source:
 
 def hh_rlhf_source() -> Source:
     return Source("hh_rlhf", HH_RLHF_DATASET, "preference", "train", False, "two_sided", _prepare_hh_rlhf)
+
+
+def gretel_text_to_sql_source() -> Source:
+    return Source(
+        "gretel_text_to_sql",
+        GRETEL_TEXT_TO_SQL_DATASET,
+        "text_to_sql",
+        "train",
+        False,
+        "two_sided",
+        _prepare_gretel_text_to_sql,
+    )
 
 
 def generate_reasoning_gym_rows(
@@ -934,6 +1037,7 @@ SOURCES = {
         openscience_source(),
         kto_mix_source(),
         hh_rlhf_source(),
+        gretel_text_to_sql_source(),
     )
 }
 

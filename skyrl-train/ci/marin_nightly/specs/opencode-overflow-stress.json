@@ -1,0 +1,35 @@
+{
+  "provenance": {
+    "what": "Manual RNO2A OpenCode boundary stress with compaction disabled, proving served context overflow, invalid UTF-8 tool output, output truncation, agent timeout, and verifier timeout remain typed and bounded inside a concurrent RL rollout workflow.",
+    "produced_by": "OPENCODE_MODE=overflow-stress skyrl-train/ci/marin_nightly/run_opencode.sh",
+    "why_these_thresholds": [
+      "The daily OpenCode lane owns the optimizer/checkpoint assertion. This mixed negative-path suite intentionally masks errors that cannot carry behavior logprobs.",
+      "The large-output case must become one typed context-length failure rather than retrying forever or crashing the rollout worker.",
+      "Malformed bytes must still produce a verified exact-TITO trajectory, and output, agent, and verifier limits must remain independently visible."
+    ],
+    "tightening": "Keep the context-overflow case exact after production vetting; other event counts may vary with model tool-use behavior."
+  },
+  "min_train_steps": 0,
+  "finite_metrics": [],
+  "bounds": {},
+  "required_log_patterns": {
+    "clean_shutdown": {"pattern": "Training done!", "minimum": 1},
+    "context_overflow": {
+      "pattern": "TrajectoryID\\(instance_id='case-04'.*ContextLengthExceededError",
+      "minimum": 1,
+      "maximum": 1
+    },
+    "garbage_bytes_case_exact": {
+      "pattern": "Trajectory TrajectoryID\\(instance_id='case-03'.*completed: reward=1\\.000.*tito_full_succeeded=True",
+      "minimum": 1,
+      "maximum": 1
+    },
+    "single_turn_output_limit": {
+      "pattern": "OpenCode task-agent response reached output limit:",
+      "minimum": 1
+    },
+    "agent_timeout": {"pattern": "TrajectoryID\\(instance_id='case-07'.*AgentTimeoutError", "minimum": 1},
+    "verifier_timeout": {"pattern": "TrajectoryID\\(instance_id='case-08'.*VerifierTimeoutError", "minimum": 1}
+  },
+  "max_wall_clock_seconds": 2400
+}

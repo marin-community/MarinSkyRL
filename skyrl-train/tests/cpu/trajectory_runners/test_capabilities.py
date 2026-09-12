@@ -24,6 +24,7 @@ def _harbor_config(agent_name, **harbor_overrides):
                 }
             },
             "terminal_bench_config": {"harbor": harbor},
+            "generator": {"backend": "vllm"},
         }
     )
 
@@ -53,12 +54,12 @@ def test_harbor_behavior_logprobs_reject_unsupported_agents(agent_name):
         validate_trajectory_runner_capabilities(_harbor_config(agent_name), TrajectoryRunnerMode.HARBOR)
 
 
-@pytest.mark.parametrize("agent_name", ["terminus-2", "terminus_2"])
+@pytest.mark.parametrize("agent_name", ["terminus-2", "terminus_2", "terminus-kira", "terminus_kira"])
 def test_harbor_behavior_logprobs_accept_terminus_with_rollout_details(agent_name):
     validate_trajectory_runner_capabilities(_harbor_config(agent_name), TrajectoryRunnerMode.HARBOR)
 
 
-@pytest.mark.parametrize("agent_name", ["terminus-2", "pi"])
+@pytest.mark.parametrize("agent_name", ["terminus-2", "terminus-kira", "pi"])
 def test_harbor_behavior_logprobs_require_rollout_details(agent_name):
     with pytest.raises(ValueError, match="collect_rollout_details=true"):
         validate_trajectory_runner_capabilities(
@@ -76,6 +77,14 @@ def test_harbor_behavior_logprobs_require_tested_opencode_version(version):
 
 def test_harbor_behavior_logprobs_accept_tested_opencode_bridge():
     validate_trajectory_runner_capabilities(_harbor_config("opencode", version="1.18.2"), TrajectoryRunnerMode.HARBOR)
+
+
+def test_harbor_behavior_logprobs_require_vllm_for_opencode():
+    cfg = _harbor_config("opencode", version="1.18.2")
+    cfg.generator.backend = "sglang"
+
+    with pytest.raises(ValueError, match="generator.backend=vllm"):
+        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
 
 
 def test_harbor_behavior_logprobs_accept_pi_literal_bridge():
@@ -131,7 +140,7 @@ def test_behavior_logprobs_reject_multiturn_custom_template_retokenization():
     ("mode", "agent_name", "version", "expected_runner"),
     [
         (TrajectoryRunnerMode.SKYRL_GYM, None, None, "SkyRL Gym"),
-        (TrajectoryRunnerMode.HARBOR, "opencode", "1.18.2", "Harbor opencode"),
+        (TrajectoryRunnerMode.HARBOR, "terminus-kira", None, "Harbor terminus-kira"),
     ],
 )
 def test_explicit_full_tito_rejects_runners_without_exact_continuation(mode, agent_name, version, expected_runner):
@@ -143,9 +152,9 @@ def test_explicit_full_tito_rejects_runners_without_exact_continuation(mode, age
         validate_trajectory_runner_capabilities(cfg, mode)
 
 
-@pytest.mark.parametrize("agent_name", ["terminus-2", "pi"])
-def test_explicit_full_tito_accepts_exact_harbor_continuation(agent_name):
-    cfg = _harbor_config(agent_name)
+@pytest.mark.parametrize(("agent_name", "version"), [("terminus-2", None), ("opencode", "1.18.2"), ("pi", None)])
+def test_explicit_full_tito_accepts_exact_harbor_continuation(agent_name, version):
+    cfg = _harbor_config(agent_name, version=version)
     cfg.trainer.algorithm.use_tis = False
     cfg.trainer.algorithm.tito_full = True
 

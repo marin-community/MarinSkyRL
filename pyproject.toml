@@ -230,7 +230,7 @@ causal-conv1d = [
 mamba-ssm = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
-harbor-config = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-280541674a8e684b5bd8e3d19e8c149981a2e186/harbor_config-0.1.0-py3-none-any.whl" }
+harbor-config = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-952a005353273590631b8f970f4664a121710b32/harbor_config-0.1.0-py3-none-any.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

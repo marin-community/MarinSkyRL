@@ -18,7 +18,7 @@ import requests
 import traceback
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Any, Coroutine, Dict, Optional, Protocol, TypeVar
+from typing import Any, Coroutine, Dict, Optional, TypeVar
 
 import fastapi
 import uvicorn
@@ -27,6 +27,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from skyrl_train.inference_engines.inference_http_backend import InferenceHTTPBackend
+from skyrl_train.inference_engines.opencode_continuation import OpenCodeContinuationManager
 from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator
 
 
@@ -34,25 +36,8 @@ logger = logging.getLogger(__name__)
 
 _ResponseT = TypeVar("_ResponseT")
 TOKENIZE_ENDPOINT = "/tokenize"
-
-
-class InferenceHTTPBackend(Protocol):
-    """What this endpoint needs of the engine client it serves.
-
-    InferenceEngineClient satisfies it. It is a protocol rather than that concrete type
-    because the dependency runs the other way: inference_engine_client imports this module
-    for the error types and the server entrypoints below.
-    """
-
-    model_name: str
-
-    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
-
-    async def chat_completion_stream(self, request_payload: Dict[str, Any]): ...
-
-    async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]: ...
-
-    def tokenize(self, request: "TokenizeRequest") -> list[int]: ...
+MODELS_ENDPOINT = "/v1/models"
+_SERVER_CREATED_TIME = int(time.time())
 
 
 # Global state to hold the inference engine client and backend
@@ -72,23 +57,25 @@ class ErrorResponse(BaseModel):
     error: ErrorInfo
 
 
-class TokenizeRequest(BaseModel):
-    model: Optional[str] = None
-    messages: list[Dict[str, Any]]
-    add_generation_prompt: bool = True
-    continue_final_message: bool = False
-    add_special_tokens: bool = False
-    chat_template: Optional[str] = None
-    chat_template_kwargs: Optional[Dict[str, Any]] = None
-    tools: Optional[list[Dict[str, Any]]] = None
+class ModelCard(BaseModel):
+    id: str
+    object: str = "model"
+    created: int
+    owned_by: str = "skyrl"
+    max_model_len: Optional[int]
 
 
-class TokenizeResponse(BaseModel):
-    tokens: list[int]
-    count: int
+class ModelList(BaseModel):
+    object: str = "list"
+    data: list[ModelCard]
 
 
-def set_global_state(inference_engine_client: InferenceHTTPBackend, uvicorn_server: uvicorn.Server):
+def is_engine_error_response(response: Dict[str, Any]) -> bool:
+    """Recognize the error response shapes returned by vLLM and SGLang."""
+    return "error" in response or response.get("object", "") == "error"
+
+
+def set_global_state(inference_engine_client: InferenceHTTPBackend, uvicorn_server: uvicorn.Server | None):
     """Set the global inference engine client."""
     global _global_inference_engine_client
     global _global_uvicorn_server
@@ -262,18 +249,26 @@ async def _await_with_disconnect(raw_request: Request, backend_request: Coroutin
         await asyncio.gather(backend_task, disconnect_task, return_exceptions=True)
 
 
-async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stats: HTTPBridgeStatsAccumulator):
-    """Handle /completions or /chat/completions request.
+async def handle_openai_request(
+    raw_request: Request,
+    endpoint: str,
+    bridge_stats: HTTPBridgeStatsAccumulator,
+    continuation_manager: OpenCodeContinuationManager | None = None,
+):
+    """Handle a request implemented by the policy model's serving backend.
 
     Returns ``StreamingResponse`` for ``stream:true`` chat-completions and
     ``JSONResponse`` for everything else (byte-identical to pre-streaming behavior).
     """
-    assert endpoint in ["/completions", "/chat/completions"]
+    assert endpoint in ["/completions", "/chat/completions", TOKENIZE_ENDPOINT]
     try:
         request_json = await raw_request.json()
 
         # SkyRL-side validation
-        error_response = _validate_openai_request(request_json, endpoint=endpoint)
+        if endpoint == TOKENIZE_ENDPOINT:
+            error_response = _validate_backend_model(request_json.get("model"))
+        else:
+            error_response = _validate_openai_request(request_json, endpoint=endpoint)
         if error_response is not None:
             return _json_response(
                 error_response.model_dump(),
@@ -290,7 +285,10 @@ async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stat
 
         # ── Streaming branch ──────────────────────────────────────────────
         if request_json.get("stream", False) and endpoint == "/chat/completions":
+            lease = await continuation_manager.begin(payload) if continuation_manager is not None else None
             raw_gen = _global_inference_engine_client.chat_completion_stream(payload)
+            if lease is not None:
+                raw_gen = lease.capture(raw_gen)
             return StreamingResponse(
                 content=_safe_sse_stream(raw_gen, endpoint=endpoint, bridge_stats=bridge_stats),
                 media_type="text/event-stream",
@@ -300,11 +298,13 @@ async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stat
         # Non-streaming requests stay attached to the client until completion.
         if endpoint == "/chat/completions":
             backend_request = _global_inference_engine_client.chat_completion(payload)
-        else:
+        elif endpoint == "/completions":
             backend_request = _global_inference_engine_client.completion(payload)
+        else:
+            backend_request = _global_inference_engine_client.tokenize(payload)
         response = await _await_with_disconnect(raw_request, backend_request)
 
-        if "error" in response or response.get("object", "") == "error":
+        if is_engine_error_response(response):
             # former is vllm format, latter is sglang format
             error_code = response["error"]["code"] if "error" in response else response["code"]
             return _json_response(response, endpoint=endpoint, bridge_stats=bridge_stats, status_code=error_code)
@@ -343,24 +343,6 @@ async def handle_openai_request(raw_request: Request, endpoint: str, bridge_stat
             bridge_stats=bridge_stats,
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
         )
-
-
-async def handle_tokenize_request(request: TokenizeRequest, bridge_stats: HTTPBridgeStatsAccumulator) -> JSONResponse:
-    """Render chat messages with the tokenizer used by the inference client."""
-    error_response = _validate_backend_model(request.model)
-    if error_response is not None:
-        return _json_response(
-            error_response.model_dump(),
-            endpoint=TOKENIZE_ENDPOINT,
-            bridge_stats=bridge_stats,
-            status_code=error_response.error.code,
-        )
-
-    backend = _global_inference_engine_client
-    assert backend is not None
-    token_ids = await asyncio.to_thread(backend.tokenize, request)
-    response = TokenizeResponse(tokens=token_ids, count=len(token_ids))
-    return _json_response(response.model_dump(), endpoint=TOKENIZE_ENDPOINT, bridge_stats=bridge_stats)
 
 
 def shutdown_server(host: str = "127.0.0.1", port: int = 8000, max_wait_seconds: int = 30) -> None:
@@ -439,13 +421,43 @@ async def _monitor_event_loop_lag(
         raise
 
 
+async def handle_models_request(
+    *,
+    bridge_stats: HTTPBridgeStatsAccumulator,
+) -> JSONResponse:
+    """Return the served model name and live engine context limit."""
+    backend = _global_inference_engine_client
+    assert backend is not None
+    response = ModelList(
+        data=[
+            ModelCard(
+                id=backend.model_name,
+                created=_SERVER_CREATED_TIME,
+                max_model_len=backend.max_model_len,
+            )
+        ]
+    )
+    return _json_response(
+        response.model_dump(),
+        endpoint=MODELS_ENDPOINT,
+        bridge_stats=bridge_stats,
+    )
+
+
 def create_app(
     bridge_stats: HTTPBridgeStatsAccumulator | None = None,
     *,
+    backend: InferenceHTTPBackend | None = None,
     event_loop_lag_interval_seconds: float = 0.5,
+    enable_opencode_exact_continuation: bool = False,
 ) -> fastapi.FastAPI:
     """Create the FastAPI application."""
     bridge_stats = bridge_stats or HTTPBridgeStatsAccumulator()
+    continuation_manager = None
+    if enable_opencode_exact_continuation:
+        if backend is None:
+            raise ValueError("OpenCode exact continuation requires an explicit inference backend")
+        continuation_manager = OpenCodeContinuationManager(backend)
 
     @asynccontextmanager
     async def lifespan(app: fastapi.FastAPI):
@@ -498,7 +510,12 @@ def create_app(
         - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
         - https://docs.sglang.ai/basic_usage/openai_api_completions.html
         """
-        return await handle_openai_request(raw_request, endpoint="/chat/completions", bridge_stats=bridge_stats)
+        return await handle_openai_request(
+            raw_request,
+            endpoint="/chat/completions",
+            bridge_stats=bridge_stats,
+            continuation_manager=continuation_manager,
+        )
 
     @app.post("/v1/completions")
     async def completions(raw_request: Request):
@@ -525,9 +542,14 @@ def create_app(
         return await handle_openai_request(raw_request, endpoint="/completions", bridge_stats=bridge_stats)
 
     @app.post(TOKENIZE_ENDPOINT)
-    async def tokenize(request: TokenizeRequest):
-        """Render chat messages to token IDs with vLLM-compatible request fields."""
-        return await handle_tokenize_request(request, bridge_stats)
+    async def tokenize(raw_request: Request):
+        """Delegate chat tokenization to the inference backend's serving renderer."""
+        return await handle_openai_request(raw_request, endpoint=TOKENIZE_ENDPOINT, bridge_stats=bridge_stats)
+
+    @app.get(MODELS_ENDPOINT)
+    async def models():
+        """Return the served model identity and configured context limit."""
+        return await handle_models_request(bridge_stats=bridge_stats)
 
     # Health check endpoint
     # All inference engine replicas are initialized before creating `InferenceEngineClient`, and thus
@@ -563,6 +585,7 @@ def serve(
     port: int = 8000,
     log_level: str = "info",
     bridge_stats: HTTPBridgeStatsAccumulator | None = None,
+    enable_opencode_exact_continuation: bool = False,
 ):
     """
     Start the HTTP endpoint.
@@ -573,9 +596,13 @@ def serve(
         port: Port to bind to (default: 8000)
         log_level: Logging level (default: "info")
         bridge_stats: Shared accumulator for HTTP bridge metrics
+        enable_opencode_exact_continuation: Preserve exact served token prefixes for terminal-bench OpenCode
     """
-    # Create app
-    app = create_app(bridge_stats)
+    app = create_app(
+        bridge_stats,
+        backend=inference_engine_client,
+        enable_opencode_exact_continuation=enable_opencode_exact_continuation,
+    )
 
     # Configure logging
     logging.basicConfig(level=getattr(logging, log_level.upper()))

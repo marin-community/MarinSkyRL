@@ -95,10 +95,10 @@ class _RemoteCapture:
                     def remote(**kwargs):
                         capture.remote_calls.append(kwargs)
                         # Stand-in vLLM actor handle. The disaggregated readiness gate
-                        # calls engine.inference_engine_actor.report_engine_hosts.remote(),
-                        # so the handle must expose that method.
+                        # and context-limit probe call both actor methods.
                         return types.SimpleNamespace(
-                            report_engine_hosts=types.SimpleNamespace(remote=lambda *a, **k: None)
+                            report_engine_hosts=types.SimpleNamespace(remote=lambda *a, **k: None),
+                            get_model_max_len=types.SimpleNamespace(remote=lambda *a, **k: "max-model-len-ref"),
                         )
 
                 return _Bound()
@@ -143,8 +143,12 @@ def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
     monkeypatch.setattr(rwie, "get_all_env_variables", fake_get_all)
     monkeypatch.setattr(rwie, "get_ray_pg_ready_with_timeout", lambda *a, **k: None)
 
-    # ray.get(...) is called on get_all_env_variables.remote() — return a dummy env dict.
-    monkeypatch.setattr(rwie.ray, "get", lambda *a, **k: {})
+    def fake_ray_get(refs):
+        if refs == ["max-model-len-ref"]:
+            return [32768]
+        return {}
+
+    monkeypatch.setattr(rwie.ray, "get", fake_ray_get)
     monkeypatch.setattr(rwie, "wait_for_inference_engine_startup", lambda *a, **k: None)
     # get_rendezvous_addr_port is only used for data_parallel_size>1; stub anyway.
     monkeypatch.setattr(
@@ -156,7 +160,7 @@ def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
     # handle as .inference_engine_actor), so use it unmocked — the readiness gate reads
     # engine.inference_engine_actor off it.
 
-    rwie.create_ray_wrapped_inference_engines(
+    engines = rwie.create_ray_wrapped_inference_engines(
         num_inference_engines=1,
         tensor_parallel_size=1,
         model_dtype="bfloat16",
@@ -176,6 +180,7 @@ def _run_create(monkeypatch, dcp: int, attention_backend: str | None = None):
         vllm_attention_backend=attention_backend,
         engine_init_timeout_seconds=60,
     )
+    capture.resolved_max_model_len = engines[0].max_model_len
     return capture
 
 
@@ -228,3 +233,9 @@ def test_attention_backend_absent_by_default(monkeypatch):
 def test_attention_backend_forwarded_to_vllm_actor(monkeypatch):
     capture = _run_create(monkeypatch, dcp=1, attention_backend="FLASH_ATTN")
     assert capture.remote_calls[0]["attention_backend"] == "FLASH_ATTN"
+
+
+def test_wrapper_records_the_limit_resolved_by_vllm(monkeypatch):
+    capture = _run_create(monkeypatch, dcp=1)
+
+    assert capture.resolved_max_model_len == 32768

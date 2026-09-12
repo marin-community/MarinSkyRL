@@ -142,3 +142,50 @@ def test_lcb_contract_rejects_unlaunchable_test_schemas(ground_truth, error):
 def test_contract_preflight_rejects_unknown_or_incomplete_verifier_specs(env_id, ground_truth):
     with pytest.raises(ValueError):
         get_data_contract(env_id).normalize_ground_truth(ground_truth)
+
+
+_T2S_GROUND_TRUTH = {
+    "schema_sql": "CREATE TABLE Hospitals (HospitalID INT, State TEXT);",
+    "insert_sql": "INSERT INTO Hospitals VALUES (1,'CA'),(2,'CA'),(3,'NY'),(4,'NY'),(5,'TX'),(6,'TX');",
+    "reference_sql": "SELECT State, COUNT(*) FROM Hospitals GROUP BY State",
+    "order_significant": False,
+    "table_names": ["Hospitals"],
+}
+
+
+def test_text_to_sql_contract_normalizes_and_runs_a_two_sided_preflight():
+    contract = get_data_contract("text_to_sql")
+
+    ground_truth = contract.validate_example(
+        _T2S_GROUND_TRUTH,
+        "<solution>SELECT State, COUNT(*) AS n FROM Hospitals GROUP BY 1</solution>",
+        "SELECT 1",
+    )
+
+    payload = json.loads(ground_truth)
+    assert payload["reference_sql"] == _T2S_GROUND_TRUTH["reference_sql"]
+    assert payload["table_names"] == ["Hospitals"]
+    assert payload["order_significant"] is False
+
+
+@pytest.mark.parametrize(
+    "ground_truth, error",
+    [
+        ({"insert_sql": "x", "reference_sql": "SELECT 1", "order_significant": False}, "missing keys"),
+        ({**_T2S_GROUND_TRUTH, "schema_sql": "CREATE TABLE (;"}, "does not load"),
+        ({**_T2S_GROUND_TRUTH, "insert_sql": "SELECT 1"}, "only INSERT"),
+        (
+            {**_T2S_GROUND_TRUTH, "schema_sql": _T2S_GROUND_TRUTH["schema_sql"] + " PRAGMA user_version;"},
+            "only CREATE TABLE",
+        ),
+    ],
+)
+def test_text_to_sql_contract_rejects_unrunnable_specs(ground_truth, error):
+    with pytest.raises(ValueError, match=error):
+        get_data_contract("text_to_sql").normalize_ground_truth(ground_truth)
+
+
+def test_text_to_sql_contract_rejects_a_positive_that_fails_the_verifier():
+    contract = get_data_contract("text_to_sql")
+    with pytest.raises(ValueError):
+        contract.validate_example(_T2S_GROUND_TRUTH, "<solution>SELECT 1</solution>", "SELECT 2")

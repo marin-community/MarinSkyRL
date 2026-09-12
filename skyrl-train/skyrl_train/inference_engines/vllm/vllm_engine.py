@@ -36,7 +36,10 @@ try:
         CompletionRequest,
         CompletionResponse,
     )
-    from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+    try:
+        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+    except ImportError:
+        from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 except ImportError:
     # vLLM < 0.16 (old flat layout)
     from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -50,6 +53,16 @@ except ImportError:
         CompletionResponse,
     )
 
+from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest, TokenizeResponse
+
+try:
+    from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
+except ImportError:
+    try:
+        from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization as ServingTokenization
+    except ImportError:
+        ServingTokenization = None
+
 try:
     from vllm.v1.metrics.loggers import LoggingStatLogger
 except ImportError:
@@ -59,6 +72,7 @@ from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
 import warnings
+from contextvars import ContextVar
 
 
 from skyrl_train.inference_engines.base import (
@@ -67,6 +81,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.inference_engines.opencode_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
@@ -90,6 +105,35 @@ import time
 from packaging import version
 
 
+_exact_chat_prompt_token_ids: ContextVar[list[int] | None] = ContextVar("exact_chat_prompt_token_ids", default=None)
+
+
+class SkyRLOpenAIServingChat(OpenAIServingChat):
+    """Substitute exact prompt token IDs while retaining vLLM's chat response parser."""
+
+    async def render_chat_request(self, request):
+        rendered = await super().render_chat_request(request)
+        exact_ids = _exact_chat_prompt_token_ids.get()
+        if exact_ids is None or not isinstance(rendered, tuple):
+            return rendered
+        conversation, engine_inputs = rendered
+        if len(engine_inputs) != 1:
+            raise ValueError("Exact OpenCode continuation requires one rendered prompt")
+        return conversation, [TokensPrompt(prompt_token_ids=list(exact_ids))]
+
+    async def create_chat_completion_with_exact_prompt(
+        self,
+        request: ChatCompletionRequest,
+        raw_request: "_MinimalRequest",
+        prompt_token_ids: list[int],
+    ) -> ChatCompletionResponse | ErrorResponse | AsyncGenerator[str, None]:
+        token = _exact_chat_prompt_token_ids.set(prompt_token_ids)
+        try:
+            return await super().create_chat_completion(request, raw_request)
+        finally:
+            _exact_chat_prompt_token_ids.reset(token)
+
+
 def _parse_vllm_version() -> version.Version:
     """Parse vllm.__version__, treating 'dev' or other invalid strings as 999.0.0."""
     try:
@@ -111,13 +155,16 @@ def _build_error_response(message: str, type_phrase: str, code: int) -> Dict[str
     then fall back to the flat-field ErrorResponse for pre-0.10 vLLM.
     """
     ErrorInfo = None
-    try:  # vLLM >= 0.16 (sub-package layout, same module as ErrorResponse)
-        from vllm.entrypoints.openai.engine.protocol import ErrorInfo  # type: ignore
+    try:  # Current vLLM serve layout.
+        from vllm.entrypoints.serve.engine.protocol import ErrorInfo  # type: ignore
     except ImportError:
-        try:  # vLLM 0.10–0.15 (flat layout)
-            from vllm.entrypoints.openai.protocol import ErrorInfo  # type: ignore
+        try:  # vLLM 0.16–0.20 layout.
+            from vllm.entrypoints.openai.engine.protocol import ErrorInfo  # type: ignore
         except ImportError:
-            ErrorInfo = None
+            try:  # vLLM 0.10–0.15 flat layout.
+                from vllm.entrypoints.openai.protocol import ErrorInfo  # type: ignore
+            except ImportError:
+                ErrorInfo = None
 
     if ErrorInfo is not None:
         return ErrorResponse(
@@ -1049,6 +1096,10 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Get the underlying engine for RPC calls."""
         return self.llm.engine if hasattr(self.llm, "engine") else self.llm
 
+    def get_model_max_len(self) -> int:
+        """Return the context limit resolved by vLLM's model configuration."""
+        return self._get_engine().model_config.max_model_len
+
     def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
         """Check if this is a LoRA disk loading request."""
         is_lora = request["names"][0] == "lora_disk_load"
@@ -1648,7 +1699,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         else:
             custom_chat_template_content = None
 
-        # The pinned fork shares one renderer between chat and completion serving.
+        # The pinned fork shares one renderer between chat, completion, and
+        # tokenization serving.
         online_renderer = OnlineRenderer(
             model_config=model_config,
             renderer=engine.renderer,
@@ -1658,7 +1710,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             **wrapper_kwargs,
         )
         online_renderer.warmup()
-        self.openai_serving_chat = OpenAIServingChat(
+        self.openai_serving_chat = SkyRLOpenAIServingChat(
             engine_client=engine,
             models=models,
             response_role="assistant",
@@ -1674,6 +1726,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             online_renderer=online_renderer,
             request_logger=None,
         )
+        self.openai_serving_tokenization = None
+        if ServingTokenization is not None:
+            self.openai_serving_tokenization = ServingTokenization(
+                models=models,
+                online_renderer=online_renderer,
+                request_logger=None,
+                chat_template=custom_chat_template_content,
+                chat_template_content_format="auto",
+            )
         return engine
 
     async def _load_lora_from_disk(self, lora_path: str):
@@ -1876,6 +1937,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
+        exact_prompt_token_ids = body.pop(EXACT_PROMPT_TOKEN_IDS_KEY, None)
 
         # Apply configured sampling params from generator config.
         # Harbor requests may include their own sampling params; we override
@@ -1897,7 +1959,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             # Create a minimal request-like object with attributes used by vLLM
             minimal_request = _MinimalRequest(headers)
             if endpoint == "/chat/completions":
-                generator = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
+                if exact_prompt_token_ids is None:
+                    generator = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
+                else:
+                    generator = await self.openai_serving_chat.create_chat_completion_with_exact_prompt(
+                        request, minimal_request, exact_prompt_token_ids
+                    )
                 assert isinstance(generator, (ChatCompletionResponse, ErrorResponse))
             else:
                 generator = await self.openai_serving_completion.create_completion(request, minimal_request)
@@ -1945,6 +2012,21 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         return await self._handle_openai_request(request_payload, endpoint="/chat/completions")
 
+    async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Return vLLM's native chat-tokenization response."""
+        body = request_payload.get("json", {})
+        headers = request_payload.get("headers", {})
+        try:
+            request = TokenizeChatRequest(**body)
+        except Exception as e:
+            return _build_error_response(str(e), HTTPStatus.BAD_REQUEST.phrase, HTTPStatus.BAD_REQUEST.value)
+
+        if self.openai_serving_tokenization is None:
+            raise RuntimeError("The configured vLLM version does not expose the shared rendering service")
+        response = await self.openai_serving_tokenization.create_tokenize(request, _MinimalRequest(headers))
+        assert isinstance(response, (TokenizeResponse, ErrorResponse))
+        return response.model_dump()
+
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/completions` in Python vLLM engine.
 
@@ -1970,6 +2052,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
+        exact_prompt_token_ids = body.pop(EXACT_PROMPT_TOKEN_IDS_KEY, None)
 
         apply_openai_sampling(body, self._openai_sampling_params, self._validate_rollout_logprob_sampling)
         body["stream"] = True
@@ -1978,7 +2061,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         try:
             request = ChatCompletionRequest(**body)
             minimal_request = _MinimalRequest(headers)
-            result = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
+            if exact_prompt_token_ids is None:
+                result = await self.openai_serving_chat.create_chat_completion(request, minimal_request)
+            else:
+                result = await self.openai_serving_chat.create_chat_completion_with_exact_prompt(
+                    request, minimal_request, exact_prompt_token_ids
+                )
 
             if isinstance(result, ErrorResponse):
                 err = result.model_dump()

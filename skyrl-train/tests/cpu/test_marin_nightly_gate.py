@@ -4,13 +4,24 @@ Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_marin_
 """
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from ci.marin_nightly.gate import GateSpec, MetricBound, RewardTrend, check_run, load_spec, parse_metrics
+from ci.marin_nightly.gate import (
+    GateSpec,
+    LogPatternBound,
+    MetricBound,
+    RewardTrend,
+    check_log_patterns,
+    check_run,
+    load_spec,
+    parse_metrics,
+)
 
 SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b.json"
+OPENCODE_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opencode-qwen3-8b.json"
 
 # What the trainer actually writes: loguru decorates the line, so the payload is embedded
 # rather than anchored at the start. Keep this in the shape the trainer emits it.
@@ -136,6 +147,21 @@ def test_run_over_the_wall_clock_budget_fails(spec):
     assert "budget" in failures[0]
 
 
+def test_required_log_patterns_have_named_inclusive_bounds(spec):
+    spec = replace(
+        spec,
+        required_log_patterns={
+            "compaction": LogPatternBound(r"history (?:did not grow|was rewritten)", 1, 2),
+            "timeout": LogPatternBound(r"AgentTimeoutError", 1, 1),
+        },
+    )
+    log = "history did not grow\nAgentTimeoutError\nhistory was rewritten\n"
+
+    assert check_log_patterns(log, spec) == []
+    failures = check_log_patterns(log + "AgentTimeoutError\n", spec)
+    assert failures == ["log pattern 'timeout' occurred 2 times, expected at most 1"]
+
+
 def test_eval_payloads_do_not_count_as_training_steps(spec):
     log = "\n".join([mirror_line(1), mirror_line(1, kind="eval"), mirror_line(2, kind="eval")])
     failures = check_run(parse_metrics(log), spec, wall_clock_seconds=300)
@@ -166,3 +192,34 @@ def test_shipped_spec_gates_a_healthy_run():
     """The checked-in spec has to stay loadable by the gate and pass a plausible run."""
     spec = load_spec(SHIPPED_SPEC)
     assert check_run(parse_metrics(healthy_log(steps=spec.min_train_steps)), spec, wall_clock_seconds=600) == []
+
+
+def test_opencode_spec_requires_exact_concurrent_literal_coverage():
+    spec = load_spec(OPENCODE_SPEC)
+    exact_metrics = {
+        "generate/failed_trajectory_fraction": 0.0,
+        "generate/literal_bridge/correlated_trials": 8.0,
+        "generate/literal_bridge/correlated_turns": 24.0,
+        "generate/tis/exact_match_fraction": 1.0,
+        "generate/tis/lcs_fallback_fraction": 0.0,
+        "generate/tis/unaligned_fraction": 0.0,
+        "generate/tis/tito_full/success_fraction": 1.0,
+        "generate/tis/tito_full/decline_count": 0.0,
+        "tis/skipped_fraction": 0.0,
+    }
+    healthy = parse_metrics(mirror_line(1, **exact_metrics))
+    assert check_run(healthy, spec, wall_clock_seconds=900) == []
+
+    approximate = parse_metrics(
+        mirror_line(
+            1,
+            **{
+                **exact_metrics,
+                "generate/tis/exact_match_fraction": 0.99,
+                "generate/tis/lcs_fallback_fraction": 0.01,
+            },
+        )
+    )
+    failures = check_run(approximate, spec, wall_clock_seconds=900)
+    assert any("exact_match_fraction" in failure for failure in failures)
+    assert any("lcs_fallback_fraction" in failure for failure in failures)

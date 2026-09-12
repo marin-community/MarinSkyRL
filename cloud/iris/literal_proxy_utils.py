@@ -31,6 +31,7 @@ disabled path are fully unit-testable without a server (see tests/hpc/test_liter
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tempfile
@@ -54,6 +55,8 @@ from urllib.parse import urlsplit, urlunsplit
 # fronts the LOCAL vLLM; external reach is via the existing pinggy/controller path).
 DEFAULT_LITERAL_PROXY_PORT = 8010
 DEFAULT_LITERAL_PROXY_HOST = "127.0.0.1"
+_LITERAL_PROXY_PORT_BASE = 10000
+_LITERAL_PROXY_PORT_COUNT = 10000
 
 # Filename harbor's opencode agent reads back from its logs dir
 # (``OpenCode._LITERAL_LOG_FILENAME``); we name the co-located log the same for
@@ -64,6 +67,13 @@ LITERAL_LOG_FILENAME = "literal.jsonl"
 def _slug(job_name: str) -> str:
     """Filesystem-safe slug for a job name (``.`` preserved for readability)."""
     return re.sub(r"[^A-Za-z0-9._-]+", "-", (job_name or "job")).strip("-.") or "job"
+
+
+def literal_proxy_port(job_name: str) -> int:
+    """Choose a stable per-task port outside the kernel's default ephemeral range."""
+    task_id = os.environ.get("IRIS_TASK_ID", "")
+    digest = hashlib.blake2s(f"{job_name}:{task_id}".encode(), digest_size=2).digest()
+    return _LITERAL_PROXY_PORT_BASE + int.from_bytes(digest) % _LITERAL_PROXY_PORT_COUNT
 
 
 def serve_token() -> str:

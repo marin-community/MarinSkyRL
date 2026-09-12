@@ -28,6 +28,7 @@ from omegaconf import OmegaConf
 import asyncio
 import pytest
 import random
+import ray.exceptions
 from copy import deepcopy
 
 
@@ -501,6 +502,45 @@ def _make_min_cfg():
     )
 
 
+@pytest.mark.parametrize(
+    "engine_limit,expected",
+    [
+        (65536, 65536),
+        (None, None),
+    ],
+)
+def test_client_context_limit_comes_from_live_engine(engine_limit, expected):
+    configured = _make_min_cfg()
+    engines = [] if engine_limit is None else [type("Engine", (), {"max_model_len": engine_limit})()]
+
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=configured)
+
+    assert client.max_model_len == expected
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "agent_name", "collect_rollout_details", "backend", "expected"),
+    [
+        ("terminal_bench", "opencode", True, "vllm", True),
+        ("terminal_bench", "opencode", False, "vllm", False),
+        ("terminal_bench", "terminus-2", True, "vllm", False),
+        ("terminal_bench", "opencode", True, "sglang", False),
+        ("gsm8k", "opencode", True, "vllm", False),
+    ],
+)
+def test_exact_opencode_continuation_is_terminal_bench_scoped(
+    entrypoint, agent_name, collect_rollout_details, backend, expected
+):
+    configured = _make_min_cfg()
+    configured.entrypoint = entrypoint
+    configured.generator.backend = backend
+    configured.terminal_bench = {"harbor": {"name": agent_name, "collect_rollout_details": collect_rollout_details}}
+
+    client = InferenceEngineClient(engines=[], tokenizer=object(), full_config=configured)
+
+    assert client.enable_opencode_exact_continuation is expected
+
+
 @pytest.mark.asyncio
 async def test_chat_completion_retry_accumulates_and_sends_continuations():
     """
@@ -762,6 +802,50 @@ async def test_chat_completion_retry_resends_original_when_no_tokens_generated_y
     # Since finish_reason != abort on the second call and base_response was None,
     # client should return the second response directly (no accumulation)
     assert out == engines[0].responses[1]
+
+
+# -------------------------------------------
+# tests for terminal-bench tokenization
+# --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tokenize_returns_native_serving_response_without_local_rendering():
+    class NativeRenderingEngine:
+        def __init__(self):
+            self.request_payload = None
+
+        async def tokenize(self, request_payload):
+            self.request_payload = request_payload
+            return {
+                "tokens": [7, 8, 9],
+                "count": 3,
+                "max_model_len": 4096,
+                "token_strs": ["typed", "content", "parts"],
+            }
+
+    engine = NativeRenderingEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    request_payload = {
+        "json": {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+            "continue_final_message": True,
+            "add_generation_prompt": False,
+            "return_token_strs": True,
+        },
+        "headers": {"x-request-id": "continuation-1"},
+    }
+
+    response = await client.tokenize(deepcopy(request_payload))
+
+    assert response == {
+        "tokens": [7, 8, 9],
+        "count": 3,
+        "max_model_len": 4096,
+        "token_strs": ["typed", "content", "parts"],
+    }
+    assert engine.request_payload == request_payload
 
 
 # -------------------------------------------
@@ -1074,3 +1158,236 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
     chunks = await asyncio.wait_for(task, timeout=5)
     assert engines[0].entered.is_set()
     assert any("[DONE]" in c for c in chunks)
+
+
+# -------------------------------------------
+# completion behavior at the weight-sync pause boundary
+# --------------------------------------------
+
+
+class _MockCompletionEngine:
+    """Engine whose ``completion`` replays a scripted list of responses and records requests."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+        self.entered = asyncio.Event()
+
+    async def completion(self, request_payload):
+        self.entered.set()
+        self.calls.append(deepcopy(request_payload["json"]))
+        response = self.responses[min(len(self.calls) - 1, len(self.responses) - 1)]
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+def _completion_response(text, finish_reason, *, completion_tokens=None):
+    return {
+        "id": "cmpl-mock",
+        "object": "text_completion",
+        "model": "dummy-model",
+        "choices": [{"index": 0, "text": text, "finish_reason": finish_reason}],
+        "usage": {
+            "prompt_tokens": 4,
+            "completion_tokens": completion_tokens if completion_tokens is not None else len(text),
+            "total_tokens": 4 + (completion_tokens if completion_tokens is not None else len(text)),
+        },
+    }
+
+
+def _completion_payload(prompt, **extra):
+    return {
+        "json": {"model": "dummy-model", "prompt": prompt, "max_tokens": 32, **extra},
+        "headers": {"Content-Type": "application/json"},
+    }
+
+
+# The two single-prompt shapes: a raw string, and the flat token-id list harbor's TITO
+# transport sends. A list OF strings is batched even at length 1 (see
+# `postprocess_completion_request`), which is why the shapes are pinned here.
+SINGLE_PROMPTS = [pytest.param("hello", id="string"), pytest.param([1, 2, 3, 4], id="token_ids")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt", SINGLE_PROMPTS)
+async def test_completion_single_prompt_blocks_while_paused_then_resumes(prompt, monkeypatch):
+    engines = [_MockCompletionEngine([_completion_response("done", "stop")])]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+    barrier_entered = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def _wait_for_resume():
+        barrier_entered.set()
+        await resume.wait()
+
+    monkeypatch.setattr(client, "_wait_for_generation_to_resume", _wait_for_resume)
+
+    task = asyncio.create_task(client.completion(_completion_payload(prompt)))
+    await asyncio.wait_for(barrier_entered.wait(), timeout=1)
+    assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
+    assert not task.done()
+
+    resume.set()
+    result = await asyncio.wait_for(task, timeout=5)
+
+    assert engines[0].entered.is_set()
+    assert result["choices"][0]["text"] == "done"
+    assert len(engines[0].calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt", SINGLE_PROMPTS)
+async def test_completion_single_prompt_reissues_once_after_a_midflight_abort(prompt):
+    """A pause that begins mid-flight comes back as finish_reason "abort" (the abort-mode
+    scheduler pause returns what was generated so far). /completions cannot continue a
+    partial generation the way chat can, so the request is re-issued from the start, once,
+    and the caller sees only the completed response."""
+    engines = [
+        _MockCompletionEngine(
+            [
+                _completion_response("partial", "abort", completion_tokens=2),
+                _completion_response("complete answer", "stop"),
+            ]
+        )
+    ]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    result = await client.completion(_completion_payload(prompt))
+
+    assert result["choices"][0]["finish_reason"] == "stop"
+    assert result["choices"][0]["text"] == "complete answer"
+    assert len(engines[0].calls) == 2
+    # The re-issue restarts from the ORIGINAL prompt (no continuation protocol here), and
+    # every other sampling field is carried over unchanged.
+    expected_prompt = [prompt]
+    for call in engines[0].calls:
+        assert call["prompt"] == expected_prompt
+        assert call["max_tokens"] == 32
+
+
+@pytest.mark.asyncio
+async def test_completion_single_prompt_reissue_waits_for_a_pause_that_is_still_on(monkeypatch):
+    engines = [
+        _MockCompletionEngine(
+            [
+                _completion_response("partial", "abort", completion_tokens=2),
+                _completion_response("complete answer", "stop"),
+            ]
+        )
+    ]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    retry_waiting = asyncio.Event()
+    resume_retry = asyncio.Event()
+    barrier_calls = 0
+
+    async def _wait_for_resume():
+        nonlocal barrier_calls
+        barrier_calls += 1
+        if barrier_calls == 2:
+            retry_waiting.set()
+            await resume_retry.wait()
+
+    monkeypatch.setattr(client, "_wait_for_generation_to_resume", _wait_for_resume)
+
+    task = asyncio.create_task(client.completion(_completion_payload([1, 2, 3, 4])))
+    await asyncio.wait_for(retry_waiting.wait(), timeout=1)
+    assert len(engines[0].calls) == 1, "the retry entered the engine while generation was paused"
+    assert not task.done()
+
+    resume_retry.set()
+    result = await asyncio.wait_for(task, timeout=5)
+
+    assert result["choices"][0]["finish_reason"] == "stop"
+    assert len(engines[0].calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_completion_single_prompt_returns_a_second_abort_as_is():
+    """One retry, not a loop: a re-issue restarts generation, so retrying forever could
+    livelock a long generation under frequent weight syncs. A second abort is handed back
+    to the caller — the behaviour it would have seen before any of this handling."""
+    engines = [_MockCompletionEngine([_completion_response("partial", "abort", completion_tokens=2)])]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    result = await client.completion(_completion_payload([1, 2, 3, 4]))
+
+    assert result["choices"][0]["finish_reason"] == "abort"
+    assert len(engines[0].calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_completion_pause_retry_stays_on_failover_engine():
+    engines = [
+        _MockCompletionEngine([ray.exceptions.RayActorError()]),
+        _MockCompletionEngine(
+            [
+                _completion_response("partial", "abort", completion_tokens=2),
+                _completion_response("complete", "stop"),
+            ]
+        ),
+    ]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    result = await client._single_completion_with_pause_retry(
+        0,
+        _completion_payload([1, 2, 3, 4])["json"],
+        {"Content-Type": "application/json"},
+    )
+
+    assert result["choices"][0]["text"] == "complete"
+    assert len(engines[0].calls) == 1
+    assert len(engines[1].calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_completion_single_prompt_engine_error_is_wrapped_not_retried():
+    """An engine error payload carries no usable `choices`; it is not an abort, so it is
+    returned as the client-level error response without a second attempt."""
+    error_payload = {
+        "object": "error",
+        "message": "This model's maximum context length is 32768 tokens",
+        "type": HTTPStatus.BAD_REQUEST.phrase,
+        "code": HTTPStatus.BAD_REQUEST.value,
+    }
+    engines = [_MockCompletionEngine([error_payload])]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    result = await client.completion(_completion_payload([1, 2, 3, 4]))
+
+    assert result["error"]["code"] == HTTPStatus.BAD_REQUEST.value
+    assert "maximum context length" in result["error"]["message"]
+    assert len(engines[0].calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prompt",
+    [pytest.param(["hello"], id="one_string_is_still_batched"), pytest.param([["a"], ["b"]], id="batched")],
+)
+async def test_completion_batched_still_raises_while_paused(prompt):
+    """Batched /completions fans out across engines with no per-sub-request pause handling,
+    so it keeps the pre-existing behaviour. A list of ONE string is batched by
+    `postprocess_completion_request`, and stays on that path here too."""
+    engines = [_MockCompletionEngine([_completion_response("done", "stop")])]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+    client.generation_paused_event.set()
+
+    with pytest.raises(RuntimeError, match="unsupported for batched /completions"):
+        await client.completion(_completion_payload(prompt))
+
+    assert not engines[0].entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_completion_single_prompt_is_unaffected_when_never_paused():
+    """Steady state: no pause, no abort, one engine call, response forwarded unchanged."""
+    engines = [_MockCompletionEngine([_completion_response("done", "stop")])]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    result = await client.completion(_completion_payload([1, 2, 3, 4], session_id="trial-7"))
+
+    assert result["choices"][0]["text"] == "done"
+    assert len(engines[0].calls) == 1
+    assert "session_id" not in engines[0].calls[0], "session_id must be stripped before it reaches the engine"

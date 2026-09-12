@@ -847,3 +847,46 @@ def test_nemotron_if_adapter_builds_fractional_ifeval_constraints():
         {"func_name": "verify_postscript", "postscript_marker": "P.S."},
     ]
     assert [json.loads(ifeval_utils.normalize_ground_truth(constraint)) for constraint in constraints] == constraints
+
+
+def test_gretel_text_to_sql_adapter_builds_result_set_ground_truth():
+    from infra.rl_data.sources import gretel_text_to_sql_source
+
+    schema = "CREATE TABLE Hospitals (HospitalID INT, State TEXT);"
+    inserts = (
+        "INSERT INTO Hospitals VALUES "
+        "(1,'CA'),(2,'CA'),(3,'NY'),(4,'NY'),(5,'TX'),(6,'TX');"
+    )
+    artifact = prepare_artifact(
+        gretel_text_to_sql_source(),
+        [
+            {
+                "id": 5150,
+                "sql_prompt": "How many hospitals are there in each state?",
+                "sql_context": schema + " " + inserts,
+                "sql": "SELECT State, COUNT(*) FROM Hospitals GROUP BY State",
+                "sql_complexity": "aggregation",
+            },
+            {  # dropped: MySQL-only function in the reference
+                "id": 9,
+                "sql_prompt": "rows in 2019?",
+                "sql_context": schema + " " + inserts,
+                "sql": "SELECT State FROM Hospitals WHERE YEAR(HospitalID) = 2019",
+            },
+        ],
+        get_data_contract("text_to_sql"),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(**{**_OPTS, "max_prompt_tokens": 400}),
+    )
+
+    assert len(artifact.rows) == 1
+    row = artifact.rows[0]
+    assert row["data_source"] == "gretelai/synthetic_text_to_sql"
+    assert row["env_class"] == "text_to_sql"
+    assert row["prompt"][0]["role"] == "user"
+    assert "CREATE TABLE Hospitals" in row["prompt"][0]["content"]
+    ground_truth = json.loads(row["reward_model"]["ground_truth"])
+    assert ground_truth["reference_sql"] == "SELECT State, COUNT(*) FROM Hospitals GROUP BY State"
+    assert ground_truth["table_names"] == ["Hospitals"]
+    assert artifact.provenance["counts"]["malformed_rows_skipped"] == 1
+    assert artifact.provenance["verification"] == "two_sided"

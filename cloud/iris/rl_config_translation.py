@@ -46,7 +46,6 @@ class RLEntrypoint(StrEnum):
     STANDARD = "standard"
     TERMINAL_BENCH = "terminal_bench"
     TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
-    TERMINAL_BENCH_TEACHER_LOGITS = "terminal_bench_teacher_logits"
 
 
 RL_ENTRYPOINT_MODULES = {
@@ -56,7 +55,6 @@ RL_ENTRYPOINT_MODULES = {
     RLEntrypoint.STANDARD: "skyrl_train.entrypoints.main_base",
     RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
     RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
-    RLEntrypoint.TERMINAL_BENCH_TEACHER_LOGITS: "skyrl_train.entrypoints.terminal_bench_teacher_logits",
 }
 
 
@@ -488,7 +486,6 @@ class ParsedRLConfig:
     environment: Dict[str, Any] = field(default_factory=dict)
     trajectory_runner: Dict[str, Any] = field(default_factory=dict)
     terminal_bench: Optional[Dict[str, Any]] = None
-    teacher: Optional[Dict[str, Any]] = None
     tensor_parallel_size: int = 1
     # "tasks" (default; terminal_bench task-dir extraction) or "parquet" (single-turn
     # RLVR: an HF id / .parquet is passed through to PromptDataset, NOT task-extracted).
@@ -603,7 +600,11 @@ def parse_rl_config(
     data = dict(raw.get("data", {}))
     environment = raw.get("environment", {})
     trajectory_runner = raw.get("trajectory_runner", {})
-    teacher = raw.get("teacher")
+    if "teacher" in raw:
+        raise ValueError(
+            f"{path}: teacher configuration is not supported by any Iris RL entrypoint. "
+            "OPD entrypoints are disabled until teacher scores are connected to a validated training objective."
+        )
 
     # data.kind is a launcher-only routing key (parquet vs. terminal_bench tasks); pop it
     # so it never leaks into the flattened Hydra args (SkyRL's `data` has no `kind` field).
@@ -640,7 +641,6 @@ def parse_rl_config(
         environment=environment,
         trajectory_runner=trajectory_runner,
         terminal_bench=terminal_bench,
-        teacher=teacher,
         tensor_parallel_size=tensor_parallel_size,
         data_kind=data_kind,
     )
@@ -1000,12 +1000,6 @@ def build_skyrl_hydra_args(
         for key, val in _flatten_dict(values, section).items():
             prefix = "++" if any(pattern in key for pattern in _OPTIONAL_HYDRA_PATTERNS) else ""
             args.append(format_hydra_arg(key, val, prefix=prefix))
-
-    # Teacher config (on-policy distillation) — all keys use ++ since the teacher
-    # section doesn't exist in SkyRL's base Hydra config.
-    if parsed.teacher:
-        for key, val in _flatten_dict(parsed.teacher, "teacher").items():
-            args.append(format_hydra_arg(key, val, prefix="++"))
 
     # Terminal-Bench experiments may override packaged group keys or add new ones.
     if parsed.terminal_bench:

@@ -337,6 +337,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
         # Create the SGLang engine (signal handler issue is now fixed by patching)
         self.engine = Engine(**kwargs)
+        self.max_model_len = self.engine.tokenizer_manager.context_len
         logger.info(f"Created SGLang engine with kwargs: {kwargs}")
 
         # Create weight loader for coordinating weight updates

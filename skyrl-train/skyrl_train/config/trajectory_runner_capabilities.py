@@ -9,6 +9,7 @@ from marinskyrl.harbor_agent_names import (
     DEFAULT_HARBOR_AGENT_NAME,
     OPENCODE_HARBOR_AGENT_NAME,
     PI_HARBOR_AGENT_NAME,
+    TERMINUS_KIRA_HARBOR_AGENT_NAME,
 )
 
 SUPPORTED_OPENCODE_LITERAL_VERSION = "1.18.2"
@@ -63,22 +64,45 @@ _EXACT_HARBOR_EVIDENCE = _HarborEvidenceProfile(
     full_context_continuation=EvidenceFidelity.EXACT,
     action_tokens=ActionTokenHandling.EXACT,
 )
+_EXACT_COMPLETION_ONLY_HARBOR_EVIDENCE = _HarborEvidenceProfile(
+    sampled_completion=EvidenceFidelity.EXACT,
+    full_context_continuation=EvidenceFidelity.UNAVAILABLE,
+    action_tokens=ActionTokenHandling.EXACT,
+)
 _HARBOR_EVIDENCE_PROFILES = {
     DEFAULT_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
-    OPENCODE_HARBOR_AGENT_NAME: _HarborEvidenceProfile(
-        sampled_completion=EvidenceFidelity.EXACT,
-        full_context_continuation=EvidenceFidelity.UNAVAILABLE,
-        action_tokens=ActionTokenHandling.EXACT,
-    ),
+    # Native tool results change the structured chat history between model
+    # turns. Harbor captures each sampled completion exactly, but currently
+    # re-renders the next prompt after those tool messages instead of extending
+    # the prior literal token prefix.
+    TERMINUS_KIRA_HARBOR_AGENT_NAME: _EXACT_COMPLETION_ONLY_HARBOR_EVIDENCE,
+    OPENCODE_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
     PI_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
 }
 
 
-def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
+def _terminal_bench_harbor_config(cfg: DictConfig) -> DictConfig | None:
     terminal_bench = cfg.get("terminal_bench_config")
     if terminal_bench is None and str(cfg.get("entrypoint", "")) == "terminal_bench":
         terminal_bench = cfg.get("terminal_bench")
-    harbor = terminal_bench.get("harbor") if terminal_bench is not None else None
+    return terminal_bench.get("harbor") if terminal_bench is not None else None
+
+
+def opencode_exact_continuation_enabled(cfg: DictConfig) -> bool:
+    """Whether this launch needs the terminal-bench OpenCode continuation bridge."""
+    harbor = _terminal_bench_harbor_config(cfg)
+    if harbor is None:
+        return False
+    agent_name = str(harbor.get("name", DEFAULT_HARBOR_AGENT_NAME)).strip().lower().replace("_", "-")
+    return bool(
+        str(cfg.get("generator", {}).get("backend", "")) == "vllm"
+        and agent_name == OPENCODE_HARBOR_AGENT_NAME
+        and harbor.get("collect_rollout_details", False)
+    )
+
+
+def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
+    harbor = _terminal_bench_harbor_config(cfg)
     if harbor is None:
         return TrajectoryRunnerCapabilities(
             runner="harbor (unconfigured)",
@@ -95,11 +119,18 @@ def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
     )
     requirements = [rollout_details]
     if agent_name == OPENCODE_HARBOR_AGENT_NAME:
-        requirements.append(
-            CapabilityRequirement(
-                config_path="terminal_bench.harbor.version",
-                expected_value=SUPPORTED_OPENCODE_LITERAL_VERSION,
-                satisfied=str(harbor.get("version", "")).strip() == SUPPORTED_OPENCODE_LITERAL_VERSION,
+        requirements.extend(
+            (
+                CapabilityRequirement(
+                    config_path="terminal_bench.harbor.version",
+                    expected_value=SUPPORTED_OPENCODE_LITERAL_VERSION,
+                    satisfied=str(harbor.get("version", "")).strip() == SUPPORTED_OPENCODE_LITERAL_VERSION,
+                ),
+                CapabilityRequirement(
+                    config_path="generator.backend",
+                    expected_value="vllm",
+                    satisfied=str(cfg.get("generator", {}).get("backend", "")) == "vllm",
+                ),
             )
         )
     elif agent_name == PI_HARBOR_AGENT_NAME:

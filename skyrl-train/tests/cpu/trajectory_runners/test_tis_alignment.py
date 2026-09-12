@@ -338,6 +338,33 @@ def test_valid_multi_turn_full_tito_preserves_all_training_logprobs():
     assert not stats.tito_full_declines
 
 
+def test_full_tito_treats_assistant_messages_before_selected_segment_as_context():
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    completion = _generated_ids(tokenizer, "Post-compaction answer.")
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+    exact_prompt = [700, 701, 702] + generation_prompt_ids
+    behavior_logprobs = [[-0.1] * len(completion)]
+    stats = AlignmentStats()
+
+    _, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+        [
+            {"role": "assistant", "content": "Summary already present in the exact prompt."},
+            {"role": "user", "content": "Continue after compaction."},
+            {"role": "assistant", "content": "Post-compaction answer."},
+        ],
+        tokenizer,
+        assistant_logprobs=behavior_logprobs,
+        assistant_token_ids=[completion],
+        assistant_prompt_token_ids=[exact_prompt],
+        rollout_logprobs_required=True,
+        alignment_stats=stats,
+    )
+
+    assert [logprob for logprob, mask in zip(rollout_logprobs, loss_mask, strict=True) if mask] == behavior_logprobs[0]
+    assert stats.n_tito_full_successes == 1
+    assert not stats.tito_full_declines
+
+
 def test_context_mismatch_decline_masks_exact_completion_ids():
     """A context mismatch must not hide behind exact completion-id alignment."""
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")

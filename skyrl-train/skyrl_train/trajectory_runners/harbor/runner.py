@@ -22,6 +22,8 @@ from skyrl_train.trajectory_runners.types import VerifierTestCollection
 from skyrl_train.trajectory_runners.projections import attach_terminal_classifications, project_loss_mask
 from skyrl_train.metric_names import (
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
+    LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
+    LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
     TIS_ALIGNMENT_ALERT_METRIC,
     TIS_METRIC_PREFIX,
 )
@@ -234,6 +236,8 @@ class TerminalBenchAgentOutput:
     # original_reward==0 + truncation_penalty>0). Counted into rollout_metrics.
     truncation_penalized: bool = False
     error_treatment: str | None = None
+    literal_bridge_correlated: bool = False
+    literal_bridge_turns: int = 0
 
 
 def _failed_agent_output(
@@ -1209,6 +1213,12 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             )
         )
         rollout_metrics.update(identity_aware_metrics)
+        rollout_metrics[LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC] = float(
+            sum(output.literal_bridge_correlated for output in all_outputs)
+        )
+        rollout_metrics[LITERAL_BRIDGE_CORRELATED_TURNS_METRIC] = float(
+            sum(output.literal_bridge_turns for output in all_outputs)
+        )
 
         # TIS logprob-alignment metrics (aggregated across all trajectories with
         # logprobs). These make an LCS fallback or alignment failure ALWAYS visible
@@ -2079,6 +2089,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
 
         # Extract per-turn behavior logprobs from Harbor's rollout details.
         rollout_details = getattr(result.agent_result, "rollout_details", None)
+        had_native_rollout_details = bool(rollout_details)
         # CLI agents that bypass Harbor Chat return empty
         # rollout_details even under a co-located RecordProxy (the proxy writes a
         # shared worker-side log, not the in-sandbox trial dir). Recover this trial's
@@ -2086,6 +2097,11 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # harbor stamped (x-ot-trial-id). No-op when rollout_details is already
         # populated (terminus native), the flag is off, or no proxy log is present.
         rollout_details = self._maybe_correlate_cli_rollout_details(result, rollout_details)
+        literal_bridge_correlated = not had_native_rollout_details and bool(rollout_details)
+        literal_bridge_turns = 0
+        if literal_bridge_correlated:
+            completion_turns = rollout_details[0].get("completion_token_ids", [])
+            literal_bridge_turns = len(completion_turns) if isinstance(completion_turns, list) else 0
         assistant_logprobs = extract_logprobs_from_rollout_details(rollout_details)
         # Exact-alignment ids: Harbor's per-turn completion_token_ids, index-aligned
         # with assistant_logprobs. Enables the exact (no re-tokenization guess) TIS path.
@@ -2289,6 +2305,11 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             preserve_exception_type=preserve_exception_type,
             terminal_exception_type=terminal_exception_type,
         )
+        tito_full_succeeded = bool(alignment_stats and alignment_stats.n_tito_full_successes)
+        logger.info(
+            f"Trajectory {trajectory_id} completed: reward={reward:.3f} stop_reason={stop_reason} "
+            f"literal_turns={literal_bridge_turns} tito_full_succeeded={tito_full_succeeded}"
+        )
         return TerminalBenchAgentOutput(
             evidence=evidence,
             verification=verification,
@@ -2302,4 +2323,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             response_span_tags=response_span_tags,
             truncation_penalized=truncation_penalized,
             error_treatment=None if terminal_error_treatment is None else terminal_error_treatment.value,
+            literal_bridge_correlated=literal_bridge_correlated,
+            literal_bridge_turns=literal_bridge_turns,
         )

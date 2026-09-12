@@ -26,6 +26,7 @@ from cloud.iris.literal_proxy_utils import (  # noqa: E402
     literal_log_path,
     literal_log_remote_uri,
     literal_proxy_endpoint,
+    literal_proxy_port,
     maybe_serve_literal_proxy,
     serve_token,
     upstream_origin,
@@ -42,6 +43,16 @@ def test_upstream_origin_strips_path_to_avoid_double_v1():
 
 def test_literal_proxy_endpoint_default_port():
     assert literal_proxy_endpoint() == f"http://127.0.0.1:{DEFAULT_LITERAL_PROXY_PORT}/v1"
+
+
+def test_literal_proxy_port_is_stable_and_separates_iris_tasks(monkeypatch):
+    monkeypatch.setenv("IRIS_TASK_ID", "/user/job-a/0:0")
+    first = literal_proxy_port("job-a")
+    assert first == literal_proxy_port("job-a")
+    assert 10000 <= first < 20000
+
+    monkeypatch.setenv("IRIS_TASK_ID", "/user/job-b/0:0")
+    assert literal_proxy_port("job-b") != first
 
 
 def test_slug_is_filesystem_safe():
