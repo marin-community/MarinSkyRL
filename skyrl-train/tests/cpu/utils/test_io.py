@@ -12,6 +12,7 @@ import torch
 
 from skyrl_train.hf_model_io import local_hf_model_dir
 from skyrl_train.io.io import (
+    _release_directory_page_cache,
     is_cloud_path,
     makedirs,
     exists,
@@ -420,6 +421,25 @@ class TestContextManagers:
             assert second_read_dir == first_read_dir
 
         mock_download_directory.assert_called_once()
+
+    def test_checkpoint_page_cache_release_advises_every_file(self, monkeypatch, tmp_path):
+        (tmp_path / "first.distcp").write_bytes(b"first")
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        (nested / "second.distcp").write_bytes(b"second")
+        advice_calls = []
+        monkeypatch.setattr(
+            os,
+            "posix_fadvise",
+            lambda descriptor, offset, length, advice: advice_calls.append((descriptor, offset, length, advice)),
+        )
+
+        _release_directory_page_cache(tmp_path)
+
+        assert len(advice_calls) == 2
+        assert all(
+            (offset, length, advice) == (0, 0, os.POSIX_FADV_DONTNEED) for _, offset, length, advice in advice_calls
+        )
 
 
 class FakeHFCloudFilesystem:

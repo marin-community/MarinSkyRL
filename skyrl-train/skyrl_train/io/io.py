@@ -282,6 +282,34 @@ def local_read_dir(input_path: str):
         yield input_path
 
 
+def _release_directory_page_cache(directory: Path) -> None:
+    """Release clean cached pages after a large immutable checkpoint read."""
+    if not hasattr(os, "posix_fadvise") or not hasattr(os, "POSIX_FADV_DONTNEED"):
+        return
+    released_files = 0
+    failed_files = 0
+    for path in directory.rglob("*"):
+        if not path.is_file():
+            continue
+        descriptor = None
+        try:
+            descriptor = os.open(path, os.O_RDONLY)
+            os.posix_fadvise(descriptor, 0, 0, os.POSIX_FADV_DONTNEED)
+            released_files += 1
+        except OSError:
+            failed_files += 1
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    if failed_files:
+        logger.warning(
+            f"Released checkpoint page cache for {released_files} files under {directory}; "
+            f"{failed_files} files could not be advised"
+        )
+    else:
+        logger.info(f"Released checkpoint page cache for {released_files} files under {directory}")
+
+
 @contextmanager
 def node_cached_local_read_dir(input_path: str, cache_root: str | None = None):
     """Stage one immutable cloud directory once per node and retain it for the job."""
@@ -310,4 +338,7 @@ def node_cached_local_read_dir(input_path: str, cache_root: str | None = None):
         elif complete_marker.read_text() != input_path:
             raise RuntimeError(f"Node checkpoint cache identity mismatch at {cache_dir}")
 
-    yield str(cache_dir)
+    try:
+        yield str(cache_dir)
+    finally:
+        _release_directory_page_cache(cache_dir)
