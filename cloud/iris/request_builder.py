@@ -14,7 +14,6 @@ from typing import Any
 import yaml
 
 from cloud.iris.protocol import (
-    DataLocator,
     IrisLaunchOptions,
     ModelLocator,
     RuntimeIdentity,
@@ -24,6 +23,7 @@ from cloud.iris.protocol import (
     SkyRLRolePlan,
     SkyRLTopology,
 )
+from marinskyrl.task_sources import data_source
 from cloud.iris.runtime_bundle import LauncherSource, resolve_launcher_source
 from cloud.iris.runtime_environment import RuntimeProfile, runtime_profile_for_strategy
 
@@ -119,8 +119,8 @@ def build_job_spec(
     model_local_path: str,
     tokenizer_uri: str,
     tokenizer_revision: str,
-    train_data: list[dict[str, str]],
-    validation_data: list[dict[str, str]] | None = None,
+    train_data: list[dict[str, Any]],
+    validation_data: list[dict[str, Any]] | None = None,
     cluster: str,
     cluster_config: str,
     cpu: float,
@@ -180,8 +180,8 @@ def build_job_spec(
                 tokenizer_uri=tokenizer_uri,
                 tokenizer_revision=tokenizer_revision,
             ),
-            train_data=tuple(DataLocator(**d) for d in train_data),
-            validation_data=tuple(DataLocator(**d) for d in (validation_data or [])),
+            train_data=tuple(data_source(d) for d in train_data),
+            validation_data=tuple(data_source(d) for d in (validation_data or [])),
             topology=SkyRLTopology(
                 num_nodes=num_nodes,
                 gpus_per_node=plan.policy_num_gpus_per_node,

@@ -71,6 +71,9 @@ def relative_object_key(root: str, path: str) -> str:
 
 def _source_inventory(uri: str) -> tuple[AbstractFileSystem, tuple[tuple[str, FileEntry], ...]]:
     filesystem, source_path = fs_and_path(uri)
+    if filesystem.isfile(source_path):
+        entry = FileEntry(path=posixpath.basename(source_path), size=int(filesystem.info(source_path)["size"]))
+        return filesystem, ((source_path, entry),)
     source_files = sorted(path for path in filesystem.find(source_path) if not filesystem.isdir(path))
     if not source_files:
         raise ValueError(f"Artifact source contains no files: {uri}")

@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from omegaconf import OmegaConf
 
 from cloud.iris.iris_backend import create_parser, normalize
 from cloud.iris.rl_config_translation import build_skyrl_hydra_args, parse_rl_config
+from cloud.iris.training_driver import parse_list_arg
 from skyrl_train.entrypoints.main_base import config_dir
 
 
@@ -107,6 +109,36 @@ def test_terminal_bench_launcher_overrides_compose_with_packaged_group():
 
     assert OmegaConf.to_container(cfg.terminal_bench_config.prm) == expected_prm
     assert OmegaConf.to_container(cfg.terminal_bench_config.trace_upload) == expected_trace_upload
+
+
+def test_packed_task_source_crosses_cli_and_hydra_boundaries():
+    parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
+    source = {
+        "kind": "tasktrove_parquet",
+        "uri": "s3://tasktrove/clean/part-00000.parquet",
+        "local_path": "/tmp/tasktrove/clean",
+        "relative_path": "part-00000.parquet",
+        "selection": {
+            "sources": ["DCAgent2__nl2bash"],
+            "tags": ["bash", "terminal"],
+            "modes": ["script"],
+            "tag_match": "all",
+            "limit": None,
+            "seed": 17,
+        },
+    }
+    train_data = parse_list_arg(json.dumps([source]))
+
+    hydra_args = build_skyrl_hydra_args(
+        parsed,
+        {"num_nodes": 4, "train_data": train_data},
+        SimpleNamespace(gpus_per_node=8),
+    )
+
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=hydra_args)
+
+    assert OmegaConf.to_container(cfg.data.train_data) == [source]
 
 
 def test_trajectory_runner_settings_reach_skyrl_hydra_config(tmp_path):
