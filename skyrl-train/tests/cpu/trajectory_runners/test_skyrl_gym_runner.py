@@ -16,7 +16,9 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_rollout_metrics,
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
+from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.trajectory_runners.types import AgentLoopOutput
 
 
 # Mock constants, where 4 is the eos token id
@@ -257,6 +259,70 @@ def validate_trajectory_batch(output: TrajectoryBatch) -> bool:
 
 
 @pytest.mark.asyncio
+async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(generator_cfg, mock_tokenizer):
+    generator_cfg.batched = False
+    skyrl_gym_cfg = DictConfig(
+        {
+            "max_env_workers": 0,
+            "nemotron_ultra": {
+                "genrm": {
+                    "num_rollouts_per_prompt": 2,
+                    "group_answer_length_penalty_coeff": 0.0,
+                    "group_reasoning_length_penalty_coeff": 0.0,
+                    "reasoning_bonus": 0.0,
+                    "answer_bonus": 0.0,
+                }
+            },
+        }
+    )
+    runner = SkyRLGymTrajectoryRunner(generator_cfg, skyrl_gym_cfg, MagicMock(), mock_tokenizer)
+
+    class _GenRMJudge:
+        def generate_response(self, _messages, *, metadata, **_kwargs):
+            first_is_better = metadata["response_1"] == "better"
+            return (
+                '{"score_1": 5, "score_2": 1, "ranking": 1}'
+                if first_is_better
+                else '{"score_1": 1, "score_2": 5, "ranking": 6}'
+            )
+
+    runner.genrm_judge = _GenRMJudge()
+
+    def output(answer):
+        return AgentLoopOutput(
+            evidence=RolloutEvidence(
+                messages=({"role": "user", "content": "q"}, {"role": "assistant", "content": answer}),
+                response=answer,
+                response_token_ids=(10, 11),
+            ),
+            verification=VerificationResult.verified(3.0),
+            reward=RewardResult(unshaped_reward=3.0, optimization_reward=3.0, token_rewards=(0.0, 3.0)),
+            disposition=TrainingDisposition.train(),
+            loss_mask=[1, 1],
+            env_metrics={},
+        )
+
+    outputs = [output("better"), output("worse")]
+    ultra = {
+        "agent": "genrm_simple_agent",
+        "record_json": '{"principle": "Prefer correct answers."}',
+    }
+    request = {
+        "prompts": [[{"role": "user", "content": "q"}]] * 2,
+        "env_classes": ["nemotron_ultra"] * 2,
+        "env_extras": [{"extra_info": {"nemotron_ultra": ultra}}] * 2,
+        "sampling_params": None,
+        "trajectory_ids": [TrajectoryID("prompt", 0), TrajectoryID("prompt", 1)],
+        "batch_metadata": None,
+    }
+
+    await runner._apply_genrm_cohort_rewards(outputs, request)
+
+    assert [item.reward.optimization_reward for item in outputs] == pytest.approx([5.0, 1.0])
+    assert [item.reward.token_rewards for item in outputs] == [(0.0, 5.0), (0.0, 1.0)]
+
+
+@pytest.mark.asyncio
 @patch("skyrl_gym.make")
 @pytest.mark.parametrize("use_conversation_multi_turn", [True, False])
 async def test_agent_loop_single_turn(
@@ -295,6 +361,140 @@ async def test_agent_loop_single_turn(
     assert sum(output.reward.token_rewards or ()) == 1.0
     assert (output.evidence.stop_reason or "unknown") == "stop"
     assert output.loss_mask == [1] * len(MOCK_LLM_OUTPUT_IDS)
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_agent_loop_forwards_environment_chat_options_and_structured_assistant_message(
+    mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg
+):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = False
+    generator_cfg.sampling_params.logprobs = 0
+    tools = [{"type": "function", "name": "search", "parameters": {"type": "object"}}]
+    mock_env.init.return_value = (
+        [{"role": "user", "content": "look it up"}],
+        {"chat_completion_params": {"tools": tools, "parallel_tool_calls": False}},
+    )
+    mock_env.step.side_effect = None
+    mock_env.step.return_value = BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+    mock_make.return_value = mock_env
+    assistant_message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"type": "function", "function": {"name": "search", "arguments": "{}"}}],
+    }
+    model_client = AsyncMock()
+    model_client.generate.return_value = {
+        "responses": ["<tool-call tokens>"],
+        "response_ids": [[21, 22]],
+        "prompt_ids": [[11, 12, 13]],
+        "stop_reasons": ["tool_calls"],
+        "response_logprobs": [[-0.1, -0.2]],
+        "prompt_logprobs": None,
+        "assistant_messages": [assistant_message],
+        "token_provenance": "engine",
+    }
+    runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=AsyncMock(),
+        tokenizer=mock_tokenizer,
+        model_client=model_client,
+    )
+
+    output = await runner.agent_loop(
+        [{"role": "user", "content": "look it up"}],
+        mock_env_cfg.env_class,
+        {},
+        max_tokens=8,
+        max_input_length=512,
+    )
+
+    request = model_client.generate.await_args.args[0]
+    assert request["prompts"] == [[{"role": "user", "content": "look it up"}]]
+    assert request["chat_completion_params"] == [{"tools": tools, "parallel_tool_calls": False}]
+    evidence = mock_env.set_rollout_evidence.call_args.args[0]
+    assert evidence.metadata["assistant_message"] == assistant_message
+    assert output.evidence.prompt_token_ids == (11, 12, 13)
+    assert output.evidence.response_token_ids == (21, 22, mock_tokenizer.eos_token_id)
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_agent_loop_preserves_exact_vllm_prefix_across_structured_tool_turns(
+    mock_make, mock_tokenizer, mock_env, generator_cfg, mock_env_cfg
+):
+    generator_cfg.batched = False
+    generator_cfg.use_conversation_multi_turn = False
+    generator_cfg.sampling_params.logprobs = 0
+    tools = [{"type": "function", "name": "python", "parameters": {"type": "object"}}]
+    mock_env.init.return_value = (
+        [{"role": "user", "content": "calculate"}],
+        {"chat_completion_params": {"tools": tools}},
+    )
+    observation = {"role": "tool", "tool_call_id": "call-1", "content": "4"}
+    mock_env.step.side_effect = [
+        BaseTextEnvStepOutput(observations=[observation], reward=0.0, done=False, metadata={}),
+        BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={}),
+    ]
+    mock_make.return_value = mock_env
+    tool_call = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "python", "arguments": "{}"}}],
+    }
+    final_message = {"role": "assistant", "content": "four", "tool_calls": []}
+    model_client = AsyncMock()
+    model_client.generate.side_effect = [
+        {
+            "responses": ["<tool>"],
+            "response_ids": [[21, 22]],
+            "prompt_ids": [[11, 12]],
+            "stop_reasons": ["tool_calls"],
+            "response_logprobs": [[-0.1, -0.2]],
+            "assistant_messages": [tool_call],
+            "token_provenance": "engine",
+        },
+        {
+            "responses": ["four"],
+            "response_ids": [[41]],
+            "prompt_ids": [[11, 12, 21, 22, 31, 32]],
+            "stop_reasons": ["stop"],
+            "response_logprobs": [[-0.3]],
+            "assistant_messages": [final_message],
+            "token_provenance": "engine",
+        },
+    ]
+    runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=AsyncMock(),
+        tokenizer=mock_tokenizer,
+        model_client=model_client,
+    )
+
+    output = await runner.agent_loop(
+        [{"role": "user", "content": "calculate"}],
+        mock_env_cfg.env_class,
+        {},
+        max_tokens=8,
+        max_input_length=512,
+    )
+
+    second_request = model_client.generate.await_args_list[1].args[0]
+    assert second_request["prompts"] == [
+        [
+            {"role": "user", "content": "calculate"},
+            tool_call,
+            observation,
+        ]
+    ]
+    assert output.evidence.prompt_token_ids == (11, 12)
+    assert output.evidence.response_token_ids == (21, 22, 31, 32, 41, mock_tokenizer.eos_token_id)
+    assert output.loss_mask == [1, 1, 0, 0, 1, 0]
+    assert output.evidence.behavior_logprobs == (-0.1, -0.2, 0.0, 0.0, -0.3, 0.0)
+    assert output.reward.optimization_reward == 1.0
 
 
 @pytest.mark.asyncio

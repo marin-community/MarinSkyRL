@@ -712,6 +712,27 @@ def _rollout_logprob_presence(trajectory_batches: List[TrajectoryBatch], *, requ
     return presence
 
 
+def _concatenate_rewards(trajectory_batches: List[TrajectoryBatch]) -> Union[List[float], List[List[float]]]:
+    """Concatenate rewards while preserving token-level credit from any child batch."""
+    has_token_level_rewards = any(
+        isinstance(reward, list) for output in trajectory_batches for reward in output["rewards"]
+    )
+    if not has_token_level_rewards:
+        return [float(reward) for output in trajectory_batches for reward in output["rewards"]]
+
+    rewards: List[List[float]] = []
+    for output in trajectory_batches:
+        for reward, response_ids in zip(output["rewards"], output["response_ids"], strict=True):
+            if isinstance(reward, list):
+                rewards.append(reward)
+                continue
+            token_rewards = [0.0] * len(response_ids)
+            if token_rewards:
+                token_rewards[-1] = float(reward)
+            rewards.append(token_rewards)
+    return rewards
+
+
 def concatenate_trajectory_batches(
     trajectory_batches: List[TrajectoryBatch],
     *,
@@ -836,7 +857,7 @@ def concatenate_trajectory_batches(
     result: TrajectoryBatch = {
         "prompt_token_ids": sum([output["prompt_token_ids"] for output in trajectory_batches], []),
         "response_ids": sum([output["response_ids"] for output in trajectory_batches], []),
-        "rewards": sum([output["rewards"] for output in trajectory_batches], []),
+        "rewards": _concatenate_rewards(trajectory_batches),
         "loss_masks": sum([output["loss_masks"] for output in trajectory_batches], []),
         "stop_reasons": (
             sum([output["stop_reasons"] for output in trajectory_batches], [])

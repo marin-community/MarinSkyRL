@@ -9,6 +9,10 @@ defaults:
 data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
+  # Optional task-directory sidechannel for mixed Nemotron Ultra RLVR. The
+  # parquet dataloader remains authoritative; SWE rows resolve their instance ID
+  # against these terminal-bench task roots at rollout time.
+  terminal_bench_data: []
   sampling:
     kind: null # null = stock shuffle; naive|thompson|learnability|grade-uniform|grade-adaptive|grade-prior
     decay: 0.95 # per-step multiplicative decay of bin sufficient stats

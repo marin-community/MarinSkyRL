@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from dataclasses import dataclass
 from uuid import uuid4
 import skyrl_gym
@@ -22,6 +23,8 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
+from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
     environment_metrics_from_step,
@@ -181,6 +184,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # Set by the fully-async trainer before generation workers start.
         self.global_step_fn: Optional[Callable[[], int]] = None
 
+        ultra_config = skyrl_gym_cfg.get("nemotron_ultra", {})
+        self.genrm_config = dict(ultra_config.get("genrm", {}))
+        genrm_judge = self.genrm_config.get("judge")
+        self.genrm_judge = OpenAIJudge(**dict(genrm_judge)) if genrm_judge is not None else None
+
     def _validate_cfg(self, trajectory_runner_cfg: DictConfig):
         if len(trajectory_runner_cfg.chat_template_kwargs) and trajectory_runner_cfg.batched:
             raise ValueError(
@@ -247,7 +255,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         chat_history = copy.deepcopy(prompt)
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
-        chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
+        chat_history, init_metadata = await self._run_in_executor_if_available(env.init, chat_history)
+        chat_completion_params = init_metadata.get("chat_completion_params")
+        if chat_completion_params is not None and not isinstance(chat_completion_params, dict):
+            raise TypeError("environment chat_completion_params metadata must be a mapping")
         initial_chat_history_length = len(chat_history)
         chat_end_index = len(chat_history)
         input_ids = normalize_token_ids(
@@ -314,9 +325,16 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 break
 
             # 1. Generate output
-            if retokenize_chat_history:
+            if retokenize_chat_history or chat_completion_params is not None:
                 engine_input = InferenceEngineInput(
-                    prompts=[chat_history], session_ids=[session_id], sampling_params=sampling_params
+                    prompts=[copy.deepcopy(chat_history)],
+                    session_ids=[session_id],
+                    sampling_params=current_sampling_params,
+                    **(
+                        {"chat_completion_params": [chat_completion_params]}
+                        if chat_completion_params is not None
+                        else {}
+                    ),
                 )
             else:
                 # Token-in-token-out.
@@ -332,7 +350,16 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
+            if chat_completion_params is not None:
+                rendered_prompt_ids = engine_output.get("prompt_ids")
+                if rendered_prompt_ids is None:
+                    raise RuntimeError("chat generation must return the backend-rendered prompt token IDs")
+                if not per_step_rewards:
+                    input_ids = rendered_prompt_ids[0]
+                    initial_prompt_length = len(input_ids)
             stop_reason = engine_output["stop_reasons"][0]
+            assistant_messages = engine_output.get("assistant_messages")
+            assistant_message = assistant_messages[0] if assistant_messages is not None else None
             response_logprobs_batch = engine_output.get("response_logprobs")
             response_logprobs = response_logprobs_batch[0] if response_logprobs_batch is not None else None
             if response_logprobs is not None and len(response_logprobs) != len(output_ids):
@@ -342,6 +369,21 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
             if collect_logprobs and response_logprobs is None:
                 rollout_logprobs = None
+
+            if chat_completion_params is not None:
+                if assistant_message is None:
+                    raise RuntimeError("chat generation must return the structured assistant message")
+                if per_step_rewards:
+                    if input_ids != rendered_prompt_ids[0][: len(input_ids)]:
+                        raise RuntimeError(
+                            "vLLM changed the tokenization of an earlier chat turn while rendering the next turn; "
+                            "behavior logprobs can no longer be aligned exactly"
+                        )
+                    observation_token_count = len(rendered_prompt_ids[0]) - len(input_ids)
+                    loss_mask += [0] * observation_token_count
+                    if rollout_logprobs is not None:
+                        rollout_logprobs += [0.0] * observation_token_count
+                input_ids = rendered_prompt_ids[0]
 
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
@@ -366,13 +408,33 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 prompt_token_ids=input_ids,
                 response_token_ids=output_ids,
                 behavior_logprobs=response_logprobs,
-                metadata={"generation_token_budget": max_tokens},
+                metadata={
+                    "generation_token_budget": max_tokens,
+                    **({"assistant_message": assistant_message} if assistant_message is not None else {}),
+                },
             )
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             verification_results.append(verification_from_env_step(env_step_output))
             done = env_step_output["done"]
+
+            reset_conversation = env_step_output.get("reset_conversation")
+            if reset_conversation is not None:
+                if done or chat_completion_params is None:
+                    raise ValueError("reset_conversation requires a continuing structured-chat trajectory")
+                # NVIDIA's proof-refinement agent issues every correction as a
+                # fresh single-turn request and returns only the final attempt to
+                # NeMo RL. Discard this failed attempt before the next render.
+                chat_history = copy.deepcopy(reset_conversation)
+                initial_chat_history_length = len(chat_history)
+                input_ids = []
+                initial_prompt_length = 0
+                loss_mask = []
+                rollout_logprobs = [] if collect_logprobs else None
+                per_step_rewards = []
+                verification_results = []
+                continue
 
             if env_step_output.get("postprocessed_action", None) is not None:
                 # TODO(Charlie): come back to this, we should deprecate postprocessed action
@@ -393,7 +455,20 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
             # Three ways of managing input
-            if retokenize_chat_history:
+            if chat_completion_params is not None:
+                input_ids += output_ids
+                loss_mask += [1] * len(output_ids)
+                response_end_idx = len(input_ids) - 1
+                if rollout_logprobs is not None:
+                    if response_logprobs is None:
+                        rollout_logprobs = None
+                    else:
+                        rollout_logprobs += response_logprobs
+                per_step_rewards.append((step_reward, response_end_idx))
+                chat_history.append(dict(assistant_message))
+                if not done:
+                    chat_history.extend(new_obs)
+            elif retokenize_chat_history:
                 # a. We always re-tokenize the entire chat history every turn and at the end.
                 chat_history, chat_end_index, input_ids = self._get_next_input_ids_by_retokenizing_chat_history(
                     chat_history, chat_end_index, output, new_obs
@@ -497,7 +572,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         verification, unshaped_reward = fold_verification_results(verification_results)
 
         evidence = RolloutEvidence(
-            messages=tuple(chat_history) if retokenize_chat_history else (),
+            messages=tuple(chat_history) if retokenize_chat_history or chat_completion_params is not None else (),
             response=output,
             stop_reason=stop_reason,
             generated_token_count=sum(bool(value) for value in loss_mask),
@@ -665,7 +740,82 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Run the configured environment loop and project its interaction records."""
         outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
+        if isinstance(outputs, list) and outputs and isinstance(outputs[0], AgentLoopOutput):
+            await self._apply_genrm_cohort_rewards(outputs, input_batch)
         return self.projection.project(outputs, input_batch)
+
+    async def _apply_genrm_cohort_rewards(
+        self,
+        outputs: list[AgentLoopOutput],
+        input_batch: TrajectoryRequestBatch,
+    ) -> None:
+        env_extras = input_batch.get("env_extras") or []
+        genrm_agents = {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}
+
+        def ultra_at(index: int) -> dict[str, Any] | None:
+            extra_info = env_extras[index].get("extra_info") if index < len(env_extras) else None
+            ultra = extra_info.get("nemotron_ultra") if isinstance(extra_info, dict) else None
+            return ultra if isinstance(ultra, dict) else None
+
+        genrm_indices = [index for index in range(len(outputs)) if (ultra_at(index) or {}).get("agent") in genrm_agents]
+        if not genrm_indices:
+            return
+        if self.genrm_judge is None:
+            raise RuntimeError("Nemotron Ultra GenRM rows require environment.skyrl_gym.nemotron_ultra.genrm.judge")
+        trajectory_ids = input_batch.get("trajectory_ids")
+        if trajectory_ids is None:
+            raise ValueError("GenRM cohort rewards require trajectory IDs")
+
+        groups: dict[str, list[int]] = {}
+        for index in genrm_indices:
+            groups.setdefault(trajectory_ids[index].instance_id, []).append(index)
+        expected_size = int(self.genrm_config.get("num_rollouts_per_prompt", 16))
+        for indices in groups.values():
+            if len(indices) != expected_size:
+                raise ValueError(
+                    f"GenRM cohort requires {expected_size} rollouts for a prompt, received {len(indices)}"
+                )
+            records = [json.loads((ultra_at(index) or {})["record_json"]) for index in indices]
+            if not all(isinstance(record, dict) for record in records):
+                raise TypeError("GenRM record_json must decode to an object")
+            principles = {record.get("principle") for record in records}
+            if len(principles) != 1 or None in principles:
+                raise ValueError("GenRM cohort rows must agree on a non-empty principle")
+            response_objects = []
+            for index in indices:
+                messages = outputs[index].evidence.messages
+                assistant_message = next(
+                    (dict(message) for message in reversed(messages) if message.get("role") == "assistant"),
+                    {},
+                )
+                response_objects.append(response_object(assistant_message, outputs[index].evidence.response or ""))
+            rewards, metrics = await asyncio.to_thread(
+                grade_genrm_group,
+                conversation_history=input_batch["prompts"][indices[0]],
+                response_objects=response_objects,
+                principle=next(iter(principles)),
+                judge=self.genrm_judge,
+                config=self.genrm_config,
+            )
+            for index, reward in zip(indices, rewards, strict=True):
+                old_token_rewards = outputs[index].reward.token_rewards
+                token_rewards = None
+                if old_token_rewards is not None:
+                    token_rewards_list = [0.0] * len(old_token_rewards)
+                    credited = [position for position, value in enumerate(old_token_rewards) if value]
+                    if credited:
+                        token_rewards_list[credited[-1]] = reward
+                    token_rewards = tuple(token_rewards_list)
+                outputs[index].reward = RewardResult(
+                    unshaped_reward=reward,
+                    optimization_reward=reward,
+                    token_rewards=token_rewards,
+                )
+                outputs[index].verification = VerificationResult.verified(
+                    reward,
+                    diagnostics={"agent": (ultra_at(index) or {})["agent"], "genrm_metrics": metrics},
+                )
+                outputs[index].env_metrics.update({f"genrm/{name}": value for name, value in metrics.items()})
 
     # ----------------------------------------------------------------------------
     # Three methods of managing chat history and input ids in `agent_loop()`

@@ -15,6 +15,10 @@ class BaseTextEnvStepOutput(TypedDict):
     postprocessed_action: NotRequired[Optional[str]]
     verification: NotRequired[VerificationResult]
     reward_result: NotRequired[RewardResult]
+    # Replace, rather than append to, the chat context for the next model call.
+    # Used by NVIDIA's Lean refinement agent, whose correction is a fresh
+    # single-turn request and whose trainer retains only the final attempt.
+    reset_conversation: NotRequired[ConversationType]
 
 
 class BaseTextEnv(Env[ConversationType, str]):

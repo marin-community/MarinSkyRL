@@ -1,6 +1,7 @@
 import datasets
 from loguru import logger
 import os
+from collections.abc import Mapping
 from typing import List
 from transformers import PreTrainedTokenizerBase
 
@@ -32,14 +33,14 @@ class PromptDataset:
         for source in self.datasets:
             ext = os.path.splitext(source)[-1].lower()
             if ext == ".parquet":
-                ds = datasets.load_dataset("parquet", data_files=source, keep_in_memory=True)["train"]
+                ds = datasets.load_dataset("parquet", data_files=source, keep_in_memory=False)["train"]
             elif ext in [".json", ".jsonl"]:
-                ds = datasets.load_dataset("json", data_files=source, keep_in_memory=True)["train"]
+                ds = datasets.load_dataset("json", data_files=source, keep_in_memory=False)["train"]
             else:
                 # Treat as HF dataset spec: "name" or "name:split"
                 dataset_name, has_split, split = source.partition(":")
                 try:
-                    ds_dict = datasets.load_dataset(path=dataset_name, keep_in_memory=True)
+                    ds_dict = datasets.load_dataset(path=dataset_name, keep_in_memory=False)
                 except ValueError:
                     raise ValueError(f"Dataset `{dataset_name}` not found on Hugging Face.")
                 split = split if has_split else "train"
@@ -58,10 +59,7 @@ class PromptDataset:
         tokenizer = self.tokenizer
         prompt_key = self.prompt_key
         self.dataframe = self.dataframe.filter(
-            lambda doc: (
-                len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True))
-                <= self.max_prompt_length
-            ),
+            lambda doc: _prompt_token_count(tokenizer, doc[prompt_key]) <= self.max_prompt_length,
             num_proc=self.num_workers,
             desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
         )
@@ -86,3 +84,21 @@ class PromptDataset:
 
     def __len__(self):
         return len(self.dataframe)
+
+
+def _prompt_token_count(tokenizer: PreTrainedTokenizerBase, prompt) -> int:
+    """Count token IDs, including with Transformers 5.x ``BatchEncoding`` output."""
+    encoded = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
+    if isinstance(encoded, Mapping):
+        encoded = encoded.get("input_ids")
+    if encoded is None:
+        raise TypeError("tokenizer chat template returned no input_ids")
+    if hasattr(encoded, "tolist"):
+        encoded = encoded.tolist()
+    if isinstance(encoded, list) and len(encoded) == 1 and isinstance(encoded[0], list):
+        encoded = encoded[0]
+    if isinstance(encoded, str):
+        return len(encoded)
+    if not isinstance(encoded, list):
+        raise TypeError(f"tokenizer chat template returned unsupported token IDs: {type(encoded).__name__}")
+    return len(encoded)

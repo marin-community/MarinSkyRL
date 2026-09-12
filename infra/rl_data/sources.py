@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import itertools
 import json
 import re
@@ -43,6 +44,10 @@ EURUS2_DATASET = "PRIME-RL/Eurus-2-RL-Data"
 NEMOTRON_DATASET = "nvidia/Llama-Nemotron-Post-Training-Dataset"
 REASONING_GYM_DATASET = "open-thought/reasoning-gym"
 GRETEL_TEXT_TO_SQL_DATASET = "gretelai/synthetic_text_to_sql"
+NEMOTRON_ULTRA_RL_DATASET = "nvidia/Nemotron-RL-Ultra-Training-Blends"
+NEMOTRON_ULTRA_REVISION = "79f8eda15ea12e1adf7bb14dcb338a29d391b80e"
+NEMOTRON_ULTRA_DAPO_REVISION = "65877096c24ffa7abc4e4fa5edb95cf3413a5674"
+NEMOTRON_ULTRA_SKYWORK_REVISION = "1cdedc52e0e2db85fdf252f9be682e63a5a38c33"
 TEST_ONLY_SOURCE_LABELS = {"aime24": "AIME24", "math500": "MATH-500"}
 TEST_ONLY_SOURCE_NAMES = frozenset(TEST_ONLY_SOURCE_LABELS)
 
@@ -78,6 +83,192 @@ class Source:
     verification: str
     prepare_row: PrepareRow
     load_rows: Callable[[Source, str, Mapping[str, Any]], Iterable[Mapping[str, Any]]] | None = None
+    deduplicate_by_prompt: bool = True
+
+
+NEMOTRON_ULTRA_RLVR1_AGENTS = frozenset(
+    {
+        "abstention_simple_agent",
+        "calendar_simple_agent",
+        "code_gen_simple_agent",
+        "genrm_simple_agent",
+        "genrm_simple_agent_reasoning_off",
+        "instruction_following_simple_agent",
+        "jailbreak_engagement_with_disclaimer",
+        "jailbreak_hard_refusal_no_redirection",
+        "jailbreak_hard_refusal_with_helplines",
+        "jailbreak_refusal_with_explanation",
+        "math_formal_lean_refinement_agent",
+        "math_with_judge_simple_agent",
+        "mcqa_simple_agent",
+        "multichallenge_simple_agent",
+        "ns_tools_simple_agent",
+        "nvarc_inductive_simple_agent",
+        "nvarc_transductive_simple_agent",
+        "reasoning_gym_simple_agent",
+        "single_step_tool_use_with_argument_comparison_agent",
+        "structured_outputs_simple_agent",
+        "swe_pivot_single_step_tool_use_with_argument_comparison_agent",
+        "toolcall_schema_single_step_tool_use_with_argument_comparison_agent",
+    }
+)
+NEMOTRON_ULTRA_RLVR2_AGENTS = NEMOTRON_ULTRA_RLVR1_AGENTS | {
+    "citation_format_simple_agent",
+    "freeform_formatting_simple_agent",
+    "rdkit_chemistry_agent",
+    "structured_outputs_v3_simple_agent",
+}
+NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
+_NEMOTRON_PLACEHOLDER_KEY = "_hf_question_placeholder"
+_NEMOTRON_DAPO_PREFIX = (
+    "Solve the following math problem step by step. The last line of your response "
+    "should be of the form Answer: $Answer (without quotes) where $Answer is the "
+    "answer to the problem."
+)
+_NEMOTRON_DAPO_SUFFIX = 'Remember to put your answer on its own line after "Answer:".'
+
+
+def _message_text(content: Any) -> str | None:
+    if content is None or isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        raise TypeError("NeMo Gym message content must be a string, null, or a list of content items.")
+    text: list[str] = []
+    for item in content:
+        if not isinstance(item, Mapping) or item.get("type") not in {"input_text", "output_text"}:
+            raise ValueError(f"Unsupported NeMo Gym message content item: {item!r}.")
+        value = item.get("text")
+        if not isinstance(value, str):
+            raise TypeError("NeMo Gym text content items must contain a string text field.")
+        text.append(value)
+    return "".join(text)
+
+
+def _nemotron_ultra_messages(raw_input: Any) -> list[dict[str, Any]]:
+    """Translate the released Responses-API history to vLLM chat messages.
+
+    Reasoning items carry no user-visible content in the released blend. They are
+    deliberately omitted, while function calls and their outputs retain their IDs
+    and exact JSON argument strings.
+    """
+    if isinstance(raw_input, str):
+        return [{"role": "user", "content": raw_input}]
+    if not isinstance(raw_input, list) or not raw_input:
+        raise TypeError("responses_create_params.input must be a non-empty string or list.")
+
+    messages: list[dict[str, Any]] = []
+    pending_calls: list[dict[str, Any]] = []
+
+    def flush_calls() -> None:
+        if pending_calls:
+            messages.append({"role": "assistant", "content": None, "tool_calls": list(pending_calls)})
+            pending_calls.clear()
+
+    for item in raw_input:
+        if not isinstance(item, Mapping):
+            raise TypeError("NeMo Gym input items must be mappings.")
+        item_type = item.get("type", "message")
+        if item_type == "reasoning":
+            continue
+        if item_type == "function_call":
+            name = item.get("name")
+            call_id = item.get("call_id")
+            arguments = item.get("arguments")
+            if not all(isinstance(value, str) for value in (name, call_id, arguments)):
+                raise TypeError("NeMo Gym function calls require string name, call_id, and arguments fields.")
+            pending_calls.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }
+            )
+            continue
+
+        flush_calls()
+        if item_type == "function_call_output":
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str):
+                raise TypeError("NeMo Gym function-call outputs require a string call_id.")
+            output = item.get("output", "")
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output if isinstance(output, str) else json.dumps(output, ensure_ascii=False),
+                }
+            )
+            continue
+        if item_type != "message":
+            raise ValueError(f"Unsupported NeMo Gym input item type {item_type!r}.")
+        role = item.get("role")
+        if role not in {"system", "developer", "user", "assistant"}:
+            raise ValueError(f"Unsupported NeMo Gym message role {role!r}.")
+        messages.append({"role": role, "content": _message_text(item.get("content"))})
+    flush_calls()
+    if not messages:
+        raise ValueError("NeMo Gym input did not contain any chat-visible messages.")
+    return messages
+
+
+def _prepare_nemotron_ultra(
+    example: Mapping[str, Any],
+    index: int,
+    contract: VerifierDataContract,
+    *,
+    agents: frozenset[str],
+    blend: str,
+) -> PreparedRow:
+    del contract
+    request = example.get("responses_create_params")
+    agent_ref = example.get("agent_ref")
+    if not isinstance(request, Mapping):
+        raise TypeError("Nemotron Ultra row responses_create_params must be a mapping.")
+    if not isinstance(agent_ref, Mapping):
+        raise TypeError("Nemotron Ultra row agent_ref must be a mapping.")
+    agent = agent_ref.get("name")
+    if not isinstance(agent, str) or agent not in agents:
+        raise ValueError(f"Nemotron Ultra row has unsupported agent_ref.name {agent!r}.")
+
+    route = "terminal_bench" if agent == NEMOTRON_ULTRA_SWE_AGENT else "skyrl_gym"
+    metadata = example.get("metadata")
+    instance_id = metadata.get("instance_id") if isinstance(metadata, Mapping) else None
+    if route == "terminal_bench" and not isinstance(instance_id, str):
+        raise ValueError("Nemotron Ultra SWE pivot row is missing metadata.instance_id.")
+    if _NEMOTRON_PLACEHOLDER_KEY in example:
+        raise ValueError("Nemotron Ultra math placeholder was not restored before row preparation.")
+
+    return {
+        "data_source": NEMOTRON_ULTRA_RL_DATASET,
+        "prompt": _nemotron_ultra_messages(request.get("input")),
+        "env_class": "nemotron_ultra",
+        "reward_model": {"ground_truth": agent},
+        "extra_info": {
+            "split": "train",
+            "index": index,
+            "nemotron_ultra": {
+                "uuid": str(example.get("uuid", index)),
+                "blend": blend,
+                "agent": agent,
+                "route": route,
+                "terminal_bench_instance_id": instance_id,
+                "request_json": json.dumps(
+                    {key: value for key, value in request.items() if key != "input"},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "record_json": json.dumps(
+                    {
+                        key: value
+                        for key, value in example.items()
+                        if key not in {"responses_create_params", "agent_ref"}
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            },
+        },
+    }
 
 
 def _last_user_content(messages: list[Mapping[str, Any]]) -> str:
@@ -888,6 +1079,34 @@ def gretel_text_to_sql_source() -> Source:
     )
 
 
+def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str) -> Source:
+    return Source(
+        name,
+        NEMOTRON_ULTRA_RL_DATASET,
+        "nemotron_ultra",
+        "train",
+        True,
+        "row_selected",
+        lambda example, index, contract: _prepare_nemotron_ultra(
+            example, index, contract, agents=agents, blend=blend
+        ),
+        _load_nemotron_ultra_rows,
+        deduplicate_by_prompt=False,
+    )
+
+
+def nemotron_ultra_rlvr1_source() -> Source:
+    return _nemotron_ultra_source(
+        name="nemotron_ultra_rlvr1", agents=NEMOTRON_ULTRA_RLVR1_AGENTS, blend="rlvr1"
+    )
+
+
+def nemotron_ultra_rlvr2_source() -> Source:
+    return _nemotron_ultra_source(
+        name="nemotron_ultra_rlvr2", agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2"
+    )
+
+
 def generate_reasoning_gym_rows(
     *, tasks: tuple[str, ...], rows_per_task: int, seed: int, start_index: int = 0
 ):
@@ -1006,6 +1225,90 @@ def _load_nemotron_rows(source: Source, revision: str, parameters: Mapping[str, 
     return _skip_source_rows(source, _load_hugging_face_dataset(source, revision, "RL"), parameters)
 
 
+def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
+    import datasets
+    from huggingface_hub import hf_hub_download
+
+    filename = source.name.removeprefix("nemotron_ultra_") + ".jsonl"
+    local_path = hf_hub_download(
+        repo_id=source.dataset_id,
+        repo_type="dataset",
+        filename=filename,
+        revision=revision,
+    )
+    rows = datasets.load_dataset("json", data_files=local_path, split="train", streaming=True)
+    rows = _skip_source_rows(source, rows, parameters)
+
+    placeholder_sources = {
+        (DAPO_MATH_DATASET, "train"): datasets.load_dataset(
+            DAPO_MATH_DATASET,
+            split="train",
+            revision=NEMOTRON_ULTRA_DAPO_REVISION,
+        ),
+        ("Skywork/Skywork-OR1-RL-Data", "math"): datasets.load_dataset(
+            "Skywork/Skywork-OR1-RL-Data",
+            split="math",
+            revision=NEMOTRON_ULTRA_SKYWORK_REVISION,
+        ),
+    }
+    return (_restore_nemotron_ultra_placeholder(row, placeholder_sources) for row in rows)
+
+
+def _unwrap_nemotron_answer(raw: Any) -> str:
+    if not isinstance(raw, str):
+        if isinstance(raw, list) and raw:
+            return str(raw[0])
+        return str(raw)
+    stripped = raw.strip()
+    if (stripped.startswith("[") and stripped.endswith("]")) or (
+        stripped.startswith("{") and stripped.endswith("}")
+    ):
+        try:
+            value = json.loads(stripped)
+        except json.JSONDecodeError:
+            return stripped
+        if isinstance(value, list) and value:
+            return str(value[0])
+        return str(value)
+    return stripped
+
+
+def _restore_nemotron_ultra_placeholder(
+    row: Mapping[str, Any],
+    sources: Mapping[tuple[str, str], Any],
+) -> Mapping[str, Any]:
+    placeholder = row.get(_NEMOTRON_PLACEHOLDER_KEY)
+    if not isinstance(placeholder, Mapping):
+        return row
+    dataset_id = str(placeholder["dataset"])
+    split = str(placeholder["split"])
+    source = sources[(dataset_id, split)][int(placeholder["row"])]
+    bare = str(source["prompt"][0]["content"])
+    if dataset_id == DAPO_MATH_DATASET:
+        if _NEMOTRON_DAPO_PREFIX in bare:
+            bare = bare.split(_NEMOTRON_DAPO_PREFIX, 1)[1]
+        if _NEMOTRON_DAPO_SUFFIX in bare:
+            bare = bare.rsplit(_NEMOTRON_DAPO_SUFFIX, 1)[0]
+    bare = bare.strip()
+    if placeholder.get("mode") == "canonical":
+        question = str(placeholder.get("lead", "")) + bare + str(placeholder.get("trail", ""))
+    else:
+        question = str(placeholder.get("prefix", "")) + bare + str(placeholder.get("suffix", ""))
+    answer = _unwrap_nemotron_answer((source.get("reward_model") or {}).get("ground_truth"))
+
+    restored = copy.deepcopy(dict(row))
+    restored.pop(_NEMOTRON_PLACEHOLDER_KEY)
+    restored["question"] = question
+    restored["expected_answer"] = answer
+    request_input = restored.get("responses_create_params", {}).get("input")
+    if isinstance(request_input, list) and request_input and isinstance(request_input[0], dict):
+        request_input[0]["content"] = question
+    for matched_source in restored.get("matched_sources") or []:
+        if isinstance(matched_source, dict) and "expected_answer" in matched_source:
+            matched_source["expected_answer"] = answer
+    return restored
+
+
 def load_source_rows(source: Source, revision: str, parameters: Mapping[str, Any] | None = None):
     """Load source rows only when the CLI is invoked, keeping core tests offline."""
     loader = source.load_rows or _load_hugging_face_rows
@@ -1038,6 +1341,8 @@ SOURCES = {
         kto_mix_source(),
         hh_rlhf_source(),
         gretel_text_to_sql_source(),
+        nemotron_ultra_rlvr1_source(),
+        nemotron_ultra_rlvr2_source(),
     )
 }
 

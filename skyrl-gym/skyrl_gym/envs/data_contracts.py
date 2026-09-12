@@ -82,6 +82,16 @@ def _reasoning_gym_is_correct(response: str, ground_truth: str) -> bool:
     return score_reasoning_gym_response(response, ground_truth) == 1.0
 
 
+def _nemotron_ultra_ground_truth(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError("Nemotron Ultra ground truth must identify a row-selected verifier.")
+    return value
+
+
+def _nemotron_ultra_is_correct(response: str, ground_truth: str) -> bool:
+    raise NotImplementedError("Nemotron Ultra correctness depends on the complete source row.")
+
+
 # ---------------------------------------------------------------------------
 # GSM8K
 # ---------------------------------------------------------------------------
@@ -180,6 +190,11 @@ CONTRACTS = {
         env_id="reasoning_gym",
         normalize_ground_truth=normalize_reasoning_gym_ground_truth,
         is_correct=_reasoning_gym_is_correct,
+    ),
+    "nemotron_ultra": VerifierDataContract(
+        env_id="nemotron_ultra",
+        normalize_ground_truth=_nemotron_ultra_ground_truth,
+        is_correct=_nemotron_ultra_is_correct,
     ),
     "mcq": VerifierDataContract(
         env_id="mcq",

@@ -422,12 +422,44 @@ class BasePPOExp:
                 StepWiseRolloutCollector,
                 StepWiseTrajectoryProjection(cfg.generator, tokenizer),
             )
-        return SkyRLGymTrajectoryRunner(
+        gym_runner = SkyRLGymTrajectoryRunner(
             trajectory_runner_cfg=cfg.generator,
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
             pipeline=pipeline,
+        )
+        terminal_bench_data = list(cfg.data.get("terminal_bench_data", []))
+        if not terminal_bench_data:
+            return gym_runner
+
+        if cfg.trainer.step_wise_training:
+            raise ValueError("Nemotron Ultra terminal-bench routing is incompatible with step-wise training")
+
+        from skyrl_train.trajectory_runners.harbor.execution import (  # noqa: PLC0415
+            ExecutionEnvironment,
+            HarborRunnerSpec,
+            ProcessPoolResources,
+            TrajectoryWorkload,
+            build_harbor_trajectory_runner,
+        )
+        from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter  # noqa: PLC0415
+        from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
+
+        if not cfg.get("terminal_bench_config"):
+            raise ValueError("data.terminal_bench_data requires terminal_bench_config")
+        harbor_runner = build_harbor_trajectory_runner(
+            spec=HarborRunnerSpec.from_config(cfg),
+            workload=TrajectoryWorkload(environment=ExecutionEnvironment.PRODUCTION),
+            tokenizer=tokenizer,
+            resources=ProcessPoolResources.from_config(cfg),
+        )
+        return NemotronUltraTrajectoryRouter(
+            gym_runner=gym_runner,
+            harbor_runner=harbor_runner,
+            terminal_bench_data=terminal_bench_data,
+            require_rollout_logprobs=rollout_logprobs_enabled(cfg.trainer.algorithm),
+            tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
 
     def get_trainer(

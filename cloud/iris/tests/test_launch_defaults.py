@@ -403,6 +403,30 @@ def test_task_command_stages_training_and_validation_selectors_on_every_node(tmp
     assert options["--val-data"] == [json.dumps([val_selector])]
 
 
+def test_task_command_stages_terminal_bench_sidechannel_on_every_node(tmp_path):
+    selector = "fixture-org/nemotron-ultra-swe@immutable::train"
+    args = _args(tmp_path, "opencode")
+    Path(args.rl_config).write_text(
+        f"""\
+terminal_bench:
+  harbor:
+    name: opencode
+data:
+  terminal_bench_data:
+    - {selector}
+"""
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    assert iris_backend.load_config_terminal_bench_data(args.rl_config) == [selector]
+    command = build_task_command(args)[-1]
+    assert "--terminal-bench-data" in command
+    options = _shell_options(command)
+
+    assert options["--terminal-bench-data"] == [json.dumps([selector])]
+
+
 def test_normalize_rejects_negative_driver_liveness_timeout(tmp_path):
     args = _args(tmp_path, "opencode", ["--driver-liveness-timeout", "-1"])
 
