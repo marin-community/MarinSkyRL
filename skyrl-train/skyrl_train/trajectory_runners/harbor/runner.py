@@ -764,6 +764,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         """
         if self._orchestrator_lock is None:
             # startup() was never called
+            self._packed_task_materializer.close()
             return
 
         async with self._orchestrator_lock:
@@ -781,6 +782,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                     logger.warning(f"Error during orchestrator shutdown: {e}")
                 finally:
                     self._orchestrator = None
+        self._packed_task_materializer.close()
 
     async def start_eval_session(
         self,

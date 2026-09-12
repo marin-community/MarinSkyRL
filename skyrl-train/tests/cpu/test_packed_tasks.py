@@ -167,6 +167,21 @@ def test_packed_dataset_defers_extraction_until_materialization(tmp_path: Path) 
     assert not (task_path / "solution").exists()
 
 
+def test_packed_materializer_reuses_reader_across_batches(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "tasks.parquet"
+    _write_dataset(dataset_path)
+    references = select_task_references(_source(dataset_path, TaskTroveSelection(sources=("source-a",)))).references
+    materializer = PackedTaskMaterializer(tmp_path / "cache")
+
+    first = materializer.materialize_batch([references[0]])[references[0]]
+    dataset_path.unlink()
+    second = materializer.materialize_batch([references[1]])[references[1]]
+    materializer.close()
+
+    assert (first / "instruction.md").read_text() == "Do one"
+    assert (second / "instruction.md").read_text() == "Do three"
+
+
 def test_packed_dataset_rejects_changed_launch_selection(tmp_path: Path) -> None:
     dataset_path = tmp_path / "tasks.parquet"
     _write_dataset(dataset_path)

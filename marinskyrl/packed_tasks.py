@@ -217,6 +217,20 @@ class PackedTaskMaterializer:
 
     def __init__(self, cache_root: Path) -> None:
         self.cache_root = cache_root
+        self._parquet_files: dict[str, pq.ParquetFile] = {}
+
+    def close(self) -> None:
+        """Close Parquet readers held for reuse across rollout batches."""
+        for parquet in self._parquet_files.values():
+            parquet.close()
+        self._parquet_files.clear()
+
+    def _parquet_file(self, dataset_path: str) -> pq.ParquetFile:
+        parquet = self._parquet_files.get(dataset_path)
+        if parquet is None:
+            parquet = pq.ParquetFile(dataset_path)
+            self._parquet_files[dataset_path] = parquet
+        return parquet
 
     def _task_path(self, reference: PackedTaskReference) -> Path:
         identity = hashlib.sha256(reference.dataset_identity.encode()).hexdigest()[:16]
@@ -268,7 +282,7 @@ class PackedTaskMaterializer:
                     if not (self._task_path(reference) / _COMPLETE_MARKER_FILENAME).is_file()
                 ]
                 if remaining:
-                    rows = pq.ParquetFile(dataset_path).read_row_group(
+                    rows = self._parquet_file(dataset_path).read_row_group(
                         row_group,
                         columns=["source", "mode", "path", "dockerfile_id", "task_binary"],
                     )
