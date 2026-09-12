@@ -127,7 +127,8 @@ from cloud.iris.rl_config_translation import (
 )
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
-from cloud.iris.protocol import DataLocator, LaunchMode, SkyRLJobSpec
+from cloud.iris.protocol import LaunchMode, SkyRLJobSpec
+from marinskyrl.task_sources import DataSource, DirectoryDataSource, TaskTroveParquetSource
 from cloud.iris.env_vars import DistributedDebugMode, EnvVarManager, EnvVarScope, wandb_launch_environment
 from cloud.iris.runtime_environment import (
     CHECKPOINT_EXPORT_ENTRYPOINT,
@@ -271,11 +272,11 @@ def _gpu_constraints(
     return constraints
 
 
-def _resolved_data_path(locator: DataLocator) -> str:
-    relative = Path(locator.relative_path)
-    if relative.is_absolute() or ".." in relative.parts:
-        raise ValueError(f"Data relative_path must stay below its source root: {locator.relative_path!r}")
-    return os.path.join(locator.local_path, *relative.parts)
+def _resolved_data_entry(source: DataSource) -> str | dict[str, Any]:
+    if isinstance(source, DirectoryDataSource):
+        return source.resolved_path()
+    assert isinstance(source, TaskTroveParquetSource)
+    return asdict(source)
 
 
 def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = LaunchMode.WAIT) -> list[str]:
@@ -307,9 +308,9 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
         "--model-source-identity",
         request.model.identity,
         "--train-data",
-        json.dumps([_resolved_data_path(locator) for locator in request.train_data]),
+        json.dumps([_resolved_data_entry(source) for source in request.train_data]),
         "--val-data",
-        json.dumps([_resolved_data_path(locator) for locator in request.validation_data]),
+        json.dumps([_resolved_data_entry(source) for source in request.validation_data]),
         "--data-sources-json",
         json.dumps(data_sources, sort_keys=True),
         "--run-id",

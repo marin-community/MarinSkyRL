@@ -9,7 +9,7 @@ import posixpath
 import subprocess
 import sys
 import tempfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -22,6 +22,8 @@ from cloud.iris.artifacts import (
 )
 from marinskyrl.checkpoint_paths import policy_export_path
 from marinskyrl.hf_model import validate_portable_hf_model_files
+from marinskyrl.packed_tasks import select_task_references
+from marinskyrl.task_sources import DataSource, TaskTroveParquetSource
 from cloud.iris.runtime_bundle import runtime_bundle_inputs
 from cloud.iris.iris_backend import IrisBackend, IrisLaunchOutcome
 from cloud.iris.protocol import (
@@ -126,6 +128,24 @@ def _record_failed_attempt(
     return response
 
 
+def _preflight_tasktrove_sources(sources: tuple[DataSource, ...]) -> tuple[DataSource, ...]:
+    prepared: list[DataSource] = []
+    for source in sources:
+        if not isinstance(source, TaskTroveParquetSource):
+            prepared.append(source)
+            continue
+        summary = select_task_references(source)
+        prepared.append(
+            replace(
+                source,
+                selected_count=len(summary.references),
+                selection_digest=summary.digest,
+                distinct_environment_count=summary.distinct_environment_count,
+            )
+        )
+    return tuple(prepared)
+
+
 def execute_job(
     spec: SkyRLJobSpec,
     *,
@@ -135,6 +155,12 @@ def execute_job(
     """Validate, detach from, or monitor one job according to ``mode``."""
     request = spec.request
     runtime_bundle_inputs(request.runtime.commit)
+    request = replace(
+        request,
+        train_data=_preflight_tasktrove_sources(request.train_data),
+        validation_data=_preflight_tasktrove_sources(request.validation_data),
+    )
+    spec = replace(spec, request=request)
     if _path_exists(request.output.terminal_manifest_uri):
         raise ValueError(f"Terminal manifest is immutable and already exists: {request.output.terminal_manifest_uri}")
 

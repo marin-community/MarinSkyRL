@@ -21,8 +21,10 @@ marinskyrl/__init__.py
 marinskyrl/checkpoint_paths.py
 marinskyrl/harbor_agent_names.py
 marinskyrl/hf_model.py
+marinskyrl/packed_tasks.py
 marinskyrl/resource_locator.py
 marinskyrl/runtime_options.py
+marinskyrl/task_sources.py
 chat_templates/delphi_v0.jinja2
 chat_templates/delphi_v1.jinja2
 chat_templates/qwen3_thinking_acc.jinja2

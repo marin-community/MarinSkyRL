@@ -60,6 +60,7 @@ from skyrl_train.utils.span_tagger import tag_response_spans
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
 from omegaconf import DictConfig
 from pathlib import Path
+from marinskyrl.packed_tasks import PackedTaskMaterializer, packed_task_reference
 
 # Harbor orchestrator and trial imports.
 # QueueOrchestrator + OrchestratorEvent come through a compat shim because
@@ -423,6 +424,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Schema-driven Harbor config builder
         # Automatically maps YAML fields to Harbor's TrialConfig with validation
         self._harbor_config_builder = HarborConfigBuilder(terminal_bench_cfg)
+        self._packed_task_materializer = PackedTaskMaterializer(Path("/tmp/marinskyrl/packed_tasks"))
 
         # Configure Harbor log level (default WARNING to reduce noise)
         harbor_log_level = self._harbor_config_builder.get_log_level(default="WARNING")
@@ -984,8 +986,17 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Convert HuggingFace-style "org/model" to just "model" for the alias.
         model_alias = self.model_name.split("/")[-1] if "/" in self.model_name else self.model_name
 
+        packed_references = {
+            i: packed_task_reference(extras["packed_task"])
+            for i, extras in enumerate(input_batch["env_extras"] or [])
+            if isinstance(extras, dict) and "packed_task" in extras
+        }
+        materialized_tasks = self._packed_task_materializer.materialize_batch(tuple(packed_references.values()))
+
         for i in range(num_trials):
             prompt = input_batch["prompts"][i]
+            if i in packed_references:
+                prompt = str(materialized_tasks[packed_references[i]])
             trajectory_id = input_batch["trajectory_ids"][i]
 
             # Generate session_id for sticky routing to inference engines

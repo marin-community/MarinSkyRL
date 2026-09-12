@@ -63,8 +63,8 @@ class LocalRLConfig:
     entrypoint: str | None = None
     model_source_uri: str | None = None
     model_source_identity: str | None = None
-    train_data: List[str] = field(default_factory=list)
-    val_data: List[str] = field(default_factory=list)
+    train_data: List[str | dict[str, Any]] = field(default_factory=list)
+    val_data: List[str | dict[str, Any]] = field(default_factory=list)
     experiments_dir: str = "experiments"
     resolved_config_uri: str | None = None
     gpus: int = 4
