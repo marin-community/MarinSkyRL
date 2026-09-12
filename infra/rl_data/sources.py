@@ -236,6 +236,11 @@ def _prepare_nemotron_ultra(
     instance_id = metadata.get("instance_id") if isinstance(metadata, Mapping) else None
     if route == "terminal_bench" and not isinstance(instance_id, str):
         raise ValueError("Nemotron Ultra SWE pivot row is missing metadata.instance_id.")
+    # The stored schema name is historical: snapshot-backed SWE rows use the
+    # exact TaskTrove archive path as their Harbor task identifier.
+    terminal_bench_task_id = (
+        metadata.get("tasktrove_proxy_path", instance_id) if isinstance(metadata, Mapping) else None
+    )
     if _NEMOTRON_PLACEHOLDER_KEY in example:
         raise ValueError("Nemotron Ultra math placeholder was not restored before row preparation.")
 
@@ -252,7 +257,7 @@ def _prepare_nemotron_ultra(
                 "blend": blend,
                 "agent": agent,
                 "route": route,
-                "terminal_bench_instance_id": instance_id,
+                "terminal_bench_instance_id": terminal_bench_task_id,
                 "request_json": json.dumps(
                     {key: value for key, value in request.items() if key != "input"},
                     ensure_ascii=False,
@@ -465,9 +470,7 @@ def _plain_numeric_answer(answer: Any) -> str:
     return normalized
 
 
-def _prepare_hendrycks_math(
-    example: Mapping[str, Any], index: int, contract: VerifierDataContract
-) -> PreparedRow:
+def _prepare_hendrycks_math(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
     source = hendrycks_math_source()
     problem = example.get("problem")
     solution = example.get("solution")
@@ -480,9 +483,7 @@ def _prepare_hendrycks_math(
     return row
 
 
-def _prepare_aime_1983_2024(
-    example: Mapping[str, Any], index: int, contract: VerifierDataContract
-) -> PreparedRow:
+def _prepare_aime_1983_2024(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
     source = aime_1983_2024_source()
     question = example.get("Question")
     answer = example.get("Answer")
@@ -862,6 +863,7 @@ def _prepare_hh_rlhf(example: Mapping[str, Any], index: int, contract: VerifierD
 # Gretel synthetic text-to-SQL (result-set-equivalence verifier)
 # ---------------------------------------------------------------------------
 
+
 def _ensure_semicolon(stmt: str) -> str:
     stmt = stmt.strip()
     return stmt if stmt.endswith(";") else stmt + ";"
@@ -902,9 +904,7 @@ def _split_gretel_context(context: str) -> tuple[list[str], list[str], list[str]
     return create_stmts, insert_stmts, table_names
 
 
-def _prepare_gretel_text_to_sql(
-    example: Mapping[str, Any], index: int, contract: VerifierDataContract
-) -> PreparedRow:
+def _prepare_gretel_text_to_sql(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
     """Static transform only. Whether the reference query actually executes is checked once, by the
     contract's two-sided ``validate_example`` preflight — not in bulk here."""
     source = gretel_text_to_sql_source()
@@ -994,9 +994,7 @@ def svamp_source() -> Source:
 
 
 def numina_math_source() -> Source:
-    return Source(
-        "numina_math", NUMINA_MATH_DATASET, "aime", "train", False, "two_sided", _prepare_numina_math
-    )
+    return Source("numina_math", NUMINA_MATH_DATASET, "aime", "train", False, "two_sided", _prepare_numina_math)
 
 
 def hardmath_source() -> Source:
@@ -1088,29 +1086,21 @@ def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str) -> 
         "train",
         True,
         "row_selected",
-        lambda example, index, contract: _prepare_nemotron_ultra(
-            example, index, contract, agents=agents, blend=blend
-        ),
+        lambda example, index, contract: _prepare_nemotron_ultra(example, index, contract, agents=agents, blend=blend),
         _load_nemotron_ultra_rows,
         deduplicate_by_prompt=False,
     )
 
 
 def nemotron_ultra_rlvr1_source() -> Source:
-    return _nemotron_ultra_source(
-        name="nemotron_ultra_rlvr1", agents=NEMOTRON_ULTRA_RLVR1_AGENTS, blend="rlvr1"
-    )
+    return _nemotron_ultra_source(name="nemotron_ultra_rlvr1", agents=NEMOTRON_ULTRA_RLVR1_AGENTS, blend="rlvr1")
 
 
 def nemotron_ultra_rlvr2_source() -> Source:
-    return _nemotron_ultra_source(
-        name="nemotron_ultra_rlvr2", agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2"
-    )
+    return _nemotron_ultra_source(name="nemotron_ultra_rlvr2", agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2")
 
 
-def generate_reasoning_gym_rows(
-    *, tasks: tuple[str, ...], rows_per_task: int, seed: int, start_index: int = 0
-):
+def generate_reasoning_gym_rows(*, tasks: tuple[str, ...], rows_per_task: int, seed: int, start_index: int = 0):
     """Generate a deterministic, index-disjoint slice for each Reasoning Gym task."""
     if not tasks:
         raise ValueError("Reasoning Gym requires at least one task.")
@@ -1140,9 +1130,7 @@ def _load_reasoning_gym_rows(source: Source, revision: str, parameters: Mapping[
         raise ValueError(
             f"Reasoning Gym revision must match the installed package version {installed_version!r}, got {revision!r}."
         )
-    _validate_source_parameters(
-        "Reasoning Gym", parameters, {"tasks", "rows_per_task", "seed", "start_index"}
-    )
+    _validate_source_parameters("Reasoning Gym", parameters, {"tasks", "rows_per_task", "seed", "start_index"})
     tasks = parameters.get("tasks")
     if not isinstance(tasks, list) or not tasks or not all(isinstance(task, str) and task for task in tasks):
         raise TypeError("Reasoning Gym parameters.tasks must be a non-empty list of task names.")
@@ -1245,6 +1233,10 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
     import datasets
     from huggingface_hub import hf_hub_download
 
+    # Local import breaks the source/sidechannel module cycle while keeping the
+    # heavyweight TaskTrove archive scan out of ordinary source imports.
+    from infra.rl_data.nemotron_ultra_swe import bind_tasktrove_swe_proxies, load_tasktrove_swe_proxy_index
+
     filename = source.name.removeprefix("nemotron_ultra_") + ".jsonl"
     local_path = hf_hub_download(
         repo_id=source.dataset_id,
@@ -1253,6 +1245,7 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
         revision=revision,
     )
     rows = _skip_source_rows(source, _iter_jsonl_rows(Path(local_path)), parameters)
+    rows = bind_tasktrove_swe_proxies(rows, load_tasktrove_swe_proxy_index())
 
     placeholder_sources = {
         (DAPO_MATH_DATASET, "train"): datasets.load_dataset(
@@ -1275,9 +1268,7 @@ def _unwrap_nemotron_answer(raw: Any) -> str:
             return str(raw[0])
         return str(raw)
     stripped = raw.strip()
-    if (stripped.startswith("[") and stripped.endswith("]")) or (
-        stripped.startswith("{") and stripped.endswith("}")
-    ):
+    if (stripped.startswith("[") and stripped.endswith("]")) or (stripped.startswith("{") and stripped.endswith("}")):
         try:
             value = json.loads(stripped)
         except json.JSONDecodeError:

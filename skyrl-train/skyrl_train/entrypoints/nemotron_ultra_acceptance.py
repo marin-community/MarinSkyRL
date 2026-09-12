@@ -90,13 +90,13 @@ def prepare_acceptance_data(cfg: DictConfig, root: Path) -> dict[str, object]:
     sample_path = root / "generator-sample.parquet"
     manifest = write_generator_sample(sample_path, seed=int(cfg.trainer.seed))
     sample = datasets.load_dataset("parquet", data_files=str(sample_path), split="train")
-    desired_ids = {
+    desired_paths = {
         ultra["terminal_bench_instance_id"]
         for row in sample
         if (ultra := row["extra_info"]["nemotron_ultra"])["route"] == "terminal_bench"
     }
     task_artifact = root / "swe-task-artifact"
-    task_manifest = prepare_swe_task_artifact(task_artifact, desired_ids=desired_ids)
+    task_manifest = prepare_swe_task_artifact(task_artifact, desired_paths=desired_paths)
     task_root = root / "swe-tasks"
     from_parquet(str(task_artifact / "tasks.parquet"), str(task_root), max_workers=2)
 

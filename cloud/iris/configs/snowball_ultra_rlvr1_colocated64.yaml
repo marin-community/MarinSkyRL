@@ -21,7 +21,7 @@ terminal_bench:
     override_cpus: 1
     override_memory_mb: 4096
     override_storage_mb: 4096
-    auto_snapshot: false
+    auto_snapshot: true
     env_network_policy:
       mode: unrestricted
     max_retries: 3
@@ -157,11 +157,11 @@ environment:
 data:
   kind: parquet
   train_data:
-    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/rlvr1/train.parquet
+    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/tasktrove-v1/rlvr1/train.parquet
   val_data:
-    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/rlvr1/validation.parquet
+    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/tasktrove-v1/rlvr1/validation.parquet
   terminal_bench_data:
-    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/swe-tasks-v2/tasks.parquet
+    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/tasktrove-swe-v1/tasks.parquet
   shuffle: false
 
 extra_env:

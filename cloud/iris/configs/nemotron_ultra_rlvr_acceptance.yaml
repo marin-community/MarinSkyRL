@@ -1,6 +1,5 @@
-# One-off, checked-in acceptance run for every generator in both released blends.
-# The dedicated entrypoint replaces the empty data paths with a bounded random
-# sample from NVIDIA's pinned release and constructs the matching Harbor tasks.
+# One-off acceptance run for every generator in both released blends.
+# The sample and exact TaskTrove proxy sidechannel are immutable campaign artifacts.
 entrypoint: standard
 
 config_groups:
@@ -26,7 +25,7 @@ terminal_bench:
     override_cpus: 1
     override_memory_mb: 4096
     override_storage_mb: 4096
-    auto_snapshot: false
+    auto_snapshot: true
     env_network_policy:
       mode: unrestricted
     max_retries: 1
@@ -64,8 +63,11 @@ trainer:
   update_epochs_per_batch: 1
   train_batch_size: 48
   policy_mini_batch_size: 48
-  micro_forward_batch_size_per_gpu: 2
+  micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
+  flash_attn: true
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
   use_sample_packing: false
   eval_interval: 999999
   eval_before_train: false
@@ -128,10 +130,36 @@ generator:
 environment:
   skyrl_gym:
     nemotron_ultra:
+      sandbox:
+        host: snowball-nemo-skills-sandbox.iris.svc.cluster.local
+        port: 6000
+      judges:
+        general:
+          base_url: https://api.together.xyz/v1
+          model: openai/gpt-oss-120b
+          api_key_env: TOGETHER_API_KEY
+          reasoning_effort: low
+          timeout_seconds: 600.0
+        safety:
+          base_url: https://api.together.xyz/v1
+          model: openai/gpt-oss-120b
+          api_key_env: TOGETHER_API_KEY
+          reasoning_effort: low
+          timeout_seconds: 600.0
       genrm:
+        judge:
+          base_url: https://api.together.xyz/v1
+          model: openai/gpt-oss-120b
+          api_key_env: TOGETHER_API_KEY
+          response_transport: chat_completions
+          reasoning_effort: low
+          timeout_seconds: 600.0
         num_rollouts_per_prompt: 2
         group_answer_length_penalty_coeff: 0.0
         group_reasoning_length_penalty_coeff: 0.0
+        max_output_tokens: 512
+        temperature: 0.0
+        top_p: 1.0
 
 extra_env:
   NCCL_DEBUG: WARN
@@ -139,5 +167,8 @@ extra_env:
 
 data:
   kind: parquet
-  train_data: []
+  train_data:
+    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/acceptance-tasktrove-v1/sample.parquet
   val_data: []
+  terminal_bench_data:
+    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/tasktrove-swe-v1/tasks.parquet

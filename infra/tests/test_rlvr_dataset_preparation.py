@@ -211,6 +211,20 @@ def test_nemotron_ultra_adapter_routes_only_swe_pivots_to_terminal_bench():
     assert ultra["terminal_bench_instance_id"] == "python-pillow__Pillow-deadbeef"
 
 
+def test_nemotron_ultra_adapter_routes_bound_swe_pivot_to_tasktrove_proxy():
+    example = _nemotron_ultra_pivot_row()
+    example["agent_ref"]["name"] = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
+    example["metadata"] = {
+        "instance_id": "python-pillow__Pillow-deadbeef",
+        "agent_cls": "opencode",
+        "tasktrove_proxy_path": "agentic-swe-pivot-v4-deadbeef.tar.gz",
+    }
+
+    row = nemotron_ultra_rlvr1_source().prepare_row(example, 0, NemotronUltraContract())
+
+    assert row["extra_info"]["nemotron_ultra"]["terminal_bench_instance_id"] == ("agentic-swe-pivot-v4-deadbeef.tar.gz")
+
+
 def test_nemotron_ultra_blend_keeps_duplicate_prompts_in_source_order():
     first = _nemotron_ultra_pivot_row(uuid="first", prompt="same prompt")
     second = _nemotron_ultra_pivot_row(uuid="second", prompt="same prompt")
@@ -642,7 +656,12 @@ def test_gsm8k_rejects_missing_delimiter():
     [
         (
             hendrycks_math_source(),
-            {"problem": "Compute 2 + 2.", "solution": "Therefore \\boxed{4}.", "level": "Level 1", "subject": "algebra"},
+            {
+                "problem": "Compute 2 + 2.",
+                "solution": "Therefore \\boxed{4}.",
+                "level": "Level 1",
+                "subject": "algebra",
+            },
             "4",
             {"level": "Level 1", "subject": "algebra"},
         ),
@@ -736,9 +755,7 @@ def test_asdiv_loader_reads_pinned_xml(monkeypatch):
 
     rows = list(load_source_rows(asdiv_source(), "commit-123", {}))
 
-    assert rows == [
-        {"Body": "Sam has four apples.", "Question": "How many?", "Answer": "4 (apples)", "Grade": "3"}
-    ]
+    assert rows == [{"Body": "Sam has four apples.", "Question": "How many?", "Answer": "4 (apples)", "Grade": "3"}]
     assert requested == [
         ("https://raw.githubusercontent.com/chaochun/nlu-asdiv-dataset/commit-123/dataset/ASDiv.xml", 60)
     ]
@@ -1009,9 +1026,7 @@ def test_eurus_code_adapter_normalizes_apps_tests():
             {
                 "ability": "code",
                 "prompt": [{"role": "user", "content": "Read two integers and print their sum."}],
-                "reward_model": {
-                    "ground_truth": json.dumps({"inputs": ["1 2\n", "4 5\n"], "outputs": ["3\n", "9\n"]})
-                },
+                "reward_model": {"ground_truth": json.dumps({"inputs": ["1 2\n", "4 5\n"], "outputs": ["3\n", "9\n"]})},
             }
         ],
         get_data_contract("lcb"),
@@ -1029,19 +1044,13 @@ def test_eurus_code_adapter_normalizes_apps_tests():
 
 def test_reasoning_gym_generation_is_deterministic_verifiable_and_disjoint():
     train_rows = list(
-        generate_reasoning_gym_rows(
-            tasks=("leg_counting", "knights_knaves"), rows_per_task=3, seed=41, start_index=0
-        )
+        generate_reasoning_gym_rows(tasks=("leg_counting", "knights_knaves"), rows_per_task=3, seed=41, start_index=0)
     )
     rebuilt_rows = list(
-        generate_reasoning_gym_rows(
-            tasks=("leg_counting", "knights_knaves"), rows_per_task=3, seed=41, start_index=0
-        )
+        generate_reasoning_gym_rows(tasks=("leg_counting", "knights_knaves"), rows_per_task=3, seed=41, start_index=0)
     )
     holdout_rows = list(
-        generate_reasoning_gym_rows(
-            tasks=("leg_counting", "knights_knaves"), rows_per_task=100, seed=41, start_index=3
-        )
+        generate_reasoning_gym_rows(tasks=("leg_counting", "knights_knaves"), rows_per_task=100, seed=41, start_index=3)
     )
 
     assert rebuilt_rows == train_rows
@@ -1095,10 +1104,7 @@ def test_gretel_text_to_sql_adapter_builds_result_set_ground_truth():
     from infra.rl_data.sources import gretel_text_to_sql_source
 
     schema = "CREATE TABLE Hospitals (HospitalID INT, State TEXT);"
-    inserts = (
-        "INSERT INTO Hospitals VALUES "
-        "(1,'CA'),(2,'CA'),(3,'NY'),(4,'NY'),(5,'TX'),(6,'TX');"
-    )
+    inserts = "INSERT INTO Hospitals VALUES (1,'CA'),(2,'CA'),(3,'NY'),(4,'NY'),(5,'TX'),(6,'TX');"
     artifact = prepare_artifact(
         gretel_text_to_sql_source(),
         [
