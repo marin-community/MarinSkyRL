@@ -22,3 +22,12 @@ The checked-in Jupiter batch file runs a frozen GPU environment resolved from th
 Iris frozen-CUDA activation supplies the wheel-backed CUDA runtime and the exact Torch, Megatron Core, and
 Transformer Engine closure under test. The job records the checkout revision, GPU topology, imported package
 versions, commands, and test output alongside the numerical artifacts.
+
+## FP16 gradient storage
+
+`fp16_gradient_native.py` is an opt-in CPU/Gloo diagnostic requiring the locked MCore 0.18.0
+package. Run it explicitly with `python -m pytest skyrl-train/tests/gpu/diagnostics/fp16_gradient_native.py`
+from the repository root. It redirects CUDA allocation at the hardware boundary and exercises native
+gradient-buffer views, the backward scheduler, dynamic scaler and optimizer step on two CPU ranks.
+A one-rank overflow after reduction must skip both master shards. It does not qualify CUDA kernels,
+NCCL reduce-scatter, Transformer Engine Adam, the full model provider or checkpoint resume.

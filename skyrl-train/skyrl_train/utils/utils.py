@@ -10,6 +10,7 @@ import ray
 import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from skyrl_train.distributed.megatron.gradient_precision import validate_fp16_gradient_config
 from skyrl_train.data_order import validate_epoch_seeded_shuffle
 from ray.util.placement_group import (
     placement_group,
@@ -604,6 +605,13 @@ def validate_fully_async_cfg(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    precision = cfg.trainer.policy.megatron_config
+    validate_fp16_gradient_config(precision, bf16=cfg.trainer.bf16)
+    if precision.get("fp16_grad_reduce", False):
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError("FP16 gradient reduction requires Megatron")
+        if str(cfg.trainer.policy.optimizer_config.get("optimizer", "adam")).lower() not in ("adam", "adamw"):
+            raise ValueError("FP16 gradient reduction requires native Adam")
     if type(cfg.trainer.optimizer_state_metrics) is not bool:
         raise ValueError("trainer.optimizer_state_metrics must be a boolean")
     if cfg.trainer.optimizer_state_metrics and (

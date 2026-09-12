@@ -13,6 +13,13 @@ from functools import partial
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from loguru import logger
+from skyrl_train.distributed.megatron.gradient_precision import (
+    bind_fp16_gradient_optimizer,
+    fp16_optimizer_overrides,
+    gradient_precision_metrics,
+    use_fp16_gradient_buffers,
+    validate_fp16_gradient_config,
+)
 from skyrl_train.utils.progress import tqdm
 from omegaconf import OmegaConf
 
@@ -242,6 +249,7 @@ class MegatronWorker:
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
         """
+        validate_fp16_gradient_config(megatron_config, bf16=bf16)
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
@@ -281,6 +289,8 @@ class MegatronWorker:
 
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
+        if megatron_config.get("fp16_grad_reduce", False):
+            provider.gradient_accumulation_fusion = False
         provider.finalize()
 
         self.provider = provider
@@ -306,8 +316,12 @@ class MegatronWorker:
         if ddp_config is not None:
             for k, v in ddp_config.items():
                 setattr(default_ddp_config, k, v)
+        fp16_gradients = wrap_with_ddp and self.cfg.trainer.policy.megatron_config.get("fp16_grad_reduce", False)
         model = self.provider.provide_distributed_model(
-            ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
+            ddp_config=default_ddp_config,
+            wrap_with_ddp=wrap_with_ddp,
+            bf16=bf16,
+            post_wrap_hook=use_fp16_gradient_buffers if fp16_gradients else None,
         )
         return model
 
@@ -614,10 +628,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler = Profiler(self.cfg.trainer.policy.megatron_config.torch_profiler_config)
 
         # create optimizer
-        optim_config = init_megatron_optim_config(
-            self.cfg.trainer.policy.optimizer_config, self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs
-        )
+        precision = self.cfg.trainer.policy.megatron_config
+        optimizer_kwargs = dict(precision.optimizer_config_kwargs)
+        if precision.get("fp16_grad_reduce", False):
+            optimizer_kwargs.update(fp16_optimizer_overrides(precision))
+        optim_config = init_megatron_optim_config(self.cfg.trainer.policy.optimizer_config, optimizer_kwargs)
         self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
+        if precision.get("fp16_grad_reduce", False):
+            bind_fp16_gradient_optimizer(self.optimizer)
 
         self._normalize_mini_batch_size()
 
@@ -771,6 +789,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     if self.empty_cuda_cache:
                         torch.cuda.empty_cache()
 
+                    fp16_gradients = self.cfg.trainer.policy.megatron_config.get("fp16_grad_reduce", False)
+                    scale_before = float(self.optimizer.get_loss_scale().item()) if fp16_gradients else 1.0
                     with timing.span(OPTIMIZER_STEP):
                         grad_norm = self.strategy.optimizer_step(
                             self.optimizer,
@@ -791,6 +811,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             ),
                         )
 
+                    precision_metrics = {}
+                    if fp16_gradients:
+                        precision_metrics = gradient_precision_metrics(
+                            self.actor_module, self.optimizer, scale_before, self.strategy.last_optimizer_step_succeeded
+                        )
+                        logger.info(
+                            "FP16_GRADIENT_REDUCTION rank={} step={} minibatch={} dtype=float16 metrics={}",
+                            self._rank,
+                            int(train_data.metadata["global_step"]),
+                            policy_update_steps + 1,
+                            precision_metrics,
+                        )
+
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch
                     for i, metrics in enumerate(metrics_list):
@@ -804,6 +837,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             status["raw_grad_norm"] = grad_norm
                         if i == len(metrics_list) - 1:
                             status.update(self.strategy.last_grad_metrics)
+                            status.update(precision_metrics)
                             status["optimizer_step_succeeded"] = float(self.strategy.last_optimizer_step_succeeded)
 
                         # attach response_length

@@ -37,3 +37,11 @@ logprob_chunk_size: 1024
 # Re-run the eval-mode and train-mode forwards inside ppo_train and log how far each is
 # from the old log-probs, separating eval repeatability from train/eval drift.
 check_train_eval_parity: false
+
+# Gradient-only FP16 experiment; model and parameter buffers stay BF16.
+fp16_grad_reduce: false
+dynamic_loss_scale:
+  initial_scale: 128.0
+  min_scale: 1.0
+  growth_interval: 1000
+  hysteresis: 1

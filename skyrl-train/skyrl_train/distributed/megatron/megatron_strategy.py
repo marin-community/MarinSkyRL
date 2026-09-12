@@ -169,7 +169,8 @@ class MegatronStrategy(DistributedStrategy):
             )
         if after_step is not None:
             after_step(successful)
-        scheduler.step(1)
+        if successful or not self.megatron_config.get("fp16_grad_reduce", False):
+            scheduler.step(1)
         optimizer.zero_grad()
         return grad_norm
 

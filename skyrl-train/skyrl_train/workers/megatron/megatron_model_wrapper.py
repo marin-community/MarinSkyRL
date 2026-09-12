@@ -10,6 +10,7 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
 from megatron.core.distributed import finalize_model_grads
 
+from skyrl_train.distributed.megatron.gradient_precision import bind_fp16_gradient_loss
 from skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
     from_parallel_logits_to_logprobs_packed_sequences,
@@ -94,6 +95,10 @@ class MegatronModelWrapper:
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the build in finalize_model_grads function to all reduce gradients across parallelism dimensions
         config.finalize_model_grads_func = finalize_model_grads
+        if actor_optimizer is not None and self.cfg.trainer.policy.megatron_config.get("fp16_grad_reduce", False):
+            # MCore applies this once to the scalar loss before backward, after microbatch
+            # normalization. Forward-only evaluation and reported losses remain unscaled.
+            bind_fp16_gradient_loss([get_model_config(chunk) for chunk in self.actor_module], actor_optimizer)
 
     def train(self):
         [module.train() for module in self.actor_module]
