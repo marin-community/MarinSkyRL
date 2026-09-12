@@ -1,5 +1,8 @@
 import json
 import os
+from pathlib import Path
+import subprocess
+import sys
 import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
 from dataclasses import dataclass, fields as _dataclass_fields, replace
@@ -8,6 +11,7 @@ from http import HTTPStatus
 import ray
 import torch
 import asyncio
+import hashlib
 import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
@@ -17,6 +21,10 @@ from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.config.behavior_logprobs import (
     ROLLOUT_LOGPROB_VALIDATION_KEY,
     validate_behavior_logprob_sampling,
+)
+from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    publish_speculator_checkpoint,
+    restore_speculator_checkpoint,
 )
 
 # vLLM 0.16+ reorganized entrypoints into sub-packages.
@@ -296,6 +304,167 @@ class WorkerWrap:
     def test_rpc(self, *args, **kwargs):
         """Test RPC call to worker"""
         return args, kwargs
+
+    def begin_online_eagle_capture(self, config):
+        """Begin bounded verifier-state capture on the resident model runner."""
+        resolved = dict(config)
+        reserved_gpu_memory_gib = float(resolved.pop("reserved_gpu_memory_gib"))
+        total_memory_gib = torch.cuda.get_device_properties(self.device).total_memory / 2**30
+        gpu_memory_utilization = float(self.model_runner.cache_config.gpu_memory_utilization)
+        unreserved_memory_gib = total_memory_gib * (1 - gpu_memory_utilization)
+        if reserved_gpu_memory_gib > unreserved_memory_gib:
+            raise RuntimeError(
+                "Online EAGLE training reserves "
+                f"{reserved_gpu_memory_gib:.2f} GiB, but vLLM gpu_memory_utilization="
+                f"{gpu_memory_utilization:.3f} leaves only {unreserved_memory_gib:.2f} GiB "
+                f"on this {total_memory_gib:.2f} GiB device"
+            )
+        return self.model_runner.begin_online_eagle_capture(resolved)
+
+    def seal_online_eagle_capture(self, output_dir):
+        """Seal verifier-state capture before policy weights are synchronized."""
+        return self.model_runner.seal_online_eagle_capture(output_dir)
+
+    def discard_online_eagle_capture(self):
+        """Discard verifier-state capture after a failed rollout."""
+        return self.model_runner.discard_online_eagle_capture()
+
+    def install_online_eagle_speculator(self, candidate_dir, trainer_rank):
+        """Install a complete candidate in place on every inference rank."""
+        result = self.model_runner.install_online_eagle_speculator(candidate_dir, trainer_rank)
+        if self.model_runner.parallel_config.data_parallel_rank == trainer_rank:
+            self._online_eagle_served_candidate_dir = candidate_dir
+        return result
+
+    def publish_online_eagle_speculator(
+        self,
+        source_dir,
+        destination,
+        draft_revision,
+        served_target_revision,
+        trainer_rank,
+    ):
+        """Publish the selected rank's exact served draft beside a policy checkpoint."""
+        worker_rank = self.model_runner.parallel_config.data_parallel_rank
+        if worker_rank != trainer_rank:
+            return {"active": False, "worker_rank": worker_rank}
+        result = publish_speculator_checkpoint(
+            source_dir,
+            destination,
+            draft_revision=draft_revision,
+            served_target_revision=served_target_revision,
+        )
+        return {"active": True, "worker_rank": worker_rank, **result}
+
+    def restore_online_eagle_speculator(self, source, destination, trainer_rank):
+        """Stage a served checkpoint on the selected rank before collective install."""
+        worker_rank = self.model_runner.parallel_config.data_parallel_rank
+        if worker_rank != trainer_rank:
+            return {"active": False, "worker_rank": worker_rank}
+        result = restore_speculator_checkpoint(source, destination)
+        return {"active": True, "worker_rank": worker_rank, **result}
+
+    def start_online_eagle_speculator_update(self, job):
+        """Launch the SkyRL-owned trainer beside one selected inference rank."""
+        trainer_rank = int(job["training"]["trainer_rank"])
+        worker_rank = self.model_runner.parallel_config.data_parallel_rank
+        if worker_rank != trainer_rank:
+            return {"active": False, "worker_rank": worker_rank}
+        existing = getattr(self, "_online_eagle_trainer_process", None)
+        if existing is not None:
+            raise RuntimeError("An online EAGLE trainer process has not been joined")
+        output_dir = Path(job["output_dir"])
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        job_path = output_dir.with_suffix(".job.json")
+        log_path = output_dir.with_suffix(".log")
+        job_path.write_text(json.dumps(job, indent=2, sort_keys=True))
+        environment = dict(os.environ)
+        visible_devices = environment.get("CUDA_VISIBLE_DEVICES")
+        device_index = self.device.index
+        if visible_devices and device_index is not None:
+            devices = visible_devices.split(",")
+            if device_index < len(devices):
+                environment["CUDA_VISIBLE_DEVICES"] = devices[device_index]
+        elif device_index is not None:
+            environment["CUDA_VISIBLE_DEVICES"] = str(device_index)
+        with log_path.open("wb") as log_stream:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "skyrl_train.inference_engines.vllm.online_eagle_trainer",
+                    str(job_path),
+                ],
+                stdout=log_stream,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=environment,
+            )
+        self._online_eagle_trainer_process = process
+        self._online_eagle_trainer_job = job
+        self._online_eagle_trainer_log = str(log_path)
+        return {
+            "active": True,
+            "worker_rank": worker_rank,
+            "pid": process.pid,
+            "log_path": str(log_path),
+        }
+
+    def finish_online_eagle_speculator_update(self, boundary_wait_seconds):
+        """Join the selected trainer, terminating it at the rollout boundary."""
+        process = getattr(self, "_online_eagle_trainer_process", None)
+        worker_rank = self.model_runner.parallel_config.data_parallel_rank
+        if process is None:
+            return {"active": False, "worker_rank": worker_rank}
+        job = self._online_eagle_trainer_job
+        try:
+            returncode = process.wait(timeout=float(boundary_wait_seconds))
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            result = {
+                "active": True,
+                "accepted": False,
+                "deferred": True,
+                "error": (f"Online EAGLE trainer exceeded boundary_wait_seconds={boundary_wait_seconds}"),
+            }
+        else:
+            result_path = Path(job["result_path"])
+            if result_path.exists():
+                result = json.loads(result_path.read_text())
+            else:
+                result = {
+                    "active": True,
+                    "accepted": False,
+                    "error": f"Online EAGLE trainer exited {returncode} without a result",
+                }
+            result["returncode"] = returncode
+        result["worker_rank"] = worker_rank
+        result["log_path"] = self._online_eagle_trainer_log
+        self._online_eagle_trainer_process = None
+        self._online_eagle_trainer_job = None
+        return result
+
+    def abort_online_eagle_speculator_update(self):
+        """Terminate an unjoined trainer during exceptional teardown."""
+        process = getattr(self, "_online_eagle_trainer_process", None)
+        worker_rank = self.model_runner.parallel_config.data_parallel_rank
+        if process is None:
+            return {"active": False, "worker_rank": worker_rank}
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        self._online_eagle_trainer_process = None
+        self._online_eagle_trainer_job = None
+        return {"active": True, "worker_rank": worker_rank, "returncode": process.returncode}
 
     def init_weight_update_communicator(
         self,
@@ -1834,12 +2003,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
 
+        session_ids = input_batch.get("session_ids")
+        if session_ids is not None and len(session_ids) != len(prompt_token_ids):
+            raise ValueError("session_ids must align one-for-one with prompt_token_ids")
+
         tasks = []
         request_ids: list[str] = []
-        for prompt in prompt_token_ids:
+        for index, prompt in enumerate(prompt_token_ids):
             # Schedule the collection of outputs for each prompt.
             # Avoid duplicate request_ids
-            request_id = str(uuid4().hex)
+            if session_ids is None:
+                request_id = uuid4().hex
+            else:
+                group_digest = hashlib.sha256(str(session_ids[index]).encode()).hexdigest()[:16]
+                request_id = f"skyrl-group-{group_digest}-{uuid4().hex}"
             request_ids.append(request_id)
             task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params))
             tasks.append(task)
@@ -1900,6 +2077,61 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             "init_weight_update_communicator",
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
         )
+
+    async def begin_online_eagle_capture(self, config: Dict[str, Any]):
+        """Begin bounded capture on every worker rank."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("begin_online_eagle_capture", args=(config,))
+
+    async def seal_online_eagle_capture(self, output_dir: str):
+        """Seal capture on every rank before target synchronization."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("seal_online_eagle_capture", args=(output_dir,))
+
+    async def discard_online_eagle_capture(self):
+        """Discard capture on every worker rank."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("discard_online_eagle_capture")
+
+    async def install_online_eagle_speculator(self, candidate_dir: str, trainer_rank: int):
+        """Install a candidate collectively without replacing resident parameter storage."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("install_online_eagle_speculator", args=(candidate_dir, trainer_rank))
+
+    async def start_online_eagle_speculator_update(self, job: Dict[str, Any]):
+        """Launch the selected rank's co-resident trainer subprocess."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("start_online_eagle_speculator_update", args=(job,))
+
+    async def finish_online_eagle_speculator_update(self, boundary_wait_seconds: float):
+        """Join or terminate the co-resident trainer at the no-request boundary."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("finish_online_eagle_speculator_update", args=(boundary_wait_seconds,))
+
+    async def abort_online_eagle_speculator_update(self):
+        """Terminate an unjoined trainer during exceptional teardown."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("abort_online_eagle_speculator_update")
+
+    async def publish_online_eagle_speculator(
+        self,
+        source_dir: str,
+        destination: str,
+        draft_revision: str,
+        served_target_revision: str,
+        trainer_rank: int,
+    ):
+        """Publish an exact served draft checkpoint from its owning rank."""
+        engine = self._get_engine()
+        return await engine.collective_rpc(
+            "publish_online_eagle_speculator",
+            args=(source_dir, destination, draft_revision, served_target_revision, trainer_rank),
+        )
+
+    async def restore_online_eagle_speculator(self, source: str, destination: str, trainer_rank: int):
+        """Stage a served draft checkpoint on its owning rank."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("restore_online_eagle_speculator", args=(source, destination, trainer_rank))
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         if "names" not in request:

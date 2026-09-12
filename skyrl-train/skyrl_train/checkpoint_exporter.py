@@ -1,4 +1,4 @@
-"""Policy-only conversion of distributed checkpoints to Hugging Face format."""
+"""Conversion of policy checkpoints and paired speculators to export format."""
 
 from __future__ import annotations
 
@@ -12,7 +12,12 @@ from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group, remove_placement_group
 from transformers import PreTrainedTokenizerBase
 
-from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY, policy_export_path
+from marinskyrl.checkpoint_paths import (
+    POLICY_CHECKPOINT_SUBDIRECTORY,
+    SPECULATOR_CHECKPOINT_SUBDIRECTORY,
+    policy_export_path,
+    speculator_export_path,
+)
 from skyrl_train import hf_model_io
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_HUB_REVISION,
@@ -49,11 +54,20 @@ class CheckpointExportPlan:
     def policy_export_path(self) -> str:
         return policy_export_path(self.export_root, self.step)
 
+    @property
+    def speculator_checkpoint_path(self) -> str:
+        return os.path.join(self.checkpoint_path, SPECULATOR_CHECKPOINT_SUBDIRECTORY)
+
+    @property
+    def speculator_export_path(self) -> str:
+        return speculator_export_path(self.export_root, self.step)
+
 
 @dataclass(frozen=True)
 class CheckpointExportResult:
     step: int
     export_path: str
+    speculator_export_path: str | None = None
 
 
 class PolicyExportWorkers(Protocol):
@@ -144,9 +158,24 @@ class CheckpointExporter:
             self._workers.load_model_checkpoint(self._plan.policy_checkpoint_path)
             self._workers.save_hf_model(self._plan.policy_export_path, self._tokenizer)
             hf_model_io.verify_hf_model_export(self._plan.policy_export_path)
+            paired_speculator_path = None
+            if io.exists(self._plan.speculator_checkpoint_path):
+                from skyrl_train.inference_engines.vllm.online_eagle_trainer import (  # noqa: PLC0415
+                    export_served_speculator_checkpoint,
+                )
+
+                export_served_speculator_checkpoint(
+                    self._plan.speculator_checkpoint_path,
+                    self._plan.speculator_export_path,
+                )
+                paired_speculator_path = self._plan.speculator_export_path
             if self._publisher is not None:
                 self._publisher.publish(self._plan.policy_export_path, self._plan.step)
-            return CheckpointExportResult(step=self._plan.step, export_path=self._plan.policy_export_path)
+            return CheckpointExportResult(
+                step=self._plan.step,
+                export_path=self._plan.policy_export_path,
+                speculator_export_path=paired_speculator_path,
+            )
         finally:
             self._workers.close()
 

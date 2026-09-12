@@ -23,6 +23,7 @@ marinskyrl/harbor_agent_names.py
 marinskyrl/hf_model.py
 marinskyrl/resource_locator.py
 marinskyrl/runtime_options.py
+marinskyrl/speculative_decoding.py
 chat_templates/delphi_v0.jinja2
 chat_templates/delphi_v1.jinja2
 chat_templates/qwen3_thinking_acc.jinja2

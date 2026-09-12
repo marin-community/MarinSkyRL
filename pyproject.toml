@@ -82,6 +82,8 @@ vllm = [
     "harbor-config ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
     "quack-kernels==0.5.0 ; sys_platform == 'linux'",
+    "hs-connectors ; sys_platform == 'linux'",
+    "speculators ; sys_platform == 'linux'",
     "tensordict ; sys_platform == 'linux'",
     "torch==2.11.0 ; sys_platform == 'linux'",
     "torchdata ; sys_platform == 'linux'",
@@ -197,6 +199,8 @@ flash-attn = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 harbor = { git = "https://github.com/marin-community/harbor.git" }
+hs-connectors = { git = "https://github.com/lukedhlee/speculators.git", rev = "6496b4db007de00dd4741349643d23b23e29dce8", subdirectory = "hs_connectors" }
+speculators = { git = "https://github.com/lukedhlee/speculators.git", rev = "6496b4db007de00dd4741349643d23b23e29dce8" }
 torch = [
     { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { index = "pytorch-cu129", extra = "cuda" },

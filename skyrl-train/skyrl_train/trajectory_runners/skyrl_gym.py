@@ -78,6 +78,7 @@ class BatchedTrajectoryCollector:
             request["env_extras"],
             runner.trajectory_runner_cfg.sampling_params.max_generate_length,
             request.get("sampling_params"),
+            request.get("trajectory_ids"),
         )
         return batch
 
@@ -528,6 +529,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         env_extras: List[Dict[str, Any]],
         max_tokens: int,
         sampling_params: Optional[Dict[str, Any]] = None,
+        trajectory_ids: Optional[List[TrajectoryID]] = None,
     ) -> TrajectoryBatch:
         """
         Single-turn batched generation (can use the synchronous offline engine)
@@ -552,7 +554,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             envs.append(env)
 
         # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
-        engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
+        session_ids = (
+            [trajectory_id.instance_id for trajectory_id in trajectory_ids] if trajectory_ids is not None else None
+        )
+        engine_input = InferenceEngineInput(
+            prompts=init_prompts,
+            session_ids=session_ids,
+            sampling_params=sampling_params,
+        )
         engine_output = await self.model_client.generate(engine_input)
         outputs = engine_output["responses"]
         responses = engine_output["response_ids"]

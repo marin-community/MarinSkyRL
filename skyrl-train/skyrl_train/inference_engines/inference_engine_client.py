@@ -16,7 +16,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 )
 from transformers import PreTrainedTokenizerBase
 import asyncio
-from typing import List, Any, Optional, Dict, Union
+from typing import List, Any, Optional, Dict, Union, Hashable
 from skyrl_train.inference_engines.utils import (
     route_prompts_to_engines,
     hash_with_sha256,
@@ -238,6 +238,8 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         num_prompts = len(prompt_token_ids)
         num_inference_engines = len(self.engines)
+        if session_ids is not None and len(session_ids) != num_prompts:
+            raise ValueError("session_ids must align one-for-one with prompts")
 
         # 1. Route prompts to engines
         engine_idx_to_prompt_ids: dict[int, list[int]] = route_prompts_to_engines(
@@ -259,6 +261,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 engine_idx=engine_idx,
                 original_prompt_ids=original_prompt_ids,
                 sampling_params=sampling_params,
+                session_id=session_ids[0] if session_ids is not None else None,
             )
 
         # For batched generate(), pause/continue cannot be supported.
@@ -281,6 +284,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             engine_input = InferenceEngineInput(
                 prompt_token_ids=cur_prompt_token_ids,
                 sampling_params=sampling_params,
+                session_ids=[session_ids[i] for i in prompt_ids] if session_ids is not None else None,
             )
             tasks.append(asyncio.create_task(self.engines[engine_idx].generate(engine_input)))
             indices_list.append(prompt_ids)
@@ -299,6 +303,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=cur_prompt_token_ids,
                     sampling_params=sampling_params,
+                    session_ids=[session_ids[j] for j in indices_list[i]] if session_ids is not None else None,
                 )
                 results[i] = await self.engines[fallback].generate(engine_input)
             elif isinstance(result, BaseException):
@@ -335,8 +340,65 @@ class InferenceEngineClient(InferenceEngineInterface):
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
         )
 
+    async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[Any]:
+        """Begin the same capture interval on every live inference engine."""
+        return await self._run_on_all_engines("begin_online_eagle_capture", config)
+
+    async def seal_online_eagle_capture(self, output_root: str) -> List[Any]:
+        """Seal every engine before the target-weight synchronization boundary."""
+        live = [(index, engine) for index, engine in enumerate(self.engines) if index not in self._dead_engines]
+        return await asyncio.gather(
+            *(engine.seal_online_eagle_capture(f"{output_root}/engine-{index}") for index, engine in live)
+        )
+
+    async def discard_online_eagle_capture(self) -> List[Any]:
+        """Discard capture buffers on every live inference engine."""
+        return await self._run_on_all_engines("discard_online_eagle_capture")
+
+    async def install_online_eagle_speculator(self, candidate_dir: str, trainer_rank: int) -> List[Any]:
+        """Install the same complete draft revision across every live rank."""
+        return await self._run_on_all_engines("install_online_eagle_speculator", candidate_dir, trainer_rank)
+
+    async def start_online_eagle_speculator_update(self, job: Dict[str, Any]) -> List[Any]:
+        """Start one online update after its capture has sealed."""
+        return await self._run_on_all_engines("start_online_eagle_speculator_update", job)
+
+    async def finish_online_eagle_speculator_update(self, boundary_wait_seconds: float) -> List[Any]:
+        """Join the update before mutating target or draft serving weights."""
+        return await self._run_on_all_engines("finish_online_eagle_speculator_update", boundary_wait_seconds)
+
+    async def abort_online_eagle_speculator_update(self) -> List[Any]:
+        """Terminate any online update still running during teardown."""
+        return await self._run_on_all_engines("abort_online_eagle_speculator_update")
+
+    async def publish_online_eagle_speculator(
+        self,
+        source_dir: str,
+        destination: str,
+        draft_revision: str,
+        served_target_revision: str,
+        trainer_rank: int,
+    ) -> List[Any]:
+        """Publish one exact served draft beside its matching policy checkpoint."""
+        return await self._run_on_all_engines(
+            "publish_online_eagle_speculator",
+            source_dir,
+            destination,
+            draft_revision,
+            served_target_revision,
+            trainer_rank,
+        )
+
+    async def restore_online_eagle_speculator(self, source: str, destination: str, trainer_rank: int) -> List[Any]:
+        """Stage a checkpoint on its owning rank before collective install."""
+        return await self._run_on_all_engines("restore_online_eagle_speculator", source, destination, trainer_rank)
+
     async def _generate_single_with_retry(
-        self, engine_idx: int, original_prompt_ids: List[int], sampling_params: Optional[Dict[str, Any]]
+        self,
+        engine_idx: int,
+        original_prompt_ids: List[int],
+        sampling_params: Optional[Dict[str, Any]],
+        session_id: Hashable | None = None,
     ) -> InferenceEngineOutput:
         """
         Generate a single response with retry mechanism.
@@ -396,6 +458,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[new_prompt_ids],
                 sampling_params=cur_sampling_params,
+                session_ids=[session_id] if session_id is not None else None,
             )
 
             # 3.2. Send the request.

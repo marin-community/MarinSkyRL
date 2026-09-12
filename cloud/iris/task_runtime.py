@@ -32,7 +32,9 @@ from enum import StrEnum
 import glob
 import json
 import os
+from pathlib import Path
 import queue
+import shutil
 import signal
 import socket
 import subprocess
@@ -42,8 +44,8 @@ import threading
 import time
 import uuid
 from typing import Protocol
-from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
-from marinskyrl.hf_model import validate_portable_hf_model_files
+from cloud.iris.artifacts import ArtifactSource, SOURCE_MANIFEST_FILENAME, fs_and_path, materialize
+from marinskyrl.hf_model import sha256_file, validate_portable_hf_model_files, validate_speculator_model_files
 from cloud.iris.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
     FR_DUMP_TEMP_FILE_ENV,
@@ -56,6 +58,7 @@ from cloud.iris.env_vars import (
 from cloud.iris.model_paths import unsupported_model_path_message
 from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
+from marinskyrl.speculative_decoding import SpeculatorModelConfig
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
     DEFAULT_RAY_SPILL_DIR,
@@ -456,6 +459,147 @@ def materialize_model_export(source_uri: str, local_path: str, source_identity: 
     artifact = materialize(source, validate=validate_portable_hf_model_files)
     _log(
         f"Model export staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
+        f"({len(artifact.files)} files, identity={source.identity})"
+    )
+
+
+@dataclass(frozen=True)
+class _ContentFileEntry:
+    path: str
+    size: int
+    sha256: str
+
+
+def _local_artifact_inventory(root: Path) -> tuple[_ContentFileEntry, ...]:
+    """Return the stable file, size, and content inventory stored in a source manifest."""
+    return tuple(
+        _ContentFileEntry(
+            path=path.relative_to(root).as_posix(),
+            size=path.stat().st_size,
+            sha256=sha256_file(path),
+        )
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.name != SOURCE_MANIFEST_FILENAME and ".cache" not in path.parts
+    )
+
+
+def _hf_speculator_snapshot_matches(target: Path, model: SpeculatorModelConfig) -> bool:
+    manifest_path = target / SOURCE_MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        return False
+    inventory = _local_artifact_inventory(target)
+    expected = {
+        "source_uri": model.source_uri,
+        "source_identity": model.source_identity,
+        "files": [asdict(entry) for entry in inventory],
+    }
+    if manifest != expected:
+        return False
+    try:
+        validate_speculator_model_files({entry.path for entry in inventory}, model.source_uri)
+    except ValueError:
+        return False
+    return True
+
+
+def _stage_hf_speculator_snapshot(model: SpeculatorModelConfig) -> None:
+    """Download an exact Hub commit to an atomically installed task-local directory."""
+    target = Path(model.path).resolve()
+    if _hf_speculator_snapshot_matches(target, model):
+        _log(f"Speculator snapshot already staged: {model.source_uri}@{model.source_identity} -> {target}")
+        return
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.staging-", dir=target.parent))
+    backup: Path | None = None
+    repo_id = model.hugging_face_repo_id
+    assert repo_id is not None
+    allow_patterns = ["*.safetensors", "*.bin", "*.json", "*.txt", "*.model", "*.py", "*.npy", "*.jinja"]
+    child_env = {
+        key: value for key, value in os.environ.items() if key not in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    }
+    child_env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    code = (
+        "import sys\n"
+        "from huggingface_hub import snapshot_download\n"
+        "snapshot_download(repo_id=sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3], "
+        "allow_patterns=sys.argv[4].split(','))\n"
+    )
+    try:
+        last_error = ""
+        for attempt in range(1, 4):
+            try:
+                process = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        code,
+                        repo_id,
+                        model.source_identity,
+                        str(staging),
+                        ",".join(allow_patterns),
+                    ],
+                    env=child_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                last_error = "snapshot_download timed out after 600 seconds"
+            else:
+                if process.returncode == 0:
+                    break
+                last_error = (process.stderr or process.stdout or "")[-800:]
+            _log(f"Speculator snapshot attempt {attempt}/3 failed: {last_error}")
+            time.sleep(min(30, 2**attempt))
+        else:
+            raise RuntimeError(
+                f"Speculator snapshot download failed for {model.source_uri}@{model.source_identity}: {last_error}"
+            )
+
+        shutil.rmtree(staging / ".cache", ignore_errors=True)
+        inventory = _local_artifact_inventory(staging)
+        validate_speculator_model_files({entry.path for entry in inventory}, model.source_uri)
+        manifest = {
+            "source_uri": model.source_uri,
+            "source_identity": model.source_identity,
+            "files": [asdict(entry) for entry in inventory],
+        }
+        (staging / SOURCE_MANIFEST_FILENAME).write_text(json.dumps(manifest, sort_keys=True))
+        if target.exists():
+            backup = Path(tempfile.mkdtemp(prefix=f".{target.name}.old-", dir=target.parent))
+            backup.rmdir()
+            os.replace(target, backup)
+        os.replace(staging, target)
+    except BaseException:
+        if backup is not None and backup.exists() and not target.exists():
+            os.replace(backup, target)
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+        if backup is not None and backup.exists():
+            shutil.rmtree(backup)
+    _log(f"Speculator snapshot staged: {model.source_uri}@{model.source_identity} -> {target}")
+
+
+def stage_speculator_model(source_uri: str, local_path: str, source_identity: str) -> None:
+    """Materialize an immutable HF or object-store EAGLE draft on this node."""
+    model = SpeculatorModelConfig.from_mapping(
+        {"path": local_path, "source_uri": source_uri, "source_identity": source_identity},
+        context="speculator model",
+    )
+    if model.hugging_face_repo_id is not None:
+        _stage_hf_speculator_snapshot(model)
+        return
+    source = ArtifactSource(uri=model.source_uri, local_path=model.path, identity=model.source_identity)
+    artifact = materialize(source, validate=validate_speculator_model_files)
+    _log(
+        f"Speculator export staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
         f"({len(artifact.files)} files, identity={source.identity})"
     )
 
@@ -2051,6 +2195,21 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="Immutable producer identity recorded beside the staged export.",
     )
     parser.add_argument(
+        "--speculator-source-uri",
+        default="",
+        help="Immutable Hugging Face or object-store draft source to stage on every node.",
+    )
+    parser.add_argument(
+        "--speculator-local-path",
+        default="",
+        help="Absolute task-local draft-model directory passed to vLLM.",
+    )
+    parser.add_argument(
+        "--speculator-source-identity",
+        default="",
+        help="Exact Hub commit or immutable object-store draft identity.",
+    )
+    parser.add_argument(
         "--policy-chat-template",
         default=os.environ.get("OT_AGENT_IRIS_POLICY_CHAT_TEMPLATE", ""),
         help="Repo-relative path to a chat-template jinja to FORCE onto the policy "
@@ -2119,6 +2278,16 @@ def main() -> None:
         if not args.model_local_path or not args.model_source_identity:
             raise ValueError("--model-source-uri requires --model-local-path and --model-source-identity")
         materialize_model_export(args.model_source_uri, args.model_local_path, args.model_source_identity)
+    if args.speculator_source_uri:
+        if not args.speculator_local_path or not args.speculator_source_identity:
+            raise ValueError(
+                "--speculator-source-uri requires --speculator-local-path and --speculator-source-identity"
+            )
+        stage_speculator_model(
+            args.speculator_source_uri,
+            args.speculator_local_path,
+            args.speculator_source_identity,
+        )
     # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
     # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:

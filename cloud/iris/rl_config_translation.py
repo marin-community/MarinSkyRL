@@ -29,6 +29,7 @@ import yaml
 
 from cloud.iris.paths import resolve_paths_in_dict
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
+from marinskyrl.speculative_decoding import parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 
 # Directory containing the bundled example RL config YAML files.
@@ -435,6 +436,7 @@ SKYRL_INTERNAL_ENGINE_KWARGS = frozenset(
         "tokenizer",  # Passed from external tokenizer
         "custom_weight_loader",  # Hardcoded SkyRL path
         "skip_tokenizer_init",  # Hardcoded True for SGLang
+        "speculative_config",  # Derived from generator.speculative_decoding
     }
 )
 
@@ -618,7 +620,19 @@ def parse_rl_config(
     # regardless of the working directory at runtime. Skip data.train_data /
     # data.val_data as they may be HF repo IDs.
     trainer = resolve_paths_in_dict(trainer, skip_keys={"policy.model.path"})
-    generator = resolve_paths_in_dict(generator)
+    generator = resolve_paths_in_dict(generator, skip_keys={"speculative_decoding.model.source_uri"})
+
+    parse_speculative_decoding_config(
+        generator.get("speculative_decoding"),
+        backend=generator.get("backend", "vllm"),
+        run_engines_locally=generator.get("run_engines_locally", True),
+        entrypoint=entrypoint,
+        colocate_all=trainer.get("placement", {}).get("colocate_all", True),
+        num_inference_engines=generator.get("num_inference_engines", 1),
+        pipeline_parallel_size=generator.get("inference_engine_pipeline_parallel_size", 1),
+        engine_init_kwargs=generator.get("engine_init_kwargs", {}),
+        context=f"{path}: generator.speculative_decoding",
+    )
 
     if model_override:
         trainer.setdefault("policy", {}).setdefault("model", {})["path"] = model_override
@@ -776,6 +790,7 @@ def format_hydra_arg(key: str, value: Any, prefix: str = "") -> str:
 
 _OPTIONAL_HYDRA_PATTERNS = {
     ".engine_init_kwargs",
+    ".speculative_decoding",
     ".hf_hub_",
     ".enable_db_registration",
     ".optimizer_kwargs",
