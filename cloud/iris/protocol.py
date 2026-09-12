@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any
 
 from cloud.iris.runtime_environment import RuntimeProfile
+from marinskyrl.task_sources import DataSource, data_source
 
 
 class AttemptState(StrEnum):
@@ -35,14 +36,6 @@ class ModelLocator:
     local_path: str
     tokenizer_uri: str
     tokenizer_revision: str
-
-
-@dataclass(frozen=True)
-class DataLocator:
-    uri: str
-    identity: str
-    local_path: str
-    relative_path: str
 
 
 @dataclass(frozen=True)
@@ -82,8 +75,8 @@ class SkyRLLaunchRequest:
     config_yaml: str
     runtime: RuntimeIdentity
     model: ModelLocator
-    train_data: tuple[DataLocator, ...]
-    validation_data: tuple[DataLocator, ...]
+    train_data: tuple[DataSource, ...]
+    validation_data: tuple[DataSource, ...]
     topology: SkyRLTopology
     output: SkyRLOutputPaths
     seed: int
@@ -146,8 +139,8 @@ def job_spec(value: dict[str, Any]) -> SkyRLJobSpec:
                 profile=RuntimeProfile(request["runtime"]["profile"]),
             ),
             model=ModelLocator(**request["model"]),
-            train_data=tuple(DataLocator(**locator) for locator in request["train_data"]),
-            validation_data=tuple(DataLocator(**locator) for locator in request["validation_data"]),
+            train_data=tuple(data_source(source) for source in request["train_data"]),
+            validation_data=tuple(data_source(source) for source in request["validation_data"]),
             topology=SkyRLTopology(
                 num_nodes=request["topology"]["num_nodes"],
                 gpus_per_node=request["topology"]["gpus_per_node"],

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from skyrl_train.trajectory_runners.trajectory_processing import (
     AlignmentStats,
+    TitoFullDeclineReason,
     apply_overlong_filtering,
     concatenate_trajectory_batches,
     minimum_captured_global_step,
@@ -953,6 +954,42 @@ def test_unaligned_logprob_alert_survives_concatenation():
     assert merged["rollout_metrics"]["generate/tis/unaligned_fraction"] == pytest.approx(0.05)
     assert merged["rollout_metrics"]["generate/tis/lcs_fallback_alert"] == 0.0
     assert merged["rollout_metrics"]["generate/tis/alignment_alert"] == 1.0
+
+
+def test_full_tito_and_literal_bridge_metrics_survive_concatenation():
+    groups = [_generated_group(1, 0), _generated_group(1, 0)]
+    first = AlignmentStats()
+    first.n_tokens = 5
+    first.n_exact = 5
+    first.record_tito_full_success()
+    second = AlignmentStats()
+    second.n_tokens = 5
+    second.n_exact = 5
+    second.record_tito_full_decline(TitoFullDeclineReason.PREFIX_MISMATCH)
+    groups[0]["rollout_metrics"].update(first.as_metrics(prefix="generate/tis/", lcs_alert_threshold=0.005))
+    groups[1]["rollout_metrics"].update(second.as_metrics(prefix="generate/tis/", lcs_alert_threshold=0.005))
+    groups[0]["rollout_metrics"].update(
+        {
+            "generate/literal_bridge/correlated_trials": 1.0,
+            "generate/literal_bridge/correlated_turns": 3.0,
+        }
+    )
+    groups[1]["rollout_metrics"].update(
+        {
+            "generate/literal_bridge/correlated_trials": 1.0,
+            "generate/literal_bridge/correlated_turns": 2.0,
+        }
+    )
+
+    merged = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=0.005)
+
+    assert merged["rollout_metrics"]["generate/tis/tito_full/attempts"] == 2.0
+    assert merged["rollout_metrics"]["generate/tis/tito_full/success_fraction"] == 0.5
+    assert merged["rollout_metrics"]["generate/tis/tito_full/decline_count"] == 1.0
+    assert merged["rollout_metrics"]["generate/tis/tito_full/decline/prefix_mismatch"] == 1.0
+    assert merged["rollout_metrics"]["generate/tis/alignment_alert"] == 1.0
+    assert merged["rollout_metrics"]["generate/literal_bridge/correlated_trials"] == 2.0
+    assert merged["rollout_metrics"]["generate/literal_bridge/correlated_turns"] == 5.0
 
 
 def test_identity_aware_reward_metrics_survive_concatenation():

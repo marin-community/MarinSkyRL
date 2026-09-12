@@ -20,7 +20,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import ast
 import contextlib
 import json
 import os
@@ -63,8 +62,8 @@ class LocalRLConfig:
     entrypoint: str | None = None
     model_source_uri: str | None = None
     model_source_identity: str | None = None
-    train_data: List[str] = field(default_factory=list)
-    val_data: List[str] = field(default_factory=list)
+    train_data: List[str | dict[str, Any]] = field(default_factory=list)
+    val_data: List[str | dict[str, Any]] = field(default_factory=list)
     experiments_dir: str = "experiments"
     resolved_config_uri: str | None = None
     gpus: int = 4
@@ -351,7 +350,7 @@ class LocalRLRunner:
             register_controller_endpoint,
         )
         from cloud.iris.literal_proxy_utils import (
-            DEFAULT_LITERAL_PROXY_PORT,
+            literal_proxy_port,
             maybe_serve_literal_proxy,
         )
 
@@ -374,10 +373,11 @@ class LocalRLRunner:
                     "--parent_controller_config); needed to mint at iris.oa.dev."
                 )
 
+        proxy_port = literal_proxy_port(self.config.job_name)
         endpoint_name, register_address = controller_registration_plan(
             self.config.job_name,
             record_literal=self.config.record_literal,
-            proxy_port=DEFAULT_LITERAL_PROXY_PORT,
+            proxy_port=proxy_port,
             vllm_port=self.config.vllm_http_port,
         )
         vllm_local = f"http://localhost:{self.config.vllm_http_port}/v1"
@@ -390,6 +390,7 @@ class LocalRLRunner:
             experiments_dir=self.config.experiments_dir,
             job_name=self.config.job_name,
             host="0.0.0.0",
+            port=proxy_port,
         ):
             registration = register_controller_endpoint(endpoint_name, register_address)
             try:
@@ -530,17 +531,14 @@ class _LocalHPCStub:
     name: str = "local"
 
 
-def parse_list_arg(value: str) -> List[str]:
-    """Parse a list argument from the CLI (JSON or Python literal)."""
+def parse_list_arg(value: str) -> List[str | dict[str, Any]]:
+    """Parse a JSON list argument from the CLI."""
     if not value:
         return []
-    try:
-        parsed = ast.literal_eval(value)
-        if isinstance(parsed, list):
-            return parsed
-        return [str(parsed)]
-    except (ValueError, SyntaxError):
-        return [value]
+    parsed = json.loads(value)
+    if not isinstance(parsed, list):
+        raise ValueError("expected a JSON list")
+    return parsed
 
 
 def create_parser() -> argparse.ArgumentParser:

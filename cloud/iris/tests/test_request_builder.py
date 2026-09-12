@@ -90,6 +90,7 @@ def _build_basic_spec(tmp_path, **kwargs):
         tokenizer_revision="rev123",
         train_data=[
             {
+                "kind": "directory",
                 "uri": "s3://bucket/data",
                 "identity": "data@v1",
                 "local_path": "/tmp/data",
@@ -254,7 +255,15 @@ class TestBuildJobSpec:
             model_local_path="/tmp/m",
             tokenizer_uri="t",
             tokenizer_revision="tr",
-            train_data=[{"uri": "s3://d", "identity": "di", "local_path": "/tmp/d", "relative_path": "train.parquet"}],
+            train_data=[
+                {
+                    "kind": "directory",
+                    "uri": "s3://d",
+                    "identity": "di",
+                    "local_path": "/tmp/d",
+                    "relative_path": "train.parquet",
+                }
+            ],
             cluster="cw-rno2a",
             cluster_config="/c.yaml",
             cpu=48.0,
@@ -307,7 +316,13 @@ class TestBuildJobSpec:
         spec = _build_basic_spec(
             tmp_path,
             validation_data=[
-                {"uri": "s3://v", "identity": "vi", "local_path": "/tmp/v", "relative_path": "val.parquet"}
+                {
+                    "kind": "directory",
+                    "uri": "s3://v",
+                    "identity": "vi",
+                    "local_path": "/tmp/v",
+                    "relative_path": "val.parquet",
+                }
             ],
             overrides=["++trainer.max_steps=100", "++trainer.epochs=3"],
         )
@@ -373,7 +388,9 @@ def test_build_raises_on_missing_geometry_key(tmp_path):
             model_local_path="/tmp/m",
             tokenizer_uri="t",
             tokenizer_revision="tr",
-            train_data=[{"uri": "s3://d", "identity": "di", "local_path": "/tmp/d", "relative_path": "p"}],
+            train_data=[
+                {"kind": "directory", "uri": "s3://d", "identity": "di", "local_path": "/tmp/d", "relative_path": "p"}
+            ],
             cluster="cw-rno2a",
             cluster_config="/c.yaml",
             cpu=48.0,
@@ -396,7 +413,9 @@ def test_config_yaml_preserved_verbatim_in_request(tmp_path):
         model_local_path="/tmp/m",
         tokenizer_uri="t",
         tokenizer_revision="tr",
-        train_data=[{"uri": "s3://d", "identity": "di", "local_path": "/tmp/d", "relative_path": "p"}],
+        train_data=[
+            {"kind": "directory", "uri": "s3://d", "identity": "di", "local_path": "/tmp/d", "relative_path": "p"}
+        ],
         cluster="cw-rno2a",
         cluster_config="/c.yaml",
         cpu=48.0,

@@ -42,8 +42,27 @@ def test_federated_parent_auth_is_not_needed_for_direct_ingress():
 
 def test_federated_parent_auth_requires_the_marin_login_record(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher, "MARIN_LOGIN_RECORD_PATH", tmp_path / "marin.json")
-    with pytest.raises(SystemExit, match="requires the cached Marin IAP login record"):
+    monkeypatch.setattr(launcher, "_resolve_parent_cluster_config", lambda _config: None)
+    with pytest.raises(SystemExit, match="cached Marin IAP login record.*or ambient service-account credentials"):
         launcher.prepare_federated_parent_credentials(_args())
+
+
+def test_federated_parent_auth_forwards_ambient_service_account_iap_token(tmp_path, monkeypatch):
+    import iris.cli.connect
+    import iris.cluster.config
+
+    monkeypatch.setattr(launcher, "MARIN_LOGIN_RECORD_PATH", tmp_path / "marin.json")
+    monkeypatch.setattr(launcher, "_resolve_parent_cluster_config", lambda _config: "/configs/marin.yaml")
+    monkeypatch.setattr(iris.cluster.config, "load_config", lambda _path: object())
+    monkeypatch.setattr(
+        iris.cli.connect,
+        "client_credentials",
+        lambda _config, _cluster: argparse.Namespace(iap_provider=argparse.Namespace(get_token=lambda: "iap-token")),
+    )
+
+    assert launcher.prepare_federated_parent_credentials(_args()) == launcher.FederatedParentCredentials(
+        iap_token="iap-token"
+    )
 
 
 def test_federated_parent_auth_validates_and_returns_the_record(tmp_path, monkeypatch):
@@ -59,7 +78,9 @@ def test_federated_parent_auth_validates_and_returns_the_record(tmp_path, monkey
             return "iap-token"
 
     monkeypatch.setattr(rigging.auth, "IapRefreshTokenProvider", FakeTokenProvider)
-    assert json.loads(launcher.prepare_federated_parent_credentials(_args()) or "{}") == _record()
+    credentials = launcher.prepare_federated_parent_credentials(_args())
+    assert credentials is not None
+    assert json.loads(credentials.login_record_json or "{}") == _record()
 
 
 def test_federated_parent_auth_rejects_a_non_marin_record(tmp_path, monkeypatch):

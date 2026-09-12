@@ -525,6 +525,29 @@ def test_client_context_limit_comes_from_live_engine(engine_limit, expected):
     assert client.max_model_len == expected
 
 
+@pytest.mark.parametrize(
+    ("entrypoint", "agent_name", "collect_rollout_details", "backend", "expected"),
+    [
+        ("terminal_bench", "opencode", True, "vllm", True),
+        ("terminal_bench", "opencode", False, "vllm", False),
+        ("terminal_bench", "terminus-2", True, "vllm", False),
+        ("terminal_bench", "opencode", True, "sglang", False),
+        ("gsm8k", "opencode", True, "vllm", False),
+    ],
+)
+def test_exact_opencode_continuation_is_terminal_bench_scoped(
+    entrypoint, agent_name, collect_rollout_details, backend, expected
+):
+    configured = _make_min_cfg()
+    configured.entrypoint = entrypoint
+    configured.generator.backend = backend
+    configured.terminal_bench = {"harbor": {"name": agent_name, "collect_rollout_details": collect_rollout_details}}
+
+    client = InferenceEngineClient(engines=[], tokenizer=object(), full_config=configured)
+
+    assert client.enable_opencode_exact_continuation is expected
+
+
 @pytest.mark.asyncio
 async def test_chat_completion_retry_accumulates_and_sends_continuations():
     """
