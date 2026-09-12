@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import version
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -1225,6 +1226,21 @@ def _load_nemotron_rows(source: Source, revision: str, parameters: Mapping[str, 
     return _skip_source_rows(source, _load_hugging_face_dataset(source, revision, "RL"), parameters)
 
 
+def _iter_jsonl_rows(path: Path) -> Iterable[Mapping[str, Any]]:
+    """Read heterogeneous JSONL records without imposing an inferred Arrow schema."""
+    with path.open(encoding="utf-8") as source_file:
+        for line_number, line in enumerate(source_file, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"Invalid JSON in {path} at line {line_number}: {error.msg}") from error
+            if not isinstance(row, Mapping):
+                raise TypeError(f"Expected a JSON object in {path} at line {line_number}.")
+            yield row
+
+
 def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
     import datasets
     from huggingface_hub import hf_hub_download
@@ -1236,8 +1252,7 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
         filename=filename,
         revision=revision,
     )
-    rows = datasets.load_dataset("json", data_files=local_path, split="train", streaming=True)
-    rows = _skip_source_rows(source, rows, parameters)
+    rows = _skip_source_rows(source, _iter_jsonl_rows(Path(local_path)), parameters)
 
     placeholder_sources = {
         (DAPO_MATH_DATASET, "train"): datasets.load_dataset(
