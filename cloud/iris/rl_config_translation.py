@@ -736,6 +736,22 @@ def _quote_for_hydra(s: str) -> str:
     return f"'{escaped}'"
 
 
+def _format_hydra_collection_value(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, dict):
+        items = ",".join(f"{key}:{_format_hydra_collection_value(item)}" for key, item in value.items())
+        return f"{{{items}}}"
+    if isinstance(value, (list, tuple)):
+        items = ",".join(_format_hydra_collection_value(item) for item in value)
+        return f"[{items}]"
+    if isinstance(value, str):
+        return json.dumps(value)
+    return str(value)
+
+
 def format_hydra_arg(key: str, value: Any, prefix: str = "") -> str:
     """Format a single Hydra CLI argument.
 
@@ -744,27 +760,8 @@ def format_hydra_arg(key: str, value: Any, prefix: str = "") -> str:
     """
     if isinstance(value, bool):
         return f"{prefix}{key}={str(value).lower()}"
-    elif isinstance(value, dict):
-        # Format as a Hydra dict literal: {k1: v1, k2: v2}. Supports nested dicts.
-        def _fmt_val(v: Any) -> str:
-            if isinstance(v, bool):
-                return str(v).lower()
-            elif isinstance(v, dict):
-                inner = ", ".join(f"{ik}: {_fmt_val(iv)}" for ik, iv in v.items())
-                return f"{{{inner}}}"
-            elif isinstance(v, (list, tuple)):
-                items = ", ".join(_fmt_val(i) for i in v)
-                return f"[{items}]"
-            else:
-                return str(v)
-
-        dict_items = ", ".join(f"{k}: {_fmt_val(v)}" for k, v in value.items())
-        return f"{prefix}{key}={{{dict_items}}}"
-    elif isinstance(value, (list, tuple)):
-        # Format as a YAML list WITHOUT outer quotes so Hydra parses it as a list.
-        # Double-quote string items to handle paths with special chars.
-        items = ",".join(f'"{v}"' if isinstance(v, str) else str(v) for v in value)
-        return f"{prefix}{key}=[{items}]"
+    elif isinstance(value, (dict, list, tuple)):
+        return f"{prefix}{key}={_format_hydra_collection_value(value)}"
     elif isinstance(value, str):
         if _needs_quoting(value):
             return f"{prefix}{key}={_quote_for_hydra(value)}"

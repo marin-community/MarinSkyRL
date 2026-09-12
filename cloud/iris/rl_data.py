@@ -13,30 +13,31 @@ import stat
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Mapping, Optional
 
 from cloud.iris.hf_datasets import resolve_hf_dataset_selector
 from marinskyrl.resource_locator import parse_hf_dataset_selector
+from marinskyrl.task_sources import TaskTroveParquetSource, data_source
 
 
 @dataclass(frozen=True)
 class ResolvedRLData:
-    """Local data paths paired with their immutable or local source references."""
+    """Runtime data entries paired with their immutable or local source references."""
 
-    paths: tuple[str, ...]
-    sources: tuple[str, ...]
+    paths: tuple[str | dict[str, Any], ...]
+    sources: tuple[str | dict[str, Any], ...]
 
 
 def resolve_rl_train_data(
-    train_data: List[str],
+    train_data: List[str | dict[str, Any]],
     scratch_dir: Optional[str] = None,
     on_exist: str = "skip",
     verbose: bool = True,
     kind: str = "tasks",
-) -> List[str]:
-    """Resolve data to paths while preserving the historical list-only API."""
+) -> List[str | dict[str, Any]]:
+    """Resolve data into local paths or structured packed-task sources."""
     return list(
         resolve_rl_train_data_with_sources(
             train_data,
@@ -49,7 +50,7 @@ def resolve_rl_train_data(
 
 
 def resolve_rl_train_data_with_sources(
-    train_data: List[str],
+    train_data: List[str | dict[str, Any]],
     scratch_dir: Optional[str] = None,
     on_exist: str = "skip",
     verbose: bool = True,
@@ -82,6 +83,8 @@ def resolve_rl_train_data_with_sources(
         resolved: List[str] = []
         stage_root = Path(scratch_dir) / "rl_parquet" if scratch_dir else Path("/tmp/skyrl_rl_parquet")
         for entry in train_data:
+            if not isinstance(entry, str):
+                raise ValueError("Structured task sources require data kind 'tasks'")
             # A local path or a bare HF dataset id is read directly by PromptDataset.
             if "://" not in entry or entry.startswith("file://"):
                 resolved.append(entry)
@@ -119,6 +122,14 @@ def resolve_rl_train_data_with_sources(
     sources = []
 
     for data_path in train_data:
+        if isinstance(data_path, Mapping):
+            source = data_source(data_path)
+            if not isinstance(source, TaskTroveParquetSource):
+                raise ValueError(f"Unsupported structured task data source: {source.kind!r}")
+            packed_source = asdict(source)
+            resolved_paths.append(packed_source)
+            sources.append(packed_source)
+            continue
         if parse_hf_dataset_selector(data_path) is not None:
             selector = resolve_hf_dataset_selector(data_path)
             canonical_source = selector.canonical()

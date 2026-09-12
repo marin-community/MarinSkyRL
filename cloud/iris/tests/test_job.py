@@ -18,7 +18,6 @@ from cloud.iris import runtime_bundle  # noqa: E402
 from cloud.iris.job import JobBackend, execute_job  # noqa: E402
 from cloud.iris.protocol import (  # noqa: E402
     AttemptState,
-    DataLocator,
     IrisLaunchOptions,
     LaunchMode,
     ModelLocator,
@@ -30,9 +29,10 @@ from cloud.iris.protocol import (  # noqa: E402
     SkyRLRolePlan,
     SkyRLTopology,
 )
+from marinskyrl.task_sources import DirectoryDataSource  # noqa: E402
 from cloud.iris.iris_backend import IrisLaunchOutcome, create_parser, job_launch_argv  # noqa: E402
 from cloud.iris.runtime_environment import RuntimeProfile, task_setup_script  # noqa: E402
-from cloud.iris.task_runtime import materialize_model_export  # noqa: E402
+from cloud.iris.task_runtime import materialize_data_sources, materialize_model_export  # noqa: E402
 from iris.client.client import JobFailedError  # noqa: E402
 from iris.client.workload_codec import job_status_from_proto  # noqa: E402
 from iris.cluster.types import JobName  # noqa: E402
@@ -174,7 +174,7 @@ def _spec(tmp_path: Path) -> SkyRLJobSpec:
                 tokenizer_revision="da87bfb",
             ),
             train_data=(
-                DataLocator(
+                DirectoryDataSource(
                     uri=(tmp_path / "input-data").as_uri(),
                     identity="gsm8k@e53f048:first-1024",
                     local_path="/tmp/iceball-gsm8k",
@@ -373,7 +373,7 @@ def test_launcher_argv_forwards_detached_submission(tmp_path: Path) -> None:
 
 def test_launcher_rejects_data_entry_outside_staged_source_root(tmp_path: Path) -> None:
     envelope = _spec(tmp_path)
-    locator = DataLocator(
+    locator = DirectoryDataSource(
         uri=envelope.request.train_data[0].uri,
         identity="bad",
         local_path="/tmp/iceball-gsm8k",
@@ -468,6 +468,31 @@ def test_materialize_model_export_replaces_a_stale_destination(tmp_path: Path) -
 
     assert not (destination / "stale.bin").exists()
     assert (destination / "model.safetensors").read_bytes() == b"new weights"
+
+
+def test_materialize_data_sources_caches_one_exact_file(tmp_path: Path) -> None:
+    source = tmp_path / "source" / "part-00000.parquet"
+    source.parent.mkdir()
+    source.write_bytes(b"packed tasks")
+    destination = tmp_path / "destination"
+
+    materialize_data_sources(
+        json.dumps(
+            [
+                {
+                    "kind": "tasktrove_parquet",
+                    "uri": source.as_uri(),
+                    "identity": "tasktrove/clean@fixture:abc123",
+                    "local_path": str(destination),
+                    "relative_path": source.name,
+                    "verifier_ref": "tasktrove-verify@fixture",
+                    "selection": {"sources": ["source-a"]},
+                }
+            ]
+        )
+    )
+
+    assert (destination / source.name).read_bytes() == b"packed tasks"
 
 
 def test_runtime_bundle_uses_selected_checkout_when_imported_package_is_stale(
