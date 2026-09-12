@@ -77,9 +77,9 @@ generator:
       max_tokens_per_update: 16384
       max_tokens_per_micro_batch: 2048
       max_sequences_per_prompt_group: 2
-      min_train_sequences: 8
+      min_train_sequences: 6
       holdout_fraction: 0.25
-      min_holdout_sequences: 4
+      min_holdout_sequences: 3
       epochs_per_update: 1
       learning_rate: 5.0e-5
       max_validation_loss_increase: 0.05

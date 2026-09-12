@@ -133,14 +133,14 @@ class SpeculatorTrainingConfig:
     """Bounded single-rank online EAGLE update settings."""
 
     interval_steps: int = 1
-    # Leave enough admission headroom to form the default 8-train/4-holdout
-    # split even when rollout response lengths vary between steps.
+    # Leave enough admission headroom for the DP-local trainer capture even
+    # when rollout response lengths vary between steps.
     max_tokens_per_update: int = 16_384
     max_tokens_per_micro_batch: int = 2_048
     max_sequences_per_prompt_group: int = 2
-    min_train_sequences: int = 8
+    min_train_sequences: int = 6
     holdout_fraction: float = 0.25
-    min_holdout_sequences: int = 4
+    min_holdout_sequences: int = 3
     epochs_per_update: int = 1
     learning_rate: float = 5e-5
     max_validation_loss_increase: float = 0
