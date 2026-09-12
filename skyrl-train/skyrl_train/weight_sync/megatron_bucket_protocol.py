@@ -298,6 +298,27 @@ async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, 
         return task
 
     per_bucket = []
+    pending_receipts = []
+
+    async def collect_receipt(bucket, wire_bytes, task):
+        rows, _ = receiver_rows(
+            await task,
+            engine_count=engine_count,
+            ranks_per_engine=ranks_per_engine,
+            data_parallel_size=generator.inference_engine_data_parallel_size,
+            expected=receiver_identities,
+        )
+        if any(row["bucket_id"] != bucket or not row["load_completion_event_recorded"] for row in rows):
+            raise ValueError("Receiver bucket sequence or load event receipt is incomplete")
+        per_bucket.append(
+            {
+                "bucket_id": bucket,
+                "wire_bytes": wire_bytes,
+                "receiver_bytes": [row["compared_bytes" if replay else "installed_bytes"] for row in rows],
+                "mismatches": [row["mismatches"] for row in rows] if replay else None,
+            }
+        )
+
     try:
         for bucket in range(manifest.bucket_count):
             if rank == 0 and pipeline:
@@ -327,29 +348,21 @@ async def run_bucket_phase(worker, client, prepared, *, replay, start_versions, 
                     # collective order while NCCL and the previous receiver load progress.
                     pending_receive = post_receive(bucket + 1)
                     pending_buffer = sender.pack_next_bucket()
-                rows, _ = receiver_rows(
-                    await receive_task,
-                    engine_count=engine_count,
-                    ranks_per_engine=ranks_per_engine,
-                    data_parallel_size=generator.inference_engine_data_parallel_size,
-                    expected=receiver_identities,
-                )
-                if any(row["bucket_id"] != bucket or not row["load_completion_event_recorded"] for row in rows):
-                    raise ValueError("Receiver bucket sequence or load event receipt is incomplete")
-                per_bucket.append(
-                    {
-                        "bucket_id": bucket,
-                        "wire_bytes": buffer.numel(),
-                        "receiver_bytes": [row["compared_bytes" if replay else "installed_bytes"] for row in rows],
-                        "mismatches": [row["mismatches"] for row in rows] if replay else None,
-                    }
-                )
+                pending_receipts.append((bucket, buffer.numel(), receive_task))
+                # Keep transport moving while prior actor receipts return. The
+                # sender sent-events and receiver load-events own slot reuse;
+                # receipts bound host work but are not CUDA completion events.
+                if not pipeline or len(pending_receipts) >= len(buffers):
+                    await collect_receipt(*pending_receipts.pop(0))
             else:
                 # All policy ranks preserve the same complete Bridge export order.
                 sender.mark_bucket_sent(bucket)
                 if pipeline and bucket + 1 < manifest.bucket_count:
                     pending_buffer = sender.pack_next_bucket()
-            torch.distributed.barrier()
+            if not pipeline:
+                torch.distributed.barrier()
+        for receipt in pending_receipts:
+            await collect_receipt(*receipt)
     except BaseException:
         await join_native_work(native_sends)
         for task in issued_receives:

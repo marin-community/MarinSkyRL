@@ -717,3 +717,63 @@ async def test_post_update_export_reserve_is_telemetry_after_preparation(gate, m
     assert phase["bridge_export_reserve_bytes"] > phase["free_device_bytes_before"]
     assert gate.client.receives > 0
     assert gate.policy._policy_weight_access.owner is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slots", [2, 3])
+async def test_pipeline_installs_window_before_first_receipt_returns(gate, monkeypatch, slots):
+    gate.policy.cfg.generator.weight_sync_bucket_pipeline = True
+    gate.policy.cfg.generator.weight_transfer_buffers_in_flight = slots
+    release = asyncio.Event()
+    window_installed = asyncio.Event()
+    installed = []
+    receive = gate.client.receive_diagnostic_weight_sync_bucket
+
+    async def delayed_receipt(bucket_id, replay=False, **identity):
+        result = await receive(bucket_id, replay=replay, **identity)
+        if not replay:
+            installed.append(bucket_id)
+            if bucket_id == slots - 1:
+                window_installed.set()
+            if bucket_id == 0:
+                await release.wait()
+        return result
+
+    monkeypatch.setattr(gate.client, "receive_diagnostic_weight_sync_bucket", delayed_receipt)
+    task = asyncio.create_task(gate.policy.diagnostic_bucket_install_and_replay(gate.client))
+    try:
+        await asyncio.wait_for(window_installed.wait(), timeout=5)
+        assert installed == list(range(slots))
+        assert not task.done()
+        assert gate.policy._policy_weight_access.owner == "bucket-install-and-replay"
+    finally:
+        release.set()
+        receipt = await asyncio.wait_for(task, timeout=10)
+    install, replay = receipt["phases"]["install"], receipt["phases"]["replay"]
+    assert [row["bucket_id"] for row in install["buckets"]] == list(range(install["sender"]["bucket_count"]))
+    assert replay["receivers"][0]["coverage"] == 1.0
+    assert replay["receivers"][0]["mismatches"] == 0
+    assert replay["receivers"][0]["compared_bytes"] == receipt["prepared_receivers"][0]["installed_parameter_bytes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["corruption", "stale_receipt", "missing_load_event"])
+async def test_pipeline_window_cannot_hide_corruption_or_invalid_receipts(gate, monkeypatch, fault):
+    gate.policy.cfg.generator.weight_sync_bucket_pipeline = True
+    gate.client.corrupt_after_install = fault == "corruption"
+    receive = gate.client.receive_diagnostic_weight_sync_bucket
+
+    async def invalid_receipt(bucket_id, replay=False, **identity):
+        result = await receive(bucket_id, replay=replay, **identity)
+        if not replay and bucket_id == 1:
+            if fault == "stale_receipt":
+                result[0][0]["bucket_id"] = 0
+            elif fault == "missing_load_event":
+                result[0][0]["load_completion_event_recorded"] = False
+        return result
+
+    monkeypatch.setattr(gate.client, "receive_diagnostic_weight_sync_bucket", invalid_receipt)
+    with pytest.raises(ValueError, match="Full-byte replay|sequence or load event"):
+        await asyncio.wait_for(gate.policy.diagnostic_bucket_install_and_replay(gate.client), timeout=10)
+    assert gate.policy._policy_weight_access.owner is None
+    assert not hasattr(gate.receiver.worker, "_diagnostic_bucket_state")
