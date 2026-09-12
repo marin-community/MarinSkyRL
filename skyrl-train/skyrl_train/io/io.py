@@ -9,6 +9,8 @@ This module provides a unified interface for file operations that works with:
 Uses fsspec for cloud storage abstraction.
 """
 
+import fcntl
+import hashlib
 import os
 import tempfile
 from contextlib import contextmanager
@@ -278,3 +280,34 @@ def local_read_dir(input_path: str):
         if not exists(input_path):
             raise FileNotFoundError(f"Path does not exist: {input_path}")
         yield input_path
+
+
+@contextmanager
+def node_cached_local_read_dir(input_path: str, cache_root: str | None = None):
+    """Stage one immutable cloud directory once per node and retain it for the job."""
+    if not is_cloud_path(input_path):
+        with local_read_dir(input_path) as read_dir:
+            yield read_dir
+        return
+
+    root = Path(cache_root or tempfile.gettempdir()) / "marinskyrl-node-checkpoint-cache"
+    root.mkdir(parents=True, exist_ok=True)
+    cache_key = hashlib.sha256(input_path.encode()).hexdigest()
+    cache_dir = root / cache_key
+    complete_marker = cache_dir / ".complete"
+    lock_path = root / f"{cache_key}.lock"
+
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        if not complete_marker.is_file():
+            if cache_dir.exists():
+                raise RuntimeError(f"Incomplete node checkpoint cache exists at {cache_dir}")
+            with tempfile.TemporaryDirectory(prefix=f".{cache_key}.", dir=root) as staging_dir:
+                download_directory(input_path, staging_dir)
+                (Path(staging_dir) / ".complete").write_text(input_path)
+                os.replace(staging_dir, cache_dir)
+            logger.info(f"Cached immutable checkpoint directory {input_path} at {cache_dir}")
+        elif complete_marker.read_text() != input_path:
+            raise RuntimeError(f"Node checkpoint cache identity mismatch at {cache_dir}")
+
+    yield str(cache_dir)
