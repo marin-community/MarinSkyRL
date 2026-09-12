@@ -1,6 +1,8 @@
 import json
 
 import datasets
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from infra.rl_data.preparation import (
@@ -12,6 +14,7 @@ from infra.rl_data.preparation import (
 )
 from infra.rl_data.mixtures import MixtureSlice, MixtureSpec, load_mixture_spec, prepare_mixture
 from infra.rl_data.sources import (
+    _iter_jsonl_rows,
     _restore_nemotron_ultra_placeholder,
     Source,
     aime_1983_2024_source,
@@ -43,6 +46,17 @@ from infra.rl_data.sources import (
 )
 from skyrl_gym import get_data_contract
 from skyrl_gym.envs.ifeval import utils as ifeval_utils
+
+
+def test_jsonl_reader_preserves_heterogeneous_nested_records(tmp_path):
+    path = tmp_path / "blend.jsonl"
+    records = [
+        {"input": [{"content": [{"type": "input_text", "text": "one"}]}]},
+        {"input": [{"content": "two"}, {"content": [{"type": "output_text", "text": "three"}]}]},
+    ]
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+
+    assert list(_iter_jsonl_rows(path)) == records
 
 
 class FakeContract:
@@ -168,6 +182,11 @@ def test_nemotron_ultra_artifact_round_trips_heterogeneous_verifier_records(tmp_
     )
     output_dir = tmp_path / "artifact"
     write_artifact(artifact, output_dir)
+
+    schema = pq.read_schema(output_dir / "train.parquet")
+    assert schema.field("prompt").type.value_type.field("content").type == pa.large_string()
+    ultra_schema = schema.field("extra_info").type.field("nemotron_ultra").type
+    assert ultra_schema.field("record_json").type == pa.large_string()
 
     rows = datasets.load_dataset("parquet", data_files=str(output_dir / "train.parquet"), split="train")
     records = [json.loads(row["extra_info"]["nemotron_ultra"]["record_json"]) for row in rows]

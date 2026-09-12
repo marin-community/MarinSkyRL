@@ -300,6 +300,52 @@ def prepare_artifact(
 
 
 def _write_parquet(rows: list[PreparedRow], path: Path) -> None:
+    if rows and all(row.get("env_class") == "nemotron_ultra" for row in rows):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        text = pa.large_string()
+        tool_call = pa.struct(
+            [
+                pa.field("id", text),
+                pa.field("type", text),
+                pa.field("function", pa.struct([pa.field("name", text), pa.field("arguments", text)])),
+            ]
+        )
+        message = pa.struct(
+            [
+                pa.field("role", text),
+                pa.field("content", text),
+                pa.field("tool_calls", pa.large_list(tool_call)),
+                pa.field("tool_call_id", text),
+            ]
+        )
+        ultra = pa.struct(
+            [
+                pa.field("uuid", text),
+                pa.field("blend", text),
+                pa.field("agent", text),
+                pa.field("route", text),
+                pa.field("terminal_bench_instance_id", text),
+                pa.field("request_json", text),
+                pa.field("record_json", text),
+            ]
+        )
+        schema = pa.schema(
+            [
+                pa.field("data_source", text),
+                pa.field("prompt", pa.large_list(message)),
+                pa.field("env_class", text),
+                pa.field("reward_model", pa.struct([pa.field("ground_truth", text)])),
+                pa.field(
+                    "extra_info",
+                    pa.struct([pa.field("split", text), pa.field("index", pa.int64()), pa.field("nemotron_ultra", ultra)]),
+                ),
+            ]
+        )
+        pq.write_table(pa.Table.from_pylist(rows, schema=schema), path, compression="zstd")
+        return
+
     import datasets
 
     datasets.Dataset.from_list(rows).to_parquet(str(path))
