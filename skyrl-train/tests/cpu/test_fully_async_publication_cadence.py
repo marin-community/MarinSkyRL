@@ -203,6 +203,7 @@ def make_driver(
     age=1,
     steps=5,
     eval_steps=100,
+    eval_at_steps=None,
     report_step=True,
     stop_step=None,
     save_step=None,
@@ -239,11 +240,11 @@ def make_driver(
         "generator.batched": False,
         "generator.n_samples_per_prompt": 2,
         "generator.eval_n_samples_per_prompt": 1,
+        "data.num_workers": 0,
     }
     if minibatches > 1:
         updates["trainer.strategy"] = "megatron"
         updates["trainer.algorithm.use_kl_loss"] = False
-        updates["data.num_workers"] = 0
     if first_token_admission is not None:
         updates["trainer.fully_async.first_token_admission"] = first_token_admission
     if interval is None:
@@ -260,10 +261,21 @@ def make_driver(
         eval_dataset=PromptRows(1),
         inference_engine_client=engine,
         trajectory_runner=runner,
-        callbacks=[EvaluationCallback(eval_steps=eval_steps), LogAndStop(stop_step, save_step)],
+        callbacks=[
+            EvaluationCallback(eval_steps=eval_steps, eval_at_steps=eval_at_steps),
+            LogAndStop(stop_step, save_step),
+        ],
     )
     trainer.policy_model = LearnerService()
     return trainer
+
+
+@pytest.mark.asyncio
+async def test_exact_update_evaluations_run_only_on_requested_installed_weights():
+    trainer = make_driver(interval=1, age=1, steps=25, eval_steps=5, eval_at_steps=[0, 5, 25])
+    await asyncio.wait_for(trainer._train_loop(), timeout=10)
+    assert trainer.trajectory_runner.evaluations == [(0, 0), (5, 5), (25, 25)]
+    assert trainer.policy_model.completed_update == 25
 
 
 @pytest.mark.asyncio
@@ -659,6 +671,25 @@ def test_initial_eval_recipe_composes_and_validates(overrides, expected):
         cfg = compose(config_name=DEFAULT_CONFIG_NAME, overrides=overrides)
     validate_cfg(cfg)
     assert cfg.trainer.initial_eval_repeat_count == expected
+
+
+@pytest.mark.parametrize("eval_at_steps,valid", [("[0,5,25]", True), ("[5,25]", False), ("[]", False)])
+def test_initial_eval_repeats_follow_explicit_update_schedule(eval_at_steps, valid):
+    with initialize_config_dir(config_dir=str(CONFIG_DIR), version_base=None):
+        cfg = compose(
+            config_name=DEFAULT_CONFIG_NAME,
+            overrides=[
+                "trainer.initial_eval_repeat_count=3",
+                "trainer.eval_before_train=false",
+                "trainer.eval_interval=-1",
+                f"trainer.eval_at_steps={eval_at_steps}",
+            ],
+        )
+    if valid:
+        validate_cfg(cfg)  # Explicit update 0 is the startup-evaluation contract.
+    else:
+        with pytest.raises(ValueError, match="initial_eval_repeat_count"):
+            validate_cfg(cfg)
 
 
 class TimedLearnerService(LearnerService):

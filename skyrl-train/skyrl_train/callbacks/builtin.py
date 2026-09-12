@@ -131,6 +131,8 @@ class EvaluationCallback(TrainerCallback):
         eval_steps: Run evaluation every N steps. Set to -1 or 0 to disable.
         eval_on_train_end: Whether to run evaluation when training ends.
         eval_before_train: Whether to run evaluation before training starts.
+        eval_at_steps: Exact update indices, including 0 for startup. When set,
+            replaces interval, startup and final-evaluation flags; [] disables evaluation.
     """
 
     def __init__(
@@ -138,10 +140,17 @@ class EvaluationCallback(TrainerCallback):
         eval_steps: int = 5,
         eval_on_train_end: bool = True,
         eval_before_train: bool = True,
+        eval_at_steps: list[int] | None = None,
     ):
         self.eval_steps = eval_steps
         self.eval_on_train_end = eval_on_train_end
         self.eval_before_train = eval_before_train
+        if eval_at_steps is not None and (
+            any(type(step) is not int or step < 0 for step in eval_at_steps)
+            or list(eval_at_steps) != sorted(set(eval_at_steps))
+        ):
+            raise ValueError("eval_at_steps must contain strictly increasing nonnegative integers")
+        self.eval_at_steps = frozenset(eval_at_steps) if eval_at_steps is not None else None
 
     def on_train_begin(
         self,
@@ -149,7 +158,11 @@ class EvaluationCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ) -> Optional[TrainerControl]:
-        if self.eval_before_train and self.eval_steps > 0:
+        if self.eval_at_steps is not None:
+            # A resumed run must not replay an evaluation for an already completed update.
+            if state.global_step == 0 and 0 in self.eval_at_steps:
+                control.should_evaluate = True
+        elif self.eval_before_train and self.eval_steps > 0:
             control.should_evaluate = True
         return control
 
@@ -159,7 +172,10 @@ class EvaluationCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ) -> Optional[TrainerControl]:
-        if self.eval_steps > 0 and state.global_step % self.eval_steps == 0:
+        if self.eval_at_steps is not None:
+            if state.global_step in self.eval_at_steps:
+                control.should_evaluate = True
+        elif self.eval_steps > 0 and state.global_step % self.eval_steps == 0:
             control.should_evaluate = True
         return control
 
@@ -169,7 +185,7 @@ class EvaluationCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ) -> Optional[TrainerControl]:
-        if self.eval_on_train_end and self.eval_steps > 0:
+        if self.eval_at_steps is None and self.eval_on_train_end and self.eval_steps > 0:
             control.should_evaluate = True
         return control
 
@@ -744,11 +760,13 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
     # Evaluation callback
     eval_interval = getattr(cfg.trainer, "eval_interval", 5)
     eval_before_train = getattr(cfg.trainer, "eval_before_train", True)
-    if eval_interval > 0:
+    eval_at_steps = getattr(cfg.trainer, "eval_at_steps", None)
+    if eval_interval > 0 or eval_at_steps is not None:
         callbacks.append(
             EvaluationCallback(
                 eval_steps=eval_interval,
                 eval_before_train=eval_before_train,
+                eval_at_steps=eval_at_steps,
             )
         )
 

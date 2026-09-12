@@ -615,13 +615,14 @@ def validate_cfg(cfg: DictConfig):
     repeats = cfg.trainer.initial_eval_repeat_count
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
         raise ValueError("trainer.initial_eval_repeat_count must be a positive integer")
-    if repeats > 1 and (
-        not cfg.trainer.eval_before_train or cfg.trainer.eval_interval <= 0 or not cfg.trainer.dump_eval_results
-    ):
-        raise ValueError(
-            "trainer.initial_eval_repeat_count > 1 requires eval_before_train=true, eval_interval>0, "
-            "and dump_eval_results=true"
-        )
+    eval_at_steps = cfg.trainer.get("eval_at_steps")
+    startup_eval = (
+        0 in eval_at_steps
+        if eval_at_steps is not None
+        else cfg.trainer.eval_before_train and cfg.trainer.eval_interval > 0
+    )
+    if repeats > 1 and (not startup_eval or not cfg.trainer.dump_eval_results):
+        raise ValueError("trainer.initial_eval_repeat_count > 1 requires startup evaluation and dump_eval_results=true")
     validate_completion_config(cfg)
     validate_fully_async_cfg(cfg)
     resolve_dynamic_sampling_criteria(

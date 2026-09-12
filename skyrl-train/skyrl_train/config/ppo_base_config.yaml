@@ -345,6 +345,8 @@ trainer:
   # each pass uses startup_pass_<index> dump paths and eval metric namespaces.
   initial_eval_repeat_count: 1
   eval_interval: 5
+  # Exact update indices (0 = startup). Overrides interval/startup/final flags; [] disables eval.
+  eval_at_steps: null
   preflight_gate:
     enabled: false
     min_reward: 0.25
