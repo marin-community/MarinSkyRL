@@ -79,6 +79,29 @@ async def test_run_preserves_measured_reconstruction_alignment_metrics():
         assert output["rollout_metrics"][name] == value
 
 
+def test_concatenate_promotes_scalar_rewards_when_mixed_with_token_rewards():
+    token_batch: TrajectoryBatch = {
+        "prompt_token_ids": [[1]],
+        "response_ids": [[2, 3]],
+        "rewards": [[0.25, 0.75]],
+        "loss_masks": [[1, 1]],
+        "stop_reasons": ["stop"],
+        "rollout_logprobs": [[-0.1, -0.2]],
+    }
+    scalar_batch: TrajectoryBatch = {
+        "prompt_token_ids": [[4]],
+        "response_ids": [[5, 6, 7]],
+        "rewards": [2.0],
+        "loss_masks": [[1, 1, 1]],
+        "stop_reasons": ["stop"],
+        "rollout_logprobs": [[-0.3, -0.4, -0.5]],
+    }
+
+    output = concatenate_trajectory_batches([token_batch, scalar_batch], tis_lcs_alert_threshold=0.005)
+
+    assert output["rewards"] == [[0.25, 0.75], [0.0, 0.0, 2.0]]
+
+
 @pytest.mark.asyncio
 async def test_run_propagates_request_identity_when_runner_output_omits_it():
     trajectory_ids = [TrajectoryID(instance_id="task", repetition_id=0)]

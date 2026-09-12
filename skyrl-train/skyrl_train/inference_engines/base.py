@@ -11,6 +11,9 @@ class InferenceEngineInput(TypedDict):
     prompt_token_ids: Optional[List[List[int]]]
     sampling_params: Optional[Dict[str, Any]]
     session_ids: Optional[List[Hashable]]
+    # Per-sample Responses-API options (tools, parallel_tool_calls, etc.) that
+    # require the serving backend's resolved chat renderer.
+    chat_completion_params: NotRequired[List[Dict[str, Any]]]
 
 
 class InferenceEngineOutput(TypedDict):
@@ -30,6 +33,8 @@ class InferenceEngineOutput(TypedDict):
     # inner list is prompt positions, dict maps token_id → logprob.
     # Only populated when SamplingParams(prompt_logprobs=K) is used.
     prompt_logprobs: Optional[List[List[Optional[Dict[int, float]]]]]
+    prompt_ids: NotRequired[List[List[int]]]
+    assistant_messages: NotRequired[List[Dict[str, Any]]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):

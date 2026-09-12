@@ -243,6 +243,17 @@ class LocalRLRunner:
             exp_args[attribute] = paths
             print(f"Resolved {role} data: {paths}")
 
+    def _resolve_terminal_bench_sidechannel(self, parsed) -> None:
+        """Resolve optional task roots without changing the primary parquet dataloader."""
+        values = parsed.data.get("terminal_bench_data")
+        if not values:
+            return
+        print(f"\nResolving terminal-bench sidechannel data (kind=tasks): {values}")
+        resolved = resolve_rl_train_data_with_sources(list(values), kind="tasks")
+        parsed.data["terminal_bench_data"] = list(resolved.paths)
+        self._terminal_bench_data_sources = list(resolved.sources)
+        print(f"Resolved terminal-bench sidechannel data: {list(resolved.paths)}")
+
     def run(self) -> int:
         """Execute the RL training job. Returns an exit code (0 for success)."""
         self.print_banner()
@@ -264,6 +275,7 @@ class LocalRLRunner:
         entrypoint = self.config.entrypoint or parsed.entrypoint
         self.config.tensor_parallel_size = parsed.tensor_parallel_size
         self._resolve_data_inputs(parsed.data_kind, exp_args)
+        self._resolve_terminal_bench_sidechannel(parsed)
         hydra_args = build_skyrl_hydra_args(parsed, exp_args, hpc_stub)
         self._record_context_budget(parsed, skyrl_overrides)
 

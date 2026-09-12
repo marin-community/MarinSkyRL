@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import patch
 from datasets import Dataset
+from transformers import BatchEncoding
 from skyrl_train.dataset import PromptDataset
 
 
@@ -54,6 +55,25 @@ def test_prompt_dataset_filtering(mock_load_dataset, mock_tokenizer, sample_data
     assert env is None
     assert messages == "short prompt"
     assert extra == {"answer": "a1"}
+
+
+@patch("datasets.load_dataset")
+def test_prompt_dataset_filtering_counts_batch_encoding_input_ids(mock_load_dataset, sample_dataset):
+    mock_load_dataset.return_value = {"train": sample_dataset}
+
+    class BatchTokenizer:
+        def apply_chat_template(self, messages, add_generation_prompt):
+            del add_generation_prompt
+            return BatchEncoding({"input_ids": list(messages), "attention_mask": [1] * len(messages)})
+
+    dataset = PromptDataset(
+        datasets=["dummy.parquet"],
+        tokenizer=BatchTokenizer(),
+        max_prompt_length=150,
+        num_workers=1,
+    )
+
+    assert len(dataset) == 2
 
 
 def test_collate_fn():
