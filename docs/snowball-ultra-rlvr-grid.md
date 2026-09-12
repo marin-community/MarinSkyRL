@@ -44,11 +44,13 @@ the downstream dataset reader still detects JSON, JSONL, or Parquet by filename.
 directly without the schema preparation step.
 
 Keep the released order, reserve the final 100 prepared rows for validation, and pass the remaining rows through
-`--train_data`. The SWE rows also require the task directories produced by `infra/rl_data/nemotron_ultra_swe.py`
-in `data.terminal_bench_data`. Populate that field with an immutable artifact selector before launch. Non-SWE
-rows use the configured Nemotron Ultra gym router and require the external sandbox and judge endpoints described
-by `skyrl-train/skyrl_train/config/skyrl_gym_config/default.yaml`; do not use its loopback placeholders in a
-production run.
+`--train_data`. RLVR2 must contain all 99,016 training rows, yielding 194 batches at batch size 512. The trainer's
+step target is absolute after resume, so a replacement artifact with fewer than 178 batches would terminate before
+the intended cumulative step 178. The SWE rows also require the task directories produced by
+`infra/rl_data/nemotron_ultra_swe.py` in `data.terminal_bench_data`. Populate that field with an immutable artifact
+selector before launch. Non-SWE rows use the configured Nemotron Ultra gym router and require the external sandbox
+and judge endpoints described by `skyrl-train/skyrl_train/config/skyrl_gym_config/default.yaml`; do not use its
+loopback placeholders in a production run.
 
 Use the same Iris job name and checkpoint path for each topology's two phases so `resume_mode: latest` finds the
 RLVR1 checkpoint. Run a bounded startup and 65K-context memory smoke before committing the full 64-GPU gang.

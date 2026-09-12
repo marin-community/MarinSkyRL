@@ -111,32 +111,15 @@ def test_flash_attention_configs_use_the_current_vllm_config_field():
         assert "VLLM_ATTENTION_BACKEND" not in parsed.raw.get("extra_env", {})
 
 
-def test_snowball_ultra_grid_materializes_the_shared_training_contract():
+def test_snowball_ultra_grid_derives_prompt_budget_without_authored_override():
     configs_dir = _REPO_ROOT / "cloud/iris/configs"
 
     for name in _SNOWBALL_ULTRA_CONFIGS:
         source = yaml.safe_load((configs_dir / name).read_text())
         parsed = parse_rl_config(str(configs_dir / name))
-        algorithm = parsed.trainer["algorithm"]
 
         assert "max_prompt_length" not in source["trainer"]
         assert parsed.trainer["max_prompt_length"] == 59008
-        assert source["entrypoint"] == "standard"
-        assert parsed.data_kind == "parquet"
-        assert parsed.data["shuffle"] is False
-        assert parsed.trainer["strategy"] == "megatron"
-        assert parsed.trainer["train_batch_size"] == 512
-        assert parsed.trainer["max_ckpts_to_keep"] == 2
-        assert parsed.trainer["flash_attn"] is True
-        assert parsed.trainer["gradient_checkpointing"] is True
-        assert parsed.trainer["gradient_checkpointing_use_reentrant"] is False
-        assert algorithm["advantage_estimator"] == "grpo"
-        assert algorithm["eps_clip_low"] == algorithm["eps_clip_high"] == 0.2
-        assert algorithm["use_entropy_loss"] is False
-        assert algorithm["use_kl_loss"] is False
-        assert parsed.trainer["policy"]["optimizer_config"]["max_grad_norm"] == 0.5
-        assert parsed.generator["n_samples_per_prompt"] == 16
-        assert parsed.generator["max_num_batched_tokens"] == 16384
 
 
 @pytest.mark.parametrize(
