@@ -183,7 +183,7 @@ override-dependencies = [
     # Megatron Bridge pins older serving libraries; share the selected vLLM ABI.
     "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux'",
-    "transformers==5.16.1 ; sys_platform == 'linux'",
+    "transformers==5.16.1",
     "opentelemetry-api==1.44.0 ; sys_platform == 'linux'",
     "opentelemetry-api ; sys_platform != 'linux'",
 ]
