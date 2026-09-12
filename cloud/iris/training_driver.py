@@ -20,7 +20,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import ast
 import contextlib
 import json
 import os
@@ -532,17 +531,14 @@ class _LocalHPCStub:
     name: str = "local"
 
 
-def parse_list_arg(value: str) -> List[str]:
-    """Parse a list argument from the CLI (JSON or Python literal)."""
+def parse_list_arg(value: str) -> List[str | dict[str, Any]]:
+    """Parse a JSON list argument from the CLI."""
     if not value:
         return []
-    try:
-        parsed = ast.literal_eval(value)
-        if isinstance(parsed, list):
-            return parsed
-        return [str(parsed)]
-    except (ValueError, SyntaxError):
-        return [value]
+    parsed = json.loads(value)
+    if not isinstance(parsed, list):
+        raise ValueError("expected a JSON list")
+    return parsed
 
 
 def create_parser() -> argparse.ArgumentParser:
