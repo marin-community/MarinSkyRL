@@ -43,9 +43,11 @@ class CpuAllocation(TorchFunctionMode):
 class CpuShardedOptimizer(MixedPrecisionOptimizer):
     """Supply the native optimizer's storage adapter with one real CPU master shard."""
 
-    def __init__(self, parameter, shard, scaler):
+    def __init__(self, parameter, shard, scaler, data_parallel_group):
         self.parameter = parameter
         self.shard = shard
+        self.data_parallel_group = data_parallel_group
+        self.grad_stats_parallel_group = data_parallel_group
         master = torch.nn.Parameter(parameter.float().clone()[shard])
         config = OptimizerConfig(lr=0.125, clip_grad=0.0, fp16=True, bf16=True)
         super().__init__(torch.optim.SGD([master], lr=0.125), config, scaler, None)
@@ -59,8 +61,8 @@ class CpuShardedOptimizer(MixedPrecisionOptimizer):
         return [self.master.grad]
 
     def _copy_main_params_to_model_params(self):
-        pieces = [torch.empty_like(self.master) for _ in range(dist.get_world_size())]
-        dist.all_gather(pieces, self.master.detach())
+        pieces = [torch.empty_like(self.master) for _ in range(dist.get_world_size(self.data_parallel_group))]
+        dist.all_gather(pieces, self.master.detach(), group=self.data_parallel_group)
         self.parameter.copy_(torch.cat(pieces).bfloat16())
 
     def get_grad_stats_parallel_group(self):
@@ -89,7 +91,7 @@ class NativeChunk:
     full_param_layout: FullParamLayout
 
 
-def make_chunk(parameter):
+def make_chunk(parameter, data_parallel_group):
     config = DistributedDataParallelConfig(grad_reduce_in_fp32=False, use_distributed_optimizer=True)
     layout = PerBufferParamLayout({parameter: (0, 4, 0)}, [(0, 4)], [4], [0])
     buffer = _ParamAndGradBuffer(
@@ -97,13 +99,13 @@ def make_chunk(parameter):
         torch.bfloat16,
         torch.bfloat16,
         [(parameter, "weight")],
-        dist.group.WORLD,
+        data_parallel_group,
         None,
         {parameter: "weight"},
         0.5,
         [0],
         False,
-        SimpleNamespace(tp=dist.group.WORLD, dp_cp=dist.group.WORLD),
+        SimpleNamespace(tp=dist.group.WORLD, dp_cp=data_parallel_group),
         param_layout=layout,
     )
     return NativeChunk([buffer], [], FullParamLayout({BufferKey(torch.bfloat16, torch.bfloat16, False): layout}))
@@ -111,14 +113,17 @@ def make_chunk(parameter):
 
 def distributed_case(rank, rendezvous, result_root):
     dist.init_process_group(
-        "gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2, timeout=timedelta(seconds=30)
+        "gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=4, timeout=timedelta(seconds=30)
     )
     old_current_device = torch.cuda.current_device
     torch.cuda.current_device = lambda: torch.device("cpu")
     try:
+        groups = [dist.new_group(ranks) for ranks in ([0, 2], [1, 3])]
+        data_parallel_group = groups[rank % 2]
+        data_rank = dist.get_rank(data_parallel_group)
         with CpuAllocation():
             parameter = torch.nn.Parameter(torch.ones(4, dtype=torch.bfloat16))
-            chunk = make_chunk(parameter)
+            chunk = make_chunk(parameter, data_parallel_group)
             pointer = parameter.data_ptr()
             storage_pointer = chunk.buffers[0].grad_data.data_ptr()
             use_fp16_gradient_buffers([chunk])
@@ -127,7 +132,9 @@ def distributed_case(rank, rendezvous, result_root):
             assert parameter.main_grad.dtype == chunk.buffers[0].buckets[0].grad_data.dtype == torch.float16
             assert next(iter(chunk.full_param_layout.layouts)).grad_dtype == torch.float16
             scaler = DynamicGradScaler(8.0, 1.0, 2.0, 0.5, 2, 1)
-            optimizer = CpuShardedOptimizer(parameter, slice(rank * 2, (rank + 1) * 2), scaler)
+            optimizer = CpuShardedOptimizer(
+                parameter, slice(data_rank * 2, (data_rank + 1) * 2), scaler, data_parallel_group
+            )
             chain = SimpleNamespace(chained_optimizers=[optimizer], get_loss_scale=optimizer.get_loss_scale)
             bind_fp16_gradient_optimizer(chain)
             backward_config = SimpleNamespace(grad_scale_func=None, timers=None, deallocate_pipeline_outputs=False)
@@ -139,12 +146,12 @@ def distributed_case(rank, rendezvous, result_root):
                 scale_before = scaler.scale.item()
                 before = parameter.detach().clone()
                 # Native backward must scale the loss; unscaling later must recover mean gradient 2.
-                backward_step(None, parameter.float().sum() * (1.0 + 2.0 * rank), None, backward_config)
+                backward_step(None, parameter.float().sum() * (1.0 + 2.0 * data_rank), None, backward_config)
                 parameter.main_grad.copy_(parameter.grad)
-                dist.all_reduce(chunk.buffers[0].buckets[0].grad_data)
+                dist.all_reduce(chunk.buffers[0].buckets[0].grad_data, group=data_parallel_group)
                 chunk.buffers[0].grad_data.mul_(0.5)
-                # Inject AFTER reduction into only rank 1's owned shard. Rank 0 must still skip.
-                if step == 2 and rank == 1:
+                # Inject AFTER reduction into only rank 3's owned shard. The other DP group must also skip.
+                if step == 2 and rank == 3:
                     parameter.main_grad[2] = float("inf")
                 successful, _, _ = optimizer.step()
                 metrics = gradient_precision_metrics([chunk], chain, scale_before, successful)
@@ -166,8 +173,7 @@ def distributed_case(rank, rendezvous, result_root):
 
 
 def test_native_bf16_storage_fp16_backward_finite_updates_and_global_overflow(tmp_path):
-    mp.spawn(distributed_case, args=(str(tmp_path / "gloo"), str(tmp_path)), nprocs=2, join=True)
-    left = torch.load(tmp_path / "rank0.pt", weights_only=True)
-    right = torch.load(tmp_path / "rank1.pt", weights_only=True)
-    assert left == right
-    assert sum(event["gradient_precision/optimizer_skipped"] for event in left) == 1
+    mp.spawn(distributed_case, args=(str(tmp_path / "gloo"), str(tmp_path)), nprocs=4, join=True)
+    events = [torch.load(tmp_path / f"rank{rank}.pt", weights_only=True) for rank in range(4)]
+    assert all(event == events[0] for event in events)
+    assert sum(event["gradient_precision/optimizer_skipped"] for event in events[0]) == 1

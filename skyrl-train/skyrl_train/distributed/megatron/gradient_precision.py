@@ -20,6 +20,8 @@ def validate_fp16_gradient_config(config, *, bf16: bool) -> None:
         if config.get(key, 1) != 1:
             raise ValueError(f"FP16 gradient reduction requires {key}=1")
     ddp = config.get("ddp_config", {})
+    if not ddp.get("use_distributed_optimizer", True):
+        raise ValueError("FP16 gradient reduction requires distributed optimizer DDP buffers")
     if ddp.get("grad_reduce_in_fp32", True):
         raise ValueError("FP16 gradient reduction requires grad_reduce_in_fp32=false")
     for key in (
@@ -38,7 +40,17 @@ def validate_fp16_gradient_config(config, *, bf16: bool) -> None:
     if ddp.get("num_distributed_optimizer_instances", 1) != 1:
         raise ValueError("FP16 gradient reduction requires one distributed optimizer instance")
     optimizer = config.get("optimizer_config_kwargs", {})
-    for key in ("use_precision_aware_optimizer", "optimizer_cpu_offload", "optimizer_cuda_graph"):
+    if optimizer.get("optimizer", "adam") != "adam" or not optimizer.get("use_distributed_optimizer", True):
+        raise ValueError("FP16 gradient reduction requires native distributed Adam")
+    for key in (
+        "use_precision_aware_optimizer",
+        "optimizer_cpu_offload",
+        "optimizer_cuda_graph",
+        "use_layer_wise_distributed_optimizer",
+        "overlap_param_gather",
+        "overlap_param_gather_with_optimizer_step",
+        "reuse_grad_buf_for_mxfp8_param_ag",
+    ):
         if optimizer.get(key, False):
             raise ValueError(f"FP16 gradient reduction requires native Adam without {key}")
     for key in (
@@ -55,8 +67,11 @@ def validate_fp16_gradient_config(config, *, bf16: bool) -> None:
             raise ValueError(f"Configure gradient loss scaling through dynamic_loss_scale, not optimizer {key}")
     scale = config["dynamic_loss_scale"]
     for key in ("initial_scale", "min_scale"):
-        if not math.isfinite(scale[key]) or scale[key] <= 0:
-            raise ValueError(f"dynamic_loss_scale.{key} must be finite and positive")
+        # Native MCore stores the scale and inverse in FP32. Python-finite values
+        # can overflow that storage or make its reciprocal non-finite on CUDA.
+        limits = torch.finfo(torch.float32)
+        if not math.isfinite(scale[key]) or not limits.tiny <= scale[key] <= limits.max:
+            raise ValueError(f"dynamic_loss_scale.{key} must be positive, finite and normal in FP32")
     if scale["initial_scale"] < scale["min_scale"]:
         raise ValueError("Initial loss scale must be at least min_scale")
     for key in ("growth_interval", "hysteresis"):

@@ -28,6 +28,17 @@ versions, commands, and test output alongside the numerical artifacts.
 `fp16_gradient_native.py` is an opt-in CPU/Gloo diagnostic requiring the locked MCore 0.18.0
 package. Run it explicitly with `python -m pytest skyrl-train/tests/gpu/diagnostics/fp16_gradient_native.py`
 from the repository root. It redirects CUDA allocation at the hardware boundary and exercises native
-gradient-buffer views, the backward scheduler, dynamic scaler and optimizer step on two CPU ranks.
-A one-rank overflow after reduction must skip both master shards. It does not qualify CUDA kernels,
+gradient-buffer views, the backward scheduler, dynamic scaler and optimizer step on four CPU ranks in two DP groups.
+A one-rank overflow after reduction must also skip the other DP group. It does not qualify CUDA kernels,
 NCCL reduce-scatter, Transformer Engine Adam, the full model provider or checkpoint resume.
+
+
+`fp16_gradient_cuda.py` is the next hardware qualification, invoked as
+`torchrun --standalone --nproc-per-node=4 skyrl-train/tests/gpu/diagnostics/fp16_gradient_cuda.py
+--source-commit <full-sha> --output <fresh-absolute-directory>` in the frozen Megatron runtime.
+It runs TP2/DP2 on one node with native NCCL reduce-scatter, TE Linear backward, native
+DistributedOptimizer and TE Adam. Three exact finite updates surround one deliberately injected
+post-reduction overflow on rank 3; every rank must skip it and the LR scheduler must pause.
+The diagnostic checks FP32 masters/moments, BF16 model storage, FP16 buffer views and unanimous
+scale events. Its pass line is `E71B_FP16_CUDA_KERNEL_PASS`. It supplies no Qwen quality, full
+model construction, production batch/rollout-loop, inter-node or checkpoint-resume qualification.

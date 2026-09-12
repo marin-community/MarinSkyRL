@@ -6,6 +6,7 @@ from omegaconf import OmegaConf
 import pytest
 import torch
 
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.distributed.megatron.gradient_precision import (
     fp16_optimizer_overrides,
     validate_fp16_gradient_config,
@@ -50,6 +51,7 @@ def test_fp16_gradient_configuration_preserves_bf16_parameters_and_fp32_state():
     "key,value",
     [
         ("ddp_config.grad_reduce_in_fp32", True),
+        ("ddp_config.use_distributed_optimizer", False),
         ("ddp_config.overlap_grad_reduce", True),
         ("ddp_config.nccl_ub", True),
         ("ddp_config.param_name_patterns_for_fp32_local_accumulation", ["all"]),
@@ -58,8 +60,14 @@ def test_fp16_gradient_configuration_preserves_bf16_parameters_and_fp32_state():
         ("expert_model_parallel_size", 8),
         ("pipeline_model_parallel_size", 2),
         ("optimizer_config_kwargs.use_precision_aware_optimizer", True),
+        ("optimizer_config_kwargs.optimizer", "sgd"),
+        ("optimizer_config_kwargs.use_distributed_optimizer", False),
+        ("optimizer_config_kwargs.overlap_param_gather", True),
+        ("optimizer_config_kwargs.use_layer_wise_distributed_optimizer", True),
         ("optimizer_config_kwargs.loss_scale", 128.0),
         ("dynamic_loss_scale.initial_scale", float("inf")),
+        ("dynamic_loss_scale.initial_scale", 1e40),
+        ("dynamic_loss_scale.min_scale", 1e-40),
         ("dynamic_loss_scale.initial_scale", 0.5),
         ("dynamic_loss_scale.growth_interval", 0),
     ],
@@ -69,3 +77,16 @@ def test_unqualified_geometry_buffer_or_scaler_cannot_silently_enter_fp16_mode(k
     OmegaConf.update(config, key, value)
     with pytest.raises(ValueError):
         validate_fp16_gradient_config(config, bf16=True)
+
+
+def test_hydra_policy_exposes_gradient_only_fp16_with_independent_scale_controls():
+    cfg = get_default_config()
+    precision = cfg.trainer.policy.megatron_config
+    OmegaConf.update(cfg, "trainer.policy.megatron_config.fp16_grad_reduce", True)
+    OmegaConf.update(cfg, "trainer.policy.megatron_config.ddp_config.grad_reduce_in_fp32", False)
+    OmegaConf.update(cfg, "trainer.policy.megatron_config.dynamic_loss_scale.initial_scale", 32.0)
+    validate_fp16_gradient_config(precision, bf16=cfg.trainer.bf16)
+    native = megatron_optimizer_kwargs(cfg.trainer.policy.optimizer_config, fp16_optimizer_overrides(precision))
+    assert native["params_dtype"] == torch.bfloat16
+    assert native["initial_loss_scale"] == 32.0
+    assert native["min_loss_scale"] == 1.0 and native["loss_scale_window"] == 1000
