@@ -19,8 +19,9 @@ These are integration gates, not model-quality experiments.
 | `run_grug_megatron.sh` | run the Grug Megatron parity, training, and serving gates on four H100s |
 | `run_opencode.sh` | submit, wait for, and gate the federated RNO2A OpenCode RL canary |
 | `gate.py` | reads a run's log and decides whether it was healthy (`python -m ci.marin_nightly.gate`) |
-| `specs/gsm8k-qwen3-0.6b.json` | the thresholds, with provenance for why each one is what it is |
+| `specs/gsm8k-qwen3-0.6b-<strategy>.json` | the GSM8K thresholds per training backend, with provenance for why each one is what it is |
 | `specs/opencode-qwen3-8b.json` | exact continuation, literal bridge, TIS, and optimizer thresholds |
+| `dashboard_readiness.py` | reports whether the finished run reached the RL runs dashboard; never fails the lane |
 | `../../../.github/workflows/marin-nightly.yaml` | provisions the GPU gates through Iris and tears them down |
 
 ## How the gate sees the run
@@ -38,6 +39,37 @@ reached, the required metrics are present and finite, the bounded ones are insid
 range, and the run finished inside its wall-clock budget. It exits non-zero with one line
 per violation. `tests/cpu/test_marin_nightly_gate.py` covers it.
 
+## Which training backend
+
+`STRATEGY` selects `fsdp2` (the default) or `megatron`. Both were run over the same 30-step recipe
+on one H100 on 2026-09-10:
+
+| backend | end to end | median `train_step` | max |
+| --- | --- | --- | --- |
+| fsdp2 | 667s | 6.94s | 7.38s |
+| megatron | 883s | 7.92s | 10.8s |
+
+fsdp2 is the default on that evidence. Megatron at tensor and pipeline size 1 adds coordination and
+buys no parallelism, which is what a single GPU gives it; the numbers say nothing about either
+backend at a topology where Megatron has something to do.
+
+## Two Ray instances cannot share a node
+
+Ray persists session state under a temp directory. Two Ray instances that end up on one node find
+each other's and the second dies: "Session name ... does not match persisted value. Perhaps there
+was an error connecting to Redis." Observed on 2026-09-10 between two single-GPU jobs submitted six
+seconds apart.
+
+This is not specific to this lane and it is not new. `gsm8k-h100` starts Ray through
+`task_runtime.py`; `grug-megatron-h100` starts it through `initialize_ray` in
+`tests/gpu/test_grug_megatron.py`; both target `cw-rno2a` and both are launched by the same 09:00
+cron. Before this lane moved to `task_runtime.py` it still started Ray, through the trainer's own
+`ray.init()` -- what changed is that the ports are now pinned as well.
+
+No collision has been observed between the scheduled lanes, and Iris placement may well keep them
+apart, but nothing here guarantees it. If one of them fails at `ray start` with that message, this
+is why. Two runs launched by hand seconds apart will do it: run them serially.
+
 ## Running it by hand
 
 The gate is pure stdlib and runs anywhere, against any run log:
@@ -45,7 +77,7 @@ The gate is pure stdlib and runs anywhere, against any run log:
 ```bash
 uv run --frozen python -m ci.marin_nightly.gate \
     --log nightly-run.log \
-    --spec ci/marin_nightly/specs/gsm8k-qwen3-0.6b.json \
+    --spec ci/marin_nightly/specs/gsm8k-qwen3-0.6b-fsdp2.json \
     --wall-clock-seconds 900
 ```
 
