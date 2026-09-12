@@ -134,6 +134,7 @@ class SpeculatorTrainingConfig:
 
     interval_steps: int = 1
     max_tokens_per_update: int = 8_192
+    max_tokens_per_micro_batch: int = 2_048
     max_sequences_per_prompt_group: int = 2
     min_train_sequences: int = 8
     holdout_fraction: float = 0.25
@@ -151,6 +152,7 @@ class SpeculatorTrainingConfig:
         fields = {
             "interval_steps",
             "max_tokens_per_update",
+            "max_tokens_per_micro_batch",
             "max_sequences_per_prompt_group",
             "min_train_sequences",
             "holdout_fraction",
@@ -171,6 +173,10 @@ class SpeculatorTrainingConfig:
             max_tokens_per_update=_positive_integer(
                 mapping.get("max_tokens_per_update", defaults.max_tokens_per_update),
                 f"{context}.max_tokens_per_update",
+            ),
+            max_tokens_per_micro_batch=_positive_integer(
+                mapping.get("max_tokens_per_micro_batch", defaults.max_tokens_per_micro_batch),
+                f"{context}.max_tokens_per_micro_batch",
             ),
             max_sequences_per_prompt_group=_positive_integer(
                 mapping.get("max_sequences_per_prompt_group", defaults.max_sequences_per_prompt_group),

@@ -465,32 +465,79 @@ def _load_batch(path: Path, device: torch.device) -> dict[str, torch.Tensor]:
     return {name: value.to(device) for name, value in batch.items()}
 
 
+def _load_packed_batch(paths: list[Path], device: torch.device) -> dict[str, torch.Tensor]:
+    """Pack independent captures while preserving their attention boundaries."""
+    samples = [_load_batch(path, device) for path in paths]
+    batch = {
+        name: torch.cat([sample[name] for sample in samples], dim=1)
+        for name in (
+            "input_ids",
+            "hidden_states",
+            "verifier_last_hidden_states",
+            "loss_mask",
+            "position_ids",
+        )
+    }
+    batch["document_ids"] = torch.cat(
+        [torch.full_like(sample["input_ids"], document_id) for document_id, sample in enumerate(samples)],
+        dim=1,
+    )
+    return batch
+
+
+def _pack_windows(windows: list[dict[str, Any]], max_tokens: int) -> list[list[dict[str, Any]]]:
+    """Group captures into bounded packed sequences without splitting a window."""
+    batches: list[list[dict[str, Any]]] = []
+    batch: list[dict[str, Any]] = []
+    batch_tokens = 0
+    for window in windows:
+        window_tokens = max(1, int(window["tokens"]) - 1)
+        if batch and batch_tokens + window_tokens > max_tokens:
+            batches.append(batch)
+            batch = []
+            batch_tokens = 0
+        batch.append(window)
+        batch_tokens += window_tokens
+    if batch:
+        batches.append(batch)
+    return batches
+
+
 def _evaluate(
     model: nn.Module,
     capture_dir: Path,
     windows: list[dict[str, Any]],
     num_speculative_tokens: int,
+    max_tokens_per_micro_batch: int,
     loss_config,
 ) -> OnlineEagleEvaluation:
     """Evaluate mean loss and next-token agreement on the supplied windows."""
-    losses = []
+    weighted_loss = 0.0
+    loss_tokens = 0.0
     correct = 0.0
     total = 0.0
     model.eval()
     with torch.no_grad():
-        for window in windows:
-            batch = _load_batch(capture_dir / window["path"], next(model.parameters()).device)
+        for packed_windows in _pack_windows(windows, max_tokens_per_micro_batch):
+            batch = _load_packed_batch(
+                [capture_dir / window["path"] for window in packed_windows],
+                next(model.parameters()).device,
+            )
             _, loss, metrics = model(
                 **batch,
                 ttt_steps=num_speculative_tokens,
                 loss_config=loss_config,
             )
-            losses.append(float(loss))
+            supervised_tokens = float(batch["loss_mask"].sum())
+            weighted_loss += float(loss) * supervised_tokens
+            loss_tokens += supervised_tokens
             for index in range(num_speculative_tokens):
                 correct += float(metrics[f"full_acc_{index}_sum"])
                 total += float(metrics[f"full_acc_{index}_total"])
+    if loss_tokens == 0:
+        raise ValueError("Online EAGLE holdout contains no supervised tokens")
     return OnlineEagleEvaluation(
-        mean_loss=sum(losses) / len(losses),
+        mean_loss=weighted_loss / loss_tokens,
         agreement=correct / total if total else 0.0,
     )
 
@@ -615,16 +662,18 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
         capture_dir,
         holdout_windows,
         job.num_speculative_tokens,
+        training.max_tokens_per_micro_batch,
         loss_config,
     )
 
-    train_losses = []
+    weighted_train_loss = 0.0
+    train_loss_tokens = 0.0
     model.train()
     for _epoch in range(training.epochs_per_update):
         epoch_windows = list(train_windows)
         random.shuffle(epoch_windows)
-        for window in epoch_windows:
-            batch = _load_batch(capture_dir / window["path"], device)
+        for packed_windows in _pack_windows(epoch_windows, training.max_tokens_per_micro_batch):
+            batch = _load_packed_batch([capture_dir / window["path"] for window in packed_windows], device)
             optimizer.zero_grad(set_to_none=True)
             _, loss, _metrics = model(
                 **batch,
@@ -636,12 +685,17 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(trainable, max_norm=1.0)
             optimizer.step()
-            train_losses.append(float(loss.detach()))
+            supervised_tokens = float(batch["loss_mask"].sum())
+            weighted_train_loss += float(loss.detach()) * supervised_tokens
+            train_loss_tokens += supervised_tokens
+    if train_loss_tokens == 0:
+        raise ValueError("Online EAGLE training partition contains no supervised tokens")
     candidate = _evaluate(
         model,
         capture_dir,
         holdout_windows,
         job.num_speculative_tokens,
+        training.max_tokens_per_micro_batch,
         loss_config,
     )
     max_loss_increase = training.max_validation_loss_increase
@@ -662,7 +716,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
         trained_against_target_revision=manifest["target_revision"],
         train_sequences=len(train_windows),
         holdout_sequences=len(holdout_windows),
-        train_loss=sum(train_losses) / len(train_losses),
+        train_loss=weighted_train_loss / train_loss_tokens,
         incumbent_holdout_loss=incumbent.mean_loss,
         candidate_holdout_loss=candidate.mean_loss,
         incumbent_holdout_agreement=incumbent.agreement,

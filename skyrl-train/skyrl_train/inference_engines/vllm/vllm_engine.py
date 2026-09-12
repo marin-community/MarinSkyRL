@@ -420,6 +420,10 @@ class WorkerWrap:
                 environment["CUDA_VISIBLE_DEVICES"] = devices[device_index]
         elif device_index is not None:
             environment["CUDA_VISIBLE_DEVICES"] = str(device_index)
+        # Speculators decorates its CUDA forward with torch.compile at import
+        # time. A fresh subprocess runs only one bounded update, so compilation
+        # cannot amortize and can consume the entire rollout-boundary budget.
+        environment["TORCH_COMPILE_DISABLE"] = "1"
         with log_path.open("wb") as log_stream:
             process = subprocess.Popen(
                 [

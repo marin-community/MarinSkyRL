@@ -9,6 +9,7 @@ import torch
 
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     _load_batch,
+    _load_packed_batch,
     candidate_is_acceptable,
     export_served_speculator_checkpoint,
     partition_capture_windows,
@@ -89,6 +90,39 @@ def test_online_batch_uses_previous_aux_state_and_exact_next_target_head_input(
     assert batch["verifier_last_hidden_states"].tolist() == [[[12.0], [13.0]]]
     assert batch["loss_mask"].tolist() == [[True, True]]
     assert batch["position_ids"].tolist() == [[5, 6]]
+
+
+def test_online_batch_packs_captures_with_distinct_attention_documents(tmp_path: Path) -> None:
+    paths = [tmp_path / "first.safetensors", tmp_path / "second.safetensors"]
+    save_file(
+        {
+            "input_ids": torch.tensor([10, 20, 30]),
+            "hidden_states": torch.tensor([[1.0], [2.0], [3.0]]),
+            "head_input_hidden_states": torch.tensor([[11.0], [12.0], [13.0]]),
+            "loss_mask": torch.tensor([False, True, True]),
+            "position_ids": torch.tensor([4, 5, 6]),
+        },
+        str(paths[0]),
+    )
+    save_file(
+        {
+            "input_ids": torch.tensor([40, 50, 60, 70]),
+            "hidden_states": torch.tensor([[4.0], [5.0], [6.0], [7.0]]),
+            "head_input_hidden_states": torch.tensor([[14.0], [15.0], [16.0], [17.0]]),
+            "loss_mask": torch.tensor([False, True, False, True]),
+            "position_ids": torch.tensor([10, 11, 12, 13]),
+        },
+        str(paths[1]),
+    )
+
+    batch = _load_packed_batch(paths, torch.device("cpu"))
+
+    assert batch["input_ids"].tolist() == [[20, 30, 50, 60, 70]]
+    assert batch["hidden_states"].tolist() == [[[1.0], [2.0], [4.0], [5.0], [6.0]]]
+    assert batch["verifier_last_hidden_states"].tolist() == [[[12.0], [13.0], [15.0], [16.0], [17.0]]]
+    assert batch["loss_mask"].tolist() == [[True, True, True, False, True]]
+    assert batch["position_ids"].tolist() == [[5, 6, 11, 12, 13]]
+    assert batch["document_ids"].tolist() == [[0, 0, 1, 1, 1]]
 
 
 def test_served_speculator_checkpoint_is_exact_idempotent_and_restorable(tmp_path: Path) -> None:

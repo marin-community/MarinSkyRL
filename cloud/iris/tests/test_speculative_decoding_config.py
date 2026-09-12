@@ -196,6 +196,7 @@ def test_raw_vllm_speculative_config_is_reserved(tmp_path: Path) -> None:
     ("field", "value"),
     [
         ("interval_steps", 0),
+        ("max_tokens_per_micro_batch", 0),
         ("holdout_fraction", 1),
         ("learning_rate", float("inf")),
         ("max_validation_loss_increase", -0.01),
