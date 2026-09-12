@@ -15,6 +15,8 @@ from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id
 
 _HF_SOURCE_SCHEME = "hf"
 _HF_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
+STANDARD_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
+ONLINE_EAGLE_TRAINER_RANK = 0
 
 
 class SpeculativeDecodingMethod(StrEnum):
@@ -42,12 +44,6 @@ def _reject_unknown(value: Mapping[str, Any], allowed: set[str], field: str) -> 
 def _positive_integer(value: object, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise SpeculativeDecodingConfigError(f"{field} must be a positive integer, got {value!r}")
-    return value
-
-
-def _nonnegative_integer(value: object, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise SpeculativeDecodingConfigError(f"{field} must be a nonnegative integer, got {value!r}")
     return value
 
 
@@ -147,7 +143,6 @@ class SpeculatorTrainingConfig:
     max_validation_loss_increase: float = 0
     max_validation_agreement_decrease: float = 0
     boundary_wait_seconds: float = 30
-    trainer_rank: int = 0
     reserved_gpu_memory_gib: float = 8
 
     @classmethod
@@ -165,18 +160,10 @@ class SpeculatorTrainingConfig:
             "max_validation_loss_increase",
             "max_validation_agreement_decrease",
             "boundary_wait_seconds",
-            "trainer_rank",
             "reserved_gpu_memory_gib",
         }
         _reject_unknown(mapping, fields, context)
         defaults = cls()
-        trainer_rank = _nonnegative_integer(
-            mapping.get("trainer_rank", defaults.trainer_rank), f"{context}.trainer_rank"
-        )
-        if trainer_rank != 0:
-            raise SpeculativeDecodingConfigError(
-                f"{context}.trainer_rank must be 0 in the initial single-rank implementation"
-            )
         return cls(
             interval_steps=_positive_integer(
                 mapping.get("interval_steps", defaults.interval_steps), f"{context}.interval_steps"
@@ -217,7 +204,6 @@ class SpeculatorTrainingConfig:
                 mapping.get("boundary_wait_seconds", defaults.boundary_wait_seconds),
                 f"{context}.boundary_wait_seconds",
             ),
-            trainer_rank=trainer_rank,
             reserved_gpu_memory_gib=_positive_number(
                 mapping.get("reserved_gpu_memory_gib", defaults.reserved_gpu_memory_gib),
                 f"{context}.reserved_gpu_memory_gib",
@@ -297,7 +283,7 @@ def parse_speculative_decoding_config(
         raise SpeculativeDecodingConfigError(f"{context} requires generator.run_engines_locally=true")
     if colocate_all:
         raise SpeculativeDecodingConfigError(f"{context} requires trainer.placement.colocate_all=false")
-    if config.training is not None and entrypoint != "skyrl_train.entrypoints.main_base":
+    if config.training is not None and entrypoint != STANDARD_TRAINING_ENTRYPOINT:
         raise SpeculativeDecodingConfigError(f"{context}.training is not supported by entrypoint {entrypoint!r}")
     if config.training is not None and num_inference_engines != 1:
         raise SpeculativeDecodingConfigError(f"{context}.training initially requires generator.num_inference_engines=1")

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import math
@@ -105,6 +105,65 @@ class OnlineEagleTrainingJob:
 
     def to_mapping(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class OnlineEagleCaptureConfig:
+    """One bounded capture interval passed from the trainer to vLLM."""
+
+    step: int
+    max_tokens: int
+    max_sequences_per_prompt_group: int
+    target_revision: str
+    draft_revision: str
+    reserved_gpu_memory_gib: float
+
+    def to_mapping(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class OnlineEagleEvaluation:
+    """Mean EAGLE loss and next-token agreement on one window set."""
+
+    mean_loss: float
+    agreement: float
+
+
+@dataclass(frozen=True)
+class OnlineEagleUpdateResult:
+    """Typed result envelope shared by the trainer subprocess and coordinator."""
+
+    active: bool
+    accepted: bool
+    step: int | None = None
+    parent_draft_revision: str | None = None
+    trained_against_target_revision: str | None = None
+    train_sequences: int | None = None
+    holdout_sequences: int | None = None
+    train_loss: float | None = None
+    incumbent_holdout_loss: float | None = None
+    candidate_holdout_loss: float | None = None
+    incumbent_holdout_agreement: float | None = None
+    candidate_holdout_agreement: float | None = None
+    holdout_loss_increase: float | None = None
+    holdout_agreement_decrease: float | None = None
+    max_validation_loss_increase: float | None = None
+    max_validation_agreement_decrease: float | None = None
+    duration_seconds: float | None = None
+    candidate_dir: str | None = None
+    draft_revision: str | None = None
+    deferred: bool = False
+    error: str | None = None
+    log_path: str | None = None
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "OnlineEagleUpdateResult":
+        fields = cls.__dataclass_fields__
+        return cls(**{name: value[name] for name in fields if name in value})
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {name: value for name, value in asdict(self).items() if value is not None}
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -409,7 +468,8 @@ def _evaluate(
     windows: list[dict[str, Any]],
     num_speculative_tokens: int,
     loss_config,
-) -> tuple[float, float]:
+) -> OnlineEagleEvaluation:
+    """Evaluate mean loss and next-token agreement on the supplied windows."""
     losses = []
     correct = 0.0
     total = 0.0
@@ -426,7 +486,10 @@ def _evaluate(
             for index in range(num_speculative_tokens):
                 correct += float(metrics[f"full_acc_{index}_sum"])
                 total += float(metrics[f"full_acc_{index}_total"])
-    return sum(losses) / len(losses), correct / total if total else 0.0
+    return OnlineEagleEvaluation(
+        mean_loss=sum(losses) / len(losses),
+        agreement=correct / total if total else 0.0,
+    )
 
 
 def _candidate_state(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -510,7 +573,7 @@ def _save_candidate(
         raise
 
 
-def run_training_job(job: OnlineEagleTrainingJob) -> dict[str, Any]:
+def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
     """Train and gate one draft candidate against a sealed rollout holdout."""
     started_at = time.perf_counter()
     capture_dir = Path(job.capture_dir)
@@ -544,7 +607,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> dict[str, Any]:
             torch.cuda.set_rng_state(saved_state["cuda_rng_state"], device=device)
         if saved_state.get("python_rng_state") is not None:
             random.setstate(saved_state["python_rng_state"])
-    incumbent_loss, incumbent_agreement = _evaluate(
+    incumbent = _evaluate(
         model,
         capture_dir,
         holdout_windows,
@@ -571,7 +634,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> dict[str, Any]:
             torch.nn.utils.clip_grad_norm_(trainable, max_norm=1.0)
             optimizer.step()
             train_losses.append(float(loss.detach()))
-    candidate_loss, candidate_agreement = _evaluate(
+    candidate = _evaluate(
         model,
         capture_dir,
         holdout_windows,
@@ -581,52 +644,49 @@ def run_training_job(job: OnlineEagleTrainingJob) -> dict[str, Any]:
     max_loss_increase = training.max_validation_loss_increase
     max_agreement_decrease = training.max_validation_agreement_decrease
     accepted = candidate_is_acceptable(
-        incumbent_loss=incumbent_loss,
-        candidate_loss=candidate_loss,
-        incumbent_agreement=incumbent_agreement,
-        candidate_agreement=candidate_agreement,
+        incumbent_loss=incumbent.mean_loss,
+        candidate_loss=candidate.mean_loss,
+        incumbent_agreement=incumbent.agreement,
+        candidate_agreement=candidate.agreement,
         max_loss_increase=max_loss_increase,
         max_agreement_decrease=max_agreement_decrease,
     )
-    result = {
-        "active": True,
-        "accepted": accepted,
-        "step": job.step,
-        "parent_draft_revision": manifest["draft_revision"],
-        "trained_against_target_revision": manifest["target_revision"],
-        "train_sequences": len(train_windows),
-        "holdout_sequences": len(holdout_windows),
-        "train_loss": sum(train_losses) / len(train_losses),
-        "incumbent_holdout_loss": incumbent_loss,
-        "candidate_holdout_loss": candidate_loss,
-        "incumbent_holdout_agreement": incumbent_agreement,
-        "candidate_holdout_agreement": candidate_agreement,
-        "holdout_loss_increase": candidate_loss - incumbent_loss,
-        "holdout_agreement_decrease": incumbent_agreement - candidate_agreement,
-        "max_validation_loss_increase": max_loss_increase,
-        "max_validation_agreement_decrease": max_agreement_decrease,
-        "duration_seconds": time.perf_counter() - started_at,
-    }
+    result = OnlineEagleUpdateResult(
+        active=True,
+        accepted=accepted,
+        step=job.step,
+        parent_draft_revision=manifest["draft_revision"],
+        trained_against_target_revision=manifest["target_revision"],
+        train_sequences=len(train_windows),
+        holdout_sequences=len(holdout_windows),
+        train_loss=sum(train_losses) / len(train_losses),
+        incumbent_holdout_loss=incumbent.mean_loss,
+        candidate_holdout_loss=candidate.mean_loss,
+        incumbent_holdout_agreement=incumbent.agreement,
+        candidate_holdout_agreement=candidate.agreement,
+        holdout_loss_increase=candidate.mean_loss - incumbent.mean_loss,
+        holdout_agreement_decrease=incumbent.agreement - candidate.agreement,
+        max_validation_loss_increase=max_loss_increase,
+        max_validation_agreement_decrease=max_agreement_decrease,
+        duration_seconds=time.perf_counter() - started_at,
+    )
     if accepted:
         draft_revision = f"draft-step-{job.step}"
-        result.update(
-            _save_candidate(
-                model,
-                optimizer,
-                output_dir,
-                {
-                    "draft_revision": draft_revision,
-                    "initial_source_identity": job.initial_draft_source_identity,
-                    "parent_draft_revision": manifest["draft_revision"],
-                    "trained_against_target_revision": manifest["target_revision"],
-                    "capture_manifest_sha256": sha256_file(capture_dir / _MANIFEST_FILENAME),
-                    "training": asdict(training),
-                    "metrics": result,
-                },
-            )
+        _save_candidate(
+            model,
+            optimizer,
+            output_dir,
+            {
+                "draft_revision": draft_revision,
+                "initial_source_identity": job.initial_draft_source_identity,
+                "parent_draft_revision": manifest["draft_revision"],
+                "trained_against_target_revision": manifest["target_revision"],
+                "capture_manifest_sha256": sha256_file(capture_dir / _MANIFEST_FILENAME),
+                "training": asdict(training),
+                "metrics": result.to_mapping(),
+            },
         )
-        result["candidate_dir"] = str(output_dir)
-        result["draft_revision"] = draft_revision
+        result = replace(result, candidate_dir=str(output_dir), draft_revision=draft_revision)
     return result
 
 
@@ -645,7 +705,7 @@ def main() -> int:
             {"active": True, "accepted": False, "error": f"{type(error).__name__}: {error}"},
         )
         raise
-    _atomic_json(result_path, result)
+    _atomic_json(result_path, result.to_mapping())
     return 0
 
 

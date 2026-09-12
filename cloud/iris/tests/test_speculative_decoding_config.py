@@ -200,7 +200,6 @@ def test_raw_vllm_speculative_config_is_reserved(tmp_path: Path) -> None:
         ("learning_rate", float("inf")),
         ("max_validation_loss_increase", -0.01),
         ("max_validation_agreement_decrease", float("nan")),
-        ("trainer_rank", 1),
         ("reserved_gpu_memory_gib", 0),
     ],
 )

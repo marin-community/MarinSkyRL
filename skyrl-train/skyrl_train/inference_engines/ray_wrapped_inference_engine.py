@@ -258,6 +258,44 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def resume_generation(self) -> None:
         return await self.inference_engine_actor.resume_generation.remote()
 
+    async def begin_online_eagle_capture(self, config: Dict[str, Any]):
+        return await self.inference_engine_actor.begin_online_eagle_capture.remote(config)
+
+    async def seal_online_eagle_capture(self, output_dir: str):
+        return await self.inference_engine_actor.seal_online_eagle_capture.remote(output_dir)
+
+    async def discard_online_eagle_capture(self):
+        return await self.inference_engine_actor.discard_online_eagle_capture.remote()
+
+    async def start_online_eagle_speculator_update(self, job: Dict[str, Any]):
+        return await self.inference_engine_actor.start_online_eagle_speculator_update.remote(job)
+
+    async def finish_online_eagle_speculator_update(self, boundary_wait_seconds: float):
+        return await self.inference_engine_actor.finish_online_eagle_speculator_update.remote(boundary_wait_seconds)
+
+    async def abort_online_eagle_speculator_update(self):
+        return await self.inference_engine_actor.abort_online_eagle_speculator_update.remote()
+
+    async def install_online_eagle_speculator(self, candidate_dir: str):
+        return await self.inference_engine_actor.install_online_eagle_speculator.remote(candidate_dir)
+
+    async def publish_online_eagle_speculator(
+        self,
+        source_dir: str,
+        destination: str,
+        draft_revision: str,
+        served_target_revision: str,
+    ):
+        return await self.inference_engine_actor.publish_online_eagle_speculator.remote(
+            source_dir,
+            destination,
+            draft_revision,
+            served_target_revision,
+        )
+
+    async def restore_online_eagle_speculator(self, source: str, destination: str):
+        return await self.inference_engine_actor.restore_online_eagle_speculator.remote(source, destination)
+
     async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET):
         """Return throughput, latency, cache, token, and request statistics."""
         return await self.inference_engine_actor.get_stats.remote(read_mode=read_mode)

@@ -98,8 +98,8 @@ class _SpeculatorCaptureClient:
             ]
         ]
 
-    async def install_online_eagle_speculator(self, candidate_dir, trainer_rank):
-        self.installs.append((candidate_dir, trainer_rank))
+    async def install_online_eagle_speculator(self, candidate_dir):
+        self.installs.append(candidate_dir)
         return [
             [
                 {"draft_revision": "draft-step-2", "weights_sha256": "abc"},
@@ -111,8 +111,8 @@ class _SpeculatorCaptureClient:
         self.publishes.append(args)
         return [[{"active": True, "complete": True, "path": "/checkpoints/speculator/manifest.json"}]]
 
-    async def restore_online_eagle_speculator(self, source, destination, trainer_rank):
-        self.restores.append((source, destination, trainer_rank))
+    async def restore_online_eagle_speculator(self, source, destination):
+        self.restores.append((source, destination))
         return [
             [
                 {
@@ -170,7 +170,6 @@ def test_online_speculator_capture_seals_target_snapshot_before_training_boundar
             "step": 2,
             "max_tokens": 262_144,
             "max_sequences_per_prompt_group": 1,
-            "trainer_rank": 0,
             "target_revision": "policy-step-1",
             "draft_revision": "draft-step-1",
             "reserved_gpu_memory_gib": 8,
@@ -219,7 +218,7 @@ def test_online_speculator_update_overlaps_then_installs_at_boundary():
     asyncio.run(trainer._finish_speculator_update())
 
     assert trainer.inference_engine_client.finish_waits == [30.0]
-    assert trainer.inference_engine_client.installs == [("/tmp/candidate", 0)]
+    assert trainer.inference_engine_client.installs == ["/tmp/candidate"]
     assert trainer._served_draft_path == "/tmp/candidate"
     assert trainer._served_draft_revision == "draft-step-2"
     assert trainer.all_metrics["speculator/install_count"] == 1.0
@@ -262,7 +261,6 @@ def test_online_speculator_checkpoint_pairs_exact_served_target_and_draft():
             "/checkpoints/global_step_2/speculator",
             "draft-step-1",
             "policy-step-2",
-            0,
         )
     ]
 
@@ -272,7 +270,6 @@ def test_online_speculator_checkpoint_pairs_exact_served_target_and_draft():
         (
             "/checkpoints/global_step_2/speculator",
             "/tmp/marinskyrl-online-eagle/process-id/resume",
-            0,
         )
     ]
     assert trainer._served_draft_revision == "draft-step-2"

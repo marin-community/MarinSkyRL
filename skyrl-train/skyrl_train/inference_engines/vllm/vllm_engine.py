@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 
+from marinskyrl.speculative_decoding import ONLINE_EAGLE_TRAINER_RANK
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.config.behavior_logprobs import (
     ROLLOUT_LOGPROB_VALIDATION_KEY,
@@ -98,6 +99,9 @@ from skyrl_train.inference_engines.vllm.stats import (
 from skyrl_train.utils import get_tcp_url, str_to_torch_dtype, torch_dtype_to_str
 import time
 from packaging import version
+
+
+_ONLINE_EAGLE_PROCESS_TERMINATION_GRACE_SECONDS = 5
 
 
 def _parse_vllm_version() -> version.Version:
@@ -308,6 +312,7 @@ class WorkerWrap:
     def begin_online_eagle_capture(self, config):
         """Begin bounded verifier-state capture on the resident model runner."""
         resolved = dict(config)
+        resolved["trainer_rank"] = ONLINE_EAGLE_TRAINER_RANK
         reserved_gpu_memory_gib = float(resolved.pop("reserved_gpu_memory_gib"))
         total_memory_gib = torch.cuda.get_device_properties(self.device).total_memory / 2**30
         gpu_memory_utilization = float(self.model_runner.cache_config.gpu_memory_utilization)
@@ -366,9 +371,8 @@ class WorkerWrap:
 
     def start_online_eagle_speculator_update(self, job):
         """Launch the SkyRL-owned trainer beside one selected inference rank."""
-        trainer_rank = int(job["training"]["trainer_rank"])
         worker_rank = self.model_runner.parallel_config.data_parallel_rank
-        if worker_rank != trainer_rank:
+        if worker_rank != ONLINE_EAGLE_TRAINER_RANK:
             return {"active": False, "worker_rank": worker_rank}
         existing = getattr(self, "_online_eagle_trainer_process", None)
         if existing is not None:
@@ -422,7 +426,7 @@ class WorkerWrap:
         except subprocess.TimeoutExpired:
             process.terminate()
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=_ONLINE_EAGLE_PROCESS_TERMINATION_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
@@ -458,7 +462,7 @@ class WorkerWrap:
         if process.poll() is None:
             process.terminate()
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=_ONLINE_EAGLE_PROCESS_TERMINATION_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
@@ -2093,10 +2097,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await engine.collective_rpc("discard_online_eagle_capture")
 
-    async def install_online_eagle_speculator(self, candidate_dir: str, trainer_rank: int):
+    async def install_online_eagle_speculator(self, candidate_dir: str):
         """Install a candidate collectively without replacing resident parameter storage."""
         engine = self._get_engine()
-        return await engine.collective_rpc("install_online_eagle_speculator", args=(candidate_dir, trainer_rank))
+        return await engine.collective_rpc(
+            "install_online_eagle_speculator", args=(candidate_dir, ONLINE_EAGLE_TRAINER_RANK)
+        )
 
     async def start_online_eagle_speculator_update(self, job: Dict[str, Any]):
         """Launch the selected rank's co-resident trainer subprocess."""
@@ -2119,19 +2125,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         destination: str,
         draft_revision: str,
         served_target_revision: str,
-        trainer_rank: int,
     ):
         """Publish an exact served draft checkpoint from its owning rank."""
         engine = self._get_engine()
         return await engine.collective_rpc(
             "publish_online_eagle_speculator",
-            args=(source_dir, destination, draft_revision, served_target_revision, trainer_rank),
+            args=(source_dir, destination, draft_revision, served_target_revision, ONLINE_EAGLE_TRAINER_RANK),
         )
 
-    async def restore_online_eagle_speculator(self, source: str, destination: str, trainer_rank: int):
+    async def restore_online_eagle_speculator(self, source: str, destination: str):
         """Stage a served draft checkpoint on its owning rank."""
         engine = self._get_engine()
-        return await engine.collective_rpc("restore_online_eagle_speculator", args=(source, destination, trainer_rank))
+        return await engine.collective_rpc(
+            "restore_online_eagle_speculator", args=(source, destination, ONLINE_EAGLE_TRAINER_RANK)
+        )
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         if "names" not in request:

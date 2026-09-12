@@ -177,6 +177,7 @@ RENDEZVOUS_WRITE_TIMEOUT = 30  # seconds per attempt
 RAY_START_HEAD_TIMEOUT = 300  # seconds
 # Failure reporting must never keep an Iris task alive after its driver exits.
 FAILURE_ARTIFACT_TIMEOUT = 30
+HF_SNAPSHOT_ATTEMPT_TIMEOUT_SECONDS = 600
 # Allow healthy policy phases longer than one hour while bounding a live but silent driver.
 DEFAULT_DRIVER_LIVENESS_TIMEOUT = 9000
 DRIVER_WATCHDOG_POLL_INTERVAL = 1.0
@@ -422,7 +423,6 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     # shard on the next attempt, so a killed-mid-download attempt loses nothing.
     # 600s comfortably covers a clean ~160 GB pull yet fits several retries inside
     # the 1800s gang-join budget.
-    PRESTAGE_ATTEMPT_TIMEOUT_S = 600
     for attempt in range(1, 7):
         try:
             proc = subprocess.run(
@@ -430,11 +430,11 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
                 env=child_env,
                 capture_output=True,
                 text=True,
-                timeout=PRESTAGE_ATTEMPT_TIMEOUT_S,
+                timeout=HF_SNAPSHOT_ATTEMPT_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired:
             last_err = (
-                f"snapshot_download stalled > {PRESTAGE_ATTEMPT_TIMEOUT_S}s "
+                f"snapshot_download stalled > {HF_SNAPSHOT_ATTEMPT_TIMEOUT_SECONDS}s "
                 "(mid-download socket hang); killed, retrying (HF resumes the partial shard)"
             )
             _log(f"model prestage attempt {attempt}/6 TIMED OUT: {last_err}")
@@ -546,10 +546,10 @@ def _stage_hf_speculator_snapshot(model: SpeculatorModelConfig) -> None:
                     env=child_env,
                     capture_output=True,
                     text=True,
-                    timeout=600,
+                    timeout=HF_SNAPSHOT_ATTEMPT_TIMEOUT_SECONDS,
                 )
             except subprocess.TimeoutExpired:
-                last_error = "snapshot_download timed out after 600 seconds"
+                last_error = f"snapshot_download timed out after {HF_SNAPSHOT_ATTEMPT_TIMEOUT_SECONDS} seconds"
             else:
                 if process.returncode == 0:
                     break

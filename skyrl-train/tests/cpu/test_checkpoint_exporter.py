@@ -114,6 +114,20 @@ def test_checkpoint_exporter_converts_only_the_policy_model(tmp_path):
     assert workers.closed
 
 
+def test_checkpoint_export_plan_preserves_cloud_uri_schemes() -> None:
+    plan = CheckpointExportPlan(
+        step=12,
+        checkpoint_path="gs://bucket/checkpoints/global_step_12",
+        export_root="s3://bucket/exports",
+        model_path="org/model",
+    )
+
+    assert plan.policy_checkpoint_path == "gs://bucket/checkpoints/global_step_12/policy"
+    assert plan.speculator_checkpoint_path == "gs://bucket/checkpoints/global_step_12/speculator"
+    assert plan.policy_export_path == "s3://bucket/exports/global_step_12/policy"
+    assert plan.speculator_export_path == "s3://bucket/exports/global_step_12/speculator"
+
+
 def test_checkpoint_exporter_copies_the_paired_served_speculator(tmp_path):
     plan = _plan(tmp_path)
     candidate = tmp_path / "candidate"

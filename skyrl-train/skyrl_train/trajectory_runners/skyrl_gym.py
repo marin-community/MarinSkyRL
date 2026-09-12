@@ -540,6 +540,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             env_extras: List[Dict[str, Any]]
             max_tokens: int
             sampling_params: Optional[Dict[str, Any]]
+            trajectory_ids: Stable rollout identities used for sticky serving sessions.
         Returns:
             TrajectoryBatch
         """

@@ -58,7 +58,11 @@ from skyrl_train.distributed.dispatch import (
 )
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.vllm.online_eagle_trainer import OnlineEagleTrainingJob
+from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    OnlineEagleCaptureConfig,
+    OnlineEagleTrainingJob,
+    OnlineEagleUpdateResult,
+)
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import (
     AdmissionRejection,
@@ -75,9 +79,8 @@ from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.checkpoint_paths import (
     GLOBAL_STEP_PREFIX,
     LATEST_CHECKPOINT_FILE,
-    SPECULATOR_CHECKPOINT_SUBDIRECTORY,
+    speculator_export_path,
 )
-from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import (
@@ -126,6 +129,14 @@ from skyrl_train.hf_export_schema import (
 
 _ONLINE_EAGLE_SCRATCH_ROOT = "/tmp/marinskyrl-online-eagle"
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
+
+
+def _single_active_online_eagle_result(results: list[Any], operation: str) -> dict[str, Any]:
+    """Return the one DP-rank result that owns online EAGLE state."""
+    active = [item for engine_results in results for item in engine_results if item.get("active", False)]
+    if len(active) != 1:
+        raise RuntimeError(f"Expected one active online EAGLE rank for {operation}, got {len(active)}")
+    return active[0]
 
 
 class RayPPOTrainer:
@@ -581,15 +592,14 @@ class RayPPOTrainer:
         training = self.speculative_decoding.training
         assert training is not None
         assert self._served_draft_revision is not None
-        capture_config = {
-            "step": self.global_step,
-            "max_tokens": training.max_tokens_per_update,
-            "max_sequences_per_prompt_group": training.max_sequences_per_prompt_group,
-            "trainer_rank": training.trainer_rank,
-            "target_revision": f"policy-step-{self.global_step - 1}",
-            "draft_revision": self._served_draft_revision,
-            "reserved_gpu_memory_gib": training.reserved_gpu_memory_gib,
-        }
+        capture_config = OnlineEagleCaptureConfig(
+            step=self.global_step,
+            max_tokens=training.max_tokens_per_update,
+            max_sequences_per_prompt_group=training.max_sequences_per_prompt_group,
+            target_revision=f"policy-step-{self.global_step - 1}",
+            draft_revision=self._served_draft_revision,
+            reserved_gpu_memory_gib=training.reserved_gpu_memory_gib,
+        ).to_mapping()
         await self.inference_engine_client.begin_online_eagle_capture(capture_config)
         self._speculator_capture_active = True
         logger.info(
@@ -608,7 +618,7 @@ class RayPPOTrainer:
             self._speculator_capture_active = False
 
     async def _seal_speculator_capture(self) -> list[Any] | None:
-        """Seal target-owned tensors before policy optimization or weight sync."""
+        """Seal and return per-engine manifests, or ``None`` without an active capture."""
         if not self._speculator_capture_active:
             return None
         output_root = self._speculator_scratch_path(f"step-{self.global_step}")
@@ -616,29 +626,19 @@ class RayPPOTrainer:
             manifests = await self.inference_engine_client.seal_online_eagle_capture(output_root)
         finally:
             self._speculator_capture_active = False
-        active_manifests = [
-            manifest for engine_manifests in manifests for manifest in engine_manifests if manifest.get("active", False)
-        ]
-        if len(active_manifests) != 1:
-            raise RuntimeError(f"Expected exactly one active online EAGLE capture rank, got {len(active_manifests)}")
-        self._sealed_speculator_capture_dir = os.path.dirname(active_manifests[0]["path"])
+        active_manifest = _single_active_online_eagle_result(manifests, "capture seal")
+        self._sealed_speculator_capture_dir = os.path.dirname(active_manifest["path"])
         self.all_metrics.update(
             {
-                "speculator/captured_rows": float(
-                    sum(manifest.get("captured_rows", 0) for manifest in active_manifests)
-                ),
-                "speculator/captured_windows": float(
-                    sum(len(manifest.get("windows", ())) for manifest in active_manifests)
-                ),
-                "speculator/dropped_windows": float(
-                    sum(manifest.get("dropped_windows", 0) for manifest in active_manifests)
-                ),
+                "speculator/captured_rows": float(active_manifest.get("captured_rows", 0)),
+                "speculator/captured_windows": float(len(active_manifest.get("windows", ()))),
+                "speculator/dropped_windows": float(active_manifest.get("dropped_windows", 0)),
             }
         )
         logger.info(
             "Online EAGLE capture sealed: step={} active_manifests={} output_root={}",
             self.global_step,
-            len(active_manifests),
+            1,
             output_root,
         )
         return manifests
@@ -664,16 +664,14 @@ class RayPPOTrainer:
             training=training,
         ).to_mapping()
         results = await self.inference_engine_client.start_online_eagle_speculator_update(job)
-        active = [item for engine_results in results for item in engine_results if item.get("active", False)]
-        if len(active) != 1:
-            raise RuntimeError(f"Expected exactly one active online EAGLE trainer rank, got {len(active)}")
+        active = _single_active_online_eagle_result(results, "trainer start")
         self._speculator_update_inflight = True
         self._sealed_speculator_capture_dir = None
         logger.info(
             "Online EAGLE update started: step={} pid={} log_path={}",
             self.global_step,
-            active[0]["pid"],
-            active[0]["log_path"],
+            active["pid"],
+            active["log_path"],
         )
 
     async def _finish_speculator_update(self) -> None:
@@ -689,51 +687,62 @@ class RayPPOTrainer:
             )
         finally:
             self._speculator_update_inflight = False
-        active = [item for engine_results in results for item in engine_results if item.get("active", False)]
-        if len(active) != 1:
-            raise RuntimeError(f"Expected one online EAGLE trainer result, got {len(active)}")
-        result = active[0]
+        result = OnlineEagleUpdateResult.from_mapping(_single_active_online_eagle_result(results, "trainer finish"))
         self.all_metrics.update(
             {
-                "speculator/train_loss": float(result.get("train_loss", float("nan"))),
-                "speculator/incumbent_holdout_loss": float(result.get("incumbent_holdout_loss", float("nan"))),
-                "speculator/candidate_holdout_loss": float(result.get("candidate_holdout_loss", float("nan"))),
+                "speculator/train_loss": float(result.train_loss if result.train_loss is not None else float("nan")),
+                "speculator/incumbent_holdout_loss": float(
+                    result.incumbent_holdout_loss if result.incumbent_holdout_loss is not None else float("nan")
+                ),
+                "speculator/candidate_holdout_loss": float(
+                    result.candidate_holdout_loss if result.candidate_holdout_loss is not None else float("nan")
+                ),
                 "speculator/incumbent_holdout_agreement": float(
-                    result.get("incumbent_holdout_agreement", float("nan"))
+                    result.incumbent_holdout_agreement
+                    if result.incumbent_holdout_agreement is not None
+                    else float("nan")
                 ),
                 "speculator/candidate_holdout_agreement": float(
-                    result.get("candidate_holdout_agreement", float("nan"))
+                    result.candidate_holdout_agreement
+                    if result.candidate_holdout_agreement is not None
+                    else float("nan")
                 ),
-                "speculator/holdout_loss_increase": float(result.get("holdout_loss_increase", float("nan"))),
-                "speculator/holdout_agreement_decrease": float(result.get("holdout_agreement_decrease", float("nan"))),
-                "speculator/train_sequences": float(result.get("train_sequences", 0)),
-                "speculator/holdout_sequences": float(result.get("holdout_sequences", 0)),
-                "speculator/train_duration_seconds": float(result.get("duration_seconds", float("nan"))),
-                "speculator/candidate_accepted": float(bool(result.get("accepted", False))),
+                "speculator/holdout_loss_increase": float(
+                    result.holdout_loss_increase if result.holdout_loss_increase is not None else float("nan")
+                ),
+                "speculator/holdout_agreement_decrease": float(
+                    result.holdout_agreement_decrease if result.holdout_agreement_decrease is not None else float("nan")
+                ),
+                "speculator/train_sequences": float(result.train_sequences or 0),
+                "speculator/holdout_sequences": float(result.holdout_sequences or 0),
+                "speculator/train_duration_seconds": float(
+                    result.duration_seconds if result.duration_seconds is not None else float("nan")
+                ),
+                "speculator/candidate_accepted": float(result.accepted),
             }
         )
-        if result.get("deferred", False):
+        if result.deferred:
             self._speculator_boundary_deferrals += 1
-        if result.get("error"):
+        if result.error:
             self._speculator_update_failures += 1
             logger.error(
                 "Online EAGLE update failed: step={} error={} log_path={}",
                 self.global_step,
-                result["error"],
-                result.get("log_path"),
+                result.error,
+                result.log_path,
             )
-        if result.get("accepted", False):
+        if result.accepted:
+            if result.candidate_dir is None or result.draft_revision is None:
+                raise RuntimeError("Accepted online EAGLE result omitted its candidate identity")
             with Timer("install_speculator", self.all_timings):
-                installs = await self.inference_engine_client.install_online_eagle_speculator(
-                    result["candidate_dir"], training.trainer_rank
-                )
+                installs = await self.inference_engine_client.install_online_eagle_speculator(result.candidate_dir)
             installed = [item for engine_results in installs for item in engine_results]
             revisions = {item["draft_revision"] for item in installed}
             digests = {item["weights_sha256"] for item in installed}
-            if revisions != {result["draft_revision"]} or len(digests) != 1:
+            if revisions != {result.draft_revision} or len(digests) != 1:
                 raise RuntimeError("Online EAGLE ranks reported inconsistent installed revisions or hashes")
-            self._served_draft_revision = result["draft_revision"]
-            self._served_draft_path = result["candidate_dir"]
+            self._served_draft_revision = result.draft_revision
+            self._served_draft_path = result.candidate_dir
             self._speculator_install_count += 1
         self.all_metrics.update(
             {
@@ -743,13 +752,6 @@ class RayPPOTrainer:
             }
         )
 
-    def _speculator_checkpoint_path(self, step: int) -> str:
-        return join_resource_path(
-            self.cfg.trainer.ckpt_path,
-            f"{GLOBAL_STEP_PREFIX}{step}",
-            SPECULATOR_CHECKPOINT_SUBDIRECTORY,
-        )
-
     async def _publish_speculator_checkpoint(self) -> None:
         """Publish the exact served draft before the policy completion marker."""
         speculative_decoding = getattr(self, "speculative_decoding", None)
@@ -757,24 +759,21 @@ class RayPPOTrainer:
             return
         assert self._served_draft_path is not None
         assert self._served_draft_revision is not None
-        training = speculative_decoding.training
-        trainer_rank = 0 if training is None else training.trainer_rank
-        destination = self._speculator_checkpoint_path(self.global_step)
+        destination = speculator_export_path(self.cfg.trainer.ckpt_path, self.global_step)
         results = await self.inference_engine_client.publish_online_eagle_speculator(
             self._served_draft_path,
             destination,
             self._served_draft_revision,
             f"policy-step-{self.global_step}",
-            trainer_rank,
         )
-        active = [item for engine_results in results for item in engine_results if item.get("active", False)]
-        if len(active) != 1 or not active[0].get("complete", False):
-            raise RuntimeError(f"Expected one complete served speculator checkpoint, got {active}")
+        active = _single_active_online_eagle_result(results, "checkpoint publication")
+        if not active.get("complete", False):
+            raise RuntimeError(f"Served speculator checkpoint was incomplete: {active}")
         logger.info(
             "Published served speculator checkpoint: step={} draft_revision={} path={}",
             self.global_step,
             self._served_draft_revision,
-            active[0]["path"],
+            active["path"],
         )
 
     async def _restore_speculator_checkpoint(self) -> None:
@@ -782,17 +781,10 @@ class RayPPOTrainer:
         speculative_decoding = getattr(self, "speculative_decoding", None)
         if speculative_decoding is None or self.global_step == 0:
             return
-        training = speculative_decoding.training
-        trainer_rank = 0 if training is None else training.trainer_rank
-        source = self._speculator_checkpoint_path(self.global_step)
+        source = speculator_export_path(self.cfg.trainer.ckpt_path, self.global_step)
         restored_path = self._speculator_scratch_path("resume")
-        results = await self.inference_engine_client.restore_online_eagle_speculator(
-            source, restored_path, trainer_rank
-        )
-        active = [item for engine_results in results for item in engine_results if item.get("active", False)]
-        if len(active) != 1:
-            raise RuntimeError(f"Expected one restored served speculator checkpoint, got {active}")
-        manifest = active[0]
+        results = await self.inference_engine_client.restore_online_eagle_speculator(source, restored_path)
+        manifest = _single_active_online_eagle_result(results, "checkpoint restore")
         expected_target_revision = f"policy-step-{self.global_step}"
         if manifest["served_target_revision"] != expected_target_revision:
             raise RuntimeError(
@@ -805,7 +797,7 @@ class RayPPOTrainer:
                 "Resumed draft source lineage mismatch: expected "
                 f"{speculative_decoding.model.source_identity}, got {initial_source_identity!r}"
             )
-        installs = await self.inference_engine_client.install_online_eagle_speculator(restored_path, trainer_rank)
+        installs = await self.inference_engine_client.install_online_eagle_speculator(restored_path)
         installed = [item for engine_results in installs for item in engine_results]
         if {item["draft_revision"] for item in installed} != {manifest["draft_revision"]}:
             raise RuntimeError("Restored online EAGLE ranks installed inconsistent revisions")

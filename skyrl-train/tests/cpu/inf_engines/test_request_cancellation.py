@@ -46,6 +46,44 @@ class InferenceActor:
         self.tokenize = RemoteMethod(tokenize_result)
 
 
+class ResolvedReference:
+    def __init__(self, value):
+        self.value = value
+
+    def __await__(self):
+        async def resolve():
+            return self.value
+
+        return resolve().__await__()
+
+
+class RecordingRemoteMethod:
+    def __init__(self, name, calls):
+        self.name = name
+        self.calls = calls
+
+    def remote(self, *args):
+        self.calls.append((self.name, args))
+        return ResolvedReference({"method": self.name})
+
+
+class OnlineEagleActor:
+    def __init__(self):
+        self.calls = []
+        for name in (
+            "begin_online_eagle_capture",
+            "seal_online_eagle_capture",
+            "discard_online_eagle_capture",
+            "start_online_eagle_speculator_update",
+            "finish_online_eagle_speculator_update",
+            "abort_online_eagle_speculator_update",
+            "install_online_eagle_speculator",
+            "publish_online_eagle_speculator",
+            "restore_online_eagle_speculator",
+        ):
+            setattr(self, name, RecordingRemoteMethod(name, self.calls))
+
+
 @pytest.fixture
 def record_ray_cancellation(monkeypatch):
     def cancel(reference):
@@ -97,3 +135,34 @@ async def test_abandoned_chat_stream_cancels_ray_actor_task(record_ray_cancellat
     with pytest.raises(asyncio.CancelledError):
         await request
     assert reference.cancelled
+
+
+@pytest.mark.asyncio
+async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
+    actor = OnlineEagleActor()
+    engine = RayWrappedInferenceEngine(actor)
+
+    await engine.begin_online_eagle_capture({"step": 3})
+    await engine.seal_online_eagle_capture("/tmp/capture")
+    await engine.discard_online_eagle_capture()
+    await engine.start_online_eagle_speculator_update({"step": 3})
+    await engine.finish_online_eagle_speculator_update(30)
+    await engine.abort_online_eagle_speculator_update()
+    await engine.install_online_eagle_speculator("/tmp/candidate")
+    await engine.publish_online_eagle_speculator("/tmp/candidate", "s3://bucket/draft", "draft-3", "policy-3")
+    await engine.restore_online_eagle_speculator("s3://bucket/draft", "/tmp/restored")
+
+    assert actor.calls == [
+        ("begin_online_eagle_capture", ({"step": 3},)),
+        ("seal_online_eagle_capture", ("/tmp/capture",)),
+        ("discard_online_eagle_capture", ()),
+        ("start_online_eagle_speculator_update", ({"step": 3},)),
+        ("finish_online_eagle_speculator_update", (30,)),
+        ("abort_online_eagle_speculator_update", ()),
+        ("install_online_eagle_speculator", ("/tmp/candidate",)),
+        (
+            "publish_online_eagle_speculator",
+            ("/tmp/candidate", "s3://bucket/draft", "draft-3", "policy-3"),
+        ),
+        ("restore_online_eagle_speculator", ("s3://bucket/draft", "/tmp/restored")),
+    ]

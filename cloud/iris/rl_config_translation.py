@@ -29,7 +29,7 @@ import yaml
 
 from cloud.iris.paths import resolve_paths_in_dict
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
-from marinskyrl.speculative_decoding import parse_speculative_decoding_config
+from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 
 # Directory containing the bundled example RL config YAML files.
@@ -53,7 +53,7 @@ RL_ENTRYPOINT_MODULES = {
     RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
     RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
     RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
-    RLEntrypoint.STANDARD: "skyrl_train.entrypoints.main_base",
+    RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
     RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
     RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
 }

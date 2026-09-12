@@ -84,7 +84,6 @@ generator:
       max_validation_loss_increase: 0.05
       max_validation_agreement_decrease: 0.01
       boundary_wait_seconds: 30
-      trainer_rank: 0
       reserved_gpu_memory_gib: 8
   sampling_params:
     temperature: 1.0

@@ -27,7 +27,7 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
-from marinskyrl.speculative_decoding import parse_speculative_decoding_config
+from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -109,7 +109,7 @@ def create_ray_wrapped_inference_engines_from_config(
     colocate_pg,
     tokenizer: PreTrainedTokenizerBase,
     *,
-    entrypoint: str = "skyrl_train.entrypoints.main_base",
+    entrypoint: str = STANDARD_TRAINING_ENTRYPOINT,
 ):
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 

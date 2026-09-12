@@ -140,3 +140,45 @@ class InferenceEngineInterface(ABC):
     async def resume_generation(self) -> None:
         """Resume the scheduler after a weight update."""
         raise NotImplementedError()
+
+    async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> Any:
+        """Begin a bounded online-EAGLE capture interval when supported."""
+        raise NotImplementedError()
+
+    async def seal_online_eagle_capture(self, output_dir: str) -> Any:
+        """Seal the active capture into an immutable local artifact."""
+        raise NotImplementedError()
+
+    async def discard_online_eagle_capture(self) -> Any:
+        """Discard the active capture interval after a failed rollout."""
+        raise NotImplementedError()
+
+    async def start_online_eagle_speculator_update(self, job: Dict[str, Any]) -> Any:
+        """Start a bounded draft update from a sealed capture."""
+        raise NotImplementedError()
+
+    async def finish_online_eagle_speculator_update(self, boundary_wait_seconds: float) -> Any:
+        """Join the draft update at a no-request serving boundary."""
+        raise NotImplementedError()
+
+    async def abort_online_eagle_speculator_update(self) -> Any:
+        """Terminate an unjoined draft update during exceptional teardown."""
+        raise NotImplementedError()
+
+    async def install_online_eagle_speculator(self, candidate_dir: str) -> Any:
+        """Install a complete draft candidate across the serving engine."""
+        raise NotImplementedError()
+
+    async def publish_online_eagle_speculator(
+        self,
+        source_dir: str,
+        destination: str,
+        draft_revision: str,
+        served_target_revision: str,
+    ) -> Any:
+        """Publish the exact served draft beside a policy checkpoint."""
+        raise NotImplementedError()
+
+    async def restore_online_eagle_speculator(self, source: str, destination: str) -> Any:
+        """Restore the draft paired with a resumed policy checkpoint."""
+        raise NotImplementedError()

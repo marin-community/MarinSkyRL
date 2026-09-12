@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Callable, Protocol, Sequence
 
@@ -18,6 +17,7 @@ from marinskyrl.checkpoint_paths import (
     policy_export_path,
     speculator_export_path,
 )
+from marinskyrl.resource_locator import join_resource_path
 from skyrl_train import hf_model_io
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_HUB_REVISION,
@@ -48,7 +48,7 @@ class CheckpointExportPlan:
 
     @property
     def policy_checkpoint_path(self) -> str:
-        return os.path.join(self.checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
+        return join_resource_path(self.checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
 
     @property
     def policy_export_path(self) -> str:
@@ -56,7 +56,7 @@ class CheckpointExportPlan:
 
     @property
     def speculator_checkpoint_path(self) -> str:
-        return os.path.join(self.checkpoint_path, SPECULATOR_CHECKPOINT_SUBDIRECTORY)
+        return join_resource_path(self.checkpoint_path, SPECULATOR_CHECKPOINT_SUBDIRECTORY)
 
     @property
     def speculator_export_path(self) -> str:
@@ -138,7 +138,7 @@ class CheckpointExporter:
         self._publisher = publisher
 
     def _validate_checkpoint(self) -> None:
-        trainer_state_path = os.path.join(self._plan.checkpoint_path, TRAINER_STATE_FILENAME)
+        trainer_state_path = join_resource_path(self._plan.checkpoint_path, TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
             raise FileNotFoundError(f"completed checkpoint marker not found: {trainer_state_path}")
         with io.open_file(trainer_state_path, "rb") as source:

@@ -355,9 +355,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         """Discard capture buffers on every live inference engine."""
         return await self._run_on_all_engines("discard_online_eagle_capture")
 
-    async def install_online_eagle_speculator(self, candidate_dir: str, trainer_rank: int) -> List[Any]:
+    async def install_online_eagle_speculator(self, candidate_dir: str) -> List[Any]:
         """Install the same complete draft revision across every live rank."""
-        return await self._run_on_all_engines("install_online_eagle_speculator", candidate_dir, trainer_rank)
+        return await self._run_on_all_engines("install_online_eagle_speculator", candidate_dir)
 
     async def start_online_eagle_speculator_update(self, job: Dict[str, Any]) -> List[Any]:
         """Start one online update after its capture has sealed."""
@@ -377,7 +377,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         destination: str,
         draft_revision: str,
         served_target_revision: str,
-        trainer_rank: int,
     ) -> List[Any]:
         """Publish one exact served draft beside its matching policy checkpoint."""
         return await self._run_on_all_engines(
@@ -386,12 +385,11 @@ class InferenceEngineClient(InferenceEngineInterface):
             destination,
             draft_revision,
             served_target_revision,
-            trainer_rank,
         )
 
-    async def restore_online_eagle_speculator(self, source: str, destination: str, trainer_rank: int) -> List[Any]:
+    async def restore_online_eagle_speculator(self, source: str, destination: str) -> List[Any]:
         """Stage a checkpoint on its owning rank before collective install."""
-        return await self._run_on_all_engines("restore_online_eagle_speculator", source, destination, trainer_rank)
+        return await self._run_on_all_engines("restore_online_eagle_speculator", source, destination)
 
     async def _generate_single_with_retry(
         self,
