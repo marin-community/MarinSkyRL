@@ -1,13 +1,10 @@
 # Nightly end-to-end gates
 
-The nightly runs dense Qwen GRPO on one H100, a tiny Grug RL cycle on four GB200s,
-the Grug Megatron gates on four H100s, and an OpenCode agentic RL step on eight H100s,
-all from the frozen root environment. The
-GSM8K run is scored against a checked-in spec; the GB200 run proves the locked Marin
-vLLM wheel can load Grug, generate rollouts, train the eager FSDP2 policy, synchronize
-mixed-dtype weights, and generate again; the Megatron run checks that the Megatron
-port of Grug matches the HF reference, keeps the training forward bit-identical to
-the recomputed old log-probs, and completes a rollout/train/broadcast/rollout cycle.
+The nightly runs dense Qwen GRPO on one H100, the Grug Megatron gates on four H100s,
+and an OpenCode agentic RL step on eight H100s, all from the frozen root environment.
+The GSM8K run is scored against a checked-in spec; the Megatron run checks that the
+Megatron port of Grug matches the HF reference, keeps the training forward bit-identical
+to the recomputed old log-probs, and completes a rollout/train/broadcast/rollout cycle.
 The OpenCode lane runs eight concurrent, three-turn Daytona tasks through the controller
 RecordProxy and requires exact full-TITO/TIS coverage before an FSDP2 policy update.
 These are integration gates, not model-quality experiments.
@@ -15,7 +12,6 @@ These are integration gates, not model-quality experiments.
 | file | role |
 | --- | --- |
 | `run_h100.sh` | sync the frozen root environment, slice GSM8K, train, and gate on H100 |
-| `run_grug_vllm.sh` | run a tiny Grug rollout/train/broadcast/rollout cycle on four GB200s |
 | `run_grug_megatron.sh` | run the Grug Megatron parity, training, and serving gates on four H100s |
 | `run_opencode.sh` | submit, wait for, and gate the federated RNO2A OpenCode RL canary |
 | `gate.py` | reads a run's log and decides whether it was healthy (`python -m ci.marin_nightly.gate`) |
@@ -56,11 +52,6 @@ environment (`MODEL`, `MAX_STEPS`, `DATA_DIR`). Inside an Iris GPU task:
 ```bash
 MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
 ```
-
-The GB200 lane additionally imports `vllm._C` and the cuMem allocator, verifies the
-Grug model registry entry, then runs a real rollout, eager FSDP2 policy update,
-mixed-dtype weight broadcast, and second rollout. The eager policy path keeps this
-gate independent of the optional compiled FlashAttention package.
 
 The Megatron lane runs `tests/gpu/test_grug_megatron.py` with the Megatron runtime
 closure; see `docs/grug-megatron-training.md` for what each test guards.
@@ -119,8 +110,7 @@ To exercise the whole path — provision, train, gate, tear down — trigger the
 ```bash
 gh workflow run marin-nightly.yaml \
   -f max_steps=2 \
-  -f target_cluster=cw-rno2a \
-  -f grug_target_cluster=cw-us-east-08a
+  -f target_cluster=cw-rno2a
 ```
 
 ## Tightening the spec
