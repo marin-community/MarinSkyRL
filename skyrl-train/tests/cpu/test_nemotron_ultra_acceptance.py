@@ -1,9 +1,18 @@
 import json
+from pathlib import Path
 
 import requests
+import yaml
 
 from ci.nemotron_ultra.gate import check_log, expected_coverage
 from skyrl_train.entrypoints.nemotron_ultra_acceptance import verifier_server
+
+
+def test_acceptance_swe_sandboxes_allow_agent_setup_traffic():
+    config_path = Path(__file__).parents[3] / "cloud/iris/configs/nemotron_ultra_rlvr_acceptance.yaml"
+    config = yaml.safe_load(config_path.read_text())
+
+    assert config["terminal_bench"]["harbor"]["env_network_policy"] == {"mode": "unrestricted"}
 
 
 def test_acceptance_verifier_server_implements_all_external_protocols():

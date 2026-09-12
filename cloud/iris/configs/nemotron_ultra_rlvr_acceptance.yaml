@@ -28,8 +28,7 @@ terminal_bench:
     override_storage_mb: 4096
     auto_snapshot: false
     env_network_policy:
-      mode: domain_allow_list
-      value: iris.oa.dev
+      mode: unrestricted
     max_retries: 1
     min_wait_sec: 10.0
     max_wait_sec: 60.0
