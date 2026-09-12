@@ -95,7 +95,7 @@ vllm = [
     "torch==2.13.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchdata ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision==0.28.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "vllm==0.0.0.dev20260911+marin.5d4d4234d0b8.cu132 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "vllm==0.0.0.dev20260912+marin.177d960f5b43.cu132 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 megatron = [
     "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -224,7 +224,7 @@ torchvision = [
 ]
 flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 vllm = [
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260911-5d4d4234d0b8/vllm-0.0.0.dev20260911+marin.5d4d4234d0b8.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260912-177d960f5b43/vllm-0.0.0.dev20260912+marin.177d960f5b43.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 transformer-engine-torch = [
