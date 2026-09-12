@@ -74,6 +74,41 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
     assert captured["vllm_attention_backend"] == "FLASH_ATTN"
 
 
+def test_standard_entrypoint_identity_survives_python_module_execution(monkeypatch):
+    """Online EAGLE remains supported when ``python -m`` names the module ``__main__``."""
+    pytest.importorskip("hydra")
+    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
+    from skyrl_train.entrypoints import main_base
+
+    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
+
+    monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **_kwargs: [])
+    monkeypatch.setattr(main_base.BasePPOExp, "__module__", "__main__")
+
+    cfg = get_default_config()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.speculative_decoding = {
+        "method": "eagle3",
+        "model": {
+            "path": "/tmp/marinskyrl-models/snowball-eagle3",
+            "source_uri": "hf://laion/snowball-64k-eagle3-draft-r2egym",
+            "source_identity": "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
+        },
+        "num_speculative_tokens": 3,
+        "training": {"interval_steps": 1},
+    }
+
+    experiment = object.__new__(main_base.BasePPOExp)
+    experiment.cfg = cfg
+    experiment.colocate_pg = None
+    experiment.tokenizer = None
+
+    client = experiment.create_inference_engine_client()
+
+    assert client.backend == "vllm"
+    assert client.engines == []
+
+
 # ===================================================== remote forwarding G1 + G4
 class _RemoteCapture:
     """Captures the kwargs passed to the (mocked) vLLM actor .options(...).remote(...)."""
