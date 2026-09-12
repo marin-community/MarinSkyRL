@@ -103,8 +103,7 @@ def resolve_rl_train_data_with_sources(
     task containing an ``instruction.md`` file. HuggingFace dataset identifiers are
     extracted to ``$SCRATCH/tasks/<repo-name>/`` via
     ``cloud.iris.extract_tasks_from_parquet``, permissions fixed, and local paths returned.
-    Object-store parquet URIs are first staged into an identity-keyed node-local cache and
-    then extracted by the same task-archive reader.
+    Object-store parquet URIs resolve to local directories containing the extracted tasks.
 
     ``kind="parquet"`` (single-turn RLVR, e.g. main_base + aime): the entries are
     SkyRL-shaped parquet paths that ``PromptDataset`` loads via ``datasets.load_dataset``.

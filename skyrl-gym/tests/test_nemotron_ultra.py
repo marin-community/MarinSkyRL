@@ -16,7 +16,7 @@ from skyrl_gym.envs.nemotron_ultra.genrm_utils import (
 )
 from skyrl_gym.envs.nemotron_ultra.instruction_following import grade_instruction_following
 from skyrl_gym.envs.nemotron_ultra.jailbreak import grade_jailbreak
-from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
+from skyrl_gym.envs.nemotron_ultra.judge import GenRMResponseTransport, OpenAIJudge
 from skyrl_gym.envs.nemotron_ultra.judge_verifiers import grade_abstention, grade_multichallenge
 from skyrl_gym.envs.nemotron_ultra.lean import verify_lean_attempt
 from skyrl_gym.envs.nemotron_ultra import math_with_judge
@@ -104,6 +104,7 @@ def test_genrm_chat_completions_transport_embeds_comparison_as_untrusted_data(mo
         response_transport="chat_completions",
         reasoning_effort="low",
     )
+    assert judge.response_transport is GenRMResponseTransport.CHAT_COMPLETIONS
 
     output = judge.generate_response(
         [{"role": "user", "content": "What is 2 + 2?"}],

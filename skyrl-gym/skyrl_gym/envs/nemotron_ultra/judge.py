@@ -36,7 +36,7 @@ class OpenAIJudge:
     reasoning_effort: str | None = None
 
     def __post_init__(self) -> None:
-        GenRMResponseTransport(self.response_transport)
+        object.__setattr__(self, "response_transport", GenRMResponseTransport(self.response_transport))
 
     def _resolved_api_key(self) -> str:
         if self.api_key_env is None:
@@ -66,11 +66,23 @@ class OpenAIJudge:
             request["reasoning_effort"] = self.reasoning_effort
         return request
 
-    def generate(self, messages: list[dict[str, str]], *, max_tokens: int = 8192) -> str:
+    def _post_chat_completion(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int,
+        temperature: float = 0.0,
+        top_p: float | None = None,
+    ) -> str:
         response = requests.post(
             f"{self.base_url.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {self._resolved_api_key()}", "Content-Type": "application/json"},
-            json=self._chat_completion_request(messages, max_tokens=max_tokens),
+            json=self._chat_completion_request(
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            ),
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
@@ -79,6 +91,9 @@ class OpenAIJudge:
         if not isinstance(content, str):
             raise RuntimeError(f"Judge returned no message content: {body}")
         return content
+
+    def generate(self, messages: list[dict[str, str]], *, max_tokens: int = 8192) -> str:
+        return self._post_chat_completion(messages, max_tokens=max_tokens)
 
     def generate_response(
         self,
@@ -97,26 +112,15 @@ class OpenAIJudge:
                 "response_1": metadata["response_1"],
                 "response_2": metadata["response_2"],
             }
-            response = requests.post(
-                f"{self.base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {self._resolved_api_key()}", "Content-Type": "application/json"},
-                json=self._chat_completion_request(
-                    [
-                        {"role": "system", "content": _GENRM_COMPARISON_INSTRUCTIONS},
-                        {"role": "user", "content": json.dumps(comparison, ensure_ascii=False, sort_keys=True)},
-                    ],
-                    max_tokens=max_output_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                ),
-                timeout=self.timeout_seconds,
+            return self._post_chat_completion(
+                [
+                    {"role": "system", "content": _GENRM_COMPARISON_INSTRUCTIONS},
+                    {"role": "user", "content": json.dumps(comparison, ensure_ascii=False, sort_keys=True)},
+                ],
+                max_tokens=max_output_tokens,
+                temperature=temperature,
+                top_p=top_p,
             )
-            response.raise_for_status()
-            body: dict[str, Any] = response.json()
-            content = body["choices"][0]["message"].get("content")
-            if not isinstance(content, str):
-                raise RuntimeError(f"GenRM judge returned no message content: {body}")
-            return content
 
         response = requests.post(
             f"{self.base_url.rstrip('/')}/responses",

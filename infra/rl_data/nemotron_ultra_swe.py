@@ -43,6 +43,13 @@ class SWEGymSelection:
     matched_ids: set[str]
     reconstructed_count: int
 
+
+@dataclass(frozen=True)
+class TaskTroveScan:
+    tasks: list[dict[str, Any]]
+    matched_ids: set[str]
+    templates_by_repo: dict[str, bytes]
+
 _TASK_TOML = """\
 version = "1.0"
 
@@ -190,7 +197,7 @@ def _select_tasktrove_rows_and_templates(
     desired_ids: set[str],
     tasktrove_rows: Iterable[Mapping[str, Any]],
     needed_repos: set[str],
-) -> tuple[list[dict[str, Any]], set[str], dict[str, bytes]]:
+) -> TaskTroveScan:
     selected: list[dict[str, Any]] = []
     matched: set[str] = set()
     template_by_repo: dict[str, bytes] = {}
@@ -213,7 +220,7 @@ def _select_tasktrove_rows_and_templates(
             raise TypeError("TaskTrove task path must be a string")
         selected.append({"path": _safe_task_path(path), "task_binary": archive})
         matched.add(str(instance_id))
-    return selected, matched, template_by_repo
+    return TaskTroveScan(selected, matched, template_by_repo)
 
 
 def _select_and_reconstruct_swegym_tasks(
@@ -229,15 +236,15 @@ def _select_and_reconstruct_swegym_tasks(
         for row in source_by_id.values()
         if isinstance(row.get("repo"), str) and row["instance_id"] in desired_ids
     }
-    selected, matched, template_by_repo = _select_tasktrove_rows_and_templates(
-        desired_ids, tasktrove_rows, needed_repos
-    )
+    scan = _select_tasktrove_rows_and_templates(desired_ids, tasktrove_rows, needed_repos)
+    selected = scan.tasks
+    matched = scan.matched_ids
 
     reconstructed = 0
     for instance_id in sorted(desired_ids - matched):
         source = source_by_id.get(instance_id)
         repo = source.get("repo") if source else None
-        template = template_by_repo.get(str(repo))
+        template = scan.templates_by_repo.get(str(repo))
         if source is None or template is None:
             continue
         selected.append(reconstruct_swegym_task(template, source))
