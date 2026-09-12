@@ -9,8 +9,9 @@ from skyrl_train.trajectory_runners.types import TrajectoryID
 
 
 class StubRunner:
-    def __init__(self, reward: float):
+    def __init__(self, reward: float, *, token_level_rewards: bool = False):
         self.reward = reward
+        self.token_level_rewards = token_level_rewards
         self.requests = []
 
     async def startup(self):
@@ -34,7 +35,7 @@ class StubRunner:
         return {
             "prompt_token_ids": [[index] for index in range(size)],
             "response_ids": [[int(self.reward)] for _ in range(size)],
-            "rewards": [self.reward] * size,
+            "rewards": ([[self.reward]] * size if self.token_level_rewards else [self.reward] * size),
             "loss_masks": [[1]] * size,
             "stop_reasons": ["complete"] * size,
             "rollout_metrics": {},
@@ -52,7 +53,7 @@ def _task(root: Path, name: str) -> None:
 @pytest.mark.asyncio
 async def test_routes_only_swe_to_terminal_bench_and_restores_order(tmp_path):
     _task(tmp_path, "swe-1")
-    gym = StubRunner(1.0)
+    gym = StubRunner(1.0, token_level_rewards=True)
     harbor = StubRunner(2.0)
     router = NemotronUltraTrajectoryRouter(
         gym_runner=gym,
@@ -86,7 +87,7 @@ async def test_routes_only_swe_to_terminal_bench_and_restores_order(tmp_path):
 
     result = await router.run(batch)
 
-    assert result["rewards"] == [1.0, 2.0, 1.0]
+    assert result["rewards"] == [[1.0], [2.0], [1.0]]
     assert result["trajectory_ids"] == ids
     assert result["rollout_metrics"]["nemotron_ultra/coverage/rlvr1/calendar_simple_agent"] == 1
     assert (

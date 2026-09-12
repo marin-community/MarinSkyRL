@@ -92,8 +92,8 @@ class NemotronUltraTrajectoryRouter:
     """Dispatch ordinary RLVR rows to Gym and SWE rows to Harbor.
 
     Both child runners retain their normal public lifecycle and finalization. The
-    router only partitions and restores row order; it does not reinterpret either
-    runner's token stream or reward.
+    router partitions and restores row order. Batch concatenation promotes scalar
+    rewards to token-level rewards when needed so Gym and Harbor outputs can mix.
     """
 
     def __init__(
