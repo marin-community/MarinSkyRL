@@ -9,7 +9,7 @@ container images contain the repository, dependencies, and verifier tests.
 
 from __future__ import annotations
 
-import base64
+import hashlib
 import io
 import json
 import re
@@ -17,11 +17,13 @@ import shlex
 import shutil
 import tarfile
 import tempfile
+import tomllib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
 
@@ -35,6 +37,10 @@ SWEGYM_REVISION = "bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb"
 SWEGYM_PARQUET = "data/train-00000-of-00001.parquet"
 R2E_GYM_DATASET = "R2E-Gym/R2E-Gym-Subset"
 R2E_GYM_REVISION = "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
+ENVIRONMENT_DIR = "environment"
+R2E_TEST_INFO_PATH = "tests/test_info.json"
+LEGACY_R2E_TEST_INFO_PATH = "/workspace/metadata.json"
+R2E_TEST_INFO_ABSOLUTE_PATH = f"/{R2E_TEST_INFO_PATH}"
 
 
 @dataclass(frozen=True)
@@ -49,6 +55,12 @@ class TaskTroveScan:
     tasks: list[dict[str, Any]]
     matched_ids: set[str]
     templates_by_repo: dict[str, bytes]
+
+
+@dataclass
+class SWEGymBuildContext:
+    files: dict[str, tuple[bytes, int]]
+    task_paths: list[str]
 
 _TASK_TOML = """\
 version = "1.0"
@@ -126,7 +138,7 @@ def reward(parsed, expected_json):
     return float(all(not key or expected.get(key) == value for key, value in parsed.items()))
 
 
-metadata = json.loads(Path("/workspace/metadata.json").read_text())
+metadata = json.loads(Path("__R2E_TEST_INFO_PATH__").read_text())
 value = reward(parse_log_pytest(Path(sys.argv[1]).read_text()), metadata.get("expected_output_json", "{}"))
 Path("/logs/verifier/reward.txt").write_text(str(value))
 print(f"Reward: {value}")
@@ -139,7 +151,7 @@ fi
 bash /root/run_tests.sh 2>&1 | tee /tmp/test_output.txt
 python3 /tests/calculate_reward.py /tmp/test_output.txt
 test -f /logs/verifier/reward.txt
-"""
+""".replace("__R2E_TEST_INFO_PATH__", R2E_TEST_INFO_ABSOLUTE_PATH)
 
 
 def collect_swe_instance_ids(rows: Iterable[Mapping[str, Any]]) -> set[str]:
@@ -299,9 +311,17 @@ Be thorough in your exploration, testing, and reasoning. It's fine if your think
 """
 
 
-def _tar_bytes(files: Mapping[str, tuple[bytes, int]]) -> bytes:
+def _tar_bytes(files: Mapping[str, tuple[bytes, int]], *, directories: Iterable[str] = ()) -> bytes:
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+        for name in sorted(directories):
+            info = tarfile.TarInfo(name.rstrip("/") + "/")
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o755
+            info.mtime = 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            archive.addfile(info)
         for name, (content, mode) in sorted(files.items()):
             info = tarfile.TarInfo(name)
             info.size = len(content)
@@ -324,6 +344,212 @@ def _archive_files(archive: bytes) -> dict[str, tuple[bytes, int]]:
                 raise ValueError(f"could not read TaskTrove archive member {member.name!r}")
             files[member.name] = (stream.read(), member.mode)
     return files
+
+
+_IMAGE_REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]*$")
+
+
+def _task_toml_with_image(content: bytes, image: str) -> bytes:
+    if not _IMAGE_REFERENCE.fullmatch(image):
+        raise ValueError(f"invalid prebuilt image reference {image!r}")
+    config = tomllib.loads(content.decode())
+    environment = config.get("environment")
+    if environment is not None:
+        if not isinstance(environment, Mapping):
+            raise ValueError("task.toml [environment] must be a table")
+        existing_image = environment.get("docker_image")
+        if existing_image == image:
+            return content
+        if existing_image is not None:
+            raise ValueError("task.toml already defines a different environment.docker_image")
+        rendered = content.decode()
+        rendered, count = re.subn(
+            r"(?m)^(\[environment\][ \t]*(?:#.*)?)$",
+            lambda match: f"{match.group(1)}\ndocker_image = {json.dumps(image)}",
+            rendered,
+            count=1,
+        )
+        if count != 1:
+            raise ValueError("task.toml defines [environment] in an unsupported form")
+        return rendered.encode()
+    return content.rstrip() + b"\n\n" + f"[environment]\ndocker_image = {json.dumps(image)}\n".encode()
+
+
+def _r2e_metadata(files: Mapping[str, tuple[bytes, int]]) -> Mapping[str, Any] | None:
+    value = files.get(R2E_TEST_INFO_PATH)
+    if value is None:
+        return None
+    metadata = json.loads(value[0])
+    if not isinstance(metadata, Mapping) or metadata.get("source") != "r2egym":
+        return None
+    return metadata
+
+
+def _environment_context(files: Mapping[str, tuple[bytes, int]]) -> dict[str, tuple[bytes, int]]:
+    context: dict[str, tuple[bytes, int]] = {}
+    for name, value in files.items():
+        path = PurePosixPath(name)
+        if not path.parts or path.parts[0] != ENVIRONMENT_DIR:
+            continue
+        relative = PurePosixPath(*path.parts[1:])
+        if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"unsafe environment archive path {name!r}")
+        context[relative.as_posix()] = value
+    if "Dockerfile" not in context:
+        raise ValueError("SWE-Gym task does not contain environment/Dockerfile")
+    return context
+
+
+def _environment_digest(context: Mapping[str, tuple[bytes, int]]) -> str:
+    digest = hashlib.sha256()
+    for name, (content, mode) in sorted(context.items()):
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(f"{mode:o}".encode())
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _swegym_contexts(rows: Iterable[Mapping[str, Any]]) -> tuple[dict[str, SWEGymBuildContext], int]:
+    """Group SWE-Gym environments by digest and count skipped R2E-Gym tasks."""
+    contexts: dict[str, SWEGymBuildContext] = {}
+    r2e_count = 0
+    for row in rows:
+        archive = row.get("task_binary")
+        path = row.get("path")
+        if not isinstance(archive, (bytes, bytearray, memoryview)) or not isinstance(path, str):
+            raise TypeError("task rows require string path and binary task_binary")
+        files = _archive_files(bytes(archive))
+        if _r2e_metadata(files) is not None:
+            r2e_count += 1
+            continue
+        context = _environment_context(files)
+        digest = _environment_digest(context)
+        entry = contexts.setdefault(digest, SWEGymBuildContext(files=context, task_paths=[]))
+        if entry.files != context:
+            raise ValueError(f"environment digest collision for {digest}")
+        entry.task_paths.append(path)
+    return contexts, r2e_count
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def prepare_swegym_build_contexts(source_tasks: Path, output_dir: Path) -> dict[str, Any]:
+    """Write each unique SWE-Gym environment as a content-addressed build context."""
+    if output_dir.exists():
+        raise FileExistsError(f"Refusing to overwrite existing artifact: {output_dir}")
+    rows = pq.read_table(source_tasks).to_pylist()
+    contexts, r2e_count = _swegym_contexts(rows)
+    manifest = {
+        "source": {"tasks": str(source_tasks), "sha256": _file_sha256(source_tasks)},
+        "counts": {
+            "tasks": len(rows),
+            "swegym_tasks": len(rows) - r2e_count,
+            "unique_contexts": len(contexts),
+            "r2egym_tasks": r2e_count,
+        },
+        "contexts": [
+            {
+                "digest": digest,
+                "task_count": len(entry.task_paths),
+                "task_paths": sorted(entry.task_paths),
+            }
+            for digest, entry in sorted(contexts.items())
+        ],
+    }
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_dir.parent))
+    try:
+        for digest, entry in contexts.items():
+            context_root = staging / digest
+            for name, (content, mode) in entry.files.items():
+                target = context_root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                target.chmod(mode)
+        (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        staging.rename(output_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return manifest
+
+
+_DIGEST_PINNED_IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$")
+
+
+def _convert_task_to_prebuilt(row: Mapping[str, Any], swegym_images: Mapping[str, str]) -> dict[str, Any]:
+    files = _archive_files(bytes(row["task_binary"]))
+    r2e = _r2e_metadata(files)
+    if r2e is None:
+        image = swegym_images[_environment_digest(_environment_context(files))]
+    else:
+        image = r2e.get("docker_image")
+        if not isinstance(image, str) or not image:
+            raise ValueError(f"R2E task {row['path']!r} has no docker_image")
+        test_script = files.get("tests/test.sh")
+        if test_script is not None:
+            files["tests/test.sh"] = (
+                test_script[0].replace(LEGACY_R2E_TEST_INFO_PATH.encode(), R2E_TEST_INFO_ABSOLUTE_PATH.encode()),
+                test_script[1],
+            )
+    task_toml = files.get("task.toml")
+    if task_toml is None:
+        raise ValueError(f"task {row['path']!r} has no task.toml")
+    files["task.toml"] = (_task_toml_with_image(task_toml[0], image), task_toml[1])
+    environment_prefix = f"{ENVIRONMENT_DIR}/"
+    files = {name: value for name, value in files.items() if not name.startswith(environment_prefix)}
+    return {"path": row["path"], "task_binary": _tar_bytes(files, directories=(ENVIRONMENT_DIR,))}
+
+
+def _write_task_artifact(output_dir: Path, rows: list[dict[str, Any]], provenance: Mapping[str, Any]) -> None:
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_dir.parent))
+    try:
+        table = pa.Table.from_pylist(rows, schema=pa.schema([("path", pa.string()), ("task_binary", pa.binary())]))
+        pq.write_table(table, staging / "tasks.parquet", compression="zstd")
+        (staging / "provenance.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
+        staging.rename(output_dir)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def convert_swe_tasks_to_prebuilt(
+    source_tasks: Path,
+    output_dir: Path,
+    swegym_images: Mapping[str, str],
+) -> dict[str, Any]:
+    """Replace task Dockerfiles with prebuilt image references, failing closed on gaps."""
+    if output_dir.exists():
+        raise FileExistsError(f"Refusing to overwrite existing artifact: {output_dir}")
+    rows = pq.read_table(source_tasks).to_pylist()
+    contexts, r2e_count = _swegym_contexts(rows)
+    missing = sorted(contexts.keys() - swegym_images.keys())
+    unexpected = sorted(swegym_images.keys() - contexts.keys())
+    if missing or unexpected:
+        raise ValueError(f"SWE-Gym image map mismatch: missing published images={missing}; unexpected={unexpected}")
+    mutable = sorted(image for image in swegym_images.values() if not _DIGEST_PINNED_IMAGE.fullmatch(image))
+    if mutable:
+        raise ValueError(f"SWE-Gym images must be digest-pinned: {mutable}")
+
+    converted = [_convert_task_to_prebuilt(row, swegym_images) for row in rows]
+
+    provenance = {
+        "source": {"tasks": str(source_tasks), "sha256": _file_sha256(source_tasks)},
+        "counts": {"total": len(rows), "swegym": len(rows) - r2e_count, "r2egym": r2e_count},
+        "swegym_images": dict(sorted(swegym_images.items())),
+    }
+    _write_task_artifact(output_dir, converted, provenance)
+    return provenance
 
 
 def _required_string(row: Mapping[str, Any], field: str) -> str:
@@ -477,20 +703,10 @@ def make_r2e_task(instance_id: str, row: Mapping[str, Any]) -> dict[str, Any]:
         "source": "r2egym",
     }
     metadata_bytes = (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode()
-    encoded_metadata = base64.b64encode(metadata_bytes).decode("ascii")
     files = {
         "instruction.md": (_instruction(problem, commit).encode(), 0o644),
-        "task.toml": (_TASK_TOML.encode(), 0o644),
-        "environment/Dockerfile": (
-            (
-                f"FROM {image}\n"
-                "RUN mkdir -p /workspace && "
-                f"printf '%s' '{encoded_metadata}' | base64 -d > /workspace/metadata.json\n"
-                "WORKDIR /testbed\n"
-            ).encode(),
-            0o644,
-        ),
-        "tests/test_info.json": (metadata_bytes, 0o644),
+        "task.toml": (_task_toml_with_image(_TASK_TOML.encode(), image), 0o644),
+        R2E_TEST_INFO_PATH: (metadata_bytes, 0o644),
         "tests/test.sh": (_TEST_SH.encode(), 0o755),
     }
     return {"path": _safe_task_path(instance_id.casefold()), "task_binary": _tar_bytes(files)}
@@ -593,8 +809,6 @@ def prepare_swe_task_artifact(
     r2e_revision: str = R2E_GYM_REVISION,
 ) -> dict[str, Any]:
     """Download pinned inputs and atomically write one Harbor task parquet."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
     from datasets import load_dataset
 
     if output_dir.exists():
@@ -628,14 +842,5 @@ def prepare_swe_task_artifact(
         "r2egym": {"dataset": R2E_GYM_DATASET, "revision": r2e_revision, "split": "train"},
         "counts": counts,
     }
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_dir.parent))
-    try:
-        table = pa.Table.from_pylist(rows, schema=pa.schema([("path", pa.string()), ("task_binary", pa.binary())]))
-        pq.write_table(table, staging / "tasks.parquet", compression="zstd")
-        (staging / "provenance.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
-        staging.rename(output_dir)
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+    _write_task_artifact(output_dir, rows, provenance)
     return provenance

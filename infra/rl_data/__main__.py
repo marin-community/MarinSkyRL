@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import replace
 from pathlib import Path
 
 from skyrl_gym import get_data_contract
 
 from infra.rl_data.mixtures import load_mixture_spec, prepare_mixture
-from infra.rl_data.nemotron_ultra_swe import prepare_swe_task_artifact
+from infra.rl_data.nemotron_ultra_swe import (
+    convert_swe_tasks_to_prebuilt,
+    prepare_swe_task_artifact,
+    prepare_swegym_build_contexts,
+)
 from infra.rl_data.preparation import (
     PreparationOptions,
     PreparedArtifact,
@@ -29,6 +34,13 @@ from infra.rl_data.sources import (
 
 class _PreparationArgumentError(ValueError):
     pass
+
+
+def _reject_options(parser: argparse.ArgumentParser, args: argparse.Namespace, names: tuple[str, ...], mode: str) -> None:
+    conflicts = [name for name in names if getattr(args, name) not in (None, False)]
+    if conflicts:
+        rendered = ", ".join(f"--{name.replace('_', '-')}" for name in conflicts)
+        parser.error(f"{mode} cannot be combined with {rendered}.")
 
 
 def _token_counter(tokenizer_name: str):
@@ -124,10 +136,28 @@ def _prepare_dual_source(args: argparse.Namespace, token_count: TokenCount) -> N
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    artifact_mode = parser.add_mutually_exclusive_group()
+    artifact_mode.add_argument(
         "--nemotron-ultra-swe-tasks",
         action="store_true",
         help="Build the complete Harbor SWE sidechannel for the released RLVR blends.",
+    )
+    artifact_mode.add_argument(
+        "--nemotron-ultra-swegym-build-contexts",
+        type=Path,
+        metavar="TASKS_PARQUET",
+        help="Extract unique SWE-Gym Docker build contexts from a prepared sidechannel.",
+    )
+    artifact_mode.add_argument(
+        "--nemotron-ultra-swe-prebuilt",
+        type=Path,
+        metavar="TASKS_PARQUET",
+        help="Convert a prepared sidechannel to prebuilt-image-only tasks.",
+    )
+    parser.add_argument(
+        "--swegym-image-map",
+        type=Path,
+        help="JSON object mapping SWE-Gym context digests to digest-pinned published images.",
     )
     parser.add_argument("--mixture", type=Path, help="YAML file declaring train and validation source slices.")
     parser.add_argument("--source", choices=sorted(SOURCES))
@@ -156,22 +186,62 @@ def main() -> None:
     parser.add_argument("--allow-train-on-test", action="store_true")
     args = parser.parse_args()
 
-    if args.nemotron_ultra_swe_tasks:
-        conflicting = (
-            args.mixture,
-            args.source,
-            args.revision,
-            args.validation_source,
-            args.validation_revision,
-            args.validation_tail_rows,
-            args.tokenizer,
-            args.max_prompt_tokens,
+    preparation_options = (
+        "mixture",
+        "source",
+        "revision",
+        "validation_source",
+        "validation_revision",
+        "validation_tail_rows",
+        "tokenizer",
+        "max_prompt_tokens",
+        "minimum_unique_rows",
+        "minimum_yield_fraction",
+        "unique_cap",
+        "subsample_n",
+        "allow_train_on_test",
+    )
+
+    if args.nemotron_ultra_swegym_build_contexts is not None:
+        _reject_options(
+            parser,
+            args,
+            (*preparation_options, "swegym_image_map"),
+            "--nemotron-ultra-swegym-build-contexts",
         )
-        if any(value is not None for value in conflicting):
-            parser.error("--nemotron-ultra-swe-tasks cannot be combined with parquet preparation options.")
+        manifest = prepare_swegym_build_contexts(args.nemotron_ultra_swegym_build_contexts, args.output_dir)
+        print(manifest)
+        return
+
+    if args.nemotron_ultra_swe_prebuilt is not None:
+        _reject_options(parser, args, preparation_options, "--nemotron-ultra-swe-prebuilt")
+        if args.swegym_image_map is None:
+            parser.error("--nemotron-ultra-swe-prebuilt requires --swegym-image-map.")
+        try:
+            image_map = json.loads(args.swegym_image_map.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            parser.error(f"Could not read --swegym-image-map: {error}")
+        if not isinstance(image_map, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in image_map.items()
+        ):
+            parser.error("--swegym-image-map must contain one JSON object of string keys and values.")
+        provenance = convert_swe_tasks_to_prebuilt(args.nemotron_ultra_swe_prebuilt, args.output_dir, image_map)
+        print(provenance)
+        return
+
+    if args.nemotron_ultra_swe_tasks:
+        _reject_options(
+            parser,
+            args,
+            (*preparation_options, "swegym_image_map"),
+            "--nemotron-ultra-swe-tasks",
+        )
         provenance = prepare_swe_task_artifact(args.output_dir)
         print(provenance)
         return
+
+    if args.swegym_image_map is not None:
+        parser.error("--swegym-image-map requires --nemotron-ultra-swe-prebuilt.")
 
     if args.tokenizer is None or args.max_prompt_tokens is None:
         parser.error("parquet preparation requires --tokenizer and --max-prompt-tokens.")
