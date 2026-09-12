@@ -109,6 +109,42 @@ def test_standard_entrypoint_identity_survives_python_module_execution(monkeypat
     assert client.engines == []
 
 
+def test_online_eagle_training_uses_vllm_synchronous_scheduling(monkeypatch):
+    """SkyRL's async actor API must not turn on vLLM's async scheduler for capture."""
+    pytest.importorskip("hydra")
+    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
+    from skyrl_train.entrypoints import main_base
+
+    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
+
+    captured = {}
+
+    def fake_create(**engine_kwargs):
+        captured.update(engine_kwargs)
+        return []
+
+    monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", fake_create)
+
+    cfg = get_default_config()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.async_engine = True
+    cfg.generator.speculative_decoding = {
+        "method": "eagle3",
+        "model": {
+            "path": "/tmp/marinskyrl-models/snowball-eagle3",
+            "source_uri": "hf://laion/snowball-64k-eagle3-draft-r2egym",
+            "source_identity": "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
+        },
+        "num_speculative_tokens": 3,
+        "training": {"interval_steps": 1},
+    }
+
+    main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
+
+    assert captured["async_engine"] is True
+    assert captured["engine_init_kwargs"]["async_scheduling"] is False
+
+
 # ===================================================== remote forwarding G1 + G4
 class _RemoteCapture:
     """Captures the kwargs passed to the (mocked) vLLM actor .options(...).remote(...)."""

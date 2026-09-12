@@ -130,6 +130,11 @@ def create_ray_wrapped_inference_engines_from_config(
     }
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
+        if speculative_decoding.training is not None:
+            # ``async_engine`` selects SkyRL's actor/API wrapper. vLLM separately
+            # enables its asynchronous scheduler by default, but online EAGLE
+            # capture must reconcile each target forward before the next schedule.
+            engine_init_kwargs["async_scheduling"] = False
 
     engine_kwargs = {
         "num_inference_engines": cfg.generator.num_inference_engines,
