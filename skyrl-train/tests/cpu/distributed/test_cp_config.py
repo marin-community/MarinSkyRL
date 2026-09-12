@@ -60,6 +60,7 @@ DEBUG_MODE_TRAINER_FIELDS = {
 RUNTIME_CONFIG_TRAINER_FIELDS = {
     "collective_phase_diagnostics": False,
     "offload_optimizer_during_rollouts": False,
+    "restore_dataloader_state": True,
     "distributed": {
         "placement_group_timeout_seconds": 180,
         "worker_collective_timeout_seconds": 1800,
@@ -126,6 +127,7 @@ ADDITIVE_TRAINING_OPTIMIZER_FIELDS = {
 # before the structural-identity comparison against the pre-CP golden.
 ADDITIVE_DATA_FIELDS = {
     "sampling": None,
+    "shuffle": True,
     "terminal_bench_data": [],
 }
 ADDITIVE_SKYRL_GYM_FIELDS = {

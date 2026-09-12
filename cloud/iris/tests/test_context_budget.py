@@ -41,6 +41,10 @@ _CONFIGS = {
     "opencode_smoke_literal.yaml": (32768, 4096, 30),
     "snowball_megatron_full.yaml": (9216, 8192, 1),
     "snowball_megatron_smoke.yaml": (2048, 512, 1),
+    "snowball_ultra_rlvr1_colocated64.yaml": (65536, 6528, 999999),
+    "snowball_ultra_rlvr1_split64.yaml": (65536, 6528, 999999),
+    "snowball_ultra_rlvr2_colocated64.yaml": (65536, 6528, 999999),
+    "snowball_ultra_rlvr2_split64.yaml": (65536, 6528, 999999),
     "tasktrove_dq_sweep_30b.yaml": (131072, 16384, 90),
     "tasktrove_dq_sweep_30b_cp6.yaml": (131072, 16384, 90),
     "tasktrove_dq_sweep_30b_gb200.yaml": (131072, 16384, 90),
@@ -55,11 +59,22 @@ _FLASH_ATTN_CONFIGS = {
     "64GPU_qwen3_6_35b_a3b.yaml",
     "snowball_megatron_full.yaml",
     "snowball_megatron_smoke.yaml",
+    "snowball_ultra_rlvr1_colocated64.yaml",
+    "snowball_ultra_rlvr1_split64.yaml",
+    "snowball_ultra_rlvr2_colocated64.yaml",
+    "snowball_ultra_rlvr2_split64.yaml",
     "tasktrove_dq_sweep_30b.yaml",
     "tasktrove_dq_sweep_30b_cp6.yaml",
     "tasktrove_dq_sweep_30b_gb200.yaml",
     "tasktrove_dq_sweep_30b_ncclnet.yaml",
     "tasktrove_dq_sweep_30b_terminus2.yaml",
+}
+
+_SNOWBALL_ULTRA_CONFIGS = {
+    "snowball_ultra_rlvr1_colocated64.yaml",
+    "snowball_ultra_rlvr1_split64.yaml",
+    "snowball_ultra_rlvr2_colocated64.yaml",
+    "snowball_ultra_rlvr2_split64.yaml",
 }
 
 
@@ -94,6 +109,40 @@ def test_flash_attention_configs_use_the_current_vllm_config_field():
         parsed = parse_rl_config(str(configs_dir / name))
         assert parsed.generator["vllm_attention_backend"] == "FLASH_ATTN"
         assert "VLLM_ATTENTION_BACKEND" not in parsed.raw.get("extra_env", {})
+
+
+def test_snowball_ultra_grid_derives_prompt_budget_without_authored_override():
+    configs_dir = _REPO_ROOT / "cloud/iris/configs"
+
+    for name in _SNOWBALL_ULTRA_CONFIGS:
+        source = yaml.safe_load((configs_dir / name).read_text())
+        parsed = parse_rl_config(str(configs_dir / name))
+
+        assert "max_prompt_length" not in source["trainer"]
+        assert parsed.trainer["max_prompt_length"] == 59008
+
+
+@pytest.mark.parametrize(
+    ("topology", "colocate_all", "policy_nodes", "inference_engines"),
+    [("colocated64", True, 8, 8), ("split64", False, 4, 4)],
+)
+def test_snowball_ultra_phase_two_resumes_training_with_fresh_data(
+    topology, colocate_all, policy_nodes, inference_engines
+):
+    configs_dir = _REPO_ROOT / "cloud/iris/configs"
+    phase_one = parse_rl_config(str(configs_dir / f"snowball_ultra_rlvr1_{topology}.yaml"))
+    phase_two = parse_rl_config(str(configs_dir / f"snowball_ultra_rlvr2_{topology}.yaml"))
+
+    assert phase_one.trainer["max_steps"] == 128
+    assert phase_one.trainer["resume_mode"] == "none"
+    assert phase_two.trainer["max_steps"] == 178
+    assert phase_two.trainer["resume_mode"] == "latest"
+    assert phase_two.trainer["restore_dataloader_state"] is False
+    assert phase_two.trainer["placement"] == phase_one.trainer["placement"]
+    assert phase_two.trainer["placement"]["colocate_all"] is colocate_all
+    assert phase_two.trainer["placement"]["colocate_policy_ref"] is True
+    assert phase_two.trainer["placement"]["policy_num_nodes"] == policy_nodes
+    assert phase_two.generator["num_inference_engines"] == inference_engines
 
 
 def test_context_budget_derives_all_hydra_length_arguments():
