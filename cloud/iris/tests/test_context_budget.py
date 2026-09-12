@@ -122,6 +122,33 @@ def test_snowball_ultra_grid_derives_prompt_budget_without_authored_override():
         assert parsed.trainer["max_prompt_length"] == 59008
 
 
+def test_snowball_ultra_grid_pins_phase_data_and_secret_free_judge_config():
+    configs_dir = _REPO_ROOT / "cloud/iris/configs"
+    dataset_root = (
+        "s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/"
+        "20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e"
+    )
+
+    for name in _SNOWBALL_ULTRA_CONFIGS:
+        source = yaml.safe_load((configs_dir / name).read_text())
+        phase = "rlvr1" if "rlvr1" in name else "rlvr2"
+        ultra = source["environment"]["skyrl_gym"]["nemotron_ultra"]
+
+        assert source["data"]["train_data"] == [f"{dataset_root}/{phase}/train.parquet"]
+        assert source["data"]["val_data"] == [f"{dataset_root}/{phase}/validation.parquet"]
+        assert source["data"]["terminal_bench_data"] == [f"{dataset_root}/swe-tasks-v2/tasks.parquet"]
+        assert ultra["sandbox"] == {
+            "host": "snowball-nemo-skills-sandbox.iris.svc.cluster.local",
+            "port": 6000,
+        }
+        for role in ("general", "safety"):
+            assert ultra["judges"][role]["api_key_env"] == "TOGETHER_API_KEY"
+            assert "api_key" not in ultra["judges"][role]
+        assert ultra["genrm"]["judge"]["response_transport"] == "chat_completions"
+        assert ultra["genrm"]["judge"]["api_key_env"] == "TOGETHER_API_KEY"
+        assert "api_key" not in ultra["genrm"]["judge"]
+
+
 @pytest.mark.parametrize(
     ("topology", "colocate_all", "policy_nodes", "inference_engines"),
     [("colocated64", True, 8, 8), ("split64", False, 4, 4)],

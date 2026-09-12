@@ -1,24 +1,48 @@
 import base64
-import io
 import json
-import tarfile
 
 import pytest
 
 from infra.rl_data.nemotron_ultra_swe import (
+    _archive_files,
     _tar_bytes,
     collect_swe_instance_ids,
     compose_swe_tasks,
+    reconstruct_swegym_task,
 )
 from infra.rl_data.sources import NEMOTRON_ULTRA_SWE_AGENT
 
 
-def _swegym_row(instance_id: str):
+def _swegym_row(instance_id: str, *, full: bool = False):
+    config = {"instance_id": instance_id}
+    files = {
+        "instruction.md": (b"fix it", 0o644),
+        "tests/config.json": ((json.dumps(config) + "\n").encode(), 0o644),
+    }
+    if full:
+        config.update({"repo": "iterative/dvc", "base_commit": "old-commit"})
+        files.update(
+            {
+                "environment/Dockerfile": (b"FROM ubuntu:22.04\n", 0o644),
+                "metadata.json": (b"{}\n", 0o644),
+                "solution/solve.sh": (b"old solution\n", 0o755),
+                "task.toml": (b'version = "1.0"\n', 0o644),
+                "tests/config.json": ((json.dumps(config) + "\n").encode(), 0o644),
+                "tests/install_trusted_test_patch.sh": (b"generic patch installer\n", 0o755),
+                "tests/install_trusted_test_paths.sh": (b"generic path installer\n", 0o755),
+                "tests/test.sh": (
+                    b"PASS_TESTS=(\n    'old::pass'\n)\nFAIL_TESTS=(\n    'old::fail'\n)\n"
+                    b"git cat-file -e old-commit^{commit}\n",
+                    0o755,
+                ),
+                "tests/test_patch.diff": (b"old test patch\n", 0o644),
+                "tests/test_state.py": (b"generic verifier\n", 0o644),
+                "tests/trusted_patch_paths.txt": (b"old_test.py\n", 0o644),
+                "tests/trusted_test_paths.txt": (b"old_test.py\n", 0o644),
+            }
+        )
     archive = _tar_bytes(
-        {
-            "instruction.md": (b"fix it", 0o644),
-            "tests/config.json": ((json.dumps({"instance_id": instance_id}) + "\n").encode(), 0o644),
-        }
+        files
     )
     return {"path": "swegym-0001", "task_binary": archive}
 
@@ -31,17 +55,6 @@ def _r2e_row(commit: str):
         "problem_statement": "Repair image loading.",
         "expected_output_json": json.dumps({"TestImages.test_load": "PASSED"}),
     }
-
-
-def _archive_files(blob: bytes) -> dict[str, tuple[bytes, int]]:
-    result = {}
-    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:*") as archive:
-        for member in archive.getmembers():
-            if member.isfile():
-                source = archive.extractfile(member)
-                assert source is not None
-                result[member.name] = (source.read(), member.mode)
-    return result
 
 
 def test_collects_only_unique_swe_rows():
@@ -88,3 +101,69 @@ def test_composes_swegym_archives_and_r2e_image_tasks():
 def test_composition_fails_when_any_blend_instance_has_no_environment():
     with pytest.raises(ValueError, match="No Harbor source for 1 SWE instances"):
         compose_swe_tasks({"missing__repo-deadbeef"}, [], [])
+
+
+def test_reconstructs_missing_swegym_task_from_same_repo_template():
+    source = {
+        "instance_id": "iterative__dvc-6954",
+        "repo": "iterative/dvc",
+        "base_commit": "new-commit",
+        "version": "2.8",
+        "created_at": "2021-11-10T14:10:57Z",
+        "problem_statement": "Recognize negative numbers.",
+        "patch": "diff --git a/dvc/value.py b/dvc/value.py\n--- a/dvc/value.py\n+++ b/dvc/value.py\n",
+        "test_patch": (
+            "diff --git a/tests/test_value.py b/tests/test_value.py\n"
+            "--- /dev/null\n"
+            "+++ b/tests/test_value.py\n"
+        ),
+        "PASS_TO_PASS": ["tests/test_value.py::test_positive"],
+        "FAIL_TO_PASS": ["tests/test_value.py::test_negative"],
+    }
+
+    result = reconstruct_swegym_task(_swegym_row("iterative__dvc-4379", full=True)["task_binary"], source)
+
+    assert result["path"] == "iterative__dvc-6954"
+    files = _archive_files(result["task_binary"])
+    assert files["environment/Dockerfile"][0] == b"FROM ubuntu:22.04\n"
+    assert files["tests/install_trusted_test_paths.sh"][0] == b"generic path installer\n"
+    assert files["tests/test_patch.diff"][0].decode() == source["test_patch"]
+    assert files["tests/trusted_patch_paths.txt"][0] == b"tests/test_value.py\n"
+    assert files["tests/trusted_test_paths.txt"][0] == b"tests/test_value.py\n"
+    assert "Recognize negative numbers." in files["instruction.md"][0].decode()
+    assert "git checkout new-commit" in files["solution/solve.sh"][0].decode()
+    assert source["patch"] in files["solution/solve.sh"][0].decode()
+    test_script = files["tests/test.sh"][0].decode()
+    assert "old-commit" not in test_script
+    assert "new-commit" in test_script
+    assert "tests/test_value.py::test_positive" in test_script
+    assert "tests/test_value.py::test_negative" in test_script
+    config = json.loads(files["tests/config.json"][0])
+    assert config["instance_id"] == "iterative__dvc-6954"
+    assert config["base_commit"] == "new-commit"
+    assert config["pass_to_pass"] == source["PASS_TO_PASS"]
+    assert config["fail_to_pass"] == source["FAIL_TO_PASS"]
+
+
+def test_composition_uses_pinned_swegym_source_to_fill_missing_task():
+    desired = "iterative__dvc-6954"
+    source = {
+        "instance_id": desired,
+        "repo": "iterative/dvc",
+        "base_commit": "new-commit",
+        "problem_statement": "Recognize negative numbers.",
+        "patch": "diff --git a/dvc/value.py b/dvc/value.py\n--- a/dvc/value.py\n+++ b/dvc/value.py\n",
+        "test_patch": "diff --git a/tests/test_value.py b/tests/test_value.py\n--- /dev/null\n+++ b/tests/test_value.py\n",
+        "PASS_TO_PASS": [],
+        "FAIL_TO_PASS": ["tests/test_value.py::test_negative"],
+    }
+
+    rows, counts = compose_swe_tasks(
+        {desired},
+        [_swegym_row("iterative__dvc-4379", full=True)],
+        [],
+        swegym_source_rows=[source],
+    )
+
+    assert [row["path"] for row in rows] == [desired]
+    assert counts == {"total": 1, "swegym": 1, "swegym_reconstructed": 1, "r2egym": 0}
