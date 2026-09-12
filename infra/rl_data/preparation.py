@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import random
@@ -64,6 +65,46 @@ class ConversionResult:
     @property
     def yield_fraction(self) -> float:
         return self.converted_rows / self.raw_rows if self.raw_rows else 0.0
+
+
+def ordered_tail_holdout(
+    artifact: PreparedArtifact, validation_rows: int
+) -> tuple[PreparedArtifact, PreparedArtifact]:
+    """Split a prepared artifact without changing its source order.
+
+    Args:
+        artifact: Fully prepared source artifact to partition.
+        validation_rows: Number of rows to reserve from the source tail.
+
+    Returns:
+        The ordered training prefix and validation suffix.
+    """
+    if validation_rows <= 0 or validation_rows >= len(artifact.rows):
+        raise ValueError("validation_rows must leave non-empty training and validation splits")
+
+    boundary = len(artifact.rows) - validation_rows
+
+    def build_split(rows: list[PreparedRow], split: str, start_index: int, end_index: int) -> PreparedArtifact:
+        split_rows = [
+            {**row, "extra_info": {**row["extra_info"], "split": split, "index": index}}
+            for index, row in enumerate(rows)
+        ]
+        provenance = copy.deepcopy(artifact.provenance)
+        provenance["preparation"]["artifact_split"] = split
+        provenance["counts"]["emitted_rows"] = len(split_rows)
+        provenance["partition"] = {
+            "strategy": "ordered_tail_holdout",
+            "source_rows": len(artifact.rows),
+            "start_index": start_index,
+            "end_index": end_index,
+            "validation_rows": validation_rows,
+        }
+        return PreparedArtifact(split_rows, provenance)
+
+    return (
+        build_split(artifact.rows[:boundary], "train", 0, boundary),
+        build_split(artifact.rows[boundary:], "validation", boundary, len(artifact.rows)),
+    )
 
 
 def _prompt_content(row: PreparedRow) -> str:

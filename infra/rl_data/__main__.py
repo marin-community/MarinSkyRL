@@ -8,7 +8,7 @@ from pathlib import Path
 
 from infra.rl_data.mixtures import load_mixture_spec, prepare_mixture
 from infra.rl_data.nemotron_ultra_swe import prepare_swe_task_artifact
-from infra.rl_data.preparation import PreparationOptions, prepare_artifact, write_bundle
+from infra.rl_data.preparation import PreparationOptions, ordered_tail_holdout, prepare_artifact, write_bundle
 from infra.rl_data.sources import (
     SOURCES,
     TEST_ONLY_SOURCE_LABELS,
@@ -56,6 +56,11 @@ def main() -> None:
     parser.add_argument("--validation-source", choices=sorted(SOURCES))
     parser.add_argument("--validation-revision", help="Immutable Hugging Face revision for validation.")
     parser.add_argument(
+        "--validation-tail-rows",
+        type=int,
+        help="Reserve this many rows from the ordered tail of the prepared training source for validation.",
+    )
+    parser.add_argument(
         "--output-dir", type=Path, required=True, help="New local directory for train/validation parquet."
     )
     parser.add_argument("--tokenizer", help="Tokenizer used by the planned training run.")
@@ -79,6 +84,7 @@ def main() -> None:
             args.revision,
             args.validation_source,
             args.validation_revision,
+            args.validation_tail_rows,
             args.tokenizer,
             args.max_prompt_tokens,
         )
@@ -93,7 +99,13 @@ def main() -> None:
 
     counter = _token_counter(args.tokenizer)
     if args.mixture is not None:
-        single_source_args = (args.source, args.revision, args.validation_source, args.validation_revision)
+        single_source_args = (
+            args.source,
+            args.revision,
+            args.validation_source,
+            args.validation_revision,
+            args.validation_tail_rows,
+        )
         if any(value is not None for value in single_source_args):
             parser.error("--mixture cannot be combined with single-source arguments.")
         train, validation = prepare_mixture(
@@ -103,6 +115,40 @@ def main() -> None:
             args.seed,
             allow_train_on_test=args.allow_train_on_test,
         )
+        write_bundle(train, validation, args.output_dir)
+        return
+
+    if args.validation_tail_rows is not None:
+        if args.validation_tail_rows <= 0:
+            parser.error("--validation-tail-rows must be positive.")
+        incompatible = {
+            "--validation-source": args.validation_source,
+            "--validation-revision": args.validation_revision,
+            "--subsample-n": args.subsample_n,
+            "--unique-cap": args.unique_cap,
+        }
+        selected = [name for name, value in incompatible.items() if value is not None]
+        if selected:
+            parser.error(f"--validation-tail-rows cannot be combined with {', '.join(selected)}.")
+        missing = [name for name, value in (("--source", args.source), ("--revision", args.revision)) if value is None]
+        if missing:
+            parser.error(f"--validation-tail-rows requires {', '.join(missing)}.")
+
+        source = source_by_name(args.source)
+        if source.name in TEST_ONLY_SOURCE_NAMES and not args.allow_train_on_test:
+            label = TEST_ONLY_SOURCE_LABELS[source.name]
+            parser.error(f"{label} is test-only; pass --allow-train-on-test to use it as a training source.")
+
+        from skyrl_gym import get_data_contract
+
+        artifact = prepare_artifact(
+            source,
+            load_source_rows(source, args.revision),
+            get_data_contract(source.env_id),
+            counter,
+            _options(args, source.name, args.revision),
+        )
+        train, validation = ordered_tail_holdout(artifact, args.validation_tail_rows)
         write_bundle(train, validation, args.output_dir)
         return
 
