@@ -384,6 +384,19 @@ class _ResidencyPolicyGroup:
             self.model_on_gpu = False
 
 
+class _CheckpointResidencyPolicyGroup(_ResidencyPolicyGroup):
+    def __init__(self):
+        super().__init__()
+        self.restore_residencies = []
+
+    def async_run_ray_method(self, dispatch_type, method_name, **kwargs):
+        assert dispatch_type == "pass_through"
+        assert method_name == "load_checkpoint"
+        assert kwargs["load_training_state"]
+        self.restore_residencies.append((self.model_on_gpu, self.optimizer_on_gpu))
+        return []
+
+
 class _ResidencyInferenceClient:
     def __init__(self):
         self.awake = True
@@ -854,6 +867,33 @@ def test_load_checkpoints_accepts_trailing_slash_resume_path(dummy_config):
             trainer.load_checkpoints()
 
     exists.assert_called_once_with(resume_path.rstrip("/"))
+
+
+def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore(dummy_config, tmp_path, monkeypatch):
+    checkpoint_path = tmp_path / "global_step_12"
+    (checkpoint_path / trainer_module.POLICY_CHECKPOINT_SUBDIRECTORY).mkdir(parents=True)
+    torch.save({"global_step": 12}, checkpoint_path / trainer_module.TRAINER_STATE_FILENAME)
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+    dummy_config.trainer.offload_optimizer_during_rollouts = True
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.colocate_all = False
+    trainer.all_startup_timings = {}
+    trainer.train_dataloader = MagicMock()
+    trainer.policy_model = _CheckpointResidencyPolicyGroup()
+    trainer.policy_model.model_on_gpu = True
+    trainer.policy_model.optimizer_on_gpu = True
+    trainer.critic_model = None
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+
+    global_step, restored_path = trainer.load_checkpoints()
+
+    assert global_step == 12
+    assert restored_path == str(checkpoint_path)
+    assert trainer.policy_model.restore_residencies == [(True, False)]
+    assert "offload_policy_optimizer_before_checkpoint_load" in trainer.all_startup_timings
 
 
 def test_calculate_kl_create_experience_batched(dummy_config, dummy_trajectory_runner):

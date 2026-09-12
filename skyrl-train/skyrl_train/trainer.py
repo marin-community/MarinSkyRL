@@ -2591,6 +2591,14 @@ class RayPPOTrainer:
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
             )
 
+        # Match the optimizer residency used when disaggregated checkpoints are
+        # saved. Megatron initializes restore buffers before reading checkpoint
+        # tensors; leaving the optimizer and gradient buffers on GPU can double
+        # their peak allocation and OOM before the first rollout.
+        if not self.colocate_all and self.cfg.trainer.offload_optimizer_during_rollouts:
+            with Timer("offload_policy_optimizer_before_checkpoint_load", self.all_startup_timings):
+                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+
         # 3. Load policy checkpoint
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")
         _ = ray.get(
