@@ -82,11 +82,10 @@ class OnlineEagleTrainingJob:
             or num_speculative_tokens <= 0
         ):
             raise ValueError("Online EAGLE num_speculative_tokens must be a positive integer")
-        paths = {
-            field: value[field]
-            for field in ("capture_dir", "draft_model_dir", "output_dir", "result_path")
-        }
-        invalid_paths = [field for field, path in paths.items() if not isinstance(path, str) or not Path(path).is_absolute()]
+        paths = {field: value[field] for field in ("capture_dir", "draft_model_dir", "output_dir", "result_path")}
+        invalid_paths = [
+            field for field, path in paths.items() if not isinstance(path, str) or not Path(path).is_absolute()
+        ]
         if invalid_paths:
             raise ValueError(f"Online EAGLE job paths must be absolute: {', '.join(invalid_paths)}")
         initial_identity = value["initial_draft_source_identity"]
