@@ -455,11 +455,12 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
 
 def materialize_model_export(source_uri: str, local_path: str, source_identity: str) -> None:
     """Copy and validate an object-store HF export on this allocated node."""
+    started = time.monotonic()
     source = ArtifactSource(uri=source_uri, local_path=local_path, identity=source_identity)
     artifact = materialize(source, validate=validate_portable_hf_model_files)
     _log(
         f"Model export staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
-        f"({len(artifact.files)} files, identity={source.identity})"
+        f"({len(artifact.files)} files, identity={source.identity}, elapsed_seconds={time.monotonic() - started:.3f})"
     )
 
 
@@ -496,11 +497,12 @@ def materialize_data_sources(data_sources_json: str) -> None:
     if not isinstance(sources, list):
         raise ValueError("--data-sources-json must contain a JSON list")
     for value in sources:
+        started = time.monotonic()
         source = ArtifactSource(uri=value["uri"], local_path=value["local_path"], identity=value["identity"])
         artifact = materialize(source)
         _log(
             f"Dataset staged on rank {_rank()}/{_num_tasks()}: {source.uri} -> {source.local_path} "
-            f"({len(artifact.files)} files, identity={source.identity})"
+            f"({len(artifact.files)} files, identity={source.identity}, elapsed_seconds={time.monotonic() - started:.3f})"
         )
 
 
