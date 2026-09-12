@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import stat
@@ -17,7 +18,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, List, Mapping, Optional
 
+import fsspec
+
 from cloud.iris.hf_datasets import resolve_hf_dataset_selector
+from cloud.iris.tasks_parquet import from_parquet
 from marinskyrl.resource_locator import parse_hf_dataset_selector
 from marinskyrl.task_sources import TaskTroveParquetSource, data_source
 
@@ -28,6 +32,39 @@ class ResolvedRLData:
 
     paths: tuple[str | dict[str, Any], ...]
     sources: tuple[str | dict[str, Any], ...]
+
+
+def _stage_remote_file(uri: str, destination: Path, *, overwrite: bool) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and not overwrite:
+        return
+    staging = destination.parent / f".{destination.name}.{os.getpid()}.tmp"
+    try:
+        with fsspec.open(uri, "rb") as src, open(staging, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        os.replace(staging, destination)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def _stage_remote_task_parquet(
+    uri: str,
+    tasks_base: Path,
+    *,
+    on_exist: str,
+    verbose: bool,
+) -> Path:
+    if not uri.split("?", 1)[0].endswith(".parquet"):
+        raise ValueError(f"Remote task data must name a parquet file: {uri!r}")
+    identity = hashlib.sha256(uri.encode()).hexdigest()[:20]
+    local_parquet = tasks_base / ".remote" / identity / "tasks.parquet"
+    output_dir = tasks_base / f"remote-{identity}"
+    _stage_remote_file(uri, local_parquet, overwrite=on_exist == "overwrite")
+    if verbose:
+        print(f"[rl_data] Staged remote task parquet: {uri} -> {local_parquet}")
+    from_parquet(str(local_parquet), str(output_dir), on_exist=on_exist)
+    _fix_task_permissions(output_dir, verbose=verbose)
+    return output_dir
 
 
 def resolve_rl_train_data(
@@ -66,6 +103,8 @@ def resolve_rl_train_data_with_sources(
     task containing an ``instruction.md`` file. HuggingFace dataset identifiers are
     extracted to ``$SCRATCH/tasks/<repo-name>/`` via
     ``cloud.iris.extract_tasks_from_parquet``, permissions fixed, and local paths returned.
+    Object-store parquet URIs are first staged into an identity-keyed node-local cache and
+    then extracted by the same task-archive reader.
 
     ``kind="parquet"`` (single-turn RLVR, e.g. main_base + aime): the entries are
     SkyRL-shaped parquet paths that ``PromptDataset`` loads via ``datasets.load_dataset``.
@@ -90,13 +129,8 @@ def resolve_rl_train_data_with_sources(
                 resolved.append(entry)
                 continue
             # Object-store URI: pull to node-local disk (offline mode blocks the remote read).
-            import fsspec
-
-            stage_root.mkdir(parents=True, exist_ok=True)
             local = stage_root / Path(entry.split("?", 1)[0]).name
-            if not local.exists() or on_exist == "overwrite":
-                with fsspec.open(entry, "rb") as src, open(local, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+            _stage_remote_file(entry, local, overwrite=on_exist == "overwrite")
             if verbose:
                 print(f"[rl_data] data.kind=parquet: staged {entry} -> {local}")
             resolved.append(str(local))
@@ -129,6 +163,11 @@ def resolve_rl_train_data_with_sources(
             packed_source = asdict(source)
             resolved_paths.append(packed_source)
             sources.append(packed_source)
+            continue
+        if "://" in data_path and not data_path.startswith("file://"):
+            output_dir = _stage_remote_task_parquet(data_path, tasks_base, on_exist=on_exist, verbose=verbose)
+            resolved_paths.append(str(output_dir))
+            sources.append(data_path)
             continue
         if parse_hf_dataset_selector(data_path) is not None:
             selector = resolve_hf_dataset_selector(data_path)

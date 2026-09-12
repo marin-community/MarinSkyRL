@@ -12,20 +12,36 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
+import shlex
 import shutil
 import tarfile
 import tempfile
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+import pyarrow.parquet as pq
+from huggingface_hub import hf_hub_download
 
 from infra.rl_data.sources import NEMOTRON_ULTRA_REVISION, NEMOTRON_ULTRA_RL_DATASET, NEMOTRON_ULTRA_SWE_AGENT
 
 TASKTROVE_DATASET = "open-thoughts/TaskTrove"
 TASKTROVE_REVISION = "131d8a8470c7a81113baac898c0c232db3f5ae31"
 TASKTROVE_SWEGYM_PARQUET = "laion__swegym-tasks-patched-validated-v5/tasks.parquet"
+SWEGYM_DATASET = "SWE-Gym/SWE-Gym"
+SWEGYM_REVISION = "bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb"
+SWEGYM_PARQUET = "data/train-00000-of-00001.parquet"
 R2E_GYM_DATASET = "R2E-Gym/R2E-Gym-Subset"
 R2E_GYM_REVISION = "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
+
+
+@dataclass(frozen=True)
+class SWEGymSelection:
+    tasks: list[dict[str, Any]]
+    matched_ids: set[str]
+    reconstructed_count: int
 
 _TASK_TOML = """\
 version = "1.0"
@@ -153,18 +169,41 @@ def _safe_task_path(value: str) -> str:
     return value
 
 
-def select_swegym_tasks(
-    desired_ids: set[str], rows: Iterable[Mapping[str, Any]]
-) -> tuple[list[dict[str, Any]], set[str]]:
-    """Select TaskTrove archives by their embedded upstream SWE-Gym ID."""
+def _index_swegym_source_rows(
+    desired_ids: set[str],
+    source_rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    source_by_id: dict[str, Mapping[str, Any]] = {}
+    for row in source_rows:
+        instance_id = row.get("instance_id")
+        if instance_id not in desired_ids:
+            continue
+        if not isinstance(instance_id, str):
+            raise ValueError("SWE-Gym source row has an invalid instance_id")
+        if instance_id in source_by_id:
+            raise ValueError(f"duplicate SWE-Gym source instance {instance_id!r}")
+        source_by_id[instance_id] = row
+    return source_by_id
+
+
+def _select_tasktrove_rows_and_templates(
+    desired_ids: set[str],
+    tasktrove_rows: Iterable[Mapping[str, Any]],
+    needed_repos: set[str],
+) -> tuple[list[dict[str, Any]], set[str], dict[str, bytes]]:
     selected: list[dict[str, Any]] = []
     matched: set[str] = set()
-    for row in rows:
-        archive = row.get("task_binary")
-        if not isinstance(archive, (bytes, bytearray, memoryview)):
+    template_by_repo: dict[str, bytes] = {}
+    for row in tasktrove_rows:
+        archive_value = row.get("task_binary")
+        if not isinstance(archive_value, (bytes, bytearray, memoryview)):
             raise TypeError("TaskTrove task_binary must be bytes")
-        config = _archive_json(bytes(archive), "tests/config.json")
+        archive = bytes(archive_value)
+        config = _archive_json(archive, "tests/config.json")
         instance_id = config.get("instance_id") if config else None
+        repo = config.get("repo") if config else None
+        if isinstance(repo, str) and repo in needed_repos and repo not in template_by_repo:
+            template_by_repo[repo] = archive
         if instance_id not in desired_ids:
             continue
         if instance_id in matched:
@@ -172,9 +211,39 @@ def select_swegym_tasks(
         path = row.get("path")
         if not isinstance(path, str):
             raise TypeError("TaskTrove task path must be a string")
-        selected.append({"path": _safe_task_path(path), "task_binary": bytes(archive)})
+        selected.append({"path": _safe_task_path(path), "task_binary": archive})
         matched.add(str(instance_id))
-    return selected, matched
+    return selected, matched, template_by_repo
+
+
+def _select_and_reconstruct_swegym_tasks(
+    desired_ids: set[str],
+    tasktrove_rows: Iterable[Mapping[str, Any]],
+    source_rows: Iterable[Mapping[str, Any]],
+) -> SWEGymSelection:
+    """Select direct TaskTrove matches and reconstruct evidenced missing rows."""
+    source_by_id = _index_swegym_source_rows(desired_ids, source_rows)
+
+    needed_repos = {
+        str(row["repo"])
+        for row in source_by_id.values()
+        if isinstance(row.get("repo"), str) and row["instance_id"] in desired_ids
+    }
+    selected, matched, template_by_repo = _select_tasktrove_rows_and_templates(
+        desired_ids, tasktrove_rows, needed_repos
+    )
+
+    reconstructed = 0
+    for instance_id in sorted(desired_ids - matched):
+        source = source_by_id.get(instance_id)
+        repo = source.get("repo") if source else None
+        template = template_by_repo.get(str(repo))
+        if source is None or template is None:
+            continue
+        selected.append(reconstruct_swegym_task(template, source))
+        matched.add(instance_id)
+        reconstructed += 1
+    return SWEGymSelection(selected, matched, reconstructed)
 
 
 def _instruction(problem_statement: str, base_commit: str) -> str:
@@ -235,6 +304,152 @@ def _tar_bytes(files: Mapping[str, tuple[bytes, int]]) -> bytes:
             info.uname = info.gname = ""
             archive.addfile(info, io.BytesIO(content))
     return output.getvalue()
+
+
+def _archive_files(archive: bytes) -> dict[str, tuple[bytes, int]]:
+    files: dict[str, tuple[bytes, int]] = {}
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as source:
+        for member in source.getmembers():
+            if not member.isfile():
+                continue
+            stream = source.extractfile(member)
+            if stream is None:
+                raise ValueError(f"could not read TaskTrove archive member {member.name!r}")
+            files[member.name] = (stream.read(), member.mode)
+    return files
+
+
+def _required_string(row: Mapping[str, Any], field: str) -> str:
+    value = row.get(field)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"SWE-Gym reconstruction row is missing {field!r}")
+    return value
+
+
+def _diff_paths(patch: str) -> list[str]:
+    paths = []
+    for path in re.findall(r"^\+\+\+ b/(.+)$", patch, flags=re.MULTILINE):
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _replace_test_array(script: str, name: str, values: list[str]) -> str:
+    pattern = re.compile(rf"(?ms)^(?P<indent>[ \t]*){name}=\(\n.*?^(?P=indent)\)")
+
+    def replacement(match: re.Match[str]) -> str:
+        indent = match.group("indent")
+        entries = "\n".join(f"{indent}    {shlex.quote(value)}" for value in values)
+        return f"{indent}{name}=(\n{entries}\n{indent})"
+
+    result, count = pattern.subn(replacement, script, count=1)
+    if count != 1:
+        raise ValueError(f"TaskTrove template does not define {name}")
+    return result
+
+
+def _swegym_solution_script(repo: str, commit: str, test_patch: str, solution_patch: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        raise ValueError(f"unsafe SWE-Gym repository {repo!r}")
+    if not re.fullmatch(r"[0-9a-f]{40}|[A-Za-z0-9_.-]+", commit):
+        raise ValueError(f"unsafe SWE-Gym commit {commit!r}")
+    if "TEST_PATCH_EOF" in test_patch or "SOLUTION_PATCH_EOF" in solution_patch:
+        raise ValueError("SWE-Gym patch contains a reserved heredoc delimiter")
+    return f"""\
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+source /opt/miniconda3/bin/activate
+conda activate testbed
+cd /testbed
+if [ ! -d repo ]; then
+    git clone https://github.com/{repo}.git repo
+fi
+cd repo
+git checkout {commit}
+
+cat <<'TEST_PATCH_EOF' | git apply --whitespace=nowarn --apply
+{test_patch.rstrip()}
+TEST_PATCH_EOF
+cat <<'SOLUTION_PATCH_EOF' | git apply --whitespace=nowarn --apply
+{solution_patch.rstrip()}
+SOLUTION_PATCH_EOF
+"""
+
+
+def reconstruct_swegym_task(template_archive: bytes, row: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild a missing SWE-Gym task from a same-repository TaskTrove template."""
+    instance_id = _required_string(row, "instance_id")
+    repo = _required_string(row, "repo")
+    commit = _required_string(row, "base_commit")
+    problem = _required_string(row, "problem_statement")
+    solution_patch = _required_string(row, "patch")
+    test_patch = _required_string(row, "test_patch")
+    pass_to_pass = row.get("PASS_TO_PASS")
+    fail_to_pass = row.get("FAIL_TO_PASS")
+    if not isinstance(pass_to_pass, list) or not all(isinstance(value, str) for value in pass_to_pass):
+        raise ValueError(f"SWE-Gym reconstruction row {instance_id!r} has invalid PASS_TO_PASS")
+    if not isinstance(fail_to_pass, list) or not all(isinstance(value, str) for value in fail_to_pass):
+        raise ValueError(f"SWE-Gym reconstruction row {instance_id!r} has invalid FAIL_TO_PASS")
+
+    files = _archive_files(template_archive)
+    required_template_files = {
+        "environment/Dockerfile",
+        "task.toml",
+        "tests/install_trusted_test_patch.sh",
+        "tests/install_trusted_test_paths.sh",
+        "tests/test.sh",
+        "tests/test_state.py",
+    }
+    missing = required_template_files - files.keys()
+    if missing:
+        raise ValueError(f"TaskTrove reconstruction template is missing files: {sorted(missing)}")
+    template_config = _archive_json(template_archive, "tests/config.json")
+    if template_config is None or template_config.get("repo") != repo:
+        raise ValueError(f"TaskTrove reconstruction template is not for repository {repo!r}")
+
+    test_script = files["tests/test.sh"][0].decode()
+    old_commit = _required_string(template_config, "base_commit")
+    if old_commit not in test_script:
+        raise ValueError("TaskTrove reconstruction template test script does not contain its base commit")
+    test_script = test_script.replace(old_commit, commit)
+    test_script = _replace_test_array(test_script, "PASS_TESTS", pass_to_pass)
+    test_script = _replace_test_array(test_script, "FAIL_TESTS", fail_to_pass)
+
+    metadata = {
+        "source": SWEGYM_DATASET,
+        "split": "train",
+        "instance_id": instance_id,
+        "repo": repo,
+        "base_commit": commit,
+        "version": row.get("version"),
+        "pass_to_pass": pass_to_pass,
+        "fail_to_pass": fail_to_pass,
+        "created_at": row.get("created_at"),
+        "reconstructed_from_tasktrove_template": template_config.get("instance_id"),
+    }
+    config = {**metadata, "patch": solution_patch, "test_patch_length": len(test_patch)}
+    test_paths = sorted({value.split("::", 1)[0] for value in [*pass_to_pass, *fail_to_pass] if value})
+    patch_paths = _diff_paths(test_patch)
+    if not patch_paths:
+        raise ValueError(f"SWE-Gym reconstruction row {instance_id!r} test patch has no target paths")
+
+    files.update(
+        {
+            "instruction.md": (_instruction(problem, commit).encode(), 0o644),
+            "metadata.json": ((json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode(), 0o644),
+            "solution/solve.sh": (
+                _swegym_solution_script(repo, commit, test_patch, solution_patch).encode(),
+                0o755,
+            ),
+            "tests/config.json": ((json.dumps(config, indent=2, sort_keys=True) + "\n").encode(), 0o644),
+            "tests/test.sh": (test_script.encode(), files["tests/test.sh"][1]),
+            "tests/test_patch.diff": (test_patch.encode(), 0o644),
+            "tests/trusted_patch_paths.txt": (("\n".join(patch_paths) + "\n").encode(), 0o644),
+            "tests/trusted_test_paths.txt": (("\n".join(test_paths or patch_paths) + "\n").encode(), 0o644),
+        }
+    )
+    return {"path": _safe_task_path(instance_id.casefold()), "task_binary": _tar_bytes(files)}
 
 
 def make_r2e_task(instance_id: str, row: Mapping[str, Any]) -> dict[str, Any]:
@@ -298,10 +513,16 @@ def select_r2e_tasks(desired_ids: set[str], rows: Iterable[Mapping[str, Any]]) -
 
 
 def compose_swe_tasks(
-    desired_ids: set[str], swegym_rows: Iterable[Mapping[str, Any]], r2e_rows: Iterable[Mapping[str, Any]]
+    desired_ids: set[str],
+    swegym_rows: Iterable[Mapping[str, Any]],
+    r2e_rows: Iterable[Mapping[str, Any]],
+    *,
+    swegym_source_rows: Iterable[Mapping[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Build exactly one task for every unique SWE ID in the released blend."""
-    swegym, swegym_ids = select_swegym_tasks(desired_ids, swegym_rows)
+    swegym_selection = _select_and_reconstruct_swegym_tasks(desired_ids, swegym_rows, swegym_source_rows)
+    swegym = swegym_selection.tasks
+    swegym_ids = swegym_selection.matched_ids
     r2e, r2e_ids = select_r2e_tasks(desired_ids - swegym_ids, r2e_rows)
     overlap = swegym_ids & r2e_ids
     if overlap:
@@ -312,12 +533,14 @@ def compose_swe_tasks(
     rows = sorted([*swegym, *r2e], key=lambda row: str(row["path"]))
     if len({row["path"] for row in rows}) != len(rows):
         raise ValueError("composed Harbor task paths are not unique")
-    return rows, {"total": len(rows), "swegym": len(swegym), "r2egym": len(r2e)}
+    counts = {"total": len(rows), "swegym": len(swegym)}
+    if swegym_selection.reconstructed_count:
+        counts["swegym_reconstructed"] = swegym_selection.reconstructed_count
+    counts["r2egym"] = len(r2e)
+    return rows, counts
 
 
 def _load_blend_swe_ids(revision: str) -> set[str]:
-    from huggingface_hub import hf_hub_download
-
     instance_ids: set[str] = set()
     for filename in ("rlvr1.jsonl", "rlvr2.jsonl"):
         path = hf_hub_download(
@@ -332,9 +555,6 @@ def _load_blend_swe_ids(revision: str) -> set[str]:
 
 
 def _tasktrove_rows(revision: str):
-    import pyarrow.parquet as pq
-    from huggingface_hub import hf_hub_download
-
     path = hf_hub_download(
         repo_id=TASKTROVE_DATASET,
         repo_type="dataset",
@@ -345,12 +565,24 @@ def _tasktrove_rows(revision: str):
         yield from batch.to_pylist()
 
 
+def _swegym_source_rows(revision: str):
+    path = hf_hub_download(
+        repo_id=SWEGYM_DATASET,
+        repo_type="dataset",
+        filename=SWEGYM_PARQUET,
+        revision=revision,
+    )
+    for batch in pq.ParquetFile(path).iter_batches(batch_size=256):
+        yield from batch.to_pylist()
+
+
 def prepare_swe_task_artifact(
     output_dir: Path,
     *,
     desired_ids: set[str] | None = None,
     blend_revision: str = NEMOTRON_ULTRA_REVISION,
     tasktrove_revision: str = TASKTROVE_REVISION,
+    swegym_revision: str = SWEGYM_REVISION,
     r2e_revision: str = R2E_GYM_REVISION,
 ) -> dict[str, Any]:
     """Download pinned inputs and atomically write one Harbor task parquet."""
@@ -364,7 +596,12 @@ def prepare_swe_task_artifact(
     if not desired_ids:
         raise ValueError("Nemotron Ultra SWE task preparation requires at least one instance ID")
     r2e_rows = load_dataset(R2E_GYM_DATASET, split="train", revision=r2e_revision, streaming=True)
-    rows, counts = compose_swe_tasks(desired_ids, _tasktrove_rows(tasktrove_revision), r2e_rows)
+    rows, counts = compose_swe_tasks(
+        desired_ids,
+        _tasktrove_rows(tasktrove_revision),
+        r2e_rows,
+        swegym_source_rows=_swegym_source_rows(swegym_revision),
+    )
     provenance = {
         "blend": {
             "dataset": NEMOTRON_ULTRA_RL_DATASET,
@@ -375,6 +612,11 @@ def prepare_swe_task_artifact(
             "dataset": TASKTROVE_DATASET,
             "revision": tasktrove_revision,
             "file": TASKTROVE_SWEGYM_PARQUET,
+        },
+        "swegym_reconstruction_source": {
+            "dataset": SWEGYM_DATASET,
+            "revision": swegym_revision,
+            "file": SWEGYM_PARQUET,
         },
         "r2egym": {"dataset": R2E_GYM_DATASET, "revision": r2e_revision, "split": "train"},
         "counts": counts,
