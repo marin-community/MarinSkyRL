@@ -10,6 +10,8 @@
 #   - verifier budget 2400 s, connect timeout 120 s, preserve_logprobs_on_timeout off: the
 #     three "new arms must use" values acknowledged as deviations in arm A.
 #   - resume_mode latest with no pinned checkpoint: a chain restart continues the arm.
+#   - geometry: 12 nodes (4 policy fsdp 16 + 8 generator) and 528 seats, down from 40
+#     nodes and 1584. The seat cut is the 2026-09-06 bench; see the fleet block.
 # Set before launch (still arm A's values here): data.train_data (the current-harness band),
 # backend.runtime.overlay_* (drop the golden arm's harbor overlay on the marin stack),
 # backend.apptainer.bridge_url and fleet.
@@ -66,10 +68,14 @@ backend:
       - BridgeOperationTimeoutError
     fleet:
       cluster: juwels
-      nodes: 32
+      nodes: 66
       workers_per_node: 8
       # Preflight asserts seats >= terminal_bench.harbor.n_concurrent_trials.
-      seats: 1584
+      # 528, not the golden arm's 1584: the 2026-09-06 bench measured 6.5 updates/h at
+      # 1584 seats against 6.0 at 528: 8 % for 3x the CPU nodes, because a group holds
+      # its slot until its slowest member finishes and only ~1,000 of 1,536 seats ever
+      # held a live trajectory. 66 nodes x 8 workers = 528 exactly.
+      seats: 528
       # Without HARBOR_SRC the fleet dies within seconds.
       harbor_src: /p/project1/synthlaion/lee27/harbor/src
 
@@ -157,7 +163,7 @@ trainer:
       use_grouped_mm: true
       expert_model_parallel_size: 1
       context_parallel_size: 1
-      fsdp_size: 64
+      fsdp_size: 16
     grug_query_bias_update_mode: frozen
 
   ref:
@@ -170,7 +176,7 @@ trainer:
       moe_grouped_gemm: false
       use_grouped_mm: true
       expert_model_parallel_size: 1
-      fsdp_size: 64
+      fsdp_size: 16
 
   placement:
     colocate_all: false
@@ -182,9 +188,9 @@ trainer:
     policy_strict_spread_pg: true
     policy_per_gpu_bundles: true
     policy_force_cvd_mask: true
-    # 40 nodes = 16 policy + 24 generator; preflight asserts the geometry closes.
-    policy_num_nodes: 16
-    ref_num_nodes: 16
+    # 12 nodes = 4 policy + 8 generator; preflight asserts the geometry closes.
+    policy_num_nodes: 4
+    ref_num_nodes: 4
 
 generator:
   backend: vllm
@@ -217,8 +223,9 @@ generator:
   inference_engine_tensor_parallel_size: 1
   inference_engine_data_parallel_size: 4
   inference_engine_expert_parallel_size: 4
-  # Derived: (40 - 16) nodes * 4 GPUs / (4 dp * 1 tp). Pinned as an assertion.
-  num_inference_engines: 24
+  # Derived: (12 - 4) nodes * 4 GPUs / (4 dp * 1 tp). Pinned as an assertion.
+  # 528 seats over 8 engine nodes = 16.5 sequences per GPU, the documented safe floor.
+  num_inference_engines: 8
 
   engine_init_kwargs:
     # RoPE widening: request_window_tokens (65536) exceeds the model's 32768
@@ -229,7 +236,7 @@ generator:
 
 trajectory_runner:
   process_pool:
-    num_coordinators: 12
+    num_coordinators: 16
     cpus_per_coordinator: 8
 
 terminal_bench:
@@ -313,7 +320,7 @@ terminal_bench:
     passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
-    n_concurrent_trials: 1584
+    n_concurrent_trials: 528
     extra_body:
       # SFT-format parity: think markers stay in history.
       skip_special_tokens: false
@@ -370,9 +377,3 @@ probe:
     harbor:
       verifier_override_timeout_sec: 1200
 
-# Acknowledged deviations from the preflight defaults, printed at launch.
-overrides:
-  - key: seats.trials_per_coordinator
-    reason: >-
-      1584 / 12 = 132 seats per coordinator, above the 66 ceiling. The golden arm ran
-      this way.
