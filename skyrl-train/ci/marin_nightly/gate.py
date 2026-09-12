@@ -12,7 +12,7 @@ work end to end", not "is the model any good" -- a two-step run of a 0.6B policy
 signal about quality, and a reward floor above zero would just be flaky.
 
     python -m ci.marin_nightly.gate --log run.log \
-        --spec ci/marin_nightly/specs/gsm8k-qwen3-0.6b.json --wall-clock-seconds 900
+        --spec ci/marin_nightly/specs/gsm8k-qwen3-0.6b-fsdp2.json --wall-clock-seconds 900
 """
 
 import argparse
