@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter
+from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter, _task_index
 from skyrl_train.trajectory_runners.types import TrajectoryID
 
 
@@ -48,6 +48,22 @@ def _task(root: Path, name: str) -> None:
     directory = root / name
     directory.mkdir()
     (directory / "instruction.md").write_text("fix it")
+
+
+def test_task_index_uses_harbor_dataset_sequence_interface(tmp_path, monkeypatch):
+    task = tmp_path / "swe-1"
+    task.mkdir()
+
+    class SequenceOnlyDataset:
+        def __init__(self, data_files):
+            assert data_files == [str(tmp_path)]
+
+        def __iter__(self):
+            yield {"prompt": str(task)}
+
+    monkeypatch.setattr("skyrl_train.trajectory_runners.nemotron_ultra.TerminalBenchTaskDataset", SequenceOnlyDataset)
+
+    assert _task_index([str(tmp_path)]) == {"swe-1": str(task)}
 
 
 @pytest.mark.asyncio

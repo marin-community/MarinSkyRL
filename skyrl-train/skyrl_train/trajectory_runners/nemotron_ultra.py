@@ -77,7 +77,8 @@ def _task_ids(task_path: Path) -> set[str]:
 def _task_index(data_files: list[str]) -> dict[str, str]:
     dataset = TerminalBenchTaskDataset(data_files=data_files)
     result: dict[str, str] = {}
-    for task_path in dataset.get_task_paths():
+    for item in dataset:
+        task_path = Path(item["prompt"])
         # Harbor-safe directories can be lowercased or assigned generic names.
         # NVIDIA's blend keeps the upstream SWE-Gym/R2E-Gym instance ID, so
         # index both representations using the metadata shipped with the task.
