@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import tarfile
@@ -68,14 +69,17 @@ def test_composes_swegym_archives_and_r2e_image_tasks():
     r2e_files = _archive_files(rows[0]["task_binary"])
     assert set(r2e_files) == {
         "environment/Dockerfile",
-        "environment/workspace/metadata.json",
         "instruction.md",
         "task.toml",
         "tests/test.sh",
         "tests/test_info.json",
     }
     assert r2e_files["tests/test.sh"][1] == 0o755
-    assert f"FROM namanjain12/pillow_final:{commit}" in r2e_files["environment/Dockerfile"][0].decode()
+    dockerfile = r2e_files["environment/Dockerfile"][0].decode()
+    assert f"FROM namanjain12/pillow_final:{commit}" in dockerfile
+    assert "COPY" not in dockerfile
+    encoded_metadata = dockerfile.split("printf '%s' '", 1)[1].split("'", 1)[0]
+    assert json.loads(base64.b64decode(encoded_metadata))["instance_id"] == r2e_id
     metadata = json.loads(r2e_files["tests/test_info.json"][0])
     assert metadata["instance_id"] == r2e_id
     assert metadata["base_commit"] == commit

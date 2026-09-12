@@ -9,6 +9,7 @@ container images contain the repository, dependencies, and verifier tests.
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import shutil
@@ -253,18 +254,21 @@ def make_r2e_task(instance_id: str, row: Mapping[str, Any]) -> dict[str, Any]:
         "expected_output_json": expected,
         "source": "r2egym",
     }
+    metadata_bytes = (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode()
+    encoded_metadata = base64.b64encode(metadata_bytes).decode("ascii")
     files = {
         "instruction.md": (_instruction(problem, commit).encode(), 0o644),
         "task.toml": (_TASK_TOML.encode(), 0o644),
         "environment/Dockerfile": (
-            f"FROM {image}\nCOPY workspace /workspace\nWORKDIR /testbed\n".encode(),
+            (
+                f"FROM {image}\n"
+                "RUN mkdir -p /workspace && "
+                f"printf '%s' '{encoded_metadata}' | base64 -d > /workspace/metadata.json\n"
+                "WORKDIR /testbed\n"
+            ).encode(),
             0o644,
         ),
-        "environment/workspace/metadata.json": (
-            (json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode(),
-            0o644,
-        ),
-        "tests/test_info.json": ((json.dumps(metadata, indent=2, sort_keys=True) + "\n").encode(), 0o644),
+        "tests/test_info.json": (metadata_bytes, 0o644),
         "tests/test.sh": (_TEST_SH.encode(), 0o755),
     }
     return {"path": _safe_task_path(instance_id.casefold()), "task_binary": _tar_bytes(files)}
