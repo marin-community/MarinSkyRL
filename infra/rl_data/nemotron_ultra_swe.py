@@ -31,13 +31,8 @@ from infra.rl_data.sources import NEMOTRON_ULTRA_REVISION, NEMOTRON_ULTRA_RL_DAT
 
 TASKTROVE_DATASET = "open-thoughts/TaskTrove"
 TASKTROVE_REVISION = "131d8a8470c7a81113baac898c0c232db3f5ae31"
-TASKTROVE_SWEGYM_PARQUET = "laion__swegym-tasks-patched-validated-v5/tasks.parquet"
 TASKTROVE_SWE_PROXY_PARQUET = "laion__nemotron-gym-agentic-swe-pivot-v4/tasks.parquet"
 SWEGYM_DATASET = "SWE-Gym/SWE-Gym"
-SWEGYM_REVISION = "bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb"
-SWEGYM_PARQUET = "data/train-00000-of-00001.parquet"
-R2E_GYM_DATASET = "R2E-Gym/R2E-Gym-Subset"
-R2E_GYM_REVISION = "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
 ENVIRONMENT_DIR = "environment"
 R2E_TEST_INFO_PATH = "tests/test_info.json"
 LEGACY_R2E_TEST_INFO_PATH = "/workspace/metadata.json"
@@ -183,7 +178,14 @@ def _archive_json(archive: bytes, suffix: str) -> Mapping[str, Any] | None:
     return None
 
 
-SWEProxyKey = tuple[str, int, int, int, str, str]
+@dataclass(frozen=True)
+class SWEProxyKey:
+    trajectory_id: str
+    step: int
+    turn: int
+    depth: int
+    instance_id: str
+    agent_cls: str
 
 
 def _proxy_key(values: Mapping[str, Any], *, label: str) -> SWEProxyKey:
@@ -199,13 +201,13 @@ def _proxy_key(values: Mapping[str, Any], *, label: str) -> SWEProxyKey:
         raise ValueError(f"{label} is missing agent_cls")
     if any(not isinstance(value, int) or isinstance(value, bool) for value in dimensions.values()):
         raise ValueError(f"{label} is missing integer step, turn, or depth")
-    return (
-        str(trajectory_id),
-        dimensions["step"],
-        dimensions["turn"],
-        dimensions["depth"],
-        instance_id,
-        agent_cls,
+    return SWEProxyKey(
+        trajectory_id=str(trajectory_id),
+        step=dimensions["step"],
+        turn=dimensions["turn"],
+        depth=dimensions["depth"],
+        instance_id=instance_id,
+        agent_cls=agent_cls,
     )
 
 
@@ -890,17 +892,6 @@ def _load_blend_swe_proxy_paths(revision: str, proxies: Mapping[SWEProxyKey, Map
     return paths
 
 
-def _tasktrove_rows(revision: str):
-    path = hf_hub_download(
-        repo_id=TASKTROVE_DATASET,
-        repo_type="dataset",
-        filename=TASKTROVE_SWEGYM_PARQUET,
-        revision=revision,
-    )
-    for batch in pq.ParquetFile(path).iter_batches(columns=["path", "task_binary"], batch_size=64):
-        yield from batch.to_pylist()
-
-
 def tasktrove_swe_proxy_rows(revision: str = TASKTROVE_REVISION):
     """Stream the pinned TaskTrove semantic next-action proxy archives."""
     path = hf_hub_download(
@@ -916,17 +907,6 @@ def tasktrove_swe_proxy_rows(revision: str = TASKTROVE_REVISION):
 def load_tasktrove_swe_proxy_index(revision: str = TASKTROVE_REVISION) -> dict[SWEProxyKey, dict[str, Any]]:
     """Load the pinned TaskTrove proxy archive index."""
     return tasktrove_swe_proxy_index(tasktrove_swe_proxy_rows(revision))
-
-
-def _swegym_source_rows(revision: str):
-    path = hf_hub_download(
-        repo_id=SWEGYM_DATASET,
-        repo_type="dataset",
-        filename=SWEGYM_PARQUET,
-        revision=revision,
-    )
-    for batch in pq.ParquetFile(path).iter_batches(batch_size=256):
-        yield from batch.to_pylist()
 
 
 def prepare_swe_task_artifact(

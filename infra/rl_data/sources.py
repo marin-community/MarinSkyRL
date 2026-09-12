@@ -236,7 +236,9 @@ def _prepare_nemotron_ultra(
     instance_id = metadata.get("instance_id") if isinstance(metadata, Mapping) else None
     if route == "terminal_bench" and not isinstance(instance_id, str):
         raise ValueError("Nemotron Ultra SWE pivot row is missing metadata.instance_id.")
-    terminal_bench_instance_id = (
+    # The stored schema name is historical: snapshot-backed SWE rows use the
+    # exact TaskTrove archive path as their Harbor task identifier.
+    terminal_bench_task_id = (
         metadata.get("tasktrove_proxy_path", instance_id) if isinstance(metadata, Mapping) else None
     )
     if _NEMOTRON_PLACEHOLDER_KEY in example:
@@ -255,7 +257,7 @@ def _prepare_nemotron_ultra(
                 "blend": blend,
                 "agent": agent,
                 "route": route,
-                "terminal_bench_instance_id": terminal_bench_instance_id,
+                "terminal_bench_instance_id": terminal_bench_task_id,
                 "request_json": json.dumps(
                     {key: value for key, value in request.items() if key != "input"},
                     ensure_ascii=False,

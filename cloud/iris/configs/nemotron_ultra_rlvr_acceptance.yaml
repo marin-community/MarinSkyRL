@@ -137,15 +137,22 @@ environment:
         general:
           base_url: https://api.together.xyz/v1
           model: openai/gpt-oss-120b
+          api_key_env: TOGETHER_API_KEY
+          reasoning_effort: low
           timeout_seconds: 600.0
         safety:
           base_url: https://api.together.xyz/v1
           model: openai/gpt-oss-120b
+          api_key_env: TOGETHER_API_KEY
+          reasoning_effort: low
           timeout_seconds: 600.0
       genrm:
         judge:
           base_url: https://api.together.xyz/v1
           model: openai/gpt-oss-120b
+          api_key_env: TOGETHER_API_KEY
+          response_transport: chat_completions
+          reasoning_effort: low
           timeout_seconds: 600.0
         num_rollouts_per_prompt: 2
         group_answer_length_penalty_coeff: 0.0

@@ -14,6 +14,11 @@ def test_acceptance_swe_sandboxes_allow_agent_setup_traffic():
 
     assert config["terminal_bench"]["harbor"]["auto_snapshot"] is True
     assert config["terminal_bench"]["harbor"]["env_network_policy"] == {"mode": "unrestricted"}
+    ultra = config["environment"]["skyrl_gym"]["nemotron_ultra"]
+    assert ultra["judges"]["general"]["api_key_env"] == "TOGETHER_API_KEY"
+    assert ultra["judges"]["safety"]["api_key_env"] == "TOGETHER_API_KEY"
+    assert ultra["genrm"]["judge"]["api_key_env"] == "TOGETHER_API_KEY"
+    assert ultra["genrm"]["judge"]["response_transport"] == "chat_completions"
 
 
 def test_snowball_configs_use_snapshot_safe_daytona_sandboxes():
