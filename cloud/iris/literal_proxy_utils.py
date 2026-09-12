@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import socket
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -74,6 +75,21 @@ def literal_proxy_port(job_name: str) -> int:
     task_id = os.environ.get("IRIS_TASK_ID", "")
     digest = hashlib.blake2s(f"{job_name}:{task_id}".encode(), digest_size=2).digest()
     return _LITERAL_PROXY_PORT_BASE + int.from_bytes(digest) % _LITERAL_PROXY_PORT_COUNT
+
+
+def select_literal_proxy_port(job_name: str, *, host: str = DEFAULT_LITERAL_PROXY_HOST) -> int:
+    """Choose the first bindable proxy port at or after the stable task candidate."""
+    first = literal_proxy_port(job_name)
+    first_offset = first - _LITERAL_PROXY_PORT_BASE
+    for offset in range(_LITERAL_PROXY_PORT_COUNT):
+        port = _LITERAL_PROXY_PORT_BASE + (first_offset + offset) % _LITERAL_PROXY_PORT_COUNT
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind((host, port))
+            except OSError:
+                continue
+        return port
+    raise RuntimeError(f"No free RecordProxy port on {host} in the configured range")
 
 
 def serve_token() -> str:

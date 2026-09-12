@@ -362,8 +362,8 @@ class LocalRLRunner:
             register_controller_endpoint,
         )
         from cloud.iris.literal_proxy_utils import (
-            literal_proxy_port,
             maybe_serve_literal_proxy,
+            select_literal_proxy_port,
         )
 
         if not self.config.ingress_host:
@@ -385,7 +385,7 @@ class LocalRLRunner:
                     "--parent_controller_config); needed to mint at iris.oa.dev."
                 )
 
-        proxy_port = literal_proxy_port(self.config.job_name)
+        proxy_port = select_literal_proxy_port(self.config.job_name, host="0.0.0.0")
         endpoint_name, register_address = controller_registration_plan(
             self.config.job_name,
             record_literal=self.config.record_literal,

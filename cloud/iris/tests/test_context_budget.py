@@ -134,9 +134,9 @@ def test_snowball_ultra_grid_pins_phase_data_and_secret_free_judge_config():
         phase = "rlvr1" if "rlvr1" in name else "rlvr2"
         ultra = source["environment"]["skyrl_gym"]["nemotron_ultra"]
 
-        assert source["data"]["train_data"] == [f"{dataset_root}/{phase}/train.parquet"]
-        assert source["data"]["val_data"] == [f"{dataset_root}/{phase}/validation.parquet"]
-        assert source["data"]["terminal_bench_data"] == [f"{dataset_root}/swe-tasks-v2/tasks.parquet"]
+        assert source["data"]["train_data"] == [f"{dataset_root}/tasktrove-v1/{phase}/train.parquet"]
+        assert source["data"]["val_data"] == [f"{dataset_root}/tasktrove-v1/{phase}/validation.parquet"]
+        assert source["data"]["terminal_bench_data"] == [f"{dataset_root}/tasktrove-swe-v1/tasks.parquet"]
         assert ultra["sandbox"] == {
             "host": "snowball-nemo-skills-sandbox.iris.svc.cluster.local",
             "port": 6000,
