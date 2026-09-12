@@ -15,16 +15,17 @@ def test_acceptance_swe_sandboxes_allow_agent_setup_traffic():
     assert config["terminal_bench"]["harbor"]["env_network_policy"] == {"mode": "unrestricted"}
 
 
-def test_snowball_configs_use_iris_sandboxes():
+def test_snowball_configs_use_daytona_sandboxes():
     config_dir = Path(__file__).parents[3] / "cloud/iris/configs"
     configs = sorted(config_dir.glob("snowball_ultra_rlvr[12]_*.yaml"))
     assert len(configs) == 4
 
     for path in configs:
         config = yaml.safe_load(path.read_text())
-        assert config["terminal_bench"]["harbor"]["import_path"] == (
-            "marinskyrl.iris_harbor_environment:IrisEnvironment"
-        )
+        harbor = config["terminal_bench"]["harbor"]
+        assert "import_path" not in harbor
+        assert harbor["auto_snapshot"] is False
+        assert harbor["env_network_policy"] == {"mode": "unrestricted"}
 
 
 def test_acceptance_verifier_server_implements_all_external_protocols():
