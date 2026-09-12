@@ -2,7 +2,8 @@
 # PP2 x EP8 Megatron nodes; one DP8/EP8 vLLM node serves and trains the draft.
 # The exact target revision is supplied to the launcher, while the immutable
 # public draft is staged from Hugging Face. This qualification configuration
-# requires one finite draft decision and install after every policy update.
+# requires one finite draft decision after every policy update; candidates that
+# pass the holdout gate are installed, while quality rejections retain the incumbent.
 entrypoint: standard
 
 context_budget:
