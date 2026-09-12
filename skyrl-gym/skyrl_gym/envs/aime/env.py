@@ -67,6 +67,26 @@ class AIMEEnv(BaseTextEnv):
 
     @staticmethod
     def aggregate_metrics(metrics: list[Dict[str, Any]]) -> Dict[str, float]:
+        if any("parser_protocol" in row for row in metrics):
+            if any(row.get("parser_protocol") != "post-thinking-native-v1" for row in metrics):
+                raise ValueError("AIME aggregation requires one declared parser protocol per batch")
+            # The post-thinking runner namespaces the original verifier diagnostics.
+            # Preserve that distinction: budget/outcome fractions here describe the
+            # legacy full-text verifier, while contract correctness keeps its own key.
+            legacy = [
+                {
+                    key.removeprefix("legacy_full_text/"): value
+                    for key, value in row.items()
+                    if key.startswith("legacy_full_text/")
+                }
+                for row in metrics
+            ]
+            aggregated = default_aggregate_metrics(metrics)
+            aggregated.update(
+                {f"legacy_full_text/{key}": value for key, value in AIMEEnv.aggregate_metrics(legacy).items()}
+            )
+            return aggregated
+
         def fraction(rows: list[Dict[str, Any]], key: str) -> float:
             return sum(bool(row[key]) for row in rows) / len(rows) if rows else 0.0
 

@@ -169,3 +169,80 @@ async def test_intervention_runner_preserves_actual_logprobs_masks_forced_action
     assert contract["intervention"]["original_engine_stop_reason"] == "stop"
     assert batch["stop_reasons"] == (["stop"] if kind == "force_close" else ["repetition"])
     assert contract["score_contract_completed"] == int(kind == "force_close")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response,stop_reason,legacy_correct,contract_correct",
+    [
+        ("Answer: 41 <|end_think|> Answer: 42 <|eot_id|>", "stop", 0, 1),
+        ("Answer: 42 <|end_think|> Answer: 41 <|eot_id|>", "stop", 0, 0),
+        ("Answer: 42 <|eot_id|>", "stop", 1, 0),
+        ("Answer: 41 <|end_think|> Answer: 42", "length", 0, 1),
+    ],
+)
+async def test_post_thinking_aime_aggregates_namespaced_diagnostics_and_retains_native_dump(
+    tmp_path, response, stop_reason, legacy_correct, contract_correct
+):
+    vocabulary = ["[UNK]", "<|start_think|>", "<|end_think|>", "<|eot_id|>", "Answer:", "41", "42", "question"]
+    decoder = Tokenizer(WordLevel(dict(zip(vocabulary, range(len(vocabulary)))), unk_token="[UNK]"))
+    decoder.pre_tokenizer = WhitespaceSplit()
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=decoder,
+        unk_token="[UNK]",
+        eos_token="<|eot_id|>",
+        additional_special_tokens=["<|start_think|>", "<|end_think|>"],
+    )
+    tokenizer.chat_template = "{% for m in messages %}{{ m['content'] }} <|eot_id|> {% endfor %}{% if add_generation_prompt %}<|start_think|>{% endif %}"
+    cfg = get_default_config()
+    cfg.generator.non_agentic_parser_protocol = "post-thinking-native-v1"
+    cfg.generator.max_turns = 1
+    cfg.generator.batched = False
+    cfg.generator.use_conversation_multi_turn = True
+    cfg.generator.sampling_params.logprobs = 0
+    cfg.generator.trajectory_retention.enabled = False
+    cfg.environment.skyrl_gym.max_env_workers = 0
+    client = RecordedModelClient(tokenizer, response, stop_reason)
+    # This is diagnostic-only: the generation request and its actual tokens stay intact.
+    cfg.environment.skyrl_gym.aime.evaluation_token_budget = len(client.tokens) - 1
+    extras = {"reward_model": {"ground_truth": "42"}}
+    runner = SkyRLGymTrajectoryRunner(cfg.generator, cfg.environment.skyrl_gym, None, tokenizer, model_client=client)
+    batch = await runner.run(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "env_classes": ["aime"],
+            "env_extras": [extras],
+            "sampling_params": None,
+            "trajectory_ids": None,
+            "batch_metadata": None,
+        },
+        disable_tqdm=True,
+    )
+    metrics = batch["rollout_metrics"]
+    assert metrics["environment/legacy_full_text/acc"] == legacy_correct
+    assert metrics["environment/legacy_full_text/over_evaluation_budget_fraction"] == 1
+    assert metrics["environment/legacy_full_text/correct_over_evaluation_budget_fraction"] == legacy_correct
+    assert metrics["environment/legacy_full_text/incorrect_over_evaluation_budget_fraction"] == 1 - legacy_correct
+    assert metrics["environment/legacy_full_text/answered_within_evaluation_budget_fraction"] == 0
+    assert metrics["environment/contract_correct"] == contract_correct
+    assert metrics["environment/score_contract_completed"] == contract_correct * int(stop_reason == "stop")
+    assert "environment/acc" not in metrics
+    assert batch["response_ids"] == [client.tokens]
+    assert batch["rollout_logprobs"] == [[-0.5] * len(client.tokens)]
+    expected_reward = 1.0 if contract_correct else -1.0
+    assert sum(batch["rewards"][0]) == expected_reward
+    dump_per_dataset_eval_results(
+        dump_dir_path=str(tmp_path),
+        tokenizer=tokenizer,
+        trajectory_batch=batch,
+        concat_data_sources=["aime"],
+        concat_all_envs=["aime"],
+        concat_env_extras=[extras],
+        eval_metrics={},
+        uids=["q1"],
+    )
+    dumped = json.loads((tmp_path / "aime.jsonl").read_text())
+    assert dumped["response_ids"] == client.tokens
+    assert sum(dumped["score"]) == expected_reward
+    assert dumped["non_agentic_contract"]["contract_correct"] == contract_correct
+    assert dumped["non_agentic_contract"]["score_contract_completed"] == contract_correct * int(stop_reason == "stop")
