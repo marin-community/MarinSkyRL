@@ -168,8 +168,8 @@ def test_online_speculator_capture_seals_target_snapshot_before_training_boundar
     assert trainer.inference_engine_client.begins == [
         {
             "step": 2,
-            "max_tokens": 262_144,
-            "max_sequences_per_prompt_group": 1,
+            "max_tokens": 8_192,
+            "max_sequences_per_prompt_group": 2,
             "target_revision": "policy-step-1",
             "draft_revision": "draft-step-1",
             "reserved_gpu_memory_gib": 8,

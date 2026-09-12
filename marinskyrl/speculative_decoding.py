@@ -133,11 +133,11 @@ class SpeculatorTrainingConfig:
     """Bounded single-rank online EAGLE update settings."""
 
     interval_steps: int = 1
-    max_tokens_per_update: int = 262_144
-    max_sequences_per_prompt_group: int = 1
-    min_train_sequences: int = 32
-    holdout_fraction: float = 0.05
-    min_holdout_sequences: int = 16
+    max_tokens_per_update: int = 8_192
+    max_sequences_per_prompt_group: int = 2
+    min_train_sequences: int = 8
+    holdout_fraction: float = 0.25
+    min_holdout_sequences: int = 4
     epochs_per_update: int = 1
     learning_rate: float = 5e-5
     max_validation_loss_increase: float = 0
