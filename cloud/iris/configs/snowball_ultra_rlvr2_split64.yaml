@@ -22,9 +22,6 @@ terminal_bench:
     override_cpus: 1
     override_memory_mb: 4096
     override_storage_mb: 4096
-    auto_snapshot: false
-    env_network_policy:
-      mode: unrestricted
     max_retries: 3
     n_concurrent_trials: 256
     enable_reward_shaping: false
