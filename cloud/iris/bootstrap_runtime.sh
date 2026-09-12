@@ -71,7 +71,7 @@ if [[ "$profile" == fsdp || "$profile" == fsdp-export ]]; then
   "$python" -c "import flash_attn, flash_attn_2_cuda"
 fi
 if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then
-  "$python" -c "import transformer_engine.common"
+  "$python" -c "import transformer_engine.common; from megatron.bridge import AutoBridge"
 fi
 if [[ "$profile" == *-export ]]; then
   "$python" -c "import ray, torch; from skyrl_train.checkpoint_exporter import CheckpointExporter"

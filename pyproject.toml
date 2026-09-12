@@ -36,7 +36,8 @@ dependencies = [
     "smart_open",
     "tensorboard",
     "tqdm>=4.66",
-    "transformers>=5.8.1,<5.9",
+    "tokenizers==0.23.1",
+    "transformers==5.16.1",
     "uvicorn",
     "wandb",
 ]
@@ -77,13 +78,13 @@ fsdp = [
     "torchtitan ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 vllm = [
-    # The CPU audio wheel uses Torch for GPU resampling without loading a cu130 extension.
+    # The CPU audio wheel uses Torch for GPU resampling without loading a cu132 extension.
     "torchaudio==2.11.0+cpu ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchcodec==0.16.0+cu132 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "accelerate>=1.14,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.16.post3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-python==0.6.16.post3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "harbor[analysis,datasets,daytona] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "harbor-config ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "peft>=0.19 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -177,9 +178,10 @@ no-build-isolation-package = [
 override-dependencies = [
     "nvidia-resiliency-ext ; sys_platform == 'never'",
     "fsspec==2026.4.0",
-    # Megatron Bridge pins an older FlashInfer; share the selected vLLM ABI.
-    "flashinfer-python==0.6.16.post3 ; sys_platform == 'linux'",
-    "flashinfer-cubin==0.6.16.post3 ; sys_platform == 'linux'",
+    # Megatron Bridge pins older serving libraries; share the selected vLLM ABI.
+    "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
+    "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux'",
+    "transformers==5.16.1 ; sys_platform == 'linux'",
     "opentelemetry-api==1.44.0 ; sys_platform == 'linux'",
     "opentelemetry-api ; sys_platform != 'linux'",
 ]

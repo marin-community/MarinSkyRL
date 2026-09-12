@@ -36,6 +36,7 @@ try:
         CompletionRequest,
         CompletionResponse,
     )
+
     try:
         from vllm.entrypoints.openai.engine.protocol import ErrorResponse
     except ImportError:
