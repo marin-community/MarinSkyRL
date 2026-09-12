@@ -14,14 +14,25 @@
 set -euo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:-$REPOSITORY_ROOT/.iris-nightly-env}"
+# The two backends resolve different dependency closures, so each gets its own environment path
+# and its own spec: thresholds cut from one backend say nothing about the other.
+STRATEGY="${STRATEGY:-fsdp2}"
+case "$STRATEGY" in
+  fsdp2) RUNTIME_PROFILE=fsdp ;;
+  megatron) RUNTIME_PROFILE=megatron ;;
+  *) echo "unsupported STRATEGY: $STRATEGY (expected fsdp2 or megatron)" >&2; exit 2 ;;
+esac
+NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:-$REPOSITORY_ROOT/.iris-nightly-env-$STRATEGY}"
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 MAX_STEPS="${MAX_STEPS:-30}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k_nightly}"
 LOG="${LOG:-$PWD/nightly-run.log}"
-SPEC="${SPEC:-ci/marin_nightly/specs/gsm8k-qwen3-0.6b.json}"
+SPEC="${SPEC:-ci/marin_nightly/specs/gsm8k-qwen3-0.6b-$STRATEGY.json}"
+# The identity every telemetry row joins on, and what a reader picks out of the Grafana run
+# dropdown. The workflow passes the real one; this fallback marks a hand run as one.
+RUN_ID="${RUN_ID:-nightly-gsm8k-h100-$STRATEGY-$(date -u +%Y.%m.%d)-manual}"
 source "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/resolve_runtime.sh" \
-  "$REPOSITORY_ROOT" "$NIGHTLY_RL_ENV" production
+  "$REPOSITORY_ROOT" "$NIGHTLY_RL_ENV" production "$RUNTIME_PROFILE"
 
 # The defaults below are the behavioural shape the shipped gate spec is calibrated against: 30
 # GRPO steps at batch 32 with 8 samples/prompt is enough for reward to visibly climb on a 0.6B
@@ -81,13 +92,36 @@ echo "::: shape: batch=${TRAIN_BATCH_SIZE} samples=${N_SAMPLES} gen_len=${MAX_GE
 # in this environment, so the warmup hard-fails at engine start. This is a bf16 model that never
 # uses FP8, so disable DeepGEMM outright. Exported so the Ray-spawned vLLM workers inherit it.
 export VLLM_USE_DEEP_GEMM=0
-# With no compiled flash-attn (see the sync step) the policy trains on eager attention
-# (trainer.flash_attn=false), and sample packing has to be disabled alongside it: packing
-# sequences into one relies on flash-attn's varlen kernel, so model_wrapper asserts
-# flash_attention_2 whenever use_sample_packing is true.
+# fsdp2 asks for flash attention and sample packing; bootstrap_runtime.sh asserts the import for
+# that profile, so the assertion that makes packing unusable cannot fire. Megatron needs neither.
+case "$STRATEGY" in
+  fsdp2) STRATEGY_ARGS=(
+    trainer.strategy=fsdp2
+    trainer.flash_attn=true
+    trainer.use_sample_packing=true
+  ) ;;
+  megatron) STRATEGY_ARGS=(
+    trainer.strategy=megatron
+    trainer.policy.megatron_config.tensor_model_parallel_size=1
+    trainer.policy.megatron_config.pipeline_model_parallel_size=1
+    trainer.ref.megatron_config.tensor_model_parallel_size=1
+    trainer.ref.megatron_config.pipeline_model_parallel_size=1
+  ) ;;
+esac
 START=$(date +%s)
-# This lane bypasses task_runtime.py, so resolve telemetry before starting the trainer.
-"$PYTHON" -m cloud.iris.telemetry_env -- \
+# The same entrypoint every marin-launched job uses, so this gates the real launch path. It
+# resolves the telemetry environment, starts a Ray head on the pinned metrics port, opens the Ray
+# collector, and supervises the driver. It stages nothing here: this lane passes no data or model
+# flags, so the policy still loads from the Hub cache. It refuses to start without the
+# runtime-bundle identity, which the workflow stamps on the runner -- the pod cannot produce one,
+# because Iris strips .git from the bundle it uploads.
+#
+# ELAPSED now covers Ray bring-up and teardown too, tens of seconds against a 1500s ceiling.
+# SKYRL_HOME names the runtime checkout the driver starts from; the entrypoint will not guess.
+export SKYRL_HOME="$REPOSITORY_ROOT"
+"$PYTHON" "$REPOSITORY_ROOT/cloud/iris/task_runtime.py" \
+  --run-id "$RUN_ID" \
+  -- \
   "$PYTHON" -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -95,9 +129,7 @@ START=$(date +%s)
   trainer.algorithm.use_kl_loss=true \
   trainer.policy.model.path="$MODEL" \
   trainer.policy.optimizer_config.lr="$LR" \
-  trainer.strategy=fsdp2 \
-  trainer.flash_attn=false \
-  trainer.use_sample_packing=false \
+  "${STRATEGY_ARGS[@]}" \
   trainer.placement.colocate_all=true \
   trainer.placement.policy_num_gpus_per_node=1 \
   trainer.placement.critic_num_gpus_per_node=1 \
@@ -139,3 +171,9 @@ echo "::: gating (run took ${ELAPSED}s)"
 
 echo "::: checking Grug PyTorch parity against the committed Levanter fixture"
 "$PYTHON" -m tests.grug_training_parity
+
+# Whether the run can be READ afterwards fails separately from whether it trained.
+echo "::: checking the run reached the dashboard"
+# The reporter exits zero on the failures it names; this covers the ones it cannot.
+"$PYTHON" -m ci.marin_nightly.dashboard_readiness --run-id "$RUN_ID" \
+  || echo "::: the readiness reporter itself failed; the run and its gate are unaffected"

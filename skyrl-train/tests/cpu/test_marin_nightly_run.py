@@ -30,7 +30,7 @@ def test_run_h100_exposes_checkout_packages_to_trainer(tmp_path: Path) -> None:
     shutil.copy2(NIGHTLY_SCRIPT, nightly_directory / NIGHTLY_SCRIPT.name)
     (nightly_directory / "resolve_runtime.sh").write_text(
         """#!/usr/bin/env bash
-[[ $# -eq 3 ]] || return 2
+[[ $# -eq 4 ]] || return 2
 [[ "$1" == "${REPOSITORY_ROOT}" ]] || return 3
 [[ "$2" == "${NIGHTLY_RL_ENV}" ]] || return 4
 PYTHON="$2/bin/python"
@@ -44,10 +44,25 @@ PYTHON="$2/bin/python"
     runtime = tmp_path / "rl-runtime"
     runtime_bin = runtime / "bin"
     runtime_bin.mkdir(parents=True)
+    # The lane invokes the trainer as `python <root>/cloud/iris/task_runtime.py --run-id X -- python
+    # -m skyrl_train.entrypoints.main_base ...`, so the stub has to step over the wrapper the way
+    # task_runtime does -- exec whatever follows `--` -- before the trainer branch can fire. It
+    # touches a marker there, and the test asserts the marker exists: without that, a stub that
+    # stops matching silently turns this whole test into an `exit 0`, which is what happened when
+    # the wrapper was introduced.
+    trainer_marker = tmp_path / "trainer-invoked"
     _write_executable(
         runtime_bin / "python",
         f"""#!/usr/bin/env bash
+if [[ "${{1:-}}" == *"/cloud/iris/task_runtime.py" ]]; then
+  shift
+  while [[ $# -gt 0 && "${{1:-}}" != "--" ]]; do shift; done
+  [[ "${{1:-}}" == "--" ]] || exit 90
+  shift
+  exec "$@"
+fi
 if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "skyrl_train.entrypoints.main_base" ]]; then
+  touch {shlex.quote(str(trainer_marker))}
   exec {shlex.quote(sys.executable)} -S -c 'import skyrl_train.env_vars'
 fi
 if [[ "${{1:-}}" == "-" ]]; then
@@ -79,3 +94,8 @@ exit 0
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert trainer_marker.exists(), (
+        "the lane never reached the trainer, so the PYTHONPATH assertion above never ran:\n"
+        + result.stdout
+        + result.stderr
+    )

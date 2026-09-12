@@ -20,7 +20,7 @@ from ci.marin_nightly.gate import (
     parse_metrics,
 )
 
-SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b.json"
+SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b-fsdp2.json"
 OPENCODE_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opencode-qwen3-8b.json"
 
 # What the trainer actually writes: loguru decorates the line, so the payload is embedded

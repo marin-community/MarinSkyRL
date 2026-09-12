@@ -1,0 +1,27 @@
+{
+  "provenance": {
+    "what": "Gate for the nightly single-H100 GRPO run on the Megatron backend: GSM8K, Qwen/Qwen3-0.6B, 30 training steps, tensor and pipeline parallel size 1, colocated vLLM rollouts.",
+    "produced_by": "ci/marin_nightly/run_h100.sh, submitted to Iris by .github/workflows/marin-nightly.yaml",
+    "why_these_thresholds": [
+      "Structural only: the step count is reached, the listed metrics are present and finite, and mean raw reward stays inside [0, 1] because the gsm8k environment scores each rollout 0 or 1.",
+      "reward_trend is deliberately absent. One observed Megatron run is not a distribution, and borrowing the fsdp2 threshold would assert that the two backends learn identically. Cut one from Megatron's own runs before adding it.",
+      "max_wall_clock_seconds is 1800, about 2x the 883s observed on cw-rno2a 2026-09-10 over this recipe. It is a hang backstop, not a budget."
+    ],
+    "tightening": "After the first green Megatron nights, cut reward_trend and max_wall_clock_seconds from the observed distribution the way the fsdp2 spec was cut.",
+    "observed": "2026-09-10, cw-rno2a, one H100, 30 steps: 883s end to end, median train_step 7.92s, mean 8.09s, max 10.8s. The fsdp2 lane on the same recipe and hardware: 667s, median 6.94s, mean 6.93s, max 7.38s. Megatron at tensor and pipeline size 1 adds coordination and buys no parallelism, so fsdp2 remains the lane default."
+  },
+  "min_train_steps": 30,
+  "finite_metrics": [
+    "policy/policy_loss",
+    "policy/final_loss",
+    "policy/policy_entropy",
+    "reward/avg_raw_reward"
+  ],
+  "bounds": {
+    "reward/avg_raw_reward": {
+      "minimum": 0.0,
+      "maximum": 1.0
+    }
+  },
+  "max_wall_clock_seconds": 1800
+}

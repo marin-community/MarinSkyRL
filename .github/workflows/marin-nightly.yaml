@@ -12,6 +12,9 @@ on:
       max_steps:
         description: "Training steps to run"
         default: "30"
+      strategy:
+        description: "Training backend for the GSM8K lane (fsdp2 or megatron)"
+        default: fsdp2
       target_cluster:
         description: "Iris cluster to federate the job to"
         default: cw-rno2a
@@ -68,12 +71,38 @@ jobs:
       JOB_NAME: marinskyrl-nightly-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
       MAX_STEPS: ${{ github.event.inputs.max_steps || '30' }}
       MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3-0.6B' }}
+      STRATEGY: ${{ github.event.inputs.strategy || 'fsdp2' }}
       TARGET_CLUSTER: ${{ matrix.target_cluster }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Trim the Iris bundle
         run: git rm -r --quiet skyrl-train/docs skyrl-agent
+
+      # task_runtime.py refuses to start without a runtime-bundle identity, and the pod cannot
+      # write one: Iris strips .git from the bundle, and the identity comes from a git checkout.
+      # Stamp it here, where the real launcher stamps it.
+      #
+      # The file MUST stay untracked and unignored. Committing it freezes hashes that go stale at
+      # the next edit to a bundled file; gitignoring it drops it from the bundle, because Iris
+      # collects with `git ls-files --exclude-standard`, and the pod then refuses to start.
+      - name: Stamp the runtime bundle identity
+        if: matrix.lane == 'gsm8k-h100'
+        run: |
+          PYTHONPATH=. python3 - <<'PY'
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          from cloud.iris.runtime_bundle import BUNDLE_IDENTITY_FILE, build_runtime_bundle
+
+          commit = subprocess.run(
+              ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+          ).stdout.strip()
+          workspace = build_runtime_bundle(commit)
+          shutil.copy2(workspace / BUNDLE_IDENTITY_FILE, Path(BUNDLE_IDENTITY_FILE))
+          print(f"stamped {BUNDLE_IDENTITY_FILE} for {commit}")
+          PY
 
       - uses: astral-sh/setup-uv@v7
 
@@ -99,7 +128,11 @@ jobs:
           set -o pipefail
           TASK_ENV=()
           if [[ "${{ matrix.lane }}" == "gsm8k-h100" ]]; then
-            TASK_ENV=(-e MODEL "$MODEL" -e MAX_STEPS "$MAX_STEPS")
+            # The attempt matters: a re-run reuses the workflow run id, and two runs sharing a
+            # telemetry identity overlay each other on the dashboard.
+            RUN_ID="nightly-${{ matrix.lane }}-$STRATEGY-$(date -u +%Y.%m.%d)-${{ github.run_id }}-${{ github.run_attempt }}"
+            echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+            TASK_ENV=(-e MODEL "$MODEL" -e MAX_STEPS "$MAX_STEPS" -e RUN_ID "$RUN_ID" -e STRATEGY "$STRATEGY")
           fi
           iris --cluster marin job run \
             --target-cluster "$TARGET_CLUSTER" \
@@ -114,6 +147,52 @@ jobs:
       - name: Cancel any Iris job the run left behind
         if: always()
         run: iris --cluster marin job cancel "/runner/$JOB_NAME" || true
+
+      # The report reaches the runner only through the streamed log. `iris job run` exits zero even
+      # when the task inside it dies, so a missing report means the lane never got that far.
+      - name: Summarize the run's dashboard
+        # Absent RUN_ID means the job failed in setup, so there is nothing to summarize.
+        if: always() && matrix.lane == 'gsm8k-h100' && env.RUN_ID != ''
+        run: |
+          python3 - "${{ matrix.log }}" "$RUN_ID" "$TARGET_CLUSTER" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          # `::warning::` is read from stdout; the summary is a file. One stream loses the other.
+          summary = open(os.environ["GITHUB_STEP_SUMMARY"], "a")
+          log, run_id, cluster = sys.argv[1], sys.argv[2], sys.argv[3]
+          url = (
+              f"https://grafana.oa.dev/d/marin-rl-runs?var-cluster={cluster}"
+              f"&var-run={run_id}&from=now-24h&to=now"
+          )
+          print(f"### RL run view\n\n[{run_id}]({url})\n", file=summary)
+
+          marker = "NIGHTLY_TELEMETRY_READINESS"
+          if not pathlib.Path(log).exists():
+              print("The lane produced no log, so it failed before training.", file=summary)
+              raise SystemExit(0)
+
+          lines = [line for line in pathlib.Path(log).read_text(errors="replace").splitlines() if marker in line]
+          if not lines:
+              print("The readiness report did not run, so the run may not be readable on the dashboard.", file=summary)
+              raise SystemExit(0)
+
+          report = json.loads(lines[-1].split(marker, 1)[1])
+          if "error" in report:
+              print(f"Readiness could not be checked: `{report['error']}`", file=summary)
+              raise SystemExit(0)
+
+          print("| signal | records | panel |", file=summary)
+          print("| --- | --- | --- |", file=summary)
+          for signal in report["signals"]:
+              mark = "" if signal["records"] else " :warning:"
+              print(f"| {signal['key']}{mark} | {signal['records']} | {signal['panel']} |", file=summary)
+          summary.close()
+          for key in report["missing"]:
+              print(f"::warning::no telemetry for {key}; its panel will be empty")
+          PY
 
       - uses: actions/upload-artifact@v7
         if: always()
