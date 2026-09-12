@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
@@ -14,7 +15,7 @@ import shutil
 import sys
 import tempfile
 import time
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 from uuid import uuid4
 
 from safetensors.torch import load_file
@@ -29,7 +30,10 @@ from skyrl_train.io import io
 
 _CANDIDATE_FORMAT = "marinskyrl-online-eagle-candidate"
 _CAPTURE_FORMAT = "vllm-online-eagle-capture"
+_FAILURE_FORMAT = "marinskyrl-online-eagle-failure"
 _SERVED_FORMAT = "marinskyrl-served-speculator"
+_TRAINER_STATE_FORMAT = "marinskyrl-online-eagle-trainer-state"
+_TRAINER_STATE_VERSION = 2
 _MANIFEST_FILENAME = "manifest.json"
 _MERGED_CAPTURE_DIRECTORY = "merged"
 ONLINE_EAGLE_SCRATCH_ROOT = Path("/tmp/marinskyrl-online-eagle")
@@ -56,6 +60,74 @@ def cleanup_online_eagle_training_job(job: Mapping[str, Any], *, remove_candidat
         remove_online_eagle_scratch(job["output_dir"])
 
 
+def preserve_online_eagle_failure(job: "OnlineEagleTrainingJob", error: BaseException) -> str:
+    """Hard-link the bounded inputs needed to diagnose one failed update."""
+    process_root = Path(job.output_dir).parents[1]
+    failure_root = process_root / "failures"
+    failure_root.mkdir(parents=True, exist_ok=True)
+    for prior in failure_root.iterdir():
+        if prior.is_dir():
+            shutil.rmtree(prior)
+        else:
+            prior.unlink()
+    destination = failure_root / f"step-{job.step}"
+    staging = destination.with_name(f".{destination.name}.tmp-{uuid4().hex}")
+    staging.mkdir()
+    try:
+        shutil.copytree(job.capture_dir, staging / "capture", copy_function=os.link)
+        shutil.copytree(job.draft_model_dir, staging / "incumbent", copy_function=os.link)
+        failure = {
+            "format": _FAILURE_FORMAT,
+            "format_version": 1,
+            "complete": True,
+            "step": job.step,
+            "error": f"{type(error).__name__}: {error}",
+            "capture_inventory": _directory_inventory(staging / "capture"),
+            "incumbent_inventory": _directory_inventory(staging / "incumbent"),
+        }
+        (staging / _MANIFEST_FILENAME).write_text(json.dumps(failure, indent=2, sort_keys=True))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging, destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return str(destination)
+
+
+def publish_online_eagle_failure_bundle(source: str, destination: str) -> dict[str, Any]:
+    """Publish one bounded forensic bundle, committing its manifest last."""
+    root = Path(source)
+    manifest_path = root / _MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("format") != _FAILURE_FORMAT or not manifest.get("complete", False):
+        raise ValueError(f"Invalid online EAGLE failure bundle: {source}")
+    destination_manifest = join_resource_path(destination, _MANIFEST_FILENAME)
+    if io.exists(destination_manifest):
+        existing = json.loads(io.read_bytes(destination_manifest))
+        if existing != manifest:
+            raise FileExistsError(f"A different online EAGLE failure bundle exists: {destination}")
+        return {**manifest, "path": destination_manifest}
+    if is_cloud_uri(destination):
+        io.upload_directory(str(root / "capture"), join_resource_path(destination, "capture"))
+        io.upload_directory(str(root / "incumbent"), join_resource_path(destination, "incumbent"))
+        for name in ("job.json", "trainer.log"):
+            path = root / name
+            if path.is_file():
+                io.upload_file(str(path), join_resource_path(destination, name))
+        io.upload_file(str(manifest_path), destination_manifest)
+    else:
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
+        shutil.copytree(root, staging)
+        try:
+            os.replace(staging, target)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    return {**manifest, "path": destination_manifest}
+
+
 def child_cuda_visible_device(visible_devices: str | None, device_index: int | None) -> str | None:
     """Resolve the parent worker's logical device to one child-visible device."""
     if device_index is None:
@@ -80,6 +152,7 @@ class OnlineEagleTrainingJob:
     initial_draft_source_identity: str
     output_dir: str
     result_path: str
+    failure_artifact_path: str
     num_speculative_tokens: int
     seed: int
     training: SpeculatorTrainingConfig
@@ -93,6 +166,7 @@ class OnlineEagleTrainingJob:
             "initial_draft_source_identity",
             "output_dir",
             "result_path",
+            "failure_artifact_path",
             "num_speculative_tokens",
             "seed",
             "training",
@@ -125,6 +199,11 @@ class OnlineEagleTrainingJob:
         ]
         if invalid_paths:
             raise ValueError(f"Online EAGLE job paths must be absolute: {', '.join(invalid_paths)}")
+        failure_artifact_path = value["failure_artifact_path"]
+        if not isinstance(failure_artifact_path, str) or not failure_artifact_path:
+            raise ValueError("Online EAGLE failure_artifact_path must be nonempty")
+        if not is_cloud_uri(failure_artifact_path) and not Path(failure_artifact_path).is_absolute():
+            raise ValueError("Online EAGLE failure_artifact_path must be an absolute path or cloud URI")
         initial_identity = value["initial_draft_source_identity"]
         if not isinstance(initial_identity, str) or not initial_identity:
             raise ValueError("Online EAGLE initial_draft_source_identity must be nonempty")
@@ -135,6 +214,7 @@ class OnlineEagleTrainingJob:
             initial_draft_source_identity=initial_identity,
             output_dir=paths["output_dir"],
             result_path=paths["result_path"],
+            failure_artifact_path=failure_artifact_path,
             num_speculative_tokens=num_speculative_tokens,
             seed=seed,
             training=SpeculatorTrainingConfig.from_mapping(value["training"], context="online EAGLE training job"),
@@ -193,6 +273,9 @@ class OnlineEagleUpdateResult:
     deferred: bool = False
     error: str | None = None
     log_path: str | None = None
+    failure_dir: str | None = None
+    failure_artifact_path: str | None = None
+    failure_preservation_error: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "OnlineEagleUpdateResult":
@@ -334,12 +417,26 @@ def export_served_speculator_checkpoint(source: str, destination: str) -> dict[s
     return {**manifest, "path": destination_manifest}
 
 
+def _validate_restored_trainer_state(path: Path) -> None:
+    if not path.is_file():
+        return
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    if (
+        state.get("format") != _TRAINER_STATE_FORMAT
+        or state.get("format_version") != _TRAINER_STATE_VERSION
+        or state.get("master_parameter_dtype") != str(torch.float32)
+        or "master_parameters" not in state
+    ):
+        raise ValueError(f"Incompatible online EAGLE trainer state: {path}")
+
+
 def restore_speculator_checkpoint(source: str, destination: str) -> dict[str, Any]:
     """Stage and validate a complete served-draft checkpoint for in-place reload."""
     with io.local_read_dir(source) as local_source:
         root = Path(local_source)
         manifest = _validate_served_speculator_root(root, source)
         weights = root / "weights"
+        _validate_restored_trainer_state(weights / "trainer_state.pt")
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
         staging = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
@@ -622,8 +719,74 @@ def _prepare_model(draft_model_dir: Path, capture_dir: Path, device: torch.devic
     for name, parameter in model.named_parameters():
         target_owned = name == "embed_tokens.weight" or name == "lm_head.weight" or name.startswith("verifier_")
         parameter.requires_grad_(not target_owned)
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    return model.to(device=device, dtype=dtype)
+    return model.to(device=device, dtype=_serving_dtype(device))
+
+
+def _serving_dtype(device: torch.device) -> torch.dtype:
+    return torch.bfloat16 if device.type == "cuda" else torch.float32
+
+
+def _forward_context(device: torch.device) -> Any:
+    if device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
+
+
+def _require_finite_tensor(tensor: torch.Tensor, *, label: str) -> None:
+    if (tensor.is_floating_point() or tensor.is_complex()) and not bool(torch.isfinite(tensor).all()):
+        raise FloatingPointError(f"Online EAGLE found a non-finite tensor: {label}")
+
+
+def _require_finite_trainable_state(model: nn.Module, optimizer: torch.optim.Optimizer | None = None) -> None:
+    for name, parameter in model.named_parameters():
+        if parameter.requires_grad:
+            _require_finite_tensor(parameter, label=f"parameter {name}")
+    if optimizer is not None:
+        for parameter_index, state in enumerate(optimizer.state.values()):
+            for name, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    _require_finite_tensor(value, label=f"optimizer parameter {parameter_index} state {name}")
+
+
+def _convert_trainable_parameters(model: nn.Module, dtype: torch.dtype) -> None:
+    with torch.no_grad():
+        for parameter in model.parameters():
+            if parameter.requires_grad:
+                parameter.data = parameter.data.to(dtype=dtype)
+    _require_finite_trainable_state(model)
+
+
+def _capture_trainable_master_state(model: nn.Module) -> dict[str, torch.Tensor]:
+    state = {
+        name: parameter.detach().to(device="cpu", dtype=torch.float32).contiguous()
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    if not state:
+        raise ValueError("Online EAGLE model has no trainable master parameters")
+    return state
+
+
+def _restore_trainable_master_state(
+    model: nn.Module,
+    state: Mapping[str, torch.Tensor],
+    *,
+    serving_dtype: torch.dtype,
+) -> None:
+    parameters = {name: parameter for name, parameter in model.named_parameters() if parameter.requires_grad}
+    if set(state) != set(parameters):
+        raise ValueError("Online EAGLE FP32 master tensor inventory does not match the draft model")
+    with torch.no_grad():
+        for name, parameter in parameters.items():
+            master = state[name]
+            if master.dtype != torch.float32 or master.shape != parameter.shape:
+                raise ValueError(f"Invalid online EAGLE FP32 master tensor: {name}")
+            _require_finite_tensor(master, label=f"FP32 master tensor {name}")
+            master = master.to(device=parameter.device)
+            if not torch.equal(master.to(dtype=serving_dtype), parameter.detach().to(dtype=serving_dtype)):
+                raise ValueError(f"Online EAGLE FP32 master does not round to the served tensor: {name}")
+            parameter.copy_(master)
+    _require_finite_trainable_state(model)
 
 
 def _load_batch(path: Path, device: torch.device) -> dict[str, torch.Tensor]:
@@ -639,31 +802,13 @@ def _load_batch(path: Path, device: torch.device) -> dict[str, torch.Tensor]:
         "position_ids": window["position_ids"][1:].unsqueeze(0),
     }
     batch["document_ids"] = torch.zeros_like(batch["input_ids"])
+    for name, value in batch.items():
+        _require_finite_tensor(value, label=f"capture {path} tensor {name}")
     return {name: value.to(device) for name, value in batch.items()}
 
 
-def _load_packed_batch(paths: list[Path], device: torch.device) -> dict[str, torch.Tensor]:
-    """Pack independent captures while preserving their attention boundaries."""
-    samples = [_load_batch(path, device) for path in paths]
-    batch = {
-        name: torch.cat([sample[name] for sample in samples], dim=1)
-        for name in (
-            "input_ids",
-            "hidden_states",
-            "verifier_last_hidden_states",
-            "loss_mask",
-            "position_ids",
-        )
-    }
-    batch["document_ids"] = torch.cat(
-        [torch.full_like(sample["input_ids"], document_id) for document_id, sample in enumerate(samples)],
-        dim=1,
-    )
-    return batch
-
-
 def _pack_windows(windows: list[dict[str, Any]], max_tokens: int) -> list[list[dict[str, Any]]]:
-    """Group captures into bounded packed sequences without splitting a window."""
+    """Group request-local forwards into bounded gradient-accumulation steps."""
     batches: list[list[dict[str, Any]]] = []
     batch: list[dict[str, Any]] = []
     batch_tokens = 0
@@ -678,6 +823,16 @@ def _pack_windows(windows: list[dict[str, Any]], max_tokens: int) -> list[list[d
     if batch:
         batches.append(batch)
     return batches
+
+
+def _load_window_group(
+    windows: list[dict[str, Any]],
+    capture_dir: Path,
+    device: torch.device,
+) -> Iterator[tuple[dict[str, Any], dict[str, torch.Tensor]]]:
+    """Load independent histories without crossing teacher-forcing boundaries."""
+    for window in windows:
+        yield window, _load_batch(capture_dir / window["path"], device)
 
 
 def _evaluate(
@@ -695,22 +850,27 @@ def _evaluate(
     total = 0.0
     model.eval()
     with torch.no_grad():
-        for packed_windows in _pack_windows(windows, max_tokens_per_micro_batch):
-            batch = _load_packed_batch(
-                [capture_dir / window["path"] for window in packed_windows],
-                next(model.parameters()).device,
-            )
-            _, loss, metrics = model(
-                **batch,
-                ttt_steps=num_speculative_tokens,
-                loss_config=loss_config,
-            )
-            supervised_tokens = float(batch["loss_mask"].sum())
-            weighted_loss += float(loss) * supervised_tokens
-            loss_tokens += supervised_tokens
-            for index in range(num_speculative_tokens):
-                correct += float(metrics[f"full_acc_{index}_sum"])
-                total += float(metrics[f"full_acc_{index}_total"])
+        for window_group in _pack_windows(windows, max_tokens_per_micro_batch):
+            device = next(model.parameters()).device
+            for window, batch in _load_window_group(window_group, capture_dir, device):
+                path = capture_dir / window["path"]
+                with _forward_context(device):
+                    _, loss, metrics = model(
+                        **batch,
+                        ttt_steps=num_speculative_tokens,
+                        loss_config=loss_config,
+                    )
+                _require_finite_tensor(loss, label=f"evaluation loss for {path}")
+                supervised_tokens = float(batch["loss_mask"].sum())
+                weighted_loss += float(loss) * supervised_tokens
+                loss_tokens += supervised_tokens
+                for index in range(num_speculative_tokens):
+                    correct_value = metrics[f"full_acc_{index}_sum"]
+                    total_value = metrics[f"full_acc_{index}_total"]
+                    _require_finite_tensor(correct_value, label=f"evaluation agreement numerator for {path}")
+                    _require_finite_tensor(total_value, label=f"evaluation agreement denominator for {path}")
+                    correct += float(correct_value)
+                    total += float(total_value)
     if loss_tokens == 0:
         raise ValueError("Online EAGLE holdout contains no supervised tokens")
     return OnlineEagleEvaluation(
@@ -719,11 +879,16 @@ def _evaluate(
     )
 
 
-def _candidate_state(model: nn.Module) -> dict[str, torch.Tensor]:
+def _candidate_state(model: nn.Module, *, serving_dtype: torch.dtype) -> dict[str, torch.Tensor]:
     state = {}
     for name, value in model.state_dict().items():
         target_owned = "embed_tokens" in name or name.startswith("verifier_")
         if not target_owned:
+            if value.is_floating_point() and value.dtype != serving_dtype:
+                raise ValueError(
+                    f"Online EAGLE candidate tensor {name} has dtype {value.dtype}, expected {serving_dtype}"
+                )
+            _require_finite_tensor(value, label=f"candidate tensor {name}")
             state[name] = value.detach().cpu().contiguous()
     return state
 
@@ -764,6 +929,9 @@ def _save_candidate(
     optimizer: torch.optim.Optimizer,
     output_dir: Path,
     lineage: dict[str, Any],
+    *,
+    serving_dtype: torch.dtype,
+    master_parameters: Mapping[str, torch.Tensor],
 ) -> dict[str, Any]:
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     staging = output_dir.with_name(f".{output_dir.name}.tmp-{uuid4().hex}")
@@ -771,7 +939,7 @@ def _save_candidate(
     try:
         model.save_pretrained(
             staging,
-            state_dict=_candidate_state(model),
+            state_dict=_candidate_state(model, serving_dtype=serving_dtype),
             safe_serialization=True,
             max_shard_size="5GB",
         )
@@ -782,6 +950,11 @@ def _save_candidate(
         trainer_state_path = staging / "trainer_state.pt"
         torch.save(
             {
+                "format": _TRAINER_STATE_FORMAT,
+                "format_version": _TRAINER_STATE_VERSION,
+                "master_parameter_dtype": str(torch.float32),
+                "served_parameter_dtype": str(serving_dtype),
+                "master_parameters": dict(master_parameters),
                 "optimizer": optimizer.state_dict(),
                 "torch_rng_state": torch.get_rng_state(),
                 "cuda_rng_state": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
@@ -836,13 +1009,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
     from speculators.losses import resolve_loss_config  # noqa: PLC0415
 
     loss_config = resolve_loss_config("kl_div", "fused" if device.type == "cuda" else "eager")
-    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    optimizer = torch.optim.AdamW(trainable, lr=training.learning_rate)
-    prior_trainer_state = draft_model_dir / "trainer_state.pt"
-    if prior_trainer_state.exists():
-        saved_state = torch.load(prior_trainer_state, map_location=device, weights_only=False)
-        optimizer.load_state_dict(saved_state["optimizer"])
-        _restore_rng_states(saved_state, device)
+    serving_dtype = _serving_dtype(device)
     incumbent = _evaluate(
         model,
         capture_dir,
@@ -851,6 +1018,29 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
         training.max_tokens_per_micro_batch,
         loss_config,
     )
+    _convert_trainable_parameters(model, torch.float32)
+    prior_trainer_state = draft_model_dir / "trainer_state.pt"
+    saved_state = None
+    if prior_trainer_state.exists():
+        saved_state = torch.load(prior_trainer_state, map_location=device, weights_only=False)
+        if (
+            saved_state.get("format") != _TRAINER_STATE_FORMAT
+            or saved_state.get("format_version") != _TRAINER_STATE_VERSION
+            or saved_state.get("master_parameter_dtype") != str(torch.float32)
+            or saved_state.get("served_parameter_dtype") != str(serving_dtype)
+        ):
+            raise ValueError(f"Incompatible online EAGLE trainer state: {prior_trainer_state}")
+        master_parameters = saved_state.pop("master_parameters", None)
+        if not isinstance(master_parameters, Mapping):
+            raise ValueError(f"Online EAGLE trainer state has no FP32 masters: {prior_trainer_state}")
+        _restore_trainable_master_state(model, master_parameters, serving_dtype=serving_dtype)
+        del master_parameters
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    optimizer = torch.optim.AdamW(trainable, lr=training.learning_rate)
+    if saved_state is not None:
+        optimizer.load_state_dict(saved_state["optimizer"])
+        _restore_rng_states(saved_state, device)
+    _require_finite_trainable_state(model, optimizer)
 
     weighted_train_loss = 0.0
     train_loss_tokens = 0.0
@@ -858,24 +1048,74 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
     for _epoch in range(training.epochs_per_update):
         epoch_windows = list(train_windows)
         random.shuffle(epoch_windows)
-        for packed_windows in _pack_windows(epoch_windows, training.max_tokens_per_micro_batch):
-            batch = _load_packed_batch([capture_dir / window["path"] for window in packed_windows], device)
+        for group_index, window_group in enumerate(_pack_windows(epoch_windows, training.max_tokens_per_micro_batch)):
+            group_supervised_tokens = sum(int(window["supervised_tokens"]) for window in window_group)
+            if group_supervised_tokens <= 0:
+                raise ValueError("Online EAGLE training microbatch contains no supervised tokens")
             optimizer.zero_grad(set_to_none=True)
-            _, loss, _metrics = model(
-                **batch,
-                ttt_steps=job.num_speculative_tokens,
-                loss_config=loss_config,
+            for window, batch in _load_window_group(window_group, capture_dir, device):
+                path = capture_dir / window["path"]
+                supervised_tokens = int(batch["loss_mask"].sum())
+                if supervised_tokens != int(window["supervised_tokens"]):
+                    raise ValueError(
+                        "Online EAGLE supervised-token count does not match its manifest: "
+                        f"{path} has {supervised_tokens}, manifest says {window['supervised_tokens']}"
+                    )
+                with _forward_context(device):
+                    _, loss, _metrics = model(
+                        **batch,
+                        ttt_steps=job.num_speculative_tokens,
+                        loss_config=loss_config,
+                    )
+                _require_finite_tensor(loss, label=f"training loss for {path}")
+                # Speculators' loss_function divides each window's masked loss
+                # sum by its supervised-token count. Weight the per-window mean
+                # here to reproduce one token-weighted optimizer microbatch.
+                (loss * (supervised_tokens / group_supervised_tokens)).backward()
+                weighted_train_loss += float(loss.detach()) * supervised_tokens
+                train_loss_tokens += supervised_tokens
+                print(
+                    json.dumps(
+                        {
+                            "kind": "online_eagle_microbatch",
+                            "step": job.step,
+                            "epoch": _epoch,
+                            "group": group_index,
+                            "request_id": window["request_id"],
+                            "path": str(path),
+                            "supervised_tokens": supervised_tokens,
+                            "loss": float(loss.detach()),
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+            gradient_norm = torch.nn.utils.clip_grad_norm_(
+                trainable,
+                max_norm=1.0,
+                error_if_nonfinite=True,
             )
-            if not torch.isfinite(loss):
-                raise FloatingPointError("Online EAGLE training produced a non-finite loss")
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(trainable, max_norm=1.0)
+            _require_finite_tensor(gradient_norm, label=f"gradient norm for group {group_index}")
             optimizer.step()
-            supervised_tokens = float(batch["loss_mask"].sum())
-            weighted_train_loss += float(loss.detach()) * supervised_tokens
-            train_loss_tokens += supervised_tokens
+            _require_finite_trainable_state(model, optimizer)
+            print(
+                json.dumps(
+                    {
+                        "kind": "online_eagle_optimizer_step",
+                        "step": job.step,
+                        "epoch": _epoch,
+                        "group": group_index,
+                        "supervised_tokens": group_supervised_tokens,
+                        "gradient_norm": float(gradient_norm),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
     if train_loss_tokens == 0:
         raise ValueError("Online EAGLE training partition contains no supervised tokens")
+    master_parameters = _capture_trainable_master_state(model)
+    _convert_trainable_parameters(model, serving_dtype)
     candidate = _evaluate(
         model,
         capture_dir,
@@ -928,6 +1168,8 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
                 "training": asdict(training),
                 "metrics": result.to_mapping(),
             },
+            serving_dtype=serving_dtype,
+            master_parameters=master_parameters,
         )
         result = replace(result, candidate_dir=str(output_dir), draft_revision=draft_revision)
     return result
@@ -943,9 +1185,22 @@ def main() -> int:
     try:
         result = run_training_job(job)
     except BaseException as error:
+        failure_dir = None
+        preservation_error = None
+        try:
+            failure_dir = preserve_online_eagle_failure(job, error)
+        except BaseException as failure_error:
+            preservation_error = f"{type(failure_error).__name__}: {failure_error}"
         _atomic_json(
             result_path,
-            {"active": True, "accepted": False, "error": f"{type(error).__name__}: {error}"},
+            {
+                "active": True,
+                "accepted": False,
+                "error": f"{type(error).__name__}: {error}",
+                "failure_dir": failure_dir,
+                "failure_artifact_path": job.failure_artifact_path,
+                "failure_preservation_error": preservation_error,
+            },
         )
         raise
     _atomic_json(result_path, result.to_mapping())

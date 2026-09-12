@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import random
+from types import SimpleNamespace
 
 import pytest
 from safetensors.torch import save_file
@@ -12,8 +13,11 @@ import torch
 
 import skyrl_train.inference_engines.vllm.online_eagle_trainer as online_eagle_trainer
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    _candidate_state,
+    _convert_trainable_parameters,
+    _restore_trainable_master_state,
     _load_batch,
-    _load_packed_batch,
+    _load_window_group,
     _restore_rng_states,
     candidate_is_acceptable,
     child_cuda_visible_device,
@@ -21,6 +25,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     export_served_speculator_checkpoint,
     merge_online_eagle_captures,
     partition_capture_windows,
+    preserve_online_eagle_failure,
     publish_speculator_checkpoint,
     remove_online_eagle_scratch,
     restore_speculator_checkpoint,
@@ -425,6 +430,42 @@ def test_training_job_cleanup_runs_in_managed_inference_scratch(tmp_path: Path, 
     assert not candidate_dir.exists()
 
 
+def test_failed_update_preserves_hardlinked_capture_and_incumbent(tmp_path: Path) -> None:
+    process_root = tmp_path / "process-id"
+    capture_dir = process_root / "step-7" / "merged"
+    incumbent_dir = process_root / "candidates" / "step-6"
+    output_dir = process_root / "candidates" / "step-7"
+    capture_dir.mkdir(parents=True)
+    incumbent_dir.mkdir(parents=True)
+    (capture_dir / "window.safetensors").write_bytes(b"capture")
+    (incumbent_dir / "model.safetensors").write_bytes(b"incumbent")
+    job = SimpleNamespace(
+        step=7,
+        capture_dir=str(capture_dir),
+        draft_model_dir=str(incumbent_dir),
+        output_dir=str(output_dir),
+    )
+
+    failure_dir = Path(preserve_online_eagle_failure(job, FloatingPointError("bad loss")))
+
+    manifest = json.loads((failure_dir / "manifest.json").read_text())
+    assert manifest["format"] == "marinskyrl-online-eagle-failure"
+    assert manifest["error"] == "FloatingPointError: bad loss"
+    assert (failure_dir / "capture" / "window.safetensors").stat().st_ino == (
+        capture_dir / "window.safetensors"
+    ).stat().st_ino
+    assert (failure_dir / "incumbent" / "model.safetensors").stat().st_ino == (
+        incumbent_dir / "model.safetensors"
+    ).stat().st_ino
+
+    job.step = 8
+    job.output_dir = str(process_root / "candidates" / "step-8")
+    next_failure_dir = Path(preserve_online_eagle_failure(job, RuntimeError("next failure")))
+
+    assert not failure_dir.exists()
+    assert next_failure_dir.name == "step-8"
+
+
 def test_scratch_cleanup_refuses_root_or_unmanaged_path(tmp_path: Path, monkeypatch) -> None:
     scratch_root = tmp_path / "marinskyrl-online-eagle"
     scratch_root.mkdir()
@@ -461,6 +502,39 @@ def test_candidate_gate_enforces_declared_loss_and_agreement_tolerances() -> Non
     assert not candidate_is_acceptable(candidate_loss=float("nan"), candidate_agreement=0.8, **common)
 
 
+def test_candidate_state_must_equal_declared_serving_dtype() -> None:
+    model = torch.nn.Linear(2, 2, bias=False).to(dtype=torch.float32)
+
+    with pytest.raises(ValueError, match=r"dtype torch.float32, expected torch.bfloat16"):
+        _candidate_state(model, serving_dtype=torch.bfloat16)
+
+    _convert_trainable_parameters(model, torch.bfloat16)
+    state = _candidate_state(model, serving_dtype=torch.bfloat16)
+
+    assert state["weight"].dtype == torch.bfloat16
+
+
+def test_fp32_master_must_round_to_the_served_checkpoint() -> None:
+    model = torch.nn.Linear(2, 2, bias=False).to(dtype=torch.bfloat16)
+    served = model.weight.detach().clone()
+    master = served.float()
+    _convert_trainable_parameters(model, torch.float32)
+
+    _restore_trainable_master_state(model, {"weight": master}, serving_dtype=torch.bfloat16)
+
+    assert torch.equal(model.weight, master)
+    assert torch.equal(model.weight.to(torch.bfloat16), served)
+
+
+def test_fp32_master_rejects_different_served_bytes() -> None:
+    model = torch.nn.Linear(2, 2, bias=False).to(dtype=torch.bfloat16)
+    master = model.weight.detach().float() + 1
+    _convert_trainable_parameters(model, torch.float32)
+
+    with pytest.raises(ValueError, match="does not round to the served tensor"):
+        _restore_trainable_master_state(model, {"weight": master}, serving_dtype=torch.bfloat16)
+
+
 def test_online_batch_uses_previous_aux_state_and_exact_next_target_head_input(
     tmp_path: Path,
 ) -> None:
@@ -485,7 +559,7 @@ def test_online_batch_uses_previous_aux_state_and_exact_next_target_head_input(
     assert batch["position_ids"].tolist() == [[5, 6]]
 
 
-def test_online_batch_packs_captures_with_distinct_attention_documents(tmp_path: Path) -> None:
+def test_online_window_group_keeps_teacher_forcing_histories_independent(tmp_path: Path) -> None:
     paths = [tmp_path / "first.safetensors", tmp_path / "second.safetensors"]
     save_file(
         {
@@ -508,14 +582,31 @@ def test_online_batch_packs_captures_with_distinct_attention_documents(tmp_path:
         str(paths[1]),
     )
 
-    batch = _load_packed_batch(paths, torch.device("cpu"))
+    windows = [{"path": path.name} for path in paths]
+    loaded = list(_load_window_group(windows, tmp_path, torch.device("cpu")))
 
-    assert batch["input_ids"].tolist() == [[20, 30, 50, 60, 70]]
-    assert batch["hidden_states"].tolist() == [[[1.0], [2.0], [4.0], [5.0], [6.0]]]
-    assert batch["verifier_last_hidden_states"].tolist() == [[[12.0], [13.0], [15.0], [16.0], [17.0]]]
-    assert batch["loss_mask"].tolist() == [[True, True, True, False, True]]
-    assert batch["position_ids"].tolist() == [[5, 6, 11, 12, 13]]
-    assert batch["document_ids"].tolist() == [[0, 0, 1, 1, 1]]
+    assert [window for window, _batch in loaded] == windows
+    assert loaded[0][1]["input_ids"].tolist() == [[20, 30]]
+    assert loaded[1][1]["input_ids"].tolist() == [[50, 60, 70]]
+    assert loaded[0][1]["document_ids"].tolist() == [[0, 0]]
+    assert loaded[1][1]["document_ids"].tolist() == [[0, 0, 0]]
+
+
+def test_online_batch_rejects_nonfinite_capture_with_tensor_and_path(tmp_path: Path) -> None:
+    path = tmp_path / "corrupt-window.safetensors"
+    save_file(
+        {
+            "input_ids": torch.tensor([10, 20, 30]),
+            "hidden_states": torch.tensor([[1.0], [float("nan")], [3.0]]),
+            "head_input_hidden_states": torch.tensor([[11.0], [12.0], [13.0]]),
+            "loss_mask": torch.tensor([False, True, True]),
+            "position_ids": torch.tensor([4, 5, 6]),
+        },
+        str(path),
+    )
+
+    with pytest.raises(FloatingPointError, match=r"corrupt-window.*hidden_states"):
+        _load_batch(path, torch.device("cpu"))
 
 
 def test_served_speculator_checkpoint_is_exact_idempotent_and_restorable(tmp_path: Path) -> None:
@@ -547,6 +638,24 @@ def test_served_speculator_checkpoint_is_exact_idempotent_and_restorable(tmp_pat
     normalized = json.loads((tmp_path / "restored" / "manifest.json").read_text())
     assert normalized["format"] == "marinskyrl-online-eagle-candidate"
     assert normalized["complete"] is True
+
+
+def test_restore_rejects_legacy_online_trainer_state_once(tmp_path: Path) -> None:
+    source = tmp_path / "candidate"
+    source.mkdir()
+    (source / "config.json").write_text('{"speculators_model_type":"eagle3"}')
+    save_file({"owned.weight": torch.ones(2, 2)}, str(source / "model.safetensors"))
+    torch.save({"optimizer": {}}, source / "trainer_state.pt")
+    checkpoint = tmp_path / "global_step_7" / "speculator"
+    publish_speculator_checkpoint(
+        str(source),
+        str(checkpoint),
+        draft_revision="draft-step-7",
+        served_target_revision="policy-step-7",
+    )
+
+    with pytest.raises(ValueError, match="Incompatible online EAGLE trainer state"):
+        restore_speculator_checkpoint(str(checkpoint), str(tmp_path / "restored"))
 
 
 def test_served_speculator_export_preserves_the_exact_checkpoint(tmp_path: Path) -> None:

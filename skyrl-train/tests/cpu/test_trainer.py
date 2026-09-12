@@ -253,6 +253,7 @@ def test_online_speculator_update_overlaps_then_installs_at_boundary():
     assert job["capture_dir"].endswith("/step-2")
     assert job["draft_model_dir"] == "/tmp/draft"
     assert job["initial_draft_source_identity"] == "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
+    assert job["failure_artifact_path"] == "/checkpoints/speculator-failures/step-2"
     assert job["seed"] == 17
     assert trainer.all_metrics["speculator/captured_rows"] == 72.0
     assert trainer.all_metrics["speculator/captured_windows"] == 2.0

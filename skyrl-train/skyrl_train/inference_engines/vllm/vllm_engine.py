@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import threading
@@ -24,10 +25,13 @@ from skyrl_train.config.behavior_logprobs import (
     validate_behavior_logprob_sampling,
 )
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    OnlineEagleTrainingJob,
     capture_rank_directory,
     child_cuda_visible_device,
     cleanup_online_eagle_training_job,
     merge_online_eagle_captures,
+    preserve_online_eagle_failure,
+    publish_online_eagle_failure_bundle,
     publish_speculator_checkpoint,
     remove_online_eagle_scratch,
     restore_speculator_checkpoint,
@@ -506,6 +510,29 @@ class WorkerWrap:
                         "error": f"Online EAGLE trainer exited {returncode} without a result",
                     }
                 result["returncode"] = returncode
+            if result.get("error") and not result.get("deferred", False):
+                failure_dir = result.get("failure_dir")
+                if not failure_dir:
+                    try:
+                        failure_dir = preserve_online_eagle_failure(
+                            OnlineEagleTrainingJob.from_mapping(job),
+                            RuntimeError(str(result["error"])),
+                        )
+                        result["failure_dir"] = failure_dir
+                    except BaseException as error:
+                        result["failure_preservation_error"] = f"{type(error).__name__}: {error}"
+                if failure_dir:
+                    failure_root = Path(failure_dir)
+                    shutil.copy2(self._online_eagle_trainer_log, failure_root / "trainer.log")
+                    shutil.copy2(Path(job["output_dir"]).with_suffix(".job.json"), failure_root / "job.json")
+                    try:
+                        published = publish_online_eagle_failure_bundle(
+                            str(failure_root),
+                            job["failure_artifact_path"],
+                        )
+                        result["failure_artifact_path"] = published["path"]
+                    except BaseException as error:
+                        result["failure_preservation_error"] = f"{type(error).__name__}: {error}"
             result["worker_rank"] = worker_rank
             result["log_path"] = self._online_eagle_trainer_log
             remove_candidate = not result.get("accepted", False)

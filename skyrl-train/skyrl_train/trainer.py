@@ -714,6 +714,11 @@ class RayPPOTrainer:
             initial_draft_source_identity=self.speculative_decoding.model.source_identity,
             output_dir=candidate_dir,
             result_path=f"{candidate_dir}.result.json",
+            failure_artifact_path=join_resource_path(
+                self.cfg.trainer.ckpt_path,
+                "speculator-failures",
+                f"step-{self.global_step}",
+            ),
             num_speculative_tokens=self.speculative_decoding.num_speculative_tokens,
             seed=int(self.cfg.trainer.seed),
             training=training,
@@ -795,10 +800,13 @@ class RayPPOTrainer:
         if result.error:
             self._speculator_update_failures += 1
             logger.error(
-                "Online EAGLE update failed: step={} error={} log_path={}",
+                "Online EAGLE update failed: step={} error={} log_path={} failure_artifact_path={} "
+                "failure_preservation_error={}",
                 self.global_step,
                 result.error,
                 result.log_path,
+                result.failure_artifact_path,
+                result.failure_preservation_error,
             )
         if result.accepted:
             if result.candidate_dir is None or result.draft_revision is None:
