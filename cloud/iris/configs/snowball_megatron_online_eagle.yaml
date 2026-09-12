@@ -74,7 +74,7 @@ generator:
     num_speculative_tokens: 3
     training:
       interval_steps: 1
-      max_tokens_per_update: 8192
+      max_tokens_per_update: 16384
       max_tokens_per_micro_batch: 2048
       max_sequences_per_prompt_group: 2
       min_train_sequences: 8

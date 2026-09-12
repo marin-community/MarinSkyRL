@@ -86,6 +86,7 @@ def test_managed_speculator_reaches_hydra_with_immutable_source_unchanged(tmp_pa
     }
     assert resolved.training is not None
     assert resolved.training.interval_steps == 1
+    assert resolved.training.max_tokens_per_update == 16_384
     assert resolved.training.reserved_gpu_memory_gib == 8
     assert resolved.training.max_validation_loss_increase == 0
     assert resolved.training.max_validation_agreement_decrease == 0
