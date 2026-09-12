@@ -415,8 +415,11 @@ def _prepare_model(draft_model_dir: Path, capture_dir: Path, device: torch.devic
         draft_model_dir,
         local_files_only=True,
     )
-    if device.type != "cuda":
-        config.transformer_layer_config._attn_implementation = "eager"  # noqa: SLF001
+    # Speculators' FlexAttention mask is block-padded, but online captures retain
+    # their exact sequence length. EAGLE's time-shift extension can therefore
+    # produce real Q/KV dimensions smaller than the padded BlockMask contract.
+    # This bounded one-layer trainer favors exact mask semantics over that kernel.
+    config.transformer_layer_config._attn_implementation = "eager"  # noqa: SLF001
     # The public embedding-free Snowball checkpoint intentionally has no verifier
     # path. Bypass Speculators' generic post-load verifier hook because the exact
     # target-owned tensors come from this sealed rollout, not a second HF model.
