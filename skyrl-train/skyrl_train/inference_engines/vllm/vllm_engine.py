@@ -24,6 +24,7 @@ from skyrl_train.config.behavior_logprobs import (
     validate_behavior_logprob_sampling,
 )
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    child_cuda_visible_device,
     publish_speculator_checkpoint,
     restore_speculator_checkpoint,
 )
@@ -412,14 +413,9 @@ class WorkerWrap:
         log_path = output_dir.with_suffix(".log")
         job_path.write_text(json.dumps(job, indent=2, sort_keys=True))
         environment = dict(os.environ)
-        visible_devices = environment.get("CUDA_VISIBLE_DEVICES")
-        device_index = self.device.index
-        if visible_devices and device_index is not None:
-            devices = visible_devices.split(",")
-            if device_index < len(devices):
-                environment["CUDA_VISIBLE_DEVICES"] = devices[device_index]
-        elif device_index is not None:
-            environment["CUDA_VISIBLE_DEVICES"] = str(device_index)
+        child_device = child_cuda_visible_device(environment.get("CUDA_VISIBLE_DEVICES"), self.device.index)
+        if child_device is not None:
+            environment["CUDA_VISIBLE_DEVICES"] = child_device
         # Speculators decorates its CUDA forward with torch.compile at import
         # time. A fresh subprocess runs only one bounded update, so compilation
         # cannot amortize and can consume the entire rollout-boundary budget.

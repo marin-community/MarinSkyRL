@@ -11,11 +11,31 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     _load_batch,
     _load_packed_batch,
     candidate_is_acceptable,
+    child_cuda_visible_device,
     export_served_speculator_checkpoint,
     partition_capture_windows,
     publish_speculator_checkpoint,
     restore_speculator_checkpoint,
 )
+
+
+@pytest.mark.parametrize(
+    ("visible_devices", "device_index", "child_device"),
+    [
+        (None, None, None),
+        (None, 2, "2"),
+        ("4,7", 1, "7"),
+        ("GPU-first,GPU-second", 0, "GPU-first"),
+    ],
+)
+def test_child_cuda_visible_device_follows_parent_mapping(visible_devices, device_index, child_device) -> None:
+    assert child_cuda_visible_device(visible_devices, device_index) == child_device
+
+
+@pytest.mark.parametrize(("visible_devices", "device_index"), [("4,7", -1), ("4,7", 2), ("4,,7", 1)])
+def test_child_cuda_visible_device_rejects_invalid_mapping(visible_devices, device_index) -> None:
+    with pytest.raises(RuntimeError, match="CUDA_VISIBLE_DEVICES"):
+        child_cuda_visible_device(visible_devices, device_index)
 
 
 def test_capture_partition_is_deterministic_disjoint_and_satisfies_minima() -> None:

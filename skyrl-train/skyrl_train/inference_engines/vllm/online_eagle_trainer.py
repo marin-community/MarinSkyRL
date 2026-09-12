@@ -33,6 +33,20 @@ _SERVED_FORMAT = "marinskyrl-served-speculator"
 _MANIFEST_FILENAME = "manifest.json"
 
 
+def child_cuda_visible_device(visible_devices: str | None, device_index: int | None) -> str | None:
+    """Resolve the parent worker's logical device to one child-visible device."""
+    if device_index is None:
+        return None
+    if not visible_devices:
+        return str(device_index)
+    devices = [device.strip() for device in visible_devices.split(",")]
+    if any(not device for device in devices):
+        raise RuntimeError(f"Invalid CUDA_VISIBLE_DEVICES mapping: {visible_devices!r}")
+    if device_index < 0 or device_index >= len(devices):
+        raise RuntimeError(f"CUDA device index {device_index} is outside CUDA_VISIBLE_DEVICES={','.join(devices)}")
+    return devices[device_index]
+
+
 @dataclass(frozen=True)
 class OnlineEagleTrainingJob:
     """Validated subprocess contract for one bounded draft update."""

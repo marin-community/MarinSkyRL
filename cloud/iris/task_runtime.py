@@ -178,6 +178,7 @@ RAY_START_HEAD_TIMEOUT = 300  # seconds
 # Failure reporting must never keep an Iris task alive after its driver exits.
 FAILURE_ARTIFACT_TIMEOUT = 30
 HF_SNAPSHOT_ATTEMPT_TIMEOUT_SECONDS = 600
+REMOTE_MODEL_DOWNLOAD_ATTEMPTS = 3
 # Allow healthy policy phases longer than one hour while bounding a live but silent driver.
 DEFAULT_DRIVER_LIVENESS_TIMEOUT = 9000
 DRIVER_WATCHDOG_POLL_INTERVAL = 1.0
@@ -323,7 +324,7 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
         # truncated file that the size-skip would later treat as complete.
         tmp_dest = dest + ".otwarm.partial"
         last_exc: BaseException | None = None
-        for attempt in range(1, 4):
+        for attempt in range(1, REMOTE_MODEL_DOWNLOAD_ATTEMPTS + 1):
             try:
                 client.download_file(bucket, key, tmp_dest)
                 os.replace(tmp_dest, dest)
@@ -333,7 +334,9 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
                 break
             except Exception as exc:  # noqa: BLE001 - retry a few times, then fail loud
                 last_exc = exc
-                _log(f"warm sync: download attempt {attempt}/3 for {key} failed ({exc!r})")
+                _log(
+                    f"warm sync: download attempt {attempt}/{REMOTE_MODEL_DOWNLOAD_ATTEMPTS} for {key} failed ({exc!r})"
+                )
                 try:
                     os.path.exists(tmp_dest) and os.remove(tmp_dest)
                 except OSError:
@@ -342,7 +345,10 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
         if last_exc is not None:
             # A partial in-region sync would leave a broken cache; fail this warm attempt so
             # the caller falls back to the HF prestage rather than shipping a corrupt cache.
-            _log(f"warm sync: giving up on {key} after 3 attempts ({last_exc!r}); HF fallback")
+            _log(
+                f"warm sync: giving up on {key} after {REMOTE_MODEL_DOWNLOAD_ATTEMPTS} attempts "
+                f"({last_exc!r}); HF fallback"
+            )
             return False
 
     # Point refs/main at the synthetic snapshot so offline resolution finds it.
@@ -531,7 +537,7 @@ def _stage_hf_speculator_snapshot(model: SpeculatorModelConfig) -> None:
     )
     try:
         last_error = ""
-        for attempt in range(1, 4):
+        for attempt in range(1, REMOTE_MODEL_DOWNLOAD_ATTEMPTS + 1):
             try:
                 process = subprocess.run(
                     [
@@ -554,7 +560,7 @@ def _stage_hf_speculator_snapshot(model: SpeculatorModelConfig) -> None:
                 if process.returncode == 0:
                     break
                 last_error = (process.stderr or process.stdout or "")[-800:]
-            _log(f"Speculator snapshot attempt {attempt}/3 failed: {last_error}")
+            _log(f"Speculator snapshot attempt {attempt}/{REMOTE_MODEL_DOWNLOAD_ATTEMPTS} failed: {last_error}")
             time.sleep(min(30, 2**attempt))
         else:
             raise RuntimeError(
