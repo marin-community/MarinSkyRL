@@ -117,7 +117,6 @@ from cloud.iris.rl_config_translation import (
     RL_CONFIG_PAYLOAD_ENV,
     RL_CONFIG_TASK_DIR,
     format_hydra_arg,
-    parse_rl_config,
     resolve_rl_entrypoint,
     resolve_rl_config_path,
 )
@@ -2057,8 +2056,11 @@ def _speculator_bootstrap_args(args: argparse.Namespace) -> list[str]:
     """Forward the validated immutable draft locator to each task controller."""
     if _is_checkpoint_export(args):
         return []
-    parsed = parse_rl_config(args.rl_config)
-    value = parsed.generator.get("speculative_decoding")
+    raw = _load_rl_config_yaml(args.rl_config)
+    generator = raw.get("generator") or {}
+    if not isinstance(generator, dict):
+        raise ValueError(f"{args.rl_config}: generator must be a mapping")
+    value = generator.get("speculative_decoding")
     if value is None:
         return []
     speculator = SpeculativeDecodingConfig.from_mapping(value)
