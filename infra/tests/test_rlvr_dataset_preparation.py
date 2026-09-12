@@ -3,7 +3,13 @@ import json
 import datasets
 import pytest
 
-from infra.rl_data.preparation import PreparationOptions, prepare_artifact, write_artifact, write_bundle
+from infra.rl_data.preparation import (
+    PreparationOptions,
+    ordered_tail_holdout,
+    prepare_artifact,
+    write_artifact,
+    write_bundle,
+)
 from infra.rl_data.mixtures import MixtureSlice, MixtureSpec, load_mixture_spec, prepare_mixture
 from infra.rl_data.sources import (
     _restore_nemotron_ultra_placeholder,
@@ -201,6 +207,35 @@ def test_nemotron_ultra_blend_keeps_duplicate_prompts_in_source_order():
 
     assert [row["extra_info"]["nemotron_ultra"]["uuid"] for row in artifact.rows] == ["first", "second"]
     assert artifact.provenance["counts"]["unique_rows"] == 2
+
+
+def test_ordered_tail_holdout_preserves_source_boundary_and_reindexes_splits():
+    artifact = prepare_artifact(
+        nemotron_ultra_rlvr1_source(),
+        [_nemotron_ultra_pivot_row(uuid=f"row-{index}", prompt=f"prompt {index}") for index in range(5)],
+        NemotronUltraContract(),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(source_revision="fixture", max_prompt_tokens=100, minimum_unique_rows=5),
+    )
+
+    train, validation = ordered_tail_holdout(artifact, validation_rows=2)
+
+    assert [row["extra_info"]["nemotron_ultra"]["uuid"] for row in train.rows] == ["row-0", "row-1", "row-2"]
+    assert [row["extra_info"]["nemotron_ultra"]["uuid"] for row in validation.rows] == ["row-3", "row-4"]
+    assert [row["extra_info"]["index"] for row in train.rows] == [0, 1, 2]
+    assert [row["extra_info"]["index"] for row in validation.rows] == [0, 1]
+    assert {row["extra_info"]["split"] for row in train.rows} == {"train"}
+    assert {row["extra_info"]["split"] for row in validation.rows} == {"validation"}
+    assert artifact.rows[3]["extra_info"]["split"] == "train"
+    assert train.provenance["partition"] == {
+        "strategy": "ordered_tail_holdout",
+        "source_rows": 5,
+        "start_index": 0,
+        "end_index": 3,
+        "validation_rows": 2,
+    }
+    assert validation.provenance["partition"]["start_index"] == 3
+    assert validation.provenance["partition"]["end_index"] == 5
 
 
 def test_nemotron_ultra_adapter_rejects_an_unknown_agent():
