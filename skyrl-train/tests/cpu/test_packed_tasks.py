@@ -25,7 +25,7 @@ from marinskyrl.task_sources import (
 from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset
 
 
-def _task_binary(name: str, *, solution: bool = False) -> bytes:
+def _task_binary(name: str, *, solution: bool = False, unsafe_path: bool = False) -> bytes:
     files = {
         "instruction.md": f"Do {name}".encode(),
         "task.toml": b"[environment]\n",
@@ -34,6 +34,8 @@ def _task_binary(name: str, *, solution: bool = False) -> bytes:
     }
     if solution:
         files["solution/solve.sh"] = b"#!/bin/sh\n"
+    if unsafe_path:
+        files["../escape"] = b"escaped"
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as archive:
         for path, content in files.items():
@@ -43,7 +45,7 @@ def _task_binary(name: str, *, solution: bool = False) -> bytes:
     return gzip.compress(buffer.getvalue(), mtime=0)
 
 
-def _write_dataset(path: Path, *, include_solution: bool = False) -> None:
+def _write_dataset(path: Path, *, include_solution: bool = False, include_unsafe_path: bool = False) -> None:
     schema = pa.schema(
         [
             ("source", pa.string()),
@@ -88,7 +90,7 @@ def _write_dataset(path: Path, *, include_solution: bool = False) -> None:
                 "mode": "pytest",
                 "path": "task-4",
                 "dockerfile_id": "env-c",
-                "task_binary": _task_binary("four", solution=include_solution),
+                "task_binary": _task_binary("four", solution=include_solution, unsafe_path=include_unsafe_path),
             },
         ],
     ]
@@ -190,4 +192,14 @@ def test_packed_materializer_rejects_solution_files(tmp_path: Path) -> None:
     reference = select_task_references(source).references[0]
 
     with pytest.raises(PackedTaskArchiveError, match="solution"):
+        PackedTaskMaterializer(tmp_path / "cache").materialize_batch([reference])
+
+
+def test_packed_materializer_rejects_parent_traversal(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "tasks.parquet"
+    _write_dataset(dataset_path, include_unsafe_path=True)
+    source = _source(dataset_path, TaskTroveSelection(sources=("source-c",)))
+    reference = select_task_references(source).references[0]
+
+    with pytest.raises(PackedTaskArchiveError, match="Unsafe task archive path"):
         PackedTaskMaterializer(tmp_path / "cache").materialize_batch([reference])
