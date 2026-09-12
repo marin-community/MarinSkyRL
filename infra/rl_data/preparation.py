@@ -68,12 +68,16 @@ class ConversionResult:
 
 def _prompt_content(row: PreparedRow) -> str:
     prompt = row.get("prompt")
-    if not isinstance(prompt, list) or len(prompt) != 1:
-        raise ValueError("Prepared row must contain exactly one chat prompt.")
-    content = prompt[0].get("content") if isinstance(prompt[0], Mapping) else None
-    if not isinstance(content, str) or not content:
-        raise ValueError("Prepared row must contain non-empty user content.")
-    return content
+    if not isinstance(prompt, list) or not prompt or not all(isinstance(message, Mapping) for message in prompt):
+        raise ValueError("Prepared row must contain a non-empty chat conversation.")
+    if len(prompt) == 1:
+        content = prompt[0].get("content")
+        if not isinstance(content, str) or not content:
+            raise ValueError("Prepared row must contain non-empty user content.")
+        return content
+    if not any(isinstance(message.get("content"), str) and message["content"] for message in prompt):
+        raise ValueError("Prepared row conversation must contain non-empty text content.")
+    return json.dumps(prompt, ensure_ascii=False, sort_keys=True)
 
 
 def _validate_row(row: PreparedRow, source: Source) -> None:
@@ -130,7 +134,7 @@ def _convert_rows(
         _validate_row(row, source)
         converted_rows += 1
         prompt = _prompt_content(row)
-        if prompt in seen_prompts:
+        if source.deduplicate_by_prompt and prompt in seen_prompts:
             continue
         seen_prompts.add(prompt)
         unique_rows.append(row)
@@ -249,6 +253,7 @@ def prepare_artifact(
         "conversion_failures": [failure.provenance() for failure in conversion.failures],
         "prompt_tokens": token_summary,
         "verification": source.verification,
+        "deduplicate_by_prompt": source.deduplicate_by_prompt,
     }
     return PreparedArtifact(rows=rows, provenance=provenance)
 

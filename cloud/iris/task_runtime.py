@@ -2006,6 +2006,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="JSON list of validation datasets to stage in node-local task storage on every node before Ray starts.",
     )
     parser.add_argument(
+        "--terminal-bench-data",
+        default="",
+        help="JSON list of mixed-run terminal task datasets to stage on every node.",
+    )
+    parser.add_argument(
         "--data-sources-json",
         default="",
         help="Immutable object-store data locators to materialize before Ray starts.",
@@ -2113,6 +2118,8 @@ def main() -> None:
         stage_task_data(args.train_data, role="training")
     if args.val_data:
         stage_task_data(args.val_data, role="validation")
+    if args.terminal_bench_data:
+        stage_task_data(args.terminal_bench_data, role="terminal-bench sidechannel")
     if args.data_sources_json:
         materialize_data_sources(args.data_sources_json)
     if args.model_source_uri:

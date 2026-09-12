@@ -37,6 +37,7 @@ _CONFIGS = {
     "64GPU_qwen3_6_35b_a3b.yaml": (131072, 16384, 999999),
     "delphi_math_rl.yaml": (4096, 3584, 1),
     "delphi_math_rl_ifeval.yaml": (4096, 3584, 1),
+    "nemotron_ultra_rlvr_acceptance.yaml": (32768, 256, 2),
     "opencode_smoke_literal.yaml": (32768, 4096, 30),
     "snowball_megatron_full.yaml": (9216, 8192, 1),
     "snowball_megatron_smoke.yaml": (2048, 512, 1),

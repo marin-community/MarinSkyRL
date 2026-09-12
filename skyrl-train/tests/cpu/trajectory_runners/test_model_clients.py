@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import web
@@ -21,6 +21,101 @@ async def test_direct_model_client_preserves_engine_tokens():
     output = await DirectModelClient(engine).generate({"prompt_token_ids": [[1, 2]]})
 
     assert output == {**engine_output, "token_provenance": "engine"}
+
+
+@pytest.mark.asyncio
+async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_options():
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "<tool-call tokens>"
+    engine.tokenize.return_value = {"tokens": [11, 12, 13]}
+    engine.chat_completion.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {"name": "search", "arguments": '{"query":"x"}'},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+                "token_ids": [21, 22],
+                "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+            }
+        ]
+    }
+    client = DirectModelClient(engine)
+
+    output = await client.generate(
+        {
+            "prompts": [[{"role": "user", "content": "look it up"}]],
+            "session_ids": ["trajectory-2"],
+            "sampling_params": {"temperature": 0.7, "logprobs": 0},
+            "chat_completion_params": [
+                {
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "search",
+                            "description": "Search",
+                            "parameters": {"type": "object"},
+                            "strict": True,
+                        }
+                    ],
+                    "parallel_tool_calls": False,
+                    "max_output_tokens": 128,
+                }
+            ],
+        }
+    )
+
+    expected_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {"type": "object"},
+                "strict": True,
+            },
+        }
+    ]
+    tokenize_body = engine.tokenize.await_args.args[0]["json"]
+    assert tokenize_body == {
+        "model": "snowball",
+        "messages": [{"role": "user", "content": "look it up"}],
+        "tools": expected_tools,
+        "add_generation_prompt": True,
+    }
+    chat_body = engine.chat_completion.await_args.args[0]["json"]
+    assert chat_body == {
+        "model": "snowball",
+        "messages": [{"role": "user", "content": "look it up"}],
+        "session_id": "trajectory-2",
+        "temperature": 0.7,
+        "tools": expected_tools,
+        "parallel_tool_calls": False,
+        "max_completion_tokens": 128,
+        "return_token_ids": True,
+        "logprobs": True,
+    }
+    assert output["prompt_ids"] == [[11, 12, 13]]
+    assert output["response_ids"] == [[21, 22]]
+    assert output["response_logprobs"] == [[-0.1, -0.2]]
+    assert output["assistant_messages"] == [engine.chat_completion.return_value["choices"][0]["message"]]
+    assert output["token_provenance"] == "engine"
+
+
+def test_direct_model_client_omits_empty_tools_from_vllm_request():
+    options = DirectModelClient._chat_options({"tools": [], "temperature": 0.4}, {})
+
+    assert options == {"temperature": 0.4}
 
 
 @pytest.mark.asyncio

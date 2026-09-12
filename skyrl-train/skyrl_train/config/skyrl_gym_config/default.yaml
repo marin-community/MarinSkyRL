@@ -14,6 +14,44 @@ search:
   topk: 3
   timeout: 30
 
+# External endpoints are explicit because NVIDIA's released Ultra recipe uses
+# separate judge and NeMo Skills services. Production configs should replace
+# these loopback defaults with their deployed services.
+nemotron_ultra:
+  sandbox:
+    host: "127.0.0.1"
+    port: 6000
+  judges:
+    general:
+      base_url: "http://127.0.0.1:8001/v1"
+      model: "general-judge"
+      api_key: "dummy_key"
+      timeout_seconds: 600.0
+    safety:
+      base_url: "http://127.0.0.1:8002/v1"
+      model: "safety-judge"
+      api_key: "dummy_key"
+      timeout_seconds: 600.0
+  genrm:
+    judge:
+      base_url: "http://127.0.0.1:8003/v1"
+      model: "genrm-judge"
+      api_key: "dummy_key"
+      timeout_seconds: 600.0
+    num_rollouts_per_prompt: 16
+    default_score: 3.0
+    default_ranking: 3.5
+    max_output_tokens: 24576
+    temperature: 1.0
+    top_p: 0.95
+    genrm_parse_retries: 1
+    genrm_parse_retry_sleep_seconds: 0.2
+    reasoning_bonus: 0.5
+    answer_bonus: 0.5
+    top_percentile: 0.2
+    group_reasoning_length_penalty_coeff: 0.1
+    group_answer_length_penalty_coeff: 0.1
+
 aime:
   evaluation_token_budget: 8192
   length_penalty_weight: 0.0

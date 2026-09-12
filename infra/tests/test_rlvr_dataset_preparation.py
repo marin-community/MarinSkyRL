@@ -1,10 +1,12 @@
 import json
 
+import datasets
 import pytest
 
 from infra.rl_data.preparation import PreparationOptions, prepare_artifact, write_artifact, write_bundle
 from infra.rl_data.mixtures import MixtureSlice, MixtureSpec, load_mixture_spec, prepare_mixture
 from infra.rl_data.sources import (
+    _restore_nemotron_ultra_placeholder,
     Source,
     aime_1983_2024_source,
     aime24_source,
@@ -23,6 +25,8 @@ from infra.rl_data.sources import (
     load_source_rows,
     math500_source,
     nemotron_if_source,
+    nemotron_ultra_rlvr1_source,
+    nemotron_ultra_rlvr2_source,
     numina_math_source,
     openscience_source,
     rlvr_math_source,
@@ -52,6 +56,190 @@ class FakeContract:
         if normalized not in positive_response or negative_response:
             raise ValueError("invalid verifier examples")
         return normalized
+
+
+class NemotronUltraContract:
+    env_id = "nemotron_ultra"
+    prompt_instruction = None
+
+    @staticmethod
+    def normalize_ground_truth(ground_truth):
+        return str(ground_truth)
+
+    @staticmethod
+    def validate_example(ground_truth, positive_response, negative_response):
+        raise AssertionError("Nemotron Ultra rows are validated by their row-selected verifier.")
+
+
+def _nemotron_ultra_pivot_row(*, uuid="row-1", prompt="Fix the bug"):
+    return {
+        "uuid": uuid,
+        "dataset": "ultra_sft_step3200_toolcall_schema",
+        "responses_create_params": {
+            "input": [
+                {"role": "system", "content": "Use tools carefully."},
+                {"role": "user", "content": prompt},
+                {
+                    "type": "function_call",
+                    "name": "read_file",
+                    "call_id": "call-1",
+                    "arguments": '{"path":"README.md"}',
+                },
+                {"type": "function_call_output", "call_id": "call-1", "output": "contents"},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "read_file",
+                    "description": "Read a file.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                    "strict": True,
+                }
+            ],
+            "parallel_tool_calls": False,
+            "temperature": 0.7,
+        },
+        "agent_ref": {"name": "toolcall_schema_single_step_tool_use_with_argument_comparison_agent"},
+        "expected_action": {"type": "function_call", "name": "write_file", "arguments": '{"path":"x"}'},
+        "pass_rate": 0.5,
+    }
+
+
+def test_nemotron_ultra_adapter_preserves_responses_semantics_and_routes_by_agent():
+    artifact = prepare_artifact(
+        nemotron_ultra_rlvr1_source(),
+        [_nemotron_ultra_pivot_row()],
+        NemotronUltraContract(),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(
+            source_revision="fixture",
+            max_prompt_tokens=100,
+            minimum_unique_rows=1,
+        ),
+    )
+
+    row = artifact.rows[0]
+    assert row["env_class"] == "nemotron_ultra"
+    assert row["prompt"] == [
+        {"role": "system", "content": "Use tools carefully."},
+        {"role": "user", "content": "Fix the bug"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "contents"},
+    ]
+    ultra = row["extra_info"]["nemotron_ultra"]
+    assert ultra["agent"] == "toolcall_schema_single_step_tool_use_with_argument_comparison_agent"
+    assert ultra["route"] == "skyrl_gym"
+    assert json.loads(ultra["request_json"])["tools"][0]["name"] == "read_file"
+    assert json.loads(ultra["record_json"])["expected_action"]["name"] == "write_file"
+
+
+def test_nemotron_ultra_artifact_round_trips_heterogeneous_verifier_records(tmp_path):
+    first = _nemotron_ultra_pivot_row(uuid="numeric-id")
+    first["id"] = 17
+    second = _nemotron_ultra_pivot_row(uuid="string-id")
+    second["id"] = "law-wiki-00073"
+
+    artifact = prepare_artifact(
+        nemotron_ultra_rlvr1_source(),
+        [first, second],
+        NemotronUltraContract(),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(source_revision="fixture", max_prompt_tokens=100, minimum_unique_rows=2),
+    )
+    output_dir = tmp_path / "artifact"
+    write_artifact(artifact, output_dir)
+
+    rows = datasets.load_dataset("parquet", data_files=str(output_dir / "train.parquet"), split="train")
+    records = [json.loads(row["extra_info"]["nemotron_ultra"]["record_json"]) for row in rows]
+    assert [record["id"] for record in records] == [17, "law-wiki-00073"]
+
+
+def test_nemotron_ultra_adapter_routes_only_swe_pivots_to_terminal_bench():
+    example = _nemotron_ultra_pivot_row()
+    example["agent_ref"]["name"] = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
+    example["metadata"] = {"instance_id": "python-pillow__Pillow-deadbeef", "agent_cls": "opencode"}
+
+    artifact = prepare_artifact(
+        nemotron_ultra_rlvr1_source(),
+        [example],
+        NemotronUltraContract(),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(source_revision="fixture", max_prompt_tokens=100, minimum_unique_rows=1),
+    )
+
+    ultra = artifact.rows[0]["extra_info"]["nemotron_ultra"]
+    assert ultra["route"] == "terminal_bench"
+    assert ultra["terminal_bench_instance_id"] == "python-pillow__Pillow-deadbeef"
+
+
+def test_nemotron_ultra_blend_keeps_duplicate_prompts_in_source_order():
+    first = _nemotron_ultra_pivot_row(uuid="first", prompt="same prompt")
+    second = _nemotron_ultra_pivot_row(uuid="second", prompt="same prompt")
+    second["expected_action"] = {"type": "message", "content": "different continuation"}
+
+    artifact = prepare_artifact(
+        nemotron_ultra_rlvr2_source(),
+        [first, second],
+        NemotronUltraContract(),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(source_revision="fixture", max_prompt_tokens=100, minimum_unique_rows=2),
+    )
+
+    assert [row["extra_info"]["nemotron_ultra"]["uuid"] for row in artifact.rows] == ["first", "second"]
+    assert artifact.provenance["counts"]["unique_rows"] == 2
+
+
+def test_nemotron_ultra_adapter_rejects_an_unknown_agent():
+    example = _nemotron_ultra_pivot_row()
+    example["agent_ref"]["name"] = "unreleased_magic_agent"
+
+    with pytest.raises(ValueError, match="unsupported agent_ref.name"):
+        nemotron_ultra_rlvr1_source().prepare_row(example, 0, NemotronUltraContract())
+
+
+def test_nemotron_ultra_placeholder_hydrates_prompt_answer_and_provenance():
+    row = {
+        "question": "",
+        "expected_answer": "",
+        "responses_create_params": {"input": [{"role": "user", "content": ""}]},
+        "matched_sources": [{"expected_answer": ""}],
+        "_hf_question_placeholder": {
+            "mode": "exact",
+            "dataset": "Skywork/Skywork-OR1-RL-Data",
+            "split": "math",
+            "row": 0,
+            "prefix": "Answer this: ",
+            "suffix": " Now.",
+        },
+    }
+    sources = {
+        ("Skywork/Skywork-OR1-RL-Data", "math"): [
+            {"prompt": [{"content": "2 + 2"}], "reward_model": {"ground_truth": '["4"]'}}
+        ]
+    }
+
+    restored = _restore_nemotron_ultra_placeholder(row, sources)
+
+    assert restored["question"] == "Answer this: 2 + 2 Now."
+    assert restored["expected_answer"] == "4"
+    assert restored["responses_create_params"]["input"][0]["content"] == restored["question"]
+    assert restored["matched_sources"][0]["expected_answer"] == "4"
+    assert "_hf_question_placeholder" not in restored
+    assert row["question"] == ""
 
 
 def _mostly_malformed_rlvr_math_examples():
