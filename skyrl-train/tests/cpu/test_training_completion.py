@@ -129,6 +129,7 @@ def bare_trainer(cfg, cls=RayPPOTrainer):
     trainer.global_step = 7
     # Completion starts after the final learner weights have been installed.
     trainer._published_policy_version = 7
+    trainer._background_eval_tasks = []
     trainer.total_training_steps = 7
     trainer.num_steps_per_epoch = 7
     trainer.train_dataloader = Dataloader([None] * 7)
