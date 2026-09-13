@@ -28,15 +28,19 @@ from skyrl_train.entrypoints.non_agentic_probe_primitives import final_advantage
 from skyrl_train.entrypoints.non_agentic_probe_timing import TimedNonAgenticTokenProcessor, timing_receipts
 from skyrl_train.inference_engines.non_agentic_logits_processor import NonAgenticTokenProcessor
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
-from skyrl_train.trajectory_runners.non_agentic_interventions import INTERVENTION_VERSION, TokenIntervention
+from skyrl_train.trajectory_runners.non_agentic_interventions import (
+    INTERVENTION_VERSION,
+    NON_AGENTIC_TOKEN_PROCESSOR_FQCN,
+    TokenIntervention,
+)
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.types import TokenProvenance
 from skyrl_train.utils.trainer_utils import dump_per_dataset_eval_results
 from skyrl_train.weight_sync.receiver_readback_rpc import read_all_receiver_workers
 
 
-BASE_PROCESSOR = "skyrl_train.inference_engines.non_agentic_logits_processor.NonAgenticTokenProcessor"
-TIMED_PROCESSOR = "skyrl_train.entrypoints.non_agentic_probe_timing.TimedNonAgenticTokenProcessor"
+BASE_PROCESSOR = NON_AGENTIC_TOKEN_PROCESSOR_FQCN
+TIMED_PROCESSOR = "skyrl_train.entrypoints.non_agentic_probe_timing:TimedNonAgenticTokenProcessor"
 PACKAGES = ("baseline", "force_close", "repetition_stop", "soft_overlong")
 
 

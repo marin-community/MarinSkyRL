@@ -130,7 +130,7 @@ async def test_intervention_runner_preserves_actual_logprobs_masks_forced_action
         "repetition_fraction": 0.5,
     }
     cfg.generator.engine_init_kwargs = {
-        "logits_processors": ["skyrl_train.inference_engines.non_agentic_logits_processor.NonAgenticTokenProcessor"],
+        "logits_processors": ["skyrl_train.inference_engines.non_agentic_logits_processor:NonAgenticTokenProcessor"],
         "logprobs_mode": "raw_logprobs",
     }
     response = (

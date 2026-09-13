@@ -6,6 +6,7 @@ from typing import Sequence
 
 
 INTERVENTION_VERSION = "non-agentic-token-intervention-v1"
+NON_AGENTIC_TOKEN_PROCESSOR_FQCN = "skyrl_train.inference_engines.non_agentic_logits_processor:NonAgenticTokenProcessor"
 
 
 @dataclass(frozen=True)
