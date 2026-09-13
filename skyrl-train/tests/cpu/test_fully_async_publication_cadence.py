@@ -397,7 +397,6 @@ async def test_publication_failure_resumes_before_propagating_and_skips_eval(mon
     trainer.global_step = 1
     trainer._published_policy_version = 0
     trainer.policy_model.completed_update = 1
-    trainer.all_timings["shard_sync/observation_before"] = 99
     engine = trainer.inference_engine_client
     engine.installed_update = 0
     original_pause, original_resume = engine.pause_generation, engine.resume_generation
@@ -1057,6 +1056,7 @@ async def test_shard_publication_keeps_generation_paused_until_verified_driver_b
     trainer.global_step = 1
     trainer._published_policy_version = 0
     trainer.policy_model.completed_update = 1
+    trainer.all_timings["shard_sync/observation_before"] = 99
     engine = trainer.inference_engine_client
     drains = []
 
