@@ -157,7 +157,8 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
     save_observations = []
 
-    def save_checkpoints():
+    def save_checkpoints(*, commit=True):
+        assert commit
         save_observations.append(
             (
                 trainer.policy_model.model_on_gpu,
@@ -190,9 +191,11 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
     trainer._checkpoint_save_failures = 0.0
     attempts = 0
     saved_steps = []
+    committed_steps = []
 
-    async def save_with_residency():
+    async def save_with_residency(*, commit=True):
         nonlocal attempts
+        assert not commit
         attempts += 1
         if attempts == 1:
             raise OSError("AccessDenied")
@@ -203,6 +206,7 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
         return control
 
     trainer._save_checkpoints_with_residency = save_with_residency
+    trainer._commit_checkpoint = lambda: committed_steps.append(state.global_step)
     trainer.callback_handler = SimpleNamespace(call_event_async=call_event_async)
     trainer._control = SimpleNamespace()
     state = SimpleNamespace(global_step=6)
@@ -211,6 +215,7 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
     assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
     asyncio.run(trainer._save_intermediate_checkpoint(state))
     assert saved_steps == [6]
+    assert committed_steps == [6]
 
 
 def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
@@ -219,7 +224,8 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
 
-    async def fail_save():
+    async def fail_save(*, commit=True):
+        assert not commit
         raise ValueError("invalid checkpoint state")
 
     trainer._save_checkpoints_with_residency = fail_save
