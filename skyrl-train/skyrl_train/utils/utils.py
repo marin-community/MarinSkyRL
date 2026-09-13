@@ -618,10 +618,11 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError(
             f"trainer.model_load_retry.max_retries must be non-negative; got {cfg.trainer.model_load_retry.max_retries}"
         )
-    if cfg.trainer.algorithm.group_admission.max_sample_batches < 0:
+    group_admission_stall_timeout = cfg.trainer.algorithm.group_admission.stall_timeout
+    if group_admission_stall_timeout is not None and group_admission_stall_timeout <= 0:
         raise ValueError(
-            "trainer.algorithm.group_admission.max_sample_batches must be non-negative; got "
-            f"{cfg.trainer.algorithm.group_admission.max_sample_batches}"
+            "trainer.algorithm.group_admission.stall_timeout must be positive when set; got "
+            f"{group_admission_stall_timeout}"
         )
     if cfg.trainer.algorithm.tis_lcs_alert_threshold < 0:
         raise ValueError(

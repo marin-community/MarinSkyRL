@@ -16,7 +16,7 @@ from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group
 from skyrl_train.utils.progress import tqdm
 from transformers import AutoTokenizer
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import numpy as np
 from skyrl_train.curriculum import CurriculumSampler
@@ -59,14 +59,15 @@ from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import (
+    AdmissionProgressWatchdog,
     AdmissionRejection,
+    GroupAdmissionStalledError,
     GroupAdvantageInvariant,
     assert_training_groups_eligible,
 )
 from skyrl_train.sync_group_admission import (
     GroupAdmissionSamplingResult,
     GroupAdmissionSamplingState,
-    InsufficientEligibleGroupsError,
     admit_or_collect_replacements,
 )
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
@@ -172,6 +173,8 @@ class RayPPOTrainer:
 
         self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
         self.group_admission_state: Optional[GroupAdmissionSamplingState] = None
+        self._group_admission_watchdog: AdmissionProgressWatchdog | None = None
+        self._step_time_history: deque[float] = deque(maxlen=5)
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         configure_ray_worker_logging()
@@ -784,6 +787,7 @@ class RayPPOTrainer:
                     duration_seconds=step_timer.duration,
                 )
 
+                self._step_time_history.append(step_timer.duration)
                 self.all_metrics = {}
                 publish_step_timings(self.all_timings, self.global_step)
                 self.all_timings = {}
@@ -2041,8 +2045,14 @@ class RayPPOTrainer:
         """Hold synchronous training until a complete eligible group batch is available."""
         if self.group_admission_state is None:
             self.group_admission_state = {"sample_batch_count": 1}
+            self._group_admission_watchdog = AdmissionProgressWatchdog.start(
+                now=time.monotonic(),
+                recent_step_times=self._step_time_history,
+                timeout_override=self.cfg.trainer.algorithm.group_admission.stall_timeout,
+            )
         else:
             self.group_admission_state["sample_batch_count"] += 1
+        previous_accepted_count = int(self.group_admission_state.get("num_prompts_in_batch", 0))
 
         result = admit_or_collect_replacements(
             trajectory_batch,
@@ -2067,17 +2077,19 @@ class RayPPOTrainer:
             }
         )
 
-        max_sample_batches = int(self.cfg.trainer.algorithm.group_admission.max_sample_batches)
-        if (
-            result.keep_sampling
-            and max_sample_batches > 0
-            and self.group_admission_state["sample_batch_count"] >= max_sample_batches
-        ):
-            accepted_count = int(self.group_admission_state.get("num_prompts_in_batch", 0))
-            raise InsufficientEligibleGroupsError(
-                f"Synchronous generation collected {accepted_count} of {self.cfg.trainer.train_batch_size} "
-                f"eligible groups after {max_sample_batches} batches; rejections="
-                f"{self.group_admission_state.get('rejection_counts', {})}"
+        accepted_count = int(self.group_admission_state.get("num_prompts_in_batch", 0))
+        now = time.monotonic()
+        assert self._group_admission_watchdog is not None
+        self._group_admission_watchdog.observe(
+            now=now,
+            progressed=accepted_count > previous_accepted_count,
+        )
+        if result.keep_sampling and self._group_admission_watchdog.stalled(now=now):
+            elapsed = self._group_admission_watchdog.elapsed(now=now)
+            raise GroupAdmissionStalledError(
+                f"Synchronous generation made no admission progress for {elapsed:.0f}s; "
+                f"collected={accepted_count}/{self.cfg.trainer.train_batch_size}, "
+                f"rejections={self.group_admission_state.get('rejection_counts', {})}"
             )
 
         self.group_admission_state = result.state
@@ -2088,6 +2100,8 @@ class RayPPOTrainer:
                 f"reasons={rejection_summary}. "
                 f"Waiting for a complete {self.cfg.trainer.train_batch_size}-group replacement batch."
             )
+        if not result.keep_sampling:
+            self._group_admission_watchdog = None
         return result
 
     def _get_dp_group_models(self, rank: int, model_type: str = ""):

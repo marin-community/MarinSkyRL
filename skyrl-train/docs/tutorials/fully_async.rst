@@ -109,10 +109,11 @@ For fully async specifically, the following are the main knobs to tune:
   each worker works on a group of trajectories. It should be ``>= trainer.policy_mini_batch_size`` to avoid wasted throughput, 
   and ``<= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)`` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
-- ``trainer.fully_async.admission_stall_timeout``: The maximum number of seconds to assemble one admitted training mini-batch.
-  The default is six hours so long agent episodes and dynamic-sampling rejection do not terminate a healthy run. This deadline is
-  independent of episode, collective, and recent training-step durations. Increase it when a valid batch can take longer than six
-  hours; decrease it only when false-positive termination is preferable to a long rejected-only wait.
+- ``trainer.algorithm.group_admission.stall_timeout``: An optional maximum number of seconds without newly admitted groups while
+  assembling a training batch. The same progress watchdog applies to synchronous and fully asynchronous entrypoints. The null
+  default allows 30 minutes before any step timing exists, then adapts to ``max(5 * recent median step time, 10 minutes)``. Set a
+  positive value only when the workload needs a fixed deadline. Rejected infrastructure-failure groups are skipped and fresh
+  corpus prompts refill the queue while admission is making progress; only stale async groups retry the same prompt.
 - ``trajectory_runner.process_pool.rpc_timeout_seconds``: The maximum time to wait for a Harbor rollout coordinator RPC. The default is six
   hours. Expiry cancels the coordinator request and fails the generation worker without converting its trials to agent timeouts.
   Harbor owns trial deadlines and retries; this watchdog only detects and unwinds a coordinator that does not return.
