@@ -152,6 +152,10 @@ def _poll_object_ref(ref: ObjectRef) -> tuple[bool, Any | None]:
     return (False, None) if not ready else (True, ray.get(ready[0]))
 
 
+def _policy_revision(step: int) -> str:
+    return f"policy-step-{step}"
+
+
 class RayPPOTrainer:
     def __init__(
         self,
@@ -649,7 +653,7 @@ class RayPPOTrainer:
             step=self.global_step,
             max_tokens=training.max_tokens_per_update,
             max_sequences_per_prompt_group=training.max_sequences_per_prompt_group,
-            target_revision=f"policy-step-{self.global_step - 1}",
+            target_revision=_policy_revision(self.global_step - 1),
             draft_revision=self._served_draft_revision,
             reserved_gpu_memory_gib=training.reserved_gpu_memory_gib,
         ).to_mapping()
@@ -750,7 +754,7 @@ class RayPPOTrainer:
         if self._draft_trainer is None:
             raise RuntimeError("Online EAGLE capture sealed before DraftTrainer started")
         candidate_dir = self._speculator_scratch_path("candidates", f"step-{self.global_step}")
-        target_revision = f"policy-step-{self.global_step - 1}"
+        target_revision = _policy_revision(self.global_step - 1)
         transfer_request = {
             "step": self.global_step,
             "capture_dir": self._sealed_speculator_capture_dir,
@@ -767,7 +771,6 @@ class RayPPOTrainer:
             target_revision=target_revision,
             target_weights_sha256=active["target_weights_sha256"],
             output_dir=candidate_dir,
-            result_path=f"{candidate_dir}.result.json",
             failure_artifact_path=join_resource_path(
                 self.cfg.trainer.ckpt_path,
                 "speculator-failures",
@@ -808,7 +811,7 @@ class RayPPOTrainer:
             self._draft_trainer_target_weights_sha256 = None
 
     async def _finish_speculator_update_and_install(self) -> bool:
-        """Poll, gate, and transactionally install a candidate before target sync."""
+        """Resolve and install a ready update; return false while it remains pending."""
         if not self._speculator_update_inflight:
             return False
         if self._draft_trainer_update_ref is None or self._draft_trainer is None:
@@ -987,7 +990,7 @@ class RayPPOTrainer:
         assert self._served_draft_path is not None
         assert self._served_draft_revision is not None
         destination = speculator_export_path(self.cfg.trainer.ckpt_path, self.global_step)
-        served_target_revision = f"policy-step-{self.global_step}"
+        served_target_revision = _policy_revision(self.global_step)
         if speculative_decoding.training is not None:
             if self._draft_trainer is None:
                 raise RuntimeError("Online EAGLE checkpoint publication requires DraftTrainer")
@@ -1024,7 +1027,7 @@ class RayPPOTrainer:
         restored_path = self._speculator_scratch_path("resume")
         results = await self.inference_engine_client.restore_online_eagle_speculator(source, restored_path)
         manifest = _single_active_online_eagle_result(results, "checkpoint restore")
-        expected_target_revision = f"policy-step-{self.global_step}"
+        expected_target_revision = _policy_revision(self.global_step)
         if manifest["served_target_revision"] != expected_target_revision:
             raise RuntimeError(
                 "Resumed target/draft lineage mismatch: expected "

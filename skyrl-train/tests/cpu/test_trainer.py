@@ -50,8 +50,6 @@ class _SpeculatorCaptureClient:
         self.begins = []
         self.seals = []
         self.discards = 0
-        self.jobs = []
-        self.finish_waits = []
         self.installs = []
         self.publishes = []
         self.restores = []
@@ -119,40 +117,6 @@ class _SpeculatorCaptureClient:
     async def cleanup_online_eagle_scratch(self, scratch_root):
         self.cleanups.append(scratch_root)
         return [[{"active": True, "worker_rank": 0, "path": scratch_root}, {"active": False}]]
-
-    async def start_online_eagle_speculator_update(self, job):
-        self.jobs.append(job)
-        return [
-            [
-                {
-                    "active": True,
-                    "pid": 123,
-                    "log_path": "/tmp/trainer.log",
-                    "captured_rows": 72,
-                    "captured_windows": 2,
-                    "dropped_windows": 4,
-                    "unselected_windows": 1,
-                },
-                {"active": False},
-            ]
-        ]
-
-    async def finish_online_eagle_speculator_update(self, wait_seconds):
-        self.finish_waits.append(wait_seconds)
-        return [
-            [
-                {
-                    "active": True,
-                    "accepted": True,
-                    "candidate_dir": "/tmp/candidate",
-                    "draft_revision": "draft-step-2",
-                    "train_loss": 0.5,
-                    "incumbent_holdout_loss": 0.4,
-                    "candidate_holdout_loss": 0.3,
-                },
-                {"active": False},
-            ]
-        ]
 
     async def install_online_eagle_speculator(self, candidate_dir):
         self.installs.append(candidate_dir)

@@ -15,7 +15,9 @@ import ray
 from marinskyrl.hf_model import sha256_file
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     ONLINE_EAGLE_SCRATCH_ROOT,
+    TRAINER_STATE_FILENAME,
     OnlineEagleTrainingJob,
+    OnlineEagleUpdateResult,
     preserve_online_eagle_failure,
     publish_speculator_checkpoint,
     publish_online_eagle_failure_bundle,
@@ -28,6 +30,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
 DIRECTORY_BUNDLE_FORMAT = "marinskyrl-ray-directory-bundle"
 DIRECTORY_BUNDLE_VERSION = 1
 OBJECT_STORE_CHUNK_BYTES = 64 * 1024 * 1024
+IGNORED_CACHE_DIRECTORY = ".cache"
 
 
 def _relative_bundle_path(value: object) -> Path:
@@ -62,7 +65,7 @@ def bundle_directory_for_ray(
             continue
         if path.is_symlink():
             raise ValueError(f"DraftTrainer bundle source contains a symbolic link: {path}")
-        if not path.is_file() or ".cache" in path.parts:
+        if not path.is_file() or IGNORED_CACHE_DIRECTORY in path.parts:
             continue
         file_hasher = hashlib.sha256()
         chunks: list[dict[str, Any]] = []
@@ -140,7 +143,9 @@ def materialize_ray_directory_bundle(
                     data = get(raw_chunk.get("object_ref"))
                     if not isinstance(data, bytes):
                         raise TypeError(f"DraftTrainer object-store chunk is not bytes: {relative}")
-                    if len(data) != raw_chunk.get("bytes") or hashlib.sha256(data).hexdigest() != raw_chunk.get("sha256"):
+                    if len(data) != raw_chunk.get("bytes") or hashlib.sha256(data).hexdigest() != raw_chunk.get(
+                        "sha256"
+                    ):
                         raise ValueError(f"DraftTrainer object-store chunk digest mismatch: {relative}")
                     stream.write(data)
                     file_hasher.update(data)
@@ -167,7 +172,7 @@ def validate_materialized_bundle(bundle: Mapping[str, Any], directory: str | Pat
     actual = {
         str(path.relative_to(root)): {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
         for path in sorted(root.rglob("*"))
-        if path.is_file() and ".cache" not in path.parts
+        if path.is_file() and IGNORED_CACHE_DIRECTORY not in path.parts
     }
     if actual != expected:
         raise ValueError(f"DraftTrainer materialized inventory mismatch: {root}")
@@ -222,15 +227,15 @@ class DraftTrainer:
             except BaseException as failure_error:
                 failure_artifact_path = job.failure_artifact_path
                 preservation_error = f"{type(failure_error).__name__}: {failure_error}"
-            result = {
-                "active": True,
-                "accepted": False,
-                "step": job.step,
-                "error": f"{type(error).__name__}: {error}",
-                "failure_dir": failure_dir,
-                "failure_artifact_path": failure_artifact_path,
-                "failure_preservation_error": preservation_error,
-            }
+            result = OnlineEagleUpdateResult(
+                active=True,
+                accepted=False,
+                step=job.step,
+                error=f"{type(error).__name__}: {error}",
+                failure_dir=failure_dir,
+                failure_artifact_path=failure_artifact_path,
+                failure_preservation_error=preservation_error,
+            ).to_mapping()
             remove_online_eagle_scratch(capture_dir.parent)
             return {"result": result, "candidate_bundle": None}
 
@@ -240,7 +245,7 @@ class DraftTrainer:
             assert result.draft_revision is not None
             candidate_bundle = bundle_directory_for_ray(
                 result.candidate_dir,
-                excluded_relative_paths={"trainer_state.pt"},
+                excluded_relative_paths={TRAINER_STATE_FILENAME},
             )
             self._pending_candidate_dir = result.candidate_dir
             self._pending_draft_revision = result.draft_revision

@@ -120,7 +120,6 @@ def _training_job(tmp_path: Path, *, step: int, parent_draft_revision: str) -> d
         "target_revision": f"policy-step-{step - 1}",
         "target_weights_sha256": f"target-{step - 1}",
         "output_dir": str(candidate_dir),
-        "result_path": f"{candidate_dir}.result.json",
         "failure_artifact_path": str(tmp_path / "failures" / f"step-{step}"),
         "num_speculative_tokens": 3,
         "seed": 42,

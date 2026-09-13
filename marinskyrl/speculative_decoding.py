@@ -16,7 +16,7 @@ from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id
 _HF_SOURCE_SCHEME = "hf"
 _HF_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 STANDARD_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
-ONLINE_EAGLE_TRAINER_RANK = 0
+ONLINE_EAGLE_COORDINATOR_RANK = 0
 
 
 class SpeculativeDecodingMethod(StrEnum):
@@ -145,7 +145,6 @@ class SpeculatorTrainingConfig:
     learning_rate: float = 5e-5
     max_validation_loss_increase: float = 0
     max_validation_agreement_decrease: float = 0
-    boundary_wait_seconds: float = 30
     reserved_gpu_memory_gib: float = 8
 
     @classmethod
@@ -163,7 +162,6 @@ class SpeculatorTrainingConfig:
             "learning_rate",
             "max_validation_loss_increase",
             "max_validation_agreement_decrease",
-            "boundary_wait_seconds",
             "reserved_gpu_memory_gib",
         }
         _reject_unknown(mapping, fields, context)
@@ -207,10 +205,6 @@ class SpeculatorTrainingConfig:
             max_validation_agreement_decrease=_nonnegative_number(
                 mapping.get("max_validation_agreement_decrease", defaults.max_validation_agreement_decrease),
                 f"{context}.max_validation_agreement_decrease",
-            ),
-            boundary_wait_seconds=_positive_number(
-                mapping.get("boundary_wait_seconds", defaults.boundary_wait_seconds),
-                f"{context}.boundary_wait_seconds",
             ),
             reserved_gpu_memory_gib=_positive_number(
                 mapping.get("reserved_gpu_memory_gib", defaults.reserved_gpu_memory_gib),

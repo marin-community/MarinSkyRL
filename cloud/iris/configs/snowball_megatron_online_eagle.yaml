@@ -1,5 +1,6 @@
 # Snowball 67B-A2B with an online EAGLE-3 draft on GSM8K. The policy uses four
-# PP2 x EP8 Megatron nodes; one DP8/EP8 vLLM node serves and trains the draft.
+# PP2 x EP8 Megatron nodes; one DP8/EP8 vLLM node serves while a dedicated
+# DraftTrainer actor runs on the extra node derived by the Iris request builder.
 # The exact target revision is supplied to the launcher, while the immutable
 # public draft is staged from Hugging Face. This qualification configuration
 # requires one finite draft decision after every policy update; candidates that
@@ -85,7 +86,6 @@ generator:
       learning_rate: 5.0e-5
       max_validation_loss_increase: 0.05
       max_validation_agreement_decrease: 0.01
-      boundary_wait_seconds: 60
       reserved_gpu_memory_gib: 8
   sampling_params:
     temperature: 1.0

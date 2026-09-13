@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 
-from marinskyrl.speculative_decoding import ONLINE_EAGLE_TRAINER_RANK
+from marinskyrl.speculative_decoding import ONLINE_EAGLE_COORDINATOR_RANK
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.config.behavior_logprobs import (
     ROLLOUT_LOGPROB_VALIDATION_KEY,
@@ -28,7 +28,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     publish_speculator_checkpoint,
     remove_online_eagle_scratch,
     restore_speculator_checkpoint,
-    validate_online_eagle_candidate,
+    validate_online_eagle_serving_candidate,
 )
 from skyrl_train.draft_trainer import bundle_directory_for_ray, materialize_ray_directory_bundle
 
@@ -348,6 +348,8 @@ class WorkerWrap:
         if parallel_config.tensor_parallel_size != 1 or parallel_config.pipeline_parallel_size != 1:
             raise RuntimeError("Online EAGLE training requires vLLM tensor and pipeline parallel size 1")
         worker_rank = parallel_config.data_parallel_rank
+        # The patched vLLM capture contract retains this wire name. It identifies
+        # the rank that owns the local target snapshot, not the remote DraftTrainer.
         resolved["trainer_rank"] = worker_rank
         reserved_gpu_memory_gib = float(resolved.pop("reserved_gpu_memory_gib"))
         total_memory_gib = torch.cuda.get_device_properties(self.device).total_memory / 2**30
@@ -374,10 +376,10 @@ class WorkerWrap:
         """Discard verifier-state capture after a failed rollout."""
         return self.model_runner.discard_online_eagle_capture()
 
-    def install_online_eagle_speculator(self, candidate_dir, trainer_rank):
+    def install_online_eagle_speculator(self, candidate_dir, source_rank):
         """Install a complete candidate in place on every inference rank."""
-        result = self.model_runner.install_online_eagle_speculator(candidate_dir, trainer_rank)
-        if self.model_runner.parallel_config.data_parallel_rank == trainer_rank:
+        result = self.model_runner.install_online_eagle_speculator(candidate_dir, source_rank)
+        if self.model_runner.parallel_config.data_parallel_rank == source_rank:
             self._online_eagle_served_candidate_dir = candidate_dir
         return result
 
@@ -387,11 +389,11 @@ class WorkerWrap:
         destination,
         draft_revision,
         served_target_revision,
-        trainer_rank,
+        source_rank,
     ):
         """Publish the selected rank's exact served draft beside a policy checkpoint."""
         worker_rank = self.model_runner.parallel_config.data_parallel_rank
-        if worker_rank != trainer_rank:
+        if worker_rank != source_rank:
             return {"active": False, "worker_rank": worker_rank}
         result = publish_speculator_checkpoint(
             source_dir,
@@ -401,10 +403,10 @@ class WorkerWrap:
         )
         return {"active": True, "worker_rank": worker_rank, **result}
 
-    def restore_online_eagle_speculator(self, source, destination, trainer_rank):
+    def restore_online_eagle_speculator(self, source, destination, source_rank):
         """Stage a served checkpoint on the selected rank before collective install."""
         worker_rank = self.model_runner.parallel_config.data_parallel_rank
-        if worker_rank != trainer_rank:
+        if worker_rank != source_rank:
             return {"active": False, "worker_rank": worker_rank}
         result = restore_speculator_checkpoint(source, destination)
         return {"active": True, "worker_rank": worker_rank, **result}
@@ -412,7 +414,7 @@ class WorkerWrap:
     def cleanup_online_eagle_scratch(self, scratch_root):
         """Remove one process-scoped scratch tree on its owning inference node."""
         worker_rank = self.model_runner.parallel_config.data_parallel_rank
-        if worker_rank != ONLINE_EAGLE_TRAINER_RANK:
+        if worker_rank != ONLINE_EAGLE_COORDINATOR_RANK:
             return {"active": False, "worker_rank": worker_rank}
         requested_root = Path(scratch_root).resolve()
         remove_online_eagle_scratch(requested_root)
@@ -2056,7 +2058,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def export_online_eagle_capture(self, job: Dict[str, Any]):
         """Merge local DP captures and hand them to DraftTrainer through Ray's object store."""
-        if self._dp_rank != ONLINE_EAGLE_TRAINER_RANK:
+        if self._dp_rank != ONLINE_EAGLE_COORDINATOR_RANK:
             return [{"active": False, "worker_rank": self._dp_rank}]
         training = job["training"]
         merged = merge_online_eagle_captures(
@@ -2091,7 +2093,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         incumbent_draft_revision: str,
     ):
         """Materialize and validate a candidate without mutating resident draft weights."""
-        if self._dp_rank != ONLINE_EAGLE_TRAINER_RANK:
+        if self._dp_rank != ONLINE_EAGLE_COORDINATOR_RANK:
             return [{"active": False, "worker_rank": self._dp_rank}]
         if self._online_eagle_staged_draft_dir is not None:
             raise RuntimeError("A staged online EAGLE candidate has not been resolved")
@@ -2113,7 +2115,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 f"expected {self._online_eagle_active_draft_revision}, got {incumbent_draft_revision}"
             )
         materialized = materialize_ray_directory_bundle(candidate_bundle, candidate_dir)
-        manifest = validate_online_eagle_candidate(materialized, require_trainer_state=False)
+        manifest = validate_online_eagle_serving_candidate(materialized)
         if manifest.get("draft_revision") != draft_revision or manifest.get("weights_sha256") != weights_sha256:
             remove_online_eagle_scratch(materialized)
             raise RuntimeError("Staged online EAGLE candidate identity does not match its update result")
@@ -2136,16 +2138,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         weights_sha256: str,
     ):
         """Activate an already validated candidate on every rank in this engine."""
-        manifest = validate_online_eagle_candidate(candidate_dir, require_trainer_state=False)
+        manifest = validate_online_eagle_serving_candidate(candidate_dir)
         if manifest.get("draft_revision") != draft_revision or manifest.get("weights_sha256") != weights_sha256:
             raise RuntimeError(f"Online EAGLE candidate identity changed before activation: {draft_revision}")
-        if self._dp_rank == ONLINE_EAGLE_TRAINER_RANK and (
+        if self._dp_rank == ONLINE_EAGLE_COORDINATOR_RANK and (
             self._online_eagle_staged_manifest != manifest or self._online_eagle_staged_draft_dir != candidate_dir
         ):
             raise RuntimeError(f"No staged online EAGLE candidate for {draft_revision}")
         engine = self._get_engine()
         worker_results = await engine.collective_rpc(
-            "install_online_eagle_speculator", args=(candidate_dir, ONLINE_EAGLE_TRAINER_RANK)
+            "install_online_eagle_speculator", args=(candidate_dir, ONLINE_EAGLE_COORDINATOR_RANK)
         )
         self._online_eagle_previous_draft_dir = self._online_eagle_active_draft_dir
         self._online_eagle_previous_draft_revision = self._online_eagle_active_draft_revision
@@ -2163,7 +2165,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         self._online_eagle_previous_draft_dir = None
         self._online_eagle_previous_draft_revision = None
         if (
-            self._dp_rank == ONLINE_EAGLE_TRAINER_RANK
+            self._dp_rank == ONLINE_EAGLE_COORDINATOR_RANK
             and previous is not None
             and previous != self._online_eagle_initial_draft_dir
         ):
@@ -2176,7 +2178,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         if self._online_eagle_active_draft_revision != draft_revision:
             self._online_eagle_staged_draft_dir = None
             self._online_eagle_staged_manifest = None
-            if self._dp_rank == ONLINE_EAGLE_TRAINER_RANK and candidate_dir is not None:
+            if self._dp_rank == ONLINE_EAGLE_COORDINATOR_RANK and candidate_dir is not None:
                 remove_online_eagle_scratch(candidate_dir)
             return [{"active": candidate_dir is not None, "draft_revision": draft_revision, "worker_results": []}]
 
@@ -2186,7 +2188,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         if restore_dir is None:
             raise RuntimeError("Online EAGLE activated candidate has no prior draft to restore")
         worker_results = await self._get_engine().collective_rpc(
-            "install_online_eagle_speculator", args=(restore_dir, ONLINE_EAGLE_TRAINER_RANK)
+            "install_online_eagle_speculator", args=(restore_dir, ONLINE_EAGLE_COORDINATOR_RANK)
         )
         self._online_eagle_active_draft_dir = restore_dir
         self._online_eagle_active_draft_revision = restore_revision
@@ -2194,7 +2196,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         self._online_eagle_previous_draft_revision = None
         self._online_eagle_staged_draft_dir = None
         self._online_eagle_staged_manifest = None
-        if self._dp_rank == ONLINE_EAGLE_TRAINER_RANK and candidate_dir is not None and candidate_dir != restore_dir:
+        if (
+            self._dp_rank == ONLINE_EAGLE_COORDINATOR_RANK
+            and candidate_dir is not None
+            and candidate_dir != restore_dir
+        ):
             remove_online_eagle_scratch(candidate_dir)
         return [{"active": True, "draft_revision": draft_revision, "worker_results": worker_results}]
 
@@ -2207,7 +2213,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Install a candidate collectively without replacing resident parameter storage."""
         engine = self._get_engine()
         worker_results = await engine.collective_rpc(
-            "install_online_eagle_speculator", args=(candidate_dir, ONLINE_EAGLE_TRAINER_RANK)
+            "install_online_eagle_speculator", args=(candidate_dir, ONLINE_EAGLE_COORDINATOR_RANK)
         )
         revisions = {item["draft_revision"] for item in worker_results if item.get("active", False)}
         if len(revisions) != 1:
@@ -2234,14 +2240,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await engine.collective_rpc(
             "publish_online_eagle_speculator",
-            args=(source_dir, destination, draft_revision, served_target_revision, ONLINE_EAGLE_TRAINER_RANK),
+            args=(source_dir, destination, draft_revision, served_target_revision, ONLINE_EAGLE_COORDINATOR_RANK),
         )
 
     async def restore_online_eagle_speculator(self, source: str, destination: str):
         """Stage a served draft checkpoint on its owning rank."""
         engine = self._get_engine()
         return await engine.collective_rpc(
-            "restore_online_eagle_speculator", args=(source, destination, ONLINE_EAGLE_TRAINER_RANK)
+            "restore_online_eagle_speculator", args=(source, destination, ONLINE_EAGLE_COORDINATOR_RANK)
         )
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):

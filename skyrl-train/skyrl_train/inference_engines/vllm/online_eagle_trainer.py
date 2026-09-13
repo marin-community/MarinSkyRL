@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 import hashlib
@@ -12,7 +11,6 @@ import os
 from pathlib import Path
 import random
 import shutil
-import sys
 import tempfile
 import time
 from typing import Any, Iterator, Mapping
@@ -25,6 +23,7 @@ from torch import nn
 from marinskyrl.hf_model import sha256_file
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculatorTrainingConfig
+from skyrl_train.hf_model_io import HF_WEIGHT_FILENAME
 from skyrl_train.io import io
 
 
@@ -36,6 +35,7 @@ _TRAINER_STATE_FORMAT = "marinskyrl-online-eagle-trainer-state"
 _TRAINER_STATE_VERSION = 2
 _MANIFEST_FILENAME = "manifest.json"
 _MERGED_CAPTURE_DIRECTORY = "merged"
+TRAINER_STATE_FILENAME = "trainer_state.pt"
 ONLINE_EAGLE_SCRATCH_ROOT = Path("/tmp/marinskyrl-online-eagle")
 
 
@@ -103,10 +103,6 @@ def publish_online_eagle_failure_bundle(source: str, destination: str) -> dict[s
     if is_cloud_uri(destination):
         io.upload_directory(str(root / "capture"), join_resource_path(destination, "capture"))
         io.upload_directory(str(root / "incumbent"), join_resource_path(destination, "incumbent"))
-        for name in ("job.json", "trainer.log"):
-            path = root / name
-            if path.is_file():
-                io.upload_file(str(path), join_resource_path(destination, name))
         io.upload_file(str(manifest_path), destination_manifest)
     else:
         target = Path(destination)
@@ -133,7 +129,6 @@ class OnlineEagleTrainingJob:
     target_revision: str
     target_weights_sha256: str
     output_dir: str
-    result_path: str
     failure_artifact_path: str
     num_speculative_tokens: int
     seed: int
@@ -150,7 +145,6 @@ class OnlineEagleTrainingJob:
             "target_revision",
             "target_weights_sha256",
             "output_dir",
-            "result_path",
             "failure_artifact_path",
             "num_speculative_tokens",
             "seed",
@@ -178,7 +172,7 @@ class OnlineEagleTrainingJob:
             or num_speculative_tokens <= 0
         ):
             raise ValueError("Online EAGLE num_speculative_tokens must be a positive integer")
-        paths = {field: value[field] for field in ("capture_dir", "draft_model_dir", "output_dir", "result_path")}
+        paths = {field: value[field] for field in ("capture_dir", "draft_model_dir", "output_dir")}
         invalid_paths = [
             field for field, path in paths.items() if not isinstance(path, str) or not Path(path).is_absolute()
         ]
@@ -206,7 +200,6 @@ class OnlineEagleTrainingJob:
             target_revision=identities["target_revision"],
             target_weights_sha256=identities["target_weights_sha256"],
             output_dir=paths["output_dir"],
-            result_path=paths["result_path"],
             failure_artifact_path=failure_artifact_path,
             num_speculative_tokens=num_speculative_tokens,
             seed=seed,
@@ -265,9 +258,7 @@ class OnlineEagleUpdateResult:
     candidate_dir: str | None = None
     draft_revision: str | None = None
     weights_sha256: str | None = None
-    deferred: bool = False
     error: str | None = None
-    log_path: str | None = None
     failure_dir: str | None = None
     failure_artifact_path: str | None = None
     failure_preservation_error: str | None = None
@@ -281,13 +272,6 @@ class OnlineEagleUpdateResult:
         return {name: value for name, value in asdict(self).items() if value is not None}
 
 
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True))
-    os.replace(temporary, path)
-
-
 def _directory_inventory(directory: Path) -> dict[str, dict[str, Any]]:
     return {
         str(path.relative_to(directory)): {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
@@ -296,12 +280,8 @@ def _directory_inventory(directory: Path) -> dict[str, dict[str, Any]]:
     }
 
 
-def validate_online_eagle_candidate(
-    directory: str | Path,
-    *,
-    require_trainer_state: bool = True,
-) -> dict[str, Any]:
-    """Validate one complete draft candidate before any serving rank mutates weights."""
+def validate_online_eagle_serving_candidate(directory: str | Path) -> dict[str, Any]:
+    """Validate the serving subset of a draft candidate before weights mutate."""
     root = Path(directory)
     manifest_path = root / _MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text())
@@ -310,12 +290,6 @@ def validate_online_eagle_candidate(
     weights_path = root / manifest["weights_path"]
     if not weights_path.is_file() or sha256_file(weights_path) != manifest.get("weights_sha256"):
         raise ValueError(f"Online EAGLE candidate weight digest mismatch: {root}")
-    trainer_state_name = manifest.get("trainer_state_path")
-    if trainer_state_name is not None and require_trainer_state:
-        trainer_state_path = root / trainer_state_name
-        if not trainer_state_path.is_file() or sha256_file(trainer_state_path) != manifest.get("trainer_state_sha256"):
-            raise ValueError(f"Online EAGLE candidate trainer-state digest mismatch: {root}")
-        _validate_restored_trainer_state(trainer_state_path)
     return manifest
 
 
@@ -327,12 +301,12 @@ def materialize_online_eagle_incumbent(
 ) -> dict[str, Any]:
     """Wrap the immutable initial HF draft as a rollback-compatible candidate."""
     source = Path(source_dir)
-    weights_path = source / "model.safetensors"
+    weights_path = source / HF_WEIGHT_FILENAME
     if not weights_path.is_file():
         raise FileNotFoundError(f"Online EAGLE initial draft has no unsharded model.safetensors: {source}")
     target = Path(destination)
     if target.exists():
-        manifest = validate_online_eagle_candidate(target, require_trainer_state=False)
+        manifest = validate_online_eagle_serving_candidate(target)
         if manifest.get("draft_revision") != draft_revision:
             raise FileExistsError(f"Online EAGLE incumbent has a different revision: {target}")
         return manifest
@@ -500,7 +474,7 @@ def restore_speculator_checkpoint(source: str, destination: str) -> dict[str, An
         root = Path(local_source)
         manifest = _validate_served_speculator_root(root, source)
         weights = root / "weights"
-        _validate_restored_trainer_state(weights / "trainer_state.pt")
+        _validate_restored_trainer_state(weights / TRAINER_STATE_FILENAME)
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
         staging = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
@@ -511,7 +485,7 @@ def restore_speculator_checkpoint(source: str, destination: str) -> dict[str, An
                 json.loads(candidate_manifest_path.read_text()) if candidate_manifest_path.exists() else {}
             )
             if candidate_manifest.get("format") != _CANDIDATE_FORMAT:
-                weights_path = staging / "model.safetensors"
+                weights_path = staging / HF_WEIGHT_FILENAME
                 tensors = load_file(weights_path)
                 candidate_manifest_path.write_text(
                     json.dumps(
@@ -1007,11 +981,11 @@ def _save_candidate(
             safe_serialization=True,
             max_shard_size="5GB",
         )
-        weights_path = staging / "model.safetensors"
+        weights_path = staging / HF_WEIGHT_FILENAME
         if not weights_path.exists():
             raise RuntimeError("Online EAGLE candidate unexpectedly produced sharded weights")
         state = load_file(weights_path)
-        trainer_state_path = staging / "trainer_state.pt"
+        trainer_state_path = staging / TRAINER_STATE_FILENAME
         torch.save(
             {
                 "format": _TRAINER_STATE_FORMAT,
@@ -1094,7 +1068,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
         loss_config,
     )
     _convert_trainable_parameters(model, torch.float32)
-    prior_trainer_state = draft_model_dir / "trainer_state.pt"
+    prior_trainer_state = draft_model_dir / TRAINER_STATE_FILENAME
     saved_state = None
     if prior_trainer_state.exists():
         saved_state = torch.load(prior_trainer_state, map_location=device, weights_only=False)
@@ -1255,39 +1229,3 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
             weights_sha256=candidate_manifest["weights_sha256"],
         )
     return result
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("job_config")
-    args = parser.parse_args()
-    job_path = Path(args.job_config)
-    job = OnlineEagleTrainingJob.from_mapping(json.loads(job_path.read_text()))
-    result_path = Path(job.result_path)
-    try:
-        result = run_training_job(job)
-    except BaseException as error:
-        failure_dir = None
-        preservation_error = None
-        try:
-            failure_dir = preserve_online_eagle_failure(job, error)
-        except BaseException as failure_error:
-            preservation_error = f"{type(failure_error).__name__}: {failure_error}"
-        _atomic_json(
-            result_path,
-            {
-                "active": True,
-                "accepted": False,
-                "error": f"{type(error).__name__}: {error}",
-                "failure_dir": failure_dir,
-                "failure_artifact_path": job.failure_artifact_path,
-                "failure_preservation_error": preservation_error,
-            },
-        )
-        raise
-    _atomic_json(result_path, result.to_mapping())
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
