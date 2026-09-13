@@ -14,6 +14,7 @@ class GeneratedOutputGroup:
     uid: str
     earliest_model_step: int
     source_prompts: List[dict]
+    behavior_policy_versions: List[int] | None = None
 
 
 @dataclass

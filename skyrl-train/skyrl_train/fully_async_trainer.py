@@ -56,13 +56,40 @@ from skyrl_train.dynamic_sampling import (
 )
 from skyrl_train.group_admission import AdmissionDecision, AdmissionRejection, GroupAdmissionPolicy
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.learner_bridge import BEHAVIOR_POLICY_VERSIONS_METADATA_KEY
 
 
 _QueueItem = TypeVar("_QueueItem")
+BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY = "behavior_policy_version_segments"
 
 
 class GenerationStalledError(RuntimeError):
     """Raised when generation cannot make progress (no active producers, or dataset exhausted)."""
+
+
+def _receiver_observed_behavior_policy_versions(trajectory_batch: TrajectoryBatch) -> List[int]:
+    """Collapse serving-observed segment versions into one stable version per response row."""
+    segments_by_row = trajectory_batch.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY)
+    response_count = len(trajectory_batch["response_ids"])
+    if not isinstance(segments_by_row, list) or len(segments_by_row) != response_count:
+        raise RuntimeError(
+            "async learner rollouts require serving-observed policy-version segments aligned with response rows"
+        )
+
+    versions = []
+    for row_index, segment_versions in enumerate(segments_by_row):
+        if (
+            not isinstance(segment_versions, list)
+            or not segment_versions
+            or any(type(version) is not int or version < 0 for version in segment_versions)
+        ):
+            raise RuntimeError(f"async learner rollout row {row_index} has an invalid policy version")
+        if len(set(segment_versions)) != 1:
+            raise RuntimeError(
+                f"async learner rollout row {row_index} spans multiple installed policy versions: {segment_versions}"
+            )
+        versions.append(segment_versions[0])
+    return versions
 
 
 def _drain_queue(queue: asyncio.Queue[_QueueItem]) -> List[_QueueItem]:
@@ -1088,6 +1115,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 )
                 actual_step = cur_trajectory_batch.get("actual_global_step")
                 staleness_step = actual_step if actual_step is not None else global_step_at_start
+                behavior_policy_versions = None
+                if self.learner is not None:
+                    behavior_policy_versions = _receiver_observed_behavior_policy_versions(cur_trajectory_batch)
 
                 record_generated_work(
                     cur_trajectory_batch["response_ids"],
@@ -1099,6 +1129,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     uid=uids[0],
                     earliest_model_step=staleness_step,
                     source_prompts=rand_prompts,
+                    behavior_policy_versions=behavior_policy_versions,
                 )
                 freshness = await self._enqueue_if_fresh(queues, completed_group)
                 if freshness is _GroupFreshness.STALE:
@@ -1173,6 +1204,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             return freshness
 
     async def async_sync_policy_weights_to_inference_engines(self):
+        if self.learner is not None:
+            return await asyncio.to_thread(self._publish_learner_policy)
         # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the
         # weight-extract gather that broadcast_to_inference_engines runs. extract_weights
         # fires mesh_fsdp `_all_gather_base` collectives (fsdp_worker._gather_tensor) on a
@@ -1214,6 +1247,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         stall the async trainer's own event-loop thread; the driver coroutine still does
         not advance to the forward dispatch until every rank's drain has completed.
         """
+        if self.learner is not None:
+            return
         refs = self.policy_model.async_run_ray_method("pass_through", "barrier_all")
         await asyncio.gather(*refs)
 
@@ -1542,16 +1577,30 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
         logger.debug(f"Example generated: {vis}")
 
-        return self.convert_to_training_input(trajectory_batch, uids)
+        training_input = self.convert_to_training_input(trajectory_batch, uids)
+        if self.learner is not None:
+            if any(
+                group.behavior_policy_versions is None
+                or len(group.behavior_policy_versions) != len(group.trajectory_batch["response_ids"])
+                for group in cur_generation_group_mini_batch
+            ):
+                raise RuntimeError("async learner group lost behavior-policy version alignment")
+            behavior_policy_versions = [
+                version for group in cur_generation_group_mini_batch for version in group.behavior_policy_versions or []
+            ]
+            if len(behavior_policy_versions) != training_input.batch_size:
+                raise RuntimeError(
+                    "async behavior-policy versions lost batch alignment: "
+                    f"{len(behavior_policy_versions)} versions for {training_input.batch_size} rows"
+                )
+            training_input.metadata[BEHAVIOR_POLICY_VERSIONS_METADATA_KEY] = behavior_policy_versions
+        return training_input
 
-    def save_checkpoints(self):
-        """
-        Save checkpoints. Data consumption state is persisted by DataTrackingCallback.on_save,
-        which fires after the base checkpoint save completes.
-        """
-        # The base method saves model, dataloader state, trainer_state, and latest_ckpt_global_step.txt.
-        # DataTrackingCallback.on_save (registered in __init__) writes data_consumption_state.pt.
-        super().save_checkpoints()
+    def save_checkpoints(self, *, commit: bool = False):
+        """Stage async checkpoint files; the async callback path owns the commit marker."""
+        if commit:
+            raise RuntimeError("fully async checkpoints must commit after required save callbacks")
+        super().save_checkpoints(commit=False)
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """
