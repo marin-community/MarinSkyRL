@@ -12,7 +12,7 @@ from iris.cluster.client.job_info import JobInfo  # noqa: E402
 from iris.cluster.types import JobName  # noqa: E402
 
 from cloud.iris import telemetry_env  # noqa: E402
-from cloud.iris.env_vars import (  # noqa: E402
+from marinskyrl.environment_contract import (  # noqa: E402
     EXECUTION_UID_ENV,
     RUN_ID_ENV,
     TELEMETRY_ENDPOINT_ENV,

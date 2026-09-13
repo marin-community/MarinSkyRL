@@ -5,16 +5,13 @@ from typing import TypedDict
 
 from skyrl_train.batch_sampling import accumulate_selected_groups
 from skyrl_train.group_admission import (
+    AdmissionAction,
     AdmissionRejection,
     GroupAdmissionPolicy,
     GroupAdvantageInvariant,
     TrainingGroupInvariantError,
 )
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
-
-
-class InsufficientEligibleGroupsError(RuntimeError):
-    """Synchronous generation exhausted its replacement budget before filling a batch."""
 
 
 class GroupAdmissionSamplingState(TypedDict, total=False):
@@ -55,7 +52,6 @@ def admit_or_collect_replacements(
         rollout_logprobs_required=rollout_logprobs_required,
     )
     admissions = policy.evaluate_batch(trajectory_batch, uids, global_step=0)
-    retryable = {AdmissionRejection.FULLY_MASKED, AdmissionRejection.BELOW_MINIMUM_GROUP_SIZE}
     rejection_counts = {rejection: 0 for rejection in AdmissionRejection}
     selected_uids = []
     for admission in admissions:
@@ -64,7 +60,7 @@ def admit_or_collect_replacements(
             continue
         assert admission.decision.primary_rejection is not None
         rejection_counts[admission.decision.primary_rejection] += 1
-        if any(rejection not in retryable for rejection in admission.decision.rejections):
+        if admission.decision.action is AdmissionAction.FAIL:
             raise TrainingGroupInvariantError(
                 uid=admission.uid,
                 decision=admission.decision,

@@ -46,7 +46,7 @@ import uuid
 from typing import Protocol
 from cloud.iris.artifacts import ArtifactSource, SOURCE_MANIFEST_FILENAME, fs_and_path, materialize
 from marinskyrl.hf_model import sha256_file, validate_portable_hf_model_files, validate_speculator_model_files
-from cloud.iris.env_vars import (
+from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
     FR_DUMP_TEMP_FILE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
@@ -58,6 +58,11 @@ from cloud.iris.env_vars import (
 from cloud.iris.model_paths import unsupported_model_path_message
 from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
+from marinskyrl.process_diagnostics import (
+    ProcessOutcomeKind,
+    initialize_process_diagnostics,
+    write_process_outcome,
+)
 from marinskyrl.speculative_decoding import SpeculatorModelConfig
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
@@ -1984,7 +1989,18 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
             ray_stop()
             return DRIVER_STALLED_EXIT_CODE
         output_thread.join(timeout=DRIVER_KILL_TIMEOUT)
-        exit_code = wait_result.exit_code
+        driver_outcome, outcome_receipt = write_process_outcome(
+            "training-driver",
+            wait_result.exit_code,
+            pid=process.pid,
+        )
+        exit_code = driver_outcome.public_exit_code
+        if driver_outcome.kind is ProcessOutcomeKind.SIGNAL:
+            _log(
+                f"Training driver terminated by {driver_outcome.signal_name} "
+                f"(raw_returncode={driver_outcome.raw_returncode}, exit_code={exit_code}, "
+                f"receipt={outcome_receipt})"
+            )
         if exit_code != 0:
 
             def persist_failure_artifacts() -> None:
@@ -2273,9 +2289,11 @@ def main() -> None:
     # Ensure the NCCL flight-recorder dump dir exists on THIS node BEFORE any torch/NCCL
     # init, so a collective-timeout FR dump actually writes. See ensure_fr_dump_dir.
     ensure_fr_dump_dir()
+    # The launcher projects this manager-owned path before task runtime starts.
     debug_artifact_root = os.environ.get(DEBUG_ARTIFACT_DIR_ENV)
     if debug_artifact_root:
         ensure_debug_artifact_directories(debug_artifact_root)
+        initialize_process_diagnostics(f"task-runtime-rank{_rank()}")
     # Stage task datasets on THIS node before Ray bootstrap (head + every worker).
     # Without this, only rank-0 has the extracted tasks and the rollout workers die
     # with FileNotFoundError on task.toml. See stage_task_data docstring.

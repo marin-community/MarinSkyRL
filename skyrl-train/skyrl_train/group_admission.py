@@ -7,6 +7,56 @@ from enum import StrEnum
 from typing import Mapping, Protocol, Sequence
 
 
+_INITIAL_ADMISSION_STALL_TIMEOUT = 1800.0
+_MINIMUM_ADMISSION_STALL_TIMEOUT = 600.0
+_STEP_TIME_MULTIPLIER = 5.0
+
+
+class GroupAdmissionStalledError(RuntimeError):
+    """Admission made no progress before its shared deadline."""
+
+
+@dataclass
+class AdmissionProgressWatchdog:
+    """Track the shared sync/async deadline since the last admitted-group progress."""
+
+    last_progress_at: float
+    timeout: float
+
+    @classmethod
+    def start(
+        cls,
+        *,
+        now: float,
+        recent_step_times: Sequence[float],
+        timeout_override: float | None,
+    ) -> AdmissionProgressWatchdog:
+        if timeout_override is not None:
+            if timeout_override <= 0:
+                raise ValueError(f"group admission stall_timeout must be positive, got {timeout_override}")
+            timeout = float(timeout_override)
+        elif not recent_step_times:
+            timeout = _INITIAL_ADMISSION_STALL_TIMEOUT
+        else:
+            sorted_times = sorted(recent_step_times)
+            median = sorted_times[len(sorted_times) // 2]
+            timeout = max(median * _STEP_TIME_MULTIPLIER, _MINIMUM_ADMISSION_STALL_TIMEOUT)
+        return cls(last_progress_at=now, timeout=timeout)
+
+    def observe(self, *, now: float, progressed: bool) -> None:
+        if progressed:
+            self.last_progress_at = now
+
+    def elapsed(self, *, now: float) -> float:
+        return now - self.last_progress_at
+
+    def remaining(self, *, now: float) -> float:
+        return self.timeout - self.elapsed(now=now)
+
+    def stalled(self, *, now: float) -> bool:
+        return self.remaining(now=now) <= 0
+
+
 class GroupAdvantageKind(StrEnum):
     """Supported group-relative advantage contracts."""
 
@@ -78,6 +128,15 @@ class AdmissionRejection(StrEnum):
     DUPLICATE_UID = "duplicate_uid"
 
 
+class AdmissionAction(StrEnum):
+    """Shared caller action for an admission decision."""
+
+    ACCEPT = "accept"
+    RETRY_PROMPT = "retry_prompt"
+    REPLACE_PROMPT = "replace_prompt"
+    FAIL = "fail"
+
+
 @dataclass(frozen=True)
 class AdmissionDecision:
     """Pure admission result; queue routing is owned by the caller."""
@@ -91,6 +150,21 @@ class AdmissionDecision:
     @property
     def primary_rejection(self) -> AdmissionRejection | None:
         return self.rejections[0] if self.rejections else None
+
+    @property
+    def action(self) -> AdmissionAction:
+        """Route stale, replaceable, and structurally invalid work consistently."""
+        if self.accepted:
+            return AdmissionAction.ACCEPT
+        fatal_rejections = {
+            AdmissionRejection.PHYSICAL_GROUP_SIZE,
+            AdmissionRejection.MISSING_ROLLOUT_LOGPROBS,
+        }
+        if any(rejection in fatal_rejections for rejection in self.rejections):
+            return AdmissionAction.FAIL
+        if AdmissionRejection.STALE in self.rejections:
+            return AdmissionAction.RETRY_PROMPT
+        return AdmissionAction.REPLACE_PROMPT
 
 
 @dataclass(frozen=True)
@@ -125,6 +199,27 @@ class TrainingGroupInvariantError(ValueError):
             f"training group {uid!r} violates the resolved group invariant: {reasons} "
             f"(physical_count={physical_count}, expected={expected_physical_count}, "
             f"row_count={len(row_indices)}, row_indices={list(row_indices)})"
+        )
+
+    @classmethod
+    def from_generated_group(
+        cls,
+        *,
+        uid: str,
+        group: GeneratedGroup,
+        decision: AdmissionDecision,
+        invariant: GroupAdvantageInvariant,
+    ) -> TrainingGroupInvariantError:
+        """Build the same typed invariant error for an asynchronous group."""
+        facts = _inspect_group(group)
+        response_ids = group.trajectory_batch["response_ids"]
+        assert isinstance(response_ids, Sequence)
+        return cls(
+            uid=uid,
+            decision=decision,
+            physical_count=facts.physical_count,
+            expected_physical_count=invariant.physical_group_size,
+            row_indices=range(len(response_ids)),
         )
 
 

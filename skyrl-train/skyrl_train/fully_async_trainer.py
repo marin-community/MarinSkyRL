@@ -54,7 +54,15 @@ from skyrl_train.dynamic_sampling import (
     GroupSelectionResult,
     resolve_dynamic_sampling_criteria,
 )
-from skyrl_train.group_admission import AdmissionDecision, AdmissionRejection, GroupAdmissionPolicy
+from skyrl_train.group_admission import (
+    AdmissionAction,
+    AdmissionDecision,
+    AdmissionProgressWatchdog,
+    AdmissionRejection,
+    GroupAdmissionPolicy,
+    GroupAdmissionStalledError,
+    TrainingGroupInvariantError,
+)
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 
 
@@ -442,9 +450,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
-        self.admission_stall_timeout = int(cfg.trainer.fully_async.admission_stall_timeout)
-        if self.admission_stall_timeout <= 0:
-            raise ValueError("trainer.fully_async.admission_stall_timeout must be positive")
+        self.group_admission_stall_timeout = cfg.trainer.algorithm.group_admission.stall_timeout
         self._group_selection_policy = GroupSelectionPolicy.for_fully_async(
             cfg.trainer.algorithm.dynamic_sampling.type,
             criteria=resolve_dynamic_sampling_criteria(
@@ -544,7 +550,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._groups_rejected_since_step = 0
         self._rejection_reasons_since_step: collections.Counter[str] = collections.Counter()
         self._groups_inspected_since_step = 0
-        self._step_time_history: collections.deque[float] = collections.deque(maxlen=5)
 
     def _configure_training_schedule(self):
         """
@@ -1325,16 +1330,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _generation_stall_timeout(self) -> float:
         """Adaptive deadline for receiving new groups during a generation wait.
 
-        Returns a multiple of the recent median step time (at least 10 minutes)
-        so the stall fires long before a human would notice, but never during
-        normal cadence.  When no step history exists (first step), defaults to
-        30 minutes.
+        An explicit timeout is returned unchanged. Otherwise the deadline is a
+        multiple of the recent median step time (at least 10 minutes); before
+        step timing exists, it is 30 minutes.
         """
-        if not self._step_time_history:
-            return 1800.0
-        sorted_times = sorted(self._step_time_history)
-        median = sorted_times[len(sorted_times) // 2]
-        return max(median * 5.0, 600.0)
+        return AdmissionProgressWatchdog.start(
+            now=0.0,
+            recent_step_times=self._step_time_history,
+            timeout_override=self.group_admission_stall_timeout,
+        ).timeout
 
     def _raise_admission_stall(
         self,
@@ -1344,7 +1348,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         active_producers: int,
     ) -> None:
         """Bound a step that has admitted no new groups, even if producer tasks remain alive."""
-        raise GenerationStalledError(
+        raise GroupAdmissionStalledError(
             f"Generation stalled: no groups admitted for {elapsed:.0f}s; "
             f"active_producers={active_producers}, "
             f"rejected_completions={dict(rejection_counts)}"
@@ -1388,7 +1392,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Discard or retry rejected groups and wait for a full admitted mini-batch.
 
         Raises:
-            GenerationStalledError: No producer can make admission progress.
+            GroupAdmissionStalledError: Live producers make no admission progress before the shared deadline.
+            GenerationStalledError: The finite source is exhausted before a complete batch is assembled.
             RuntimeError: Dynamic sampling exhausts its per-step candidate budget.
         """
         if queues.admitted_groups_consumed:
@@ -1396,7 +1401,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         accepted_groups = queues.admitted_groups
         loop = asyncio.get_event_loop()
         last_admitted_progress = loop.time()
-        stall_timeout = float(self.admission_stall_timeout)
+        watchdog = AdmissionProgressWatchdog.start(
+            now=last_admitted_progress,
+            recent_step_times=self._step_time_history,
+            timeout_override=self.group_admission_stall_timeout,
+        )
         rejection_counts_since_admission: collections.Counter[str] = collections.Counter()
         dynamic_candidate_metrics = _DynamicSamplingCandidateMetrics()
         dynamic_discarded_count = 0
@@ -1412,8 +1421,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             f"dynamic_discarded={dynamic_discarded_count}, "
                             f"rejections={dict(rejection_counts_since_admission)}"
                         )
-                    elapsed = loop.time() - last_admitted_progress
-                    remaining = stall_timeout - elapsed
+                    now = loop.time()
+                    elapsed = watchdog.elapsed(now=now)
+                    remaining = watchdog.remaining(now=now)
                     if remaining <= 0:
                         self._raise_admission_stall(
                             elapsed,
@@ -1424,7 +1434,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         await asyncio.wait_for(queues.condition.wait(), timeout=remaining)
                     except asyncio.TimeoutError:
                         self._raise_admission_stall(
-                            loop.time() - last_admitted_progress,
+                            watchdog.elapsed(now=loop.time()),
                             rejection_counts_since_admission,
                             active_producers=queues.active_producers,
                         )
@@ -1436,7 +1446,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     | self.data_tracker.get_consumed_uids_in_epoch(),
                 )
                 for group, decision in partition.rejected_groups:
-                    queues.retries.put_nowait(group.source_prompts)
+                    if decision.action is AdmissionAction.RETRY_PROMPT:
+                        queues.retries.put_nowait(group.source_prompts)
+                    elif decision.action is AdmissionAction.FAIL:
+                        raise TrainingGroupInvariantError.from_generated_group(
+                            uid=group.uid,
+                            group=group,
+                            decision=decision,
+                            invariant=self._group_admission_policy.invariant,
+                        )
                     assert decision.primary_rejection is not None
                     rejection_counts_since_admission[decision.primary_rejection.value] += 1
 
@@ -1454,8 +1472,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     queues.completed.put_nowait(group)
 
                 if selection.admitted_groups:
-                    last_admitted_progress = loop.time()
-                    stall_timeout = float(self.admission_stall_timeout)
+                    watchdog.observe(now=loop.time(), progressed=True)
                     rejection_counts_since_admission.clear()
 
                 if len(accepted_groups) >= self.mini_batch_size:

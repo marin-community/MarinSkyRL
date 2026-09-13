@@ -14,7 +14,7 @@ nvidia-smi --query-gpu=name,driver_version --format=csv
 echo "::: running the Grug Megatron parity, training, and serving gates"
 cd "$REPOSITORY_ROOT"
 JUNIT_XML="$REPOSITORY_ROOT/grug-megatron-junit.xml"
-"$PYTHON" "$REPOSITORY_ROOT/cloud/iris/env_vars.py" \
+"$PYTHON" "$REPOSITORY_ROOT/marinskyrl/environment_contract.py" \
   run-grug-gpu-gate "$REPOSITORY_ROOT" -- \
   "$PYTHON" -m pytest ${GRUG_MEGATRON_PYTEST_ARGS:--x} -s \
   --junitxml="$JUNIT_XML" \

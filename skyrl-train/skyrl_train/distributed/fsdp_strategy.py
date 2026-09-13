@@ -55,6 +55,33 @@ _DEFAULT_OPTIMIZER_NAME = "AdamW"
 _MUONH_OPTIMIZER_NAME = "MuonH"
 
 
+def snapshot_shared_state_dict_tensors(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Detach state tensors that share storage from the module being sharded.
+
+    FSDP2 replaces tied parameters while it shards a module. A state-dict view of
+    those parameters otherwise keeps pointing at the storage FSDP2 is replacing,
+    so the subsequent full-state loader can read partially initialized data.
+    """
+    storage_groups: dict[tuple[torch.device, int], list[tuple[str, torch.Tensor]]] = defaultdict(list)
+    for name, tensor in state_dict.items():
+        if tensor.device.type == "meta" or tensor.numel() == 0:
+            continue
+        storage = tensor.untyped_storage()
+        storage_groups[(tensor.device, storage.data_ptr())].append((name, tensor))
+
+    result = state_dict.copy()
+    for tensors in storage_groups.values():
+        if len(tensors) < 2:
+            continue
+        snapshots: dict[tuple[int, tuple[int, ...], tuple[int, ...], torch.dtype], torch.Tensor] = {}
+        for name, tensor in tensors:
+            view = (tensor.storage_offset(), tuple(tensor.shape), tuple(tensor.stride()), tensor.dtype)
+            if view not in snapshots:
+                snapshots[view] = tensor.detach().clone()
+            result[name] = snapshots[view]
+    return result
+
+
 def resolve_fsdp_parameter_storage_dtype(
     optimizer_name: str,
     configured_dtype: str | None,
@@ -412,6 +439,8 @@ class FSDPStrategy(DistributedStrategy):
             }
             module = model.model if is_wrapped else model
             full_state = module.state_dict()
+            if not ep_on and dist.get_rank() == 0:
+                full_state = snapshot_shared_state_dict_tensors(full_state)
             # Stage 4a: shard experts over the "ep" submesh BEFORE the FSDP wrap.
             # torchtitan ExpertParallel's _partition_fn distribute_tensor's the raw
             # expert params onto the "ep" submesh; this must happen while they are

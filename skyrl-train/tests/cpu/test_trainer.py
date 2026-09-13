@@ -4,6 +4,7 @@ uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
 
 import contextlib
 import asyncio
+import collections
 import gc
 import weakref
 from types import SimpleNamespace
@@ -17,8 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from skyrl_train.distributed.dispatch import MeshRank
-from skyrl_train.group_admission import GroupAdvantageInvariant
-from skyrl_train.sync_group_admission import InsufficientEligibleGroupsError
+from skyrl_train.group_admission import GroupAdmissionStalledError, GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import ResumeMode
@@ -509,10 +509,12 @@ def test_online_speculator_restore_rejects_a_different_initial_source() -> None:
         asyncio.run(trainer._restore_speculator_checkpoint("/source/checkpoints/global_step_2"))
 
 
-def test_sync_group_admission_exhaustion_raises_typed_error():
+def test_sync_group_admission_uses_elapsed_time_instead_of_batch_count():
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=2)
     trainer.group_admission_state = None
+    trainer._group_admission_watchdog = None
+    trainer._step_time_history = collections.deque(maxlen=5)
     trainer.all_metrics = {}
     trainer.global_step = 1
     trainer.cfg = OmegaConf.create(
@@ -522,7 +524,7 @@ def test_sync_group_admission_exhaustion_raises_typed_error():
                 "algorithm": {
                     "policy_loss_type": "regular",
                     "tis_lcs_alert_threshold": 0.005,
-                    "group_admission": {"max_sample_batches": 1},
+                    "group_admission": {"stall_timeout": 10.0},
                 },
             }
         }
@@ -538,8 +540,11 @@ def test_sync_group_admission_exhaustion_raises_typed_error():
         "exclude_from_baseline": [True, True],
     }
 
-    with pytest.raises(InsufficientEligibleGroupsError):
-        trainer.handle_group_admission(fully_masked, ["masked", "masked"])
+    with patch("skyrl_train.trainer.time.monotonic", side_effect=[100.0, 100.0, 109.0, 110.0]):
+        assert trainer.handle_group_admission(fully_masked, ["masked", "masked"]).keep_sampling
+        assert trainer.handle_group_admission(fully_masked, ["masked", "masked"]).keep_sampling
+        with pytest.raises(GroupAdmissionStalledError, match="no admission progress for 10s"):
+            trainer.handle_group_admission(fully_masked, ["masked", "masked"])
 
 
 _TEST_PROGRESS_CONFIG = {
@@ -1108,6 +1113,47 @@ def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore
     assert restored_path == str(checkpoint_path)
     assert trainer.policy_model.restore_residencies == [(True, False)]
     assert "offload_policy_optimizer_before_checkpoint_load" in trainer.all_startup_timings
+
+
+class _CursorDataLoader:
+    def __init__(self):
+        self.cursor = 0
+
+    def load_state_dict(self, state):
+        self.cursor = state["cursor"]
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        value = f"row-{self.cursor}"
+        self.cursor += 1
+        return value
+
+
+def test_load_checkpoints_can_restart_a_replacement_dataset(tmp_path, dummy_config):
+    checkpoint_path = tmp_path / "global_step_12"
+    checkpoint_path.mkdir()
+    torch.save({"global_step": 12}, checkpoint_path / "trainer_state.pt")
+    torch.save({"cursor": 7}, checkpoint_path / "data.pt")
+
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+    dummy_config.trainer.restore_dataloader_state = False
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.colocate_all = True
+    trainer.train_dataloader = _CursorDataLoader()
+    trainer.policy_model = MagicMock()
+    trainer.policy_model.async_run_ray_method.return_value = []
+    trainer.critic_model = None
+
+    with patch("skyrl_train.trainer.ray.get", return_value=None):
+        global_step, loaded_path = trainer.load_checkpoints()
+
+    assert global_step == 12
+    assert loaded_path == str(checkpoint_path)
+    assert next(trainer.train_dataloader) == "row-0"
 
 
 def test_calculate_kl_create_experience_batched(dummy_config, dummy_trajectory_runner):

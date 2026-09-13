@@ -1,5 +1,8 @@
 """Canonical ownership and projection of MarinSkyRL environment variables."""
 
+# Direct ambient-environment access is intentional here: this module is the manager and
+# process-boundary adapter that replaces scattered readers and writers elsewhere.
+
 from __future__ import annotations
 
 import json
@@ -24,8 +27,9 @@ class EnvVarScope(StrEnum):
     TASK_RUNTIME = "task_runtime"
 
 
-class DistributedDebugMode(StrEnum):
+class DebugMode(StrEnum):
     OFF = "off"
+    LIGHT = "light"
     DISTRIBUTED = "distributed"
 
 
@@ -64,6 +68,9 @@ ALL_RUNTIME_SCOPES = frozenset(EnvVarScope)
 DEBUG_MODE_ENV = "SKYRL_DEBUG_MODE"
 DEBUG_ARTIFACT_DIR_ENV = "SKYRL_DEBUG_ARTIFACT_DIR"
 COLLECTIVE_PHASE_DIAGNOSTICS_ENV = "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"
+PYTHONFAULTHANDLER_ENV = "PYTHONFAULTHANDLER"
+RAY_USE_UVLOOP_ENV = "RAY_USE_UVLOOP"
+UV_USE_IO_URING_ENV = "UV_USE_IO_URING"
 FR_DUMP_TEMP_FILE_ENV = "TORCH_FR_DUMP_TEMP_FILE"
 NCCL_DEBUG_INFO_TEMP_FILE_ENV = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
 PYTHONPATH_ENV = "PYTHONPATH"
@@ -89,12 +96,24 @@ ENV_VAR_SPECS = (
     EnvVarSpec("NCCL_DEBUG", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("NCCL_DEBUG_SUBSYS", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("NCCL_DEBUG_FILE", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
-    EnvVarSpec("PYTHONFAULTHANDLER", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
+    EnvVarSpec(PYTHONFAULTHANDLER_ENV, "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec(
         COLLECTIVE_PHASE_DIAGNOSTICS_ENV,
         "trainer.collective_phase_diagnostics",
         EnvVarSource.DERIVED,
         ALL_RUNTIME_SCOPES,
+    ),
+    EnvVarSpec(
+        RAY_USE_UVLOOP_ENV,
+        "trainer.debug_mode",
+        EnvVarSource.DERIVED,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
+    ),
+    EnvVarSpec(
+        UV_USE_IO_URING_ENV,
+        "trainer.debug_mode",
+        EnvVarSource.DERIVED,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
     ),
     EnvVarSpec("TORCH_FR_BUFFER_SIZE", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("TORCH_CPP_LOG_LEVEL", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
@@ -350,9 +369,16 @@ def _config_value(config: Any, dotted_path: str, default: Any = None) -> Any:
     return default if value is None else value
 
 
-def _safe_component(value: str) -> str:
+def safe_artifact_component(value: str) -> str:
     cleaned = _SAFE_COMPONENT.sub("-", value).strip("-.")
     return cleaned or "run"
+
+
+def write_atomic_json(path: Path, payload: Mapping[str, object]) -> None:
+    """Write one JSON object without exposing a partial artifact to readers."""
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    temporary.replace(path)
 
 
 class EnvVarManager:
@@ -368,6 +394,8 @@ class EnvVarManager:
     def from_config(cls, config: Any, *, environ: Mapping[str, str] | None = None) -> "EnvVarManager":
         ambient = os.environ if environ is None else environ
         values = {}
+        values[RAY_USE_UVLOOP_ENV] = "0"
+        values[UV_USE_IO_URING_ENV] = "0"
         passthrough_names = (
             LD_LIBRARY_PATH_ENV,
             NVRTC_HOME_ENV,
@@ -384,25 +412,47 @@ class EnvVarManager:
             values[VLLM_ALLOW_INSECURE_SERIALIZATION_ENV] = "1"
         if _config_value(config, "trainer.placement.enable_numa_affinity", False):
             values[NUMA_AFFINITY_ENV] = "1"
-        if _config_value(config, "trainer.collective_phase_diagnostics", False):
+        phase_diagnostics = _config_value(config, "trainer.collective_phase_diagnostics")
+        if phase_diagnostics is True:
             values[COLLECTIVE_PHASE_DIAGNOSTICS_ENV] = "1"
-        raw_mode = _config_value(config, "trainer.debug_mode", "off")
+        raw_mode = _config_value(config, "trainer.debug_mode", DebugMode.LIGHT.value)
         try:
-            mode = DistributedDebugMode(str(raw_mode))
+            mode = DebugMode(str(raw_mode))
         except ValueError as error:
-            choices = ", ".join(mode.value for mode in DistributedDebugMode)
+            choices = ", ".join(mode.value for mode in DebugMode)
             raise ValueError(f"trainer.debug_mode must be one of: {choices}; got {raw_mode!r}") from error
-        if mode is DistributedDebugMode.OFF:
+        if mode is DebugMode.OFF:
             return cls(values)
 
         artifact_root = ambient.get(DEBUG_ARTIFACT_DIR_ENV) or cls._artifact_root(config)
-        values.update(cls._distributed_values(artifact_root))
+        values.update(
+            cls._debug_values(
+                mode,
+                artifact_root,
+                collective_phase_diagnostics=phase_diagnostics is not False,
+            )
+        )
         return cls(values)
 
     @classmethod
-    def for_distributed_launch(cls, *, job_name: str, artifact_root: str | None = None) -> "EnvVarManager":
-        root = artifact_root or f"/tmp/skyrl-debug/{_safe_component(job_name)}"
-        return cls(cls._distributed_values(root))
+    def for_debug_launch(
+        cls,
+        *,
+        mode: DebugMode = DebugMode.LIGHT,
+        job_name: str,
+        artifact_root: str | None = None,
+        collective_phase_diagnostics: bool = True,
+    ) -> "EnvVarManager":
+        root = artifact_root or f"/tmp/skyrl-debug/{safe_artifact_component(job_name)}"
+        if mode is DebugMode.OFF:
+            return cls({})
+        return cls(
+            cls._debug_values(
+                mode,
+                root,
+                collective_phase_diagnostics=collective_phase_diagnostics,
+            )
+        )
 
     @classmethod
     def for_frozen_cuda_runtime(
@@ -433,34 +483,46 @@ class EnvVarManager:
     @staticmethod
     def _artifact_root(config: Any) -> str:
         checkpoint_path = str(_config_value(config, "trainer.ckpt_path", "") or "")
-        run_name = _safe_component(str(_config_value(config, "trainer.run_name", "run")))
+        run_name = safe_artifact_component(str(_config_value(config, "trainer.run_name", "run")))
         if checkpoint_path and not _REMOTE_PATH.match(checkpoint_path):
             checkpoint = Path(checkpoint_path).expanduser()
             return str(checkpoint.parent / "debug")
         return f"/tmp/skyrl-debug/{run_name}"
 
     @staticmethod
-    def _distributed_values(artifact_root: str) -> dict[str, str]:
+    def _debug_values(
+        mode: DebugMode,
+        artifact_root: str,
+        *,
+        collective_phase_diagnostics: bool,
+    ) -> dict[str, str]:
         root = str(Path(artifact_root).expanduser())
         flight_prefix = str(Path(root) / "flight_recorder" / "nccl_fr_rank_")
-        return {
+        values = {
             **nccl_diagnostics_environment(heartbeat_timeout_seconds=300),
-            DEBUG_MODE_ENV: DistributedDebugMode.DISTRIBUTED.value,
+            DEBUG_MODE_ENV: mode.value,
             DEBUG_ARTIFACT_DIR_ENV: root,
-            "NCCL_DEBUG": "INFO",
-            "NCCL_DEBUG_SUBSYS": _NCCL_SETUP_SUBSYSTEMS,
-            "NCCL_DEBUG_FILE": str(Path(root) / "nccl" / "nccl.%h.%p.log"),
-            "PYTHONFAULTHANDLER": "1",
-            COLLECTIVE_PHASE_DIAGNOSTICS_ENV: "1",
-            "TORCH_CPP_LOG_LEVEL": "INFO",
+            PYTHONFAULTHANDLER_ENV: "1",
             FR_DUMP_TEMP_FILE_ENV: flight_prefix,
             NCCL_DEBUG_INFO_TEMP_FILE_ENV: flight_prefix,
-            "TORCH_NCCL_DESYNC_DEBUG": "1",
-            "TORCH_NCCL_ENABLE_TIMING": "1",
-            "TORCH_NCCL_TRACE_CPP_STACK": "1",
-            "TORCH_SHOW_CPP_STACKTRACES": "1",
-            "TORCH_SYMBOLIZE_MODE": "fast",
         }
+        if collective_phase_diagnostics:
+            values[COLLECTIVE_PHASE_DIAGNOSTICS_ENV] = "1"
+        if mode is DebugMode.DISTRIBUTED:
+            values.update(
+                {
+                    "NCCL_DEBUG": "INFO",
+                    "NCCL_DEBUG_SUBSYS": _NCCL_SETUP_SUBSYSTEMS,
+                    "NCCL_DEBUG_FILE": str(Path(root) / "nccl" / "nccl.%h.%p.log"),
+                    "TORCH_CPP_LOG_LEVEL": "INFO",
+                    "TORCH_NCCL_DESYNC_DEBUG": "1",
+                    "TORCH_NCCL_ENABLE_TIMING": "1",
+                    "TORCH_NCCL_TRACE_CPP_STACK": "1",
+                    "TORCH_SHOW_CPP_STACKTRACES": "1",
+                    "TORCH_SYMBOLIZE_MODE": "fast",
+                }
+            )
+        return values
 
     def environment_for(self, scope: EnvVarScope) -> dict[str, str]:
         return {name: value for name, value in self._values.items() if scope in _SPECS_BY_NAME[name].scopes}
@@ -498,7 +560,7 @@ def temporarily_unset_managed_environment(
 
 def ensure_debug_artifact_directories(artifact_root: str) -> None:
     root = Path(artifact_root)
-    for child in ("collective_phases", "flight_recorder", "nccl", "processes", "runs"):
+    for child in ("collective_phases", "flight_recorder", "nccl", "outcomes", "processes", "runs", "stacks"):
         (root / child).mkdir(parents=True, exist_ok=True)
 
 
@@ -520,15 +582,19 @@ def write_process_manifest(
     environment: Mapping[str, str] | None = None,
     metadata: Mapping[str, object] | None = None,
 ) -> Path:
-    """Persist one collision-free process receipt when distributed debug mode is active."""
+    """Persist one collision-free process receipt beneath the configured artifact directory."""
     values = os.environ if environment is None else environment
     artifact_root = values.get(DEBUG_ARTIFACT_DIR_ENV)
     if not artifact_root:
         raise RuntimeError(f"{DEBUG_ARTIFACT_DIR_ENV} is required for a debug process manifest")
     ensure_debug_artifact_directories(artifact_root)
     hostname = socket.gethostname()
-    path = Path(artifact_root) / "processes" / f"{_safe_component(role)}.{hostname}.{os.getpid()}.json"
-    managed = {name: values[name] for name in sorted(_SPECS_BY_NAME) if name in values}
+    path = Path(artifact_root) / "processes" / f"{safe_artifact_component(role)}.{hostname}.{os.getpid()}.json"
+    managed = {
+        name: values[name]
+        for name, spec in sorted(_SPECS_BY_NAME.items())
+        if name in values and spec.source is not EnvVarSource.SECRET
+    }
     payload = {
         "schema_version": 1,
         "role": role,
@@ -538,9 +604,7 @@ def write_process_manifest(
         "environment": managed,
         "metadata": dict(metadata or {}),
     }
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n")
-    temporary.replace(path)
+    write_atomic_json(path, payload)
     return path
 
 

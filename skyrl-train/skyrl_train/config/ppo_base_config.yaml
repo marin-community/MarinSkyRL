@@ -9,6 +9,7 @@ defaults:
 data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
+  shuffle: true
   # Optional task-directory sidechannel for mixed Nemotron Ultra RLVR. The
   # parquet dataloader remains authoritative; SWE rows resolve their instance ID
   # against these terminal-bench task roots at rollout time.
@@ -40,8 +41,12 @@ checkpoint_export:
   hf_upload_mode: latest
 
 trainer:
-  debug_mode: "off"
-  collective_phase_diagnostics: false
+  # light is the shared default: fatal Python stacks, bounded NCCL flight recording,
+  # process receipts, and per-rank phase history. Use distributed for live stacks
+  # and C++/NCCL escalation, or off as an emergency escape hatch.
+  debug_mode: "light"
+  # null follows debug_mode (on for light/distributed); true/false explicitly overrides it.
+  collective_phase_diagnostics: null
   distributed:
     placement_group_timeout_seconds: 180
     worker_collective_timeout_seconds: 1800
@@ -236,8 +241,9 @@ trainer:
       min_reward_std: 0.0
 
     group_admission:
-      # Bound replacement generation when completed groups cannot enter training.
-      max_sample_batches: 30
+      # Null uses a shared adaptive sync/async deadline: 30 minutes before timing exists,
+      # then max(5 x recent median step time, 10 minutes).
+      stall_timeout: null
     
     clip_cov:
       clip_ratio: 0.0002
@@ -273,13 +279,13 @@ trainer:
     max_staleness_steps: 4
 
     num_parallel_generation_workers: 768
-    admission_stall_timeout: 21600
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   seed: 42
   resume_mode: latest
   resume_path: null
+  restore_dataloader_state: true
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
   ckpt_interval: 5

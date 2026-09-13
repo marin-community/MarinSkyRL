@@ -7,6 +7,9 @@ from skyrl_train.dynamic_sampling import (
     resolve_dynamic_sampling_criteria,
 )
 from skyrl_train.group_admission import (
+    AdmissionAction,
+    AdmissionDecision,
+    AdmissionProgressWatchdog,
     AdmissionRejection,
     GroupAdmissionPolicy,
     GroupAdvantageInvariant,
@@ -41,6 +44,46 @@ def _group(
         earliest_model_step=earliest_model_step,
         source_prompts=[{"uid": "group"}],
     )
+
+
+@pytest.mark.parametrize(
+    ("history", "expected"),
+    [
+        ([], 1800.0),
+        ([100.0, 200.0, 300.0], 1000.0),
+        ([1.0, 2.0, 3.0], 600.0),
+    ],
+)
+def test_admission_watchdog_uses_shared_adaptive_timeout(history, expected):
+    watchdog = AdmissionProgressWatchdog.start(now=10.0, recent_step_times=history, timeout_override=None)
+
+    assert watchdog.timeout == expected
+    assert watchdog.remaining(now=11.0) == expected - 1.0
+
+
+def test_admission_watchdog_resets_only_when_admission_progresses():
+    watchdog = AdmissionProgressWatchdog.start(now=10.0, recent_step_times=[], timeout_override=20.0)
+
+    watchdog.observe(now=15.0, progressed=False)
+    assert watchdog.elapsed(now=18.0) == 8.0
+
+    watchdog.observe(now=18.0, progressed=True)
+    assert watchdog.elapsed(now=20.0) == 2.0
+
+
+@pytest.mark.parametrize(
+    ("rejections", "expected"),
+    [
+        ((), AdmissionAction.ACCEPT),
+        ((AdmissionRejection.STALE,), AdmissionAction.RETRY_PROMPT),
+        ((AdmissionRejection.FULLY_MASKED,), AdmissionAction.REPLACE_PROMPT),
+        ((AdmissionRejection.BELOW_MINIMUM_GROUP_SIZE,), AdmissionAction.REPLACE_PROMPT),
+        ((AdmissionRejection.PHYSICAL_GROUP_SIZE,), AdmissionAction.FAIL),
+        ((AdmissionRejection.MISSING_ROLLOUT_LOGPROBS,), AdmissionAction.FAIL),
+    ],
+)
+def test_admission_decision_has_shared_queue_action(rejections, expected):
+    assert AdmissionDecision(rejections).action is expected
 
 
 def test_exact_group_accepts_masked_trial_when_group_can_train():

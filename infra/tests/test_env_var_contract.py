@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 import infra.check_env_var_contract as env_contract
-from cloud.iris.env_vars import (
+from marinskyrl.environment_contract import (
     ENV_VAR_SPECS,
     EXECUTION_UID_ENV,
     EnvVarScope,
@@ -110,11 +110,15 @@ def test_typed_process_boundary_settings_project_only_to_workers():
 
     assert manager.environment_for(EnvVarScope.DRIVER) == {}
     assert manager.environment_for(EnvVarScope.RAY_WORKER) == {
+        "RAY_USE_UVLOOP": "0",
         "SKYRL_ENABLE_NUMA_AFFINITY": "1",
+        "UV_USE_IO_URING": "0",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
     }
     assert manager.environment_for(EnvVarScope.INFERENCE_WORKER) == {
+        "RAY_USE_UVLOOP": "0",
         "SKYRL_ENABLE_NUMA_AFFINITY": "1",
+        "UV_USE_IO_URING": "0",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
     }
 
@@ -144,5 +148,9 @@ def test_non_debug_worker_projection_does_not_require_an_artifact_directory():
         EnvVarScope.RAY_WORKER, environ=environ
     )
 
-    assert applied == {"SKYRL_ENABLE_NUMA_AFFINITY": "1"}
+    assert applied == {
+        "RAY_USE_UVLOOP": "0",
+        "SKYRL_ENABLE_NUMA_AFFINITY": "1",
+        "UV_USE_IO_URING": "0",
+    }
     assert environ == applied

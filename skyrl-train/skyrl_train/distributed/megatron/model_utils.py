@@ -586,13 +586,23 @@ class _VocabParallelEntropy(torch.autograd.Function):
         return grad_input
 
 
-def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
-    """Compute entropy when the logits are sharded in tp ranks
+def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor, chunk_size: Optional[int] = None) -> torch.Tensor:
+    """Compute entropy when the logits are sharded across tensor-parallel ranks.
 
     Args:
-        vocab_parallel_logits: (total_nnz, vocab_size // tp_size)
+        vocab_parallel_logits: Logits ending in ``(sequence, vocab_size // tp_size)``.
+        chunk_size: Optional bound on the sequence positions processed together.
 
-    Returns: (total_nnz,)
+    Returns:
+        Per-token entropy with the vocabulary dimension removed.
 
     """
-    return _VocabParallelEntropy.apply(vocab_parallel_logits)
+    if chunk_size is None or vocab_parallel_logits.shape[-2] <= chunk_size:
+        return _VocabParallelEntropy.apply(vocab_parallel_logits)
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+
+    entropy_chunks = [
+        _VocabParallelEntropy.apply(logits_chunk) for logits_chunk in vocab_parallel_logits.split(chunk_size, dim=-2)
+    ]
+    return torch.cat(entropy_chunks, dim=-1)

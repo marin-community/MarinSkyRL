@@ -1,129 +1,129 @@
-# One-off acceptance run for every generator in both released blends.
-# The sample and exact TaskTrove proxy sidechannel are immutable campaign artifacts.
+# Snowball Ultra-style RLVR phase 1 with learner and rollout sharing 64 H100s.
 entrypoint: standard
 
 config_groups:
   terminal_bench_config: terminal_bench
 
 context_budget:
-  request_window_tokens: 32768
-  max_new_tokens_per_turn: 256
-  max_turns: 2
+  request_window_tokens: 65536
+  max_new_tokens_per_turn: 6528
+  max_turns: 999999
+  generated_budget_fraction: 1.0
 
 terminal_bench:
   harbor:
     name: opencode
     version: "1.18.2"
-    opencode_config:
-      compaction:
-        auto: true
-        reserved: 4096
     collect_rollout_details: true
     override_setup_timeout_sec: 600
-    override_timeout_sec: 240
-    verifier_override_timeout_sec: 120
+    override_timeout_sec: 1800
+    verifier_override_timeout_sec: 300
     override_cpus: 1
     override_memory_mb: 4096
     override_storage_mb: 4096
     auto_snapshot: true
     env_network_policy:
       mode: unrestricted
-    max_retries: 1
-    min_wait_sec: 10.0
-    max_wait_sec: 60.0
-    wait_multiplier: 2.0
-    n_concurrent_trials: 4
-    log_level: INFO
+    max_retries: 3
+    n_concurrent_trials: 256
     enable_reward_shaping: false
     enable_error_classification: true
-    mask_exceptions: []
-    zero_exceptions: []
     default_error_treatment: zero
   model_info:
   archiving:
     enabled: false
   trace_upload:
     enabled: false
-    repo_org: DCAgent
-    episodes: last
-    dataset_type: SFT
-    cleanup: true
 
 trainer:
-  strategy: fsdp2
-  seed: 1729
-  algorithm:
-    advantage_estimator: reinforce++
-    use_kl_loss: false
-    kl_loss_coef: 0.0
-    use_tis: false
-    loss_reduction: sequence_mean
-  epochs: 1
-  max_steps: 1
-  update_epochs_per_batch: 1
-  train_batch_size: 48
-  policy_mini_batch_size: 48
-  micro_forward_batch_size_per_gpu: 1
-  micro_train_batch_size_per_gpu: 1
+  strategy: megatron
+  seed: 42
   flash_attn: true
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
-  use_sample_packing: false
-  eval_interval: 999999
-  eval_before_train: false
+  algorithm:
+    advantage_estimator: rloo_n
+    group_advantage_min_size: 4
+    advantage_batch_normalize: false
+    eps_clip_low: 0.2
+    eps_clip_high: 0.2
+    use_entropy_loss: false
+    use_kl_loss: false
+    use_kl_in_reward: false
+    loss_reduction: token_mean
+  epochs: 1
+  max_steps: 128
+  update_epochs_per_batch: 1
+  train_batch_size: 512
+  policy_mini_batch_size: 512
+  eval_batch_size: 100
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  use_sample_packing: true
+  eval_before_train: true
+  eval_interval: 16
+  ckpt_interval: 8
+  max_ckpts_to_keep: 2
   resume_mode: none
-  hf_hub_repo_id: null
-  enable_db_registration: false
-  project_name: nemotron-ultra-rlvr-acceptance
-  run_name: null
-  logger: console
-  tracker_commit_each_step: true
-  log_level: INFO
+  logger: wandb
+  project_name: snowball-ultra-rlvr
   policy:
     optimizer_config:
-      lr: 1.0e-6
+      optimizer: AdamW
+      lr: 4.0e-6
       weight_decay: 0.0
-      adam_betas: [0.9, 0.999]
-      max_grad_norm: 1.0
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
+      max_grad_norm: 0.5
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 8
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      ddp_config:
+        overlap_grad_reduce: true
+        overlap_param_gather: true
+        grad_reduce_in_fp32: false
   ref:
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 8
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
   placement:
     colocate_all: true
-    policy_num_nodes: null
-    ref_num_nodes: null
-    policy_num_gpus_per_node: null
-    ref_num_gpus_per_node: null
+    colocate_policy_ref: true
+    policy_num_nodes: 8
+    policy_num_gpus_per_node: 8
+    ref_num_nodes: 8
+    ref_num_gpus_per_node: 8
 
 generator:
   backend: vllm
   model_dtype: bfloat16
+  vllm_attention_backend: FLASH_ATTN
   inference_engine_tensor_parallel_size: 1
-  num_inference_engines: null
-  n_samples_per_prompt: 2
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  num_inference_engines: 8
+  n_samples_per_prompt: 16
   eval_n_samples_per_prompt: 1
-  gpu_memory_utilization: 0.8
-  max_num_seqs: 32
-  max_num_batched_tokens: 8192
+  gpu_memory_utilization: 0.7
+  max_num_seqs: 16
+  max_num_batched_tokens: 16384
   enable_prefix_caching: true
   enable_chunked_prefill: true
+  enforce_eager: false
   run_engines_locally: true
   weight_sync_backend: nccl
   async_engine: true
   batched: false
   enable_http_endpoint: true
-  append_eos_token_after_stop_str_in_multi_turn: true
   sampling_params:
-    temperature: 0.7
+    temperature: 1.0
     top_p: 1.0
     top_k: -1
   engine_init_kwargs:
-    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
-    served_model_name: Qwen3-8B
     enable_auto_tool_choice: true
     tool_call_parser: hermes
 
@@ -154,21 +154,19 @@ environment:
           response_transport: chat_completions
           reasoning_effort: low
           timeout_seconds: 600.0
-        num_rollouts_per_prompt: 2
-        group_answer_length_penalty_coeff: 0.0
-        group_reasoning_length_penalty_coeff: 0.0
         max_output_tokens: 512
         temperature: 0.0
         top_p: 1.0
 
-extra_env:
-  NCCL_DEBUG: WARN
-  RAY_DEDUP_LOGS: "0"
-
 data:
   kind: parquet
   train_data:
-    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/acceptance-tasktrove-v1/sample.parquet
-  val_data: []
+    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/tasktrove-v1/rlvr1/train.parquet
+  val_data:
+    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/tasktrove-v1/rlvr1/validation.parquet
   terminal_bench_data:
     - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/tasktrove-swe-v1/tasks.parquet
+  shuffle: false
+
+extra_env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

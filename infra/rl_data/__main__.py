@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import replace
 from pathlib import Path
 
+from skyrl_gym import get_data_contract
+
 from infra.rl_data.mixtures import load_mixture_spec, prepare_mixture
-from infra.rl_data.nemotron_ultra_swe import prepare_swe_task_artifact
-from infra.rl_data.preparation import PreparationOptions, prepare_artifact, write_bundle
+from infra.rl_data.nemotron_ultra_swe import (
+    convert_swe_tasks_to_prebuilt,
+    prepare_swe_task_artifact,
+    prepare_swegym_build_contexts,
+)
+from infra.rl_data.preparation import (
+    PreparationOptions,
+    PreparedArtifact,
+    TokenCount,
+    ordered_tail_holdout,
+    prepare_artifact,
+    write_bundle,
+)
 from infra.rl_data.sources import (
     SOURCES,
     TEST_ONLY_SOURCE_LABELS,
@@ -16,6 +30,17 @@ from infra.rl_data.sources import (
     load_source_rows,
     source_by_name,
 )
+
+
+class _PreparationArgumentError(ValueError):
+    pass
+
+
+def _reject_options(parser: argparse.ArgumentParser, args: argparse.Namespace, names: tuple[str, ...], mode: str) -> None:
+    conflicts = [name for name in names if getattr(args, name) not in (None, False)]
+    if conflicts:
+        rendered = ", ".join(f"--{name.replace('_', '-')}" for name in conflicts)
+        parser.error(f"{mode} cannot be combined with {rendered}.")
 
 
 def _token_counter(tokenizer_name: str):
@@ -43,18 +68,107 @@ def _options(args: argparse.Namespace, source_name: str, revision: str) -> Prepa
     )
 
 
+def _prepare_source_artifact(
+    source_name: str,
+    revision: str,
+    token_count: TokenCount,
+    options: PreparationOptions,
+    *,
+    allow_train_on_test: bool,
+) -> PreparedArtifact:
+    source = source_by_name(source_name)
+    if options.artifact_split == "train" and source.name in TEST_ONLY_SOURCE_NAMES and not allow_train_on_test:
+        label = TEST_ONLY_SOURCE_LABELS[source.name]
+        raise _PreparationArgumentError(
+            f"{label} is test-only; pass --allow-train-on-test to use it as a training source."
+        )
+    return prepare_artifact(
+        source,
+        load_source_rows(source, revision),
+        get_data_contract(source.env_id),
+        token_count,
+        options,
+    )
+
+
+def _prepare_ordered_tail(args: argparse.Namespace, token_count: TokenCount) -> None:
+    source_name = str(args.source)
+    revision = str(args.revision)
+    artifact = _prepare_source_artifact(
+        source_name,
+        revision,
+        token_count,
+        _options(args, source_name, revision),
+        allow_train_on_test=args.allow_train_on_test,
+    )
+    train, validation = ordered_tail_holdout(artifact, args.validation_tail_rows)
+    write_bundle(train, validation, args.output_dir)
+
+
+def _prepare_dual_source(args: argparse.Namespace, token_count: TokenCount) -> None:
+    train_source_name = str(args.source)
+    train_revision = str(args.revision)
+    validation_source_name = str(args.validation_source)
+    validation_revision = str(args.validation_revision)
+    train_options = _options(args, train_source_name, train_revision)
+    validation_options = replace(
+        _options(args, validation_source_name, validation_revision),
+        artifact_split="validation",
+        subsample_n=None,
+        unique_cap=None,
+    )
+    train = _prepare_source_artifact(
+        train_source_name,
+        train_revision,
+        token_count,
+        train_options,
+        allow_train_on_test=args.allow_train_on_test,
+    )
+    validation = _prepare_source_artifact(
+        validation_source_name,
+        validation_revision,
+        token_count,
+        validation_options,
+        allow_train_on_test=args.allow_train_on_test,
+    )
+    write_bundle(train, validation, args.output_dir)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    artifact_mode = parser.add_mutually_exclusive_group()
+    artifact_mode.add_argument(
         "--nemotron-ultra-swe-tasks",
         action="store_true",
         help="Build the complete Harbor SWE sidechannel for the released RLVR blends.",
+    )
+    artifact_mode.add_argument(
+        "--nemotron-ultra-swegym-build-contexts",
+        type=Path,
+        metavar="TASKS_PARQUET",
+        help="Extract unique SWE-Gym Docker build contexts from a prepared sidechannel.",
+    )
+    artifact_mode.add_argument(
+        "--nemotron-ultra-swe-prebuilt",
+        type=Path,
+        metavar="TASKS_PARQUET",
+        help="Convert a prepared sidechannel to prebuilt-image-only tasks.",
+    )
+    parser.add_argument(
+        "--swegym-image-map",
+        type=Path,
+        help="JSON object mapping SWE-Gym context digests to digest-pinned published images.",
     )
     parser.add_argument("--mixture", type=Path, help="YAML file declaring train and validation source slices.")
     parser.add_argument("--source", choices=sorted(SOURCES))
     parser.add_argument("--revision", help="Immutable Hugging Face revision for the training source.")
     parser.add_argument("--validation-source", choices=sorted(SOURCES))
     parser.add_argument("--validation-revision", help="Immutable Hugging Face revision for validation.")
+    parser.add_argument(
+        "--validation-tail-rows",
+        type=int,
+        help="Reserve this many rows from the ordered tail of the prepared training source for validation.",
+    )
     parser.add_argument(
         "--output-dir", type=Path, required=True, help="New local directory for train/validation parquet."
     )
@@ -72,28 +186,75 @@ def main() -> None:
     parser.add_argument("--allow-train-on-test", action="store_true")
     args = parser.parse_args()
 
-    if args.nemotron_ultra_swe_tasks:
-        conflicting = (
-            args.mixture,
-            args.source,
-            args.revision,
-            args.validation_source,
-            args.validation_revision,
-            args.tokenizer,
-            args.max_prompt_tokens,
+    preparation_options = (
+        "mixture",
+        "source",
+        "revision",
+        "validation_source",
+        "validation_revision",
+        "validation_tail_rows",
+        "tokenizer",
+        "max_prompt_tokens",
+        "minimum_unique_rows",
+        "minimum_yield_fraction",
+        "unique_cap",
+        "subsample_n",
+        "allow_train_on_test",
+    )
+
+    if args.nemotron_ultra_swegym_build_contexts is not None:
+        _reject_options(
+            parser,
+            args,
+            (*preparation_options, "swegym_image_map"),
+            "--nemotron-ultra-swegym-build-contexts",
         )
-        if any(value is not None for value in conflicting):
-            parser.error("--nemotron-ultra-swe-tasks cannot be combined with parquet preparation options.")
+        manifest = prepare_swegym_build_contexts(args.nemotron_ultra_swegym_build_contexts, args.output_dir)
+        print(manifest)
+        return
+
+    if args.nemotron_ultra_swe_prebuilt is not None:
+        _reject_options(parser, args, preparation_options, "--nemotron-ultra-swe-prebuilt")
+        if args.swegym_image_map is None:
+            parser.error("--nemotron-ultra-swe-prebuilt requires --swegym-image-map.")
+        try:
+            image_map = json.loads(args.swegym_image_map.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            parser.error(f"Could not read --swegym-image-map: {error}")
+        if not isinstance(image_map, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in image_map.items()
+        ):
+            parser.error("--swegym-image-map must contain one JSON object of string keys and values.")
+        provenance = convert_swe_tasks_to_prebuilt(args.nemotron_ultra_swe_prebuilt, args.output_dir, image_map)
+        print(provenance)
+        return
+
+    if args.nemotron_ultra_swe_tasks:
+        _reject_options(
+            parser,
+            args,
+            (*preparation_options, "swegym_image_map"),
+            "--nemotron-ultra-swe-tasks",
+        )
         provenance = prepare_swe_task_artifact(args.output_dir)
         print(provenance)
         return
+
+    if args.swegym_image_map is not None:
+        parser.error("--swegym-image-map requires --nemotron-ultra-swe-prebuilt.")
 
     if args.tokenizer is None or args.max_prompt_tokens is None:
         parser.error("parquet preparation requires --tokenizer and --max-prompt-tokens.")
 
     counter = _token_counter(args.tokenizer)
     if args.mixture is not None:
-        single_source_args = (args.source, args.revision, args.validation_source, args.validation_revision)
+        single_source_args = (
+            args.source,
+            args.revision,
+            args.validation_source,
+            args.validation_revision,
+            args.validation_tail_rows,
+        )
         if any(value is not None for value in single_source_args):
             parser.error("--mixture cannot be combined with single-source arguments.")
         train, validation = prepare_mixture(
@@ -104,6 +265,28 @@ def main() -> None:
             allow_train_on_test=args.allow_train_on_test,
         )
         write_bundle(train, validation, args.output_dir)
+        return
+
+    if args.validation_tail_rows is not None:
+        if args.validation_tail_rows <= 0:
+            parser.error("--validation-tail-rows must be positive.")
+        incompatible = {
+            "--validation-source": args.validation_source,
+            "--validation-revision": args.validation_revision,
+            "--subsample-n": args.subsample_n,
+            "--unique-cap": args.unique_cap,
+        }
+        selected = [name for name, value in incompatible.items() if value is not None]
+        if selected:
+            parser.error(f"--validation-tail-rows cannot be combined with {', '.join(selected)}.")
+        missing = [name for name, value in (("--source", args.source), ("--revision", args.revision)) if value is None]
+        if missing:
+            parser.error(f"--validation-tail-rows requires {', '.join(missing)}.")
+
+        try:
+            _prepare_ordered_tail(args, counter)
+        except _PreparationArgumentError as error:
+            parser.error(str(error))
         return
 
     missing = [
@@ -119,38 +302,10 @@ def main() -> None:
     if missing:
         parser.error(f"single-source mode requires {', '.join(missing)}; otherwise pass --mixture.")
 
-    train_source = source_by_name(args.source)
-    validation_source = source_by_name(args.validation_source)
-    if train_source.name in TEST_ONLY_SOURCE_NAMES and not args.allow_train_on_test:
-        label = TEST_ONLY_SOURCE_LABELS[train_source.name]
-        parser.error(f"{label} is test-only; pass --allow-train-on-test to use it as a training source.")
-
-    from skyrl_gym import get_data_contract
-
-    train_contract = get_data_contract(train_source.env_id)
-    validation_contract = get_data_contract(validation_source.env_id)
-    train_options = _options(args, train_source.name, args.revision)
-    validation_options = replace(
-        _options(args, validation_source.name, args.validation_revision),
-        artifact_split="validation",
-        subsample_n=None,
-        unique_cap=None,
-    )
-    train = prepare_artifact(
-        train_source,
-        load_source_rows(train_source, args.revision),
-        train_contract,
-        counter,
-        train_options,
-    )
-    validation = prepare_artifact(
-        validation_source,
-        load_source_rows(validation_source, args.validation_revision),
-        validation_contract,
-        counter,
-        validation_options,
-    )
-    write_bundle(train, validation, args.output_dir)
+    try:
+        _prepare_dual_source(args, counter)
+    except _PreparationArgumentError as error:
+        parser.error(str(error))
 
 
 if __name__ == "__main__":

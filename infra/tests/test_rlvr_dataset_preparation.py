@@ -1,11 +1,20 @@
 import json
 
 import datasets
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
-from infra.rl_data.preparation import PreparationOptions, prepare_artifact, write_artifact, write_bundle
+from infra.rl_data.preparation import (
+    PreparationOptions,
+    ordered_tail_holdout,
+    prepare_artifact,
+    write_artifact,
+    write_bundle,
+)
 from infra.rl_data.mixtures import MixtureSlice, MixtureSpec, load_mixture_spec, prepare_mixture
 from infra.rl_data.sources import (
+    _iter_jsonl_rows,
     _restore_nemotron_ultra_placeholder,
     Source,
     aime_1983_2024_source,
@@ -37,6 +46,17 @@ from infra.rl_data.sources import (
 )
 from skyrl_gym import get_data_contract
 from skyrl_gym.envs.ifeval import utils as ifeval_utils
+
+
+def test_jsonl_reader_preserves_heterogeneous_nested_records(tmp_path):
+    path = tmp_path / "blend.jsonl"
+    records = [
+        {"input": [{"content": [{"type": "input_text", "text": "one"}]}]},
+        {"input": [{"content": "two"}, {"content": [{"type": "output_text", "text": "three"}]}]},
+    ]
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+
+    assert list(_iter_jsonl_rows(path)) == records
 
 
 class FakeContract:
@@ -163,6 +183,11 @@ def test_nemotron_ultra_artifact_round_trips_heterogeneous_verifier_records(tmp_
     output_dir = tmp_path / "artifact"
     write_artifact(artifact, output_dir)
 
+    schema = pq.read_schema(output_dir / "train.parquet")
+    assert schema.field("prompt").type.value_type.field("content").type == pa.large_string()
+    ultra_schema = schema.field("extra_info").type.field("nemotron_ultra").type
+    assert ultra_schema.field("record_json").type == pa.large_string()
+
     rows = datasets.load_dataset("parquet", data_files=str(output_dir / "train.parquet"), split="train")
     records = [json.loads(row["extra_info"]["nemotron_ultra"]["record_json"]) for row in rows]
     assert [record["id"] for record in records] == [17, "law-wiki-00073"]
@@ -186,6 +211,20 @@ def test_nemotron_ultra_adapter_routes_only_swe_pivots_to_terminal_bench():
     assert ultra["terminal_bench_instance_id"] == "python-pillow__Pillow-deadbeef"
 
 
+def test_nemotron_ultra_adapter_routes_bound_swe_pivot_to_tasktrove_proxy():
+    example = _nemotron_ultra_pivot_row()
+    example["agent_ref"]["name"] = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
+    example["metadata"] = {
+        "instance_id": "python-pillow__Pillow-deadbeef",
+        "agent_cls": "opencode",
+        "tasktrove_proxy_path": "agentic-swe-pivot-v4-deadbeef.tar.gz",
+    }
+
+    row = nemotron_ultra_rlvr1_source().prepare_row(example, 0, NemotronUltraContract())
+
+    assert row["extra_info"]["nemotron_ultra"]["terminal_bench_instance_id"] == ("agentic-swe-pivot-v4-deadbeef.tar.gz")
+
+
 def test_nemotron_ultra_blend_keeps_duplicate_prompts_in_source_order():
     first = _nemotron_ultra_pivot_row(uuid="first", prompt="same prompt")
     second = _nemotron_ultra_pivot_row(uuid="second", prompt="same prompt")
@@ -201,6 +240,35 @@ def test_nemotron_ultra_blend_keeps_duplicate_prompts_in_source_order():
 
     assert [row["extra_info"]["nemotron_ultra"]["uuid"] for row in artifact.rows] == ["first", "second"]
     assert artifact.provenance["counts"]["unique_rows"] == 2
+
+
+def test_ordered_tail_holdout_preserves_source_boundary_and_reindexes_splits():
+    artifact = prepare_artifact(
+        nemotron_ultra_rlvr1_source(),
+        [_nemotron_ultra_pivot_row(uuid=f"row-{index}", prompt=f"prompt {index}") for index in range(5)],
+        NemotronUltraContract(),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(source_revision="fixture", max_prompt_tokens=100, minimum_unique_rows=5),
+    )
+
+    train, validation = ordered_tail_holdout(artifact, validation_rows=2)
+
+    assert [row["extra_info"]["nemotron_ultra"]["uuid"] for row in train.rows] == ["row-0", "row-1", "row-2"]
+    assert [row["extra_info"]["nemotron_ultra"]["uuid"] for row in validation.rows] == ["row-3", "row-4"]
+    assert [row["extra_info"]["index"] for row in train.rows] == [0, 1, 2]
+    assert [row["extra_info"]["index"] for row in validation.rows] == [0, 1]
+    assert {row["extra_info"]["split"] for row in train.rows} == {"train"}
+    assert {row["extra_info"]["split"] for row in validation.rows} == {"validation"}
+    assert artifact.rows[3]["extra_info"]["split"] == "train"
+    assert train.provenance["partition"] == {
+        "strategy": "ordered_tail_holdout",
+        "source_rows": 5,
+        "start_index": 0,
+        "end_index": 3,
+        "validation_rows": 2,
+    }
+    assert validation.provenance["partition"]["start_index"] == 3
+    assert validation.provenance["partition"]["end_index"] == 5
 
 
 def test_nemotron_ultra_adapter_rejects_an_unknown_agent():
@@ -588,7 +656,12 @@ def test_gsm8k_rejects_missing_delimiter():
     [
         (
             hendrycks_math_source(),
-            {"problem": "Compute 2 + 2.", "solution": "Therefore \\boxed{4}.", "level": "Level 1", "subject": "algebra"},
+            {
+                "problem": "Compute 2 + 2.",
+                "solution": "Therefore \\boxed{4}.",
+                "level": "Level 1",
+                "subject": "algebra",
+            },
             "4",
             {"level": "Level 1", "subject": "algebra"},
         ),
@@ -682,9 +755,7 @@ def test_asdiv_loader_reads_pinned_xml(monkeypatch):
 
     rows = list(load_source_rows(asdiv_source(), "commit-123", {}))
 
-    assert rows == [
-        {"Body": "Sam has four apples.", "Question": "How many?", "Answer": "4 (apples)", "Grade": "3"}
-    ]
+    assert rows == [{"Body": "Sam has four apples.", "Question": "How many?", "Answer": "4 (apples)", "Grade": "3"}]
     assert requested == [
         ("https://raw.githubusercontent.com/chaochun/nlu-asdiv-dataset/commit-123/dataset/ASDiv.xml", 60)
     ]
@@ -955,9 +1026,7 @@ def test_eurus_code_adapter_normalizes_apps_tests():
             {
                 "ability": "code",
                 "prompt": [{"role": "user", "content": "Read two integers and print their sum."}],
-                "reward_model": {
-                    "ground_truth": json.dumps({"inputs": ["1 2\n", "4 5\n"], "outputs": ["3\n", "9\n"]})
-                },
+                "reward_model": {"ground_truth": json.dumps({"inputs": ["1 2\n", "4 5\n"], "outputs": ["3\n", "9\n"]})},
             }
         ],
         get_data_contract("lcb"),
@@ -975,19 +1044,13 @@ def test_eurus_code_adapter_normalizes_apps_tests():
 
 def test_reasoning_gym_generation_is_deterministic_verifiable_and_disjoint():
     train_rows = list(
-        generate_reasoning_gym_rows(
-            tasks=("leg_counting", "knights_knaves"), rows_per_task=3, seed=41, start_index=0
-        )
+        generate_reasoning_gym_rows(tasks=("leg_counting", "knights_knaves"), rows_per_task=3, seed=41, start_index=0)
     )
     rebuilt_rows = list(
-        generate_reasoning_gym_rows(
-            tasks=("leg_counting", "knights_knaves"), rows_per_task=3, seed=41, start_index=0
-        )
+        generate_reasoning_gym_rows(tasks=("leg_counting", "knights_knaves"), rows_per_task=3, seed=41, start_index=0)
     )
     holdout_rows = list(
-        generate_reasoning_gym_rows(
-            tasks=("leg_counting", "knights_knaves"), rows_per_task=100, seed=41, start_index=3
-        )
+        generate_reasoning_gym_rows(tasks=("leg_counting", "knights_knaves"), rows_per_task=100, seed=41, start_index=3)
     )
 
     assert rebuilt_rows == train_rows
@@ -1041,10 +1104,7 @@ def test_gretel_text_to_sql_adapter_builds_result_set_ground_truth():
     from infra.rl_data.sources import gretel_text_to_sql_source
 
     schema = "CREATE TABLE Hospitals (HospitalID INT, State TEXT);"
-    inserts = (
-        "INSERT INTO Hospitals VALUES "
-        "(1,'CA'),(2,'CA'),(3,'NY'),(4,'NY'),(5,'TX'),(6,'TX');"
-    )
+    inserts = "INSERT INTO Hospitals VALUES (1,'CA'),(2,'CA'),(3,'NY'),(4,'NY'),(5,'TX'),(6,'TX');"
     artifact = prepare_artifact(
         gretel_text_to_sql_source(),
         [

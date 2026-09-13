@@ -48,6 +48,7 @@ from cloud.iris.rl_data import (
     resolve_rl_train_data_with_sources,
 )
 from cloud.iris.storage_policy import hydra_override_value
+from marinskyrl.process_diagnostics import ProcessOutcomeKind, write_process_outcome
 from marinskyrl.resource_locator import model_source_for_path
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
 
@@ -362,8 +363,9 @@ class LocalRLRunner:
             register_controller_endpoint,
         )
         from cloud.iris.literal_proxy_utils import (
-            literal_proxy_port,
+            DEFAULT_LITERAL_PROXY_HOST,
             maybe_serve_literal_proxy,
+            select_literal_proxy_port,
         )
 
         if not self.config.ingress_host:
@@ -385,7 +387,7 @@ class LocalRLRunner:
                     "--parent_controller_config); needed to mint at iris.oa.dev."
                 )
 
-        proxy_port = literal_proxy_port(self.config.job_name)
+        proxy_port = select_literal_proxy_port(self.config.job_name, host=DEFAULT_LITERAL_PROXY_HOST)
         endpoint_name, register_address = controller_registration_plan(
             self.config.job_name,
             record_literal=self.config.record_literal,
@@ -401,7 +403,7 @@ class LocalRLRunner:
             vllm_local,
             experiments_dir=self.config.experiments_dir,
             job_name=self.config.job_name,
-            host="0.0.0.0",
+            host=DEFAULT_LITERAL_PROXY_HOST,
             port=proxy_port,
         ):
             registration = register_controller_endpoint(endpoint_name, register_address)
@@ -531,7 +533,21 @@ class LocalRLRunner:
 
         proc = subprocess.Popen(cmd, cwd=cwd)
         self._processes.append(proc)
-        return proc.wait()
+        returncode = proc.wait()
+        outcome, receipt = write_process_outcome(
+            "skyrl-entrypoint",
+            returncode,
+            pid=proc.pid,
+            metadata={"entrypoint": entrypoint},
+        )
+        if outcome.kind is ProcessOutcomeKind.SIGNAL:
+            print(
+                f"SkyRL entrypoint pid={proc.pid} terminated by {outcome.signal_name} "
+                f"(raw_returncode={returncode}, exit_code={outcome.public_exit_code}, receipt={receipt})",
+                file=sys.stderr,
+                flush=True,
+            )
+        return outcome.public_exit_code
 
 
 @dataclass

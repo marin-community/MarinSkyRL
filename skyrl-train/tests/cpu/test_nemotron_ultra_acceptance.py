@@ -12,7 +12,44 @@ def test_acceptance_swe_sandboxes_allow_agent_setup_traffic():
     config_path = Path(__file__).parents[3] / "cloud/iris/configs/nemotron_ultra_rlvr_acceptance.yaml"
     config = yaml.safe_load(config_path.read_text())
 
+    assert config["terminal_bench"]["harbor"]["auto_snapshot"] is True
     assert config["terminal_bench"]["harbor"]["env_network_policy"] == {"mode": "unrestricted"}
+    ultra = config["environment"]["skyrl_gym"]["nemotron_ultra"]
+    assert ultra["judges"]["general"]["api_key_env"] == "TOGETHER_API_KEY"
+    assert ultra["judges"]["safety"]["api_key_env"] == "TOGETHER_API_KEY"
+    assert ultra["genrm"]["judge"]["api_key_env"] == "TOGETHER_API_KEY"
+    assert ultra["genrm"]["judge"]["response_transport"] == "chat_completions"
+
+
+def test_snowball_configs_use_snapshot_safe_daytona_sandboxes():
+    config_dir = Path(__file__).parents[3] / "cloud/iris/configs"
+    configs = sorted(config_dir.glob("snowball_ultra_rlvr[12]_*.yaml"))
+    assert len(configs) == 4
+
+    for path in configs:
+        config = yaml.safe_load(path.read_text())
+        harbor = config["terminal_bench"]["harbor"]
+        assert "import_path" not in harbor
+        assert harbor["auto_snapshot"] is True
+        assert harbor["env_network_policy"] == {"mode": "unrestricted"}
+        engine_init_kwargs = config["generator"]["engine_init_kwargs"]
+        assert engine_init_kwargs["enable_auto_tool_choice"] is True
+        assert engine_init_kwargs["tool_call_parser"] == "hermes"
+        expected_gpu_memory_utilization = 0.7 if "colocated64" in path.name else 0.8
+        assert config["generator"]["gpu_memory_utilization"] == expected_gpu_memory_utilization
+
+
+def test_snowball_configs_admit_partially_masked_rloo_n_groups():
+    config_dir = Path(__file__).parents[3] / "cloud/iris/configs"
+    configs = sorted(config_dir.glob("snowball_ultra_rlvr[12]_*.yaml"))
+    assert len(configs) == 4
+
+    for path in configs:
+        config = yaml.safe_load(path.read_text())
+        algorithm = config["trainer"]["algorithm"]
+        assert algorithm["advantage_estimator"] == "rloo_n"
+        assert algorithm["group_advantage_min_size"] == 4
+        assert algorithm["advantage_batch_normalize"] is False
 
 
 def test_acceptance_verifier_server_implements_all_external_protocols():

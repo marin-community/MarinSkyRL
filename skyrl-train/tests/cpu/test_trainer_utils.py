@@ -1067,6 +1067,18 @@ def test_build_dataloader_seeding(dummy_config):
     assert first_batch(42) != first_batch(123)
 
 
+def test_build_dataloader_can_preserve_training_source_order(dummy_config):
+    dataset = MultiItemDataset(size=10)
+    config = dummy_config.copy()
+    config.data.shuffle = False
+    config.trainer.train_batch_size = 5
+    config.generator.enable_http_endpoint = True
+
+    batches = list(build_dataloader(config, dataset, is_train=True))
+
+    assert batches == [dataset.data[:5], dataset.data[5:]]
+
+
 def test_validate_trajectory_batch_invalid_rewards():
     """Test validate_trajectory_batch raises AssertionError when rewards is neither List[float-like] nor List[List[float-like]]."""
     input_batch = TrajectoryRequestBatch(

@@ -537,7 +537,7 @@ def build_dataloader(
     dataloader = StatefulDataLoader(
         dataset,
         batch_size=batch_size if not is_fully_async else 1,
-        shuffle=is_train and sampler is None,
+        shuffle=is_train and cfg.data.shuffle and sampler is None,
         sampler=sampler,
         collate_fn=dataset.collate_fn,
         # Curriculum sampling stays single-process: worker prefetch would draw several

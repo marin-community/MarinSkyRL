@@ -18,6 +18,21 @@ The command writes `train.parquet`, `validation.parquet`, and `provenance.json` 
 the complete directory next to `--output-dir` and renaming it only after both parquet writes
 finish. It will not overwrite an existing artifact.
 
+Use `--validation-tail-rows` when a source recipe defines an ordered tail holdout. This mode prepares the source
+once, writes the unchanged prefix as training data, and reindexes the reserved suffix as validation data. It rejects
+subsampling and unique-row caps because either would change the source boundary. For example, NVIDIA's Ultra RLVR
+blends reserve their final 100 rows:
+
+```bash
+uv run python -m infra.rl_data \
+  --source nemotron_ultra_rlvr1 \
+  --revision 79f8eda15ea12e1adf7bb14dcb338a29d391b80e \
+  --validation-tail-rows 100 \
+  --tokenizer open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.11 \
+  --max-prompt-tokens 59008 \
+  --output-dir /shared/rl-data/nemotron-ultra-rlvr1
+```
+
 Use `--mixture` to compose independently validated sources with different verifier environments:
 
 ```yaml

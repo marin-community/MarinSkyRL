@@ -1,6 +1,22 @@
-# Distributed debug mode
+# Debug modes
 
-Use distributed debug mode for a canary investigating multi-rank stalls:
+Every entrypoint uses the same `trainer.debug_mode` contract. The default `light` mode captures bounded failure
+evidence without enabling verbose NCCL logs or C++ stack recording:
+
+```yaml
+trainer:
+  debug_mode: light
+```
+
+Light mode enables Python fault handling, a 20,000-event NCCL flight recorder, per-rank process manifests,
+structured collective-phase JSONL, and process-outcome receipts. Phase files rotate at 8 MiB and retain the current
+and immediately previous file. A subprocess killed by a signal records the raw negative return code and signal name
+before the launcher exposes the conventional `128 + signal` exit code.
+
+Set `trainer.collective_phase_diagnostics: false` to disable phase JSONL independently while retaining the rest of
+the light preset.
+
+Use `distributed` for a canary investigating multi-rank stalls:
 
 ```yaml
 trainer:
@@ -14,18 +30,20 @@ flag that resolves to the same contract:
 marinskyrl ... --debug-mode distributed
 ```
 
-Normal mode keeps MarinSkyRL at `INFO`, NCCL at `WARN`, and expensive phase/timing/stack recording off. Debug
-mode keeps MarinSkyRL at `INFO` and uses NCCL `INFO` only for communicator initialization, bootstrap,
+Distributed mode keeps MarinSkyRL at `INFO` and uses NCCL `INFO` only for communicator initialization, bootstrap,
 environment, network, topology, and tuning. Per-collective text logging is excluded; the bounded PyTorch flight
 recorder captures that history instead.
 
-The preset enables per-rank phase records, NCCL desynchronization diagnostics, collective timing, C++ stacks,
-PyTorch C++ informational logs, fast symbolization, dump-on-timeout, process manifests, Python fault handling,
-and the policy host-memory monitor. It intentionally does not enable `CUDA_LAUNCH_BLOCKING` or
+The distributed tier adds NCCL desynchronization diagnostics, collective timing, C++ stacks, PyTorch C++
+informational logs, fast symbolization, and on-demand all-thread Python stack snapshots. Send `SIGUSR2` to a driver
+or Ray worker process to append a snapshot to its job-scoped `stacks/` artifact. It intentionally does not
+enable `CUDA_LAUNCH_BLOCKING` or
 `TORCH_DISTRIBUTED_DEBUG=DETAIL`, because those settings change synchronization and can hide or create timing
 failures. See the [PyTorch flight-recorder guide](https://docs.pytorch.org/tutorials/unstable/flight_recorder_tutorial.html)
 and [NCCL logging reference](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#environment-variables)
 for the underlying controls.
+
+Use `debug_mode: off` only when isolating a diagnostic interaction or recovering from an artifact-storage problem.
 
 For a local checkpoint path, artifacts land in a sibling `debug/` directory next to `checkpoints/`. This is the
 durable GPFS path on Jupiter. An object-store checkpoint path uses a job-scoped node-local staging directory;
@@ -35,8 +53,8 @@ the Iris task runtime periodically and finally uploads it under:
 <rendezvous>/debug_artifacts/<node-id>/
 ```
 
-Each Iris upload writes `sync-manifest.json` with every copied or budget-rejected file. A single file is capped
-at 512 MiB and one node sync at 2 GiB.
+Each Iris upload writes `sync-manifest.json` with every copied or budget-rejected file. A single file is capped at
+512 MiB and one node sync at 2 GiB. Full process core dumps remain disabled.
 
 ## Jupiter acceptance test
 

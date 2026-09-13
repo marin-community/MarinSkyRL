@@ -67,14 +67,24 @@ def test_iris_command_resolves_binary_when_invoked(monkeypatch):
     assert calls[0][0] == ["/opt/operator/bin/iris", "--cluster=cw-rno2a", "job", "list"]
 
 
-def test_job_bundle_uses_cluster_and_full_iris_identity(tmp_path):
-    bundle = job_bundle(tmp_path, "cw-rno2a", "/benjaminfeuer/glm52-r10")
+@pytest.mark.parametrize(
+    ("job_id", "relative_path"),
+    [
+        ("/benjaminfeuer/glm52-r10", Path("benjaminfeuer/glm52-r10")),
+        (
+            "/benjaminfeuer/coordinator/gpu-child",
+            Path("benjaminfeuer/coordinator/gpu-child"),
+        ),
+    ],
+)
+def test_job_bundle_uses_cluster_and_full_iris_identity(tmp_path, job_id, relative_path):
+    bundle = job_bundle(tmp_path, "cw-rno2a", job_id)
 
-    assert bundle.directory == tmp_path / "jobs" / "cw-rno2a" / "benjaminfeuer" / "glm52-r10"
+    assert bundle.directory == tmp_path / "jobs" / "cw-rno2a" / relative_path
 
     write_bundle_manifest(bundle, {"kind": "harbor", "progress": {"completed": 4}})
 
-    assert json.loads(bundle.manifest_path.read_text())["job_id"] == "/benjaminfeuer/glm52-r10"
+    assert json.loads(bundle.manifest_path.read_text())["job_id"] == job_id
     assert load_bundle_manifest(bundle)["progress"] == {"completed": 4}
 
 

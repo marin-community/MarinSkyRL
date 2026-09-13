@@ -347,7 +347,7 @@ class JobBundle:
 
     The full Iris id is preserved as path components rather than flattened, so
     every watcher and analyzer addresses the same evidence unambiguously:
-    ``<root>/jobs/<cluster>/<user>/<job>/``.
+    ``<root>/jobs/<cluster>/<user>/<job>[/<child>...]/``.
     """
 
     root: Path
@@ -364,12 +364,13 @@ class JobBundle:
 
 
 def job_id_parts(job_id: str) -> tuple[str, ...]:
-    """Validate a canonical root Iris id and return safe path components."""
+    """Validate a canonical Iris id and return safe path components."""
+    expected = "Expected Iris job id '/<user>/<job>[/<child>...]'"
     if not job_id.startswith("/"):
-        raise ValueError(f"Expected root Iris job id '/<user>/<job>', got {job_id!r}.")
+        raise ValueError(f"{expected}, got {job_id!r}.")
     parts = tuple(job_id[1:].split("/"))
-    if len(parts) != 2 or any(not part.strip() or part in {".", ".."} for part in parts):
-        raise ValueError(f"Expected root Iris job id '/<user>/<job>', got {job_id!r}.")
+    if len(parts) < 2 or any(not part.strip() or part in {".", ".."} for part in parts):
+        raise ValueError(f"{expected}, got {job_id!r}.")
     return parts
 
 

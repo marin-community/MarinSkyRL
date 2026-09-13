@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import random
@@ -64,6 +65,46 @@ class ConversionResult:
     @property
     def yield_fraction(self) -> float:
         return self.converted_rows / self.raw_rows if self.raw_rows else 0.0
+
+
+def ordered_tail_holdout(
+    artifact: PreparedArtifact, validation_rows: int
+) -> tuple[PreparedArtifact, PreparedArtifact]:
+    """Split a prepared artifact without changing its source order.
+
+    Args:
+        artifact: Fully prepared source artifact to partition.
+        validation_rows: Number of rows to reserve from the source tail.
+
+    Returns:
+        The ordered training prefix and validation suffix.
+    """
+    if validation_rows <= 0 or validation_rows >= len(artifact.rows):
+        raise ValueError("validation_rows must leave non-empty training and validation splits")
+
+    boundary = len(artifact.rows) - validation_rows
+
+    def build_split(rows: list[PreparedRow], split: str, start_index: int, end_index: int) -> PreparedArtifact:
+        split_rows = [
+            {**row, "extra_info": {**row["extra_info"], "split": split, "index": index}}
+            for index, row in enumerate(rows)
+        ]
+        provenance = copy.deepcopy(artifact.provenance)
+        provenance["preparation"]["artifact_split"] = split
+        provenance["counts"]["emitted_rows"] = len(split_rows)
+        provenance["partition"] = {
+            "strategy": "ordered_tail_holdout",
+            "source_rows": len(artifact.rows),
+            "start_index": start_index,
+            "end_index": end_index,
+            "validation_rows": validation_rows,
+        }
+        return PreparedArtifact(split_rows, provenance)
+
+    return (
+        build_split(artifact.rows[:boundary], "train", 0, boundary),
+        build_split(artifact.rows[boundary:], "validation", boundary, len(artifact.rows)),
+    )
 
 
 def _prompt_content(row: PreparedRow) -> str:
@@ -259,6 +300,52 @@ def prepare_artifact(
 
 
 def _write_parquet(rows: list[PreparedRow], path: Path) -> None:
+    if rows and all(row.get("env_class") == "nemotron_ultra" for row in rows):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        text = pa.large_string()
+        tool_call = pa.struct(
+            [
+                pa.field("id", text),
+                pa.field("type", text),
+                pa.field("function", pa.struct([pa.field("name", text), pa.field("arguments", text)])),
+            ]
+        )
+        message = pa.struct(
+            [
+                pa.field("role", text),
+                pa.field("content", text),
+                pa.field("tool_calls", pa.large_list(tool_call)),
+                pa.field("tool_call_id", text),
+            ]
+        )
+        ultra = pa.struct(
+            [
+                pa.field("uuid", text),
+                pa.field("blend", text),
+                pa.field("agent", text),
+                pa.field("route", text),
+                pa.field("terminal_bench_instance_id", text),
+                pa.field("request_json", text),
+                pa.field("record_json", text),
+            ]
+        )
+        schema = pa.schema(
+            [
+                pa.field("data_source", text),
+                pa.field("prompt", pa.large_list(message)),
+                pa.field("env_class", text),
+                pa.field("reward_model", pa.struct([pa.field("ground_truth", text)])),
+                pa.field(
+                    "extra_info",
+                    pa.struct([pa.field("split", text), pa.field("index", pa.int64()), pa.field("nemotron_ultra", ultra)]),
+                ),
+            ]
+        )
+        pq.write_table(pa.Table.from_pylist(rows, schema=schema), path, compression="zstd")
+        return
+
     import datasets
 
     datasets.Dataset.from_list(rows).to_parquet(str(path))

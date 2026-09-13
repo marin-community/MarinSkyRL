@@ -11,6 +11,7 @@ Run:
 
 from __future__ import annotations
 
+import socket
 import sys
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from cloud.iris.literal_proxy_utils import (  # noqa: E402
     literal_proxy_endpoint,
     literal_proxy_port,
     maybe_serve_literal_proxy,
+    select_literal_proxy_port,
     serve_token,
     upstream_origin,
 )
@@ -53,6 +55,17 @@ def test_literal_proxy_port_is_stable_and_separates_iris_tasks(monkeypatch):
 
     monkeypatch.setenv("IRIS_TASK_ID", "/user/job-b/0:0")
     assert literal_proxy_port("job-b") != first
+
+
+def test_select_literal_proxy_port_skips_bound_candidate(monkeypatch):
+    monkeypatch.setenv("IRIS_TASK_ID", "/user/job-port-collision/0:0")
+    first = literal_proxy_port("job-port-collision")
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", first))
+        selected = select_literal_proxy_port("job-port-collision", host="127.0.0.1")
+
+    assert selected != first
+    assert 10000 <= selected < 20000
 
 
 def test_slug_is_filesystem_safe():

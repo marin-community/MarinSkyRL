@@ -77,7 +77,7 @@ def test_head_returns_driver_abort_when_failure_artifact_upload_blocks(tmp_path,
     try:
         assert upload_started.wait(timeout=5)
         runtime_thread.join(timeout=1)
-        assert result == [-signal.SIGABRT]
+        assert result == [128 + signal.SIGABRT]
     finally:
         release_upload.set()
         runtime_thread.join(timeout=5)
