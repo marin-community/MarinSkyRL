@@ -537,23 +537,23 @@ class RayPPOTrainer:
             # The interval save may have just written this same step; do not write it twice.
             if self._control.should_save and self._last_saved_step != self.global_step:
                 with Timer("save_checkpoints", self.all_timings):
-                    await asyncio.to_thread(self.save_checkpoints, commit=False)
+                    await asyncio.to_thread(self._stage_checkpoint)
                 await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
                 await asyncio.to_thread(self._commit_checkpoint)
                 logger.info("Saved final checkpoint.")
             if self._control.should_save_hf_model:
                 await asyncio.to_thread(self.handle_hf_export)
 
-    async def _save_checkpoints_with_residency(self, *, commit: bool = True) -> None:
-        """Save a checkpoint, swapping colocated training and inference residency when needed."""
+    async def _stage_checkpoint_with_residency(self) -> None:
+        """Stage a checkpoint, swapping colocated training and inference residency when needed."""
         if not self.colocate_all:
-            await asyncio.to_thread(self.save_checkpoints, commit=commit)
+            await asyncio.to_thread(self._stage_checkpoint)
             return
 
         await self.inference_engine_client.sleep()
         try:
             self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
-            await asyncio.to_thread(self.save_checkpoints, commit=commit)
+            await asyncio.to_thread(self._stage_checkpoint)
         finally:
             await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
@@ -568,7 +568,7 @@ class RayPPOTrainer:
         """Save one requested step checkpoint without terminating training on storage failure."""
         try:
             with Timer("save_checkpoints", self.all_timings):
-                await self._save_checkpoints_with_residency(commit=False)
+                await self._stage_checkpoint_with_residency()
         except OSError:
             self._record_checkpoint_save_failure(state)
             return
@@ -630,7 +630,7 @@ class RayPPOTrainer:
 
     def _publish_learner_policy(self):
         assert self.learner is not None
-        self._initialize_learner()
+        self._initialize_or_validate_learner()
         self.learner.publish_policy()
         state = self.learner.state
         if not state.ready_for_rollouts:
@@ -1216,7 +1216,7 @@ class RayPPOTrainer:
         Setup the connection between policy model and inference engine for weight syncing.
         """
         if self.learner is not None:
-            state = self._initialize_learner()
+            state = self._initialize_or_validate_learner()
             logger.info(
                 "Learner publication state ready: policy_version={} installed_version={}",
                 state.policy_version,
@@ -1245,7 +1245,7 @@ class RayPPOTrainer:
             len(self.inference_engine_client.engines),
         )
 
-    def _initialize_learner(self, *, allow_failed: bool = False):
+    def _initialize_or_validate_learner(self, *, allow_failed: bool = False):
         assert self.learner is not None
         assert self.learner_config is not None
         state = self.learner.state
@@ -1979,7 +1979,7 @@ class RayPPOTrainer:
     def _learner_fwd_logprobs(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
         assert self.learner is not None
         assert self.learner_config is not None
-        self._initialize_learner()
+        self._initialize_or_validate_learner()
         learner_batch = learner_batch_from_training_input(training_input)
         result = self.learner.compute_log_probs(learner_batch)
         if result.policy_version != self.learner.state.policy_version:
@@ -2141,7 +2141,7 @@ class RayPPOTrainer:
 
     def _learner_update(self, data: TrainingInputBatch) -> dict[str, float | int | str]:
         assert self.learner is not None
-        self._initialize_learner()
+        self._initialize_or_validate_learner()
         previous_state = self.learner.state
         try:
             result = self.learner.update(update_request_from_training_input(data, global_step=self.global_step))
@@ -2299,9 +2299,14 @@ class RayPPOTrainer:
         actor_info: ActorInfo = model.actor_infos[rank]
         return actor_info.rank
 
-    def save_checkpoints(self, *, commit: bool = True):
+    def save_checkpoints(self):
+        """Save a complete checkpoint and publish its completion marker."""
+        self._stage_checkpoint()
+        self._commit_checkpoint()
+
+    def _stage_checkpoint(self):
         """
-        Save the model, optimizer, and training states to disk.
+        Stage the model, optimizer, and training states without publishing them.
 
         If colocate_all is True, assumes that the policy model is currently on GPU.
         """
@@ -2314,7 +2319,7 @@ class RayPPOTrainer:
 
         # Save policy checkpoint
         if self.learner is not None:
-            self._initialize_learner()
+            self._initialize_or_validate_learner()
             self.learner.save_checkpoint(policy_save_dir)
         else:
             ray.get(
@@ -2366,9 +2371,6 @@ class RayPPOTrainer:
         with io.open_file(trainer_state_path, "wb") as f:
             torch.save(trainer_state, f)
         logger.info(f"Saved trainer state to {trainer_state_path}")
-
-        if commit:
-            self._commit_checkpoint()
 
     def _commit_checkpoint(self) -> None:
         """Publish a staged checkpoint after every required artifact exists."""
@@ -2517,7 +2519,7 @@ class RayPPOTrainer:
         # 3. Load policy checkpoint
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")
         if self.learner is not None:
-            self._initialize_learner(allow_failed=True)
+            self._initialize_or_validate_learner(allow_failed=True)
             self.learner.load_checkpoint(policy_ckpt_dir)
             restored_state = self.learner.state
             if restored_state.ready_for_rollouts:

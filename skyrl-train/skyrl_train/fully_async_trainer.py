@@ -1596,11 +1596,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             training_input.metadata[BEHAVIOR_POLICY_VERSIONS_METADATA_KEY] = behavior_policy_versions
         return training_input
 
-    def save_checkpoints(self, *, commit: bool = False):
-        """Stage async checkpoint files; the async callback path owns the commit marker."""
-        if commit:
-            raise RuntimeError("fully async checkpoints must commit after required save callbacks")
-        super().save_checkpoints(commit=False)
+    def save_checkpoints(self):
+        """Reject checkpoint writes outside the async callback lifecycle."""
+        raise RuntimeError("fully async checkpoints must commit after required save callbacks")
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """

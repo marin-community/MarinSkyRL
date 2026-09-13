@@ -27,10 +27,10 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
+from skyrl_train.learner import Learner
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-    from skyrl_train.learner import Learner
     from skyrl_train.trajectory_runners.base import TrajectoryRunner
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.

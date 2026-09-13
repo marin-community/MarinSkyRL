@@ -413,7 +413,7 @@ def test_async_checkpoint_commits_after_required_callbacks(tmp_path):
     state = TrainerState(global_step=1, epoch=0, total_steps=1, num_steps_per_epoch=1)
 
     with pytest.raises(RuntimeError):
-        trainer.save_checkpoints(commit=True)
+        trainer.save_checkpoints()
     with pytest.raises(RuntimeError):
         asyncio.run(trainer._save_intermediate_checkpoint(state))
 
