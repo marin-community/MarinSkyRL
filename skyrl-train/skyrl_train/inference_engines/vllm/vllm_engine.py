@@ -74,7 +74,7 @@ from skyrl_train.inference_engines.opencode_continuation import EXACT_PROMPT_TOK
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
-from skyrl_train.models.grug_moe import is_grug_router_bias
+from skyrl_train.weight_sync.weight_extractor import is_weight_sync_dtype_compatible
 from skyrl_train.inference_engines.vllm.utils import (
     pop_vllm_wrapper_kwargs,
     apply_openai_sampling,
@@ -2255,11 +2255,16 @@ class VLLMWeightTransferReceiver:
         self.model_config = model_config
         self.device = device
 
-    def _is_fp32_grug_router_bias(self, name: str, dtype: torch.dtype) -> bool:
+    def _is_compatible_weight_dtype(self, name: str, dtype: torch.dtype) -> bool:
         hf_config = getattr(self.model_config, "hf_text_config", None)
         if hf_config is None:
             hf_config = getattr(self.model_config, "hf_config", None)
-        return is_grug_router_bias(getattr(hf_config, "model_type", None), name) and dtype == torch.float32
+        return is_weight_sync_dtype_compatible(
+            getattr(hf_config, "model_type", None),
+            name,
+            dtype,
+            self.model_config.dtype,
+        )
 
     def receive_weights(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights and yield (name, tensor) tuples.
@@ -2280,8 +2285,10 @@ class VLLMWeightTransferReceiver:
         _fuse = bool(request.get("packed", False))
         for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
             dtype = str_to_torch_dtype(dtype_str)
-            if not _fuse and not self._is_fp32_grug_router_bias(name, dtype):
-                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+            if not _fuse:
+                assert self._is_compatible_weight_dtype(name, dtype), (
+                    f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+                )
             # Always receive in sender's dtype, load_weights handles conversion
             weight = torch.empty(shape, dtype=dtype, device="cuda")
             torch.distributed.broadcast(weight, 0, group=self.model_update_group)
@@ -2299,7 +2306,8 @@ class VLLMWeightTransferReceiver:
         if packed:
             assert len(ipc_handles) == 1, "packed weight update should receive one ipc handle for all tensors"
             assert len(set(dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
-            assert str_to_torch_dtype(dtypes[0]) == self.model_config.dtype, (
+            dtype = str_to_torch_dtype(dtypes[0])
+            assert all(self._is_compatible_weight_dtype(name, dtype) for name in names), (
                 f"mismatch dtype: src {dtypes[0]}, dst {self.model_config.dtype}"
             )
             assert len(sizes) == len(names), "sizes must be provided for packed weight update"
@@ -2326,10 +2334,9 @@ class VLLMWeightTransferReceiver:
             physical_gpu_id = str(props.uuid)
             for name, dtype_str, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
                 dtype = str_to_torch_dtype(dtype_str)
-                if not self._is_fp32_grug_router_bias(name, dtype):
-                    assert dtype == self.model_config.dtype, (
-                        f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-                    )
+                assert self._is_compatible_weight_dtype(name, dtype), (
+                    f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+                )
 
                 handle = ipc_handle[physical_gpu_id]
                 device_id = self.device.index
