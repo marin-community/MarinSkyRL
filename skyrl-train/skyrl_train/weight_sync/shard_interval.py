@@ -164,6 +164,7 @@ async def run_shard_interval(
             installed[1], manifest_id, publication_id, receiver_ranks, "installed"
         )
         if capture is not None:
+            capture_started = time.perf_counter()
             capture(
                 {
                     "phase": "installed-before-replay",
@@ -172,6 +173,7 @@ async def run_shard_interval(
                     "result": result,
                 }
             )
+            timings["interval_capture"] = time.perf_counter() - capture_started
         if proofs:
             proof = (await measured("full_byte_replay", settled(replay(manifest_id, publication_id))))[0]
             proof_rows = validate_rows(proof, manifest_id, publication_id, receiver_ranks, "verified")
