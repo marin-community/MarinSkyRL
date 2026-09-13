@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 import requests
+
+
+logger = logging.getLogger(__name__)
+
+_MAX_REQUEST_ATTEMPTS = 5
+_INITIAL_RETRY_DELAY_SECONDS = 1.0
+_TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 
 class GenRMResponseTransport(StrEnum):
@@ -23,6 +32,41 @@ principle and the conversation. Score each response from 1 (fully incorrect or h
 ideal). Rank the pair from 1 (response 1 clearly better) through 6 (response 2 clearly better), using 3 or 4 for a
 near tie. Return only a JSON object with numeric keys score_1, score_2, and ranking.
 """
+
+
+def _post_json_with_retry(
+    *,
+    url: str,
+    headers: dict[str, str],
+    json_body: dict[str, Any],
+    timeout: float,
+) -> requests.Response:
+    for attempt in range(_MAX_REQUEST_ATTEMPTS):
+        try:
+            response = requests.post(url, headers=headers, json=json_body, timeout=timeout)
+        except (requests.ConnectionError, requests.Timeout) as error:
+            if attempt == _MAX_REQUEST_ATTEMPTS - 1:
+                raise
+            retry_reason = type(error).__name__
+        else:
+            if response.status_code not in _TRANSIENT_STATUS_CODES:
+                response.raise_for_status()
+                return response
+            if attempt == _MAX_REQUEST_ATTEMPTS - 1:
+                response.raise_for_status()
+            retry_reason = f"HTTP {response.status_code}"
+
+        delay = _INITIAL_RETRY_DELAY_SECONDS * 2**attempt
+        logger.warning(
+            "Judge request failed with %s; retrying in %.1f seconds (attempt %d/%d)",
+            retry_reason,
+            delay,
+            attempt + 1,
+            _MAX_REQUEST_ATTEMPTS,
+        )
+        time.sleep(delay)
+
+    raise AssertionError("Judge retry loop must return or raise")
 
 
 @dataclass(frozen=True)
@@ -74,10 +118,10 @@ class OpenAIJudge:
         temperature: float = 0.0,
         top_p: float | None = None,
     ) -> str:
-        response = requests.post(
-            f"{self.base_url.rstrip('/')}/chat/completions",
+        response = _post_json_with_retry(
+            url=f"{self.base_url.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {self._resolved_api_key()}", "Content-Type": "application/json"},
-            json=self._chat_completion_request(
+            json_body=self._chat_completion_request(
                 messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -85,7 +129,6 @@ class OpenAIJudge:
             ),
             timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
         body: dict[str, Any] = response.json()
         content = body["choices"][0]["message"].get("content")
         if not isinstance(content, str):
@@ -122,10 +165,10 @@ class OpenAIJudge:
                 top_p=top_p,
             )
 
-        response = requests.post(
-            f"{self.base_url.rstrip('/')}/responses",
+        response = _post_json_with_retry(
+            url=f"{self.base_url.rstrip('/')}/responses",
             headers={"Authorization": f"Bearer {self._resolved_api_key()}", "Content-Type": "application/json"},
-            json={
+            json_body={
                 "model": self.model,
                 "input": input_messages,
                 "metadata": metadata,
@@ -135,7 +178,6 @@ class OpenAIJudge:
             },
             timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
         body: dict[str, Any] = response.json()
         for item in reversed(body.get("output", [])):
             if item.get("type") != "message":
