@@ -1,9 +1,6 @@
 import json
 import os
 from pathlib import Path
-import shutil
-import subprocess
-import sys
 import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
 from dataclasses import dataclass, fields as _dataclass_fields, replace
@@ -25,17 +22,15 @@ from skyrl_train.config.behavior_logprobs import (
     validate_behavior_logprob_sampling,
 )
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
-    OnlineEagleTrainingJob,
     capture_rank_directory,
-    child_cuda_visible_device,
-    cleanup_online_eagle_training_job,
+    materialize_online_eagle_incumbent,
     merge_online_eagle_captures,
-    preserve_online_eagle_failure,
-    publish_online_eagle_failure_bundle,
     publish_speculator_checkpoint,
     remove_online_eagle_scratch,
     restore_speculator_checkpoint,
+    validate_online_eagle_candidate,
 )
+from skyrl_train.draft_trainer import bundle_directory_for_ray, materialize_ray_directory_bundle
 
 # vLLM 0.16+ reorganized entrypoints into sub-packages.
 # Try new paths first, fall back to old paths for backwards compatibility.
@@ -112,7 +107,6 @@ import time
 from packaging import version
 
 
-_ONLINE_EAGLE_PROCESS_TERMINATION_GRACE_SECONDS = 5
 _exact_chat_prompt_token_ids: ContextVar[list[int] | None] = ContextVar("exact_chat_prompt_token_ids", default=None)
 
 
@@ -382,12 +376,9 @@ class WorkerWrap:
 
     def install_online_eagle_speculator(self, candidate_dir, trainer_rank):
         """Install a complete candidate in place on every inference rank."""
-        previous_candidate_dir = getattr(self, "_online_eagle_served_candidate_dir", None)
         result = self.model_runner.install_online_eagle_speculator(candidate_dir, trainer_rank)
         if self.model_runner.parallel_config.data_parallel_rank == trainer_rank:
             self._online_eagle_served_candidate_dir = candidate_dir
-            if previous_candidate_dir is not None and previous_candidate_dir != candidate_dir:
-                remove_online_eagle_scratch(previous_candidate_dir)
         return result
 
     def publish_online_eagle_speculator(
@@ -417,149 +408,6 @@ class WorkerWrap:
             return {"active": False, "worker_rank": worker_rank}
         result = restore_speculator_checkpoint(source, destination)
         return {"active": True, "worker_rank": worker_rank, **result}
-
-    def start_online_eagle_speculator_update(self, job):
-        """Launch the SkyRL-owned trainer beside one selected inference rank."""
-        worker_rank = self.model_runner.parallel_config.data_parallel_rank
-        if worker_rank != ONLINE_EAGLE_TRAINER_RANK:
-            return {"active": False, "worker_rank": worker_rank}
-        existing = getattr(self, "_online_eagle_trainer_process", None)
-        if existing is not None:
-            raise RuntimeError("An online EAGLE trainer process has not been joined")
-        training = job["training"]
-        merged_capture = merge_online_eagle_captures(
-            job["capture_dir"],
-            expected_workers=self.model_runner.parallel_config.data_parallel_size,
-            expected_step=int(job["step"]),
-            max_tokens=int(training["max_tokens_per_update"]),
-            max_sequences_per_prompt_group=int(training["max_sequences_per_prompt_group"]),
-        )
-        job = {**job, "capture_dir": os.path.dirname(merged_capture["path"])}
-        output_dir = Path(job["output_dir"])
-        output_dir.parent.mkdir(parents=True, exist_ok=True)
-        job_path = output_dir.with_suffix(".job.json")
-        log_path = output_dir.with_suffix(".log")
-        job_path.write_text(json.dumps(job, indent=2, sort_keys=True))
-        environment = dict(os.environ)
-        child_device = child_cuda_visible_device(environment.get("CUDA_VISIBLE_DEVICES"), self.device.index)
-        if child_device is not None:
-            environment["CUDA_VISIBLE_DEVICES"] = child_device
-        # Speculators decorates its CUDA forward with torch.compile at import
-        # time. A fresh subprocess runs only one bounded update, so compilation
-        # cannot amortize and can consume the entire rollout-boundary budget.
-        environment["TORCH_COMPILE_DISABLE"] = "1"
-        with log_path.open("wb") as log_stream:
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "skyrl_train.inference_engines.vllm.online_eagle_trainer",
-                    str(job_path),
-                ],
-                stdout=log_stream,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                env=environment,
-            )
-        self._online_eagle_trainer_process = process
-        self._online_eagle_trainer_job = job
-        self._online_eagle_trainer_log = str(log_path)
-        return {
-            "active": True,
-            "worker_rank": worker_rank,
-            "pid": process.pid,
-            "log_path": str(log_path),
-            "captured_rows": merged_capture["captured_rows"],
-            "captured_windows": len(merged_capture["windows"]),
-            "dropped_windows": merged_capture["dropped_windows"],
-            "unselected_windows": merged_capture["unselected_windows"],
-        }
-
-    def finish_online_eagle_speculator_update(self, boundary_wait_seconds):
-        """Join the selected trainer, terminating it at the rollout boundary."""
-        process = getattr(self, "_online_eagle_trainer_process", None)
-        worker_rank = self.model_runner.parallel_config.data_parallel_rank
-        if process is None:
-            return {"active": False, "worker_rank": worker_rank}
-        job = self._online_eagle_trainer_job
-        remove_candidate = True
-        try:
-            try:
-                returncode = process.wait(timeout=float(boundary_wait_seconds))
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                try:
-                    process.wait(timeout=_ONLINE_EAGLE_PROCESS_TERMINATION_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-                result = {
-                    "active": True,
-                    "accepted": False,
-                    "deferred": True,
-                    "error": (f"Online EAGLE trainer exceeded boundary_wait_seconds={boundary_wait_seconds}"),
-                }
-            else:
-                result_path = Path(job["result_path"])
-                if result_path.exists():
-                    result = json.loads(result_path.read_text())
-                else:
-                    result = {
-                        "active": True,
-                        "accepted": False,
-                        "error": f"Online EAGLE trainer exited {returncode} without a result",
-                    }
-                result["returncode"] = returncode
-            if result.get("error") and not result.get("deferred", False):
-                failure_dir = result.get("failure_dir")
-                if not failure_dir:
-                    try:
-                        failure_dir = preserve_online_eagle_failure(
-                            OnlineEagleTrainingJob.from_mapping(job),
-                            RuntimeError(str(result["error"])),
-                        )
-                        result["failure_dir"] = failure_dir
-                    except BaseException as error:
-                        result["failure_preservation_error"] = f"{type(error).__name__}: {error}"
-                if failure_dir:
-                    failure_root = Path(failure_dir)
-                    shutil.copy2(self._online_eagle_trainer_log, failure_root / "trainer.log")
-                    shutil.copy2(Path(job["output_dir"]).with_suffix(".job.json"), failure_root / "job.json")
-                    try:
-                        published = publish_online_eagle_failure_bundle(
-                            str(failure_root),
-                            job["failure_artifact_path"],
-                        )
-                        result["failure_artifact_path"] = published["path"]
-                    except BaseException as error:
-                        result["failure_preservation_error"] = f"{type(error).__name__}: {error}"
-            result["worker_rank"] = worker_rank
-            result["log_path"] = self._online_eagle_trainer_log
-            remove_candidate = not result.get("accepted", False)
-            return result
-        finally:
-            cleanup_online_eagle_training_job(job, remove_candidate=remove_candidate)
-            self._online_eagle_trainer_process = None
-            self._online_eagle_trainer_job = None
-
-    def abort_online_eagle_speculator_update(self):
-        """Terminate an unjoined trainer during exceptional teardown."""
-        process = getattr(self, "_online_eagle_trainer_process", None)
-        worker_rank = self.model_runner.parallel_config.data_parallel_rank
-        if process is None:
-            return {"active": False, "worker_rank": worker_rank}
-        job = self._online_eagle_trainer_job
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=_ONLINE_EAGLE_PROCESS_TERMINATION_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-        self._online_eagle_trainer_process = None
-        self._online_eagle_trainer_job = None
-        cleanup_online_eagle_training_job(job, remove_candidate=True)
-        return {"active": True, "worker_rank": worker_rank, "returncode": process.returncode}
 
     def cleanup_online_eagle_scratch(self, scratch_root):
         """Remove one process-scoped scratch tree on its owning inference node."""
@@ -1225,7 +1073,16 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         self._tp_size = kwargs.get("tensor_parallel_size", 1)
         self._pp_size = kwargs.get("pipeline_parallel_size", 1)
         self._dp_size = kwargs.get("data_parallel_size", 1)
+        self._dp_rank = kwargs.get("data_parallel_rank", 0)
         self._is_lora = kwargs.get("enable_lora", False)
+        speculative_config = kwargs.get("speculative_config")
+        self._online_eagle_initial_draft_dir = None if speculative_config is None else speculative_config.get("model")
+        self._online_eagle_active_draft_dir = self._online_eagle_initial_draft_dir
+        self._online_eagle_active_draft_revision = None
+        self._online_eagle_previous_draft_dir = None
+        self._online_eagle_previous_draft_revision = None
+        self._online_eagle_staged_draft_dir = None
+        self._online_eagle_staged_manifest = None
 
         if "rope_scaling" in kwargs:
             kwargs.pop("rope_scaling")
@@ -2197,6 +2054,150 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await engine.collective_rpc("seal_online_eagle_capture", args=(output_dir,))
 
+    async def export_online_eagle_capture(self, job: Dict[str, Any]):
+        """Merge local DP captures and hand them to DraftTrainer through Ray's object store."""
+        if self._dp_rank != ONLINE_EAGLE_TRAINER_RANK:
+            return [{"active": False, "worker_rank": self._dp_rank}]
+        training = job["training"]
+        merged = merge_online_eagle_captures(
+            job["capture_dir"],
+            expected_workers=self._dp_size,
+            expected_step=int(job["step"]),
+            max_tokens=int(training["max_tokens_per_update"]),
+            max_sequences_per_prompt_group=int(training["max_sequences_per_prompt_group"]),
+        )
+        capture_dir = str(Path(merged["path"]).parent)
+        bundle = bundle_directory_for_ray(capture_dir)
+        remove_online_eagle_scratch(Path(job["capture_dir"]))
+        return [
+            {
+                "active": True,
+                "capture_bundle": bundle,
+                "captured_rows": merged["captured_rows"],
+                "captured_windows": len(merged["windows"]),
+                "dropped_windows": merged["dropped_windows"],
+                "unselected_windows": merged["unselected_windows"],
+                "target_weights_sha256": merged["target"]["weights_sha256"],
+                "target_config_sha256": merged["target"]["config_sha256"],
+            }
+        ]
+
+    async def stage_online_eagle_speculator(
+        self,
+        candidate_bundle: Dict[str, Any],
+        candidate_dir: str,
+        draft_revision: str,
+        weights_sha256: str,
+        incumbent_draft_revision: str,
+    ):
+        """Materialize and validate a candidate without mutating resident draft weights."""
+        if self._dp_rank != ONLINE_EAGLE_TRAINER_RANK:
+            return [{"active": False, "worker_rank": self._dp_rank}]
+        if self._online_eagle_staged_draft_dir is not None:
+            raise RuntimeError("A staged online EAGLE candidate has not been resolved")
+        if self._online_eagle_active_draft_revision is None:
+            if self._online_eagle_active_draft_dir != self._online_eagle_initial_draft_dir:
+                raise RuntimeError("Online EAGLE initial draft state is inconsistent")
+            incumbent_key = hashlib.sha256(incumbent_draft_revision.encode()).hexdigest()[:16]
+            incumbent_dir = str(Path(candidate_dir).parents[1] / "incumbents" / incumbent_key)
+            materialize_online_eagle_incumbent(
+                self._online_eagle_initial_draft_dir,
+                incumbent_dir,
+                draft_revision=incumbent_draft_revision,
+            )
+            self._online_eagle_active_draft_dir = incumbent_dir
+            self._online_eagle_active_draft_revision = incumbent_draft_revision
+        elif self._online_eagle_active_draft_revision != incumbent_draft_revision:
+            raise RuntimeError(
+                "Online EAGLE staged candidate does not descend from the active draft: "
+                f"expected {self._online_eagle_active_draft_revision}, got {incumbent_draft_revision}"
+            )
+        materialized = materialize_ray_directory_bundle(candidate_bundle, candidate_dir)
+        manifest = validate_online_eagle_candidate(materialized, require_trainer_state=False)
+        if manifest.get("draft_revision") != draft_revision or manifest.get("weights_sha256") != weights_sha256:
+            remove_online_eagle_scratch(materialized)
+            raise RuntimeError("Staged online EAGLE candidate identity does not match its update result")
+        self._online_eagle_staged_draft_dir = str(materialized)
+        self._online_eagle_staged_manifest = manifest
+        return [
+            {
+                "active": True,
+                "draft_revision": draft_revision,
+                "weights_sha256": weights_sha256,
+                "candidate_dir": str(materialized),
+                "incumbent_draft_revision": incumbent_draft_revision,
+            }
+        ]
+
+    async def activate_online_eagle_speculator(
+        self,
+        candidate_dir: str,
+        draft_revision: str,
+        weights_sha256: str,
+    ):
+        """Activate an already validated candidate on every rank in this engine."""
+        manifest = validate_online_eagle_candidate(candidate_dir, require_trainer_state=False)
+        if manifest.get("draft_revision") != draft_revision or manifest.get("weights_sha256") != weights_sha256:
+            raise RuntimeError(f"Online EAGLE candidate identity changed before activation: {draft_revision}")
+        if self._dp_rank == ONLINE_EAGLE_TRAINER_RANK and (
+            self._online_eagle_staged_manifest != manifest or self._online_eagle_staged_draft_dir != candidate_dir
+        ):
+            raise RuntimeError(f"No staged online EAGLE candidate for {draft_revision}")
+        engine = self._get_engine()
+        worker_results = await engine.collective_rpc(
+            "install_online_eagle_speculator", args=(candidate_dir, ONLINE_EAGLE_TRAINER_RANK)
+        )
+        self._online_eagle_previous_draft_dir = self._online_eagle_active_draft_dir
+        self._online_eagle_previous_draft_revision = self._online_eagle_active_draft_revision
+        self._online_eagle_active_draft_dir = candidate_dir
+        self._online_eagle_active_draft_revision = draft_revision
+        self._online_eagle_staged_draft_dir = None
+        self._online_eagle_staged_manifest = None
+        return [{"active": True, "draft_revision": draft_revision, "worker_results": worker_results}]
+
+    async def commit_online_eagle_speculator(self, draft_revision: str):
+        """Release the prior candidate after the coordinator commits all engines."""
+        if self._online_eagle_active_draft_revision != draft_revision:
+            raise RuntimeError(f"Online EAGLE active revision is not {draft_revision}")
+        previous = self._online_eagle_previous_draft_dir
+        self._online_eagle_previous_draft_dir = None
+        self._online_eagle_previous_draft_revision = None
+        if (
+            self._dp_rank == ONLINE_EAGLE_TRAINER_RANK
+            and previous is not None
+            and previous != self._online_eagle_initial_draft_dir
+        ):
+            remove_online_eagle_scratch(previous)
+        return [{"active": True, "draft_revision": draft_revision}]
+
+    async def rollback_online_eagle_speculator(self, draft_revision: str):
+        """Restore the prior draft after any engine fails candidate activation."""
+        candidate_dir = self._online_eagle_staged_draft_dir
+        if self._online_eagle_active_draft_revision != draft_revision:
+            self._online_eagle_staged_draft_dir = None
+            self._online_eagle_staged_manifest = None
+            if self._dp_rank == ONLINE_EAGLE_TRAINER_RANK and candidate_dir is not None:
+                remove_online_eagle_scratch(candidate_dir)
+            return [{"active": candidate_dir is not None, "draft_revision": draft_revision, "worker_results": []}]
+
+        candidate_dir = self._online_eagle_active_draft_dir
+        restore_dir = self._online_eagle_previous_draft_dir
+        restore_revision = self._online_eagle_previous_draft_revision
+        if restore_dir is None:
+            raise RuntimeError("Online EAGLE activated candidate has no prior draft to restore")
+        worker_results = await self._get_engine().collective_rpc(
+            "install_online_eagle_speculator", args=(restore_dir, ONLINE_EAGLE_TRAINER_RANK)
+        )
+        self._online_eagle_active_draft_dir = restore_dir
+        self._online_eagle_active_draft_revision = restore_revision
+        self._online_eagle_previous_draft_dir = None
+        self._online_eagle_previous_draft_revision = None
+        self._online_eagle_staged_draft_dir = None
+        self._online_eagle_staged_manifest = None
+        if self._dp_rank == ONLINE_EAGLE_TRAINER_RANK and candidate_dir is not None and candidate_dir != restore_dir:
+            remove_online_eagle_scratch(candidate_dir)
+        return [{"active": True, "draft_revision": draft_revision, "worker_results": worker_results}]
+
     async def discard_online_eagle_capture(self):
         """Discard capture on every worker rank."""
         engine = self._get_engine()
@@ -2205,24 +2206,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def install_online_eagle_speculator(self, candidate_dir: str):
         """Install a candidate collectively without replacing resident parameter storage."""
         engine = self._get_engine()
-        return await engine.collective_rpc(
+        worker_results = await engine.collective_rpc(
             "install_online_eagle_speculator", args=(candidate_dir, ONLINE_EAGLE_TRAINER_RANK)
         )
-
-    async def start_online_eagle_speculator_update(self, job: Dict[str, Any]):
-        """Launch the selected rank's co-resident trainer subprocess."""
-        engine = self._get_engine()
-        return await engine.collective_rpc("start_online_eagle_speculator_update", args=(job,))
-
-    async def finish_online_eagle_speculator_update(self, boundary_wait_seconds: float):
-        """Join or terminate the co-resident trainer at the no-request boundary."""
-        engine = self._get_engine()
-        return await engine.collective_rpc("finish_online_eagle_speculator_update", args=(boundary_wait_seconds,))
-
-    async def abort_online_eagle_speculator_update(self):
-        """Terminate an unjoined trainer during exceptional teardown."""
-        engine = self._get_engine()
-        return await engine.collective_rpc("abort_online_eagle_speculator_update")
+        revisions = {item["draft_revision"] for item in worker_results if item.get("active", False)}
+        if len(revisions) != 1:
+            raise RuntimeError(f"Restored online EAGLE candidate reported inconsistent revisions: {revisions}")
+        self._online_eagle_active_draft_dir = candidate_dir
+        self._online_eagle_active_draft_revision = revisions.pop()
+        self._online_eagle_previous_draft_dir = None
+        self._online_eagle_previous_draft_revision = None
+        return worker_results
 
     async def cleanup_online_eagle_scratch(self, scratch_root: str):
         """Remove process-scoped trainer scratch on the inference node."""

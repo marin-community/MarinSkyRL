@@ -73,10 +73,12 @@ class OnlineEagleActor:
         for name in (
             "begin_online_eagle_capture",
             "seal_online_eagle_capture",
+            "export_online_eagle_capture",
             "discard_online_eagle_capture",
-            "start_online_eagle_speculator_update",
-            "finish_online_eagle_speculator_update",
-            "abort_online_eagle_speculator_update",
+            "stage_online_eagle_speculator",
+            "activate_online_eagle_speculator",
+            "commit_online_eagle_speculator",
+            "rollback_online_eagle_speculator",
             "cleanup_online_eagle_scratch",
             "install_online_eagle_speculator",
             "publish_online_eagle_speculator",
@@ -145,10 +147,12 @@ async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
 
     await engine.begin_online_eagle_capture({"step": 3})
     await engine.seal_online_eagle_capture("/tmp/capture")
+    await engine.export_online_eagle_capture({"step": 3})
     await engine.discard_online_eagle_capture()
-    await engine.start_online_eagle_speculator_update({"step": 3})
-    await engine.finish_online_eagle_speculator_update(30)
-    await engine.abort_online_eagle_speculator_update()
+    await engine.stage_online_eagle_speculator({"bundle": True}, "/tmp/candidate", "draft-3", "digest-3", "draft-2")
+    await engine.activate_online_eagle_speculator("/tmp/candidate", "draft-3", "digest-3")
+    await engine.commit_online_eagle_speculator("draft-3")
+    await engine.rollback_online_eagle_speculator("draft-3")
     await engine.cleanup_online_eagle_scratch("/tmp/marinskyrl-online-eagle/process")
     await engine.install_online_eagle_speculator("/tmp/candidate")
     await engine.publish_online_eagle_speculator("/tmp/candidate", "s3://bucket/draft", "draft-3", "policy-3")
@@ -157,10 +161,15 @@ async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
     assert actor.calls == [
         ("begin_online_eagle_capture", ({"step": 3},)),
         ("seal_online_eagle_capture", ("/tmp/capture",)),
+        ("export_online_eagle_capture", ({"step": 3},)),
         ("discard_online_eagle_capture", ()),
-        ("start_online_eagle_speculator_update", ({"step": 3},)),
-        ("finish_online_eagle_speculator_update", (30,)),
-        ("abort_online_eagle_speculator_update", ()),
+        (
+            "stage_online_eagle_speculator",
+            ({"bundle": True}, "/tmp/candidate", "draft-3", "digest-3", "draft-2"),
+        ),
+        ("activate_online_eagle_speculator", ("/tmp/candidate", "draft-3", "digest-3")),
+        ("commit_online_eagle_speculator", ("draft-3",)),
+        ("rollback_online_eagle_speculator", ("draft-3",)),
         ("cleanup_online_eagle_scratch", ("/tmp/marinskyrl-online-eagle/process",)),
         ("install_online_eagle_speculator", ("/tmp/candidate",)),
         (

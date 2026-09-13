@@ -350,6 +350,50 @@ class InferenceEngineClient(InferenceEngineInterface):
         """Seal every engine before the target-weight synchronization boundary."""
         return await self._run_on_all_engines("seal_online_eagle_capture", output_root)
 
+    async def export_online_eagle_capture(self, job: Dict[str, Any]) -> List[Any]:
+        """Move each engine's sealed capture into bounded DraftTrainer transport."""
+        return await self._run_on_all_engines("export_online_eagle_capture", job)
+
+    async def stage_online_eagle_speculator(
+        self,
+        candidate_bundle: Dict[str, Any],
+        candidate_dir: str,
+        draft_revision: str,
+        weights_sha256: str,
+        incumbent_draft_revision: str,
+    ) -> List[Any]:
+        """Stage and validate the candidate on every live engine."""
+        return await self._run_on_all_engines(
+            "stage_online_eagle_speculator",
+            candidate_bundle,
+            candidate_dir,
+            draft_revision,
+            weights_sha256,
+            incumbent_draft_revision,
+        )
+
+    async def activate_online_eagle_speculator(
+        self,
+        candidate_dir: str,
+        draft_revision: str,
+        weights_sha256: str,
+    ) -> List[Any]:
+        """Activate one staged revision on every live engine."""
+        return await self._run_on_all_engines(
+            "activate_online_eagle_speculator",
+            candidate_dir,
+            draft_revision,
+            weights_sha256,
+        )
+
+    async def commit_online_eagle_speculator(self, draft_revision: str) -> List[Any]:
+        """Commit an all-engine activation and release the prior revision."""
+        return await self._run_on_all_engines("commit_online_eagle_speculator", draft_revision)
+
+    async def rollback_online_eagle_speculator(self, draft_revision: str) -> List[Any]:
+        """Restore the prior revision after any activation failure."""
+        return await self._run_on_all_engines("rollback_online_eagle_speculator", draft_revision)
+
     async def discard_online_eagle_capture(self) -> List[Any]:
         """Discard capture buffers on every live inference engine."""
         return await self._run_on_all_engines("discard_online_eagle_capture")
@@ -357,18 +401,6 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def install_online_eagle_speculator(self, candidate_dir: str) -> List[Any]:
         """Install the same complete draft revision across every live rank."""
         return await self._run_on_all_engines("install_online_eagle_speculator", candidate_dir)
-
-    async def start_online_eagle_speculator_update(self, job: Dict[str, Any]) -> List[Any]:
-        """Start one online update after its capture has sealed."""
-        return await self._run_on_all_engines("start_online_eagle_speculator_update", job)
-
-    async def finish_online_eagle_speculator_update(self, boundary_wait_seconds: float) -> List[Any]:
-        """Join the update before mutating target or draft serving weights."""
-        return await self._run_on_all_engines("finish_online_eagle_speculator_update", boundary_wait_seconds)
-
-    async def abort_online_eagle_speculator_update(self) -> List[Any]:
-        """Terminate any online update still running during teardown."""
-        return await self._run_on_all_engines("abort_online_eagle_speculator_update")
 
     async def cleanup_online_eagle_scratch(self, scratch_root: str) -> List[Any]:
         """Remove online-EAGLE scratch on the inference node that owns it."""

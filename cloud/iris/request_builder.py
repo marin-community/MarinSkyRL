@@ -63,6 +63,9 @@ def derive_role_plan(config: dict[str, Any]) -> SkyRLRolePlan:
     for path, field in _ROLE_PLAN_PATHS.items():
         raw = _at(config, path)
         values[field] = bool(raw) if field == "colocate_all" else int(raw)
+    speculative_decoding = config.get("generator", {}).get("speculative_decoding")
+    online_training = isinstance(speculative_decoding, dict) and speculative_decoding.get("training") is not None
+    values["draft_trainer_num_gpus"] = 1 if online_training else 0
     return SkyRLRolePlan(**values)
 
 
@@ -73,11 +76,13 @@ def derive_num_nodes(plan: SkyRLRolePlan) -> int:
     so ``num_nodes = policy_num_nodes``.
 
     **Disaggregated** (``colocate_all=False``): each inference engine runs on its own
-    node, so ``num_nodes = policy_num_nodes + num_inference_engines``.
+    node. Online draft training adds one dedicated GPU node so its working set cannot
+    evict the serving model.
     """
     if plan.colocate_all:
         return plan.policy_num_nodes
-    return plan.policy_num_nodes + plan.num_inference_engines
+    draft_trainer_nodes = 1 if plan.draft_trainer_num_gpus else 0
+    return plan.policy_num_nodes + plan.num_inference_engines + draft_trainer_nodes
 
 
 def derive_strategy(config: dict[str, Any]) -> str | None:

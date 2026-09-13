@@ -49,6 +49,7 @@ class SkyRLRolePlan:
     policy_mini_batch_size: int
     micro_train_batch_size_per_gpu: int
     n_samples_per_prompt: int
+    draft_trainer_num_gpus: int = 0
 
 
 @dataclass(frozen=True)

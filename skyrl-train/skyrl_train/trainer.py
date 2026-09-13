@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import asdict
 import json
 import math
 import os
@@ -64,6 +65,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     OnlineEagleTrainingJob,
     OnlineEagleUpdateResult,
 )
+from skyrl_train.draft_trainer import create_draft_trainer
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import (
     AdmissionRejection,
@@ -145,6 +147,11 @@ def _active_online_eagle_results(results: list[Any]) -> list[dict[str, Any]]:
     return [item for engine_results in results for item in engine_results if item.get("active", False)]
 
 
+def _poll_object_ref(ref: ObjectRef) -> tuple[bool, Any | None]:
+    ready, _ = ray.wait([ref], timeout=0)
+    return (False, None) if not ready else (True, ray.get(ready[0]))
+
+
 class RayPPOTrainer:
     def __init__(
         self,
@@ -206,6 +213,10 @@ class RayPPOTrainer:
         self._sealed_speculator_capture_dir: str | None = None
         self._served_draft_path = None if self.speculative_decoding is None else self.speculative_decoding.model.path
         self._speculator_update_inflight = False
+        self._draft_trainer = None
+        self._draft_trainer_update_ref: ObjectRef | None = None
+        self._draft_trainer_target_revision: str | None = None
+        self._draft_trainer_target_weights_sha256: str | None = None
         self._speculator_update_failures = 0
         self._speculator_boundary_deferrals = 0
         self._speculator_install_count = 0
@@ -356,6 +367,14 @@ class RayPPOTrainer:
                 except Exception as e:
                     logger.warning(f"Error killing {model_name} actors: {e}")
 
+        if getattr(self, "_draft_trainer", None) is not None:
+            try:
+                ray.kill(self._draft_trainer, no_restart=True)
+                logger.info("Killed DraftTrainer actor")
+            except Exception as error:
+                logger.warning("Error killing DraftTrainer actor: {}", error)
+            self._draft_trainer = None
+
         # Kill inference engine actors.  These are not covered by the model
         # actor groups above.
         if self.inference_engine_client is not None:
@@ -399,13 +418,14 @@ class RayPPOTrainer:
             label="Trajectory runner shutdown",
         )
         self._guarded_sync(self.trajectory_sink.close, label="Trajectory retention shutdown")
-        if getattr(self, "_speculator_update_inflight", False):
+        if getattr(self, "_draft_trainer", None) is not None:
             await self._guarded_async(
-                self.inference_engine_client.abort_online_eagle_speculator_update(),
+                self._draft_trainer.cleanup.remote(),
                 timeout=10,
-                label="Online EAGLE trainer shutdown",
+                label="DraftTrainer scratch cleanup",
             )
-            self._speculator_update_inflight = False
+        self._draft_trainer_update_ref = None
+        self._speculator_update_inflight = False
         if getattr(self, "speculative_decoding", None) is not None and self.inference_engine_client is not None:
             await self._guarded_async(
                 self.inference_engine_client.cleanup_online_eagle_scratch(self._speculator_scratch_path()),
@@ -586,6 +606,19 @@ class RayPPOTrainer:
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
         await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
+    async def _start_draft_trainer(self) -> None:
+        """Start the independent one-GPU draft trainer when online updates are enabled."""
+        config = self.speculative_decoding
+        if config is None or config.training is None or self._draft_trainer is not None:
+            return
+        self._draft_trainer = create_draft_trainer(
+            initial_draft_dir=config.model.path,
+            initial_draft_revision=config.model.source_identity,
+            process_id=self._speculator_process_id,
+        )
+        status = await self._draft_trainer.status.remote()
+        logger.info("DraftTrainer ready: {}", status)
+
     def _should_update_speculator(self) -> bool:
         config = self.speculative_decoding
         return (
@@ -600,6 +633,13 @@ class RayPPOTrainer:
     async def _begin_speculator_capture(self) -> None:
         """Open one capture interval before the first rollout attempt for a step."""
         if self._speculator_capture_active or not self._should_update_speculator():
+            return
+        if self._speculator_update_inflight:
+            self.all_metrics["speculator/capture_skipped_backpressure"] = 1.0
+            logger.warning(
+                "Skipping online EAGLE capture at step {} because DraftTrainer is still busy",
+                self.global_step,
+            )
             return
         assert self.speculative_decoding is not None
         training = self.speculative_decoding.training
@@ -699,19 +739,33 @@ class RayPPOTrainer:
         return manifests
 
     async def _start_speculator_update(self) -> None:
-        """Start the bounded trainer subprocess after the immutable seal exists."""
+        """Hand a sealed capture to the independent DraftTrainer actor."""
         if self._sealed_speculator_capture_dir is None or self._speculator_update_inflight:
             return
         assert self.speculative_decoding is not None
         training = self.speculative_decoding.training
         assert training is not None
         assert self._served_draft_path is not None
+        assert self._served_draft_revision is not None
+        if self._draft_trainer is None:
+            raise RuntimeError("Online EAGLE capture sealed before DraftTrainer started")
         candidate_dir = self._speculator_scratch_path("candidates", f"step-{self.global_step}")
+        target_revision = f"policy-step-{self.global_step - 1}"
+        transfer_request = {
+            "step": self.global_step,
+            "capture_dir": self._sealed_speculator_capture_dir,
+            "training": asdict(training),
+        }
+        exports = await self.inference_engine_client.export_online_eagle_capture(transfer_request)
+        active = _single_active_online_eagle_result(exports, "capture export")
         job = OnlineEagleTrainingJob(
             step=self.global_step,
-            capture_dir=self._sealed_speculator_capture_dir,
+            capture_dir=str(Path(self._sealed_speculator_capture_dir) / "merged"),
             draft_model_dir=self._served_draft_path,
             initial_draft_source_identity=self.speculative_decoding.model.source_identity,
+            parent_draft_revision=self._served_draft_revision,
+            target_revision=target_revision,
+            target_weights_sha256=active["target_weights_sha256"],
             output_dir=candidate_dir,
             result_path=f"{candidate_dir}.result.json",
             failure_artifact_path=join_resource_path(
@@ -723,8 +777,6 @@ class RayPPOTrainer:
             seed=int(self.cfg.trainer.seed),
             training=training,
         ).to_mapping()
-        results = await self.inference_engine_client.start_online_eagle_speculator_update(job)
-        active = _single_active_online_eagle_result(results, "trainer start")
         self.all_metrics.update(
             {
                 "speculator/captured_rows": float(active["captured_rows"]),
@@ -733,37 +785,62 @@ class RayPPOTrainer:
                 "speculator/unselected_windows": float(active["unselected_windows"]),
             }
         )
+        self._draft_trainer_update_ref = self._draft_trainer.update.remote(job, active["capture_bundle"])
+        self._draft_trainer_target_revision = target_revision
+        self._draft_trainer_target_weights_sha256 = active["target_weights_sha256"]
         self._speculator_update_inflight = True
         self._sealed_speculator_capture_dir = None
         logger.info(
-            "Online EAGLE update started: step={} pid={} log_path={}",
+            "DraftTrainer update submitted: step={} target_revision={} target_weights_sha256={}",
             self.global_step,
-            active["pid"],
-            active["log_path"],
+            target_revision,
+            active["target_weights_sha256"],
         )
 
     async def _finish_speculator_update(self) -> None:
-        """Finish one update; its owner reclaims inference-node capture scratch."""
+        """Poll one update and install it only at a no-request serving boundary."""
         if not self._speculator_update_inflight:
             return
-        try:
-            await self._finish_speculator_update_and_install()
-        finally:
+        if await self._finish_speculator_update_and_install():
             self._speculator_update_inflight = False
+            self._draft_trainer_update_ref = None
+            self._draft_trainer_target_revision = None
+            self._draft_trainer_target_weights_sha256 = None
 
-    async def _finish_speculator_update_and_install(self) -> None:
-        """Join, gate, and collectively install a candidate before target sync."""
+    async def _finish_speculator_update_and_install(self) -> bool:
+        """Poll, gate, and transactionally install a candidate before target sync."""
         if not self._speculator_update_inflight:
-            return
-        assert self.speculative_decoding is not None
-        training = self.speculative_decoding.training
-        assert training is not None
-        results = await self.inference_engine_client.finish_online_eagle_speculator_update(
-            training.boundary_wait_seconds
+            return False
+        if self._draft_trainer_update_ref is None or self._draft_trainer is None:
+            raise RuntimeError("DraftTrainer update state is incomplete")
+        ready, payload = _poll_object_ref(self._draft_trainer_update_ref)
+        if not ready:
+            self._speculator_boundary_deferrals += 1
+            self.all_metrics.update(
+                {
+                    "speculator/update_pending": 1.0,
+                    "speculator/boundary_deferrals": float(self._speculator_boundary_deferrals),
+                    "speculator/install_count": float(self._speculator_install_count),
+                    "speculator/update_failures": float(self._speculator_update_failures),
+                }
+            )
+            logger.info("DraftTrainer update remains pending at policy step {}", self.global_step)
+            return False
+        assert payload is not None
+        result = OnlineEagleUpdateResult.from_mapping(payload["result"])
+        logger.info(
+            "DraftTrainer update completed: submitted_step={} observed_step={} accepted={} "
+            "duration_seconds={} parent_draft_revision={} trained_against_target_revision={}",
+            result.step,
+            self.global_step,
+            result.accepted,
+            result.duration_seconds,
+            result.parent_draft_revision,
+            result.trained_against_target_revision,
         )
-        result = OnlineEagleUpdateResult.from_mapping(_single_active_online_eagle_result(results, "trainer finish"))
         self.all_metrics.update(
             {
+                "speculator/update_pending": 0.0,
                 "speculator/train_loss": float(result.train_loss if result.train_loss is not None else float("nan")),
                 "speculator/incumbent_holdout_loss": float(
                     result.incumbent_holdout_loss if result.incumbent_holdout_loss is not None else float("nan")
@@ -795,32 +872,104 @@ class RayPPOTrainer:
                 "speculator/candidate_accepted": float(result.accepted),
             }
         )
-        if result.deferred:
-            self._speculator_boundary_deferrals += 1
         if result.error:
             self._speculator_update_failures += 1
             logger.error(
-                "Online EAGLE update failed: step={} error={} log_path={} failure_artifact_path={} "
+                "DraftTrainer update failed: submitted_step={} observed_step={} error={} failure_artifact_path={} "
                 "failure_preservation_error={}",
+                result.step,
                 self.global_step,
                 result.error,
-                result.log_path,
                 result.failure_artifact_path,
                 result.failure_preservation_error,
             )
         if result.accepted:
-            if result.candidate_dir is None or result.draft_revision is None:
+            candidate_bundle = payload.get("candidate_bundle")
+            if (
+                result.candidate_dir is None
+                or result.draft_revision is None
+                or result.weights_sha256 is None
+                or candidate_bundle is None
+            ):
                 raise RuntimeError("Accepted online EAGLE result omitted its candidate identity")
-            with Timer("install_speculator", self.all_timings):
-                installs = await self.inference_engine_client.install_online_eagle_speculator(result.candidate_dir)
-            installed = [item for engine_results in installs for item in engine_results]
-            revisions = {item["draft_revision"] for item in installed}
-            digests = {item["weights_sha256"] for item in installed}
-            if revisions != {result.draft_revision} or len(digests) != 1:
-                raise RuntimeError("Online EAGLE ranks reported inconsistent installed revisions or hashes")
+            if (
+                result.parent_draft_revision != self._served_draft_revision
+                or result.trained_against_target_revision != self._draft_trainer_target_revision
+                or result.trained_against_target_weights_sha256 != self._draft_trainer_target_weights_sha256
+            ):
+                await self._draft_trainer.rollback.remote(result.draft_revision)
+                raise RuntimeError("DraftTrainer candidate lineage no longer matches its submitted capture")
+            try:
+                with Timer("install_speculator", self.all_timings):
+                    stages = await self.inference_engine_client.stage_online_eagle_speculator(
+                        candidate_bundle,
+                        result.candidate_dir,
+                        result.draft_revision,
+                        result.weights_sha256,
+                        self._served_draft_revision,
+                    )
+                    staged = _active_online_eagle_results(stages)
+                    expected_serving_nodes = int(self.cfg.generator.num_inference_engines)
+                    expected_engine_actors = expected_serving_nodes * int(
+                        self.cfg.generator.inference_engine_data_parallel_size
+                    )
+                    if len(self.inference_engine_client.engines) != expected_engine_actors:
+                        raise RuntimeError(
+                            "Online EAGLE engine actor geometry does not match configured inference DP: "
+                            f"expected {expected_engine_actors}, got {len(self.inference_engine_client.engines)}"
+                        )
+                    if len(staged) != expected_serving_nodes or {item["weights_sha256"] for item in staged} != {
+                        result.weights_sha256
+                    }:
+                        raise RuntimeError("Online EAGLE engines staged inconsistent candidate hashes")
+                    activations = await self.inference_engine_client.activate_online_eagle_speculator(
+                        result.candidate_dir,
+                        result.draft_revision,
+                        result.weights_sha256,
+                    )
+                activated = _active_online_eagle_results(activations)
+                if len(activated) != expected_engine_actors:
+                    raise RuntimeError("Online EAGLE engines returned incomplete activation acknowledgements")
+                installed = [item for engine_result in activated for item in engine_result["worker_results"]]
+                expected_workers = expected_engine_actors
+                revisions = {item["draft_revision"] for item in installed}
+                digests = {item["weights_sha256"] for item in installed}
+                worker_ranks = {item.get("worker_rank") for item in installed}
+                if (
+                    len(installed) != expected_workers
+                    or revisions != {result.draft_revision}
+                    or digests != {result.weights_sha256}
+                    or worker_ranks != set(range(int(self.cfg.generator.inference_engine_data_parallel_size)))
+                ):
+                    raise RuntimeError("Online EAGLE ranks reported inconsistent installed revisions or hashes")
+            except BaseException as activation_error:
+                rollback_errors = []
+                try:
+                    await self.inference_engine_client.rollback_online_eagle_speculator(result.draft_revision)
+                except BaseException as error:
+                    rollback_errors.append(f"serving rollback: {type(error).__name__}: {error}")
+                try:
+                    await self._draft_trainer.rollback.remote(result.draft_revision)
+                except BaseException as error:
+                    rollback_errors.append(f"trainer rollback: {type(error).__name__}: {error}")
+                if rollback_errors:
+                    raise RuntimeError("; ".join(rollback_errors)) from activation_error
+                raise
+            await self.inference_engine_client.commit_online_eagle_speculator(result.draft_revision)
+            await self._draft_trainer.commit.remote(result.draft_revision)
             self._served_draft_revision = result.draft_revision
             self._served_draft_path = result.candidate_dir
             self._speculator_install_count += 1
+            logger.info(
+                "DraftTrainer candidate installed: submitted_step={} observed_step={} draft_revision={} "
+                "weights_sha256={} inference_engines={} workers={}",
+                result.step,
+                self.global_step,
+                result.draft_revision,
+                result.weights_sha256,
+                expected_serving_nodes,
+                len(installed),
+            )
         self.all_metrics.update(
             {
                 "speculator/update_failures": float(self._speculator_update_failures),
@@ -828,6 +977,7 @@ class RayPPOTrainer:
                 "speculator/install_count": float(self._speculator_install_count),
             }
         )
+        return True
 
     async def _publish_speculator_checkpoint(self) -> None:
         """Publish the exact served draft before the policy completion marker."""
@@ -837,13 +987,23 @@ class RayPPOTrainer:
         assert self._served_draft_path is not None
         assert self._served_draft_revision is not None
         destination = speculator_export_path(self.cfg.trainer.ckpt_path, self.global_step)
-        results = await self.inference_engine_client.publish_online_eagle_speculator(
-            self._served_draft_path,
-            destination,
-            self._served_draft_revision,
-            f"policy-step-{self.global_step}",
-        )
-        active = _single_active_online_eagle_result(results, "checkpoint publication")
+        served_target_revision = f"policy-step-{self.global_step}"
+        if speculative_decoding.training is not None:
+            if self._draft_trainer is None:
+                raise RuntimeError("Online EAGLE checkpoint publication requires DraftTrainer")
+            active = await self._draft_trainer.publish.remote(
+                destination,
+                self._served_draft_revision,
+                served_target_revision,
+            )
+        else:
+            results = await self.inference_engine_client.publish_online_eagle_speculator(
+                self._served_draft_path,
+                destination,
+                self._served_draft_revision,
+                served_target_revision,
+            )
+            active = _single_active_online_eagle_result(results, "checkpoint publication")
         if not active.get("complete", False):
             raise RuntimeError(f"Served speculator checkpoint was incomplete: {active}")
         logger.info(
@@ -876,6 +1036,13 @@ class RayPPOTrainer:
                 "Resumed draft source lineage mismatch: expected "
                 f"{speculative_decoding.model.source_identity}, got {initial_source_identity!r}"
             )
+        if speculative_decoding.training is not None:
+            if self._draft_trainer is None:
+                raise RuntimeError("Online EAGLE resume requires a running DraftTrainer")
+            trainer_manifest = await self._draft_trainer.restore.remote(source, restored_path)
+            for field in ("draft_revision", "served_target_revision"):
+                if trainer_manifest[field] != manifest[field]:
+                    raise RuntimeError(f"DraftTrainer restored inconsistent {field}")
         installs = await self.inference_engine_client.install_online_eagle_speculator(restored_path)
         installed = [item for engine_results in installs for item in engine_results]
         if {item["draft_revision"] for item in installed} != {manifest["draft_revision"]}:
@@ -952,6 +1119,7 @@ class RayPPOTrainer:
             with Timer("load_checkpoints", self.all_startup_timings):
                 self.global_step, loaded_checkpoint_path = self.load_checkpoints()
 
+        await self._start_draft_trainer()
         await self._restore_speculator_checkpoint(loaded_checkpoint_path)
 
         await self._sync_policy_for_rollouts(reason="initial")

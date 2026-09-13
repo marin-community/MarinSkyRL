@@ -264,17 +264,45 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def seal_online_eagle_capture(self, output_dir: str):
         return await self.inference_engine_actor.seal_online_eagle_capture.remote(output_dir)
 
+    async def export_online_eagle_capture(self, job: Dict[str, Any]):
+        return await self.inference_engine_actor.export_online_eagle_capture.remote(job)
+
+    async def stage_online_eagle_speculator(
+        self,
+        candidate_bundle: Dict[str, Any],
+        candidate_dir: str,
+        draft_revision: str,
+        weights_sha256: str,
+        incumbent_draft_revision: str,
+    ):
+        return await self.inference_engine_actor.stage_online_eagle_speculator.remote(
+            candidate_bundle,
+            candidate_dir,
+            draft_revision,
+            weights_sha256,
+            incumbent_draft_revision,
+        )
+
+    async def activate_online_eagle_speculator(
+        self,
+        candidate_dir: str,
+        draft_revision: str,
+        weights_sha256: str,
+    ):
+        return await self.inference_engine_actor.activate_online_eagle_speculator.remote(
+            candidate_dir,
+            draft_revision,
+            weights_sha256,
+        )
+
+    async def commit_online_eagle_speculator(self, draft_revision: str):
+        return await self.inference_engine_actor.commit_online_eagle_speculator.remote(draft_revision)
+
+    async def rollback_online_eagle_speculator(self, draft_revision: str):
+        return await self.inference_engine_actor.rollback_online_eagle_speculator.remote(draft_revision)
+
     async def discard_online_eagle_capture(self):
         return await self.inference_engine_actor.discard_online_eagle_capture.remote()
-
-    async def start_online_eagle_speculator_update(self, job: Dict[str, Any]):
-        return await self.inference_engine_actor.start_online_eagle_speculator_update.remote(job)
-
-    async def finish_online_eagle_speculator_update(self, boundary_wait_seconds: float):
-        return await self.inference_engine_actor.finish_online_eagle_speculator_update.remote(boundary_wait_seconds)
-
-    async def abort_online_eagle_speculator_update(self):
-        return await self.inference_engine_actor.abort_online_eagle_speculator_update.remote()
 
     async def cleanup_online_eagle_scratch(self, scratch_root: str):
         return await self.inference_engine_actor.cleanup_online_eagle_scratch.remote(scratch_root)

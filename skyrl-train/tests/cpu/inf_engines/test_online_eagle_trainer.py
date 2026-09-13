@@ -20,9 +20,8 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     _load_window_group,
     _restore_rng_states,
     candidate_is_acceptable,
-    child_cuda_visible_device,
-    cleanup_online_eagle_training_job,
     export_served_speculator_checkpoint,
+    materialize_online_eagle_incumbent,
     merge_online_eagle_captures,
     partition_capture_windows,
     preserve_online_eagle_failure,
@@ -135,25 +134,6 @@ def test_rng_restore_moves_device_mapped_generator_states_back_to_cpu(monkeypatc
         "cuda": (cuda_rng_state, torch.device("cuda:0")),
         "python": python_rng_state,
     }
-
-
-@pytest.mark.parametrize(
-    ("visible_devices", "device_index", "child_device"),
-    [
-        (None, None, None),
-        (None, 2, "2"),
-        ("4,7", 1, "7"),
-        ("GPU-first,GPU-second", 0, "GPU-first"),
-    ],
-)
-def test_child_cuda_visible_device_follows_parent_mapping(visible_devices, device_index, child_device) -> None:
-    assert child_cuda_visible_device(visible_devices, device_index) == child_device
-
-
-@pytest.mark.parametrize(("visible_devices", "device_index"), [("4,7", -1), ("4,7", 2), ("4,,7", 1)])
-def test_child_cuda_visible_device_rejects_invalid_mapping(visible_devices, device_index) -> None:
-    with pytest.raises(RuntimeError, match="CUDA_VISIBLE_DEVICES"):
-        child_cuda_visible_device(visible_devices, device_index)
 
 
 def test_capture_partition_is_deterministic_disjoint_and_satisfies_minima() -> None:
@@ -412,24 +392,6 @@ def test_dp_capture_merge_hardlinks_survive_source_cleanup(tmp_path: Path) -> No
     assert not (root / "rank-00000").exists()
 
 
-def test_training_job_cleanup_runs_in_managed_inference_scratch(tmp_path: Path, monkeypatch) -> None:
-    scratch_root = tmp_path / "marinskyrl-online-eagle"
-    process_root = scratch_root / "process-id"
-    capture_root = process_root / "step-7"
-    candidate_dir = process_root / "candidates" / "step-7"
-    (capture_root / "merged").mkdir(parents=True)
-    candidate_dir.mkdir(parents=True)
-    monkeypatch.setattr(online_eagle_trainer, "ONLINE_EAGLE_SCRATCH_ROOT", scratch_root)
-    job = {"capture_dir": str(capture_root / "merged"), "output_dir": str(candidate_dir)}
-
-    cleanup_online_eagle_training_job(job, remove_candidate=False)
-
-    assert not capture_root.exists()
-    assert candidate_dir.is_dir()
-    remove_online_eagle_scratch(candidate_dir)
-    assert not candidate_dir.exists()
-
-
 def test_failed_update_preserves_hardlinked_capture_and_incumbent(tmp_path: Path) -> None:
     process_root = tmp_path / "process-id"
     capture_dir = process_root / "step-7" / "merged"
@@ -638,6 +600,21 @@ def test_served_speculator_checkpoint_is_exact_idempotent_and_restorable(tmp_pat
     normalized = json.loads((tmp_path / "restored" / "manifest.json").read_text())
     assert normalized["format"] == "marinskyrl-online-eagle-candidate"
     assert normalized["complete"] is True
+
+
+def test_initial_draft_is_materialized_as_a_rollback_candidate(tmp_path: Path) -> None:
+    source = tmp_path / "initial"
+    source.mkdir()
+    save_file({"owned.weight": torch.ones(2, 2)}, str(source / "model.safetensors"))
+    destination = tmp_path / "incumbents" / "initial"
+
+    first = materialize_online_eagle_incumbent(source, destination, draft_revision="hf-revision")
+    second = materialize_online_eagle_incumbent(source, destination, draft_revision="hf-revision")
+
+    assert first == second
+    assert first["draft_revision"] == "hf-revision"
+    assert first["weights_sha256"] == sha256_file(source / "model.safetensors")
+    assert (destination / "model.safetensors").read_bytes() == (source / "model.safetensors").read_bytes()
 
 
 def test_restore_rejects_legacy_online_trainer_state_once(tmp_path: Path) -> None:

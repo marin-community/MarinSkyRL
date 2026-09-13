@@ -43,6 +43,7 @@ def _make_config(
     policy_mini_batch_size: int = 32,
     micro_train_batch_size_per_gpu: int = 1,
     n_samples_per_prompt: int = 8,
+    online_draft_training: bool = False,
 ) -> dict:
     config: dict = {
         "trainer": {
@@ -63,6 +64,8 @@ def _make_config(
     }
     if strategy is not None:
         config["trainer"]["strategy"] = strategy
+    if online_draft_training:
+        config["generator"]["speculative_decoding"] = {"training": {"interval_steps": 4}}
     return config
 
 
@@ -138,6 +141,7 @@ class TestDeriveRolePlan:
         assert plan.policy_mini_batch_size == 64
         assert plan.micro_train_batch_size_per_gpu == 2
         assert plan.n_samples_per_prompt == 16
+        assert plan.draft_trainer_num_gpus == 0
 
     def test_colocate_all_coerced_to_bool(self):
         config = _make_config()
@@ -186,6 +190,19 @@ class TestDeriveNumNodes:
     def test_disaggregated_with_one_engine(self):
         plan = derive_role_plan(_make_config(colocate_all=False, policy_num_nodes=1, num_inference_engines=1))
         assert derive_num_nodes(plan) == 2
+
+    def test_online_draft_training_adds_a_dedicated_node(self):
+        plan = derive_role_plan(
+            _make_config(
+                colocate_all=False,
+                policy_num_nodes=4,
+                num_inference_engines=1,
+                online_draft_training=True,
+            )
+        )
+
+        assert plan.draft_trainer_num_gpus == 1
+        assert derive_num_nodes(plan) == 6
 
 
 # ---------------------------------------------------------------------------

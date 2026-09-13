@@ -53,13 +53,6 @@ def remove_online_eagle_scratch(path: str | Path) -> None:
     shutil.rmtree(requested, ignore_errors=True)
 
 
-def cleanup_online_eagle_training_job(job: Mapping[str, Any], *, remove_candidate: bool) -> None:
-    """Reclaim one joined or aborted trainer job on its inference node."""
-    remove_online_eagle_scratch(Path(job["capture_dir"]).parent)
-    if remove_candidate:
-        remove_online_eagle_scratch(job["output_dir"])
-
-
 def preserve_online_eagle_failure(job: "OnlineEagleTrainingJob", error: BaseException) -> str:
     """Hard-link the bounded inputs needed to diagnose one failed update."""
     process_root = Path(job.output_dir).parents[1]
@@ -128,28 +121,17 @@ def publish_online_eagle_failure_bundle(source: str, destination: str) -> dict[s
     return {**manifest, "path": destination_manifest}
 
 
-def child_cuda_visible_device(visible_devices: str | None, device_index: int | None) -> str | None:
-    """Resolve the parent worker's logical device to one child-visible device."""
-    if device_index is None:
-        return None
-    if not visible_devices:
-        return str(device_index)
-    devices = [device.strip() for device in visible_devices.split(",")]
-    if any(not device for device in devices):
-        raise RuntimeError(f"Invalid CUDA_VISIBLE_DEVICES mapping: {visible_devices!r}")
-    if device_index < 0 or device_index >= len(devices):
-        raise RuntimeError(f"CUDA device index {device_index} is outside CUDA_VISIBLE_DEVICES={','.join(devices)}")
-    return devices[device_index]
-
-
 @dataclass(frozen=True)
 class OnlineEagleTrainingJob:
-    """Validated subprocess contract for one bounded draft update."""
+    """Validated actor contract for one bounded draft update."""
 
     step: int
     capture_dir: str
     draft_model_dir: str
     initial_draft_source_identity: str
+    parent_draft_revision: str
+    target_revision: str
+    target_weights_sha256: str
     output_dir: str
     result_path: str
     failure_artifact_path: str
@@ -164,6 +146,9 @@ class OnlineEagleTrainingJob:
             "capture_dir",
             "draft_model_dir",
             "initial_draft_source_identity",
+            "parent_draft_revision",
+            "target_revision",
+            "target_weights_sha256",
             "output_dir",
             "result_path",
             "failure_artifact_path",
@@ -207,11 +192,19 @@ class OnlineEagleTrainingJob:
         initial_identity = value["initial_draft_source_identity"]
         if not isinstance(initial_identity, str) or not initial_identity:
             raise ValueError("Online EAGLE initial_draft_source_identity must be nonempty")
+        identities = {
+            field: value[field] for field in ("parent_draft_revision", "target_revision", "target_weights_sha256")
+        }
+        if any(not isinstance(identity, str) or not identity for identity in identities.values()):
+            raise ValueError("Online EAGLE job lineage identities must be nonempty strings")
         return cls(
             step=step,
             capture_dir=paths["capture_dir"],
             draft_model_dir=paths["draft_model_dir"],
             initial_draft_source_identity=initial_identity,
+            parent_draft_revision=identities["parent_draft_revision"],
+            target_revision=identities["target_revision"],
+            target_weights_sha256=identities["target_weights_sha256"],
             output_dir=paths["output_dir"],
             result_path=paths["result_path"],
             failure_artifact_path=failure_artifact_path,
@@ -249,13 +242,14 @@ class OnlineEagleEvaluation:
 
 @dataclass(frozen=True)
 class OnlineEagleUpdateResult:
-    """Typed result envelope shared by the trainer subprocess and coordinator."""
+    """Typed result envelope shared by DraftTrainer and its coordinator."""
 
     active: bool
     accepted: bool
     step: int | None = None
     parent_draft_revision: str | None = None
     trained_against_target_revision: str | None = None
+    trained_against_target_weights_sha256: str | None = None
     train_sequences: int | None = None
     holdout_sequences: int | None = None
     train_loss: float | None = None
@@ -270,6 +264,7 @@ class OnlineEagleUpdateResult:
     duration_seconds: float | None = None
     candidate_dir: str | None = None
     draft_revision: str | None = None
+    weights_sha256: str | None = None
     deferred: bool = False
     error: str | None = None
     log_path: str | None = None
@@ -299,6 +294,75 @@ def _directory_inventory(directory: Path) -> dict[str, dict[str, Any]]:
         for path in sorted(directory.rglob("*"))
         if path.is_file() and ".cache" not in path.parts
     }
+
+
+def validate_online_eagle_candidate(
+    directory: str | Path,
+    *,
+    require_trainer_state: bool = True,
+) -> dict[str, Any]:
+    """Validate one complete draft candidate before any serving rank mutates weights."""
+    root = Path(directory)
+    manifest_path = root / _MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("format") != _CANDIDATE_FORMAT or not manifest.get("complete", False):
+        raise ValueError(f"Incomplete online EAGLE candidate: {root}")
+    weights_path = root / manifest["weights_path"]
+    if not weights_path.is_file() or sha256_file(weights_path) != manifest.get("weights_sha256"):
+        raise ValueError(f"Online EAGLE candidate weight digest mismatch: {root}")
+    trainer_state_name = manifest.get("trainer_state_path")
+    if trainer_state_name is not None and require_trainer_state:
+        trainer_state_path = root / trainer_state_name
+        if not trainer_state_path.is_file() or sha256_file(trainer_state_path) != manifest.get("trainer_state_sha256"):
+            raise ValueError(f"Online EAGLE candidate trainer-state digest mismatch: {root}")
+        _validate_restored_trainer_state(trainer_state_path)
+    return manifest
+
+
+def materialize_online_eagle_incumbent(
+    source_dir: str | Path,
+    destination: str | Path,
+    *,
+    draft_revision: str,
+) -> dict[str, Any]:
+    """Wrap the immutable initial HF draft as a rollback-compatible candidate."""
+    source = Path(source_dir)
+    weights_path = source / "model.safetensors"
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"Online EAGLE initial draft has no unsharded model.safetensors: {source}")
+    target = Path(destination)
+    if target.exists():
+        manifest = validate_online_eagle_candidate(target, require_trainer_state=False)
+        if manifest.get("draft_revision") != draft_revision:
+            raise FileExistsError(f"Online EAGLE incumbent has a different revision: {target}")
+        return manifest
+
+    tensors = load_file(weights_path)
+    manifest = {
+        "format": _CANDIDATE_FORMAT,
+        "format_version": 1,
+        "complete": True,
+        "draft_revision": draft_revision,
+        "weights_path": weights_path.name,
+        "weights_sha256": sha256_file(weights_path),
+        "tensor_inventory": {
+            name: {"shape": list(value.shape), "dtype": str(value.dtype)} for name, value in tensors.items()
+        },
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
+    staging.mkdir()
+    try:
+        try:
+            os.link(weights_path, staging / weights_path.name)
+        except OSError:
+            shutil.copy2(weights_path, staging / weights_path.name)
+        (staging / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, sort_keys=True))
+        os.replace(staging, target)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return manifest
 
 
 def publish_speculator_checkpoint(
@@ -993,6 +1057,17 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
     draft_model_dir = Path(job.draft_model_dir)
     output_dir = Path(job.output_dir)
     manifest = _load_and_validate_capture(capture_dir)
+    if manifest["draft_revision"] != job.parent_draft_revision:
+        raise ValueError(
+            "Online EAGLE capture parent mismatch: "
+            f"expected {job.parent_draft_revision}, got {manifest['draft_revision']}"
+        )
+    if manifest["target_revision"] != job.target_revision:
+        raise ValueError(
+            f"Online EAGLE capture target mismatch: expected {job.target_revision}, got {manifest['target_revision']}"
+        )
+    if manifest["target"]["weights_sha256"] != job.target_weights_sha256:
+        raise ValueError("Online EAGLE capture target weight digest mismatch")
     training = job.training
     train_windows, holdout_windows = partition_capture_windows(
         manifest["windows"],
@@ -1140,6 +1215,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
         step=job.step,
         parent_draft_revision=manifest["draft_revision"],
         trained_against_target_revision=manifest["target_revision"],
+        trained_against_target_weights_sha256=manifest["target"]["weights_sha256"],
         train_sequences=len(train_windows),
         holdout_sequences=len(holdout_windows),
         train_loss=weighted_train_loss / train_loss_tokens,
@@ -1155,7 +1231,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
     )
     if accepted:
         draft_revision = f"draft-step-{job.step}"
-        _save_candidate(
+        candidate_manifest = _save_candidate(
             model,
             optimizer,
             output_dir,
@@ -1164,6 +1240,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
                 "initial_source_identity": job.initial_draft_source_identity,
                 "parent_draft_revision": manifest["draft_revision"],
                 "trained_against_target_revision": manifest["target_revision"],
+                "trained_against_target_weights_sha256": manifest["target"]["weights_sha256"],
                 "capture_manifest_sha256": sha256_file(capture_dir / _MANIFEST_FILENAME),
                 "training": asdict(training),
                 "metrics": result.to_mapping(),
@@ -1171,7 +1248,12 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
             serving_dtype=serving_dtype,
             master_parameters=master_parameters,
         )
-        result = replace(result, candidate_dir=str(output_dir), draft_revision=draft_revision)
+        result = replace(
+            result,
+            candidate_dir=str(output_dir),
+            draft_revision=draft_revision,
+            weights_sha256=candidate_manifest["weights_sha256"],
+        )
     return result
 
 

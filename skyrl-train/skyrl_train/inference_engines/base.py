@@ -154,20 +154,40 @@ class InferenceEngineInterface(ABC):
         """Seal the active capture into an immutable local artifact."""
         raise NotImplementedError()
 
+    async def export_online_eagle_capture(self, job: Dict[str, Any]) -> Any:
+        """Move a sealed capture into transport shared with DraftTrainer."""
+        raise NotImplementedError()
+
+    async def stage_online_eagle_speculator(
+        self,
+        candidate_bundle: Dict[str, Any],
+        candidate_dir: str,
+        draft_revision: str,
+        weights_sha256: str,
+        incumbent_draft_revision: str,
+    ) -> Any:
+        """Validate a candidate on the serving node without activating it."""
+        raise NotImplementedError()
+
+    async def activate_online_eagle_speculator(
+        self,
+        candidate_dir: str,
+        draft_revision: str,
+        weights_sha256: str,
+    ) -> Any:
+        """Activate the staged candidate on every rank."""
+        raise NotImplementedError()
+
+    async def commit_online_eagle_speculator(self, draft_revision: str) -> Any:
+        """Commit a successful all-engine activation."""
+        raise NotImplementedError()
+
+    async def rollback_online_eagle_speculator(self, draft_revision: str) -> Any:
+        """Restore the prior draft after a failed activation."""
+        raise NotImplementedError()
+
     async def discard_online_eagle_capture(self) -> Any:
         """Discard the active capture interval after a failed rollout."""
-        raise NotImplementedError()
-
-    async def start_online_eagle_speculator_update(self, job: Dict[str, Any]) -> Any:
-        """Start a bounded draft update from a sealed capture."""
-        raise NotImplementedError()
-
-    async def finish_online_eagle_speculator_update(self, boundary_wait_seconds: float) -> Any:
-        """Join the draft update at a no-request serving boundary."""
-        raise NotImplementedError()
-
-    async def abort_online_eagle_speculator_update(self) -> Any:
-        """Terminate an unjoined draft update during exceptional teardown."""
         raise NotImplementedError()
 
     async def cleanup_online_eagle_scratch(self, scratch_root: str) -> Any:
