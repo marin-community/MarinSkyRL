@@ -1671,6 +1671,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             raise RuntimeError("Weight sync is restricted to the training driver task")
         if self._published_policy_version == self.global_step:
             return
+        sync_started = time.perf_counter()
+        shard_publication = getattr(self, "_shard_training_publication", None)
+        if shard_publication is not None:
+            await shard_publication.before_pause(self.global_step)
         trace_publication = self.cfg.generator.publication_stage_timing
         if trace_publication:
             self._record_publication_inflight("before_pause")
@@ -1726,6 +1730,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # the legacy NCCL stage cache. Do not invent an unmeasured send duration
                 # or reuse a derived value from an earlier publication.
                 self.all_timings.pop("publication_stall_seconds", None)
+        if shard_publication is not None:
+            await shard_publication.after_resume(self.global_step)
+            self.all_timings["shard_sync/with_diagnostics"] = time.perf_counter() - sync_started
         self._log_weight_update_completed(reason=reason, duration_seconds=weight_update_timer.duration)
 
     async def _record_publication_requests(
@@ -2002,8 +2009,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 publication = ShardTrainingPublication(self)
                 self._shard_training_publication = publication
             result = await publication.publish(self.global_step)
+            # A diagnostic run changes placement after its inline prefix. Do not
+            # carry old observation/capture timers into later optimized updates.
+            for name in tuple(self.all_timings):
+                if name.startswith("shard_sync/"):
+                    del self.all_timings[name]
             self.all_timings.update(
                 {f"shard_sync/{name}": seconds for name, seconds in result["phase_seconds"].items()}
+            )
+            self.all_timings["shard_sync/diagnostics_outside_pause"] = int(
+                result["diagnostics_scope"] == "outside-pause"
             )
             self.all_timings["weight_broadcast"] = result["phase_seconds"]["install"]
             self.all_timings["shard_sync/total_including_proof"] = result["total_seconds_including_proof"]

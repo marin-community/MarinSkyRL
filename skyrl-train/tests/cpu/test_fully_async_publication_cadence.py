@@ -397,6 +397,7 @@ async def test_publication_failure_resumes_before_propagating_and_skips_eval(mon
     trainer.global_step = 1
     trainer._published_policy_version = 0
     trainer.policy_model.completed_update = 1
+    trainer.all_timings["shard_sync/observation_before"] = 99
     engine = trainer.inference_engine_client
     engine.installed_update = 0
     original_pause, original_resume = engine.pause_generation, engine.resume_generation
@@ -1060,12 +1061,23 @@ async def test_shard_publication_keeps_generation_paused_until_verified_driver_b
     drains = []
 
     class Publication:
+        async def before_pause(self, version):
+            assert not engine.generation_paused_event.is_set()
+
+        async def after_resume(self, version):
+            assert not engine.generation_paused_event.is_set()
+            assert engine.installed_update == version
+
         async def publish(self, version):
             assert engine.generation_paused_event.is_set()
             engine.installed_update = version
             if failure_stage == "proof":
                 raise ValueError("native shard proof failure")
-            return {"phase_seconds": {"install": 7, "full_byte_replay": 103}, "total_seconds_including_proof": 113}
+            return {
+                "phase_seconds": {"install": 7, "full_byte_replay": 103},
+                "total_seconds_including_proof": 113,
+                "diagnostics_scope": "paused-install",
+            }
 
     async def drain():
         drains.append(engine.generation_paused_event.is_set())
@@ -1088,6 +1100,7 @@ async def test_shard_publication_keeps_generation_paused_until_verified_driver_b
         assert trainer.trajectory_runner.evaluations == [(1, 1)]
         assert trainer.all_timings["weight_broadcast"] == 7
         assert trainer.all_timings["shard_sync/full_byte_replay"] == 103
+        assert "shard_sync/observation_before" not in trainer.all_timings
 
 
 @pytest.mark.asyncio
@@ -1112,6 +1125,13 @@ async def test_configured_shard_mode_trains_evaluates_final_weights_and_closes_c
         def __init__(self, driver):
             assert driver is trainer
 
+        async def before_pause(self, version):
+            assert not engine.generation_paused_event.is_set()
+
+        async def after_resume(self, version):
+            assert not engine.generation_paused_event.is_set()
+            assert engine.installed_update == version
+
         async def publish(self, publication_id):
             if not engine.publications:
                 await engine.pause_generation()
@@ -1119,7 +1139,11 @@ async def test_configured_shard_mode_trains_evaluates_final_weights_and_closes_c
             assert publication_id == trainer.policy_model.completed_update
             engine.installed_update = publication_id
             engine.publications.append(publication_id)
-            return {"phase_seconds": {"install": 7, "full_byte_replay": 103}, "total_seconds_including_proof": 113}
+            return {
+                "phase_seconds": {"install": 7, "full_byte_replay": 103},
+                "total_seconds_including_proof": 113,
+                "diagnostics_scope": "paused-install",
+            }
 
         async def close(self):
             assert trainer.trajectory_runner.evaluations[-1] == (3, 3)
@@ -1224,13 +1248,24 @@ async def test_shard_startup_initializes_request_accounting_before_releasing_gen
         def __init__(self, driver):
             assert driver is trainer
 
+        async def before_pause(self, version):
+            assert not engine.generation_paused_event.is_set()
+
+        async def after_resume(self, version):
+            assert not engine.generation_paused_event.is_set()
+            assert engine.installed_update == version
+
         async def publish(self, publication_id):
             if not engine.publications:
                 await engine.pause_generation()
             assert engine.generation_paused_event.is_set()
             engine.installed_update = publication_id
             engine.publications.append(publication_id)
-            return {"phase_seconds": {"install": 7, "full_byte_replay": 103}, "total_seconds_including_proof": 113}
+            return {
+                "phase_seconds": {"install": 7, "full_byte_replay": 103},
+                "total_seconds_including_proof": 113,
+                "diagnostics_scope": "paused-install",
+            }
 
         async def close(self):
             pass
