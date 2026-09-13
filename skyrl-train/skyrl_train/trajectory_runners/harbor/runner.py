@@ -5,9 +5,17 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, replace
-from typing import Callable, Deque, List, Optional, Dict, Any, Tuple
+from pathlib import Path
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 import numpy as np
+from harbor.models.trial.config import TrialConfig
+from harbor.models.trial.result import TrialResult
+from harbor.utils.traces_utils import normalize_message
+from harbor.verifier.verifier import VerifierOutputParseError
+from loguru import logger
+from omegaconf import DictConfig
 from skyrl_gym.verification import (
     RewardResult,
     RolloutEvidence,
@@ -15,38 +23,13 @@ from skyrl_gym.verification import (
     VerificationResult,
     VerificationStatus,
 )
-from loguru import logger
-from uuid import uuid4
-from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
-from skyrl_train.trajectory_runners.types import VerifierTestCollection
-from skyrl_train.trajectory_runners.projections import (
-    attach_terminal_classifications,
-    is_length_stopped,
-    mask_length_stops,
-    mask_truncated_turns,
-    project_loss_mask,
-)
+
 from skyrl_train.metric_names import (
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
     TIS_ALIGNMENT_ALERT_METRIC,
     TIS_METRIC_PREFIX,
 )
-from skyrl_train.trajectory_runners.trajectory_processing import (
-    BATCH_ERROR_METRIC_PREFIX,
-    get_batch_failure_metrics,
-    get_rollout_metrics,
-    get_response_ids_and_loss_mask_from_messages,
-    get_generation_prompt_ids,
-    detect_qwen3_5_empty_think_prefix,
-    extract_logprobs_from_rollout_details,
-    extract_token_ids_from_rollout_details,
-    extract_prompt_token_ids_from_rollout_details,
-    extract_routed_experts_from_rollout_details,
-    normalize_token_ids,
-    AlignmentStats,
-    _sentinel_routed_experts_row,
-    SENTINEL_EXPERT_ID,
-)
+from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryID, TrajectoryRequestBatch, TrajectoryRunner
 from skyrl_train.trajectory_runners.context_distillation import (
     ContextDistillationConfig,
     ContextEdit,
@@ -54,23 +37,6 @@ from skyrl_train.trajectory_runners.context_distillation import (
     context_distillation_batch_fields,
     strip_guidance_suffix,
 )
-from skyrl_train.utils.reward_shaping import (
-    ParsedTestResult,
-    parse_test_output_with_parser,
-    shape_reward_from_output,
-    shape_reward_with_components,
-    verifier_test_collection,
-)
-from skyrl_train.utils.harbor_errors import (
-    ErrorTreatment,
-    classify_exception_type,
-    passthrough_logprob_error_type,
-    treatment_excludes_from_baseline,
-)
-from skyrl_train.utils.span_tagger import tag_response_spans
-from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
-from omegaconf import DictConfig
-from pathlib import Path
 
 # Harbor orchestrator and trial imports.
 # QueueOrchestrator + OrchestratorEvent come through a compat shim because
@@ -81,10 +47,6 @@ from skyrl_train.trajectory_runners.harbor._harbor_compat import (
     QueueOrchestrator,
     create_rollback_hook,
 )
-from harbor.models.trial.config import TrialConfig
-from harbor.models.trial.result import TrialResult
-from harbor.utils.traces_utils import normalize_message
-from harbor.verifier.verifier import VerifierOutputParseError
 
 # Schema-driven Harbor config mapping
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
@@ -93,14 +55,53 @@ from skyrl_train.trajectory_runners.harbor.identity_aware_reward import (
     IDENTITY_AWARE_SHAPER,
     identity_aware_pass_ratios,
 )
+
+# Incremental, trial-indexed reader for the shared CLI-agent literal log.
+from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogStore
 from skyrl_train.trajectory_runners.harbor.truncation_penalty import (
     apply_truncation_penalty,
     detect_turn_truncation,
     truncated_turn_spans,
 )
-
-# Incremental, trial-indexed reader for the shared CLI-agent literal log.
-from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogStore
+from skyrl_train.trajectory_runners.projections import (
+    attach_terminal_classifications,
+    is_length_stopped,
+    mask_length_stops,
+    mask_truncated_turns,
+    project_loss_mask,
+)
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    BATCH_ERROR_METRIC_PREFIX,
+    SENTINEL_EXPERT_ID,
+    AlignmentStats,
+    _sentinel_routed_experts_row,
+    detect_qwen3_5_empty_think_prefix,
+    extract_logprobs_from_rollout_details,
+    extract_prompt_token_ids_from_rollout_details,
+    extract_routed_experts_from_rollout_details,
+    extract_token_ids_from_rollout_details,
+    get_batch_failure_metrics,
+    get_generation_prompt_ids,
+    get_response_ids_and_loss_mask_from_messages,
+    get_rollout_metrics,
+    normalize_token_ids,
+)
+from skyrl_train.trajectory_runners.types import VerifierTestCollection
+from skyrl_train.utils.harbor_errors import (
+    ErrorTreatment,
+    classify_exception_type,
+    passthrough_logprob_error_type,
+    treatment_excludes_from_baseline,
+)
+from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
+from skyrl_train.utils.reward_shaping import (
+    ParsedTestResult,
+    parse_test_output_with_parser,
+    shape_reward_from_output,
+    shape_reward_with_components,
+    verifier_test_collection,
+)
+from skyrl_train.utils.span_tagger import tag_response_spans
 
 # Maximum restart attempts for orchestrator recovery
 MAX_ORCHESTRATOR_RESTART_ATTEMPTS = 3
@@ -1930,8 +1931,10 @@ class HarborTrajectoryRunner(TrajectoryRunner):
 
         Off, or during evaluation, the served prompt is the training prompt. When the guidance
         span is stripped the training prompt is re-tokenized from the edited text and the served
-        ids ride along for the rollout-context forwards. A failed edit is reported for masking
-        (``on_failure: mask``) or raised (``error``); an absent marker is an unprompted rollout.
+        ids ride along for the rollout-context forwards. A failed edit raises (``on_failure: error``)
+        or marks the sample loss-ineligible (``mask``; an edit failure is a property of the task
+        text, so every rollout of that task fails alike and group admission then drops the whole
+        group); an absent marker is an unprompted rollout.
         """
         config = self._context_distillation
         if not config.enabled or is_eval:
@@ -1939,7 +1942,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         content = first_user_message.get("content")
         if not isinstance(content, str):
             return rollout_prompt_ids, None, None
-        edit = strip_guidance_suffix(content, config.start_marker, config.end_marker)
+        edit = strip_guidance_suffix(content, config.start_marker, config.end_marker, config.max_removed_chars)
         if edit.failed and config.on_failure == "error":
             raise ContextEditError(f"context distillation could not isolate the guidance span: {edit.status}")
         if not edit.stripped:

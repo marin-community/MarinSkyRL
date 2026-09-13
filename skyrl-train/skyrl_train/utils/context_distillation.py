@@ -10,6 +10,7 @@ See :mod:`skyrl_train.trajectory_runners.context_distillation` for the mechanism
 from __future__ import annotations
 
 import torch
+from loguru import logger
 
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl_train.training_batch import TrainingInputBatch
@@ -29,12 +30,19 @@ EDITED_FRACTION_METRIC = CONTEXT_DISTILLATION_TRAINER_METRIC_PREFIX + "edited_fr
 SHIFT_PER_TOKEN_METRIC = CONTEXT_DISTILLATION_TRAINER_METRIC_PREFIX + "shift_per_token"
 SHIFT_ABS_PER_TOKEN_METRIC = CONTEXT_DISTILLATION_TRAINER_METRIC_PREFIX + "shift_abs_per_token"
 SHIFT_PER_TRAJECTORY_METRIC = CONTEXT_DISTILLATION_TRAINER_METRIC_PREFIX + "shift_per_trajectory"
-CONTEXT_SHIFT_METRIC_KEYS = (
-    EDITED_FRACTION_METRIC,
+# The block acts mostly on the first assistant turn, so the shift is also reported over the first
+# SHIFT_HEAD_TOKENS response positions and over the rest.
+SHIFT_HEAD_TOKENS = 512
+SHIFT_PER_TOKEN_HEAD_METRIC = CONTEXT_DISTILLATION_TRAINER_METRIC_PREFIX + "shift_per_token_head"
+SHIFT_PER_TOKEN_TAIL_METRIC = CONTEXT_DISTILLATION_TRAINER_METRIC_PREFIX + "shift_per_token_tail"
+SHIFT_METRIC_KEYS = (
     SHIFT_PER_TOKEN_METRIC,
     SHIFT_ABS_PER_TOKEN_METRIC,
     SHIFT_PER_TRAJECTORY_METRIC,
+    SHIFT_PER_TOKEN_HEAD_METRIC,
+    SHIFT_PER_TOKEN_TAIL_METRIC,
 )
+CONTEXT_SHIFT_METRIC_KEYS = (EDITED_FRACTION_METRIC, *SHIFT_METRIC_KEYS)
 
 
 def build_rollout_context_tensors(
@@ -133,12 +141,12 @@ def context_shift_metrics(
 ) -> dict[str, float]:
     """How much the block still changes the policy on the tokens it produced.
 
-    All means are over the loss-masked response tokens of edited rows; a batch with no
-    edited row reports zeros so the key set is stable across steps.
+    All means are over the loss-masked response tokens of edited rows. A batch with no edited
+    row reports NaN for every shift key (there is nothing to measure; zero would read as
+    "fully absorbed"), with the key set stable across steps.
     """
     edited = context_edited.to(loss_mask.device)
-    metrics = dict.fromkeys(CONTEXT_SHIFT_METRIC_KEYS, 0.0)
-    metrics[EDITED_FRACTION_METRIC] = float(edited.float().mean().item()) if edited.numel() else 0.0
+    metrics = dict.fromkeys(SHIFT_METRIC_KEYS, float("nan"))
     token_mask = (loss_mask > 0) & edited[:, None]
     n_tokens = float(token_mask.sum().item())
     n_rows = float(edited.sum().item())
@@ -148,6 +156,13 @@ def context_shift_metrics(
     metrics[SHIFT_PER_TOKEN_METRIC] = float(shift.sum().item() / n_tokens)
     metrics[SHIFT_ABS_PER_TOKEN_METRIC] = float(shift.abs().sum().item() / n_tokens)
     metrics[SHIFT_PER_TRAJECTORY_METRIC] = float(shift.sum().item() / n_rows)
+    head = token_mask.clone()
+    head[:, SHIFT_HEAD_TOKENS:] = False
+    tail = token_mask & ~head
+    for key, region in ((SHIFT_PER_TOKEN_HEAD_METRIC, head), (SHIFT_PER_TOKEN_TAIL_METRIC, tail)):
+        n_region = float(region.sum().item())
+        if n_region > 0.0:
+            metrics[key] = float((shift * region).sum().item() / n_region)
     return metrics
 
 
@@ -162,27 +177,35 @@ def apply_context_distillation_references(
 
     Called once per step after the logprob phase. Returns the driver-side metrics; the
     batch leaves with the same keys it would have without the feature so the training
-    dispatch stays lean and key-identical.
+    dispatch stays lean and key-identical. The batch's own columns decide what happens:
+    edited rows are re-based when the rollout-context logprobs are available, and
+    neutralised (ratio one) otherwise, so a stripped prompt never trains against the
+    prompted behaviour logprobs, whatever the driver's config says.
     """
     if not has_rollout_context(training_input):
         return {}
     context_edited = training_input[CONTEXT_EDITED_TENSOR_KEY]
     loss_mask = training_input["loss_mask"]
-    metrics: dict[str, float] = dict.fromkeys(CONTEXT_SHIFT_METRIC_KEYS, 0.0)
-    metrics[EDITED_FRACTION_METRIC] = float(context_edited.float().mean().item()) if context_edited.numel() else 0.0
+    # padded rows (pad_batch) are never edited; report the fraction over the real rows
+    n_real = max(int(context_edited.numel()) - int((training_input.metadata or {}).get("pad_size", 0)), 1)
+    metrics: dict[str, float] = {EDITED_FRACTION_METRIC: float(context_edited.sum().item()) / n_real}
+    metrics.update(dict.fromkeys(SHIFT_METRIC_KEYS, float("nan")))
     if rollout_context_logprobs is not None:
         metrics.update(
             context_shift_metrics(training_context_logprobs, rollout_context_logprobs, loss_mask, context_edited)
         )
     rollout_logprobs = training_input.get("rollout_logprobs")
     if rollout_logprobs is not None and bool(context_edited.any()):
-        if config.tis_reference == "rollout":
-            if rollout_context_logprobs is None:
-                raise ValueError("tis_reference=rollout needs the rollout-context policy logprobs")
+        if rollout_context_logprobs is not None:
             training_input["rollout_logprobs"] = rebase_behavior_logprobs(
                 rollout_logprobs, training_context_logprobs, rollout_context_logprobs, context_edited
             )
         else:
+            if config.rollout_context_forward_needed:
+                logger.warning(
+                    "context distillation: edited rows without rollout-context logprobs; "
+                    "their behaviour ratio is neutralised for this step (no engine-mismatch correction)"
+                )
             training_input["rollout_logprobs"] = neutralize_behavior_logprobs(
                 rollout_logprobs, training_context_logprobs, context_edited
             )

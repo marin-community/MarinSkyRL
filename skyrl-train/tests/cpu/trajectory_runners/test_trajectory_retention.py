@@ -1,30 +1,29 @@
+import asyncio
 import gzip
 import json
-from pathlib import Path
-import asyncio
 import threading
 import zipfile
+from pathlib import Path
 
 import pytest
-
 from skyrl_train.trajectory_runners.base import (
     BatchMetadata,
-    TrajectoryRequestBatch,
-    TrajectoryRunner,
     TrajectoryBatch,
     TrajectoryID,
+    TrajectoryRequestBatch,
+    TrajectoryRunner,
 )
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
 from skyrl_train.trajectory_runners.harbor.rollout_dispatcher import RolloutDispatcher
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import (
     RETENTION_METRIC_PREFIX,
-    TrajectorySink,
-    retain_trajectories,
     TrajectoryRetentionPublicationError,
     TrajectoryRetentionPublicationTimeout,
+    TrajectorySink,
     build_trajectory_records,
     parse_trajectory_retention_config,
+    retain_trajectories,
 )
 from skyrl_train.trajectory_runners.trajectory_retention_publisher import (
     ProcessTrajectoryPublisher,
@@ -258,6 +257,20 @@ def test_normalized_output_produces_complete_core_trace_schema():
     assert record["schema_version"] == 3
     assert record["disposition"] == {"exception_type": None, "error_treatment": None}
     assert record["provenance"]["runner"] == "SkyRLGymTrajectoryRunner"
+
+
+def test_retained_prompt_is_the_served_one_under_context_distillation():
+    output = _output()
+    output["rollout_prompt_token_ids"] = [[1, 9], [2, 9], [3, 9]]
+    output["context_edited"] = [True, True, True]
+    records = build_trajectory_records(
+        _input(),
+        output,
+        _config(Path("/unused")),
+        _Tokenizer(),
+        runner_name="HarborTrajectoryRunner",
+    )
+    assert [record.to_json()["prompt"]["token_ids"] for record in records] == [[1, 9], [2, 9], [3, 9]]
 
 
 def test_verifier_tests_are_persisted_with_the_retained_trace():

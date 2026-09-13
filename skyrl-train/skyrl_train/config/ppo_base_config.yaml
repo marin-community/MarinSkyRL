@@ -223,9 +223,10 @@ trainer:
       enabled: false
       start_marker: "\n\n---\nWorking guidance:\n"
       end_marker: "\n\nCurrent terminal state:"
-      on_failure: mask  # mask | error: a sample whose start marker is present but the span cannot be isolated
-      tis_reference: rollout  # rollout | none: behaviour-logprob reference context for edited samples
-      kl_reference: rollout  # rollout | training: frozen-reference (KL) context for edited samples
+      max_removed_chars: 4096  # a longer span means the end marker sat past something appended after the block
+      on_failure: error  # error | mask: a message with the start marker whose span cannot be isolated (mask drops the group)
+      tis_reference: rollout  # rollout | none: behaviour-logprob reference context for edited samples (none skips the forward)
+      kl_reference: training  # training | rollout: frozen-reference (KL) context; rollout = teacher, needs kl_estimator_type k2
     enable_token_reward_channel: false
     think_token_weight: 1.0
     think_token_cost: 0.0

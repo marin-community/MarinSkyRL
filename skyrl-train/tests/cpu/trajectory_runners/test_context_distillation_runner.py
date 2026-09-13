@@ -120,7 +120,7 @@ def test_enabled_leaves_an_unprompted_rollout_alone():
 
 
 def test_failed_edit_masks_the_sample_but_keeps_its_reward_in_the_baseline():
-    output = _process(_runner(ENABLED), NO_END)
+    output = _process(_runner(ContextDistillationConfig(enabled=True, on_failure="mask")), NO_END)
     assert output.context_edit.status is ContextEditStatus.END_MISSING
     assert not output.disposition.loss_eligible
     assert output.disposition.baseline_eligible
@@ -130,9 +130,14 @@ def test_failed_edit_masks_the_sample_but_keeps_its_reward_in_the_baseline():
     assert output.reward_result.optimization_reward == 1.0
 
 
-def test_failed_edit_raises_when_configured():
+def test_failed_edit_raises_by_default():
     with pytest.raises(ContextEditError, match="end_missing"):
-        _process(_runner(ContextDistillationConfig(enabled=True, on_failure="error")), NO_END)
+        _process(_runner(ENABLED), NO_END)
+
+
+def test_an_overlong_span_is_a_failure_too():
+    with pytest.raises(ContextEditError, match="span_too_long"):
+        _process(_runner(ContextDistillationConfig(enabled=True, max_removed_chars=8)), PROMPTED)
 
 
 def test_evaluation_never_strips():

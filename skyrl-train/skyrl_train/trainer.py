@@ -1,27 +1,83 @@
 import asyncio
+import copy
 import json
 import math
 import os
 import shutil
 import threading
 import time
-from typing import Any, List, Optional, Dict, Tuple, Union
-from jaxtyping import Float
-from pathlib import Path
-import ray
-from ray import ObjectRef
-import torch
-from loguru import logger
-from omegaconf import DictConfig
-from ray.util.placement_group import PlacementGroup, placement_group
-from skyrl_train.utils.progress import tqdm
-from transformers import AutoTokenizer
 from collections import defaultdict
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import ray
+import torch
+from jaxtyping import Float
+from loguru import logger
+from omegaconf import DictConfig
+from ray import ObjectRef
+from ray.util.placement_group import PlacementGroup, placement_group
+from transformers import AutoTokenizer
+
+from marinskyrl.checkpoint_paths import (
+    GLOBAL_STEP_PREFIX,
+    LATEST_CHECKPOINT_FILE,
+    POLICY_CHECKPOINT_SUBDIRECTORY,
+    policy_export_path,
+)
+from skyrl_train.callbacks import (
+    CallbackHandler,
+    DefaultCallbackHandler,
+    RefModelUpdateCallback,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
+)
+from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.curriculum import CurriculumSampler
 from skyrl_train.dataset import PromptDataset
-from skyrl_train.utils.tracking import Tracking
+from skyrl_train.dataset.preprocess import (
+    collate_response_token_channel,
+    convert_prompts_responses_to_batch_tensors,
+)
+from skyrl_train.distributed.dispatch import (
+    ActorInfo,
+    MeshRank,
+    collect_actor_results,
+    concatenate_outputs_after_mesh_dispatch,
+)
+from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
+from skyrl_train.evaluate import evaluate, evaluate_step_wise
+from skyrl_train.group_admission import (
+    AdmissionRejection,
+    GroupAdvantageInvariant,
+    assert_training_groups_eligible,
+)
+from skyrl_train.hf_export import (
+    protected_hf_export_steps,
+    read_hf_export_request,
+    write_hf_export_request,
+)
+from skyrl_train.hf_export_schema import (
+    DEFAULT_HF_HUB_REVISION,
+    DEFAULT_HF_UPLOAD_MODE,
+    TRAINER_STATE_FILENAME,
+    HFExportRequest,
+    HFExportStatus,
+    HFUploadMode,
+)
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl_train.io import io
+from skyrl_train.sync_group_admission import (
+    GroupAdmissionSamplingResult,
+    GroupAdmissionSamplingState,
+    InsufficientEligibleGroupsError,
+    admit_or_collect_replacements,
+)
+from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
+from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.training_batch import (
     GLOBAL_LOSS_DENOM_METADATA_KEY,
     TrainingInputBatch,
@@ -29,11 +85,15 @@ from skyrl_train.training_batch import (
     per_data_parallel_batch_size,
 )
 from skyrl_train.trajectory_runners.base import (
-    TrajectoryRequestBatch,
     TrajectoryBatch,
+    TrajectoryRequestBatch,
     TrajectoryRunner,
 )
-import copy
+from skyrl_train.trajectory_runners.context_distillation import (
+    CONTEXT_EDITED_KEY,
+    ROLLOUT_PROMPT_TOKEN_IDS_KEY,
+    ContextDistillationConfig,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
     get_outcome_rewards,
@@ -41,16 +101,18 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     validate_trajectory_batch,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
-from skyrl_train.dataset.preprocess import (
-    collate_response_token_channel,
-    convert_prompts_responses_to_batch_tensors,
-)
-from skyrl_train.utils import diag_utils, trainer_utils
-from skyrl_train.io import io
-from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
-from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
-from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
+from skyrl_train.utils import Timer, diag_utils, get_ray_pg_ready_with_timeout, get_system_memory_metrics, trainer_utils
 from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
+from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.utils.context_distillation import (
+    CONTEXT_EDITED_TENSOR_KEY,
+    apply_context_distillation_references,
+    attach_rollout_context,
+    build_rollout_context_tensors,
+    rollout_context_forward_batch,
+)
+from skyrl_train.utils.kl_controllers import AdaptiveKLController, FixedKLController, get_kl_controller
+from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.utils.loss_reduction import (
     GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
     PROMPT_MEAN_LOSS_REDUCTION,
@@ -59,83 +121,25 @@ from skyrl_train.utils.loss_reduction import (
     compute_prompt_mean_advantage_scale,
     count_nonzero_advantage_seqs,
 )
-from skyrl_train.distributed.dispatch import (
-    ActorInfo,
-    MeshRank,
-    collect_actor_results,
-    concatenate_outputs_after_mesh_dispatch,
-)
-from skyrl_train.workers.worker import PPORayActorGroup
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.group_admission import (
-    AdmissionRejection,
-    GroupAdvantageInvariant,
-    assert_training_groups_eligible,
-)
-from skyrl_train.sync_group_admission import (
-    GroupAdmissionSamplingResult,
-    GroupAdmissionSamplingState,
-    InsufficientEligibleGroupsError,
-    admit_or_collect_replacements,
-)
-from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
-from skyrl_train.checkpoint_listing import extract_step_from_path
+from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
+from skyrl_train.utils.progress import tqdm
+from skyrl_train.utils.tracking import Tracking
 from skyrl_train.utils.trainer_utils import (
-    cleanup_old_checkpoints,
-    run_on_each_node,
-    get_node_ids,
-    validate_consistency_for_latest_checkpoint,
-    ResumeMode,
     DynamicSamplingState,
+    ResumeMode,
     build_dataloader,
+    cleanup_old_checkpoints,
+    get_node_ids,
+    run_on_each_node,
+    validate_consistency_for_latest_checkpoint,
 )
 from skyrl_train.utils.utils import (
     configure_ray_worker_logging,
     moe_router_replay_enabled,
-    policy_per_gpu_bundles_enabled,
     policy_force_cvd_mask_enabled,
+    policy_per_gpu_bundles_enabled,
 )
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
-from skyrl_train.trajectory_runners.context_distillation import (
-    CONTEXT_EDITED_KEY,
-    ROLLOUT_PROMPT_TOKEN_IDS_KEY,
-    ContextDistillationConfig,
-)
-from skyrl_train.utils.context_distillation import (
-    CONTEXT_EDITED_TENSOR_KEY,
-    apply_context_distillation_references,
-    attach_rollout_context,
-    build_rollout_context_tensors,
-    rollout_context_forward_batch,
-)
-from skyrl_train.evaluate import evaluate, evaluate_step_wise
-from skyrl_train.utils.logging_utils import log_example
-from skyrl_train.callbacks import (
-    TrainerCallback,
-    TrainerState,
-    TrainerControl,
-    CallbackHandler,
-    DefaultCallbackHandler,
-    RefModelUpdateCallback,
-)
-from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
-from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
-from skyrl_train.hf_export import (
-    protected_hf_export_steps,
-    read_hf_export_request,
-    write_hf_export_request,
-)
-from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY, policy_export_path
-from skyrl_train.hf_export_schema import (
-    DEFAULT_HF_HUB_REVISION,
-    DEFAULT_HF_UPLOAD_MODE,
-    HFExportRequest,
-    HFExportStatus,
-    HFUploadMode,
-    TRAINER_STATE_FILENAME,
-)
+from skyrl_train.workers.worker import PPORayActorGroup
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
@@ -1326,6 +1330,13 @@ class RayPPOTrainer:
         # rollout-context forwards of the logprob phase. Attached only when the runner shipped
         # them, so the flag-off batch keeps its key set.
         rollout_prompt_ids = trajectory_batch.get(ROLLOUT_PROMPT_TOKEN_IDS_KEY)
+        if rollout_prompt_ids is None and bool(
+            self.cfg.trainer.algorithm.get("context_distillation", {}).get("enabled", False)
+        ):
+            logger.warning(
+                "context distillation is enabled but this batch carries no served-prompt column "
+                "(a runner without the feature, or groups buffered before it was on); trained as is"
+            )
         if rollout_prompt_ids is not None:
             rollout_sequences, rollout_attention_mask = build_rollout_context_tensors(
                 self.tokenizer, rollout_prompt_ids, response_ids, rewards, loss_masks, response_masks_tensor

@@ -48,6 +48,7 @@ from skyrl_train.metric_names import (
 # behind this delimiter, so the span to remove ends where the terminal state begins.
 DEFAULT_START_MARKER = "\n\n---\nWorking guidance:\n"
 DEFAULT_END_MARKER = "\n\nCurrent terminal state:"
+DEFAULT_MAX_REMOVED_CHARS = 4096
 
 ON_FAILURE_CHOICES = ("mask", "error")
 TIS_REFERENCE_CHOICES = ("rollout", "none")
@@ -66,9 +67,13 @@ class ContextDistillationConfig:
     enabled: bool = False
     start_marker: str = DEFAULT_START_MARKER
     end_marker: str = DEFAULT_END_MARKER
-    on_failure: str = "mask"
+    # A guidance block is a few hundred tokens; a longer removed span means the end marker was found
+    # past something else the harness appended after the block (MCP servers, skills) and the edit is
+    # refused rather than silently widening the strip.
+    max_removed_chars: int = DEFAULT_MAX_REMOVED_CHARS
+    on_failure: str = "error"
     tis_reference: str = "rollout"
-    kl_reference: str = "rollout"
+    kl_reference: str = "training"
 
     @classmethod
     def disabled(cls) -> ContextDistillationConfig:
@@ -84,9 +89,10 @@ class ContextDistillationConfig:
             enabled=bool(block.get("enabled", False)),
             start_marker=str(block.get("start_marker", DEFAULT_START_MARKER)),
             end_marker=str(block.get("end_marker", DEFAULT_END_MARKER)),
-            on_failure=str(block.get("on_failure", "mask")),
+            max_removed_chars=int(block.get("max_removed_chars", DEFAULT_MAX_REMOVED_CHARS)),
+            on_failure=str(block.get("on_failure", "error")),
             tis_reference=str(block.get("tis_reference", "rollout")),
-            kl_reference=str(block.get("kl_reference", "rollout")),
+            kl_reference=str(block.get("kl_reference", "training")),
         )
         config.validate()
         return config
@@ -103,15 +109,22 @@ class ContextDistillationConfig:
             raise ValueError(f"{prefix}.kl_reference must be one of {KL_REFERENCE_CHOICES}, got {self.kl_reference!r}")
         if self.enabled and not self.start_marker:
             raise ValueError(f"{prefix}.start_marker must be non-empty when the feature is enabled")
+        if self.max_removed_chars <= 0:
+            raise ValueError(f"{prefix}.max_removed_chars must be positive, got {self.max_removed_chars}")
 
     @property
     def rollout_context_forward_needed(self) -> bool:
-        """True when edited samples need a policy forward under the rollout context."""
-        return self.enabled and self.tis_reference == "rollout"
+        """True when edited samples need a policy forward under the rollout context.
+
+        Deliberately independent of ``enabled``: the batch's own columns say whether any row was
+        edited (a group buffered under a previous config still carries stripped prompts), and a
+        stripped row must be re-based whatever the driver's flag says today.
+        """
+        return self.tis_reference == "rollout"
 
     @property
     def reference_uses_rollout_context(self) -> bool:
-        return self.enabled and self.kl_reference == "rollout"
+        return self.kl_reference == "rollout"
 
 
 class ContextEditStatus(StrEnum):
@@ -119,9 +132,12 @@ class ContextEditStatus(StrEnum):
     STRIPPED = "stripped"  # the span was removed from the first user message
     START_REPEATED = "start_repeated"  # the start marker occurs more than once
     END_MISSING = "end_missing"  # no end marker after the start marker
+    SPAN_TOO_LONG = "span_too_long"  # the span exceeds max_removed_chars: something else sits between the markers
 
 
-FAILED_EDIT_STATUSES = frozenset({ContextEditStatus.START_REPEATED, ContextEditStatus.END_MISSING})
+FAILED_EDIT_STATUSES = frozenset(
+    {ContextEditStatus.START_REPEATED, ContextEditStatus.END_MISSING, ContextEditStatus.SPAN_TOO_LONG}
+)
 
 
 @dataclass(frozen=True)
@@ -145,14 +161,18 @@ class ContextEditError(ValueError):
     """Raised for a failed edit when ``on_failure: error``."""
 
 
-def strip_guidance_suffix(content: str, start_marker: str, end_marker: str) -> ContextEdit:
+def strip_guidance_suffix(
+    content: str, start_marker: str, end_marker: str, max_removed_chars: int | None = None
+) -> ContextEdit:
     """Remove ``[start_marker, end_marker)`` from ``content``.
 
     The start marker must occur exactly once and the end marker must follow it; an empty
     end marker strips to the end of the text. A message without the start marker is an
     unprompted rollout and comes back unchanged with status ``ABSENT``. Failures return
     the original text with a typed status so the caller decides between masking the
-    sample and raising.
+    sample and raising; a span longer than ``max_removed_chars`` is a failure too, since
+    the end marker is a template anchor and anything the harness appended after the block
+    would otherwise be removed with it.
     """
     if not start_marker:
         raise ValueError("start_marker must be non-empty")
@@ -168,6 +188,8 @@ def strip_guidance_suffix(content: str, start_marker: str, end_marker: str) -> C
             return ContextEdit(ContextEditStatus.END_MISSING, content)
     else:
         end = len(content)
+    if max_removed_chars is not None and end - start > max_removed_chars:
+        return ContextEdit(ContextEditStatus.SPAN_TOO_LONG, content, removed_chars=end - start)
     return ContextEdit(ContextEditStatus.STRIPPED, content[:start] + content[end:], removed_chars=end - start)
 
 

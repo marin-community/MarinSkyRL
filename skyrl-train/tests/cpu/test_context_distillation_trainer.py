@@ -2,6 +2,7 @@
 logprobs so TIS keeps correcting engine-vs-trainer mismatch only, the shift metrics, and the logprob phase's
 second forward under the served prompt."""
 
+import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -24,7 +25,10 @@ from skyrl_train.utils.context_distillation import (
     ROLLOUT_CONTEXT_TENSOR_KEYS,
     ROLLOUT_SEQUENCES_KEY,
     SHIFT_ABS_PER_TOKEN_METRIC,
+    SHIFT_METRIC_KEYS,
+    SHIFT_PER_TOKEN_HEAD_METRIC,
     SHIFT_PER_TOKEN_METRIC,
+    SHIFT_PER_TOKEN_TAIL_METRIC,
     SHIFT_PER_TRAJECTORY_METRIC,
     apply_context_distillation_references,
     context_shift_metrics,
@@ -32,6 +36,7 @@ from skyrl_train.utils.context_distillation import (
     rebase_behavior_logprobs,
     rollout_context_forward_batch,
 )
+from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics
 
 from tests.cpu.util import example_dummy_config
 
@@ -131,17 +136,30 @@ def test_shift_metrics_are_hand_computable():
     rollout = torch.tensor([[-0.5, -2.0, -2.0], [-0.2, -0.2, -0.2]])
     loss_mask = torch.tensor([[1, 1, 0], [1, 1, 1]])
     metrics = context_shift_metrics(training, rollout, loss_mask, torch.tensor([True, False]))
-    # row 0 only, masked tokens: shifts +0.5 and 0.0
-    assert metrics[EDITED_FRACTION_METRIC] == pytest.approx(0.5)
+    # row 0 only, masked tokens: shifts +0.5 and 0.0; every position is inside the head window
     assert metrics[SHIFT_PER_TOKEN_METRIC] == pytest.approx(0.25)
     assert metrics[SHIFT_ABS_PER_TOKEN_METRIC] == pytest.approx(0.25)
     assert metrics[SHIFT_PER_TRAJECTORY_METRIC] == pytest.approx(0.5)
+    assert metrics[SHIFT_PER_TOKEN_HEAD_METRIC] == pytest.approx(0.25)
+    assert math.isnan(metrics[SHIFT_PER_TOKEN_TAIL_METRIC])
 
 
-def test_shift_metrics_keep_the_key_set_without_edited_rows():
+def test_shift_metrics_split_head_and_tail_positions(monkeypatch):
+    import skyrl_train.utils.context_distillation as module
+
+    monkeypatch.setattr(module, "SHIFT_HEAD_TOKENS", 2)
+    training = torch.zeros(1, 4)
+    rollout = torch.tensor([[1.0, 1.0, 3.0, 3.0]])
+    metrics = context_shift_metrics(training, rollout, torch.ones(1, 4), torch.tensor([True]))
+    assert metrics[SHIFT_PER_TOKEN_HEAD_METRIC] == pytest.approx(1.0)
+    assert metrics[SHIFT_PER_TOKEN_TAIL_METRIC] == pytest.approx(3.0)
+    assert metrics[SHIFT_PER_TOKEN_METRIC] == pytest.approx(2.0)
+
+
+def test_shift_metrics_are_nan_not_zero_without_edited_rows():
     metrics = context_shift_metrics(TRAINING, ROLLOUT, torch.ones(2, 2), torch.tensor([False, False]))
-    assert set(metrics) == set(CONTEXT_SHIFT_METRIC_KEYS)
-    assert all(value == 0.0 for value in metrics.values())
+    assert set(metrics) == set(SHIFT_METRIC_KEYS)
+    assert all(math.isnan(value) for value in metrics.values())
 
 
 def _logprob_phase_batch(edited=(True, False), with_rollout_logprobs=True):
@@ -174,27 +192,45 @@ def test_apply_references_rebases_reports_and_drops_the_rollout_tensors():
     assert metrics[EDITED_FRACTION_METRIC] == pytest.approx(0.5)
 
 
-def test_apply_references_neutralizes_without_the_second_forward():
+@pytest.mark.parametrize("tis_reference", ["none", "rollout"])
+def test_apply_references_neutralizes_when_the_second_forward_is_absent(tis_reference):
+    # tis_reference=none never runs the forward; rollout may lack it on a config-mismatched resume:
+    # either way an edited row must not train against the prompted behaviour logprobs
     batch = _logprob_phase_batch()
     metrics = apply_context_distillation_references(
         batch,
         training_context_logprobs=TRAINING,
         rollout_context_logprobs=None,
-        config=ContextDistillationConfig(enabled=True, tis_reference="none"),
+        config=ContextDistillationConfig(enabled=True, tis_reference=tis_reference),
     )
     torch.testing.assert_close(batch["rollout_logprobs"], neutralize_behavior_logprobs(ENGINE, TRAINING, EDITED))
     assert metrics[EDITED_FRACTION_METRIC] == pytest.approx(0.5)
-    assert metrics[SHIFT_PER_TOKEN_METRIC] == 0.0
+    # the shift is unmeasured, and must not read as "fully absorbed"
+    assert math.isnan(metrics[SHIFT_PER_TOKEN_METRIC])
 
 
-def test_apply_references_needs_the_second_forward_for_the_rollout_reference():
-    with pytest.raises(ValueError, match="rollout-context"):
-        apply_context_distillation_references(
-            _logprob_phase_batch(),
-            training_context_logprobs=TRAINING,
-            rollout_context_logprobs=None,
-            config=ContextDistillationConfig(enabled=True),
-        )
+def test_edited_fraction_ignores_padded_rows():
+    batch = _logprob_phase_batch(edited=(True, False))
+    batch.metadata["pad_size"] = 1  # the second row is a pad_batch clone
+    metrics = apply_context_distillation_references(
+        batch, training_context_logprobs=TRAINING, rollout_context_logprobs=ROLLOUT, config=ContextDistillationConfig()
+    )
+    assert metrics[EDITED_FRACTION_METRIC] == pytest.approx(1.0)
+
+
+def test_leak_gate_tis_diagnostics_see_only_the_engine_mismatch():
+    # the block moves the sampled tokens by a full nat; the engine differs from the trainer by 0.05
+    old_bare = torch.tensor([[-2.0, -1.0], [-2.0, -1.0]])
+    old_aug = old_bare + 1.0
+    engine = old_aug - 0.05
+    batch = _logprob_phase_batch(edited=(True, True))
+    batch["rollout_logprobs"] = engine
+    apply_context_distillation_references(
+        batch, training_context_logprobs=old_bare, rollout_context_logprobs=old_aug, config=ContextDistillationConfig()
+    )
+    diagnostics = compute_tis_diagnostics(old_bare, batch["rollout_logprobs"], batch["loss_mask"], 2.0)
+    assert diagnostics["tis/log_ratio_abs_mean"] == pytest.approx(0.05, abs=1e-6)
+    assert diagnostics["tis/imp_ratio_mean"] == pytest.approx(math.exp(0.05), abs=1e-4)
 
 
 def test_apply_references_is_a_no_op_without_rollout_context():
@@ -282,7 +318,7 @@ def _phase_trainer(monkeypatch, *, colocate_all, **context_distillation):
 
 @pytest.mark.parametrize("colocate_all", [False, True])
 def test_logprob_phase_forwards_edited_rows_under_the_rollout_context(monkeypatch, colocate_all):
-    trainer = _phase_trainer(monkeypatch, colocate_all=colocate_all)
+    trainer = _phase_trainer(monkeypatch, colocate_all=colocate_all, kl_reference="rollout")
     trainer.policy_model = _ActorGroup([TRAINING, ROLLOUT])
     trainer.ref_model = _ActorGroup([BASE])
 
@@ -311,7 +347,7 @@ def test_logprob_phase_can_keep_the_self_reference_and_skip_the_second_forward(m
     assert trainer.ref_model.forward_batches[0]["sequences"].shape == (2, 4)
     assert [batch["sequences"].shape for batch in trainer.policy_model.forward_batches] == [(2, 4)]
     torch.testing.assert_close(out["rollout_logprobs"], neutralize_behavior_logprobs(ENGINE, TRAINING, EDITED))
-    assert trainer.all_metrics[SHIFT_PER_TOKEN_METRIC] == 0.0
+    assert math.isnan(trainer.all_metrics[SHIFT_PER_TOKEN_METRIC])
 
 
 def test_logprob_phase_skips_the_extra_forwards_when_no_row_is_edited(monkeypatch):

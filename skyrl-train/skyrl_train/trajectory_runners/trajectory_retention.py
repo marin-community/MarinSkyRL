@@ -1,30 +1,24 @@
-from collections import OrderedDict
-from collections.abc import Mapping, Sequence
 import asyncio
 import concurrent.futures
-from dataclasses import dataclass, replace
 import gzip
 import hashlib
-from io import BytesIO
 import json
 import posixpath
 import threading
-from typing import Any, Protocol
 import zipfile
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from io import BytesIO
+from typing import Any, Protocol
 
-from omegaconf import DictConfig
 from loguru import logger
+from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
 from marinskyrl.resource_locator import join_resource_path
-from skyrl_train.trajectory_runners.types import (
-    TrajectoryRequestBatch,
-    TrajectoryBatch,
-    RewardShapingComponents,
-    RewardShapingLoopSpan,
-    TrajectoryID,
-    VerifierTestCollection,
-)
+from skyrl_train.io import io
+from skyrl_train.json_serialization import canonical_json_bytes, to_jsonable
 from skyrl_train.trajectory_runners.trajectory_retention_config import (
     TrajectoryRetentionConfig,
     parse_trajectory_retention_config,
@@ -40,9 +34,14 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     NormalizedReward,
     aggregate_reward_shaping_components,
 )
-from skyrl_train.json_serialization import canonical_json_bytes, to_jsonable
-from skyrl_train.io import io
-
+from skyrl_train.trajectory_runners.types import (
+    RewardShapingComponents,
+    RewardShapingLoopSpan,
+    TrajectoryBatch,
+    TrajectoryID,
+    TrajectoryRequestBatch,
+    VerifierTestCollection,
+)
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
 RETENTION_SCHEMA_VERSION = 1
@@ -410,7 +409,9 @@ def build_trajectory_records(
         final_index = row_indices[-1]
         response_ids = [token for index in row_indices for token in output["response_ids"][index]]
         loss_mask = [value for index in row_indices for value in output["loss_masks"][index]]
-        prompt_ids = output["prompt_token_ids"][row_indices[0]]
+        # Context distillation strips the training prompt; the archive keeps what the engine served.
+        served_prompts = output.get("rollout_prompt_token_ids")
+        prompt_ids = (served_prompts if served_prompts is not None else output["prompt_token_ids"])[row_indices[0]]
         normalized_reward = NormalizedReward.from_output(output["rewards"][final_index])
         shaped_reward = normalized_reward.total
         outcome = float(unshaped[final_index]) if unshaped is not None else normalized_reward.outcome

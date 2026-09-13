@@ -1,46 +1,48 @@
-import torch
+from collections import defaultdict
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol
-from collections import defaultdict
 from enum import StrEnum
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Tuple, Union
+
 import numpy as np
+import torch
+from loguru import logger
+from omegaconf import DictConfig
+from skyrl_gym.metrics import aggregate_for_environment
+
 from skyrl_train.group_admission import group_has_trainable_tokens
-from skyrl_train.trajectory_runners.base import (
-    TrajectoryBatch,
-    TrajectoryRequestBatch,
-    TrajectoryID,
-    BatchMetadata,
-    TrainingPhase,
-)
-from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
+from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.metric_names import (
     CONTEXT_DISTILLATION_METRIC_PREFIX,
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
+    ROLLOUT_FAILURE_FRACTION_METRIC,
     TIS_ALIGNED_TOKENS_METRIC,
     TIS_ALIGNMENT_ALERT_METRIC,
-    TIS_METRIC_PREFIX,
-    TIS_EXACT_MATCH_FRACTION_METRIC,
-    TIS_LCS_FALLBACK_FRACTION_METRIC,
-    TIS_UNALIGNED_FRACTION_METRIC,
     TIS_ALIGNMENT_FAIL_COUNT_METRIC,
-    TIS_LCS_FALLBACK_MESSAGES_METRIC,
+    TIS_EXACT_MATCH_FRACTION_METRIC,
     TIS_LCS_FALLBACK_ALERT_METRIC,
+    TIS_LCS_FALLBACK_FRACTION_METRIC,
+    TIS_LCS_FALLBACK_MESSAGES_METRIC,
+    TIS_METRIC_PREFIX,
     TIS_TITO_FULL_ATTEMPTS_METRIC,
-    TIS_TITO_FULL_SUCCESS_FRACTION_METRIC,
     TIS_TITO_FULL_DECLINE_COUNT_METRIC,
     TIS_TITO_FULL_DECLINE_METRIC_PREFIX,
+    TIS_TITO_FULL_SUCCESS_FRACTION_METRIC,
+    TIS_UNALIGNED_FRACTION_METRIC,
 )
+from skyrl_train.trajectory_runners.base import (
+    BatchMetadata,
+    TrainingPhase,
+    TrajectoryBatch,
+    TrajectoryID,
+    TrajectoryRequestBatch,
+)
+from skyrl_train.trajectory_runners.context_distillation import CONTEXT_EDITED_KEY, ROLLOUT_PROMPT_TOKEN_IDS_KEY
+from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     NormalizedReward,
     refresh_trajectory_reward_shaping_metrics,
 )
-from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
-from skyrl_train.inference_engines.base import ConversationType
-from omegaconf import DictConfig
-from loguru import logger
-from skyrl_gym.metrics import aggregate_for_environment
-
 
 BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
 _NUM_TRIALS_METRIC = "generate/num_trials"
@@ -859,6 +861,33 @@ def concatenate_trajectory_batches(
                 for response_ids in output["response_ids"]:
                     response_span_tags_concat.append([0] * len(response_ids))
 
+    # Context distillation: the served prompt and the edit flag per row. A group that lacks the
+    # columns while another carries them (an all-failed orchestrator group, or a group buffered
+    # before the flag was on) is filled from its own prompts with no edit, so the columns stay 1:1
+    # with response_ids and never fall through the generic additional-keys path below (which
+    # keys off the first batch only and would drop or KeyError on a mixed step).
+    has_rollout_prompts = [
+        ROLLOUT_PROMPT_TOKEN_IDS_KEY in output and output.get(ROLLOUT_PROMPT_TOKEN_IDS_KEY) is not None
+        for output in trajectory_batches
+    ]
+    rollout_prompt_token_ids_concat = None
+    context_edited_concat = None
+    if any(has_rollout_prompts):
+        rollout_prompt_token_ids_concat = []
+        context_edited_concat = []
+        for output, present in zip(trajectory_batches, has_rollout_prompts):
+            if present:
+                rollout_prompt_token_ids_concat.extend(output[ROLLOUT_PROMPT_TOKEN_IDS_KEY])
+                context_edited_concat.extend(output[CONTEXT_EDITED_KEY])
+            else:
+                logger.warning(
+                    "context distillation: a group of %d rows carries no served-prompt column; "
+                    "treating its rows as unedited",
+                    len(output["prompt_token_ids"]),
+                )
+                rollout_prompt_token_ids_concat.extend(list(prompt) for prompt in output["prompt_token_ids"])
+                context_edited_concat.extend([False] * len(output["prompt_token_ids"]))
+
     result: TrajectoryBatch = {
         "prompt_token_ids": sum([output["prompt_token_ids"] for output in trajectory_batches], []),
         "response_ids": sum([output["response_ids"] for output in trajectory_batches], []),
@@ -879,6 +908,9 @@ def concatenate_trajectory_batches(
         result["response_span_tags"] = response_span_tags_concat
     if unshaped_rewards_concat is not None:
         result["unshaped_rewards"] = unshaped_rewards_concat
+    if rollout_prompt_token_ids_concat is not None:
+        result[ROLLOUT_PROMPT_TOKEN_IDS_KEY] = rollout_prompt_token_ids_concat
+        result[CONTEXT_EDITED_KEY] = context_edited_concat
     for key, values in disposition_channels.items():
         result[key] = values
     if baseline_exclusions_concat is not None:
