@@ -69,6 +69,7 @@ def _fake_frozen_runtime(
     _write_module(site_packages, "daytona.py", "class Daytona: pass\nclass DaytonaConfig: pass\n")
     _write_module(site_packages, "quack/activation.py")
     _write_module(site_packages, "flash_attn.py", "__version__ = '2.8.3'\n")
+    _write_module(site_packages, "flash_attn_2_cuda.py")
     _write_module(site_packages, "memray.py")
     _write_module(site_packages, "torch.py", "__version__ = '2.11.0+cu129'\n")
     _write_module(site_packages, "vllm/__init__.py", "__version__ = 'test'\n")
@@ -171,15 +172,16 @@ def _run_bootstrap(
     )
 
 
-def test_fsdp_bootstrap_rejects_runtime_without_flash_attention_extension(tmp_path: Path) -> None:
+@pytest.mark.parametrize("profile", ["fsdp", "megatron"])
+def test_policy_bootstrap_rejects_runtime_without_flash_attention_extension(tmp_path: Path, profile: str) -> None:
     environment, process_environment = _fake_frozen_runtime(tmp_path)
+    site_packages = next((environment / "lib").glob("python*/site-packages"))
+    (site_packages / "flash_attn_2_cuda.py").unlink()
 
-    fsdp = _run_bootstrap(environment, process_environment, "fsdp")
-    megatron = _run_bootstrap(environment, process_environment, "megatron")
+    result = _run_bootstrap(environment, process_environment, profile)
 
-    assert fsdp.returncode != 0
-    assert "No module named 'flash_attn_2_cuda'" in fsdp.stderr
-    assert megatron.returncode == 0, megatron.stderr
+    assert result.returncode != 0
+    assert "No module named 'flash_attn_2_cuda'" in result.stderr
 
 
 def test_export_bootstrap_does_not_require_rollout_or_telemetry_packages(tmp_path: Path) -> None:
