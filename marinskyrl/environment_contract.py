@@ -68,7 +68,6 @@ ALL_RUNTIME_SCOPES = frozenset(EnvVarScope)
 DEBUG_MODE_ENV = "SKYRL_DEBUG_MODE"
 DEBUG_ARTIFACT_DIR_ENV = "SKYRL_DEBUG_ARTIFACT_DIR"
 COLLECTIVE_PHASE_DIAGNOSTICS_ENV = "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"
-LIVE_STACK_INTERVAL_ENV = "SKYRL_LIVE_STACK_INTERVAL_SECONDS"
 PYTHONFAULTHANDLER_ENV = "PYTHONFAULTHANDLER"
 RAY_USE_UVLOOP_ENV = "RAY_USE_UVLOOP"
 UV_USE_IO_URING_ENV = "UV_USE_IO_URING"
@@ -104,7 +103,6 @@ ENV_VAR_SPECS = (
         EnvVarSource.DERIVED,
         ALL_RUNTIME_SCOPES,
     ),
-    EnvVarSpec(LIVE_STACK_INTERVAL_ENV, "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec(
         RAY_USE_UVLOOP_ENV,
         "trainer.debug_mode",
@@ -515,7 +513,6 @@ class EnvVarManager:
                     "NCCL_DEBUG": "INFO",
                     "NCCL_DEBUG_SUBSYS": _NCCL_SETUP_SUBSYSTEMS,
                     "NCCL_DEBUG_FILE": str(Path(root) / "nccl" / "nccl.%h.%p.log"),
-                    LIVE_STACK_INTERVAL_ENV: "300",
                     "TORCH_CPP_LOG_LEVEL": "INFO",
                     "TORCH_NCCL_DESYNC_DEBUG": "1",
                     "TORCH_NCCL_ENABLE_TIMING": "1",

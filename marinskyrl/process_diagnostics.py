@@ -14,7 +14,8 @@ from typing import Any, Mapping, TextIO
 
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
-    LIVE_STACK_INTERVAL_ENV,
+    DEBUG_MODE_ENV,
+    DebugMode,
     PYTHONFAULTHANDLER_ENV,
     ensure_debug_artifact_directories,
     safe_artifact_component,
@@ -112,23 +113,21 @@ def install_live_stack_capture(
     *,
     environment: Mapping[str, str] | None = None,
 ) -> Path | None:
-    """Install periodic all-thread dumps when the distributed preset requests them."""
+    """Register ``SIGUSR2`` to append an all-thread dump in distributed debug mode."""
     # Read the manager-projected process contract; this module never defines environment values.
     values = os.environ if environment is None else environment
-    raw_interval = values.get(LIVE_STACK_INTERVAL_ENV)
     artifact_root = values.get(DEBUG_ARTIFACT_DIR_ENV)
-    if raw_interval is None or artifact_root is None:
+    if values.get(DEBUG_MODE_ENV) != DebugMode.DISTRIBUTED or artifact_root is None:
         return None
-    interval = int(raw_interval)
-    if interval <= 0:
-        raise ValueError(f"{LIVE_STACK_INTERVAL_ENV} must be positive")
     ensure_debug_artifact_directories(artifact_root)
     path = Path(artifact_root) / "stacks" / f"{safe_artifact_component(role)}.{socket.gethostname()}.{os.getpid()}.log"
     if path in _live_stack_files:
         return path
     output = path.open("a")
     _live_stack_files[path] = output
-    faulthandler.dump_traceback_later(interval, repeat=True, file=output)
+    # Keep capture operator-triggered. Periodic faulthandler dumps can terminate
+    # native-heavy Ray/vLLM actors while they are actively serving requests.
+    faulthandler.register(signal.SIGUSR2, file=output, all_threads=True, chain=False)
     return path
 
 

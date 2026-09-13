@@ -39,7 +39,6 @@ def test_light_mode_is_the_bounded_default(monkeypatch):
     assert environment["TORCH_NCCL_DUMP_ON_TIMEOUT"] == "1"
     assert "NCCL_DEBUG" not in environment
     assert "TORCH_SHOW_CPP_STACKTRACES" not in environment
-    assert "SKYRL_LIVE_STACK_INTERVAL_SECONDS" not in environment
 
 
 def test_off_mode_disables_default_failure_artifacts(monkeypatch):
@@ -82,7 +81,6 @@ def test_distributed_mode_expands_complete_worker_contract(monkeypatch):
     assert environment["TORCH_NCCL_TRACE_CPP_STACK"] == "1"
     assert environment["TORCH_SHOW_CPP_STACKTRACES"] == "1"
     assert environment["TORCH_SYMBOLIZE_MODE"] == "fast"
-    assert environment["SKYRL_LIVE_STACK_INTERVAL_SECONDS"] == "300"
     assert environment["PYTHONFAULTHANDLER"] == "1"
     assert environment["TORCH_FR_DUMP_TEMP_FILE"].startswith("/gpfs/experiments/run/debug/flight_recorder/")
     assert environment["NCCL_DEBUG_FILE"] == "/gpfs/experiments/run/debug/nccl/nccl.%h.%p.log"
