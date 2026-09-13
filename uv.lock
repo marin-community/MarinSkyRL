@@ -3156,7 +3156,7 @@ requires-dist = [
     { name = "transformers", specifier = "==5.16.1" },
     { name = "uvicorn" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
-    { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260912-177d960f5b43/vllm-0.0.0.dev20260912+marin.177d960f5b43.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" },
+    { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260913-4c1c798a7b60/vllm-0.0.0.dev20260913+marin.4c1c798a7b60.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" },
     { name = "wandb" },
     { name = "xmltodict" },
 ]
@@ -7075,8 +7075,8 @@ wheels = [
 
 [[package]]
 name = "vllm"
-version = "0.0.0.dev20260912+marin.177d960f5b43.cu132"
-source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260912-177d960f5b43/vllm-0.0.0.dev20260912+marin.177d960f5b43.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" }
+version = "0.0.0.dev20260913+marin.4c1c798a7b60.cu132"
+source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260913-4c1c798a7b60/vllm-0.0.0.dev20260913+marin.4c1c798a7b60.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" }
 dependencies = [
     { name = "aiohttp", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "anthropic", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -7155,7 +7155,7 @@ dependencies = [
     { name = "xgrammar", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260912-177d960f5b43/vllm-0.0.0.dev20260912+marin.177d960f5b43.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:93684330f606a830417431bf29b7cb47498d9ed723f86ed64694ee7b5d21c655" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260913-4c1c798a7b60/vllm-0.0.0.dev20260913+marin.4c1c798a7b60.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:771a1b8551ec2dd3a4739eda08383e48173f8b6d0935075b201d0cffa916d602" },
 ]
 
 [package.metadata]
