@@ -157,14 +157,12 @@ def test_collect_actor_results_logs_initiating_remote_exception_before_teardown(
     monkeypatch.setattr(dispatch_module, "log_exception_as_text", capture_exception)
     monkeypatch.setattr(dispatch_module.ray, "kill", capture_kill)
 
-    with pytest.raises(WorkerGroupTaskError):
+    with pytest.raises(WorkerGroupTaskError) as raised_error:
         collect_actor_results(actor_infos, refs, operation="policy ppo_train")
 
     event, context, remote_error = events[0]
     assert event == "exception"
-    assert "policy ppo_train" in context
-    assert "actor index 0" in context
-    assert str(actor_infos[0].rank) in context
+    assert context == str(raised_error.value)
     assert "injected policy-rank OOM" in str(remote_error)
     assert all(event == "kill" for event, _, _ in events[1:])
 

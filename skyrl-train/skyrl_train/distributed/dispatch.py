@@ -238,7 +238,7 @@ class WorkerGroupTaskError(RuntimeError):
     def __str__(self) -> str:
         return (
             f"{self.operation} failed on actor index {self.actor_index} ({self.mesh_rank}); "
-            "terminated the worker group so an outer retry can rebuild the communicator"
+            "terminating the worker group so an outer retry can rebuild the communicator"
         )
 
 
@@ -257,18 +257,16 @@ def collect_actor_results(actor_infos: List[ActorInfo], object_refs: List[Object
             results[actor_index] = ray.get(object_ref)
         except Exception as error:
             mesh_rank = actor_infos[actor_index].rank
+            group_error = WorkerGroupTaskError(operation, actor_index, mesh_rank)
             # This is the last point that still owns Ray's initiating remote exception.
             # Peer teardown can otherwise leave only secondary actor-death and process-signal receipts.
-            log_exception_as_text(
-                f"{operation} failed on actor index {actor_index} ({mesh_rank}); terminating the worker group",
-                error,
-            )
+            log_exception_as_text(str(group_error), error)
             for actor_info in actor_infos:
                 try:
                     ray.kill(actor_info.handle, no_restart=True)
                 except Exception:
                     logger.exception("Failed to terminate a peer after a distributed actor task error")
-            raise WorkerGroupTaskError(operation, actor_index, mesh_rank) from error
+            raise group_error from error
     return results
 
 
