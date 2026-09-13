@@ -538,7 +538,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             raise ValueError("fully async train_batch_size must contain complete policy minibatches")
         self.updates_per_cohort = self.cohort_size // self.mini_batch_size
         if self.updates_per_cohort > 1 and (
-            self.updates_per_cohort != 2
+            self.updates_per_cohort not in (2, 4)
             or cfg.trainer.strategy != "megatron"
             or cfg.trainer.algorithm.loss_reduction != "token_mean"
             or cfg.trainer.algorithm.advantage_estimator != "grpo"
@@ -549,7 +549,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             or cfg.trainer.step_wise_training
         ):
             raise ValueError(
-                "async N2 currently requires Megatron/token_mean/GRPO, one epoch, no KL or dynamic sampling"
+                "multi-update async cohorts support N=2 or N=4 and require "
+                "Megatron/token_mean/GRPO, one epoch, no KL or dynamic sampling"
             )
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
         self.weight_sync_interval = cfg.trainer.fully_async.weight_sync_interval
@@ -1170,7 +1171,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         status.get("policy_successful_update_steps_valid") != 1
                         or status.get("policy_successful_update_steps") != 1
                     ):
-                        raise RuntimeError("async N2 requires exactly one successful optimizer update before advancing")
+                        raise RuntimeError(
+                            "multi-update async cohorts require exactly one successful optimizer update before advancing"
+                        )
                     train_duration = self.all_timings["train_critic_and_policy"]
                     self._log_optimizer_step_completed(
                         epoch=epoch,

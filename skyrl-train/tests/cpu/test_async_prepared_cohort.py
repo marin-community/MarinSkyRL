@@ -16,9 +16,12 @@ from skyrl_train.fully_async_trainer import _GenerationQueues
 import asyncio
 
 
-def make_cohort():
-    groups = [GeneratedOutputGroup({"response_ids": [[1]] * 4}, str(i), 1, [{"uid": str(i)}]) for i in range(128)]
-    row = torch.arange(512).unsqueeze(1)
+def make_cohort(updates=2):
+    group_count = 64 * updates
+    groups = [
+        GeneratedOutputGroup({"response_ids": [[1]] * 4}, str(i), 1, [{"uid": str(i)}]) for i in range(group_count)
+    ]
+    row = torch.arange(group_count * 4).unsqueeze(1)
     mask = torch.arange(7).unsqueeze(0) <= row % 7
     batch = TrainingInputBatch(
         dict(
@@ -34,7 +37,7 @@ def make_cohort():
             attention_mask=mask.clone(),
         )
     )
-    batch.metadata = {"uids": [str(i) for i in range(128) for _ in range(4)], "response_length": 7}
+    batch.metadata = {"uids": [str(i) for i in range(group_count) for _ in range(4)], "response_length": 7}
     return PreparedAsyncCohort(batch, groups, admission_step=1, dp_size=4, mini_batch_groups=64, samples_per_prompt=4)
 
 
@@ -56,11 +59,12 @@ def dispatch_to_iterators(batch):
     )
 
 
-def test_cohort_partitions_match_native_sync_n2_dispatch_and_frozen_inputs():
-    cohort = make_cohort()
+@pytest.mark.parametrize("updates", [2, 4])
+def test_cohort_partitions_match_native_sync_dispatch_and_frozen_inputs(updates):
+    cohort = make_cohort(updates)
     native_sync = dispatch_to_iterators(cohort.batch)
     seen, tokens = [], 0
-    for update in range(2):
+    for update in range(updates):
         part = cohort.partition(consume_step=1 + update)
         actual = dispatch_to_iterators(part)
         for rank in range(4):
@@ -77,7 +81,7 @@ def test_cohort_partitions_match_native_sync_n2_dispatch_and_frozen_inputs():
         assert cohort.batch["action_log_probs"][0].item() == 0
         assert cohort.batch.metadata["uids"][0] == "0"
         cohort = cohort.advanced()
-    assert sorted(seen) == list(range(512))
+    assert sorted(seen) == list(range(256 * updates))
     assert tokens == cohort.batch["loss_mask"].sum().item()
     assert cohort.pending_groups() == []
 
