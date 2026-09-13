@@ -8,6 +8,7 @@ import ast
 import asyncio
 import json
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 from omegaconf import OmegaConf
@@ -604,17 +605,30 @@ async def test_actual_policy_and_receiver_routes_persist_physical_observations(b
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault", [None, "source_changed", "receiver_missing"])
+@pytest.mark.parametrize(
+    "fault,outside_pause",
+    [
+        (None, False),
+        (None, True),
+        ("source_changed", False),
+        ("source_changed", True),
+        ("receiver_missing", False),
+        ("receiver_missing", True),
+        ("capture_failed", True),
+    ],
+)
 async def test_configured_proofs_off_installs_and_finishes_through_actual_worker_routes(
-    boundary, tmp_path, monkeypatch, fault
+    boundary, tmp_path, monkeypatch, fault, outside_pause
 ):
     driver, actors, manifest = boundary
     await asyncio.gather(*(actor.reset_session.remote("proof_failure") for actor in actors))
     driver.cfg = get_default_config()
     driver.global_step = 0
+    driver.all_timings = {}
     config = driver.cfg.generator.shard_sync
     for name, value in {
         "proofs": False,
+        "inline_diagnostic_updates": 0 if outside_pause else 100,
         "policy_ranks": 2,
         "receiver_replicas": 2,
         "expert_parallel_size": 1,
@@ -633,6 +647,27 @@ async def test_configured_proofs_off_installs_and_finishes_through_actual_worker
 
     monkeypatch.setattr(shard_training, "replay_prepared_shards", forbidden_replay)
     service = shard_training.ShardTrainingPublication(driver)
+    if outside_pause and fault in (None, "capture_failed"):
+        persist = shard_training.persist_readback
+        loop = asyncio.get_running_loop()
+        writing = asyncio.Event()
+        generation_progress = threading.Event()
+
+        def durable_write(output_uri, stage, row):
+            assert not driver.inference_engine_client.generation_paused_event.is_set()
+            if row["phase"] == "publication-complete":
+                if fault == "capture_failed":
+                    raise OSError("Object store write failed")
+                loop.call_soon_threadsafe(writing.set)
+                assert generation_progress.wait(timeout=5), "Durable write blocked generation's event loop"
+            return persist(output_uri, stage, row)
+
+        monkeypatch.setattr(shard_training, "persist_readback", durable_write)
+
+        async def advance_generation():
+            await writing.wait()
+            assert not driver.inference_engine_client.generation_paused_event.is_set()
+            generation_progress.set()
 
     # The fixture already prepared real rank-local Gloo sessions. Only CUDA preparation
     # is omitted; configured publish, RPCs, leases, transport and durable receipts run.
@@ -644,15 +679,14 @@ async def test_configured_proofs_off_installs_and_finishes_through_actual_worker
     service.manifest_id = manifest
     service.plan = SimpleNamespace(expected_receiver_bytes=tuple(EXPECTED_RECEIVER_BYTES.items()))
     if fault == "source_changed":
-        observe = service.observe
+        install = driver.inference_engine_client.run_shard_stream
 
-        async def mutate_after_install(version, moment):
-            rows = await observe(version, moment)
-            if moment == "after":
-                await actors[0].mutate_source.remote()
+        async def mutate_after_install(*args):
+            rows = await install(*args)
+            await actors[0].mutate_source.remote()
             return rows
 
-        monkeypatch.setattr(service, "observe", mutate_after_install)
+        monkeypatch.setattr(driver.inference_engine_client, "run_shard_stream", mutate_after_install)
     if fault == "receiver_missing":
         install = driver.inference_engine_client.run_shard_stream
 
@@ -662,8 +696,9 @@ async def test_configured_proofs_off_installs_and_finishes_through_actual_worker
 
         monkeypatch.setattr(driver.inference_engine_client, "run_shard_stream", lose_receiver_receipt)
     for version in (21, 22):
+        await service.before_pause(version)
         await driver.inference_engine_client.pause_generation(settle_native_calls=True)
-        if fault is not None:
+        if fault in ("source_changed", "receiver_missing"):
             message = "unchanged weights" if fault == "source_changed" else "missing or duplicates"
             with pytest.raises((ValueError, ray.exceptions.RayTaskError), match=message):
                 await service.publish(version)
@@ -676,9 +711,14 @@ async def test_configured_proofs_off_installs_and_finishes_through_actual_worker
         assert result["proofs"] is False
         assert "source_proof" not in result and "replay" not in result
         assert not {"source_replica_proof", "full_byte_replay"} & result["phase_seconds"].keys()
-        assert {"freeze", "receiver_begin", "install", "finish", "observation_before", "observation_after"} <= result[
-            "phase_seconds"
-        ].keys()
+        assert {"freeze", "receiver_begin", "install", "finish", "interval_capture"} <= result["phase_seconds"].keys()
+        assert ("observation_before" in result["phase_seconds"]) is not outside_pause
+        assert ("observation_after" in result["phase_seconds"]) is not outside_pause
+        if outside_pause:
+            assert "durable_receipt" not in result
+            assert not list(tmp_path.glob("shard-driver-*.json")) or version == 22
+            with pytest.raises(ValueError, match="resumed inference"):
+                await service.after_resume(version)
         for phase in (
             "policy_begin",
             "receiver_begin",
@@ -699,11 +739,39 @@ async def test_configured_proofs_off_installs_and_finishes_through_actual_worker
         )
         assert driver.inference_engine_client.generation_paused_event.is_set()
         await driver.inference_engine_client.resume_generation(policy_version=version, settle_native_calls=True)
+        if fault == "capture_failed":
+            with pytest.raises(OSError, match="Object store write failed"):
+                await service.after_resume(version)
+            await service.close()
+            saved_rows = [json.loads(path.read_text()) for path in tmp_path.glob("shard-driver-*.json")]
+            assert any(row["phase"] == "publication-diagnostics-incomplete" for row in saved_rows)
+            assert not any(row["phase"] == "publication-complete" for row in saved_rows)
+            assert not driver.inference_engine_client.generation_paused_event.is_set()
+            return
+        if outside_pause and fault is None:
+            generation_progress.clear()
+            writing.clear()
+            progress = asyncio.create_task(advance_generation())
+            await service.after_resume(version)
+            await progress
+            assert not list(tmp_path.glob(f"physical-shard-{version}-before-pause-*.json"))
+            assert not list(tmp_path.glob(f"physical-shard-{version}-after-resume-*.json"))
+        else:
+            await service.after_resume(version)
         saved = json.loads(Path(result["durable_receipt"]["uri"]).read_text())
         assert (
             saved["result"]["proofs"] is False
             and saved["result"]["measurement_marker"]["attempt_uid"] == "proofs-off-cpu"
         )
+        if outside_pause:
+            assert result["diagnostics_scope"] == "outside-pause"
+            for receipt in tmp_path.glob("shard-driver-*.json"):
+                row = json.loads(receipt.read_text())
+                if row["phase"] == "installed-before-replay":
+                    assert "policy_finish" not in row["result"]
+            assert {"observation_before", "observation_after", "interval_capture", "completion_capture"} <= result[
+                "outside_pause_seconds"
+            ].keys()
     assert not driver.inference_engine_client.generation_paused_event.is_set()
 
 

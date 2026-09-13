@@ -92,13 +92,14 @@ def native_worker_identity(device):
 
 
 def observe_worker(worker, device, role, observation_id, output_uri):
-    """Persist one physical endpoint outside the matched reference's broadcast timer."""
+    """Snapshot a physical endpoint; a null output defers durability to the driver."""
+    started = time.perf_counter()
     hardware = getattr(worker, "_physical_weight_sync_identity", None)
     if hardware is None:
         hardware = hardware_identity(device)
         worker._physical_weight_sync_identity = hardware
     identity = {**hardware, **native_worker_identity(device), "role": role}
-    if device.type == "cuda" and observation_id.endswith("-before"):
+    if device.type == "cuda" and observation_id.endswith(("-before", "-before-pause")):
         torch.cuda.reset_peak_memory_stats(device)
     memory = device_memory(device)
     result = {
@@ -108,4 +109,14 @@ def observe_worker(worker, device, role, observation_id, output_uri):
         "memory": memory,
         "memory_scope": "Torch allocator peak plus device-free endpoints; external allocator peak unmeasured",
     }
-    return {**result, "durable_receipt": persist_readback(output_uri, f"physical-{observation_id}-{role}", result)}
+    result["observation_scope"] = (
+        "surrounds pause and includes concurrent generation traffic/memory"
+        if observation_id.endswith(("-before-pause", "-after-resume"))
+        else "paused install endpoint"
+    )
+    result["read_seconds"] = time.perf_counter() - started
+    if output_uri is None:
+        return {**result, "durability": "pending-driver-capture", "capture_seconds": 0.0}
+    started = time.perf_counter()
+    binding = persist_readback(output_uri, f"physical-{observation_id}-{role}", result)
+    return {**result, "durable_receipt": binding, "capture_seconds": time.perf_counter() - started}

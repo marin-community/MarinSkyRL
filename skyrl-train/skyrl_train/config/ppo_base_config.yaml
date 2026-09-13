@@ -417,6 +417,9 @@ generator:
   weight_sync_timing_mode: "off"  # off | bucket | reference | shard
   weight_sync_physical_observations: false  # Matched reference endpoints, outside its broadcast timer.
   shard_sync:
+    # Diagnostic before/after run only: keep this many initial updates inline.
+    # Production proofs-off defaults to observations and durable I/O outside pause.
+    inline_diagnostic_updates: 0
     proofs: true  # Gate-only source replica comparison and complete installed-byte replay.
     preparation_id: null
     output_uri: null
