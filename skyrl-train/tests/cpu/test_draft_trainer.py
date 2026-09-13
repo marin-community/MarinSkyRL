@@ -219,6 +219,53 @@ def test_draft_trainer_rejects_parent_outside_its_served_lineage(tmp_path: Path)
         trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-other"), {})
 
 
+def test_draft_trainer_reports_training_failure_and_preserves_its_artifact(tmp_path: Path, monkeypatch) -> None:
+    initial = tmp_path / "initial"
+    initial.mkdir()
+
+    def materialize(_bundle, destination):
+        path = Path(destination)
+        path.mkdir(parents=True)
+        return path
+
+    failure_dir = tmp_path / "preserved-failure"
+    monkeypatch.setattr(draft_trainer_module, "materialize_ray_directory_bundle", materialize)
+    monkeypatch.setattr(draft_trainer_module, "validate_materialized_bundle", lambda _bundle, _path: None)
+    monkeypatch.setattr(
+        draft_trainer_module,
+        "run_training_job",
+        lambda _job: (_ for _ in ()).throw(RuntimeError("training failed")),
+    )
+    monkeypatch.setattr(
+        draft_trainer_module,
+        "preserve_online_eagle_failure",
+        lambda _job, _error: str(failure_dir),
+    )
+    monkeypatch.setattr(
+        draft_trainer_module,
+        "publish_online_eagle_failure_bundle",
+        lambda _source, destination: {"path": f"{destination}/manifest.json"},
+    )
+    monkeypatch.setattr(draft_trainer_module, "remove_online_eagle_scratch", lambda _path: None)
+    trainer = DraftTrainer(
+        initial_draft_dir=str(initial),
+        initial_draft_revision="draft-initial",
+        process_id="process",
+    )
+
+    update = trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-initial"), {})
+
+    assert update["candidate_bundle"] is None
+    assert update["result"] == {
+        "active": True,
+        "accepted": False,
+        "step": 4,
+        "error": "RuntimeError: training failed",
+        "failure_dir": str(failure_dir),
+        "failure_artifact_path": f"{tmp_path}/failures/step-4/manifest.json",
+    }
+
+
 def test_draft_trainer_cleanup_releases_its_process_scratch(tmp_path: Path, monkeypatch) -> None:
     scratch = tmp_path / "scratch"
     process_root = scratch / "process"

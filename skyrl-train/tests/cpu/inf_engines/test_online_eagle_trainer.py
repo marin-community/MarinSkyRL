@@ -731,7 +731,7 @@ def test_initial_draft_is_materialized_as_a_rollback_candidate(tmp_path: Path) -
     assert (destination / "model.safetensors").read_bytes() == (source / "model.safetensors").read_bytes()
 
 
-def test_restore_rejects_legacy_online_trainer_state_once(tmp_path: Path) -> None:
+def test_restore_rejects_legacy_online_trainer_state(tmp_path: Path) -> None:
     source = tmp_path / "candidate"
     source.mkdir()
     (source / "config.json").write_text('{"speculators_model_type":"eagle3"}')

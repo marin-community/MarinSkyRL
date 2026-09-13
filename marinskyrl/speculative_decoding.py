@@ -299,14 +299,14 @@ def parse_speculative_decoding_config(
     if config.training is not None and entrypoint != STANDARD_TRAINING_ENTRYPOINT:
         raise SpeculativeDecodingConfigError(f"{context}.training is not supported by entrypoint {entrypoint!r}")
     if config.training is not None and num_inference_engines != 1:
-        raise SpeculativeDecodingConfigError(f"{context}.training initially requires generator.num_inference_engines=1")
+        raise SpeculativeDecodingConfigError(f"{context}.training requires generator.num_inference_engines=1")
     if config.training is not None and tensor_parallel_size != 1:
         raise SpeculativeDecodingConfigError(
-            f"{context}.training initially requires generator.inference_engine_tensor_parallel_size=1"
+            f"{context}.training requires generator.inference_engine_tensor_parallel_size=1"
         )
     if config.training is not None and pipeline_parallel_size != 1:
         raise SpeculativeDecodingConfigError(
-            f"{context}.training initially requires generator.inference_engine_pipeline_parallel_size=1"
+            f"{context}.training requires generator.inference_engine_pipeline_parallel_size=1"
         )
     if config.training is not None and (engine_init_kwargs or {}).get("async_scheduling", False):
         raise SpeculativeDecodingConfigError(f"{context}.training does not support vLLM async_scheduling")

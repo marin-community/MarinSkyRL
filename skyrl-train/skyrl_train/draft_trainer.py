@@ -217,14 +217,14 @@ class DraftTrainer:
         )
         try:
             result = run_training_job(job)
-        except BaseException as error:
+        except Exception as error:
             failure_dir = None
             preservation_error = None
             try:
                 failure_dir = preserve_online_eagle_failure(job, error)
                 published = publish_online_eagle_failure_bundle(failure_dir, job.failure_artifact_path)
                 failure_artifact_path = published["path"]
-            except BaseException as failure_error:
+            except Exception as failure_error:
                 failure_artifact_path = job.failure_artifact_path
                 preservation_error = f"{type(failure_error).__name__}: {failure_error}"
             result = OnlineEagleUpdateResult(

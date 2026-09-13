@@ -2,9 +2,9 @@
 # PP2 x EP8 Megatron nodes; one DP8/EP8 vLLM node serves while a dedicated
 # DraftTrainer actor runs on the extra node derived by the Iris request builder.
 # The exact target revision is supplied to the launcher, while the immutable
-# public draft is staged from Hugging Face. This qualification configuration
-# requires one finite draft decision after every policy update; candidates that
-# pass the holdout gate are installed, while quality rejections retain the incumbent.
+# public draft is staged from Hugging Face. Draft updates are submitted at the
+# configured interval, polled at later policy boundaries, and skipped while one
+# is pending. Candidates that pass the holdout gate replace the served draft.
 entrypoint: standard
 
 context_budget:

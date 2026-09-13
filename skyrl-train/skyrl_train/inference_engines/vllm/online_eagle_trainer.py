@@ -1141,7 +1141,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
     weighted_train_loss = 0.0
     train_loss_tokens = 0.0
     model.train()
-    for _epoch in range(training.epochs_per_update):
+    for epoch in range(training.epochs_per_update):
         epoch_windows = list(train_windows)
         random.shuffle(epoch_windows)
         packed_windows = _pack_windows(
@@ -1180,7 +1180,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
                         {
                             "kind": "online_eagle_microbatch",
                             "step": job.step,
-                            "epoch": _epoch,
+                            "epoch": epoch,
                             "group": group_index,
                             "request_id": window["request_id"],
                             "path": str(path),
@@ -1204,7 +1204,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
                     {
                         "kind": "online_eagle_optimizer_step",
                         "step": job.step,
-                        "epoch": _epoch,
+                        "epoch": epoch,
                         "group": group_index,
                         "supervised_tokens": group_supervised_tokens,
                         "gradient_norm": float(gradient_norm),
