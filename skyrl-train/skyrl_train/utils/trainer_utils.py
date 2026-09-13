@@ -22,6 +22,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
 )
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
+from skyrl_train.trajectory_runners.context_distillation import CONTEXT_DISTILLATION_ROW_KEYS
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     REWARD_SHAPING_ROW_KEYS,
     refresh_trajectory_reward_shaping_metrics,
@@ -403,7 +404,7 @@ def handle_replace_sampling(
 
             if trajectory_batch["rollout_logprobs"]:
                 trajectory_batch["rollout_logprobs"][bad_idx] = trajectory_batch["rollout_logprobs"][replacement_idx]
-            for key in REWARD_SHAPING_ROW_KEYS:
+            for key in REWARD_SHAPING_ROW_KEYS + CONTEXT_DISTILLATION_ROW_KEYS:
                 if trajectory_batch.get(key) is not None:
                     trajectory_batch[key][bad_idx] = deepcopy(trajectory_batch[key][replacement_idx])
 

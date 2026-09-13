@@ -47,6 +47,13 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     _sentinel_routed_experts_row,
     SENTINEL_EXPERT_ID,
 )
+from skyrl_train.trajectory_runners.context_distillation import (
+    ContextDistillationConfig,
+    ContextEdit,
+    ContextEditError,
+    context_distillation_batch_fields,
+    strip_guidance_suffix,
+)
 from skyrl_train.utils.reward_shaping import (
     ParsedTestResult,
     parse_test_output_with_parser,
@@ -252,6 +259,10 @@ class TerminalBenchAgentOutput:
     # mask over exactly these spans and leaves the rest of the trajectory trainable.
     truncated_turn_spans: Optional[List[Tuple[int, int]]] = None
     error_treatment: str | None = None
+    # Context distillation: the served prompt ids when the guidance span was removed from
+    # evidence.prompt_token_ids (None otherwise), and the edit outcome for the batch counters.
+    rollout_prompt_token_ids: Optional[List[int]] = None
+    context_edit: Optional[ContextEdit] = None
 
 
 def _failed_agent_output(
@@ -340,6 +351,7 @@ def _clear_failed_trajectory(output: TerminalBenchAgentOutput) -> None:
     output.loss_mask = [0]
     output.response_span_tags = None
     output.alignment_stats = None
+    output.rollout_prompt_token_ids = None
     output.truncation_penalized = False
     output.reward_result = _zero_reward()
     if output.disposition.loss_eligible:
@@ -361,6 +373,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         rollout_logprobs_required: bool = False,
         tito_full: Optional[bool] = None,
         tis_splice: bool = True,
+        context_distillation: Optional[ContextDistillationConfig] = None,
     ):
         """
         Args:
@@ -375,6 +388,8 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 behavior-policy logprobs. Full-TITO rollout assembly defaults to this.
             tito_full: ``trainer.algorithm.tito_full`` — opt into full TITO when the
                 selected objective does not already require behavior logprobs.
+            context_distillation: ``trainer.algorithm.context_distillation`` — train on the
+                first user message with its guidance span removed. None means off.
         """
         self.base_url = f"http://{trajectory_runner_cfg.http_endpoint_host}:{trajectory_runner_cfg.http_endpoint_port}"
         # Native controller-ingress for CLI-agent literal capture: when the runner stood up
@@ -430,6 +445,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         self._tito_full = tito_full
         self._tis_splice = tis_splice
         self._tis_lcs_alert_threshold = tis_lcs_alert_threshold
+        self._context_distillation = context_distillation or ContextDistillationConfig.disabled()
 
         # Core terminal bench config
         self.trials_dir = terminal_bench_cfg.trials_dir
@@ -1141,7 +1157,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             # excluded from the RLOO-N baseline) and emit an error output, exactly
             # like the orchestrator/exception paths above.
             try:
-                output = self._process_trial_result(result, trajectory_id)
+                output = self._process_trial_result(result, trajectory_id, is_eval=is_eval)
             except Exception as process_error:
                 treatment, exception_type = self._classify_exception(process_error)
                 # A processing-time render error has no verifier reward to pass
@@ -1493,6 +1509,13 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         if actual_global_step is None:
             actual_global_step = entry_global_step
 
+        # Context distillation: the served prompt per sample and the edit flag, plus the
+        # per-batch counters (summed across groups by concatenate_trajectory_batches).
+        context_fields: Dict[str, List[Any]] = {}
+        if self._context_distillation.enabled and not is_eval:
+            context_fields, context_counts = context_distillation_batch_fields(all_outputs)
+            rollout_metrics.update(context_counts)
+
         trajectory_batch: TrajectoryBatch = {
             "prompt_token_ids": [list(output.evidence.prompt_token_ids) for output in all_outputs],
             "response_ids": [list(output.evidence.response_token_ids) for output in all_outputs],
@@ -1506,6 +1529,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "actual_global_step": actual_global_step,
         }
         attach_terminal_classifications(trajectory_batch, all_outputs)
+        trajectory_batch.update(context_fields)
         if self._reward_shaping_enabled:
             trajectory_batch["verifier_tests"] = [output.verifier_tests for output in all_outputs]
 
@@ -1883,10 +1907,53 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 metrics[f"{IDENTITY_AWARE_REWARD_METRIC_PREFIX}/zero_informative_groups"] += 1
         return metrics
 
+    def _tokenize_prompt(self, messages: List[Dict[str, Any]]) -> List[int]:
+        return normalize_token_ids(
+            self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=False,
+                tokenize=True,
+                chat_template=self.custom_chat_template_content,
+                **(self._chat_template_kwargs or {}),
+            )
+        )
+
+    def _training_context_prompt(
+        self,
+        rollout_prompt_ids: List[int],
+        system_msgs: List[Dict[str, Any]],
+        first_user_message: Dict[str, Any],
+        *,
+        is_eval: bool,
+    ) -> Tuple[List[int], Optional[List[int]], Optional[ContextEdit]]:
+        """``(training prompt ids, served prompt ids or None, edit)`` for one trajectory.
+
+        Off, or during evaluation, the served prompt is the training prompt. When the guidance
+        span is stripped the training prompt is re-tokenized from the edited text and the served
+        ids ride along for the rollout-context forwards. A failed edit is reported for masking
+        (``on_failure: mask``) or raised (``error``); an absent marker is an unprompted rollout.
+        """
+        config = self._context_distillation
+        if not config.enabled or is_eval:
+            return rollout_prompt_ids, None, None
+        content = first_user_message.get("content")
+        if not isinstance(content, str):
+            return rollout_prompt_ids, None, None
+        edit = strip_guidance_suffix(content, config.start_marker, config.end_marker)
+        if edit.failed and config.on_failure == "error":
+            raise ContextEditError(f"context distillation could not isolate the guidance span: {edit.status}")
+        if not edit.stripped:
+            return rollout_prompt_ids, None, edit
+        edited_message = dict(first_user_message)
+        edited_message["content"] = edit.text
+        return self._tokenize_prompt(system_msgs + [edited_message]), rollout_prompt_ids, edit
+
     def _process_trial_result(
         self,
         result: TrialResult | Exception,
         trajectory_id: TrajectoryID,
+        *,
+        is_eval: bool = False,
     ) -> TerminalBenchAgentOutput:
         """
         Process a TrialResult from QueueOrchestrator into TerminalBenchAgentOutput.
@@ -2131,18 +2198,15 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             )
 
         # Process successful trial
-        # Prompt = system messages (if any) + first user message
-        prompt = system_msgs + [conversation[0]]
-        prompt_ids = normalize_token_ids(
-            self.tokenizer.apply_chat_template(
-                prompt,
-                add_generation_prompt=False,
-                tokenize=True,
-                chat_template=self.custom_chat_template_content,
-                **(self._chat_template_kwargs or {}),
-            )
-        )
+        # Prompt = system messages (if any) + first user message: the prompt the engine served
+        # (rollout context). Its length sets the response budget below.
+        prompt_ids = self._tokenize_prompt(system_msgs + [conversation[0]])
         initial_prompt_length = len(prompt_ids)
+        # Context distillation: the trainer's prompt is the first user message with its
+        # guidance span removed; the served prompt rides along for the rollout-context forwards.
+        training_prompt_ids, rollout_prompt_ids, context_edit = self._training_context_prompt(
+            prompt_ids, system_msgs, conversation[0], is_eval=is_eval
+        )
 
         # Process response messages (everything after the first message)
         response_messages = conversation[1:]
@@ -2352,7 +2416,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         evidence = _rollout_evidence_from_harbor(
             chat_history=chat_history,
             stop_reason=stop_reason,
-            prompt_ids=prompt_ids,
+            prompt_ids=training_prompt_ids,
             response_ids=response_ids,
             loss_mask=loss_mask,
             rollout_logprobs=rollout_logprobs,
@@ -2370,6 +2434,14 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             preserve_exception_type=preserve_exception_type,
             terminal_exception_type=terminal_exception_type,
         )
+        if context_edit is not None and context_edit.failed:
+            # on_failure=mask: the sample keeps its reward in the group baseline but gets no
+            # gradient, since training it under the served prompt would be prompt-dependent.
+            disposition = replace(
+                disposition,
+                loss_eligible=False,
+                reason=f"context distillation: guidance span not isolable ({context_edit.status})",
+            )
         return TerminalBenchAgentOutput(
             evidence=evidence,
             verification=verification,
@@ -2385,4 +2457,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             turn_truncated=bool(turn_truncated),
             truncated_turn_spans=capped_turn_spans or None,
             error_treatment=None if terminal_error_treatment is None else terminal_error_treatment.value,
+            rollout_prompt_token_ids=rollout_prompt_ids,
+            context_edit=context_edit,
         )

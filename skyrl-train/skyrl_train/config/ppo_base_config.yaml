@@ -215,6 +215,17 @@ trainer:
     tito_full: null
     tis_splice: true
     tis_lcs_alert_threshold: 0.005
+    # Context distillation (P²O, arXiv 2603.21877): rollouts carry a guidance suffix in the first
+    # user message; training removes the span [start_marker, end_marker) before tokenizing the
+    # prompt so the gradient conditions on the bare task. Behaviour logprobs are re-based so TIS
+    # keeps correcting engine-vs-trainer mismatch only. skyrl_train/trajectory_runners/context_distillation.py
+    context_distillation:
+      enabled: false
+      start_marker: "\n\n---\nWorking guidance:\n"
+      end_marker: "\n\nCurrent terminal state:"
+      on_failure: mask  # mask | error: a sample whose start marker is present but the span cannot be isolated
+      tis_reference: rollout  # rollout | none: behaviour-logprob reference context for edited samples
+      kl_reference: rollout  # rollout | training: frozen-reference (KL) context for edited samples
     enable_token_reward_channel: false
     think_token_weight: 1.0
     think_token_cost: 0.0

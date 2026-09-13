@@ -11,6 +11,7 @@ from transformers import PreTrainedTokenizerBase
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink
+from skyrl_train.trajectory_runners.context_distillation import ContextDistillationConfig
 
 
 class HarborRunner(Protocol):
@@ -117,6 +118,7 @@ class HarborRunnerSpec:
             tito_full=algorithm.get("tito_full", None),
             tis_splice=bool(algorithm.tis_splice),
             tis_lcs_alert_threshold=float(algorithm.tis_lcs_alert_threshold),
+            context_distillation=ContextDistillationConfig.from_algorithm_config(algorithm),
         )
 
 

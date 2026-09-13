@@ -98,6 +98,18 @@ from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
 )
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.trajectory_runners.context_distillation import (
+    CONTEXT_EDITED_KEY,
+    ROLLOUT_PROMPT_TOKEN_IDS_KEY,
+    ContextDistillationConfig,
+)
+from skyrl_train.utils.context_distillation import (
+    CONTEXT_EDITED_TENSOR_KEY,
+    apply_context_distillation_references,
+    attach_rollout_context,
+    build_rollout_context_tensors,
+    rollout_context_forward_batch,
+)
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks import (
@@ -1310,6 +1322,17 @@ class RayPPOTrainer:
         )
         if loop_advantages_tensor is not None:
             training_input["loop_advantages"] = loop_advantages_tensor
+        # Context distillation: the same responses behind the served prompts, for the
+        # rollout-context forwards of the logprob phase. Attached only when the runner shipped
+        # them, so the flag-off batch keeps its key set.
+        rollout_prompt_ids = trajectory_batch.get(ROLLOUT_PROMPT_TOKEN_IDS_KEY)
+        if rollout_prompt_ids is not None:
+            rollout_sequences, rollout_attention_mask = build_rollout_context_tensors(
+                self.tokenizer, rollout_prompt_ids, response_ids, rewards, loss_masks, response_masks_tensor
+            )
+            attach_rollout_context(
+                training_input, rollout_sequences, rollout_attention_mask, trajectory_batch[CONTEXT_EDITED_KEY]
+            )
         training_input.metadata = {"uids": uids}
         # For RLOO-N: pass through exclude_from_baseline flags if present
         if trajectory_batch.get("exclude_from_baseline") is not None:
@@ -1750,6 +1773,9 @@ class RayPPOTrainer:
                 elif key == "loss_mask":
                     # ensures that padding tensors don't count towards the loss
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                elif key == CONTEXT_EDITED_TENSOR_KEY:
+                    # padded rows carry no edit, so the rollout-context forward and shift metrics skip them
+                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
                 else:
                     # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
                     # `pad_size` is guaranteed to be smaller than batch_size
@@ -1808,10 +1834,31 @@ class RayPPOTrainer:
             fwd_keys.append("rollout_routed_experts")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
         data_fwd_pass.metadata["global_step"] = self.global_step
+        # Context distillation: edited rows also need forwards under the served (rollout)
+        # context. The frozen reference takes it when kl_reference=rollout; the policy takes it
+        # when tis_reference=rollout, as the behaviour-logprob reference. Absent when the batch
+        # carries no edited row.
+        context_distillation = ContextDistillationConfig.from_algorithm_config(self.cfg.trainer.algorithm)
+        rollout_context_fwd_pass = rollout_context_forward_batch(training_input, data_fwd_pass)
+        ref_fwd_pass = (
+            rollout_context_fwd_pass
+            if rollout_context_fwd_pass is not None and context_distillation.reference_uses_rollout_context
+            else data_fwd_pass
+        )
+        policy_rollout_context_fwd_pass = (
+            rollout_context_fwd_pass if context_distillation.rollout_context_forward_needed else None
+        )
+        rollout_context_log_probs = None
 
         def collect_results(actor_infos, results, key):
             ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_infos, results)
             return ret_outputs[key]
+
+        def policy_rollout_context_forward():
+            # Dispatched after the training-context forward has been gathered, so the two
+            # forwards reach every policy rank in the same order.
+            refs = self.policy_model.async_run_ray_method("mesh", "forward", data=policy_rollout_context_fwd_pass)
+            return collect_results(self.policy_model.actor_infos, ray.get(refs), key="output")
 
         base_log_probs = None
         action_log_probs = None
@@ -1833,7 +1880,7 @@ class RayPPOTrainer:
             if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
                 self.ref_model.backload_to_gpu()
 
-            base_action_log_probs_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
+            base_action_log_probs_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=ref_fwd_pass)
 
         if self.ref_model is not None:
             # handle colocate policy and ref model
@@ -1853,6 +1900,8 @@ class RayPPOTrainer:
         if self.colocate_all:
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
+            if policy_rollout_context_fwd_pass is not None:
+                rollout_context_log_probs = policy_rollout_context_forward()
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # wait all models done
@@ -1876,6 +1925,8 @@ class RayPPOTrainer:
 
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
+            if policy_rollout_context_fwd_pass is not None:
+                rollout_context_log_probs = policy_rollout_context_forward()
 
         if not self.colocate_all:
             empty_cache_refs = self.policy_model.async_run_ray_method("pass_through", "empty_cache")
@@ -1890,10 +1941,23 @@ class RayPPOTrainer:
         base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
         action_log_probs = action_log_probs[: len(sequences_all)]
         values = values[: len(sequences_all)] if values is not None else None
+        if rollout_context_log_probs is not None:
+            rollout_context_log_probs = rollout_context_log_probs[: len(sequences_all)]
 
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
+        # Context distillation: fold the deliberate context shift out of the behaviour
+        # logprobs of edited rows (so the diagnostic below and the TIS weight see only the
+        # engine-vs-trainer mismatch), report the shift, and drop the rollout-context tensors.
+        self.all_metrics.update(
+            apply_context_distillation_references(
+                training_input,
+                training_context_logprobs=action_log_probs,
+                rollout_context_logprobs=rollout_context_log_probs,
+                config=context_distillation,
+            )
+        )
 
         if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
             # calculates the difference in probs between inference and trainer components

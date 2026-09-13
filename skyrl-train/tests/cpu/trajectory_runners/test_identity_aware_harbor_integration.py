@@ -12,6 +12,7 @@ except ImportError:
 
 from harbor.verifier.verifier import VerifierOutputParseError
 from skyrl_train.metric_names import IDENTITY_AWARE_REWARD_METRIC_PREFIX
+from skyrl_train.trajectory_runners.context_distillation import ContextDistillationConfig
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
 
@@ -60,6 +61,7 @@ def _trial_runner() -> HarborTrajectoryRunner:
     runner._moe_router_replay = False
     runner._tito_full = None
     runner._tis_splice = True
+    runner._context_distillation = ContextDistillationConfig.disabled()
     runner._truncation_penalty = 0.0
     runner._enable_token_reward_channel = False
     runner._chat_template_kwargs = {}

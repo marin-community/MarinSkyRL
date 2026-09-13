@@ -16,3 +16,11 @@ TIS_TITO_FULL_ATTEMPTS_METRIC = "generate/tis/tito_full/attempts"
 TIS_TITO_FULL_SUCCESS_FRACTION_METRIC = "generate/tis/tito_full/success_fraction"
 TIS_TITO_FULL_DECLINE_COUNT_METRIC = "generate/tis/tito_full/decline_count"
 TIS_TITO_FULL_DECLINE_METRIC_PREFIX = "generate/tis/tito_full/decline/"
+
+# Context distillation (trainer.algorithm.context_distillation): per-batch counts from the
+# runner, summed across groups by concatenate_trajectory_batches.
+CONTEXT_DISTILLATION_METRIC_PREFIX = "generate/context_distillation/"
+CONTEXT_DISTILLATION_EDITED_METRIC = CONTEXT_DISTILLATION_METRIC_PREFIX + "edited"
+CONTEXT_DISTILLATION_FAILED_METRIC = CONTEXT_DISTILLATION_METRIC_PREFIX + "failed"
+CONTEXT_DISTILLATION_ABSENT_METRIC = CONTEXT_DISTILLATION_METRIC_PREFIX + "absent"
+CONTEXT_DISTILLATION_REMOVED_TOKENS_METRIC = CONTEXT_DISTILLATION_METRIC_PREFIX + "removed_tokens"

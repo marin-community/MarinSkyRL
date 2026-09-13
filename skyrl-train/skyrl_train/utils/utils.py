@@ -27,6 +27,7 @@ from skyrl_train.callbacks.types import (
 from skyrl_train.distributed_debug import apply_distributed_debug_mode
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
+from skyrl_train.trajectory_runners.context_distillation import ContextDistillationConfig
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, EnvVarManager, EnvVarScope, write_process_manifest
 from skyrl_train.group_admission import resolve_group_advantage_invariant
@@ -610,6 +611,14 @@ def validate_cfg(cfg: DictConfig):
     ):
         raise ValueError(
             f"GSPO requires trainer.algorithm.loss_reduction=sequence_mean; got {cfg.trainer.algorithm.loss_reduction}"
+        )
+    # Context distillation validates its own enum choices; it edits trajectory-level Harbor
+    # batches, which step-wise training does not build.
+    context_distillation = ContextDistillationConfig.from_algorithm_config(cfg.trainer.algorithm)
+    if context_distillation.enabled and bool(cfg.trainer.get("step_wise_training", False)):
+        raise ValueError(
+            "trainer.algorithm.context_distillation.enabled=true requires trajectory-level batches; "
+            "it is not implemented for trainer.step_wise_training=true"
         )
     runtime_values = {
         "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,

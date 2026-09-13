@@ -6,7 +6,7 @@ import pickle
 from typing import Any, Dict, Generic, Iterator, List, Optional, TypeVar, TypedDict
 
 import torch
-from jaxtyping import Float, Integer
+from jaxtyping import Bool, Float, Integer
 
 from skyrl_train.dataset.replay_buffer import Experience
 
@@ -376,6 +376,12 @@ class TrainingInput(TypedDict, total=False):
     # {OTHER=0, THINK=1, ACTION=2, EDIT=3}, aligned 1:1 with the response tokens
     # (same exact-token-id layout TIS uses). Present only when the channel is on.
     response_span_tags: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
+    # Context distillation: the same responses behind the served (guidance-bearing) prompts,
+    # and the per-row edit flag. Present between batch conversion and the end of the logprob
+    # phase only; the training dispatch never carries them.
+    rollout_sequences: Optional[Integer[torch.Tensor, "batch_size rollout_seq_len"]]
+    rollout_attention_mask: Optional[Integer[torch.Tensor, "batch_size rollout_seq_len"]]
+    context_edited: Optional[Bool[torch.Tensor, "batch_size"]]
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):

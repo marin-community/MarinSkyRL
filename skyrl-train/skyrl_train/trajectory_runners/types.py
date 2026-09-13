@@ -111,3 +111,7 @@ class TrajectoryBatch(TypedDict):
     is_last_step: Optional[List[bool]]
     exclude_from_baseline: Optional[List[bool]]
     actual_global_step: Optional[int]
+    # Context distillation: the served prompt per sample and whether its guidance span was
+    # removed from prompt_token_ids. Present only when the feature is on.
+    rollout_prompt_token_ids: Optional[List[List[int]]]
+    context_edited: Optional[List[bool]]
