@@ -138,7 +138,7 @@ class MegatronModelWrapper:
 
     def _token_entropies(self, logits: torch.Tensor, attention_mask: torch.Tensor, packed_seq_params) -> torch.Tensor:
         """Compute entropy before reconstructing only scalar token values."""
-        token_entropies = vocab_parallel_entropy(logits)
+        token_entropies = vocab_parallel_entropy(logits, chunk_size=self._logprob_chunk_size)
         if self.use_sample_packing:
             if packed_seq_params is None:
                 raise ValueError("Packed sequence parameters are required when sample packing is enabled.")
