@@ -1,7 +1,6 @@
 # Paths are relative to the MarinSkyRL checkout and are copied into each Iris task workspace.
 cloud/iris/__init__.py
 cloud/iris/artifacts.py
-cloud/iris/env_vars.py
 cloud/iris/extract_tasks_from_parquet.py
 cloud/iris/hf_datasets.py
 cloud/iris/ingress_utils.py
@@ -23,7 +22,9 @@ marinskyrl/harbor_agent_names.py
 marinskyrl/hf_model.py
 marinskyrl/iris_harbor_environment.py
 marinskyrl/packed_tasks.py
+marinskyrl/process_diagnostics.py
 marinskyrl/resource_locator.py
+marinskyrl/environment_contract.py
 marinskyrl/runtime_options.py
 marinskyrl/task_sources.py
 chat_templates/delphi_v0.jinja2

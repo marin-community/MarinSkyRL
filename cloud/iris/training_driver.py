@@ -48,6 +48,7 @@ from cloud.iris.rl_data import (
     resolve_rl_train_data_with_sources,
 )
 from cloud.iris.storage_policy import hydra_override_value
+from marinskyrl.process_diagnostics import ProcessOutcomeKind, write_process_outcome
 from marinskyrl.resource_locator import model_source_for_path
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT
 
@@ -532,7 +533,21 @@ class LocalRLRunner:
 
         proc = subprocess.Popen(cmd, cwd=cwd)
         self._processes.append(proc)
-        return proc.wait()
+        returncode = proc.wait()
+        outcome, receipt = write_process_outcome(
+            "skyrl-entrypoint",
+            returncode,
+            pid=proc.pid,
+            metadata={"entrypoint": entrypoint},
+        )
+        if outcome.kind is ProcessOutcomeKind.SIGNAL:
+            print(
+                f"SkyRL entrypoint pid={proc.pid} terminated by {outcome.signal_name} "
+                f"(raw_returncode={returncode}, exit_code={outcome.public_exit_code}, receipt={receipt})",
+                file=sys.stderr,
+                flush=True,
+            )
+        return outcome.public_exit_code
 
 
 @dataclass

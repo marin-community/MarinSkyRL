@@ -14,9 +14,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from cloud.iris.env_vars import ENV_VAR_SPECS  # noqa: E402
+from marinskyrl.environment_contract import ENV_VAR_SPECS  # noqa: E402
 
-MANAGER_PATH = Path("cloud/iris/env_vars.py")
+MANAGER_PATH = Path("marinskyrl/environment_contract.py")
 EXCLUDED_PARTS = {".agents", ".git", ".venv", "__pycache__", "skyrl-agent", "tests"}
 ENV_MAPPING_NAMES = {"env", "env_vars", "environ", "environment", "extra_env", "runtime_env"}
 UPPER_NAME = re.compile(r"^[A-Z][A-Z0-9_]+$")
@@ -200,7 +200,7 @@ def main() -> int:
     errors = contract_errors(definitions(), ENV_VAR_SPECS)
     if not errors:
         return 0
-    print("Environment-variable definitions violate cloud.iris.env_vars ownership:")
+    print("Environment-variable definitions violate marinskyrl.environment_contract ownership:")
     for error in errors:
         print(f"  {error}")
     return 1
