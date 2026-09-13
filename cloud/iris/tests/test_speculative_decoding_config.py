@@ -86,6 +86,7 @@ def test_managed_speculator_reaches_hydra_with_immutable_source_unchanged(tmp_pa
     }
     assert resolved.training is not None
     assert resolved.training.interval_steps == 1
+    assert resolved.training.max_candidate_staleness_steps == 2
     assert resolved.training.max_tokens_per_update == 16_384
     assert resolved.training.min_train_sequences == 6
     assert resolved.training.min_holdout_sequences == 3
@@ -201,6 +202,7 @@ def test_raw_vllm_speculative_config_is_reserved(tmp_path: Path) -> None:
     ("field", "value"),
     [
         ("interval_steps", 0),
+        ("max_candidate_staleness_steps", -1),
         ("max_window_tokens", 0),
         ("max_tokens_per_micro_batch", 0),
         ("holdout_fraction", 1),

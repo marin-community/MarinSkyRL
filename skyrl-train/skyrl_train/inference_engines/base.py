@@ -105,6 +105,12 @@ class InferenceEngineInterface(ABC):
     ):
         raise NotImplementedError()
 
+    async def init_draft_transfer_communicator(
+        self, master_addr, master_port, rank_offset, world_size, group_name, backend
+    ) -> Any:
+        """Join a persistent DraftTrainer-to-serving transfer group."""
+        raise NotImplementedError()
+
     @abstractmethod
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         raise NotImplementedError()
@@ -155,15 +161,16 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     async def export_online_eagle_capture(self, job: Dict[str, Any]) -> Any:
-        """Move a sealed capture into transport shared with DraftTrainer."""
+        """Return a metadata-only catalog for a sealed capture."""
+        raise NotImplementedError()
+
+    async def transfer_online_eagle_capture(self, transfer_plan: Dict[str, Any]) -> Any:
+        """Send selected capture tensors directly to DraftTrainer."""
         raise NotImplementedError()
 
     async def stage_online_eagle_speculator(
         self,
-        candidate_bundle: Dict[str, Any],
-        candidate_dir: str,
-        draft_revision: str,
-        weights_sha256: str,
+        transfer_manifest: Dict[str, Any],
         incumbent_draft_revision: str,
     ) -> Any:
         """Validate a candidate on the serving node without activating it."""
@@ -171,9 +178,7 @@ class InferenceEngineInterface(ABC):
 
     async def activate_online_eagle_speculator(
         self,
-        candidate_dir: str,
-        draft_revision: str,
-        weights_sha256: str,
+        transfer_manifest: Dict[str, Any],
     ) -> Any:
         """Activate the staged candidate on every rank."""
         raise NotImplementedError()

@@ -6,114 +6,79 @@ from pathlib import Path
 import shutil
 
 import pytest
+from safetensors.torch import load_file
+import torch
 
 import skyrl_train.draft_trainer as draft_trainer_module
 from skyrl_train.draft_trainer import (
-    DIRECTORY_BUNDLE_FORMAT,
     DraftTrainer,
-    bundle_directory_for_ray,
-    materialize_ray_directory_bundle,
-    validate_materialized_bundle,
 )
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import OnlineEagleUpdateResult
 
 
-def _identity(value):
-    return value
-
-
-def test_ray_directory_bundle_round_trips_in_bounded_chunks(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "manifest.json").write_text('{"complete":true}')
-    (source / "nested").mkdir()
-    (source / "nested" / "weights.bin").write_bytes(b"0123456789")
-
-    bundle = bundle_directory_for_ray(source, put=_identity, chunk_bytes=4)
-    destination = tmp_path / "destination"
-    materialize_ray_directory_bundle(bundle, destination, get=_identity)
-
-    assert bundle["format"] == DIRECTORY_BUNDLE_FORMAT
-    assert [chunk["bytes"] for chunk in bundle["files"][1]["chunks"]] == [4, 4, 2]
-    assert (destination / "manifest.json").read_text() == '{"complete":true}'
-    assert (destination / "nested" / "weights.bin").read_bytes() == b"0123456789"
-    validate_materialized_bundle(bundle, destination)
-
-
-def test_ray_directory_bundle_rejects_path_traversal_atomically(tmp_path: Path) -> None:
-    bundle = {
-        "format": DIRECTORY_BUNDLE_FORMAT,
+def test_draft_trainer_materializes_direct_capture_transfer(tmp_path: Path, monkeypatch) -> None:
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    trainer = DraftTrainer(
+        initial_draft_dir=str(initial),
+        initial_draft_revision="draft-initial",
+        process_id="process",
+    )
+    trainer._draft_transfer_group = object()
+    received = {
+        "window-000000.safetensors::input_ids": torch.tensor([1, 2, 3]),
+        "target.safetensors::model.embed_tokens.weight": torch.ones(2, 2),
+        "target.safetensors::lm_head.weight": torch.ones(2, 2),
+    }
+    monkeypatch.setattr(draft_trainer_module, "transfer_tensor_operations", lambda *_args, **_kwargs: received)
+    plan = {
+        "format": "marinskyrl-online-eagle-capture-transfer",
         "format_version": 1,
-        "total_bytes": 1,
+        "total_bytes": 56,
+        "operations": [{"operation": "metadata-only"}],
         "files": [
             {
-                "path": "../escape",
-                "bytes": 1,
-                "sha256": "unused",
-                "chunks": [{"bytes": 1, "sha256": "unused", "object_ref": b"x"}],
-            }
+                "destination_path": "window-000000.safetensors",
+                "tensors": [{"name": "input_ids"}],
+            },
+            {
+                "destination_path": "target.safetensors",
+                "tensors": [{"name": "lm_head.weight"}, {"name": "model.embed_tokens.weight"}],
+            },
         ],
+        "target_config_json": '{"model_type":"test"}',
+        "capture_manifest": {
+            "windows": [{"path": "window-000000.safetensors", "sha256": "source"}],
+            "captured_rows": 3,
+            "dropped_windows": 0,
+            "oversized_windows": 0,
+            "unselected_windows": 0,
+            "target": {
+                "weights_path": "target.safetensors",
+                "weights_sha256": "source",
+                "config_path": "target-config.json",
+                "config_sha256": "source",
+            },
+        },
     }
-    destination = tmp_path / "destination"
 
-    with pytest.raises(ValueError, match="normalized relative path"):
-        materialize_ray_directory_bundle(bundle, destination, get=_identity)
+    result = trainer.receive_capture(plan, str(tmp_path / "process" / "step-4" / "merged"))
 
-    assert not destination.exists()
-    assert not (tmp_path / "escape").exists()
-    assert not list(tmp_path.glob(".destination.tmp-*"))
-
-
-def test_ray_directory_bundle_rejects_corrupt_chunk_atomically(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "weights.bin").write_bytes(b"correct")
-    bundle = bundle_directory_for_ray(source, put=_identity, chunk_bytes=4)
-    bundle["files"][0]["chunks"][0]["object_ref"] = b"wrong"
-    destination = tmp_path / "destination"
-
-    with pytest.raises(ValueError, match="chunk digest mismatch"):
-        materialize_ray_directory_bundle(bundle, destination, get=_identity)
-
-    assert not destination.exists()
-    assert not list(tmp_path.glob(".destination.tmp-*"))
-
-
-def test_ray_directory_bundle_refuses_to_overwrite_existing_destination(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "weights.bin").write_bytes(b"weights")
-    destination = tmp_path / "destination"
-    destination.mkdir()
-
-    with pytest.raises(FileExistsError, match="already exists"):
-        materialize_ray_directory_bundle(
-            bundle_directory_for_ray(source, put=_identity),
-            destination,
-            get=_identity,
-        )
-
-
-def test_ray_directory_bundle_excludes_private_trainer_state(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    (source / "model.safetensors").write_bytes(b"served")
-    (source / "trainer_state.pt").write_bytes(b"private")
-
-    bundle = bundle_directory_for_ray(
-        source,
-        put=_identity,
-        excluded_relative_paths={"trainer_state.pt"},
+    assert result["captured_rows"] == 3
+    assert result["transfer_bytes"] == 56
+    assert torch.equal(
+        load_file(Path(result["capture_dir"]) / "window-000000.safetensors")["input_ids"],
+        received["window-000000.safetensors::input_ids"],
     )
-
-    assert [item["path"] for item in bundle["files"]] == ["model.safetensors"]
 
 
 def _training_job(tmp_path: Path, *, step: int, parent_draft_revision: str) -> dict:
     candidate_dir = tmp_path / "process" / "candidates" / f"step-{step}"
+    capture_dir = tmp_path / "process" / f"step-{step}" / "merged"
+    capture_dir.mkdir(parents=True, exist_ok=True)
     return {
         "step": step,
-        "capture_dir": str(tmp_path / "process" / f"step-{step}" / "merged"),
+        "capture_dir": str(capture_dir),
         "draft_model_dir": str(tmp_path / "ignored-driver-path"),
         "initial_draft_source_identity": "hf://draft@revision",
         "parent_draft_revision": parent_draft_revision,
@@ -130,39 +95,44 @@ def _training_job(tmp_path: Path, *, step: int, parent_draft_revision: str) -> d
 def test_draft_trainer_owns_served_lineage_across_commit_and_rollback(tmp_path: Path, monkeypatch) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
+    runtime_initializations = []
     observed_draft_dirs = []
 
-    def materialize(_bundle, destination):
-        path = Path(destination)
-        path.mkdir(parents=True)
-        (path / "capture.bin").write_bytes(b"capture")
-        return path
+    class Runtime:
+        def __init__(self, job, capture_dir):
+            runtime_initializations.append((job.draft_model_dir, capture_dir))
 
-    def train(job):
-        observed_draft_dirs.append(job.draft_model_dir)
-        candidate = Path(job.output_dir)
-        candidate.mkdir(parents=True)
-        (candidate / "model.safetensors").write_bytes(b"weights")
-        return OnlineEagleUpdateResult(
-            active=True,
-            accepted=True,
-            step=job.step,
-            parent_draft_revision=job.parent_draft_revision,
-            trained_against_target_revision=job.target_revision,
-            trained_against_target_weights_sha256=job.target_weights_sha256,
-            candidate_dir=job.output_dir,
-            draft_revision=f"draft-step-{job.step}",
-            weights_sha256=f"draft-digest-{job.step}",
-        )
+        def update(self, job):
+            observed_draft_dirs.append(job.draft_model_dir)
+            candidate = Path(job.output_dir)
+            candidate.mkdir(parents=True)
+            (candidate / "model.safetensors").write_bytes(b"weights")
+            return OnlineEagleUpdateResult(
+                active=True,
+                accepted=True,
+                step=job.step,
+                parent_draft_revision=job.parent_draft_revision,
+                trained_against_target_revision=job.target_revision,
+                trained_against_target_weights_sha256=job.target_weights_sha256,
+                candidate_dir=job.output_dir,
+                draft_revision=f"draft-step-{job.step}",
+                weights_sha256=f"draft-digest-{job.step}",
+            )
 
-    monkeypatch.setattr(draft_trainer_module, "materialize_ray_directory_bundle", materialize)
-    monkeypatch.setattr(draft_trainer_module, "validate_materialized_bundle", lambda _bundle, _path: None)
-    monkeypatch.setattr(draft_trainer_module, "run_training_job", train)
+        def commit(self, _draft_revision):
+            return None
+
+        def rollback(self, _draft_revision):
+            return None
+
+    monkeypatch.setattr(draft_trainer_module, "OnlineEagleTrainerRuntime", Runtime)
     monkeypatch.setattr(
         draft_trainer_module,
-        "bundle_directory_for_ray",
-        lambda path, **_kwargs: {"path": str(path)},
+        "validate_online_eagle_serving_candidate",
+        lambda _path: {"weights_path": "model.safetensors"},
     )
+    candidate_tensors = {"draft.weight": torch.arange(4, dtype=torch.bfloat16).reshape(2, 2)}
+    monkeypatch.setattr(draft_trainer_module, "load_file", lambda _path: candidate_tensors)
     monkeypatch.setattr(
         draft_trainer_module,
         "remove_online_eagle_scratch",
@@ -181,15 +151,18 @@ def test_draft_trainer_owns_served_lineage_across_commit_and_rollback(tmp_path: 
         initial_draft_revision="draft-initial",
         process_id="process",
     )
-    first = trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-initial"), {})
-    assert first["candidate_bundle"] == {"path": str(tmp_path / "process" / "candidates" / "step-4")}
+    first = trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-initial"))
+    assert first["transfer_manifest"]["revision"] == "draft-step-4"
+    assert first["transfer_manifest"]["total_bytes"] == 8
+    assert "object_ref" not in repr(first["transfer_manifest"])
     trainer.commit("draft-step-4")
     trainer.publish(str(tmp_path / "published"), "draft-step-4", "policy-step-7")
 
-    second = trainer.update(_training_job(tmp_path, step=8, parent_draft_revision="draft-step-4"), {})
+    second = trainer.update(_training_job(tmp_path, step=8, parent_draft_revision="draft-step-4"))
     trainer.rollback("draft-step-8")
 
     assert observed_draft_dirs == [str(initial), str(tmp_path / "process" / "candidates" / "step-4")]
+    assert runtime_initializations == [(str(initial), tmp_path / "process" / "step-4" / "merged")]
     assert published == [
         (
             str(tmp_path / "process" / "candidates" / "step-4"),
@@ -216,26 +189,23 @@ def test_draft_trainer_rejects_parent_outside_its_served_lineage(tmp_path: Path)
     )
 
     with pytest.raises(RuntimeError, match="served lineage"):
-        trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-other"), {})
+        trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-other"))
 
 
 def test_draft_trainer_reports_training_failure_and_preserves_its_artifact(tmp_path: Path, monkeypatch) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
 
-    def materialize(_bundle, destination):
-        path = Path(destination)
-        path.mkdir(parents=True)
-        return path
-
     failure_dir = tmp_path / "preserved-failure"
-    monkeypatch.setattr(draft_trainer_module, "materialize_ray_directory_bundle", materialize)
-    monkeypatch.setattr(draft_trainer_module, "validate_materialized_bundle", lambda _bundle, _path: None)
-    monkeypatch.setattr(
-        draft_trainer_module,
-        "run_training_job",
-        lambda _job: (_ for _ in ()).throw(RuntimeError("training failed")),
-    )
+
+    class FailingRuntime:
+        def __init__(self, _job, _capture_dir):
+            pass
+
+        def update(self, _job):
+            raise RuntimeError("training failed")
+
+    monkeypatch.setattr(draft_trainer_module, "OnlineEagleTrainerRuntime", FailingRuntime)
     monkeypatch.setattr(
         draft_trainer_module,
         "preserve_online_eagle_failure",
@@ -253,9 +223,9 @@ def test_draft_trainer_reports_training_failure_and_preserves_its_artifact(tmp_p
         process_id="process",
     )
 
-    update = trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-initial"), {})
+    update = trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-initial"))
 
-    assert update["candidate_bundle"] is None
+    assert update["transfer_manifest"] is None
     assert update["result"] == {
         "active": True,
         "accepted": False,

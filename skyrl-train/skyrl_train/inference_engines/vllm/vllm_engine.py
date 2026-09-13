@@ -22,15 +22,18 @@ from skyrl_train.config.behavior_logprobs import (
     validate_behavior_logprob_sampling,
 )
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    catalog_online_eagle_capture,
     capture_rank_directory,
-    materialize_online_eagle_incumbent,
-    merge_online_eagle_captures,
     publish_speculator_checkpoint,
     remove_online_eagle_scratch,
     restore_speculator_checkpoint,
-    validate_online_eagle_serving_candidate,
 )
-from skyrl_train.draft_trainer import bundle_directory_for_ray, materialize_ray_directory_bundle
+from skyrl_train.distributed.tensor_transfer import (
+    TensorTransferOperation,
+    TensorTransferManifest,
+    broadcast_tensor_payload,
+    transfer_tensor_operations,
+)
 
 # vLLM 0.16+ reorganized entrypoints into sub-packages.
 # Try new paths first, fall back to old paths for backwards compatibility.
@@ -348,6 +351,14 @@ class WorkerWrap:
         if parallel_config.tensor_parallel_size != 1 or parallel_config.pipeline_parallel_size != 1:
             raise RuntimeError("Online EAGLE training requires vLLM tensor and pipeline parallel size 1")
         worker_rank = parallel_config.data_parallel_rank
+        transfer_workers = self._draft_transfer_world_size - 1
+        global_token_budget = int(resolved["max_tokens"])
+        if global_token_budget < transfer_workers:
+            raise ValueError("Online EAGLE capture token budget must cover every transfer rank")
+        worker_index = self._draft_transfer_rank - 1
+        token_credit, remainder = divmod(global_token_budget, transfer_workers)
+        resolved["max_tokens"] = token_credit + int(worker_index < remainder)
+        resolved["capture_target_snapshot"] = self._draft_transfer_rank == 1
         # The patched vLLM capture contract retains this wire name. It identifies
         # the rank that owns the local target snapshot, not the remote DraftTrainer.
         resolved["trainer_rank"] = worker_rank
@@ -363,14 +374,26 @@ class WorkerWrap:
                 f"on this {total_memory_gib:.2f} GiB device"
             )
         result = self.model_runner.begin_online_eagle_capture(resolved)
-        return {**result, "node_id": str(ray.get_runtime_context().get_node_id())}
+        return {
+            **result,
+            "node_id": str(ray.get_runtime_context().get_node_id()),
+            "transfer_rank": self._draft_transfer_rank,
+            "capture_token_credit": resolved["max_tokens"],
+        }
 
     def seal_online_eagle_capture(self, output_dir):
         """Seal verifier-state capture before policy weights are synchronized."""
         worker_rank = self.model_runner.parallel_config.data_parallel_rank
         rank_output_dir = str(capture_rank_directory(output_dir, worker_rank))
         result = self.model_runner.seal_online_eagle_capture(rank_output_dir)
-        return {**result, "node_id": str(ray.get_runtime_context().get_node_id())}
+        if result.get("active", False):
+            self._online_eagle_sealed_capture_root = output_dir
+            self._online_eagle_sealed_capture_dir = rank_output_dir
+        return {
+            **result,
+            "node_id": str(ray.get_runtime_context().get_node_id()),
+            "transfer_rank": self._draft_transfer_rank,
+        }
 
     def discard_online_eagle_capture(self):
         """Discard verifier-state capture after a failed rollout."""
@@ -381,6 +404,190 @@ class WorkerWrap:
         result = self.model_runner.install_online_eagle_speculator(candidate_dir, source_rank)
         if self.model_runner.parallel_config.data_parallel_rank == source_rank:
             self._online_eagle_served_candidate_dir = candidate_dir
+        return result
+
+    def init_draft_transfer_communicator(
+        self,
+        master_address,
+        master_port,
+        rank_offset,
+        world_size,
+        group_name,
+        backend="nccl",
+    ):
+        """Join the DraftTrainer's persistent candidate-transfer group."""
+        if getattr(self, "_draft_transfer_group", None) is not None:
+            raise RuntimeError("vLLM draft transfer group is already initialized")
+        rank = torch.distributed.get_rank() + rank_offset
+        self._draft_transfer_group = init_custom_process_group(
+            backend=backend,
+            init_method=get_tcp_url(master_address, master_port),
+            world_size=world_size,
+            rank=rank,
+            group_name=group_name,
+        )
+        self._draft_transfer_rank = rank
+        self._draft_transfer_world_size = world_size
+        return {"rank": rank, "world_size": world_size, "backend": backend}
+
+    def catalog_online_eagle_capture(self):
+        """Return checksummed tensor metadata for this rank's sealed capture."""
+        capture_root = getattr(self, "_online_eagle_sealed_capture_root", None)
+        if capture_root is None:
+            raise RuntimeError("vLLM worker has no sealed online EAGLE capture")
+        worker_rank = self.model_runner.parallel_config.data_parallel_rank
+        return catalog_online_eagle_capture(
+            capture_root,
+            worker_rank=worker_rank,
+            transfer_rank=self._draft_transfer_rank,
+        )
+
+    def transfer_online_eagle_capture(self, transfer_plan):
+        """Send only this rank's selected tensors directly to DraftTrainer."""
+        if getattr(self, "_draft_transfer_group", None) is None:
+            raise RuntimeError("vLLM draft transfer group is not initialized")
+        if transfer_plan.get("format") != "marinskyrl-online-eagle-capture-transfer":
+            raise ValueError("Unsupported online EAGLE capture transfer plan")
+        capture_dir = Path(self._online_eagle_sealed_capture_dir).resolve()
+        sources = {}
+        for file_entry in transfer_plan["files"]:
+            if int(file_entry["source_rank"]) != self._draft_transfer_rank:
+                continue
+            source_path = Path(file_entry["source_path"]).resolve()
+            if source_path.parent != capture_dir:
+                raise ValueError(f"Online EAGLE transfer source escaped this rank's capture: {source_path}")
+            for tensor in file_entry["tensors"]:
+                sources[f"{file_entry['destination_path']}::{tensor['name']}"] = (source_path, tensor["name"])
+        cached_path = None
+        cached_tensors = None
+
+        def provide(operation: TensorTransferOperation):
+            nonlocal cached_path, cached_tensors
+            source_path, tensor_name = sources[operation.key]
+            if cached_path != source_path:
+                from safetensors.torch import load_file
+
+                cached_path = source_path
+                cached_tensors = load_file(source_path)
+            return cached_tensors[tensor_name]
+
+        transfer_tensor_operations(
+            transfer_plan["operations"],
+            tensor_provider=provide if sources else None,
+            group=self._draft_transfer_group,
+            device=self.device,
+        )
+        remove_online_eagle_scratch(capture_dir)
+        self._online_eagle_sealed_capture_root = None
+        self._online_eagle_sealed_capture_dir = None
+        return {
+            "active": True,
+            "worker_rank": self.model_runner.parallel_config.data_parallel_rank,
+            "transfer_rank": self._draft_transfer_rank,
+            "sent_tensors": len(sources),
+        }
+
+    @staticmethod
+    def _online_eagle_transfer_metadata(manifest: TensorTransferManifest) -> dict[str, Any]:
+        return {
+            "draft_revision": manifest.revision,
+            "weights_sha256": manifest.payload_sha256,
+            "tensor_inventory": {
+                entry.name: {"shape": list(entry.shape), "dtype": entry.dtype} for entry in manifest.tensors
+            },
+        }
+
+    def stage_online_eagle_speculator(self, transfer_manifest, incumbent_draft_revision):
+        """Receive one candidate into checksummed pinned-host staging."""
+        if getattr(self, "_draft_transfer_group", None) is None:
+            raise RuntimeError("vLLM draft transfer group is not initialized")
+        if getattr(self, "_online_eagle_staged_tensors", None) is not None:
+            raise RuntimeError("A staged online EAGLE candidate has not been resolved")
+        manifest = TensorTransferManifest.from_mapping(transfer_manifest)
+        tensors = broadcast_tensor_payload(
+            transfer_manifest,
+            tensors=None,
+            group=self._draft_transfer_group,
+            device=self.device,
+        )
+        assert tensors is not None
+        self._online_eagle_staged_manifest = manifest.to_mapping()
+        self._online_eagle_staged_tensors = tensors
+        self._online_eagle_staged_incumbent_revision = incumbent_draft_revision
+        return {
+            "active": True,
+            "worker_rank": self.model_runner.parallel_config.data_parallel_rank,
+            "draft_revision": manifest.revision,
+            "source_weights_sha256": manifest.source_weights_sha256,
+            "payload_sha256": manifest.payload_sha256,
+            "total_bytes": manifest.total_bytes,
+        }
+
+    def activate_online_eagle_speculator(self, transfer_manifest):
+        """Install staged tensors in place while retaining a host rollback copy."""
+        manifest = TensorTransferManifest.from_mapping(transfer_manifest)
+        if self._online_eagle_staged_manifest != manifest.to_mapping():
+            raise RuntimeError(f"No staged online EAGLE candidate for {manifest.revision}")
+        staged = self._online_eagle_staged_tensors
+        incumbent_revision = self._online_eagle_staged_incumbent_revision
+        names = [entry.name for entry in manifest.tensors]
+        incumbent = self.model_runner.snapshot_online_eagle_speculator(names)
+        incumbent_manifest = TensorTransferManifest.from_tensors(
+            transfer_id=f"rollback-{manifest.transfer_id}",
+            revision=incumbent_revision,
+            source_weights_sha256=f"resident:{incumbent_revision}",
+            tensors=incumbent,
+        )
+        self._online_eagle_previous_manifest = incumbent_manifest.to_mapping()
+        self._online_eagle_previous_tensors = incumbent
+        try:
+            result = self.model_runner.install_online_eagle_speculator_tensors(
+                self._online_eagle_transfer_metadata(manifest),
+                staged,
+            )
+        except BaseException:
+            self.model_runner.install_online_eagle_speculator_tensors(
+                self._online_eagle_transfer_metadata(incumbent_manifest),
+                incumbent,
+            )
+            self._online_eagle_previous_manifest = None
+            self._online_eagle_previous_tensors = None
+            raise
+        self._online_eagle_active_transfer_manifest = manifest.to_mapping()
+        self._online_eagle_staged_manifest = None
+        self._online_eagle_staged_tensors = None
+        self._online_eagle_staged_incumbent_revision = None
+        return {**result, "transfer_rank": self._draft_transfer_rank}
+
+    def commit_online_eagle_speculator(self, draft_revision):
+        """Release the retained incumbent after global activation succeeds."""
+        active = TensorTransferManifest.from_mapping(self._online_eagle_active_transfer_manifest)
+        if active.revision != draft_revision:
+            raise RuntimeError(f"Online EAGLE active revision is not {draft_revision}")
+        self._online_eagle_previous_manifest = None
+        self._online_eagle_previous_tensors = None
+        return {"active": True, "worker_rank": self.model_runner.parallel_config.data_parallel_rank}
+
+    def rollback_online_eagle_speculator(self, draft_revision):
+        """Discard staged tensors or restore the retained incumbent in place."""
+        staged = getattr(self, "_online_eagle_staged_manifest", None)
+        active_value = getattr(self, "_online_eagle_active_transfer_manifest", None)
+        if active_value is None or TensorTransferManifest.from_mapping(active_value).revision != draft_revision:
+            self._online_eagle_staged_manifest = None
+            self._online_eagle_staged_tensors = None
+            self._online_eagle_staged_incumbent_revision = None
+            return {
+                "active": staged is not None,
+                "worker_rank": self.model_runner.parallel_config.data_parallel_rank,
+            }
+        previous_manifest = TensorTransferManifest.from_mapping(self._online_eagle_previous_manifest)
+        result = self.model_runner.install_online_eagle_speculator_tensors(
+            self._online_eagle_transfer_metadata(previous_manifest),
+            self._online_eagle_previous_tensors,
+        )
+        self._online_eagle_active_transfer_manifest = None
+        self._online_eagle_previous_manifest = None
+        self._online_eagle_previous_tensors = None
         return result
 
     def publish_online_eagle_speculator(
@@ -612,6 +819,10 @@ class WorkerWrap:
         model = self.model_runner.model
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             finalize_layerwise_reload(model, self.model_config)
+        if getattr(self, "_draft_transfer_group", None) is not None:
+            # Online EAGLE currently requires TP=PP=1, so the draft-vocabulary
+            # row projection is local and exact on every serving rank.
+            self.model_runner.refresh_online_eagle_target_owned_weights()
         self._skyrl_weight_update_active = False
 
     def begin_weight_update(self) -> None:
@@ -1295,6 +1506,16 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             engine.collective_rpc,
             "init_weight_update_communicator",
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
+        )
+
+    async def init_draft_transfer_communicator(
+        self, master_addr, master_port, rank_offset, world_size, group_name, backend
+    ):
+        """Join every local worker to the dedicated draft-transfer group."""
+        return await asyncio.to_thread(
+            self._get_engine().collective_rpc,
+            "init_draft_transfer_communicator",
+            args=(master_addr, master_port, rank_offset, world_size, group_name, backend),
         )
 
     async def _load_lora_from_disk(self, lora_path: str):
@@ -2046,6 +2267,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
         )
 
+    async def init_draft_transfer_communicator(
+        self, master_addr, master_port, rank_offset, world_size, group_name, backend
+    ):
+        """Join every local worker to the dedicated draft-transfer group."""
+        return await self._get_engine().collective_rpc(
+            "init_draft_transfer_communicator",
+            args=(master_addr, master_port, rank_offset, world_size, group_name, backend),
+        )
+
     async def begin_online_eagle_capture(self, config: Dict[str, Any]):
         """Begin bounded capture on every worker rank."""
         engine = self._get_engine()
@@ -2057,153 +2287,87 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await engine.collective_rpc("seal_online_eagle_capture", args=(output_dir,))
 
     async def export_online_eagle_capture(self, job: Dict[str, Any]):
-        """Merge local DP captures and hand them to DraftTrainer through Ray's object store."""
-        if self._dp_rank != ONLINE_EAGLE_COORDINATOR_RANK:
-            return [{"active": False, "worker_rank": self._dp_rank}]
-        training = job["training"]
-        merged = merge_online_eagle_captures(
-            job["capture_dir"],
-            expected_workers=self._dp_size,
-            expected_step=int(job["step"]),
-            max_tokens=int(training["max_tokens_per_update"]),
-            max_sequences_per_prompt_group=int(training["max_sequences_per_prompt_group"]),
-            max_window_tokens=int(training["max_window_tokens"]),
-        )
-        capture_dir = str(Path(merged["path"]).parent)
-        bundle = bundle_directory_for_ray(capture_dir)
-        remove_online_eagle_scratch(Path(job["capture_dir"]))
-        return [
-            {
-                "active": True,
-                "capture_bundle": bundle,
-                "captured_rows": merged["captured_rows"],
-                "captured_windows": len(merged["windows"]),
-                "dropped_windows": merged["dropped_windows"],
-                "oversized_windows": merged["oversized_windows"],
-                "unselected_windows": merged["unselected_windows"],
-                "target_weights_sha256": merged["target"]["weights_sha256"],
-                "target_config_sha256": merged["target"]["config_sha256"],
-            }
-        ]
+        """Return metadata-only catalogs for direct multi-rank transfer planning."""
+        return await self._get_engine().collective_rpc("catalog_online_eagle_capture")
+
+    async def transfer_online_eagle_capture(self, transfer_plan: Dict[str, Any]):
+        """Send selected capture tensors directly to DraftTrainer over NCCL."""
+        return await self._get_engine().collective_rpc("transfer_online_eagle_capture", args=(transfer_plan,))
 
     async def stage_online_eagle_speculator(
         self,
-        candidate_bundle: Dict[str, Any],
-        candidate_dir: str,
-        draft_revision: str,
-        weights_sha256: str,
+        transfer_manifest: Dict[str, Any],
         incumbent_draft_revision: str,
     ):
-        """Materialize and validate a candidate without mutating resident draft weights."""
-        if self._dp_rank != ONLINE_EAGLE_COORDINATOR_RANK:
-            return [{"active": False, "worker_rank": self._dp_rank}]
-        if self._online_eagle_staged_draft_dir is not None:
+        """Receive and validate a candidate without mutating resident draft weights."""
+        manifest = TensorTransferManifest.from_mapping(transfer_manifest)
+        if self._online_eagle_staged_manifest is not None:
             raise RuntimeError("A staged online EAGLE candidate has not been resolved")
         if self._online_eagle_active_draft_revision is None:
-            if self._online_eagle_active_draft_dir != self._online_eagle_initial_draft_dir:
-                raise RuntimeError("Online EAGLE initial draft state is inconsistent")
-            incumbent_key = hashlib.sha256(incumbent_draft_revision.encode()).hexdigest()[:16]
-            incumbent_dir = str(Path(candidate_dir).parents[1] / "incumbents" / incumbent_key)
-            materialize_online_eagle_incumbent(
-                self._online_eagle_initial_draft_dir,
-                incumbent_dir,
-                draft_revision=incumbent_draft_revision,
-            )
-            self._online_eagle_active_draft_dir = incumbent_dir
             self._online_eagle_active_draft_revision = incumbent_draft_revision
         elif self._online_eagle_active_draft_revision != incumbent_draft_revision:
             raise RuntimeError(
                 "Online EAGLE staged candidate does not descend from the active draft: "
                 f"expected {self._online_eagle_active_draft_revision}, got {incumbent_draft_revision}"
             )
-        materialized = materialize_ray_directory_bundle(candidate_bundle, candidate_dir)
-        manifest = validate_online_eagle_serving_candidate(materialized)
-        if manifest.get("draft_revision") != draft_revision or manifest.get("weights_sha256") != weights_sha256:
-            remove_online_eagle_scratch(materialized)
-            raise RuntimeError("Staged online EAGLE candidate identity does not match its update result")
-        self._online_eagle_staged_draft_dir = str(materialized)
-        self._online_eagle_staged_manifest = manifest
+        worker_results = await self._get_engine().collective_rpc(
+            "stage_online_eagle_speculator",
+            args=(transfer_manifest, incumbent_draft_revision),
+        )
+        self._online_eagle_staged_manifest = manifest.to_mapping()
         return [
             {
                 "active": True,
-                "draft_revision": draft_revision,
-                "weights_sha256": weights_sha256,
-                "candidate_dir": str(materialized),
+                "draft_revision": manifest.revision,
+                "source_weights_sha256": manifest.source_weights_sha256,
+                "payload_sha256": manifest.payload_sha256,
                 "incumbent_draft_revision": incumbent_draft_revision,
+                "worker_results": worker_results,
             }
         ]
 
     async def activate_online_eagle_speculator(
         self,
-        candidate_dir: str,
-        draft_revision: str,
-        weights_sha256: str,
+        transfer_manifest: Dict[str, Any],
     ):
         """Activate an already validated candidate on every rank in this engine."""
-        manifest = validate_online_eagle_serving_candidate(candidate_dir)
-        if manifest.get("draft_revision") != draft_revision or manifest.get("weights_sha256") != weights_sha256:
-            raise RuntimeError(f"Online EAGLE candidate identity changed before activation: {draft_revision}")
-        if self._dp_rank == ONLINE_EAGLE_COORDINATOR_RANK and (
-            self._online_eagle_staged_manifest != manifest or self._online_eagle_staged_draft_dir != candidate_dir
-        ):
-            raise RuntimeError(f"No staged online EAGLE candidate for {draft_revision}")
-        engine = self._get_engine()
-        worker_results = await engine.collective_rpc(
-            "install_online_eagle_speculator", args=(candidate_dir, ONLINE_EAGLE_COORDINATOR_RANK)
+        manifest = TensorTransferManifest.from_mapping(transfer_manifest)
+        if self._online_eagle_staged_manifest != manifest.to_mapping():
+            raise RuntimeError(f"No staged online EAGLE candidate for {manifest.revision}")
+        worker_results = await self._get_engine().collective_rpc(
+            "activate_online_eagle_speculator", args=(transfer_manifest,)
         )
-        self._online_eagle_previous_draft_dir = self._online_eagle_active_draft_dir
         self._online_eagle_previous_draft_revision = self._online_eagle_active_draft_revision
-        self._online_eagle_active_draft_dir = candidate_dir
-        self._online_eagle_active_draft_revision = draft_revision
+        self._online_eagle_active_draft_revision = manifest.revision
         self._online_eagle_staged_draft_dir = None
         self._online_eagle_staged_manifest = None
-        return [{"active": True, "draft_revision": draft_revision, "worker_results": worker_results}]
+        return [{"active": True, "draft_revision": manifest.revision, "worker_results": worker_results}]
 
     async def commit_online_eagle_speculator(self, draft_revision: str):
         """Release the prior candidate after the coordinator commits all engines."""
         if self._online_eagle_active_draft_revision != draft_revision:
             raise RuntimeError(f"Online EAGLE active revision is not {draft_revision}")
-        previous = self._online_eagle_previous_draft_dir
-        self._online_eagle_previous_draft_dir = None
+        worker_results = await self._get_engine().collective_rpc(
+            "commit_online_eagle_speculator", args=(draft_revision,)
+        )
         self._online_eagle_previous_draft_revision = None
-        if (
-            self._dp_rank == ONLINE_EAGLE_COORDINATOR_RANK
-            and previous is not None
-            and previous != self._online_eagle_initial_draft_dir
-        ):
-            remove_online_eagle_scratch(previous)
-        return [{"active": True, "draft_revision": draft_revision}]
+        return [{"active": True, "draft_revision": draft_revision, "worker_results": worker_results}]
 
     async def rollback_online_eagle_speculator(self, draft_revision: str):
         """Restore the prior draft after any engine fails candidate activation."""
-        candidate_dir = self._online_eagle_staged_draft_dir
+        worker_results = await self._get_engine().collective_rpc(
+            "rollback_online_eagle_speculator", args=(draft_revision,)
+        )
         if self._online_eagle_active_draft_revision != draft_revision:
             self._online_eagle_staged_draft_dir = None
             self._online_eagle_staged_manifest = None
-            if self._dp_rank == ONLINE_EAGLE_COORDINATOR_RANK and candidate_dir is not None:
-                remove_online_eagle_scratch(candidate_dir)
-            return [{"active": candidate_dir is not None, "draft_revision": draft_revision, "worker_results": []}]
-
-        candidate_dir = self._online_eagle_active_draft_dir
-        restore_dir = self._online_eagle_previous_draft_dir
-        restore_revision = self._online_eagle_previous_draft_revision
-        if restore_dir is None:
-            raise RuntimeError("Online EAGLE activated candidate has no prior draft to restore")
-        worker_results = await self._get_engine().collective_rpc(
-            "install_online_eagle_speculator", args=(restore_dir, ONLINE_EAGLE_COORDINATOR_RANK)
-        )
-        self._online_eagle_active_draft_dir = restore_dir
-        self._online_eagle_active_draft_revision = restore_revision
-        self._online_eagle_previous_draft_dir = None
+            return [{"active": True, "draft_revision": draft_revision, "worker_results": worker_results}]
+        if self._online_eagle_previous_draft_revision is None:
+            raise RuntimeError("Online EAGLE activated candidate has no prior draft revision")
+        self._online_eagle_active_draft_revision = self._online_eagle_previous_draft_revision
         self._online_eagle_previous_draft_revision = None
         self._online_eagle_staged_draft_dir = None
         self._online_eagle_staged_manifest = None
-        if (
-            self._dp_rank == ONLINE_EAGLE_COORDINATOR_RANK
-            and candidate_dir is not None
-            and candidate_dir != restore_dir
-        ):
-            remove_online_eagle_scratch(candidate_dir)
         return [{"active": True, "draft_revision": draft_revision, "worker_results": worker_results}]
 
     async def discard_online_eagle_capture(self):

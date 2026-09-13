@@ -351,39 +351,33 @@ class InferenceEngineClient(InferenceEngineInterface):
         return await self._run_on_all_engines("seal_online_eagle_capture", output_root)
 
     async def export_online_eagle_capture(self, job: Dict[str, Any]) -> List[Any]:
-        """Move each engine's sealed capture into bounded DraftTrainer transport."""
+        """Collect metadata-only catalogs from every sealed serving rank."""
         return await self._run_on_all_engines("export_online_eagle_capture", job)
+
+    async def transfer_online_eagle_capture(self, transfer_plan: Dict[str, Any]) -> List[Any]:
+        """Run the same canonical direct-transfer plan on every serving rank."""
+        return await self._run_on_all_engines("transfer_online_eagle_capture", transfer_plan)
 
     async def stage_online_eagle_speculator(
         self,
-        candidate_bundle: Dict[str, Any],
-        candidate_dir: str,
-        draft_revision: str,
-        weights_sha256: str,
+        transfer_manifest: Dict[str, Any],
         incumbent_draft_revision: str,
     ) -> List[Any]:
         """Stage and validate the candidate on every live engine."""
         return await self._run_on_all_engines(
             "stage_online_eagle_speculator",
-            candidate_bundle,
-            candidate_dir,
-            draft_revision,
-            weights_sha256,
+            transfer_manifest,
             incumbent_draft_revision,
         )
 
     async def activate_online_eagle_speculator(
         self,
-        candidate_dir: str,
-        draft_revision: str,
-        weights_sha256: str,
+        transfer_manifest: Dict[str, Any],
     ) -> List[Any]:
         """Activate one staged revision on every live engine."""
         return await self._run_on_all_engines(
             "activate_online_eagle_speculator",
-            candidate_dir,
-            draft_revision,
-            weights_sha256,
+            transfer_manifest,
         )
 
     async def commit_online_eagle_speculator(self, draft_revision: str) -> List[Any]:
@@ -963,6 +957,38 @@ class InferenceEngineClient(InferenceEngineInterface):
                     group_name=group_name,
                     backend=backend,
                     override_existing=override_existing,
+                )
+            )
+            if relative_rank_offset is None:
+                rank_offset_count += engine.tp_size() * engine.pp_size()
+        await asyncio.gather(*tasks)
+
+    async def init_draft_transfer_communicator(
+        self,
+        master_addr,
+        master_port,
+        rank_offset,
+        world_size,
+        group_name,
+        backend,
+    ):
+        tasks = []
+        rank_offset_count = rank_offset
+        for i, engine in enumerate(self.engines):
+            if i in self._dead_engines:
+                continue
+            relative_rank_offset = engine.weight_sync_relative_rank_offset
+            engine_rank_offset = (
+                rank_offset + relative_rank_offset if relative_rank_offset is not None else rank_offset_count
+            )
+            tasks.append(
+                engine.init_draft_transfer_communicator(
+                    master_addr=master_addr,
+                    master_port=master_port,
+                    rank_offset=engine_rank_offset,
+                    world_size=world_size,
+                    group_name=group_name,
+                    backend=backend,
                 )
             )
             if relative_rank_offset is None:

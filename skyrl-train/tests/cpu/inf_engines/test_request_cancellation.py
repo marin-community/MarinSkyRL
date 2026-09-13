@@ -71,9 +71,11 @@ class OnlineEagleActor:
     def __init__(self):
         self.calls = []
         for name in (
+            "init_draft_transfer_communicator",
             "begin_online_eagle_capture",
             "seal_online_eagle_capture",
             "export_online_eagle_capture",
+            "transfer_online_eagle_capture",
             "discard_online_eagle_capture",
             "stage_online_eagle_speculator",
             "activate_online_eagle_speculator",
@@ -145,12 +147,14 @@ async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
     actor = OnlineEagleActor()
     engine = RayWrappedInferenceEngine(actor)
 
+    await engine.init_draft_transfer_communicator("10.0.0.1", 1234, 1, 3, "draft", "nccl")
     await engine.begin_online_eagle_capture({"step": 3})
     await engine.seal_online_eagle_capture("/tmp/capture")
     await engine.export_online_eagle_capture({"step": 3})
+    await engine.transfer_online_eagle_capture({"transfer": "capture"})
     await engine.discard_online_eagle_capture()
-    await engine.stage_online_eagle_speculator({"bundle": True}, "/tmp/candidate", "draft-3", "digest-3", "draft-2")
-    await engine.activate_online_eagle_speculator("/tmp/candidate", "draft-3", "digest-3")
+    await engine.stage_online_eagle_speculator({"transfer": True}, "draft-2")
+    await engine.activate_online_eagle_speculator({"transfer": True})
     await engine.commit_online_eagle_speculator("draft-3")
     await engine.rollback_online_eagle_speculator("draft-3")
     await engine.cleanup_online_eagle_scratch("/tmp/marinskyrl-online-eagle/process")
@@ -159,15 +163,14 @@ async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
     await engine.restore_online_eagle_speculator("s3://bucket/draft", "/tmp/restored")
 
     assert actor.calls == [
+        ("init_draft_transfer_communicator", ("10.0.0.1", 1234, 1, 3, "draft", "nccl")),
         ("begin_online_eagle_capture", ({"step": 3},)),
         ("seal_online_eagle_capture", ("/tmp/capture",)),
         ("export_online_eagle_capture", ({"step": 3},)),
+        ("transfer_online_eagle_capture", ({"transfer": "capture"},)),
         ("discard_online_eagle_capture", ()),
-        (
-            "stage_online_eagle_speculator",
-            ({"bundle": True}, "/tmp/candidate", "draft-3", "digest-3", "draft-2"),
-        ),
-        ("activate_online_eagle_speculator", ("/tmp/candidate", "draft-3", "digest-3")),
+        ("stage_online_eagle_speculator", ({"transfer": True}, "draft-2")),
+        ("activate_online_eagle_speculator", ({"transfer": True},)),
         ("commit_online_eagle_speculator", ("draft-3",)),
         ("rollback_online_eagle_speculator", ("draft-3",)),
         ("cleanup_online_eagle_scratch", ("/tmp/marinskyrl-online-eagle/process",)),

@@ -26,10 +26,13 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     _restore_rng_states,
     _sdpa_kernel_context,
     candidate_is_acceptable,
+    catalog_online_eagle_capture,
     export_served_speculator_checkpoint,
     materialize_online_eagle_incumbent,
     merge_online_eagle_captures,
+    OnlineEagleTrainerRuntime,
     partition_capture_windows,
+    plan_online_eagle_capture_transfer,
     preserve_online_eagle_failure,
     publish_speculator_checkpoint,
     remove_online_eagle_scratch,
@@ -104,6 +107,32 @@ def _write_rank_capture(
             }
         )
     )
+
+
+def test_capture_transfer_plan_uses_metadata_only_and_all_source_ranks(tmp_path: Path) -> None:
+    root = tmp_path / "capture"
+    _write_rank_capture(root, 0, [("request-a", "group-a")])
+    _write_rank_capture(root, 1, [("request-b", "group-b")])
+    catalogs = [
+        catalog_online_eagle_capture(root, worker_rank=0, transfer_rank=1),
+        catalog_online_eagle_capture(root, worker_rank=1, transfer_rank=2),
+    ]
+
+    plan = plan_online_eagle_capture_transfer(
+        catalogs,
+        expected_workers=2,
+        expected_step=7,
+        max_tokens=16,
+        max_sequences_per_prompt_group=2,
+        max_window_tokens=16,
+    )
+
+    assert plan["format"] == "marinskyrl-online-eagle-capture-transfer"
+    assert plan["capture_manifest"]["captured_rows"] == 6
+    assert len(plan["capture_manifest"]["windows"]) == 2
+    assert {operation["source_rank"] for operation in plan["operations"]} == {1, 2}
+    assert plan["total_bytes"] == sum(operation["tensor"]["bytes"] for operation in plan["operations"])
+    assert "object_ref" not in repr(plan)
 
 
 def test_rng_restore_moves_device_mapped_generator_states_back_to_cpu(monkeypatch) -> None:
@@ -588,6 +617,44 @@ def test_offloaded_adam_state_round_trip_matches_continuous_training() -> None:
 
     for continuous, resumed in zip(continuous_model.parameters(), resumed_model.parameters()):
         assert torch.equal(continuous, resumed)
+
+
+def test_persistent_runtime_rollback_restores_master_and_optimizer_state() -> None:
+    runtime = OnlineEagleTrainerRuntime.__new__(OnlineEagleTrainerRuntime)
+    runtime.device = torch.device("cpu")
+    runtime.serving_dtype = torch.float32
+    runtime.model = torch.nn.Linear(3, 2)
+    runtime.trainable = list(runtime.model.parameters())
+    runtime.optimizer = torch.optim.AdamW(runtime.trainable, lr=1e-3)
+    runtime._pending_revision = None
+    runtime._pending_incumbent = None
+
+    runtime.optimizer.zero_grad(set_to_none=True)
+    runtime.model(torch.ones(2, 3)).square().sum().backward()
+    runtime.optimizer.step()
+    _offload_optimizer_state(runtime.optimizer)
+    incumbent = runtime._snapshot()
+    incumbent_parameters = {name: value.clone() for name, value in runtime.model.state_dict().items()}
+    incumbent_optimizer = copy.deepcopy(runtime.optimizer.state_dict())
+
+    with torch.no_grad():
+        for parameter in runtime.model.parameters():
+            parameter.add_(10)
+    runtime._pending_revision = "draft-step-4"
+    runtime._pending_incumbent = incumbent
+    runtime.rollback("draft-step-4")
+
+    assert all(torch.equal(runtime.model.state_dict()[name], value) for name, value in incumbent_parameters.items())
+    assert runtime.optimizer.state_dict()["param_groups"] == incumbent_optimizer["param_groups"]
+    for restored, expected in zip(
+        runtime.optimizer.state_dict()["state"].values(),
+        incumbent_optimizer["state"].values(),
+        strict=True,
+    ):
+        assert restored.keys() == expected.keys()
+        assert all(torch.equal(restored[name], expected[name]) for name in restored)
+    assert runtime._pending_revision is None
+    assert runtime._pending_incumbent is None
 
 
 def test_fp32_master_must_round_to_the_served_checkpoint() -> None:

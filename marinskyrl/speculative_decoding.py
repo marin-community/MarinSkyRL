@@ -47,6 +47,12 @@ def _positive_integer(value: object, field: str) -> int:
     return value
 
 
+def _nonnegative_integer(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SpeculativeDecodingConfigError(f"{field} must be a nonnegative integer, got {value!r}")
+    return value
+
+
 def _positive_number(value: object, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
         raise SpeculativeDecodingConfigError(f"{field} must be a positive finite number, got {value!r}")
@@ -133,6 +139,7 @@ class SpeculatorTrainingConfig:
     """Bounded single-rank online EAGLE update settings."""
 
     interval_steps: int = 1
+    max_candidate_staleness_steps: int = 2
     # Bound the deterministic all-DP merge while leaving enough admission
     # headroom for rollout response lengths to vary between steps.
     max_tokens_per_update: int = 16_384
@@ -157,6 +164,7 @@ class SpeculatorTrainingConfig:
         mapping = _mapping(value, context)
         fields = {
             "interval_steps",
+            "max_candidate_staleness_steps",
             "max_tokens_per_update",
             "max_window_tokens",
             "max_tokens_per_micro_batch",
@@ -175,6 +183,10 @@ class SpeculatorTrainingConfig:
         return cls(
             interval_steps=_positive_integer(
                 mapping.get("interval_steps", defaults.interval_steps), f"{context}.interval_steps"
+            ),
+            max_candidate_staleness_steps=_nonnegative_integer(
+                mapping.get("max_candidate_staleness_steps", defaults.max_candidate_staleness_steps),
+                f"{context}.max_candidate_staleness_steps",
             ),
             max_tokens_per_update=_positive_integer(
                 mapping.get("max_tokens_per_update", defaults.max_tokens_per_update),

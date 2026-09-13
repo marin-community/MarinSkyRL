@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from skyrl_train.distributed.dispatch import MeshRank
+from skyrl_train.distributed.tensor_transfer import TensorTransferManifest
 from skyrl_train.group_admission import GroupAdmissionStalledError, GroupAdvantageInvariant
 import skyrl_train.trainer as trainer_module
 from skyrl_train.trainer import RayPPOTrainer
@@ -55,6 +56,7 @@ class _SpeculatorCaptureClient:
         self.restores = []
         self.cleanups = []
         self.exports = []
+        self.transfers = []
         self.stages = []
         self.activations = []
         self.commits = []
@@ -65,8 +67,8 @@ class _SpeculatorCaptureClient:
         self.begins.append(config)
         return [
             [
-                {"active": True, "worker_rank": 0, "node_id": "inference-node"},
-                {"active": True, "worker_rank": 1, "node_id": "inference-node"},
+                {"active": True, "worker_rank": 0, "node_id": "inference-node", "transfer_rank": 1},
+                {"active": True, "worker_rank": 1, "node_id": "inference-node", "transfer_rank": 2},
             ]
         ]
 
@@ -78,6 +80,7 @@ class _SpeculatorCaptureClient:
                     "active": True,
                     "worker_rank": 0,
                     "node_id": "inference-node",
+                    "transfer_rank": 1,
                     "captured_rows": 41,
                     "dropped_windows": 2,
                     "windows": [{"path": "window-000000.safetensors"}],
@@ -87,6 +90,7 @@ class _SpeculatorCaptureClient:
                     "active": True,
                     "worker_rank": 1,
                     "node_id": "inference-node",
+                    "transfer_rank": 2,
                     "captured_rows": 43,
                     "dropped_windows": 1,
                     "windows": [{"path": "window-000000.safetensors"}],
@@ -104,15 +108,16 @@ class _SpeculatorCaptureClient:
             [
                 {
                     "active": True,
-                    "capture_bundle": {"bundle": "capture"},
-                    "captured_rows": 72,
-                    "captured_windows": 2,
-                    "dropped_windows": 4,
-                    "oversized_windows": 3,
-                    "unselected_windows": 1,
-                    "target_weights_sha256": "target-digest",
+                    "catalog": True,
                 }
             ]
+        ]
+
+    async def transfer_online_eagle_capture(self, transfer_plan):
+        self.transfers.append(transfer_plan)
+        return [
+            [{"active": True, "worker_rank": 0, "sent_tensors": 3}],
+            [{"active": True, "worker_rank": 1, "sent_tensors": 2}],
         ]
 
     async def cleanup_online_eagle_scratch(self, scratch_root):
@@ -128,21 +133,43 @@ class _SpeculatorCaptureClient:
             ]
         ]
 
-    async def stage_online_eagle_speculator(
-        self, bundle, candidate_dir, draft_revision, weights_sha256, incumbent_draft_revision
-    ):
-        self.stages.append((bundle, candidate_dir, draft_revision, weights_sha256, incumbent_draft_revision))
-        return [[{"active": True, "draft_revision": draft_revision, "weights_sha256": weights_sha256}]]
+    async def stage_online_eagle_speculator(self, transfer_manifest, incumbent_draft_revision):
+        self.stages.append((transfer_manifest, incumbent_draft_revision))
+        return [
+            [
+                {
+                    "active": True,
+                    "draft_revision": transfer_manifest["revision"],
+                    "source_weights_sha256": transfer_manifest["source_weights_sha256"],
+                    "payload_sha256": transfer_manifest["payload_sha256"],
+                }
+            ],
+            [
+                {
+                    "active": True,
+                    "draft_revision": transfer_manifest["revision"],
+                    "source_weights_sha256": transfer_manifest["source_weights_sha256"],
+                    "payload_sha256": transfer_manifest["payload_sha256"],
+                }
+            ],
+        ]
 
-    async def activate_online_eagle_speculator(self, candidate_dir, draft_revision, weights_sha256):
-        self.activations.append((candidate_dir, draft_revision, weights_sha256))
+    async def activate_online_eagle_speculator(self, transfer_manifest):
+        self.activations.append(transfer_manifest)
+        draft_revision = transfer_manifest["revision"]
+        payload_sha256 = transfer_manifest["payload_sha256"]
         return [
             [
                 {
                     "active": True,
                     "draft_revision": draft_revision,
                     "worker_results": [
-                        {"worker_rank": 0, "draft_revision": draft_revision, "weights_sha256": "abc"},
+                        {
+                            "worker_rank": 0,
+                            "transfer_rank": 1,
+                            "draft_revision": draft_revision,
+                            "weights_sha256": payload_sha256,
+                        },
                     ],
                 }
             ],
@@ -151,7 +178,12 @@ class _SpeculatorCaptureClient:
                     "active": True,
                     "draft_revision": draft_revision,
                     "worker_results": [
-                        {"worker_rank": 1, "draft_revision": draft_revision, "weights_sha256": "abc"},
+                        {
+                            "worker_rank": 1,
+                            "transfer_rank": 2,
+                            "draft_revision": draft_revision,
+                            "weights_sha256": payload_sha256,
+                        },
                     ],
                 }
             ],
@@ -206,18 +238,41 @@ class _RemoteMethod:
 class _DraftTrainer:
     def __init__(self):
         self.updates = []
+        self.receives = []
         self.commits = []
         self.rollbacks = []
         self.restores = []
         self.publishes = []
         self.update = _RemoteMethod(self._update)
+        self.receive_capture = _RemoteMethod(self._receive_capture)
+        self.broadcast_candidate = _RemoteMethod(self._broadcast_candidate)
         self.commit = _RemoteMethod(self._commit)
         self.rollback = _RemoteMethod(self._rollback)
         self.restore = _RemoteMethod(self._restore)
         self.publish = _RemoteMethod(self._publish)
 
-    def _update(self, job, capture_bundle):
-        self.updates.append((job, capture_bundle))
+    def _receive_capture(self, transfer_plan, destination):
+        self.receives.append((transfer_plan, destination))
+        return {
+            "capture_dir": destination,
+            "captured_rows": 72,
+            "captured_windows": 2,
+            "dropped_windows": 4,
+            "oversized_windows": 3,
+            "unselected_windows": 1,
+            "target_weights_sha256": "target-digest",
+            "target_config_sha256": "config-digest",
+            "transfer_bytes": 4096,
+        }
+
+    def _update(self, job):
+        self.updates.append(job)
+        transfer_manifest = TensorTransferManifest.from_tensors(
+            transfer_id=f"candidate-step-{job['step']}",
+            revision=f"draft-step-{job['step']}",
+            source_weights_sha256="abc",
+            tensors={"draft.weight": torch.arange(4, dtype=torch.bfloat16)},
+        ).to_mapping()
         return {
             "result": {
                 "active": True,
@@ -233,7 +288,16 @@ class _DraftTrainer:
                 "incumbent_holdout_loss": 0.4,
                 "candidate_holdout_loss": 0.3,
             },
-            "candidate_bundle": {"bundle": "candidate"},
+            "transfer_manifest": transfer_manifest,
+        }
+
+    @staticmethod
+    def _broadcast_candidate(transfer_manifest):
+        return {
+            "transfer_id": transfer_manifest["transfer_id"],
+            "draft_revision": transfer_manifest["revision"],
+            "payload_sha256": transfer_manifest["payload_sha256"],
+            "total_bytes": transfer_manifest["total_bytes"],
         }
 
     def _commit(self, draft_revision):
@@ -270,7 +334,7 @@ def _online_speculator_trainer(interval_steps=1):
     )
     trainer.global_step = 2
     trainer._speculator_capture_active = False
-    trainer._speculator_capture_node_id = None
+    trainer._speculator_capture_transfer_ranks = None
     trainer._speculator_process_id = "process-id"
     trainer._served_draft_revision = "draft-step-1"
     trainer._sealed_speculator_capture_dir = None
@@ -283,6 +347,7 @@ def _online_speculator_trainer(interval_steps=1):
     trainer._speculator_update_failures = 0
     trainer._speculator_boundary_deferrals = 0
     trainer._speculator_install_count = 0
+    trainer._speculator_stale_candidate_count = 0
     trainer.inference_engine_client = _SpeculatorCaptureClient()
     trainer.all_metrics = {}
     trainer.all_timings = {}
@@ -339,13 +404,15 @@ def test_online_speculator_capture_cadence_and_discard_are_idempotent():
 
 def test_online_speculator_update_overlaps_then_installs_at_boundary(monkeypatch):
     trainer = _online_speculator_trainer()
+    transfer_plan = {"format": "test-capture-plan"}
+    monkeypatch.setattr(trainer_module, "plan_online_eagle_capture_transfer", lambda *_args, **_kwargs: transfer_plan)
 
     asyncio.run(trainer._begin_speculator_capture())
     asyncio.run(trainer._seal_speculator_capture())
     asyncio.run(trainer._start_speculator_update())
 
     assert trainer._speculator_update_inflight is True
-    job, capture_bundle = trainer._draft_trainer.updates[0]
+    job = trainer._draft_trainer.updates[0]
     assert job["capture_dir"].endswith("/step-2/merged")
     assert job["draft_model_dir"] == "/tmp/draft"
     assert job["initial_draft_source_identity"] == "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
@@ -354,28 +421,24 @@ def test_online_speculator_update_overlaps_then_installs_at_boundary(monkeypatch
     assert job["parent_draft_revision"] == "draft-step-1"
     assert job["target_revision"] == "policy-step-1"
     assert job["target_weights_sha256"] == "target-digest"
-    assert capture_bundle == {"bundle": "capture"}
+    assert trainer._draft_trainer.receives == [(transfer_plan, "/tmp/marinskyrl-online-eagle/process-id/step-2/merged")]
+    assert trainer.inference_engine_client.transfers == [transfer_plan]
     assert trainer.all_metrics["speculator/captured_rows"] == 72.0
     assert trainer.all_metrics["speculator/captured_windows"] == 2.0
     assert trainer.all_metrics["speculator/dropped_windows"] == 4.0
     assert trainer.all_metrics["speculator/oversized_windows"] == 3.0
     assert trainer.all_metrics["speculator/unselected_windows"] == 1.0
+    assert trainer.all_metrics["speculator/capture_transfer_bytes"] == 4096.0
 
     monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda ref: (True, ref.value))
     asyncio.run(trainer._finish_speculator_update())
 
-    assert trainer.inference_engine_client.stages == [
-        (
-            {"bundle": "candidate"},
-            "/tmp/marinskyrl-online-eagle/process-id/candidates/step-2",
-            "draft-step-2",
-            "abc",
-            "draft-step-1",
-        )
-    ]
-    assert trainer.inference_engine_client.activations == [
-        ("/tmp/marinskyrl-online-eagle/process-id/candidates/step-2", "draft-step-2", "abc")
-    ]
+    assert len(trainer.inference_engine_client.stages) == 1
+    transfer_manifest, incumbent_revision = trainer.inference_engine_client.stages[0]
+    assert transfer_manifest["revision"] == "draft-step-2"
+    assert transfer_manifest["source_weights_sha256"] == "abc"
+    assert incumbent_revision == "draft-step-1"
+    assert trainer.inference_engine_client.activations == [transfer_manifest]
     assert trainer.inference_engine_client.commits == ["draft-step-2"]
     assert trainer._draft_trainer.commits == ["draft-step-2"]
     assert trainer._served_draft_path.endswith("/process-id/candidates/step-2")
@@ -386,12 +449,26 @@ def test_online_speculator_update_overlaps_then_installs_at_boundary(monkeypatch
 
 def test_online_speculator_stage_disagreement_rolls_back_every_owner(monkeypatch):
     trainer = _online_speculator_trainer()
+    monkeypatch.setattr(
+        trainer_module,
+        "plan_online_eagle_capture_transfer",
+        lambda *_args, **_kwargs: {"format": "test-capture-plan"},
+    )
     asyncio.run(trainer._begin_speculator_capture())
     asyncio.run(trainer._seal_speculator_capture())
     asyncio.run(trainer._start_speculator_update())
 
     async def disagree(*_args):
-        return [[{"active": True, "draft_revision": "draft-step-2", "weights_sha256": "wrong"}]]
+        return [
+            [
+                {
+                    "active": True,
+                    "draft_revision": "draft-step-2",
+                    "source_weights_sha256": "wrong",
+                    "payload_sha256": "wrong",
+                }
+            ]
+        ]
 
     trainer.inference_engine_client.stage_online_eagle_speculator = disagree
     monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda ref: (True, ref.value))
@@ -401,27 +478,49 @@ def test_online_speculator_stage_disagreement_rolls_back_every_owner(monkeypatch
 
     assert trainer.inference_engine_client.rollbacks == ["draft-step-2"]
     assert trainer._draft_trainer.rollbacks == ["draft-step-2"]
+
+
+def test_online_speculator_discards_candidate_beyond_staleness_limit(monkeypatch):
+    trainer = _online_speculator_trainer()
+    monkeypatch.setattr(
+        trainer_module,
+        "plan_online_eagle_capture_transfer",
+        lambda *_args, **_kwargs: {"format": "test-capture-plan"},
+    )
+    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._seal_speculator_capture())
+    asyncio.run(trainer._start_speculator_update())
+    trainer.global_step = 5
+    monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda ref: (True, ref.value))
+
+    asyncio.run(trainer._finish_speculator_update())
+
+    assert trainer._draft_trainer.rollbacks == ["draft-step-2"]
+    assert trainer.inference_engine_client.stages == []
+    assert trainer.all_metrics["speculator/candidate_staleness_steps"] == 3.0
+    assert trainer.all_metrics["speculator/stale_candidate_count"] == 1.0
     assert trainer.inference_engine_client.activations == []
     assert trainer.inference_engine_client.commits == []
 
 
-def test_online_speculator_capture_rejects_cross_node_dp_before_rollouts() -> None:
+def test_online_speculator_capture_accepts_cross_node_transfer_ranks() -> None:
     trainer = _online_speculator_trainer()
 
     async def begin_cross_node(_config):
         return [
             [
-                {"active": True, "worker_rank": 0, "node_id": "node-a"},
-                {"active": True, "worker_rank": 1, "node_id": "node-b"},
+                {"active": True, "worker_rank": 0, "node_id": "node-a", "transfer_rank": 1},
+                {"active": True, "worker_rank": 0, "node_id": "node-b", "transfer_rank": 2},
             ]
         ]
 
     trainer.inference_engine_client.begin_online_eagle_capture = begin_cross_node
 
-    with pytest.raises(RuntimeError, match="every vLLM rank on one node"):
-        asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._begin_speculator_capture())
 
-    assert trainer.inference_engine_client.discards == 1
+    assert trainer._speculator_capture_active is True
+    assert trainer._speculator_capture_transfer_ranks == {1, 2}
+    assert trainer.inference_engine_client.discards == 0
 
 
 def test_online_speculator_seal_rejects_missing_dp_rank_without_handoff() -> None:
@@ -434,6 +533,7 @@ def test_online_speculator_seal_rejects_missing_dp_rank_without_handoff() -> Non
                     "active": True,
                     "worker_rank": 0,
                     "node_id": "inference-node",
+                    "transfer_rank": 1,
                     "captured_rows": 41,
                     "windows": [],
                 },
@@ -442,7 +542,7 @@ def test_online_speculator_seal_rejects_missing_dp_rank_without_handoff() -> Non
         ]
     )
 
-    with pytest.raises(RuntimeError, match=r"got ranks \[0\]"):
+    with pytest.raises(RuntimeError, match=r"got ranks \[1\]"):
         asyncio.run(trainer._seal_speculator_capture())
 
     assert trainer.inference_engine_client.cleanups == ["/tmp/marinskyrl-online-eagle/process-id/step-2"]

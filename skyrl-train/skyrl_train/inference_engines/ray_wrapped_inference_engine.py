@@ -209,6 +209,13 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing
         )
 
+    async def init_draft_transfer_communicator(
+        self, master_addr, master_port, rank_offset, world_size, group_name, backend
+    ):
+        return await self.inference_engine_actor.init_draft_transfer_communicator.remote(
+            master_addr, master_port, rank_offset, world_size, group_name, backend
+        )
+
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
@@ -267,32 +274,25 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def export_online_eagle_capture(self, job: Dict[str, Any]):
         return await self.inference_engine_actor.export_online_eagle_capture.remote(job)
 
+    async def transfer_online_eagle_capture(self, transfer_plan: Dict[str, Any]):
+        return await self.inference_engine_actor.transfer_online_eagle_capture.remote(transfer_plan)
+
     async def stage_online_eagle_speculator(
         self,
-        candidate_bundle: Dict[str, Any],
-        candidate_dir: str,
-        draft_revision: str,
-        weights_sha256: str,
+        transfer_manifest: Dict[str, Any],
         incumbent_draft_revision: str,
     ):
         return await self.inference_engine_actor.stage_online_eagle_speculator.remote(
-            candidate_bundle,
-            candidate_dir,
-            draft_revision,
-            weights_sha256,
+            transfer_manifest,
             incumbent_draft_revision,
         )
 
     async def activate_online_eagle_speculator(
         self,
-        candidate_dir: str,
-        draft_revision: str,
-        weights_sha256: str,
+        transfer_manifest: Dict[str, Any],
     ):
         return await self.inference_engine_actor.activate_online_eagle_speculator.remote(
-            candidate_dir,
-            draft_revision,
-            weights_sha256,
+            transfer_manifest,
         )
 
     async def commit_online_eagle_speculator(self, draft_revision: str):

@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Mapping
-import hashlib
+from collections.abc import Mapping
+import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import socket
 from typing import Any
 from uuid import uuid4
 
 import ray
+from safetensors.torch import load_file, save_file
+import torch
 
 from marinskyrl.hf_model import sha256_file
+from skyrl_train.distributed.tensor_transfer import (
+    TensorTransferManifest,
+    broadcast_tensor_payload,
+    transfer_tensor_operations,
+)
+from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     ONLINE_EAGLE_SCRATCH_ROOT,
-    TRAINER_STATE_FILENAME,
+    OnlineEagleTrainerRuntime,
     OnlineEagleTrainingJob,
     OnlineEagleUpdateResult,
     preserve_online_eagle_failure,
@@ -23,159 +32,18 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     publish_online_eagle_failure_bundle,
     remove_online_eagle_scratch,
     restore_speculator_checkpoint,
-    run_training_job,
+    validate_online_eagle_serving_candidate,
 )
+from skyrl_train.utils import get_tcp_url
 
 
-DIRECTORY_BUNDLE_FORMAT = "marinskyrl-ray-directory-bundle"
-DIRECTORY_BUNDLE_VERSION = 1
-OBJECT_STORE_CHUNK_BYTES = 64 * 1024 * 1024
-IGNORED_CACHE_DIRECTORY = ".cache"
-
-
-def _relative_bundle_path(value: object) -> Path:
+def _relative_transfer_path(value: object) -> Path:
     if not isinstance(value, str) or not value:
-        raise ValueError("DraftTrainer bundle paths must be nonempty strings")
+        raise ValueError("DraftTrainer transfer paths must be nonempty strings")
     path = PurePosixPath(value)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise ValueError(f"DraftTrainer bundle path must be a normalized relative path: {value!r}")
+        raise ValueError(f"DraftTrainer transfer path must be a normalized relative path: {value!r}")
     return Path(*path.parts)
-
-
-def bundle_directory_for_ray(
-    source: str | Path,
-    *,
-    put: Callable[[bytes], Any] = ray.put,
-    chunk_bytes: int = OBJECT_STORE_CHUNK_BYTES,
-    excluded_relative_paths: Collection[str] = (),
-) -> dict[str, Any]:
-    """Put one immutable directory into bounded Ray objects without driver materialization."""
-    root = Path(source)
-    if not root.is_dir():
-        raise FileNotFoundError(f"DraftTrainer bundle source is not a directory: {root}")
-    if isinstance(chunk_bytes, bool) or not isinstance(chunk_bytes, int) or chunk_bytes <= 0:
-        raise ValueError("DraftTrainer object-store chunk size must be a positive integer")
-
-    excluded = {_relative_bundle_path(path) for path in excluded_relative_paths}
-    files: list[dict[str, Any]] = []
-    total_bytes = 0
-    for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root)
-        if relative in excluded:
-            continue
-        if path.is_symlink():
-            raise ValueError(f"DraftTrainer bundle source contains a symbolic link: {path}")
-        if not path.is_file() or IGNORED_CACHE_DIRECTORY in path.parts:
-            continue
-        file_hasher = hashlib.sha256()
-        chunks: list[dict[str, Any]] = []
-        with path.open("rb") as stream:
-            while data := stream.read(chunk_bytes):
-                file_hasher.update(data)
-                chunks.append(
-                    {
-                        "bytes": len(data),
-                        "sha256": hashlib.sha256(data).hexdigest(),
-                        "object_ref": put(data),
-                    }
-                )
-        size = path.stat().st_size
-        total_bytes += size
-        files.append(
-            {
-                "path": relative.as_posix(),
-                "bytes": size,
-                "sha256": file_hasher.hexdigest(),
-                "chunks": chunks,
-            }
-        )
-    if not files:
-        raise ValueError(f"DraftTrainer bundle source contains no files: {root}")
-    return {
-        "format": DIRECTORY_BUNDLE_FORMAT,
-        "format_version": DIRECTORY_BUNDLE_VERSION,
-        "source_name": root.name,
-        "total_bytes": total_bytes,
-        "files": files,
-    }
-
-
-def materialize_ray_directory_bundle(
-    bundle: Mapping[str, Any],
-    destination: str | Path,
-    *,
-    get: Callable[[Any], bytes] = ray.get,
-) -> Path:
-    """Atomically materialize and verify a directory bundle on the consuming node."""
-    if bundle.get("format") != DIRECTORY_BUNDLE_FORMAT or bundle.get("format_version") != DIRECTORY_BUNDLE_VERSION:
-        raise ValueError("Unsupported DraftTrainer directory bundle")
-    raw_files = bundle.get("files")
-    if not isinstance(raw_files, list) or not raw_files:
-        raise ValueError("DraftTrainer directory bundle has no file inventory")
-
-    target = Path(destination)
-    if target.exists():
-        raise FileExistsError(f"DraftTrainer bundle destination already exists: {target}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
-    staging.mkdir()
-    seen: set[Path] = set()
-    total_bytes = 0
-    try:
-        for raw_file in raw_files:
-            if not isinstance(raw_file, Mapping):
-                raise ValueError("DraftTrainer bundle file entries must be mappings")
-            relative = _relative_bundle_path(raw_file.get("path"))
-            if relative in seen:
-                raise ValueError(f"Duplicate DraftTrainer bundle path: {relative}")
-            seen.add(relative)
-            chunks = raw_file.get("chunks")
-            if not isinstance(chunks, list):
-                raise ValueError(f"DraftTrainer bundle file has no chunks: {relative}")
-            output = staging / relative
-            output.parent.mkdir(parents=True, exist_ok=True)
-            file_hasher = hashlib.sha256()
-            size = 0
-            with output.open("wb") as stream:
-                for raw_chunk in chunks:
-                    if not isinstance(raw_chunk, Mapping):
-                        raise ValueError(f"DraftTrainer bundle chunk is invalid: {relative}")
-                    data = get(raw_chunk.get("object_ref"))
-                    if not isinstance(data, bytes):
-                        raise TypeError(f"DraftTrainer object-store chunk is not bytes: {relative}")
-                    if len(data) != raw_chunk.get("bytes") or hashlib.sha256(data).hexdigest() != raw_chunk.get(
-                        "sha256"
-                    ):
-                        raise ValueError(f"DraftTrainer object-store chunk digest mismatch: {relative}")
-                    stream.write(data)
-                    file_hasher.update(data)
-                    size += len(data)
-            if size != raw_file.get("bytes") or file_hasher.hexdigest() != raw_file.get("sha256"):
-                raise ValueError(f"DraftTrainer materialized file digest mismatch: {relative}")
-            total_bytes += size
-        if total_bytes != bundle.get("total_bytes"):
-            raise ValueError("DraftTrainer materialized directory byte count mismatch")
-        os.replace(staging, target)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
-    return target
-
-
-def validate_materialized_bundle(bundle: Mapping[str, Any], directory: str | Path) -> None:
-    """Require a materialized directory to match the immutable bundle inventory."""
-    root = Path(directory)
-    expected = {
-        str(_relative_bundle_path(item["path"])): {"bytes": item["bytes"], "sha256": item["sha256"]}
-        for item in bundle["files"]
-    }
-    actual = {
-        str(path.relative_to(root)): {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
-        for path in sorted(root.rglob("*"))
-        if path.is_file() and IGNORED_CACHE_DIRECTORY not in path.parts
-    }
-    if actual != expected:
-        raise ValueError(f"DraftTrainer materialized inventory mismatch: {root}")
 
 
 class DraftTrainer:
@@ -195,9 +63,114 @@ class DraftTrainer:
         self._process_root = ONLINE_EAGLE_SCRATCH_ROOT / process_id
         self._pending_candidate_dir: str | None = None
         self._pending_draft_revision: str | None = None
+        self._pending_transfer_manifest: dict[str, Any] | None = None
+        self._pending_candidate_tensors: dict[str, torch.Tensor] | None = None
+        self._training_runtime: OnlineEagleTrainerRuntime | None = None
+        self._draft_transfer_group = None
+        self._owns_default_process_group = False
 
-    def update(self, raw_job: Mapping[str, Any], capture_bundle: Mapping[str, Any]) -> dict[str, Any]:
-        """Materialize one sealed capture, train it, and return an immutable candidate bundle."""
+    def transfer_rendezvous(self) -> dict[str, Any]:
+        """Return a trainer-node TCP endpoint for the persistent transfer group."""
+        master_addr = ray._private.services.get_node_ip_address()
+        with socket.socket() as listener:
+            listener.bind(("", 0))
+            master_port = listener.getsockname()[1]
+        return {"master_addr": master_addr, "master_port": master_port}
+
+    def init_transfer_group(
+        self,
+        *,
+        master_addr: str,
+        master_port: int,
+        world_size: int,
+        group_name: str,
+        backend: str,
+    ) -> dict[str, Any]:
+        """Join the DraftTrainer and all serving ranks in one persistent group."""
+        if self._draft_transfer_group is not None:
+            raise RuntimeError("DraftTrainer transfer group is already initialized")
+        if not torch.distributed.is_initialized():
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", 0))
+                local_port = listener.getsockname()[1]
+            torch.distributed.init_process_group(
+                backend="gloo",
+                init_method=get_tcp_url("127.0.0.1", local_port),
+                world_size=1,
+                rank=0,
+            )
+            self._owns_default_process_group = True
+        if backend == "nccl":
+            torch.cuda.set_device(torch.cuda.current_device())
+        self._draft_transfer_group = init_custom_process_group(
+            backend=backend,
+            init_method=get_tcp_url(master_addr, master_port),
+            world_size=world_size,
+            rank=0,
+            group_name=group_name,
+        )
+        return {"rank": 0, "world_size": world_size, "backend": backend}
+
+    def receive_capture(self, transfer_plan: Mapping[str, Any], destination: str) -> dict[str, Any]:
+        """Receive a selected multi-rank capture directly into trainer-local files."""
+        if self._draft_transfer_group is None:
+            raise RuntimeError("DraftTrainer transfer group is not initialized")
+        if transfer_plan.get("format") != "marinskyrl-online-eagle-capture-transfer":
+            raise ValueError("Unsupported online EAGLE capture transfer plan")
+        operations = transfer_plan.get("operations")
+        files = transfer_plan.get("files")
+        if not isinstance(operations, list) or not isinstance(files, list):
+            raise ValueError("Online EAGLE capture transfer plan is incomplete")
+        capture_dir = Path(destination)
+        if capture_dir.exists():
+            raise FileExistsError(f"DraftTrainer capture destination already exists: {capture_dir}")
+        received = transfer_tensor_operations(
+            operations,
+            tensor_provider=None,
+            group=self._draft_transfer_group,
+        )
+        assert received is not None
+        staging = capture_dir.with_name(f".{capture_dir.name}.tmp-{uuid4().hex}")
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.mkdir()
+        try:
+            for file_entry in files:
+                relative_path = _relative_transfer_path(file_entry["destination_path"])
+                tensors = {
+                    tensor["name"]: received[f"{relative_path.as_posix()}::{tensor['name']}"]
+                    for tensor in file_entry["tensors"]
+                }
+                save_file(tensors, str(staging / relative_path), metadata={"format": "pt"})
+            config_path = staging / "target-config.json"
+            config_path.write_text(transfer_plan["target_config_json"])
+            manifest = dict(transfer_plan["capture_manifest"])
+            manifest["windows"] = [
+                {**window, "sha256": sha256_file(staging / window["path"])} for window in manifest["windows"]
+            ]
+            manifest["target"] = {
+                **manifest["target"],
+                "weights_sha256": sha256_file(staging / manifest["target"]["weights_path"]),
+                "config_sha256": sha256_file(config_path),
+            }
+            (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
+            os.replace(staging, capture_dir)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        return {
+            "capture_dir": str(capture_dir),
+            "captured_rows": manifest["captured_rows"],
+            "captured_windows": len(manifest["windows"]),
+            "dropped_windows": manifest["dropped_windows"],
+            "oversized_windows": manifest["oversized_windows"],
+            "unselected_windows": manifest["unselected_windows"],
+            "target_weights_sha256": manifest["target"]["weights_sha256"],
+            "target_config_sha256": manifest["target"]["config_sha256"],
+            "transfer_bytes": transfer_plan["total_bytes"],
+        }
+
+    def update(self, raw_job: Mapping[str, Any]) -> dict[str, Any]:
+        """Train from one trainer-local capture and prepare candidate tensors."""
         if self._pending_candidate_dir is not None:
             raise RuntimeError("DraftTrainer has an uncommitted candidate")
         job = OnlineEagleTrainingJob.from_mapping(raw_job)
@@ -207,17 +180,42 @@ class DraftTrainer:
                 f"expected {self._served_draft_revision}, got {job.parent_draft_revision}"
             )
         capture_dir = Path(job.capture_dir)
-        materialize_ray_directory_bundle(capture_bundle, capture_dir)
-        validate_materialized_bundle(capture_bundle, capture_dir)
+        if not capture_dir.is_dir():
+            raise FileNotFoundError(f"DraftTrainer capture is not materialized: {capture_dir}")
         job = OnlineEagleTrainingJob.from_mapping(
             {
                 **job.to_mapping(),
                 "draft_model_dir": self._served_draft_dir,
             }
         )
+        accepted_revision = None
         try:
-            result = run_training_job(job)
+            if self._training_runtime is None:
+                self._training_runtime = OnlineEagleTrainerRuntime(job, capture_dir)
+            result = self._training_runtime.update(job)
+            transfer_manifest = None
+            if result.accepted:
+                assert result.candidate_dir is not None
+                assert result.draft_revision is not None
+                assert result.weights_sha256 is not None
+                accepted_revision = result.draft_revision
+                candidate_manifest = validate_online_eagle_serving_candidate(result.candidate_dir)
+                candidate_tensors = load_file(Path(result.candidate_dir) / candidate_manifest["weights_path"])
+                manifest = TensorTransferManifest.from_tensors(
+                    transfer_id=f"candidate-step-{result.step}",
+                    revision=result.draft_revision,
+                    source_weights_sha256=result.weights_sha256,
+                    tensors=candidate_tensors,
+                )
+                self._pending_candidate_dir = result.candidate_dir
+                self._pending_draft_revision = result.draft_revision
+                self._pending_candidate_tensors = candidate_tensors
+                self._pending_transfer_manifest = manifest.to_mapping()
+                transfer_manifest = self._pending_transfer_manifest
         except Exception as error:
+            if accepted_revision is not None:
+                assert self._training_runtime is not None
+                self._training_runtime.rollback(accepted_revision)
             failure_dir = None
             preservation_error = None
             try:
@@ -237,20 +235,28 @@ class DraftTrainer:
                 failure_preservation_error=preservation_error,
             ).to_mapping()
             remove_online_eagle_scratch(capture_dir.parent)
-            return {"result": result, "candidate_bundle": None}
-
-        candidate_bundle = None
-        if result.accepted:
-            assert result.candidate_dir is not None
-            assert result.draft_revision is not None
-            candidate_bundle = bundle_directory_for_ray(
-                result.candidate_dir,
-                excluded_relative_paths={TRAINER_STATE_FILENAME},
-            )
-            self._pending_candidate_dir = result.candidate_dir
-            self._pending_draft_revision = result.draft_revision
+            return {"result": result, "transfer_manifest": None}
         remove_online_eagle_scratch(capture_dir.parent)
-        return {"result": result.to_mapping(), "candidate_bundle": candidate_bundle}
+        return {"result": result.to_mapping(), "transfer_manifest": transfer_manifest}
+
+    def broadcast_candidate(self, transfer_manifest: Mapping[str, Any]) -> dict[str, Any]:
+        """Broadcast the pending candidate directly to every vLLM rank."""
+        if self._draft_transfer_group is None:
+            raise RuntimeError("DraftTrainer transfer group is not initialized")
+        manifest = TensorTransferManifest.from_mapping(transfer_manifest)
+        if self._pending_transfer_manifest != manifest.to_mapping() or self._pending_candidate_tensors is None:
+            raise RuntimeError(f"DraftTrainer has no matching pending transfer: {manifest.transfer_id}")
+        broadcast_tensor_payload(
+            self._pending_transfer_manifest,
+            tensors=self._pending_candidate_tensors,
+            group=self._draft_transfer_group,
+        )
+        return {
+            "transfer_id": manifest.transfer_id,
+            "draft_revision": manifest.revision,
+            "payload_sha256": manifest.payload_sha256,
+            "total_bytes": manifest.total_bytes,
+        }
 
     def commit(self, draft_revision: str) -> dict[str, Any]:
         """Commit the candidate after every serving engine activated the same digest."""
@@ -258,11 +264,15 @@ class DraftTrainer:
             raise RuntimeError(
                 f"DraftTrainer cannot commit {draft_revision!r}; pending={self._pending_draft_revision!r}"
             )
+        assert self._training_runtime is not None
+        self._training_runtime.commit(draft_revision)
         previous = self._served_draft_dir
         self._served_draft_dir = self._pending_candidate_dir
         self._served_draft_revision = draft_revision
         self._pending_candidate_dir = None
         self._pending_draft_revision = None
+        self._pending_transfer_manifest = None
+        self._pending_candidate_tensors = None
         previous_path = Path(previous).resolve()
         process_root = self._process_root.resolve()
         if previous_path != Path(self._initial_draft_dir).resolve() and previous_path.is_relative_to(process_root):
@@ -276,8 +286,12 @@ class DraftTrainer:
                 f"DraftTrainer cannot roll back {draft_revision!r}; pending={self._pending_draft_revision!r}"
             )
         candidate = self._pending_candidate_dir
+        assert self._training_runtime is not None
+        self._training_runtime.rollback(draft_revision)
         self._pending_candidate_dir = None
         self._pending_draft_revision = None
+        self._pending_transfer_manifest = None
+        self._pending_candidate_tensors = None
         remove_online_eagle_scratch(candidate)
         return {"draft_revision": draft_revision, "served_draft_dir": self._served_draft_dir}
 
@@ -288,6 +302,7 @@ class DraftTrainer:
         manifest = restore_speculator_checkpoint(source, destination)
         self._served_draft_dir = destination
         self._served_draft_revision = manifest["draft_revision"]
+        self._training_runtime = None
         return manifest
 
     def publish(self, destination: str, draft_revision: str, served_target_revision: str) -> dict[str, Any]:
@@ -308,6 +323,15 @@ class DraftTrainer:
         remove_online_eagle_scratch(self._process_root)
         self._pending_candidate_dir = None
         self._pending_draft_revision = None
+        self._pending_transfer_manifest = None
+        self._pending_candidate_tensors = None
+        self._training_runtime = None
+        if self._draft_transfer_group is not None:
+            torch.distributed.destroy_process_group(self._draft_transfer_group)
+            self._draft_transfer_group = None
+        if self._owns_default_process_group:
+            torch.distributed.destroy_process_group()
+            self._owns_default_process_group = False
         return {"path": str(self._process_root)}
 
     def status(self) -> dict[str, Any]:
@@ -318,6 +342,7 @@ class DraftTrainer:
             "gpu_ids": self._gpu_ids,
             "pending_candidate_dir": self._pending_candidate_dir,
             "pending_draft_revision": self._pending_draft_revision,
+            "transfer_group_initialized": self._draft_transfer_group is not None,
         }
 
 
