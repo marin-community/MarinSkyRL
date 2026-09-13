@@ -1492,7 +1492,7 @@ def initialize_ray(cfg: DictConfig):
         manifest, stack_path = initialize_process_diagnostics("driver", environment=debug_environment)
         logger.info(f"Debug mode {debug_environment[DEBUG_MODE_ENV]} active; driver manifest: {manifest}")
         if stack_path is not None:
-            logger.info(f"Periodic all-thread stack capture active: {stack_path}")
+            logger.info(f"On-demand all-thread stack capture active (SIGUSR2): {stack_path}")
 
     env_vars = prepare_runtime_environment(cfg)
     # worker_process_setup_hook runs ONCE at the start of every Ray worker process,

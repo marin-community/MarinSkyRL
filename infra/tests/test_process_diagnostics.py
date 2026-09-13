@@ -9,7 +9,7 @@ from marinskyrl.process_diagnostics import (
 )
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
-    LIVE_STACK_INTERVAL_ENV,
+    DEBUG_MODE_ENV,
     PYTHONFAULTHANDLER_ENV,
     write_process_manifest,
 )
@@ -63,20 +63,21 @@ def test_process_manifest_does_not_capture_managed_secrets(tmp_path) -> None:
 def test_live_stack_capture_is_only_installed_when_configured(tmp_path, monkeypatch) -> None:
     calls = []
     monkeypatch.setattr(
-        "marinskyrl.process_diagnostics.faulthandler.dump_traceback_later",
-        lambda interval, **kwargs: calls.append((interval, kwargs)),
+        "marinskyrl.process_diagnostics.faulthandler.register",
+        lambda signum, **kwargs: calls.append((signum, kwargs)),
     )
 
     assert install_live_stack_capture("worker", environment={}) is None
     path = install_live_stack_capture(
         "worker",
-        environment={DEBUG_ARTIFACT_DIR_ENV: str(tmp_path), LIVE_STACK_INTERVAL_ENV: "17"},
+        environment={DEBUG_ARTIFACT_DIR_ENV: str(tmp_path), DEBUG_MODE_ENV: "distributed"},
     )
 
     assert path is not None
     assert path.parent == tmp_path / "stacks"
-    assert calls[0][0] == 17
-    assert calls[0][1]["repeat"] is True
+    assert calls[0][0] == signal.SIGUSR2
+    assert calls[0][1]["all_threads"] is True
+    assert calls[0][1]["chain"] is False
     assert calls[0][1]["file"].name == str(path)
 
 

@@ -35,7 +35,8 @@ environment, network, topology, and tuning. Per-collective text logging is exclu
 recorder captures that history instead.
 
 The distributed tier adds NCCL desynchronization diagnostics, collective timing, C++ stacks, PyTorch C++
-informational logs, fast symbolization, and periodic all-thread Python stack snapshots. It intentionally does not
+informational logs, fast symbolization, and on-demand all-thread Python stack snapshots. Send `SIGUSR2` to a driver
+or Ray worker process to append a snapshot to its job-scoped `stacks/` artifact. It intentionally does not
 enable `CUDA_LAUNCH_BLOCKING` or
 `TORCH_DISTRIBUTED_DEBUG=DETAIL`, because those settings change synchronization and can hide or create timing
 failures. See the [PyTorch flight-recorder guide](https://docs.pytorch.org/tutorials/unstable/flight_recorder_tutorial.html)
