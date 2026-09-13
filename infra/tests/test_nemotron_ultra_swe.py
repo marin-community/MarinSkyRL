@@ -11,12 +11,15 @@ import pytest
 from infra.rl_data.nemotron_ultra_swe import (
     _archive_files,
     _tar_bytes,
+    bind_tasktrove_swe_proxies,
     collect_swe_instance_ids,
     compose_swe_tasks,
     convert_swe_tasks_to_prebuilt,
     make_r2e_task,
     prepare_swegym_build_contexts,
     reconstruct_swegym_task,
+    select_tasktrove_swe_proxy_tasks,
+    tasktrove_swe_proxy_index,
 )
 from infra.rl_data.sources import NEMOTRON_ULTRA_SWE_AGENT
 
@@ -49,9 +52,7 @@ def _swegym_row(instance_id: str, *, full: bool = False):
                 "tests/trusted_test_paths.txt": (b"old_test.py\n", 0o644),
             }
         )
-    archive = _tar_bytes(
-        files
-    )
+    archive = _tar_bytes(files)
     return {"path": "swegym-0001", "task_binary": archive}
 
 
@@ -63,6 +64,65 @@ def _r2e_row(commit: str):
         "problem_statement": "Repair image loading.",
         "expected_output_json": json.dumps({"TestImages.test_load": "PASSED"}),
     }
+
+
+def _pivot_row(*, trajectory_id: int, step: int, instance_id: str, agent_cls: str = "opencode"):
+    return {
+        "agent_ref": {"name": NEMOTRON_ULTRA_SWE_AGENT},
+        "trajectory_id": trajectory_id,
+        "info": {"step": step, "turn": 1, "depth": step},
+        "metadata": {"instance_id": instance_id, "agent_cls": agent_cls},
+    }
+
+
+def _proxy_row(*, path: str, trajectory_id: int, step: int, instance_id: str, agent_cls: str = "opencode"):
+    metadata = {
+        "trajectory_id": trajectory_id,
+        "step": step,
+        "turn": 1,
+        "depth": step,
+        "instance_id": instance_id,
+        "agent_cls": agent_cls,
+    }
+    return {
+        "path": path,
+        "task_binary": _tar_bytes(
+            {
+                "instruction.md": (b"Choose the next action.\n", 0o644),
+                "metadata.json": ((json.dumps(metadata) + "\n").encode(), 0o644),
+                "task.toml": (b'version = "1.0"\n', 0o644),
+            }
+        ),
+    }
+
+
+def test_tasktrove_proxy_binding_keeps_exact_states_and_drops_unavailable_swe_rows():
+    available = _pivot_row(trajectory_id=7, step=3, instance_id="owner__repo-a")
+    unavailable = _pivot_row(trajectory_id=7, step=4, instance_id="owner__repo-a")
+    ordinary = {"agent_ref": {"name": "math_with_judge_simple_agent"}}
+    proxy = _proxy_row(path="proxy-state-7-3.tar.gz", trajectory_id=7, step=3, instance_id="owner__repo-a")
+
+    bound = list(bind_tasktrove_swe_proxies([ordinary, available, unavailable], tasktrove_swe_proxy_index([proxy])))
+
+    assert bound[0] is ordinary
+    assert len(bound) == 2
+    assert bound[1]["metadata"] == {
+        "instance_id": "owner__repo-a",
+        "agent_cls": "opencode",
+        "tasktrove_proxy_path": "proxy-state-7-3.tar.gz",
+    }
+    assert "tasktrove_proxy_path" not in available["metadata"]
+
+
+def test_tasktrove_proxy_selection_preserves_archives_and_rejects_missing_paths():
+    first = _proxy_row(path="proxy-one.tar.gz", trajectory_id=1, step=2, instance_id="owner__repo-a")
+    second = _proxy_row(path="proxy-two.tar.gz", trajectory_id=2, step=3, instance_id="owner__repo-b")
+
+    selected = select_tasktrove_swe_proxy_tasks({"proxy-two.tar.gz"}, [first, second])
+
+    assert selected == [second]
+    with pytest.raises(ValueError, match="TaskTrove has no SWE proxy"):
+        select_tasktrove_swe_proxy_tasks({"missing.tar.gz"}, [first, second])
 
 
 def test_collects_only_unique_swe_rows():
@@ -118,9 +178,7 @@ def test_reconstructs_missing_swegym_task_from_same_repo_template():
         "problem_statement": "Recognize negative numbers.",
         "patch": "diff --git a/dvc/value.py b/dvc/value.py\n--- a/dvc/value.py\n+++ b/dvc/value.py\n",
         "test_patch": (
-            "diff --git a/tests/test_value.py b/tests/test_value.py\n"
-            "--- /dev/null\n"
-            "+++ b/tests/test_value.py\n"
+            "diff --git a/tests/test_value.py b/tests/test_value.py\n--- /dev/null\n+++ b/tests/test_value.py\n"
         ),
         "PASS_TO_PASS": ["tests/test_value.py::test_positive"],
         "FAIL_TO_PASS": ["tests/test_value.py::test_negative"],

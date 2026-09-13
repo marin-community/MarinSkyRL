@@ -1,14 +1,14 @@
-"""Build the Harbor task sidechannel for Nemotron Ultra's released SWE rows.
+"""Build Harbor task sidechannels for Nemotron Ultra's released SWE rows.
 
 The released RLVR blends contain pivot-state verifier records rather than full
-repository environments. MarinSkyRL intentionally upgrades those rows to complete
-Harbor episodes. The instance IDs resolve to two upstream corpora: SWE-Gym tasks
-already repaired and packaged by TaskTrove, and R2E-Gym tasks whose published
-container images contain the repository, dependencies, and verifier tests.
+repository environments. The campaign path keeps only exact TaskTrove proxy
+states so Daytona can reuse TaskTrove's content-addressed snapshots. The older
+SWE-Gym and R2E conversion helpers remain available for Iris/gVisor workflows.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
@@ -31,12 +31,8 @@ from infra.rl_data.sources import NEMOTRON_ULTRA_REVISION, NEMOTRON_ULTRA_RL_DAT
 
 TASKTROVE_DATASET = "open-thoughts/TaskTrove"
 TASKTROVE_REVISION = "131d8a8470c7a81113baac898c0c232db3f5ae31"
-TASKTROVE_SWEGYM_PARQUET = "laion__swegym-tasks-patched-validated-v5/tasks.parquet"
+TASKTROVE_SWE_PROXY_PARQUET = "laion__nemotron-gym-agentic-swe-pivot-v4/tasks.parquet"
 SWEGYM_DATASET = "SWE-Gym/SWE-Gym"
-SWEGYM_REVISION = "bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb"
-SWEGYM_PARQUET = "data/train-00000-of-00001.parquet"
-R2E_GYM_DATASET = "R2E-Gym/R2E-Gym-Subset"
-R2E_GYM_REVISION = "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
 ENVIRONMENT_DIR = "environment"
 R2E_TEST_INFO_PATH = "tests/test_info.json"
 LEGACY_R2E_TEST_INFO_PATH = "/workspace/metadata.json"
@@ -61,6 +57,7 @@ class TaskTroveScan:
 class SWEGymBuildContext:
     files: dict[str, tuple[bytes, int]]
     task_paths: list[str]
+
 
 _TASK_TOML = """\
 version = "1.0"
@@ -179,6 +176,118 @@ def _archive_json(archive: bytes, suffix: str) -> Mapping[str, Any] | None:
                 value = json.load(source)
                 return value if isinstance(value, Mapping) else None
     return None
+
+
+@dataclass(frozen=True)
+class SWEProxyKey:
+    trajectory_id: str
+    step: int
+    turn: int
+    depth: int
+    instance_id: str
+    agent_cls: str
+
+
+def _proxy_key(values: Mapping[str, Any], *, label: str) -> SWEProxyKey:
+    trajectory_id = values.get("trajectory_id")
+    instance_id = values.get("instance_id")
+    agent_cls = values.get("agent_cls")
+    dimensions = {name: values.get(name) for name in ("step", "turn", "depth")}
+    if not isinstance(trajectory_id, (str, int)) or isinstance(trajectory_id, bool):
+        raise ValueError(f"{label} is missing trajectory_id")
+    if not isinstance(instance_id, str) or not instance_id:
+        raise ValueError(f"{label} is missing instance_id")
+    if not isinstance(agent_cls, str) or not agent_cls:
+        raise ValueError(f"{label} is missing agent_cls")
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in dimensions.values()):
+        raise ValueError(f"{label} is missing integer step, turn, or depth")
+    return SWEProxyKey(
+        trajectory_id=str(trajectory_id),
+        step=dimensions["step"],
+        turn=dimensions["turn"],
+        depth=dimensions["depth"],
+        instance_id=instance_id,
+        agent_cls=agent_cls,
+    )
+
+
+def _raw_swe_proxy_key(row: Mapping[str, Any]) -> SWEProxyKey:
+    info = row.get("info")
+    metadata = row.get("metadata")
+    if not isinstance(info, Mapping) or not isinstance(metadata, Mapping):
+        raise ValueError("Nemotron Ultra SWE row is missing info or metadata")
+    return _proxy_key({**info, **metadata, "trajectory_id": row.get("trajectory_id")}, label="Nemotron Ultra SWE row")
+
+
+def tasktrove_swe_proxy_index(rows: Iterable[Mapping[str, Any]]) -> dict[SWEProxyKey, dict[str, Any]]:
+    """Index exact TaskTrove pivot-state proxies without altering their archives."""
+    result: dict[SWEProxyKey, dict[str, Any]] = {}
+    paths: set[str] = set()
+    for row in rows:
+        path = row.get("path")
+        archive_value = row.get("task_binary")
+        if not isinstance(path, str):
+            raise TypeError("TaskTrove proxy path must be a string")
+        if not isinstance(archive_value, (bytes, bytearray, memoryview)):
+            raise TypeError("TaskTrove proxy task_binary must be bytes")
+        safe_path = _safe_task_path(path)
+        archive = bytes(archive_value)
+        metadata = _archive_json(archive, "metadata.json")
+        if metadata is None:
+            raise ValueError(f"TaskTrove proxy {path!r} has no metadata.json")
+        key = _proxy_key(metadata, label=f"TaskTrove proxy {path!r}")
+        if key in result:
+            raise ValueError(f"duplicate TaskTrove SWE proxy key {key!r}")
+        if safe_path in paths:
+            raise ValueError(f"duplicate TaskTrove SWE proxy path {safe_path!r}")
+        result[key] = {"path": safe_path, "task_binary": archive}
+        paths.add(safe_path)
+    return result
+
+
+def bind_tasktrove_swe_proxies(
+    rows: Iterable[Mapping[str, Any]],
+    proxies: Mapping[SWEProxyKey, Mapping[str, Any]],
+) -> Iterable[Mapping[str, Any]]:
+    """Bind exact proxy paths to SWE rows and omit SWE states TaskTrove lacks."""
+    for row in rows:
+        agent_ref = row.get("agent_ref")
+        if not isinstance(agent_ref, Mapping) or agent_ref.get("name") != NEMOTRON_ULTRA_SWE_AGENT:
+            yield row
+            continue
+        proxy = proxies.get(_raw_swe_proxy_key(row))
+        if proxy is None:
+            continue
+        path = proxy.get("path")
+        if not isinstance(path, str) or not path:
+            raise ValueError("TaskTrove proxy index contains an invalid path")
+        bound = copy.deepcopy(row)
+        metadata = bound["metadata"]
+        metadata["tasktrove_proxy_path"] = path
+        yield bound
+
+
+def select_tasktrove_swe_proxy_tasks(
+    desired_paths: set[str], tasktrove_rows: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Select byte-identical proxy archives for every requested task path."""
+    selected: list[dict[str, Any]] = []
+    matched: set[str] = set()
+    for row in tasktrove_rows:
+        path = row.get("path")
+        archive = row.get("task_binary")
+        if path not in desired_paths:
+            continue
+        if not isinstance(path, str) or not isinstance(archive, (bytes, bytearray, memoryview)):
+            raise TypeError("TaskTrove proxy rows require string path and binary task_binary")
+        if path in matched:
+            raise ValueError(f"duplicate TaskTrove SWE proxy path {path!r}")
+        selected.append({"path": _safe_task_path(path), "task_binary": bytes(archive)})
+        matched.add(path)
+    missing = desired_paths - matched
+    if missing:
+        raise ValueError(f"TaskTrove has no SWE proxy for {len(missing)} paths: {sorted(missing)[:5]}")
+    return selected
 
 
 def _safe_task_path(value: str) -> str:
@@ -763,8 +872,8 @@ def compose_swe_tasks(
     return rows, counts
 
 
-def _load_blend_swe_ids(revision: str) -> set[str]:
-    instance_ids: set[str] = set()
+def _load_blend_swe_proxy_paths(revision: str, proxies: Mapping[SWEProxyKey, Mapping[str, Any]]) -> set[str]:
+    paths: set[str] = set()
     for filename in ("rlvr1.jsonl", "rlvr2.jsonl"):
         path = hf_hub_download(
             repo_id=NEMOTRON_ULTRA_RL_DATASET,
@@ -773,73 +882,61 @@ def _load_blend_swe_ids(revision: str) -> set[str]:
             revision=revision,
         )
         with open(path) as source:
-            instance_ids.update(collect_swe_instance_ids(json.loads(line) for line in source))
-    return instance_ids
+            bound = bind_tasktrove_swe_proxies((json.loads(line) for line in source), proxies)
+            for row in bound:
+                agent_ref = row.get("agent_ref")
+                if not isinstance(agent_ref, Mapping) or agent_ref.get("name") != NEMOTRON_ULTRA_SWE_AGENT:
+                    continue
+                metadata = row["metadata"]
+                paths.add(str(metadata["tasktrove_proxy_path"]))
+    return paths
 
 
-def _tasktrove_rows(revision: str):
+def tasktrove_swe_proxy_rows(revision: str = TASKTROVE_REVISION):
+    """Stream the pinned TaskTrove semantic next-action proxy archives."""
     path = hf_hub_download(
         repo_id=TASKTROVE_DATASET,
         repo_type="dataset",
-        filename=TASKTROVE_SWEGYM_PARQUET,
+        filename=TASKTROVE_SWE_PROXY_PARQUET,
         revision=revision,
     )
     for batch in pq.ParquetFile(path).iter_batches(columns=["path", "task_binary"], batch_size=64):
         yield from batch.to_pylist()
 
 
-def _swegym_source_rows(revision: str):
-    path = hf_hub_download(
-        repo_id=SWEGYM_DATASET,
-        repo_type="dataset",
-        filename=SWEGYM_PARQUET,
-        revision=revision,
-    )
-    for batch in pq.ParquetFile(path).iter_batches(batch_size=256):
-        yield from batch.to_pylist()
+def load_tasktrove_swe_proxy_index(revision: str = TASKTROVE_REVISION) -> dict[SWEProxyKey, dict[str, Any]]:
+    """Load the pinned TaskTrove proxy archive index."""
+    return tasktrove_swe_proxy_index(tasktrove_swe_proxy_rows(revision))
 
 
 def prepare_swe_task_artifact(
     output_dir: Path,
     *,
-    desired_ids: set[str] | None = None,
+    desired_paths: set[str] | None = None,
     blend_revision: str = NEMOTRON_ULTRA_REVISION,
     tasktrove_revision: str = TASKTROVE_REVISION,
-    swegym_revision: str = SWEGYM_REVISION,
-    r2e_revision: str = R2E_GYM_REVISION,
 ) -> dict[str, Any]:
-    """Download pinned inputs and atomically write one Harbor task parquet."""
-    from datasets import load_dataset
-
+    """Write the exact TaskTrove SWE proxy archives used by the blends."""
     if output_dir.exists():
         raise FileExistsError(f"Refusing to overwrite existing artifact: {output_dir}")
-    desired_ids = _load_blend_swe_ids(blend_revision) if desired_ids is None else desired_ids
-    if not desired_ids:
-        raise ValueError("Nemotron Ultra SWE task preparation requires at least one instance ID")
-    r2e_rows = load_dataset(R2E_GYM_DATASET, split="train", revision=r2e_revision, streaming=True)
-    rows, counts = compose_swe_tasks(
-        desired_ids,
-        _tasktrove_rows(tasktrove_revision),
-        r2e_rows,
-        swegym_source_rows=_swegym_source_rows(swegym_revision),
-    )
+    proxy_rows = list(tasktrove_swe_proxy_rows(tasktrove_revision))
+    proxies = tasktrove_swe_proxy_index(proxy_rows)
+    desired_paths = _load_blend_swe_proxy_paths(blend_revision, proxies) if desired_paths is None else desired_paths
+    if not desired_paths:
+        raise ValueError("Nemotron Ultra SWE task preparation requires at least one TaskTrove proxy path")
+    rows = select_tasktrove_swe_proxy_tasks(desired_paths, proxy_rows)
+    counts = {"total": len(rows), "tasktrove_proxy": len(rows)}
     provenance = {
         "blend": {
             "dataset": NEMOTRON_ULTRA_RL_DATASET,
             "revision": blend_revision,
             "files": ["rlvr1.jsonl", "rlvr2.jsonl"],
         },
-        "swegym": {
+        "tasktrove_proxy": {
             "dataset": TASKTROVE_DATASET,
             "revision": tasktrove_revision,
-            "file": TASKTROVE_SWEGYM_PARQUET,
+            "file": TASKTROVE_SWE_PROXY_PARQUET,
         },
-        "swegym_reconstruction_source": {
-            "dataset": SWEGYM_DATASET,
-            "revision": swegym_revision,
-            "file": SWEGYM_PARQUET,
-        },
-        "r2egym": {"dataset": R2E_GYM_DATASET, "revision": r2e_revision, "split": "train"},
         "counts": counts,
     }
     _write_task_artifact(output_dir, rows, provenance)

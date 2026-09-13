@@ -11,11 +11,17 @@ from typing import Any
 
 import requests
 
+from infra.rl_data.nemotron_ultra_swe import (
+    SWEProxyKey,
+    bind_tasktrove_swe_proxies,
+    load_tasktrove_swe_proxy_index,
+)
 from infra.rl_data.sources import (
     NEMOTRON_ULTRA_REVISION,
     NEMOTRON_ULTRA_RL_DATASET,
     NEMOTRON_ULTRA_RLVR1_AGENTS,
     NEMOTRON_ULTRA_RLVR2_AGENTS,
+    NEMOTRON_ULTRA_SWE_AGENT,
     Source,
     nemotron_ultra_rlvr1_source,
     nemotron_ultra_rlvr2_source,
@@ -86,6 +92,7 @@ def sample_raw_generator_rows(
     seed: int,
     revision: str = NEMOTRON_ULTRA_REVISION,
     max_ranges: int = MAX_RANGES,
+    swe_proxies: dict[SWEProxyKey, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Select one random embedded row for each generator with bounded transfer."""
     if max_ranges <= 0:
@@ -94,6 +101,8 @@ def sample_raw_generator_rows(
     offsets = [rng.randrange(0, spec.size - RANGE_BYTES) for _ in range(max_ranges)]
     url = HUGGING_FACE_RESOLVE_URL.format(revision=revision, filename=spec.filename)
     candidates: dict[str, list[dict[str, Any]]] = {agent: [] for agent in spec.agents}
+    if NEMOTRON_ULTRA_SWE_AGENT in spec.agents and swe_proxies is None:
+        swe_proxies = load_tasktrove_swe_proxy_index()
 
     for batch_start in range(0, len(offsets), RANGES_PER_BATCH):
         batch = offsets[batch_start : batch_start + RANGES_PER_BATCH]
@@ -107,8 +116,16 @@ def sample_raw_generator_rows(
                         raise ValueError(f"{spec.name} contains unsupported generator {agent!r}")
                     if agent not in candidates or row.get("_hf_question_placeholder") is not None:
                         continue
+                    if agent == NEMOTRON_ULTRA_SWE_AGENT:
+                        bound = list(bind_tasktrove_swe_proxies([row], swe_proxies or {}))
+                        if not bound:
+                            continue
+                        row = dict(bound[0])
                     request = row.get("responses_create_params")
-                    if not isinstance(request, dict) or len(json.dumps(request, ensure_ascii=False)) > MAX_INPUT_CHARACTERS:
+                    if (
+                        not isinstance(request, dict)
+                        or len(json.dumps(request, ensure_ascii=False)) > MAX_INPUT_CHARACTERS
+                    ):
                         continue
                     candidates[agent].append(row)
         if all(candidates.values()):
@@ -134,8 +151,9 @@ def write_generator_sample(
         raise FileExistsError(f"Refusing to overwrite generator sample: {output_path}")
     prepared_rows = []
     sampled_uuids: dict[str, dict[str, str]] = {}
+    swe_proxies = load_tasktrove_swe_proxy_index()
     for spec in BLEND_SAMPLE_SPECS:
-        raw_rows = sample_raw_generator_rows(spec, seed=seed, revision=revision)
+        raw_rows = sample_raw_generator_rows(spec, seed=seed, revision=revision, swe_proxies=swe_proxies)
         contract = get_data_contract(spec.source.env_id)
         sampled_uuids[spec.name] = {}
         for index, row in enumerate(raw_rows):

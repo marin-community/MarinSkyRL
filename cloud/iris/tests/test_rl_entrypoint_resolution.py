@@ -169,3 +169,18 @@ trajectory_runner:
     assert process_pool["cpus_per_coordinator"] == 8
     assert process_pool["rpc_timeout_seconds"] == 1200
     assert process_pool["executor_workers"] == 256
+
+
+def test_nemotron_ultra_judge_secret_reference_composes():
+    parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/snowball_ultra_rlvr1_split64.yaml"))
+    hydra_args = build_skyrl_hydra_args(parsed, {"num_nodes": 8}, SimpleNamespace(gpus_per_node=8))
+    source_config_dir = str(_REPO_ROOT / "skyrl-train/skyrl_train/config")
+
+    with initialize_config_dir(config_dir=source_config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=hydra_args)
+
+    ultra = cfg.environment.skyrl_gym.nemotron_ultra
+    assert ultra.judges.general.api_key_env == "TOGETHER_API_KEY"
+    assert ultra.judges.general.reasoning_effort == "low"
+    assert ultra.genrm.judge.api_key_env == "TOGETHER_API_KEY"
+    assert ultra.genrm.judge.response_transport == "chat_completions"

@@ -67,7 +67,7 @@ python="$environment/bin/python"
 source "$runtime_file"
 # Keep the development linker name in this environment, outside uv's package cache.
 ln -sf "$CUDA_HOME/lib/libcudart.so.13" "$environment/lib/libcudart.so"
-if [[ "$profile" == fsdp || "$profile" == fsdp-export ]]; then
+if [[ "$profile" == fsdp || "$profile" == fsdp-export || "$profile" == megatron || "$profile" == megatron-export ]]; then
   "$python" -c "import flash_attn, flash_attn_2_cuda"
 fi
 if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then

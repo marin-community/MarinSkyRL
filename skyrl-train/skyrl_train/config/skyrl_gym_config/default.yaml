@@ -26,18 +26,27 @@ nemotron_ultra:
       base_url: "http://127.0.0.1:8001/v1"
       model: "general-judge"
       api_key: "dummy_key"
+      api_key_env: null
       timeout_seconds: 600.0
+      response_transport: responses_metadata
+      reasoning_effort: null
     safety:
       base_url: "http://127.0.0.1:8002/v1"
       model: "safety-judge"
       api_key: "dummy_key"
+      api_key_env: null
       timeout_seconds: 600.0
+      response_transport: responses_metadata
+      reasoning_effort: null
   genrm:
     judge:
       base_url: "http://127.0.0.1:8003/v1"
       model: "genrm-judge"
       api_key: "dummy_key"
+      api_key_env: null
       timeout_seconds: 600.0
+      response_transport: responses_metadata
+      reasoning_effort: null
     num_rollouts_per_prompt: 16
     default_score: 3.0
     default_ranking: 3.5

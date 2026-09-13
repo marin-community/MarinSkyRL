@@ -112,11 +112,12 @@ def test_megatron_extra_has_native_wheels_for_linux_x86_64() -> None:
         assert any("linux_x86_64.whl" in source["url"] for source in urls)
 
 
-def test_fsdp_extra_provides_flash_attention_for_linux_x86_64() -> None:
+@pytest.mark.parametrize("policy_extra", ["fsdp", "megatron"])
+def test_policy_extra_provides_flash_attention_for_linux_x86_64(policy_extra: str) -> None:
     extras = PYPROJECT["project"]["optional-dependencies"]
     sources = PYPROJECT["tool"]["uv"]["sources"]
 
-    requirements = [Requirement(value) for value in extras["fsdp"]]
+    requirements = [Requirement(value) for value in extras[policy_extra]]
     linux_x86 = {"sys_platform": "linux", "platform_machine": "x86_64"}
     assert any(req.name == "flash-attn" and req.marker.evaluate(linux_x86) for req in requirements)
     urls = sources["flash-attn"]
