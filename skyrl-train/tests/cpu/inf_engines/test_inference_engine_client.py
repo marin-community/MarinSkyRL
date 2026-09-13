@@ -804,6 +804,47 @@ async def test_chat_completion_retry_resends_original_when_no_tokens_generated_y
     assert out == engines[0].responses[1]
 
 
+@pytest.mark.asyncio
+async def test_chat_completion_accepts_tool_call_response_without_text_content():
+    """Tool parsers may return a tool-call-only message with nullable content."""
+
+    response = {
+        "id": "cmpl-tool-call",
+        "object": "chat.completion",
+        "model": "dummy-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": '{"cmd":"pwd"}'},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+    }
+
+    class MockEngine:
+        async def chat_completion(self, request_payload):
+            return deepcopy(response)
+
+    client = InferenceEngineClient(engines=[MockEngine()], tokenizer=object(), full_config=_make_min_cfg())
+    request = {
+        "json": {"model": "dummy-model", "messages": [{"role": "user", "content": "Run pwd"}]},
+        "headers": {},
+    }
+
+    assert await client.chat_completion(request) == response
+
+
 # -------------------------------------------
 # tests for terminal-bench tokenization
 # --------------------------------------------
