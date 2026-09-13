@@ -107,8 +107,8 @@ def _native_engine_methods(engine):
     return actor
 
 
-@pytest.mark.asyncio
-async def test_native_request_wrapper_records_abort_and_preserves_ledger_during_resume():
+@pytest.fixture
+def native_inflight_request():
     import asyncio
     import os
     import time
@@ -122,6 +122,8 @@ async def test_native_request_wrapper_records_abort_and_preserves_ledger_during_
             self.paused = False
             self.entered = asyncio.Event()
             self.release = asyncio.Event()
+            self.finish_reason = "length"
+            self.retained_tokens = [1, 2]
 
         async def is_paused(self):
             return self.paused
@@ -136,34 +138,46 @@ async def test_native_request_wrapper_records_abort_and_preserves_ledger_during_
             await self.release.wait()
             self.output_processor.request_states.pop(internal_id)
             yield SimpleNamespace(
-                outputs=[SimpleNamespace(finish_reason="abort", token_ids=[1, 2])],
+                outputs=[SimpleNamespace(finish_reason=self.finish_reason, token_ids=[*self.retained_tokens, 3])],
                 metrics=SimpleNamespace(first_token_ts=stamp),
             )
 
         async def pause_generation(self, *, mode, clear_cache):
-            assert mode == "abort" and clear_cache
             self.paused = True
-            self.release.set()
+            if mode == "abort":
+                self.finish_reason = "abort"
+                self.retained_tokens.clear()
+            if clear_cache:
+                self.retained_tokens.clear()
 
         async def resume_generation(self):
             self.paused = False
+            self.release.set()
 
     engine = Engine()
-    actor = _native_engine_methods(engine)
+    return engine, _native_engine_methods(engine)
+
+
+@pytest.mark.asyncio
+async def test_native_pause_keeps_inflight_request_and_cache_across_weight_reload(native_inflight_request):
+    import asyncio
+    import time
+
+    engine, actor = native_inflight_request
     initial = await actor.read_publication_request_state(initial_policy_version=0, drain_accounting=True)
     assert initial["request_accounting"]["active_ids"] == []
     task = asyncio.create_task(actor._collect_outputs([1], "actual-native-id", object()))
     await engine.entered.wait()
     await actor.pause_generation()
-    await task
     # Internal clock readback during resume must not drain request evidence.
     await actor.resume_generation(policy_version=1)
+    await task
     receipt = await actor.read_publication_request_state(drain_accounting=True)
     accounting = receipt["request_accounting"]
     assert accounting["started_ids"] == ["actual-native-id"]
     assert accounting["active_ids"] == []
-    assert accounting["terminal"][0]["reason"] == "abort"
-    assert accounting["terminal"][0]["tokens"] == 2
+    assert accounting["terminal"][0]["reason"] == "length"
+    assert accounting["terminal"][0]["tokens"] == 3
     assert accounting["terminal"][0]["policy_version_at_first_token"] == 0
     assert [version for _, version in receipt["policy_version_boundaries"]] == [0, 1]
     assert receipt["policy_version_boundaries"][0][0] <= accounting["terminal"][0]["first_token_time"]
