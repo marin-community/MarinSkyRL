@@ -47,14 +47,15 @@ class N2CpuDriver(DriverWithCpuLearner):
         }
 
 
-def n2_driver(driver_type=N2CpuDriver, **kwargs):
+def n2_driver(driver_type=N2CpuDriver, *, minibatches=2, **kwargs):
+    steps = kwargs.pop("steps", 4)
     trainer = make_driver(
         interval=1,
         age=0,
-        steps=4,
+        steps=steps,
         runner_type=FirstTokenRunner,
         first_token_admission=None,
-        minibatches=2,
+        minibatches=minibatches,
         driver_type=driver_type,
         **kwargs,
     )
@@ -77,6 +78,13 @@ def use_shard_transport(trainer, monkeypatch):
         def __init__(self, driver):
             self.driver = driver
 
+        async def before_pause(self, version):
+            assert not engine.generation_paused_event.is_set()
+
+        async def after_resume(self, version):
+            assert not engine.generation_paused_event.is_set()
+            assert engine.installed_update == version
+
         async def publish(self, version):
             if not engine.publications:
                 await engine.pause_generation()
@@ -84,7 +92,11 @@ def use_shard_transport(trainer, monkeypatch):
             assert version == self.driver.policy_model.completed_update
             engine.installed_update = version
             engine.publications.append(version)
-            return {"phase_seconds": {"install": 1}, "total_seconds_including_proof": 1}
+            return {
+                "phase_seconds": {"install": 1},
+                "total_seconds_including_proof": 1,
+                "diagnostics_scope": "paused-install",
+            }
 
         async def close(self):
             pass
@@ -213,14 +225,24 @@ async def test_unsuccessful_optimizer_does_not_advance_n2_cursor_or_publish(monk
         ("trainer.strategy", "fsdp2"),
     ],
 )
-def test_unsupported_n2_numerical_geometry_rejects_before_model_initialization(path, value):
+def test_unsupported_multi_update_numerical_geometry_rejects_before_model_initialization(path, value):
     cfg = get_default_config()
     cfg.trainer.train_batch_size = 128
     cfg.trainer.policy_mini_batch_size = 64
     cfg.trainer.strategy = "megatron"
     cfg.trainer.algorithm.use_kl_loss = False
     OmegaConf.update(cfg, path, value)
-    with pytest.raises(ValueError, match="async N2 currently requires"):
+    with pytest.raises(ValueError, match="multi-update async cohorts support N=2 or N=4"):
+        FullyAsyncRayPPOTrainer(cfg=cfg)
+
+
+def test_unqualified_n3_rejects_before_model_initialization():
+    cfg = get_default_config()
+    cfg.trainer.train_batch_size = 192
+    cfg.trainer.policy_mini_batch_size = 64
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.algorithm.use_kl_loss = False
+    with pytest.raises(ValueError, match="support N=2 or N=4"):
         FullyAsyncRayPPOTrainer(cfg=cfg)
 
 
@@ -312,3 +334,74 @@ async def test_real_loss_optimizer_resume_matches_uninterrupted_parameters_and_s
     actual = [data.metadata["uids"] for data in [*partial.inputs, *resumed.inputs]]
     assert actual == expected
     assert full.data_tracker.total_samples_consumed == resumed.data_tracker.total_samples_consumed == 8
+
+
+@pytest.mark.asyncio
+async def test_actual_n4_u28_preserves_consumption_age_and_evaluation_semantics(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        "skyrl_train.fully_async_trainer.record_event",
+        lambda name, body, **kwargs: events.append((name, body, kwargs)),
+    )
+    trainer = n2_driver(minibatches=4, steps=28, eval_steps=5)
+    try:
+        await asyncio.wait_for(trainer._train_loop(), timeout=20)
+    finally:
+        await trainer._cancel_trajectory_tasks()
+
+    assert [step for step, _ in trainer.preparations] == list(range(1, 29, 4))
+    assert trainer.inference_engine_client.publications == list(range(29))
+    assert trainer.trajectory_runner.evaluations == [(step, step) for step in [0, 5, 10, 15, 20, 25, 28]]
+    assert trainer.data_tracker.total_samples_consumed == 56
+    assert len(trainer.inputs) == 28
+    for index, data in enumerate(trainer.inputs):
+        cohort_start = 1 + 4 * (index // 4)
+        assert data["action_log_probs"].unique().tolist() == pytest.approx([-cohort_start / 10])
+        assert data["rollout_age"].unique().tolist() == [index % 4]
+        assert data.metadata["async_cohort_update_index"] == index % 4
+    uids = [uid for data in trainer.inputs for uid in data.metadata["uids"][::2]]
+    assert len(set(uids)) == len(uids) == 56
+    ages = [body for name, body, _ in events if name == "cohort_consumption"]
+    assert len(ages) == 56
+    assert all(body["admission_age"] == 0 and body["consume_age"] == body["within_cohort_lag"] for body in ages)
+    assert {body["within_cohort_lag"] for body in ages} == {0, 1, 2, 3}
+
+
+@pytest.mark.asyncio
+async def test_n4_mid_cohort_resume_matches_uninterrupted_numerical_state(tmp_path):
+    full = n2_driver(driver_type=DifferentiableN2Driver, minibatches=4, steps=8)
+    partial = n2_driver(
+        driver_type=DifferentiableN2Driver,
+        minibatches=4,
+        steps=8,
+        stop_step=3,
+        save_step=3,
+    )
+    partial.cfg.trainer.ckpt_path = str(tmp_path)
+    for trainer in (full, partial):
+        try:
+            await asyncio.wait_for(trainer._train_loop(), timeout=20)
+        finally:
+            await trainer._cancel_trajectory_tasks()
+
+    resumed = n2_driver(driver_type=DifferentiableN2Driver, minibatches=4, steps=8)
+    resumed.resume_mode = ResumeMode.LATEST
+    resumed.cfg.trainer.resume_path = str(tmp_path / "global_step_3")
+    try:
+        await asyncio.wait_for(resumed._train_loop(), timeout=20)
+    finally:
+        await resumed._cancel_trajectory_tasks()
+
+    assert [step for step, _ in resumed.preparations] == [5]
+    assert torch.equal(full.parameter, resumed.parameter)
+    assert len(full.gradients) == 8 and all(
+        torch.isfinite(gradient) and abs(gradient) > 1e-8 for gradient in full.gradients
+    )
+    full_state, resumed_state = full.optimizer.state_dict(), resumed.optimizer.state_dict()
+    assert full_state["param_groups"] == resumed_state["param_groups"]
+    for key, value in full_state["state"][0].items():
+        assert torch.equal(value, resumed_state["state"][0][key])
+    expected = [data.metadata["uids"] for data in full.inputs]
+    actual = [data.metadata["uids"] for data in [*partial.inputs, *resumed.inputs]]
+    assert actual == expected
+    assert full.data_tracker.total_samples_consumed == resumed.data_tracker.total_samples_consumed == 16
