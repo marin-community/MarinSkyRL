@@ -592,6 +592,7 @@ def merge_online_eagle_captures(
     expected_step: int,
     max_tokens: int,
     max_sequences_per_prompt_group: int,
+    max_window_tokens: int,
 ) -> dict[str, Any]:
     """Merge colocated DP-rank captures into one bounded, immutable trainer input."""
     root = Path(capture_root)
@@ -662,11 +663,15 @@ def merge_online_eagle_captures(
     selected: list[tuple[Path, dict[str, Any]]] = []
     group_counts: dict[str, int] = {}
     selected_tokens = 0
+    oversized_windows = 0
     for directory, window in candidates:
         group_id = str(window.get("group_id", window["request_id"]))
         tokens = window.get("tokens")
         if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
             raise ValueError(f"Invalid online EAGLE captured-window token count: {tokens!r}")
+        if _window_forward_tokens(window) > max_window_tokens:
+            oversized_windows += 1
+            continue
         if group_counts.get(group_id, 0) >= max_sequences_per_prompt_group:
             continue
         if selected_tokens + tokens > max_tokens:
@@ -703,6 +708,7 @@ def merge_online_eagle_captures(
             "source_windows": len(candidates),
             "dropped_requests": sum(int(manifest.get("dropped_requests", 0)) for _, manifest in manifests),
             "dropped_windows": sum(int(manifest.get("dropped_windows", 0)) for _, manifest in manifests),
+            "oversized_windows": oversized_windows,
             "unselected_windows": len(candidates) - len(selected),
             "target": merged_target,
         }
@@ -730,8 +736,10 @@ def _prepare_model(draft_model_dir: Path, capture_dir: Path, device: torch.devic
     # Speculators' FlexAttention mask is block-padded, but online captures retain
     # their exact sequence length. EAGLE's time-shift extension can therefore
     # produce real Q/KV dimensions smaller than the padded BlockMask contract.
-    # This bounded one-layer trainer favors exact mask semantics over that kernel.
-    config.transformer_layer_config._attn_implementation = "eager"  # noqa: SLF001
+    # SDPA accepts the exact dense mask without materializing eager attention's
+    # heads x queries x keys score tensor. At an 8k context and three TTT passes,
+    # that eager tensor alone is about 16 GiB for the Snowball draft.
+    _configure_exact_mask_attention(config)
     # The public embedding-free Snowball checkpoint intentionally has no verifier
     # path. Bypass Speculators' generic post-load verifier hook because the exact
     # target-owned tensors come from this sealed rollout, not a second HF model.
@@ -760,6 +768,11 @@ def _prepare_model(draft_model_dir: Path, capture_dir: Path, device: torch.devic
     return model.to(device=device, dtype=_serving_dtype(device))
 
 
+def _configure_exact_mask_attention(config: Any) -> None:
+    """Select the backend that accepts Speculators' exact dense boolean mask."""
+    config.transformer_layer_config._attn_implementation = "sdpa"  # noqa: SLF001
+
+
 def _serving_dtype(device: torch.device) -> torch.dtype:
     return torch.bfloat16 if device.type == "cuda" else torch.float32
 
@@ -767,6 +780,15 @@ def _serving_dtype(device: torch.device) -> torch.dtype:
 def _forward_context(device: torch.device) -> Any:
     if device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
+
+
+def _sdpa_kernel_context(device: torch.device) -> Any:
+    """Require fused exact-mask SDPA instead of permitting a quadratic fallback."""
+    if device.type == "cuda":
+        from torch.nn.attention import SDPBackend, sdpa_kernel  # noqa: PLC0415
+
+        return sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION)
     return nullcontext()
 
 
@@ -845,13 +867,26 @@ def _load_batch(path: Path, device: torch.device) -> dict[str, torch.Tensor]:
     return {name: value.to(device) for name, value in batch.items()}
 
 
-def _pack_windows(windows: list[dict[str, Any]], max_tokens: int) -> list[list[dict[str, Any]]]:
-    """Group request-local forwards into bounded gradient-accumulation steps."""
+def _window_forward_tokens(window: Mapping[str, Any]) -> int:
+    return max(1, int(window["tokens"]) - 1)
+
+
+def _pack_windows(
+    windows: list[dict[str, Any]],
+    max_tokens: int,
+    max_window_tokens: int,
+) -> list[list[dict[str, Any]]]:
+    """Pack forwards to a token target while preserving request-local histories."""
     batches: list[list[dict[str, Any]]] = []
     batch: list[dict[str, Any]] = []
     batch_tokens = 0
     for window in windows:
-        window_tokens = max(1, int(window["tokens"]) - 1)
+        window_tokens = _window_forward_tokens(window)
+        if window_tokens > max_window_tokens:
+            raise ValueError(
+                "Online EAGLE window exceeds max_window_tokens: "
+                f"request={window.get('request_id')!r} tokens={window_tokens} limit={max_window_tokens}"
+            )
         if batch and batch_tokens + window_tokens > max_tokens:
             batches.append(batch)
             batch = []
@@ -861,6 +896,15 @@ def _pack_windows(windows: list[dict[str, Any]], max_tokens: int) -> list[list[d
     if batch:
         batches.append(batch)
     return batches
+
+
+def _offload_optimizer_state(optimizer: torch.optim.Optimizer) -> None:
+    """Release update-only CUDA state before the candidate holdout forward."""
+    optimizer.zero_grad(set_to_none=True)
+    for state in optimizer.state.values():
+        for name, value in state.items():
+            if isinstance(value, torch.Tensor) and value.device.type != "cpu":
+                state[name] = value.detach().cpu()
 
 
 def _load_window_group(
@@ -879,6 +923,7 @@ def _evaluate(
     windows: list[dict[str, Any]],
     num_speculative_tokens: int,
     max_tokens_per_micro_batch: int,
+    max_window_tokens: int,
     loss_config,
 ) -> OnlineEagleEvaluation:
     """Evaluate mean loss and next-token agreement on the supplied windows."""
@@ -888,11 +933,11 @@ def _evaluate(
     total = 0.0
     model.eval()
     with torch.no_grad():
-        for window_group in _pack_windows(windows, max_tokens_per_micro_batch):
+        for window_group in _pack_windows(windows, max_tokens_per_micro_batch, max_window_tokens):
             device = next(model.parameters()).device
             for window, batch in _load_window_group(window_group, capture_dir, device):
                 path = capture_dir / window["path"]
-                with _forward_context(device):
+                with _forward_context(device), _sdpa_kernel_context(device):
                     _, loss, metrics = model(
                         **batch,
                         ttt_steps=num_speculative_tokens,
@@ -1065,6 +1110,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
         holdout_windows,
         job.num_speculative_tokens,
         training.max_tokens_per_micro_batch,
+        training.max_window_tokens,
         loss_config,
     )
     _convert_trainable_parameters(model, torch.float32)
@@ -1089,6 +1135,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
     if saved_state is not None:
         optimizer.load_state_dict(saved_state["optimizer"])
         _restore_rng_states(saved_state, device)
+        saved_state = None
     _require_finite_trainable_state(model, optimizer)
 
     weighted_train_loss = 0.0
@@ -1097,7 +1144,12 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
     for _epoch in range(training.epochs_per_update):
         epoch_windows = list(train_windows)
         random.shuffle(epoch_windows)
-        for group_index, window_group in enumerate(_pack_windows(epoch_windows, training.max_tokens_per_micro_batch)):
+        packed_windows = _pack_windows(
+            epoch_windows,
+            training.max_tokens_per_micro_batch,
+            training.max_window_tokens,
+        )
+        for group_index, window_group in enumerate(packed_windows):
             group_supervised_tokens = sum(int(window["supervised_tokens"]) for window in window_group)
             if group_supervised_tokens <= 0:
                 raise ValueError("Online EAGLE training microbatch contains no supervised tokens")
@@ -1110,7 +1162,7 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
                         "Online EAGLE supervised-token count does not match its manifest: "
                         f"{path} has {supervised_tokens}, manifest says {window['supervised_tokens']}"
                     )
-                with _forward_context(device):
+                with _forward_context(device), _sdpa_kernel_context(device):
                     _, loss, _metrics = model(
                         **batch,
                         ttt_steps=job.num_speculative_tokens,
@@ -1163,14 +1215,18 @@ def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
             )
     if train_loss_tokens == 0:
         raise ValueError("Online EAGLE training partition contains no supervised tokens")
+    _offload_optimizer_state(optimizer)
     master_parameters = _capture_trainable_master_state(model)
     _convert_trainable_parameters(model, serving_dtype)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     candidate = _evaluate(
         model,
         capture_dir,
         holdout_windows,
         job.num_speculative_tokens,
         training.max_tokens_per_micro_batch,
+        training.max_window_tokens,
         loss_config,
     )
     max_loss_increase = training.max_validation_loss_increase

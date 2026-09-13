@@ -108,6 +108,7 @@ class _SpeculatorCaptureClient:
                     "captured_rows": 72,
                     "captured_windows": 2,
                     "dropped_windows": 4,
+                    "oversized_windows": 3,
                     "unselected_windows": 1,
                     "target_weights_sha256": "target-digest",
                 }
@@ -357,6 +358,7 @@ def test_online_speculator_update_overlaps_then_installs_at_boundary(monkeypatch
     assert trainer.all_metrics["speculator/captured_rows"] == 72.0
     assert trainer.all_metrics["speculator/captured_windows"] == 2.0
     assert trainer.all_metrics["speculator/dropped_windows"] == 4.0
+    assert trainer.all_metrics["speculator/oversized_windows"] == 3.0
     assert trainer.all_metrics["speculator/unselected_windows"] == 1.0
 
     monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda ref: (True, ref.value))

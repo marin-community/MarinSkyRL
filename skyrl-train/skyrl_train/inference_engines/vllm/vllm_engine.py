@@ -2067,6 +2067,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             expected_step=int(job["step"]),
             max_tokens=int(training["max_tokens_per_update"]),
             max_sequences_per_prompt_group=int(training["max_sequences_per_prompt_group"]),
+            max_window_tokens=int(training["max_window_tokens"]),
         )
         capture_dir = str(Path(merged["path"]).parent)
         bundle = bundle_directory_for_ray(capture_dir)
@@ -2078,6 +2079,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "captured_rows": merged["captured_rows"],
                 "captured_windows": len(merged["windows"]),
                 "dropped_windows": merged["dropped_windows"],
+                "oversized_windows": merged["oversized_windows"],
                 "unselected_windows": merged["unselected_windows"],
                 "target_weights_sha256": merged["target"]["weights_sha256"],
                 "target_config_sha256": merged["target"]["config_sha256"],

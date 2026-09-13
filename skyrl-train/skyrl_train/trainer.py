@@ -785,6 +785,7 @@ class RayPPOTrainer:
                 "speculator/captured_rows": float(active["captured_rows"]),
                 "speculator/captured_windows": float(active["captured_windows"]),
                 "speculator/dropped_windows": float(active["dropped_windows"]),
+                "speculator/oversized_windows": float(active["oversized_windows"]),
                 "speculator/unselected_windows": float(active["unselected_windows"]),
             }
         )

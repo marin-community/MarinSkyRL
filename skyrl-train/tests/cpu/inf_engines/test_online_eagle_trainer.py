@@ -1,6 +1,8 @@
 """Behavior tests for the bounded online EAGLE trainer inputs."""
 
 import asyncio
+import copy
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -14,11 +16,15 @@ import torch
 import skyrl_train.inference_engines.vllm.online_eagle_trainer as online_eagle_trainer
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     _candidate_state,
+    _configure_exact_mask_attention,
     _convert_trainable_parameters,
     _restore_trainable_master_state,
     _load_batch,
     _load_window_group,
+    _offload_optimizer_state,
+    _pack_windows,
     _restore_rng_states,
+    _sdpa_kernel_context,
     candidate_is_acceptable,
     export_served_speculator_checkpoint,
     materialize_online_eagle_incumbent,
@@ -172,6 +178,7 @@ def test_dp_captures_merge_into_one_globally_bounded_input(tmp_path: Path) -> No
         expected_step=7,
         max_tokens=9,
         max_sequences_per_prompt_group=1,
+        max_window_tokens=100,
     )
 
     assert merged["worker_ranks"] == [0, 1]
@@ -199,6 +206,7 @@ def test_dp_capture_merge_rejects_different_target_snapshots(tmp_path: Path) -> 
             expected_step=7,
             max_tokens=9,
             max_sequences_per_prompt_group=1,
+            max_window_tokens=100,
         )
 
 
@@ -227,6 +235,7 @@ def test_inference_client_seals_rank_captures_directly_under_merge_root(tmp_path
         expected_step=7,
         max_tokens=9,
         max_sequences_per_prompt_group=1,
+        max_window_tokens=100,
     )
 
     assert {window["request_id"] for window in merged["windows"]} == {"request-a", "request-b"}
@@ -263,6 +272,7 @@ def test_dp_capture_merge_rejects_inconsistent_rank_manifests(tmp_path: Path, mu
             expected_step=7,
             max_tokens=9,
             max_sequences_per_prompt_group=1,
+            max_window_tokens=100,
         )
 
 
@@ -276,6 +286,7 @@ def test_dp_capture_merge_rejects_missing_rank_and_wrong_job_step(tmp_path: Path
             expected_step=7,
             max_tokens=9,
             max_sequences_per_prompt_group=1,
+            max_window_tokens=100,
         )
 
     step_root = tmp_path / "step"
@@ -287,6 +298,7 @@ def test_dp_capture_merge_rejects_missing_rank_and_wrong_job_step(tmp_path: Path
             expected_step=8,
             max_tokens=9,
             max_sequences_per_prompt_group=1,
+            max_window_tokens=100,
         )
 
 
@@ -306,6 +318,7 @@ def test_dp_capture_merge_is_deterministic_across_rank_assignment(tmp_path: Path
             expected_step=7,
             max_tokens=6,
             max_sequences_per_prompt_group=1,
+            max_window_tokens=100,
         )
         selected_orders.append([window["request_id"] for window in merged["windows"]])
 
@@ -329,10 +342,63 @@ def test_dp_capture_merge_skips_oversized_window_and_keeps_later_small_window(tm
         expected_step=7,
         max_tokens=6,
         max_sequences_per_prompt_group=1,
+        max_window_tokens=100,
     )
 
     assert [window["request_id"] for window in merged["windows"]] == ["request-a", "request-c"]
     assert merged["unselected_windows"] == 1
+
+
+def test_dp_capture_merge_admits_window_bound_and_excludes_next_token(tmp_path: Path) -> None:
+    root = tmp_path / "bounded-forward"
+    tokens = {"request-at-limit": 5, "request-over-limit": 6}
+    _write_rank_capture(
+        root,
+        0,
+        [("request-at-limit", "group-at-limit"), ("request-over-limit", "group-over-limit")],
+        tokens_by_request=tokens,
+    )
+
+    merged = merge_online_eagle_captures(
+        str(root),
+        expected_workers=1,
+        expected_step=7,
+        max_tokens=20,
+        max_sequences_per_prompt_group=1,
+        max_window_tokens=4,
+    )
+
+    assert [window["request_id"] for window in merged["windows"]] == ["request-at-limit"]
+    assert merged["oversized_windows"] == 1
+    assert merged["unselected_windows"] == 1
+
+
+def test_pack_windows_keeps_one_admitted_history_larger_than_the_packing_target() -> None:
+    windows = [{"request_id": "request-long", "tokens": 10}]
+
+    assert _pack_windows(windows, max_tokens=8, max_window_tokens=9) == [windows]
+
+
+def test_pack_windows_rejects_one_forward_larger_than_the_window_bound() -> None:
+    with pytest.raises(ValueError, match="request-long.*tokens=9 limit=8"):
+        _pack_windows(
+            [{"request_id": "request-long", "tokens": 10}],
+            max_tokens=4,
+            max_window_tokens=8,
+        )
+
+
+def test_exact_mask_attention_uses_sdpa_and_pins_the_efficient_cuda_kernel(monkeypatch) -> None:
+    config = SimpleNamespace(transformer_layer_config=SimpleNamespace(_attn_implementation="eager"))
+    selected = []
+    monkeypatch.setattr(torch.nn.attention, "sdpa_kernel", lambda backend: selected.append(backend) or nullcontext())
+
+    _configure_exact_mask_attention(config)
+    with _sdpa_kernel_context(torch.device("cuda")):
+        pass
+
+    assert config.transformer_layer_config._attn_implementation == "sdpa"
+    assert selected == [torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION]
 
 
 def test_dp_capture_merge_is_atomic_and_preserves_sources_on_link_failure(tmp_path: Path, monkeypatch) -> None:
@@ -347,6 +413,7 @@ def test_dp_capture_merge_is_atomic_and_preserves_sources_on_link_failure(tmp_pa
             expected_step=7,
             max_tokens=9,
             max_sequences_per_prompt_group=1,
+            max_window_tokens=100,
         )
 
     assert not (root / "merged").exists()
@@ -366,6 +433,7 @@ def test_dp_capture_merge_rejects_missing_file_without_staging(tmp_path: Path) -
             expected_step=7,
             max_tokens=9,
             max_sequences_per_prompt_group=1,
+            max_window_tokens=100,
         )
 
     assert not (root / "merged").exists()
@@ -384,6 +452,7 @@ def test_dp_capture_merge_hardlinks_survive_source_cleanup(tmp_path: Path) -> No
         expected_step=7,
         max_tokens=9,
         max_sequences_per_prompt_group=1,
+        max_window_tokens=100,
     )
 
     merged_target = root / "merged" / "target.safetensors"
@@ -474,6 +543,51 @@ def test_candidate_state_must_equal_declared_serving_dtype() -> None:
     state = _candidate_state(model, serving_dtype=torch.bfloat16)
 
     assert state["weight"].dtype == torch.bfloat16
+
+
+def test_optimizer_state_is_offloaded_before_candidate_evaluation() -> None:
+    model = torch.nn.Linear(2, 2, bias=False)
+    optimizer = torch.optim.AdamW(model.parameters())
+    model(torch.ones(1, 2)).sum().backward()
+    optimizer.step()
+
+    _offload_optimizer_state(optimizer)
+
+    assert model.weight.grad is None
+    assert all(
+        value.device.type == "cpu"
+        for state in optimizer.state.values()
+        for value in state.values()
+        if isinstance(value, torch.Tensor)
+    )
+
+
+def test_offloaded_adam_state_round_trip_matches_continuous_training() -> None:
+    torch.manual_seed(7)
+    continuous_model = torch.nn.Linear(3, 2)
+    continuous_optimizer = torch.optim.AdamW(continuous_model.parameters(), lr=1e-3)
+    inputs = torch.randn(4, 3)
+
+    continuous_optimizer.zero_grad(set_to_none=True)
+    continuous_model(inputs).square().sum().backward()
+    continuous_optimizer.step()
+    _offload_optimizer_state(continuous_optimizer)
+
+    resumed_model = torch.nn.Linear(3, 2)
+    resumed_model.load_state_dict(continuous_model.state_dict())
+    resumed_optimizer = torch.optim.AdamW(resumed_model.parameters(), lr=1e-3)
+    resumed_optimizer.load_state_dict(copy.deepcopy(continuous_optimizer.state_dict()))
+
+    for model, optimizer in (
+        (continuous_model, continuous_optimizer),
+        (resumed_model, resumed_optimizer),
+    ):
+        optimizer.zero_grad(set_to_none=True)
+        model(inputs).square().sum().backward()
+        optimizer.step()
+
+    for continuous, resumed in zip(continuous_model.parameters(), resumed_model.parameters()):
+        assert torch.equal(continuous, resumed)
 
 
 def test_fp32_master_must_round_to_the_served_checkpoint() -> None:

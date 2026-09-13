@@ -136,6 +136,11 @@ class SpeculatorTrainingConfig:
     # Bound the deterministic all-DP merge while leaving enough admission
     # headroom for rollout response lengths to vary between steps.
     max_tokens_per_update: int = 16_384
+    # A request-local history cannot be split without changing its attention
+    # semantics. This is therefore a separate hard forward bound; the packed
+    # microbatch setting below is a target that a single admitted window may
+    # exceed.
+    max_window_tokens: int = 16_384
     max_tokens_per_micro_batch: int = 2_048
     max_sequences_per_prompt_group: int = 2
     min_train_sequences: int = 6
@@ -153,6 +158,7 @@ class SpeculatorTrainingConfig:
         fields = {
             "interval_steps",
             "max_tokens_per_update",
+            "max_window_tokens",
             "max_tokens_per_micro_batch",
             "max_sequences_per_prompt_group",
             "min_train_sequences",
@@ -173,6 +179,10 @@ class SpeculatorTrainingConfig:
             max_tokens_per_update=_positive_integer(
                 mapping.get("max_tokens_per_update", defaults.max_tokens_per_update),
                 f"{context}.max_tokens_per_update",
+            ),
+            max_window_tokens=_positive_integer(
+                mapping.get("max_window_tokens", defaults.max_window_tokens),
+                f"{context}.max_window_tokens",
             ),
             max_tokens_per_micro_batch=_positive_integer(
                 mapping.get("max_tokens_per_micro_batch", defaults.max_tokens_per_micro_batch),
