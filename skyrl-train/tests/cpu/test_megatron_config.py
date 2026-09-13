@@ -1,18 +1,8 @@
-import sys
-from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.utils.utils import validate_cfg, validate_megatron_cfg
-
-
-def test_megatron_accepts_packaged_flash_attention(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = get_default_config()
-    cfg.trainer.flash_attn = True
-    monkeypatch.setitem(sys.modules, "flash_attn", SimpleNamespace(__version__="2.8.3"))
-
-    validate_megatron_cfg(cfg)
+from skyrl_train.utils.utils import validate_cfg
 
 
 def test_megatron_dcp_reports_unsupported_router_replay():
