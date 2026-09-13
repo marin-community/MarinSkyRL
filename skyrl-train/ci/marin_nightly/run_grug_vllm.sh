@@ -13,7 +13,7 @@ nvidia-smi --query-gpu=name,driver_version --format=csv
 echo "::: running a tiny Grug rollout, FSDP2 update, weight broadcast, and second rollout"
 cd "$REPOSITORY_ROOT"
 JUNIT_XML="$REPOSITORY_ROOT/grug-vllm-junit.xml"
-"$PYTHON" "$REPOSITORY_ROOT/cloud/iris/env_vars.py" \
+"$PYTHON" "$REPOSITORY_ROOT/marinskyrl/runtime_environment.py" \
   run-grug-gpu-gate "$REPOSITORY_ROOT" -- \
   "$PYTHON" -m pytest \
   --junitxml="$JUNIT_XML" \

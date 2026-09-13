@@ -16,10 +16,14 @@ from pathlib import Path
 
 import torch.distributed as dist
 from loguru import logger
-from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, ensure_debug_artifact_directories
+from skyrl_train.env_vars import (
+    COLLECTIVE_PHASE_DIAGNOSTICS_ENV,
+    DEBUG_ARTIFACT_DIR_ENV,
+    ensure_debug_artifact_directories,
+)
 
-_ENV = "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"
 LOG_PREFIX = "COLLECTIVE_PHASE_DIAGNOSTICS "
+MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 WORLD_GROUP = "world"
 _region_ids = itertools.count(1)
 _region_ids_lock = threading.Lock()
@@ -99,7 +103,8 @@ _region: ContextVar[_RegionContext | None] = ContextVar("collective_phase_region
 
 
 def enabled() -> bool:
-    return os.environ.get(_ENV, "0") == "1"
+    # Read the manager-projected worker contract; phase instrumentation never defines it.
+    return os.environ.get(COLLECTIVE_PHASE_DIAGNOSTICS_ENV, "0") == "1"
 
 
 def _default_process_group() -> ProcessGroupLike:
@@ -179,19 +184,27 @@ def _active_region() -> _RegionContext | None:
 def _log_phase(context: _RegionContext, phase: CollectivePhase) -> None:
     record = _capture_record(context, phase)
     payload = json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
-    logger.info(LOG_PREFIX + payload)
+    # The manager owns the path; each rank only consumes its projected value.
     artifact_root = os.environ.get(DEBUG_ARTIFACT_DIR_ENV)
-    if artifact_root:
-        ensure_debug_artifact_directories(artifact_root)
-        path = (
-            Path(artifact_root) / "collective_phases" / f"{os.uname().nodename}.{os.getpid()}.rank{record.rank}.jsonl"
-        )
-        with _artifact_lock:
-            artifact_file = _artifact_files.get(path)
-            if artifact_file is None:
-                artifact_file = path.open("a", buffering=1)
-                _artifact_files[path] = artifact_file
-            artifact_file.write(payload + "\n")
+    if not artifact_root:
+        logger.info(LOG_PREFIX + payload)
+        return
+    ensure_debug_artifact_directories(artifact_root)
+    path = Path(artifact_root) / "collective_phases" / f"{os.uname().nodename}.{os.getpid()}.rank{record.rank}.jsonl"
+    encoded_size = len(payload.encode()) + 1
+    with _artifact_lock:
+        artifact_file = _artifact_files.get(path)
+        if artifact_file is None:
+            artifact_file = path.open("a", buffering=1)
+            _artifact_files[path] = artifact_file
+        if artifact_file.tell() > 0 and artifact_file.tell() + encoded_size > MAX_ARTIFACT_BYTES:
+            artifact_file.close()
+            previous = path.with_suffix(".previous.jsonl")
+            previous.unlink(missing_ok=True)
+            path.replace(previous)
+            artifact_file = path.open("a", buffering=1)
+            _artifact_files[path] = artifact_file
+        artifact_file.write(payload + "\n")
 
 
 def log_phase(phase: CollectivePhase) -> None:

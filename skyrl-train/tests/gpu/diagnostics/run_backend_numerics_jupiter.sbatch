@@ -28,7 +28,7 @@ export GLOO_USE_IPV6=0
 export NCCL_SOCKET_FAMILY=AF_INET
 export MASTER_ADDR=127.0.0.1
 FROZEN_CUDA_ACTIVATION="$ARTIFACT_ROOT/frozen-cuda-runtime.env"
-"$FROZEN_PYTHON" -m cloud.iris.env_vars write-frozen-cuda-runtime "$FROZEN_CUDA_ACTIVATION"
+"$FROZEN_PYTHON" -m marinskyrl.runtime_environment write-frozen-cuda-runtime "$FROZEN_CUDA_ACTIVATION"
 . "$FROZEN_CUDA_ACTIVATION"
 cd "$CHECKOUT/skyrl-train"
 

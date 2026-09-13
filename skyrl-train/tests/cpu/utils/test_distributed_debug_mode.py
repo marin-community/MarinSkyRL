@@ -9,6 +9,7 @@ from skyrl_train.distributed_debug import apply_distributed_debug_mode, distribu
 from skyrl_train.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
     DEBUG_MODE_ENV,
+    DebugMode,
     DistributedDebugMode,
     FR_DUMP_TEMP_FILE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
@@ -24,15 +25,34 @@ def _debug_config(*, checkpoint_path: str = "/gpfs/experiments/run/checkpoints")
     return cfg
 
 
-def test_normal_mode_does_not_enable_expensive_diagnostics(monkeypatch):
+def test_light_mode_is_the_bounded_default(monkeypatch):
     monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
     cfg = example_dummy_config()
+    OmegaConf.update(cfg, "trainer.ckpt_path", "")
+
+    environment = distributed_debug_environment(cfg)
+
+    assert environment[DEBUG_MODE_ENV] == "light"
+    assert environment[DEBUG_ARTIFACT_DIR_ENV] == "/tmp/skyrl-debug/test-run"
+    assert environment["PYTHONFAULTHANDLER"] == "1"
+    assert environment["SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"] == "1"
+    assert environment["TORCH_FR_BUFFER_SIZE"] == "20000"
+    assert environment["TORCH_NCCL_DUMP_ON_TIMEOUT"] == "1"
+    assert "NCCL_DEBUG" not in environment
+    assert "TORCH_SHOW_CPP_STACKTRACES" not in environment
+    assert "SKYRL_LIVE_STACK_INTERVAL_SECONDS" not in environment
+
+
+def test_off_mode_disables_default_failure_artifacts(monkeypatch):
+    monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
+    cfg = example_dummy_config()
+    OmegaConf.update(cfg, "trainer.debug_mode", DebugMode.OFF.value)
 
     environment = distributed_debug_environment(cfg)
 
     assert DEBUG_MODE_ENV not in environment
     assert DEBUG_ARTIFACT_DIR_ENV not in environment
-    assert "NCCL_DEBUG" not in environment
+    assert "PYTHONFAULTHANDLER" not in environment
 
 
 def test_distributed_mode_expands_complete_worker_contract(monkeypatch):
@@ -52,6 +72,7 @@ def test_distributed_mode_expands_complete_worker_contract(monkeypatch):
     assert environment["TORCH_NCCL_TRACE_CPP_STACK"] == "1"
     assert environment["TORCH_SHOW_CPP_STACKTRACES"] == "1"
     assert environment["TORCH_SYMBOLIZE_MODE"] == "fast"
+    assert environment["SKYRL_LIVE_STACK_INTERVAL_SECONDS"] == "300"
     assert environment["PYTHONFAULTHANDLER"] == "1"
     assert environment["TORCH_FR_DUMP_TEMP_FILE"].startswith("/gpfs/experiments/run/debug/flight_recorder/")
     assert environment["NCCL_DEBUG_FILE"] == "/gpfs/experiments/run/debug/nccl/nccl.%h.%p.log"

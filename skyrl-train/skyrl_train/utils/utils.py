@@ -25,13 +25,14 @@ from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
 )
-from skyrl_train.distributed_debug import apply_distributed_debug_mode
+from skyrl_train.distributed_debug import apply_debug_mode
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, EnvVarManager, EnvVarScope, write_process_manifest
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
+from marinskyrl.process_diagnostics import enable_fatal_stack_capture, install_live_stack_capture
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
@@ -1265,8 +1266,6 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # ray's try_install_uvloop a no-op in ALL actors, closing that gap.
     # Actors are network-RTT-bound (vLLM/Daytona HTTP) so uvloop's throughput
     # edge is moot. See feedback_uvloop_libuv_019_pin.
-    env_vars["RAY_USE_UVLOOP"] = "0"
-
     # Ray's job runtime environment is the explicit contract for worker-wide
     # settings. Forward NUMA placement when the launcher opts in so the early
     # worker hook and actor constructors observe the same value as the driver.
@@ -1291,14 +1290,10 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # is never armed and the buggy path is dead, while uvloop otherwise keeps
     # working on plain epoll. The var was INERT before because it lived only in
     # the driver/launcher (host) env and was NEVER propagated into the Ray
-    # ACTOR process env -- Ray actors derive their environment from this
-    # runtime_env env_vars dict, not from arbitrary driver env. Setting it here
-    # puts it in the actor's process env before the actor ever imports
-    # uvloop/libuv, so libuv's first uv__use_io_uring() reads 0. Belt: the
-    # worker_process_setup_hook also re-exports it into os.environ at worker
-    # boot in case import ordering races the runtime-env injection.
-    env_vars["UV_USE_IO_URING"] = "0"
-
+    # ACTOR process env -- Ray actors derive their environment from the managed
+    # runtime_env contract, not from arbitrary driver env. EnvVarManager puts it
+    # in the actor's process env before the actor imports uvloop/libuv, so
+    # libuv's first uv__use_io_uring() reads 0.
     env_vars.update(EnvVarManager.from_config(cfg).environment_for(EnvVarScope.RAY_WORKER))
     # Resolve the actual collective deadline last so the debug preset's heartbeat
     # cannot exceed a shorter explicitly configured process-group timeout.
@@ -1491,10 +1486,14 @@ def initialize_ray(cfg: DictConfig):
     Args:
         cfg: Training config
     """
-    debug_environment = apply_distributed_debug_mode(cfg)
+    debug_environment = apply_debug_mode(cfg)
     if debug_environment.get(DEBUG_ARTIFACT_DIR_ENV):
+        enable_fatal_stack_capture(environment=debug_environment)
         manifest = write_process_manifest("driver", environment=debug_environment)
-        logger.info(f"Distributed debug mode active; driver manifest: {manifest}")
+        logger.info(f"Debug mode {debug_environment['SKYRL_DEBUG_MODE']} active; driver manifest: {manifest}")
+        stack_path = install_live_stack_capture("driver", environment=debug_environment)
+        if stack_path is not None:
+            logger.info(f"Periodic all-thread stack capture active: {stack_path}")
 
     env_vars = prepare_runtime_environment(cfg)
     # worker_process_setup_hook runs ONCE at the start of every Ray worker process,

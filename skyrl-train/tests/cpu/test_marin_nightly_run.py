@@ -10,6 +10,7 @@ REPOSITORY_ROOT = Path(__file__).parents[3]
 NIGHTLY_SCRIPT = REPOSITORY_ROOT / "skyrl-train" / "ci" / "marin_nightly" / "run_h100.sh"
 TRAINER_ENV_VARS = REPOSITORY_ROOT / "skyrl-train" / "skyrl_train" / "env_vars.py"
 IRIS_ENV_VARS = REPOSITORY_ROOT / "cloud" / "iris" / "env_vars.py"
+RUNTIME_ENVIRONMENT = REPOSITORY_ROOT / "marinskyrl" / "runtime_environment.py"
 
 
 def _write_executable(path: Path, contents: str) -> None:
@@ -22,9 +23,11 @@ def test_run_h100_exposes_checkout_packages_to_trainer(tmp_path: Path) -> None:
     nightly_directory = checkout / "skyrl-train" / "ci" / "marin_nightly"
     trainer_package = checkout / "skyrl-train" / "skyrl_train"
     iris_package = checkout / "cloud" / "iris"
+    runtime_package = checkout / "marinskyrl"
     nightly_directory.mkdir(parents=True)
     trainer_package.mkdir()
     iris_package.mkdir(parents=True)
+    runtime_package.mkdir()
     (checkout / "skyrl-gym").mkdir()
 
     shutil.copy2(NIGHTLY_SCRIPT, nightly_directory / NIGHTLY_SCRIPT.name)
@@ -38,8 +41,10 @@ PYTHON="$2/bin/python"
     )
     shutil.copy2(TRAINER_ENV_VARS, trainer_package / "env_vars.py")
     shutil.copy2(IRIS_ENV_VARS, iris_package / "env_vars.py")
+    shutil.copy2(RUNTIME_ENVIRONMENT, runtime_package / "runtime_environment.py")
     (trainer_package / "__init__.py").touch()
     (iris_package / "__init__.py").touch()
+    (runtime_package / "__init__.py").touch()
 
     runtime = tmp_path / "rl-runtime"
     runtime_bin = runtime / "bin"

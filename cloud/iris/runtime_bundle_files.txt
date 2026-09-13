@@ -23,7 +23,9 @@ marinskyrl/harbor_agent_names.py
 marinskyrl/hf_model.py
 marinskyrl/iris_harbor_environment.py
 marinskyrl/packed_tasks.py
+marinskyrl/process_diagnostics.py
 marinskyrl/resource_locator.py
+marinskyrl/runtime_environment.py
 marinskyrl/runtime_options.py
 marinskyrl/task_sources.py
 chat_templates/delphi_v0.jinja2

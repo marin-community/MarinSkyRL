@@ -515,6 +515,20 @@ def test_distributed_debug_cli_sets_one_job_scoped_contract(tmp_path):
     assert environment["SKYRL_DEBUG_ARTIFACT_DIR"] == "/tmp/skyrl-debug/debug-canary"
 
 
+def test_light_debug_is_the_default_for_configs_without_a_mode(tmp_path):
+    args = _args(tmp_path, "opencode", ["--job-name", "default-diagnostics"])
+    config = tmp_path / "debug.yaml"
+    config.write_text("trainer: {}\n")
+    args.rl_config = str(config)
+
+    environment = build_debug_launch_env(args)
+
+    assert environment["SKYRL_DEBUG_MODE"] == "light"
+    assert environment["PYTHONFAULTHANDLER"] == "1"
+    assert environment["SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"] == "1"
+    assert "TORCH_SHOW_CPP_STACKTRACES" not in environment
+
+
 def test_distributed_debug_config_sets_same_job_scoped_contract(tmp_path):
     args = _args(tmp_path, "opencode", ["--job-name", "config-debug-canary"])
     config = tmp_path / "debug.yaml"

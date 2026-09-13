@@ -1,7 +1,7 @@
 # Environment-variable ownership
 
 MarinSkyRL configuration owns every environment variable the project introduces. Declare each variable once in
-[`cloud/iris/env_vars.py`](../cloud/iris/env_vars.py), including its config owner and propagation scopes, then ask
+[`marinskyrl/runtime_environment.py`](../marinskyrl/runtime_environment.py), including its config owner and propagation scopes, then ask
 `EnvVarManager` for the driver, task-runtime, Ray-worker, or inference-worker projection. Do not add literal
 environment writes to launchers, trainer code, RL YAML `extra_env`, shell launch scripts, or container recipes.
 

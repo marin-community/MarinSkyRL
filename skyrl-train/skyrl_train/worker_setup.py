@@ -11,6 +11,7 @@ import os
 
 from skyrl_train.numa_policy import install_host_memory_policy, is_numa_affinity_enabled
 from skyrl_train.env_vars import DEBUG_MODE_ENV, write_process_manifest
+from marinskyrl.process_diagnostics import enable_fatal_stack_capture, install_live_stack_capture
 
 
 logger = logging.getLogger(__name__)
@@ -40,9 +41,11 @@ def configure_worker_process() -> None:
         )
     if is_numa_affinity_enabled():
         install_host_memory_policy()
-    os.environ["UV_USE_IO_URING"] = "0"
-    if os.environ.get(DEBUG_MODE_ENV) == "distributed":
+    # Ray has already projected the centrally managed worker environment before this hook runs.
+    if os.environ.get(DEBUG_MODE_ENV) in {"light", "distributed"}:
+        enable_fatal_stack_capture()
         write_process_manifest("ray-worker-bootstrap")
+        install_live_stack_capture("ray-worker-bootstrap")
     asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
     try:

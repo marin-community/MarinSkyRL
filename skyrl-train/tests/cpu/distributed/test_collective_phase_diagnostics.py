@@ -141,6 +141,8 @@ def test_debug_mode_persists_each_phase_record(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("SKYRL_DEBUG_ARTIFACT_DIR", str(tmp_path))
     mesh = FakeDeviceMesh(FakeProcessGroup(2), FakeProcessGroup(3))
     monkeypatch.setattr(collective_phase_diagnostics, "_default_process_group", lambda: FakeProcessGroup(1))
+    messages: list[str] = []
+    monkeypatch.setattr(collective_phase_diagnostics.logger, "info", messages.append)
 
     with collective_phase_diagnostics.region(
         mesh,
@@ -154,3 +156,27 @@ def test_debug_mode_persists_each_phase_record(tmp_path: Path, monkeypatch):
     record = json.loads(files[0].read_text())
     assert record["rank"] == 3
     assert record["phase"] == "backward_enter"
+    assert messages == []
+
+
+def test_phase_history_rotates_instead_of_growing_without_bound(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS", "1")
+    monkeypatch.setenv("SKYRL_DEBUG_ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setattr(collective_phase_diagnostics, "MAX_ARTIFACT_BYTES", 1)
+    monkeypatch.setattr(collective_phase_diagnostics, "_default_process_group", lambda: FakeProcessGroup(1))
+    mesh = FakeDeviceMesh(FakeProcessGroup(2), FakeProcessGroup(3))
+
+    with collective_phase_diagnostics.region(
+        mesh,
+        kind=collective_phase_diagnostics.CollectiveRegionKind.POLICY_TRAINING_STEP,
+        rank=4,
+    ):
+        collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
+        collective_phase_diagnostics.log_phase(collective_phase_diagnostics.CollectivePhase.MODEL_FORWARD_EXIT)
+
+    files = sorted((tmp_path / "collective_phases").glob("*.jsonl"))
+    assert len(files) == 2
+    assert {json.loads(path.read_text())["phase"] for path in files} == {
+        "model_forward_enter",
+        "model_forward_exit",
+    }
