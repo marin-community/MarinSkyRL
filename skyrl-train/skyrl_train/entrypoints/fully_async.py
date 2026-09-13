@@ -34,6 +34,7 @@ class AsyncPPOExp(BasePPOExp):
             inference_engine_client=inference_engine_client,
             trajectory_runner=trajectory_runner,
             colocate_pg=colocate_pg,
+            learner=self.learner,
         )
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):

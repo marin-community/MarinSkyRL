@@ -30,6 +30,7 @@ from skyrl_train.config.trajectory_runner_capabilities import (
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+    from skyrl_train.learner import Learner
     from skyrl_train.trajectory_runners.base import TrajectoryRunner
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
@@ -190,13 +191,18 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
 
 
 class BasePPOExp:
-    def __init__(self, cfg: DictConfig):
+    def __init__(self, cfg: DictConfig, learner: Learner | None = None):
         """
         Initializes a PPO experiment.
 
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
         self.cfg = cfg
+        self.learner = learner
+        if learner is not None:
+            from skyrl_train.trainer import learner_config_from_msrl  # noqa: PLC0415
+
+            learner_config_from_msrl(cfg)
         self._configure_log_level()
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
@@ -457,6 +463,7 @@ class BasePPOExp:
             inference_engine_client=inference_engine_client,
             trajectory_runner=trajectory_runner,
             colocate_pg=colocate_pg,
+            learner=self.learner,
         )
 
     def get_tracker(self):
@@ -524,11 +531,14 @@ class BasePPOExp:
         # eligible disaggregated no-ref run).
         logger.info("Starting policy workers: strategy={}", self.cfg.trainer.strategy)
         trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
-        logger.info(
-            "Policy workers ready: strategy={} count={}",
-            self.cfg.trainer.strategy,
-            len(trainer.policy_model.actor_infos),
-        )
+        if trainer.policy_model is None:
+            logger.info("External learner ready without Torch policy workers")
+        else:
+            logger.info(
+                "Policy workers ready: strategy={} count={}",
+                self.cfg.trainer.strategy,
+                len(trainer.policy_model.actor_infos),
+            )
         return trainer
 
     def run(self):

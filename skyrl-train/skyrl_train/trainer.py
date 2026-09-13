@@ -114,11 +114,83 @@ from skyrl_train.hf_export_schema import (
     HFUploadMode,
     TRAINER_STATE_FILENAME,
 )
+from skyrl_train.learner import (
+    Learner,
+    LearnerConfig,
+    LearnerLifecycle,
+    LearnerPublicationIncomplete,
+    LossNormalization,
+    PolicyLoss,
+    PublicationStatus,
+    UnsupportedLearnerConfiguration,
+    UpdateStatus,
+)
+from skyrl_train.learner_bridge import (
+    BEHAVIOR_POLICY_VERSIONS_METADATA_KEY,
+    apply_log_prob_result,
+    learner_batch_from_training_input,
+    update_request_from_training_input,
+)
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
+_PAD_SIZE_METADATA_KEY = "pad_size"
+
+
+def learner_config_from_msrl(cfg: DictConfig) -> LearnerConfig:
+    """Lower the supported MSRL GRPO configuration into the learner contract."""
+    unsupported = [
+        name
+        for enabled, name in (
+            (cfg.trainer.critic.model.path, "critic training"),
+            (cfg.trainer.use_sample_packing, "sample packing"),
+            (cfg.trainer.step_wise_training, "step-wise training"),
+            (cfg.trainer.algorithm.use_entropy_loss, "entropy loss"),
+            (cfg.trainer.placement.colocate_all, "learner/inference colocation"),
+            (cfg.trainer.update_ref_every_epoch, "reference-policy updates"),
+            (float(cfg.trainer.algorithm.think_token_weight) != 1.0, "think-token loss weighting"),
+            (cfg.trainer.policy.fsdp_config.moe_router_replay, "MoE router replay"),
+            (cfg.trainer.algorithm.z_clip.enabled, "z-clip"),
+            (cfg.trainer.algorithm.stale_clip.enabled, "stale-clip"),
+        )
+        if enabled
+    ]
+    if cfg.trainer.algorithm.advantage_estimator != "grpo":
+        unsupported.append(f"advantage_estimator={cfg.trainer.algorithm.advantage_estimator}")
+    try:
+        policy_loss = PolicyLoss(cfg.trainer.algorithm.policy_loss_type)
+        loss_normalization = LossNormalization(cfg.trainer.algorithm.loss_reduction)
+    except ValueError as error:
+        raise UnsupportedLearnerConfiguration(str(error)) from error
+    if policy_loss is PolicyLoss.BEHAVIOR_CLIP and cfg.trainer.algorithm.use_tis:
+        unsupported.append("behavior_clip with rollout importance sampling")
+    if unsupported:
+        raise UnsupportedLearnerConfiguration(
+            "the JAX-first learner boundary does not support " + ", ".join(unsupported)
+        )
+    reference_required = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    return LearnerConfig(
+        policy_loss=policy_loss,
+        loss_normalization=loss_normalization,
+        requires_reference_log_probs=reference_required,
+        clip_low=float(cfg.trainer.algorithm.eps_clip_low),
+        clip_high=float(cfg.trainer.algorithm.eps_clip_high),
+        dual_clip_ratio=float(cfg.trainer.algorithm.clip_ratio_c),
+        reference_kl_coefficient=(
+            float(cfg.trainer.algorithm.kl_loss_coef) if cfg.trainer.algorithm.use_kl_loss else None
+        ),
+        kl_estimator_type=str(cfg.trainer.algorithm.kl_estimator_type),
+        use_absolute_kl=bool(cfg.trainer.algorithm.use_abs_kl),
+        use_rollout_importance_sampling=bool(cfg.trainer.algorithm.use_tis),
+        rollout_importance_ratio_cap=float(cfg.trainer.algorithm.tis_imp_ratio_cap),
+        update_epochs=int(cfg.trainer.update_epochs_per_batch),
+        logprob_temperature=float(cfg.generator.sampling_params.temperature),
+        max_sequence_length=int(cfg.trainer.algorithm.max_seq_len),
+    )
 
 
 class RayPPOTrainer:
+    learner: Learner | None = None
+
     def __init__(
         self,
         cfg: DictConfig,
@@ -130,8 +202,11 @@ class RayPPOTrainer:
         colocate_pg: Optional[PlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
         callbacks: Optional[List[TrainerCallback]] = None,
+        learner: Learner | None = None,
     ):
         self.cfg = cfg
+        self.learner = learner
+        self.learner_config = learner_config_from_msrl(cfg) if learner is not None else None
         self.group_advantage_invariant = GroupAdvantageInvariant.from_config(
             cfg.trainer.algorithm.resolved_group_advantage
         )
@@ -162,9 +237,8 @@ class RayPPOTrainer:
         self._shutdown_complete = False
         self.global_step = 0
         self._last_saved_step: int | None = None
-
         # initialized in `build_models`
-        self.policy_model: PPORayActorGroup = None
+        self.policy_model: PPORayActorGroup | None = None
         self.critic_model: Optional[PPORayActorGroup] = None
         self.ref_model: Optional[PPORayActorGroup] = None
         # used for checkpoint cleanup
@@ -267,24 +341,29 @@ class RayPPOTrainer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _guarded_async(coro, *, timeout: float, label: str) -> None:
+    async def _guarded_async(coro, *, timeout: float, label: str) -> Exception | None:
         """Await *coro* with a timeout, logging but never raising on failure."""
         try:
             await asyncio.wait_for(coro, timeout=timeout)
             logger.info(f"{label} complete")
+            return None
         except asyncio.TimeoutError:
             logger.warning(f"{label} timed out after {timeout}s, proceeding with cleanup")
+            return TimeoutError(f"{label} timed out after {timeout}s")
         except Exception as e:
-            logger.warning(f"{label} error (non-fatal): {e}")
+            logger.warning(f"{label} error: {e}; proceeding with remaining cleanup")
+            return e
 
     @staticmethod
-    def _guarded_sync(fn, *, label: str) -> None:
+    def _guarded_sync(fn, *, label: str) -> Exception | None:
         """Call *fn()*, logging but never raising on failure."""
         try:
             fn()
             logger.info(f"{label} complete")
+            return None
         except Exception as e:
-            logger.warning(f"{label} error (non-fatal): {e}")
+            logger.warning(f"{label} error: {e}; proceeding with remaining cleanup")
+            return e
 
     def cleanup_ray_actors(self):
         """Public alias for :meth:`_kill_ray_actors` (used by entrypoints)."""
@@ -329,8 +408,8 @@ class RayPPOTrainer:
         """Best-effort cleanup after training ends (normal or abnormal).
 
         Each step uses a timeout so a blocked operation cannot prevent
-        subsequent cleanup from running.  Errors are logged as warnings
-        but never re-raised.
+        subsequent cleanup from running. Learner-close failures are raised
+        after the remaining cleanup steps run.
 
         Order matters:
         1. HTTP endpoint shutdown – cuts off the request path so in-flight
@@ -352,11 +431,15 @@ class RayPPOTrainer:
             label="Trajectory runner shutdown",
         )
         self._guarded_sync(self.trajectory_sink.close, label="Trajectory retention shutdown")
-        await self._guarded_async(
-            self.inference_engine_client.teardown(),
-            timeout=30,
-            label="Inference engine teardown",
-        )
+        if self.inference_engine_client is not None:
+            await self._guarded_async(
+                self.inference_engine_client.teardown(),
+                timeout=30,
+                label="Inference engine teardown",
+            )
+        learner_shutdown_error = None
+        if self.learner is not None:
+            learner_shutdown_error = self._guarded_sync(self.learner.close, label="Learner shutdown")
         self._guarded_sync(self._kill_ray_actors, label="Ray actor cleanup")
 
         # Safety net: force-exit the process if it's still alive after a
@@ -366,6 +449,8 @@ class RayPPOTrainer:
         # inference engines), that cleanup hangs indefinitely.  The watchdog
         # ensures the process eventually terminates.
         self._start_exit_watchdog(timeout=120)
+        if learner_shutdown_error is not None:
+            raise ExceptionGroup("learner shutdown did not complete", [learner_shutdown_error])
 
     async def shutdown(self) -> None:
         """Run trainer teardown once, including after partial startup."""
@@ -452,22 +537,23 @@ class RayPPOTrainer:
             # The interval save may have just written this same step; do not write it twice.
             if self._control.should_save and self._last_saved_step != self.global_step:
                 with Timer("save_checkpoints", self.all_timings):
-                    await asyncio.to_thread(self.save_checkpoints)
-                    logger.info("Saved final checkpoint.")
+                    await asyncio.to_thread(self.save_checkpoints, commit=False)
                 await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
+                await asyncio.to_thread(self._commit_checkpoint)
+                logger.info("Saved final checkpoint.")
             if self._control.should_save_hf_model:
                 await asyncio.to_thread(self.handle_hf_export)
 
-    async def _save_checkpoints_with_residency(self) -> None:
+    async def _save_checkpoints_with_residency(self, *, commit: bool = True) -> None:
         """Save a checkpoint, swapping colocated training and inference residency when needed."""
         if not self.colocate_all:
-            await asyncio.to_thread(self.save_checkpoints)
+            await asyncio.to_thread(self.save_checkpoints, commit=commit)
             return
 
         await self.inference_engine_client.sleep()
         try:
             self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
-            await asyncio.to_thread(self.save_checkpoints)
+            await asyncio.to_thread(self.save_checkpoints, commit=commit)
         finally:
             await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
@@ -482,7 +568,7 @@ class RayPPOTrainer:
         """Save one requested step checkpoint without terminating training on storage failure."""
         try:
             with Timer("save_checkpoints", self.all_timings):
-                await self._save_checkpoints_with_residency()
+                await self._save_checkpoints_with_residency(commit=False)
         except OSError:
             self._record_checkpoint_save_failure(state)
             return
@@ -493,6 +579,7 @@ class RayPPOTrainer:
             return
 
         await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
+        await asyncio.to_thread(self._commit_checkpoint)
 
     async def _run_step_end_callbacks(self, state: TrainerState) -> None:
         """Run callback-requested work that belongs to the current training step."""
@@ -526,7 +613,9 @@ class RayPPOTrainer:
 
     async def _sync_policy_for_rollouts(self, *, reason: str) -> None:
         with Timer("publish_policy_weights", log_events=False) as update_timer:
-            if self.colocate_all:
+            if self.learner is not None:
+                self._publish_learner_policy()
+            elif self.colocate_all:
                 try:
                     self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
                 finally:
@@ -538,6 +627,18 @@ class RayPPOTrainer:
                 with Timer("sync_weights", self.all_timings):
                     ray.get(self.sync_policy_weights_to_inference_engines())
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
+
+    def _publish_learner_policy(self):
+        assert self.learner is not None
+        self._initialize_learner()
+        self.learner.publish_policy()
+        state = self.learner.state
+        if not state.ready_for_rollouts:
+            raise LearnerPublicationIncomplete(
+                "inference has not installed the requested learner policy: "
+                f"status={state.publication_status}, requested={state.policy_version}, "
+                f"installed={state.installed_policy_version}"
+            )
 
     def _log_weight_update_completed(self, *, reason: str, duration_seconds: float) -> None:
         logger.info(
@@ -830,6 +931,8 @@ class RayPPOTrainer:
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
         """Remove tail data to have even shards"""
+        if self.learner is not None:
+            return entries
         dp_size = self.policy_model.actor_infos[0].rank.dp_size
         if self.critic_model is not None:
             dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
@@ -850,6 +953,13 @@ class RayPPOTrainer:
                 inference land on disjoint nodes. When None, the legacy
                 lazy-PACK behavior in `PPORayActorGroup._initiate_actors` is used.
         """
+        if self.learner is not None:
+            self.policy_model = None
+            self.critic_model = None
+            self.ref_model = None
+            logger.info("Using the external learner boundary; no Torch training actors were allocated")
+            return
+
         cfg = self.cfg
         pg = None
 
@@ -1105,6 +1215,15 @@ class RayPPOTrainer:
         """
         Setup the connection between policy model and inference engine for weight syncing.
         """
+        if self.learner is not None:
+            state = self._initialize_learner()
+            logger.info(
+                "Learner publication state ready: policy_version={} installed_version={}",
+                state.policy_version,
+                state.installed_policy_version,
+            )
+            return
+
         # Diagnostic: unwrap un-pickleable Ray exceptions into a plain
         # RuntimeError so a recurrence reports the TRUE cause (e.g. a raylet
         # killed by a GPFS SIGBUS/ESTALE mmap fault -> ActorUnavailableError)
@@ -1125,6 +1244,19 @@ class RayPPOTrainer:
             len(self.policy_model.actor_infos),
             len(self.inference_engine_client.engines),
         )
+
+    def _initialize_learner(self, *, allow_failed: bool = False):
+        assert self.learner is not None
+        assert self.learner_config is not None
+        state = self.learner.state
+        if state.lifecycle is LearnerLifecycle.UNINITIALIZED:
+            self.learner.initialize(self.learner_config)
+            return self.learner.state
+        if state.lifecycle is LearnerLifecycle.CLOSED:
+            raise RuntimeError("learner is closed")
+        if state.lifecycle is LearnerLifecycle.FAILED and not allow_failed:
+            raise RuntimeError("learner is unusable after a partial failure and requires checkpoint restore")
+        return state
 
     def _resolve_num_experts(self) -> Optional[int]:
         """Resolve the policy model's MoE expert count from its HF config, memoized.
@@ -1326,6 +1458,13 @@ class RayPPOTrainer:
         logger.info(f"Number of sequences before padding: {len(training_input['sequences'])}")
         training_input = self.pad_batch(training_input)
         logger.info(f"Number of sequences after padding: {len(training_input['sequences'])}")
+        if self.learner is not None:
+            installed_version = self.learner.state.installed_policy_version
+            if installed_version is None or not self.learner.state.ready_for_rollouts:
+                raise LearnerPublicationIncomplete("cannot label rollout rows before learner policy installation")
+            training_input.metadata[BEHAVIOR_POLICY_VERSIONS_METADATA_KEY] = [
+                installed_version
+            ] * training_input.batch_size
 
         return training_input
 
@@ -1547,7 +1686,7 @@ class RayPPOTrainer:
         data["advantages"] = advantages
 
         # remove padding while calculating metrics
-        pad_size = data.metadata.get("pad_size", 0)
+        pad_size = data.metadata.get(_PAD_SIZE_METADATA_KEY, 0)
         num_samples = len(token_level_rewards)
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
@@ -1623,6 +1762,9 @@ class RayPPOTrainer:
         """Pad the batch to be divisible by dp size"""
         import math
 
+        if self.learner is not None:
+            training_input.metadata[_PAD_SIZE_METADATA_KEY] = 0
+            return training_input
         dp_size = self.policy_model.actor_infos[0].rank.dp_size
         if self.critic_model is not None:
             dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
@@ -1631,7 +1773,7 @@ class RayPPOTrainer:
 
         pad_size = math.ceil(training_input.batch_size / dp_size) * dp_size - training_input.batch_size
         new_tensors = {}
-        training_input.metadata["pad_size"] = pad_size
+        training_input.metadata[_PAD_SIZE_METADATA_KEY] = pad_size
         if pad_size == 0:
             return training_input
         for key, tensor in training_input.items():
@@ -1684,6 +1826,9 @@ class RayPPOTrainer:
             - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
+        if self.learner is not None:
+            return self._learner_fwd_logprobs(training_input)
+
         # MoE router-replay (R3): the pre-update old-logprob / ref forward MUST
         # replay the SAME captured routing as the training forward, otherwise the
         # old-logprob pass uses NATIVE top-k routing while the training pass
@@ -1788,6 +1933,13 @@ class RayPPOTrainer:
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
 
+        self._record_log_prob_metrics(training_input)
+        return training_input
+
+    def _record_log_prob_metrics(self, training_input: TrainingInputBatch) -> None:
+        action_log_probs = training_input["action_log_probs"]
+        base_log_probs = training_input["base_action_log_probs"]
+        loss_mask = training_input["loss_mask"]
         if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
             # calculates the difference in probs between inference and trainer components
             # only consider response tokens.
@@ -1797,28 +1949,25 @@ class RayPPOTrainer:
             # here is what crashed the 80B R3+TIS train loop at global_step 1
             # ('NoneType' object is not subscriptable). Skip the inference/train prob-diff
             # diagnostic for that batch; the batch still trains as standard (non-TIS) loss.
-            logprobs_diff = (
-                training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
-                - action_log_probs[training_input["loss_mask"] > 0]
-            )
-            prob_diff = logprobs_diff.exp().abs()
-            prob_diff_mean = prob_diff.mean().item()
-            prob_diff_std = prob_diff.std().item()
-            self.all_metrics.update(
-                {
-                    "policy/rollout_train_prob_diff_mean": prob_diff_mean,
-                    "policy/rollout_train_prob_diff_std": prob_diff_std,
-                }
-            )
+            selected = loss_mask > 0
+            logprobs_diff = training_input["rollout_logprobs"][selected] - action_log_probs[selected]
+            if logprobs_diff.numel() > 0:
+                prob_diff = logprobs_diff.exp().abs()
+                self.all_metrics.update(
+                    {
+                        "policy/rollout_train_prob_diff_mean": prob_diff.mean().item(),
+                        "policy/rollout_train_prob_diff_std": prob_diff.std().item(),
+                    }
+                )
         # Always log KL divergence as a diagnostic, even when not used as penalty
         if base_log_probs is not None:
             _kl = compute_approx_kl(
                 action_log_probs,
                 base_log_probs,
-                loss_mask=training_input["loss_mask"],
+                loss_mask=loss_mask,
                 kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
             )
-            _kl_mean = masked_mean(_kl, training_input["loss_mask"], dim=-1).mean().item()
+            _kl_mean = masked_mean(_kl, loss_mask, dim=-1).mean().item()
             _kl_max = torch.max(_kl.abs(), dim=-1)[0].mean().item()
             self.all_metrics.update(
                 {
@@ -1827,6 +1976,21 @@ class RayPPOTrainer:
                 }
             )
 
+    def _learner_fwd_logprobs(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
+        assert self.learner is not None
+        assert self.learner_config is not None
+        self._initialize_learner()
+        learner_batch = learner_batch_from_training_input(training_input)
+        result = self.learner.compute_log_probs(learner_batch)
+        if result.policy_version != self.learner.state.policy_version:
+            raise RuntimeError(
+                f"learner log probabilities name policy version {result.policy_version}, but state reports "
+                f"{self.learner.state.policy_version}"
+            )
+        if self.learner_config.requires_reference_log_probs and result.reference_log_probs is None:
+            raise RuntimeError("learner omitted required reference log probabilities")
+        training_input = apply_log_prob_result(training_input, result)
+        self._record_log_prob_metrics(training_input)
         return training_input
 
     def apply_reward_kl_penalty(
@@ -1905,13 +2069,18 @@ class RayPPOTrainer:
         # contract at the driver boundary prevents a worker override from silently
         # bypassing policy-loss semantics and avoids an in-worker collective.
         if self.cfg.trainer.algorithm.loss_reduction == GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION:
-            actor_infos = self.policy_model.actor_infos
-            ranks_per_dp_group = len(actor_infos) // actor_infos[0].rank.dp_size
+            if self.learner is not None:
+                ranks_per_dp_group = 1
+            else:
+                actor_infos = self.policy_model.actor_infos
+                ranks_per_dp_group = len(actor_infos) // actor_infos[0].rank.dp_size
             data.metadata[GLOBAL_LOSS_DENOM_METADATA_KEY] = compute_global_loss_denom(
                 data["advantages"],
                 self.cfg.trainer.algorithm.max_seq_len,
                 ranks_per_dp_group,
             )
+        if self.learner is not None:
+            return self._learner_update(data)
         if self.colocate_all:
             if self.critic_model is not None:
                 with Timer("critic_train", self.all_timings):
@@ -1969,6 +2138,37 @@ class RayPPOTrainer:
         ray.get(empty_cache_refs)
 
         return policy_status
+
+    def _learner_update(self, data: TrainingInputBatch) -> dict[str, float | int | str]:
+        assert self.learner is not None
+        self._initialize_learner()
+        previous_state = self.learner.state
+        try:
+            result = self.learner.update(update_request_from_training_input(data, global_step=self.global_step))
+        except Exception as error:
+            failed_state = self.learner.state
+            if failed_state != previous_state and failed_state.lifecycle is not LearnerLifecycle.FAILED:
+                raise RuntimeError(
+                    "learner update failed after changing state without marking the learner unusable"
+                ) from error
+            raise
+        state = self.learner.state
+        if result.status is UpdateStatus.SUCCEEDED:
+            if state.policy_version <= previous_state.policy_version:
+                raise RuntimeError("successful learner update did not advance the policy version")
+            if state.update_count != previous_state.update_count + 1:
+                raise RuntimeError("successful learner update did not advance the update count once")
+            if state.publication_status is not PublicationStatus.OUTDATED or state.ready_for_rollouts:
+                raise RuntimeError("successful learner update did not mark inference weights as outdated")
+        elif state != previous_state:
+            raise RuntimeError("skipped learner update changed learner state")
+        for key, value in result.metrics.items():
+            self.all_metrics[f"policy/{key}"] = value
+        return {
+            **result.metrics,
+            "update_status": result.status.value,
+            "policy_version": state.policy_version,
+        }
 
     def handle_dynamic_sampling(
         self, trajectory_batch: TrajectoryBatch, uids: List[str]
@@ -2099,7 +2299,7 @@ class RayPPOTrainer:
         actor_info: ActorInfo = model.actor_infos[rank]
         return actor_info.rank
 
-    def save_checkpoints(self):
+    def save_checkpoints(self, *, commit: bool = True):
         """
         Save the model, optimizer, and training states to disk.
 
@@ -2113,14 +2313,18 @@ class RayPPOTrainer:
         io.makedirs(global_step_folder, exist_ok=True)
 
         # Save policy checkpoint
-        ray.get(
-            self.policy_model.async_run_ray_method(
-                "pass_through",
-                "save_checkpoint",
-                ckpt_dir=policy_save_dir,
-                tokenizer=self.tokenizer,
+        if self.learner is not None:
+            self._initialize_learner()
+            self.learner.save_checkpoint(policy_save_dir)
+        else:
+            ray.get(
+                self.policy_model.async_run_ray_method(
+                    "pass_through",
+                    "save_checkpoint",
+                    ckpt_dir=policy_save_dir,
+                    tokenizer=self.tokenizer,
+                )
             )
-        )
 
         # Save critic checkpoint (if it exists)
         if self.critic_model is not None:
@@ -2149,6 +2353,8 @@ class RayPPOTrainer:
                 torch.save(dataloader_state_dict, f)
             logger.info(f"Saved dataloader state to {dataloader_save_path}")
         except Exception as e:
+            if self.learner is not None:
+                raise
             logger.warning(f"Failed to save dataloader state: {e}")
 
         # Save additional trainer state
@@ -2161,11 +2367,15 @@ class RayPPOTrainer:
             torch.save(trainer_state, f)
         logger.info(f"Saved trainer state to {trainer_state_path}")
 
-        # Atomic tracking - write this last after all saves succeed
-        latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
-        with io.open_file(latest_checkpoint_file, "w") as f:
-            f.write(str(self.global_step))
+        if commit:
+            self._commit_checkpoint()
 
+    def _commit_checkpoint(self) -> None:
+        """Publish a staged checkpoint after every required artifact exists."""
+        latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
+        io.write_bytes_atomic(latest_checkpoint_file, str(self.global_step).encode())
+
+        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
         self._last_saved_step = self.global_step
 
@@ -2184,6 +2394,9 @@ class RayPPOTrainer:
 
         protected_steps = protected_hf_export_steps(self.cfg.trainer.ckpt_path)
 
+        if self.learner is not None:
+            cleanup_old_checkpoints(self.cfg.trainer.ckpt_path, max_ckpts, protected_steps)
+            return
         if not self._node_ids:
             self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
         try:
@@ -2303,14 +2516,21 @@ class RayPPOTrainer:
 
         # 3. Load policy checkpoint
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")
-        _ = ray.get(
-            self.policy_model.async_run_ray_method(
-                "pass_through",
-                "load_checkpoint",
-                ckpt_dir=policy_ckpt_dir,
-                load_training_state=True,
+        if self.learner is not None:
+            self._initialize_learner(allow_failed=True)
+            self.learner.load_checkpoint(policy_ckpt_dir)
+            restored_state = self.learner.state
+            if restored_state.ready_for_rollouts:
+                raise RuntimeError("restored learner state must reconcile inference before rollouts")
+        else:
+            _ = ray.get(
+                self.policy_model.async_run_ray_method(
+                    "pass_through",
+                    "load_checkpoint",
+                    ckpt_dir=policy_ckpt_dir,
+                    load_training_state=True,
+                )
             )
-        )
         logger.info("Successfully loaded policy checkpoint")
 
         # 4. Load critic checkpoint if it exists and we have a critic model
