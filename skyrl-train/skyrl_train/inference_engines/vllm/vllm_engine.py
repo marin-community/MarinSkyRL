@@ -2148,9 +2148,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await self._get_engine().collective_rpc("begin_publication_timing", args=(step,))
 
     async def prepare_diagnostic_weight_sync_buckets(self, payload, manifest_id, *, num_buffers=2, stage_timing=False):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
+        from skyrl_train.weight_sync.receiver_readback_rpc import OrderedBucketDispatch, call_all_receiver_workers
 
-        return await call_all_receiver_workers(
+        rows = await call_all_receiver_workers(
             self._get_engine(),
             "prepare_diagnostic_weight_sync_buckets",
             args=(payload, manifest_id),
@@ -2159,19 +2159,33 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             else None,
         )
 
+        counts = {row["bucket_count"] for row in rows}
+        if len(counts) != 1:
+            raise ValueError("Receiver workers disagree about the prepared bucket count")
+        self._diagnostic_bucket_dispatch = OrderedBucketDispatch(self._get_engine(), manifest_id, counts.pop())
+        return rows
+
     async def begin_diagnostic_weight_sync(self, manifest_id: str, publication_id: int):
         from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 
-        return await call_all_receiver_workers(
+        self._diagnostic_bucket_dispatch.require_idle()
+        rows = await call_all_receiver_workers(
             self._get_engine(), "begin_diagnostic_weight_sync", args=(manifest_id, publication_id), kwargs=None
         )
+
+        self._diagnostic_bucket_dispatch.begin(publication_id)
+        return rows
 
     async def begin_reference_bucket_sync(self, manifest_id, publication_id):
         from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 
-        return await call_all_receiver_workers(
+        self._diagnostic_bucket_dispatch.require_idle()
+        rows = await call_all_receiver_workers(
             self._get_engine(), "begin_reference_bucket_sync", args=(manifest_id, publication_id), kwargs=None
         )
+
+        self._diagnostic_bucket_dispatch.begin(publication_id)
+        return rows
 
     async def finish_reference_bucket_sync(self, manifest_id, publication_id):
         from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
@@ -2183,13 +2197,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def receive_diagnostic_weight_sync_bucket(
         self, bucket_id: int, *, replay: bool = False, manifest_id: str | None = None, publication_id: int | None = None
     ):
-        from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
-
-        return await call_all_receiver_workers(
-            self._get_engine(),
-            "receive_diagnostic_weight_sync_bucket",
-            args=(bucket_id,),
-            kwargs={"replay": replay, "manifest_id": manifest_id, "publication_id": publication_id},
+        return await self._diagnostic_bucket_dispatch.receive(
+            bucket_id, replay=replay, manifest_id=manifest_id, publication_id=publication_id
         )
 
     async def finish_diagnostic_weight_sync_install(self, manifest_id=None, publication_id=None):

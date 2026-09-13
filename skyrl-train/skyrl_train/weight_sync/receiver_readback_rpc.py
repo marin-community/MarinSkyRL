@@ -72,3 +72,65 @@ def group_external_dp_workers(actor_rows: list[list[dict]], geometry: dict) -> l
             workers.extend(rows)
         engines.append(workers)
     return engines
+
+
+class OrderedBucketDispatch:
+    """Order diagnostic bucket RPCs before they enter synchronous vLLM workers.
+
+    Ray and the async core client may reorder concurrent actor calls. A later
+    bucket waits here, rather than blocking the worker that must receive its
+    predecessor. The receipt joins CPU enqueue only; CUDA load events still
+    govern buffer reuse and the final install completion.
+    """
+
+    def __init__(self, engine, manifest_id: str, bucket_count: int):
+        self.engine = engine
+        self.manifest_id = manifest_id
+        self.bucket_count = bucket_count
+        self.publication_id = None
+        self.next_bucket = {False: 0, True: 0}
+        self.pending = set()
+        self.failure = None
+        self.condition = asyncio.Condition()
+
+    def begin(self, publication_id: int):
+        self.require_idle()
+        self.publication_id = publication_id
+        self.next_bucket = {False: 0, True: 0}
+        self.failure = None
+
+    def require_idle(self):
+        if self.pending:
+            raise ValueError("Diagnostic bucket dispatch still has pending receives")
+
+    async def receive(self, bucket_id: int, *, replay: bool, manifest_id, publication_id):
+        active_manifest = self.manifest_id if self.publication_id is not None else None
+        if manifest_id != active_manifest or publication_id != self.publication_id:
+            raise ValueError("Bucket dispatch does not match the active manifest and publication")
+        if type(bucket_id) is not int or not 0 <= bucket_id < self.bucket_count:
+            raise ValueError("Bucket dispatch ID is outside the manifest")
+        key = (replay, bucket_id)
+        async with self.condition:
+            if key in self.pending or bucket_id < self.next_bucket[replay]:
+                raise ValueError("Duplicate diagnostic bucket dispatch")
+            self.pending.add(key)
+            try:
+                await self.condition.wait_for(lambda: self.failure is not None or bucket_id == self.next_bucket[replay])
+                if self.failure is not None:
+                    raise RuntimeError(
+                        "Diagnostic bucket dispatch failed earlier in this publication"
+                    ) from self.failure
+                result = await call_all_receiver_workers(
+                    self.engine,
+                    "receive_diagnostic_weight_sync_bucket",
+                    args=(bucket_id,),
+                    kwargs={"replay": replay, "manifest_id": manifest_id, "publication_id": publication_id},
+                )
+                self.next_bucket[replay] += 1
+                return result
+            except BaseException as error:
+                self.failure = error
+                raise
+            finally:
+                self.pending.remove(key)
+                self.condition.notify_all()
