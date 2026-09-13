@@ -117,6 +117,90 @@ def generator_cfg():
     return cfg
 
 
+@pytest.mark.asyncio
+async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator_cfg, mock_tokenizer):
+    generator_cfg.batched = False
+    generator_cfg.sampling_params.logprobs = 1
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0}),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    successful = AgentLoopOutput(
+        evidence=RolloutEvidence(
+            response="ok",
+            stop_reason="stop",
+            generated_token_count=1,
+            prompt_token_ids=(11,),
+            response_token_ids=(12,),
+            behavior_logprobs=(-0.5,),
+        ),
+        verification=VerificationResult.verified(1.0, passed=True),
+        reward=RewardResult(unshaped_reward=1.0, optimization_reward=1.0, token_rewards=(1.0,)),
+        disposition=TrainingDisposition.train(),
+        loss_mask=[1],
+        env_metrics={},
+    )
+
+    async def agent_loop(prompt, *_args, **_kwargs):
+        if prompt[0]["content"] == "fail":
+            raise TimeoutError("judge request timed out")
+        return successful
+
+    runner.agent_loop = agent_loop
+    request = TrajectoryRequestBatch(
+        prompts=[
+            [{"role": "user", "content": "ok"}],
+            [{"role": "user", "content": "fail"}],
+        ],
+        env_classes=["gsm8k", "gsm8k"],
+        env_extras=[{}, {}],
+        sampling_params=None,
+        trajectory_ids=[TrajectoryID("ok", 0), TrajectoryID("fail", 0)],
+        batch_metadata=BatchMetadata(global_step=1, training_phase="train"),
+    )
+
+    batch = await runner._run(request, disable_tqdm=True)
+
+    assert batch["response_ids"] == [[12], [0]]
+    assert batch["rewards"] == [[1.0], [0.0]]
+    assert batch["loss_masks"] == [[1], [0]]
+    assert batch["rollout_logprobs"] == [[-0.5], [0.0]]
+    assert batch["exclude_from_baseline"] == [False, True]
+    assert batch["exception_types"] == [None, "TimeoutError"]
+    assert batch["error_treatments"] == [None, "mask"]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_failure_closes_environment_before_masking(generator_cfg, mock_tokenizer):
+    generator_cfg.batched = False
+    env = MagicMock()
+    env.init.side_effect = TimeoutError("environment initialization timed out")
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0}),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    request = TrajectoryRequestBatch(
+        prompts=[[{"role": "user", "content": "fail"}]],
+        env_classes=["gsm8k"],
+        env_extras=[{}],
+        sampling_params=None,
+        trajectory_ids=[TrajectoryID("fail", 0)],
+        batch_metadata=BatchMetadata(global_step=1, training_phase="train"),
+    )
+
+    with patch("skyrl_train.trajectory_runners.skyrl_gym.skyrl_gym.make", return_value=env):
+        batch = await runner._run(request, disable_tqdm=True)
+
+    env.close.assert_called_once_with()
+    assert batch["response_ids"] == [[0]]
+    assert batch["loss_masks"] == [[0]]
+    assert batch["exception_types"] == ["TimeoutError"]
+
+
 def test_tis_config_does_not_select_a_generation_strategy():
     from skyrl_train.utils.utils import validate_cfg
 
