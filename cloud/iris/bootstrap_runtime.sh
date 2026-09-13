@@ -63,7 +63,7 @@ UV_PROJECT_ENVIRONMENT="$environment" uv sync --quiet \
   "${runtime_extras[@]}"
 
 python="$environment/bin/python"
-"$python" "$project_root/marinskyrl/runtime_environment.py" write-frozen-cuda-runtime "$runtime_file"
+"$python" "$project_root/marinskyrl/environment_contract.py" write-frozen-cuda-runtime "$runtime_file"
 source "$runtime_file"
 if [[ "$profile" == fsdp || "$profile" == fsdp-export || "$profile" == megatron || "$profile" == megatron-export ]]; then
   "$python" -c "import flash_attn, flash_attn_2_cuda"

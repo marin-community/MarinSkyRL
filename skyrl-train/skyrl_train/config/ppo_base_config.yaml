@@ -45,7 +45,8 @@ trainer:
   # process receipts, and per-rank phase history. Use distributed for live stacks
   # and C++/NCCL escalation, or off as an emergency escape hatch.
   debug_mode: "light"
-  collective_phase_diagnostics: false
+  # null follows debug_mode (on for light/distributed); true/false explicitly overrides it.
+  collective_phase_diagnostics: null
   distributed:
     placement_group_timeout_seconds: 180
     worker_collective_timeout_seconds: 1800

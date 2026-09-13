@@ -44,7 +44,7 @@ import uuid
 from typing import Protocol
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
 from marinskyrl.hf_model import validate_portable_hf_model_files
-from marinskyrl.runtime_environment import (
+from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
     FR_DUMP_TEMP_FILE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
@@ -52,14 +52,13 @@ from marinskyrl.runtime_environment import (
     TELEMETRY_ENDPOINT_ENV,
     ensure_debug_artifact_directories,
     ray_cluster_owner_environment,
-    write_process_manifest,
 )
 from cloud.iris.model_paths import unsupported_model_path_message
 from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.process_diagnostics import (
-    enable_fatal_stack_capture,
-    install_live_stack_capture,
+    ProcessOutcomeKind,
+    initialize_process_diagnostics,
     write_process_outcome,
 )
 from cloud.iris.paths import resolve_repo_path
@@ -1846,7 +1845,7 @@ def run_head(args: argparse.Namespace, train_argv: list[str], derived_gloo_ifnam
             pid=process.pid,
         )
         exit_code = driver_outcome.public_exit_code
-        if driver_outcome.kind == "signal":
+        if driver_outcome.kind is ProcessOutcomeKind.SIGNAL:
             _log(
                 f"Training driver terminated by {driver_outcome.signal_name} "
                 f"(raw_returncode={driver_outcome.raw_returncode}, exit_code={exit_code}, "
@@ -2129,9 +2128,7 @@ def main() -> None:
     debug_artifact_root = os.environ.get(DEBUG_ARTIFACT_DIR_ENV)
     if debug_artifact_root:
         ensure_debug_artifact_directories(debug_artifact_root)
-        enable_fatal_stack_capture()
-        write_process_manifest(f"task-runtime-rank{_rank()}")
-        install_live_stack_capture(f"task-runtime-rank{_rank()}")
+        initialize_process_diagnostics(f"task-runtime-rank{_rank()}")
     # Stage task datasets on THIS node before Ray bootstrap (head + every worker).
     # Without this, only rank-0 has the extracted tasks and the rollout workers die
     # with FileNotFoundError on task.toml. See stage_task_data docstring.

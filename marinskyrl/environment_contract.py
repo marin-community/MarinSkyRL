@@ -33,10 +33,6 @@ class DebugMode(StrEnum):
     DISTRIBUTED = "distributed"
 
 
-# Compatibility name for callers written before light diagnostics became the default.
-DistributedDebugMode = DebugMode
-
-
 class EnvVarSource(StrEnum):
     CONFIG = "config"
     DERIVED = "derived"
@@ -374,9 +370,16 @@ def _config_value(config: Any, dotted_path: str, default: Any = None) -> Any:
     return default if value is None else value
 
 
-def _safe_component(value: str) -> str:
+def safe_artifact_component(value: str) -> str:
     cleaned = _SAFE_COMPONENT.sub("-", value).strip("-.")
     return cleaned or "run"
+
+
+def write_atomic_json(path: Path, payload: Mapping[str, object]) -> None:
+    """Write one JSON object without exposing a partial artifact to readers."""
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    temporary.replace(path)
 
 
 class EnvVarManager:
@@ -410,7 +413,8 @@ class EnvVarManager:
             values[VLLM_ALLOW_INSECURE_SERIALIZATION_ENV] = "1"
         if _config_value(config, "trainer.placement.enable_numa_affinity", False):
             values[NUMA_AFFINITY_ENV] = "1"
-        if _config_value(config, "trainer.collective_phase_diagnostics", False):
+        phase_diagnostics = _config_value(config, "trainer.collective_phase_diagnostics")
+        if phase_diagnostics is True:
             values[COLLECTIVE_PHASE_DIAGNOSTICS_ENV] = "1"
         raw_mode = _config_value(config, "trainer.debug_mode", DebugMode.LIGHT.value)
         try:
@@ -422,7 +426,13 @@ class EnvVarManager:
             return cls(values)
 
         artifact_root = ambient.get(DEBUG_ARTIFACT_DIR_ENV) or cls._artifact_root(config)
-        values.update(cls._debug_values(mode, artifact_root))
+        values.update(
+            cls._debug_values(
+                mode,
+                artifact_root,
+                collective_phase_diagnostics=phase_diagnostics is not False,
+            )
+        )
         return cls(values)
 
     @classmethod
@@ -432,16 +442,18 @@ class EnvVarManager:
         mode: DebugMode = DebugMode.LIGHT,
         job_name: str,
         artifact_root: str | None = None,
+        collective_phase_diagnostics: bool = True,
     ) -> "EnvVarManager":
-        root = artifact_root or f"/tmp/skyrl-debug/{_safe_component(job_name)}"
+        root = artifact_root or f"/tmp/skyrl-debug/{safe_artifact_component(job_name)}"
         if mode is DebugMode.OFF:
             return cls({})
-        return cls(cls._debug_values(mode, root))
-
-    @classmethod
-    def for_distributed_launch(cls, *, job_name: str, artifact_root: str | None = None) -> "EnvVarManager":
-        """Build the historical distributed preset for compatibility."""
-        return cls.for_debug_launch(mode=DebugMode.DISTRIBUTED, job_name=job_name, artifact_root=artifact_root)
+        return cls(
+            cls._debug_values(
+                mode,
+                root,
+                collective_phase_diagnostics=collective_phase_diagnostics,
+            )
+        )
 
     @classmethod
     def for_frozen_cuda_runtime(
@@ -472,14 +484,19 @@ class EnvVarManager:
     @staticmethod
     def _artifact_root(config: Any) -> str:
         checkpoint_path = str(_config_value(config, "trainer.ckpt_path", "") or "")
-        run_name = _safe_component(str(_config_value(config, "trainer.run_name", "run")))
+        run_name = safe_artifact_component(str(_config_value(config, "trainer.run_name", "run")))
         if checkpoint_path and not _REMOTE_PATH.match(checkpoint_path):
             checkpoint = Path(checkpoint_path).expanduser()
             return str(checkpoint.parent / "debug")
         return f"/tmp/skyrl-debug/{run_name}"
 
     @staticmethod
-    def _debug_values(mode: DebugMode, artifact_root: str) -> dict[str, str]:
+    def _debug_values(
+        mode: DebugMode,
+        artifact_root: str,
+        *,
+        collective_phase_diagnostics: bool,
+    ) -> dict[str, str]:
         root = str(Path(artifact_root).expanduser())
         flight_prefix = str(Path(root) / "flight_recorder" / "nccl_fr_rank_")
         values = {
@@ -487,10 +504,11 @@ class EnvVarManager:
             DEBUG_MODE_ENV: mode.value,
             DEBUG_ARTIFACT_DIR_ENV: root,
             PYTHONFAULTHANDLER_ENV: "1",
-            COLLECTIVE_PHASE_DIAGNOSTICS_ENV: "1",
             FR_DUMP_TEMP_FILE_ENV: flight_prefix,
             NCCL_DEBUG_INFO_TEMP_FILE_ENV: flight_prefix,
         }
+        if collective_phase_diagnostics:
+            values[COLLECTIVE_PHASE_DIAGNOSTICS_ENV] = "1"
         if mode is DebugMode.DISTRIBUTED:
             values.update(
                 {
@@ -566,14 +584,14 @@ def write_process_manifest(
     environment: Mapping[str, str] | None = None,
     metadata: Mapping[str, object] | None = None,
 ) -> Path:
-    """Persist one collision-free process receipt when a debug mode is active."""
+    """Persist one collision-free process receipt beneath the configured artifact directory."""
     values = os.environ if environment is None else environment
     artifact_root = values.get(DEBUG_ARTIFACT_DIR_ENV)
     if not artifact_root:
         raise RuntimeError(f"{DEBUG_ARTIFACT_DIR_ENV} is required for a debug process manifest")
     ensure_debug_artifact_directories(artifact_root)
     hostname = socket.gethostname()
-    path = Path(artifact_root) / "processes" / f"{_safe_component(role)}.{hostname}.{os.getpid()}.json"
+    path = Path(artifact_root) / "processes" / f"{safe_artifact_component(role)}.{hostname}.{os.getpid()}.json"
     managed = {
         name: values[name]
         for name, spec in sorted(_SPECS_BY_NAME.items())
@@ -588,9 +606,7 @@ def write_process_manifest(
         "environment": managed,
         "metadata": dict(metadata or {}),
     }
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n")
-    temporary.replace(path)
+    write_atomic_json(path, payload)
     return path
 
 

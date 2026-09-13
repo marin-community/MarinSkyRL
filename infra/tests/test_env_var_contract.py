@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 import infra.check_env_var_contract as env_contract
-from cloud.iris.env_vars import (
+from marinskyrl.environment_contract import (
     ENV_VAR_SPECS,
     EXECUTION_UID_ENV,
     EnvVarScope,

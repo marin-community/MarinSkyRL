@@ -13,6 +13,9 @@ structured collective-phase JSONL, and process-outcome receipts. Phase files rot
 and immediately previous file. A subprocess killed by a signal records the raw negative return code and signal name
 before the launcher exposes the conventional `128 + signal` exit code.
 
+Set `trainer.collective_phase_diagnostics: false` to disable phase JSONL independently while retaining the rest of
+the light preset.
+
 Use `distributed` for a canary investigating multi-rank stalls:
 
 ```yaml

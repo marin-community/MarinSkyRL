@@ -2,7 +2,7 @@ import json
 import signal
 
 from cloud.iris.training_driver import LocalRLConfig, LocalRLRunner
-from marinskyrl.runtime_environment import DEBUG_ARTIFACT_DIR_ENV
+from marinskyrl.environment_contract import DEBUG_ARTIFACT_DIR_ENV
 
 
 class _AbortedProcess:

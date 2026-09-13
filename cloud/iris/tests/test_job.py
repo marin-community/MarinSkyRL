@@ -665,9 +665,9 @@ def test_task_setup_executes_the_pinned_checkout_bootstrap(
     bootstrap.parent.mkdir(parents=True)
     bootstrap.write_bytes((_REPOSITORY_ROOT / runtime_environment.MARINSKYRL_BOOTSTRAP_SCRIPT).read_bytes())
     bootstrap.chmod(0o755)
-    env_vars_source = source / "marinskyrl/runtime_environment.py"
+    env_vars_source = source / "marinskyrl/environment_contract.py"
     env_vars_source.parent.mkdir(parents=True)
-    env_vars_source.write_bytes((_REPOSITORY_ROOT / "marinskyrl/runtime_environment.py").read_bytes())
+    env_vars_source.write_bytes((_REPOSITORY_ROOT / "marinskyrl/environment_contract.py").read_bytes())
     subprocess.run(["git", "init", "-q"], cwd=source, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=source, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)

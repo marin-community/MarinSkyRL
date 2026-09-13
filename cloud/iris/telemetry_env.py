@@ -11,7 +11,7 @@ from iris.client.client import get_iris_ctx
 from iris.cluster.client.job_info import get_job_info
 from iris.cluster.endpoints import LOG_SERVER_ENDPOINT_NAME, TELEMETRY_ENDPOINT_PATH
 
-from marinskyrl.runtime_environment import EXECUTION_UID_ENV, RUN_ID_ENV, TELEMETRY_ENDPOINT_ENV
+from marinskyrl.environment_contract import EXECUTION_UID_ENV, RUN_ID_ENV, TELEMETRY_ENDPOINT_ENV
 
 logger = logging.getLogger(__name__)
 

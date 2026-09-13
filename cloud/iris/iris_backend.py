@@ -129,7 +129,14 @@ from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
 from cloud.iris.protocol import LaunchMode, SkyRLJobSpec
 from marinskyrl.task_sources import DataSource, DirectoryDataSource, TaskTroveParquetSource
-from marinskyrl.runtime_environment import DebugMode, EnvVarManager, EnvVarScope, wandb_launch_environment
+from marinskyrl.environment_contract import (
+    DEBUG_ARTIFACT_DIR_ENV,
+    DEBUG_MODE_ENV,
+    DebugMode,
+    EnvVarManager,
+    EnvVarScope,
+    wandb_launch_environment,
+)
 from cloud.iris.runtime_environment import (
     CHECKPOINT_EXPORT_ENTRYPOINT,
     MARINSKYRL_ACTIVATION_FILE,
@@ -1823,7 +1830,7 @@ def create_parser() -> argparse.ArgumentParser:
         "teardown and localize the first rank or subgroup that stops following the "
         "shared collective schedule. Recording reads existing counters and does not "
         "issue additional collectives. "
-        "Default: unset = off.",
+        "Default: unset follows trainer.debug_mode (on for light/distributed).",
     )
 
     parser.add_argument(
@@ -1865,10 +1872,11 @@ def build_skyrl_flag_overrides(args: argparse.Namespace) -> list[str]:
 
 def build_debug_launch_env(args: argparse.Namespace) -> dict[str, str]:
     """Resolve the effective debug preset after the job name and RL config exist."""
+    raw = _load_rl_config_yaml(args.rl_config)
+    trainer = raw.get("trainer") or {}
     mode = args.debug_mode
     if mode is None:
-        raw = _load_rl_config_yaml(args.rl_config)
-        mode = str((raw.get("trainer") or {}).get("debug_mode", DebugMode.LIGHT.value))
+        mode = str(trainer.get("debug_mode", DebugMode.LIGHT.value))
     try:
         resolved = DebugMode(mode)
     except ValueError as error:
@@ -1876,9 +1884,14 @@ def build_debug_launch_env(args: argparse.Namespace) -> dict[str, str]:
         raise ValueError(f"trainer.debug_mode must be one of: {choices}; got {mode!r}") from error
     if resolved is DebugMode.OFF:
         return {}
-    return EnvVarManager.for_debug_launch(mode=resolved, job_name=args.job_name).environment_for(
-        EnvVarScope.TASK_RUNTIME
-    )
+    phase_diagnostics = trainer.get("collective_phase_diagnostics") is not False
+    if args.collective_phase_diagnostics is not None:
+        phase_diagnostics = args.collective_phase_diagnostics == "on"
+    return EnvVarManager.for_debug_launch(
+        mode=resolved,
+        job_name=args.job_name,
+        collective_phase_diagnostics=phase_diagnostics,
+    ).environment_for(EnvVarScope.TASK_RUNTIME)
 
 
 def _load_rl_config_yaml(rl_config_path: str) -> dict:
@@ -2399,8 +2412,7 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     if debug_env:
         env_vars.update(debug_env)
         print(
-            f"[rl-iris] Debug mode {debug_env['SKYRL_DEBUG_MODE']}: "
-            f"artifacts -> {debug_env['SKYRL_DEBUG_ARTIFACT_DIR']}",
+            f"[rl-iris] Debug mode {debug_env[DEBUG_MODE_ENV]}: artifacts -> {debug_env[DEBUG_ARTIFACT_DIR_ENV]}",
             flush=True,
         )
     env_vars.update(args.rl_config_launch.task_environment())

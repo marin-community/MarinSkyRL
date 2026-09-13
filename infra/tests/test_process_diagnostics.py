@@ -7,7 +7,7 @@ from marinskyrl.process_diagnostics import (
     install_live_stack_capture,
     write_process_outcome,
 )
-from marinskyrl.runtime_environment import (
+from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
     LIVE_STACK_INTERVAL_ENV,
     PYTHONFAULTHANDLER_ENV,

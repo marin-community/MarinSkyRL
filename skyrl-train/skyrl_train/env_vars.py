@@ -1,6 +1,6 @@
 """Trainer-facing import surface for the canonical pre-launch environment manager."""
 
-from marinskyrl.runtime_environment import (
+from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV as DEBUG_ARTIFACT_DIR_ENV,
     DEBUG_MODE_ENV as DEBUG_MODE_ENV,
     COLLECTIVE_PHASE_DIAGNOSTICS_ENV as COLLECTIVE_PHASE_DIAGNOSTICS_ENV,
@@ -16,7 +16,6 @@ from marinskyrl.runtime_environment import (
     UV_USE_IO_URING_ENV as UV_USE_IO_URING_ENV,
     VLLM_BATCH_INVARIANT_ENV as VLLM_BATCH_INVARIANT_ENV,
     DebugMode as DebugMode,
-    DistributedDebugMode as DistributedDebugMode,
     EnvVarManager as EnvVarManager,
     EnvVarScope as EnvVarScope,
     EnvVarSource as EnvVarSource,
