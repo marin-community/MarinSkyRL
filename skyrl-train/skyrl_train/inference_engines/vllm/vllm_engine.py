@@ -2620,14 +2620,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await self._get_engine().is_paused()
 
     async def pause_generation(self) -> None:
-        """Abort outstanding requests and hold the EngineCore scheduler idle for weight reload."""
+        """Keep outstanding requests and hold the EngineCore scheduler idle for weight reload."""
         engine = self._get_engine()
         outstanding_requests = len(engine.output_processor.request_states)
-        # vLLM's scheduler-level pause is a utility RPC into EngineCore. In abort
-        # mode it aborts running/waiting requests, waits for the scheduler to reach
-        # its paused state, and clears the KV/prefix cache before returning. Unlike
-        # AsyncLLM.abort(), it cannot report success merely because the frontend
-        # output_processor already removed the request IDs.
+        # vLLM's scheduler-level pause is a utility RPC into EngineCore that waits
+        # for the scheduler to reach its paused state. Keep mode preserves running
+        # and waiting requests, including their KV cache, across the weight reload.
         if self._publication_requests is not None:
             # vLLM keys frontend states by randomized internal IDs. The ledger
             # tracks the external ID supplied to generate(), including zero-token
@@ -2641,8 +2639,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 monotonic_time=time.monotonic(),
                 frontend_internal_to_external=bindings,
             )
-        await engine.pause_generation(mode="abort", clear_cache=True)
-        logger.info(f"pause_generation() finished, aborted {outstanding_requests} requests and paused EngineCore")
+        await engine.pause_generation(mode="keep", clear_cache=False)
+        logger.info(f"pause_generation() finished, kept {outstanding_requests} requests and paused EngineCore")
 
     async def resume_generation(self, policy_version: int | None = None) -> None:
         """Release the scheduler with an engine-local boundary for the installed version."""
