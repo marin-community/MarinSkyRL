@@ -57,6 +57,7 @@ class TrajectoryRequestBatch(TypedDict):
     sampling_params: Optional[Dict[str, Any]]
     trajectory_ids: Optional[List[TrajectoryID]]
     batch_metadata: Optional[BatchMetadata]
+    non_agentic_evaluation_endpoint: NotRequired[Literal["package_on", "common_off"]]
 
 
 class RewardShapingComponents(TypedDict):
@@ -103,6 +104,7 @@ class TrajectoryBatch(TypedDict):
     verifier_tests: Optional[List[Optional[VerifierTestCollection]]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
+    non_agentic_contract: NotRequired[List[Dict[str, Any]]]
     generator_engine_indices: NotRequired[List[int | None]]
     policy_versions_at_first_token: NotRequired[List[int | None]]
     submission_model_step: NotRequired[int]

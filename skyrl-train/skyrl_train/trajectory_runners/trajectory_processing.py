@@ -785,6 +785,13 @@ def concatenate_trajectory_batches(
         result["exclude_from_baseline"] = baseline_exclusions_concat
 
     # propagate additional keys with list values as-is
+    contracts_present = [batch.get("non_agentic_contract") is not None for batch in trajectory_batches]
+    if any(contracts_present):
+        if not all(contracts_present):
+            raise ValueError("Mixed parser protocols across trajectory batches")
+        versions = {row["parser_protocol"] for batch in trajectory_batches for row in batch["non_agentic_contract"]}
+        if len(versions) != 1:
+            raise ValueError("Mixed parser protocol versions across trajectory batches")
     additional_keys = [
         key for key in trajectory_batches[0] if key not in result and isinstance(trajectory_batches[0][key], list)
     ]
