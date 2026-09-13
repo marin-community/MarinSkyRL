@@ -28,6 +28,7 @@ from skyrl_train.models.grug_query_bias import (
     query_bias_candidate_count,
 )
 from skyrl_train.weight_sync.weight_extractor import (
+    is_weight_sync_dtype_compatible,
     prepare_weight_sync_tensor,
     validate_weight_sync_mode,
     weight_sync_dtype,
@@ -559,6 +560,16 @@ def test_weight_extractor_preserves_fp32_query_bias():
     with pytest.raises(ValueError, match="does not support fused weights"):
         validate_weight_sync_mode("grug_moe", fuse_weights=True)
     validate_weight_sync_mode("qwen3_moe", fuse_weights=True)
+
+
+def test_weight_sync_dtype_compatibility_preserves_fp32_query_bias():
+    router_bias = "model.layers.0.mlp.router.bias"
+    router_weight = "model.layers.0.mlp.router.weight"
+
+    assert is_weight_sync_dtype_compatible("grug_moe", router_bias, torch.float32, torch.bfloat16)
+    assert not is_weight_sync_dtype_compatible("grug_moe", router_bias, torch.bfloat16, torch.bfloat16)
+    assert is_weight_sync_dtype_compatible("grug_moe", router_weight, torch.bfloat16, torch.bfloat16)
+    assert not is_weight_sync_dtype_compatible("grug_moe", router_weight, torch.float32, torch.bfloat16)
 
 
 def test_weight_sync_stages_query_bias_on_cuda(monkeypatch):
