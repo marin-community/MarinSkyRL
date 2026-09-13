@@ -5,11 +5,11 @@ from omegaconf import OmegaConf
 
 from tests.cpu.util import example_dummy_config
 
-from skyrl_train.distributed_debug import apply_distributed_debug_mode, distributed_debug_environment
+from skyrl_train.debug_mode import apply_debug_mode, debug_environment
 from skyrl_train.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
     DEBUG_MODE_ENV,
-    DistributedDebugMode,
+    DebugMode,
     FR_DUMP_TEMP_FILE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
     write_process_manifest,
@@ -19,27 +19,57 @@ from skyrl_train.utils.utils import prepare_runtime_environment
 
 def _debug_config(*, checkpoint_path: str = "/gpfs/experiments/run/checkpoints"):
     cfg = example_dummy_config()
-    OmegaConf.update(cfg, "trainer.debug_mode", DistributedDebugMode.DISTRIBUTED.value)
+    OmegaConf.update(cfg, "trainer.debug_mode", DebugMode.DISTRIBUTED.value)
     OmegaConf.update(cfg, "trainer.ckpt_path", checkpoint_path)
     return cfg
 
 
-def test_normal_mode_does_not_enable_expensive_diagnostics(monkeypatch):
+def test_light_mode_is_the_bounded_default(monkeypatch):
     monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
     cfg = example_dummy_config()
+    OmegaConf.update(cfg, "trainer.ckpt_path", "")
 
-    environment = distributed_debug_environment(cfg)
+    environment = debug_environment(cfg)
+
+    assert environment[DEBUG_MODE_ENV] == "light"
+    assert environment[DEBUG_ARTIFACT_DIR_ENV] == "/tmp/skyrl-debug/test-run"
+    assert environment["PYTHONFAULTHANDLER"] == "1"
+    assert environment["SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"] == "1"
+    assert environment["TORCH_FR_BUFFER_SIZE"] == "20000"
+    assert environment["TORCH_NCCL_DUMP_ON_TIMEOUT"] == "1"
+    assert "NCCL_DEBUG" not in environment
+    assert "TORCH_SHOW_CPP_STACKTRACES" not in environment
+    assert "SKYRL_LIVE_STACK_INTERVAL_SECONDS" not in environment
+
+
+def test_off_mode_disables_default_failure_artifacts(monkeypatch):
+    monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
+    cfg = example_dummy_config()
+    OmegaConf.update(cfg, "trainer.debug_mode", DebugMode.OFF.value)
+
+    environment = debug_environment(cfg)
 
     assert DEBUG_MODE_ENV not in environment
     assert DEBUG_ARTIFACT_DIR_ENV not in environment
-    assert "NCCL_DEBUG" not in environment
+    assert "PYTHONFAULTHANDLER" not in environment
+
+
+def test_explicit_phase_diagnostics_off_overrides_light_mode(monkeypatch):
+    monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
+    cfg = example_dummy_config()
+    OmegaConf.update(cfg, "trainer.collective_phase_diagnostics", False)
+
+    environment = debug_environment(cfg)
+
+    assert environment[DEBUG_MODE_ENV] == "light"
+    assert "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS" not in environment
 
 
 def test_distributed_mode_expands_complete_worker_contract(monkeypatch):
     monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
     monkeypatch.delenv(DEBUG_ARTIFACT_DIR_ENV, raising=False)
 
-    environment = distributed_debug_environment(_debug_config())
+    environment = debug_environment(_debug_config())
 
     assert environment[DEBUG_MODE_ENV] == "distributed"
     assert environment[DEBUG_ARTIFACT_DIR_ENV] == "/gpfs/experiments/run/debug"
@@ -52,6 +82,7 @@ def test_distributed_mode_expands_complete_worker_contract(monkeypatch):
     assert environment["TORCH_NCCL_TRACE_CPP_STACK"] == "1"
     assert environment["TORCH_SHOW_CPP_STACKTRACES"] == "1"
     assert environment["TORCH_SYMBOLIZE_MODE"] == "fast"
+    assert environment["SKYRL_LIVE_STACK_INTERVAL_SECONDS"] == "300"
     assert environment["PYTHONFAULTHANDLER"] == "1"
     assert environment["TORCH_FR_DUMP_TEMP_FILE"].startswith("/gpfs/experiments/run/debug/flight_recorder/")
     assert environment["NCCL_DEBUG_FILE"] == "/gpfs/experiments/run/debug/nccl/nccl.%h.%p.log"
@@ -63,7 +94,7 @@ def test_distributed_mode_stages_remote_runs_locally(monkeypatch):
     monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
     monkeypatch.delenv(DEBUG_ARTIFACT_DIR_ENV, raising=False)
 
-    environment = distributed_debug_environment(_debug_config(checkpoint_path="s3://bucket/run/checkpoints"))
+    environment = debug_environment(_debug_config(checkpoint_path="s3://bucket/run/checkpoints"))
 
     assert environment[DEBUG_ARTIFACT_DIR_ENV] == "/tmp/skyrl-debug/test-run"
 
@@ -73,7 +104,7 @@ def test_config_mode_uses_launcher_owned_artifact_path(monkeypatch):
     cfg = example_dummy_config()
     OmegaConf.update(cfg, "trainer.debug_mode", "distributed")
 
-    environment = distributed_debug_environment(cfg)
+    environment = debug_environment(cfg)
 
     assert environment[DEBUG_ARTIFACT_DIR_ENV] == "/tmp/launcher-owned-debug"
     assert environment["TORCH_NCCL_ENABLE_TIMING"] == "1"
@@ -83,7 +114,7 @@ def test_apply_mode_writes_resolved_driver_manifest(tmp_path, monkeypatch):
     artifact_root = tmp_path / "artifacts"
     process_environment = {DEBUG_ARTIFACT_DIR_ENV: str(artifact_root)}
 
-    environment = apply_distributed_debug_mode(_debug_config(), environ=process_environment)
+    environment = apply_debug_mode(_debug_config(), environ=process_environment)
     manifest_path = write_process_manifest("driver", environment=environment)
     manifest = json.loads(manifest_path.read_text())
 

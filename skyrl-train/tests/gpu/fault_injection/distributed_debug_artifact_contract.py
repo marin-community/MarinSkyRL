@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from skyrl_train.env_vars import EnvVarManager, EnvVarScope
+from skyrl_train.env_vars import DebugMode, EnvVarManager, EnvVarScope
 from tests.process_gang import launch_process_gang
 
 
@@ -140,8 +140,10 @@ def test_healthy_and_failed_runs_terminate_with_complete_durable_artifacts(pytes
         (run_root / "control").mkdir()
         environment = os.environ.copy()
         environment.update(
-            EnvVarManager.for_distributed_launch(
-                job_name=f"debug-contract-{mode}", artifact_root=str(run_root)
+            EnvVarManager.for_debug_launch(
+                mode=DebugMode.DISTRIBUTED,
+                job_name=f"debug-contract-{mode}",
+                artifact_root=str(run_root),
             ).environment_for(EnvVarScope.TASK_RUNTIME)
         )
         master_port = 24_000 + int(job_id) % 10_000 + offset

@@ -5,7 +5,7 @@ from omegaconf import OmegaConf
 
 from tests.cpu.util import example_dummy_config
 
-from skyrl_train.distributed_debug import distributed_debug_environment
+from skyrl_train.debug_mode import debug_environment
 from skyrl_train.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
     DEBUG_MODE_ENV,
@@ -20,7 +20,7 @@ def test_ray_initialization_persists_distributed_debug_contract(tmp_path, monkey
     cfg = example_dummy_config()
     OmegaConf.update(cfg, "trainer.debug_mode", "distributed")
     OmegaConf.update(cfg, "trainer.ckpt_path", str(checkpoint_path))
-    for name, value in distributed_debug_environment(cfg).items():
+    for name, value in debug_environment(cfg).items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv(DEBUG_MODE_ENV)
     monkeypatch.delenv(DEBUG_ARTIFACT_DIR_ENV)

@@ -1,16 +1,21 @@
 """Trainer-facing import surface for the canonical pre-launch environment manager."""
 
-from cloud.iris.env_vars import (
+from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV as DEBUG_ARTIFACT_DIR_ENV,
     DEBUG_MODE_ENV as DEBUG_MODE_ENV,
+    COLLECTIVE_PHASE_DIAGNOSTICS_ENV as COLLECTIVE_PHASE_DIAGNOSTICS_ENV,
     DEFAULT_NCCL_TRACE_BUFFER_SIZE as DEFAULT_NCCL_TRACE_BUFFER_SIZE,
     ENV_VAR_SPECS as ENV_VAR_SPECS,
     FR_DUMP_TEMP_FILE_ENV as FR_DUMP_TEMP_FILE_ENV,
     HF_HUB_OFFLINE_ENV as HF_HUB_OFFLINE_ENV,
+    LIVE_STACK_INTERVAL_ENV as LIVE_STACK_INTERVAL_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV as NCCL_DEBUG_INFO_TEMP_FILE_ENV,
     NUMA_AFFINITY_ENV as NUMA_AFFINITY_ENV,
+    PYTHONFAULTHANDLER_ENV as PYTHONFAULTHANDLER_ENV,
+    RAY_USE_UVLOOP_ENV as RAY_USE_UVLOOP_ENV,
+    UV_USE_IO_URING_ENV as UV_USE_IO_URING_ENV,
     VLLM_BATCH_INVARIANT_ENV as VLLM_BATCH_INVARIANT_ENV,
-    DistributedDebugMode as DistributedDebugMode,
+    DebugMode as DebugMode,
     EnvVarManager as EnvVarManager,
     EnvVarScope as EnvVarScope,
     EnvVarSource as EnvVarSource,
