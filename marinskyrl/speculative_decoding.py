@@ -283,6 +283,7 @@ def parse_speculative_decoding_config(
     num_inference_engines: int = 1,
     tensor_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
+    async_engine: bool = True,
     engine_init_kwargs: Mapping[str, Any] | None = None,
     context: str = "generator.speculative_decoding",
 ) -> SpeculativeDecodingConfig | None:
@@ -308,6 +309,8 @@ def parse_speculative_decoding_config(
         raise SpeculativeDecodingConfigError(
             f"{context}.training requires generator.inference_engine_pipeline_parallel_size=1"
         )
+    if config.training is not None and not async_engine:
+        raise SpeculativeDecodingConfigError(f"{context}.training requires generator.async_engine=true")
     if config.training is not None and (engine_init_kwargs or {}).get("async_scheduling", False):
         raise SpeculativeDecodingConfigError(f"{context}.training does not support vLLM async_scheduling")
     return config

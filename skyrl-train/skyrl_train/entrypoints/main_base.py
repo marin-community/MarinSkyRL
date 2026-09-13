@@ -123,6 +123,7 @@ def create_ray_wrapped_inference_engines_from_config(
         num_inference_engines=cfg.generator.num_inference_engines,
         tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
         pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
+        async_engine=cfg.generator.async_engine,
         engine_init_kwargs=OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
     )
     engine_init_kwargs = {
