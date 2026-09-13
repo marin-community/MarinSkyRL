@@ -96,13 +96,18 @@ def test_grug_shard_publication_is_bit_identical(tmp_path, receiver_replicas, mo
         policy = _init_policy(cfg, 2)
         client = grug_engine_client(cfg, str(path))
         before_update = rank0_validation_snapshot(policy, names)
-        _train_step(policy, _padded_batch(tokenizer.pad_token_id))
+        first_batch = _padded_batch(tokenizer.pad_token_id)
+        first_batch.metadata["global_step"] = 1
+        _train_step(policy, first_batch)
         expected = rank0_validation_snapshot(policy, names)
         assert any(not torch.equal(expected[name], before_update[name]) for name in names)
-        sources_before = ray.get([actor.__ray_call__.remote(policy_local_snapshot) for actor in policy._actor_handlers])
+        sources_before_first = ray.get(
+            [actor.__ray_call__.remote(policy_local_snapshot) for actor in policy._actor_handlers]
+        )
         driver = SimpleNamespace(policy_model=policy, inference_engine_client=client)
 
         async def exercise():
+            nonlocal expected
             async with native_prepared_shard_diagnostic(
                 driver,
                 f"grug-ep2-r{receiver_replicas}",
@@ -168,19 +173,42 @@ def test_grug_shard_publication_is_bit_identical(tmp_path, receiver_replicas, mo
 
                 installed = await interval(1)
                 assert all(row["coverage"] == 1.0 and row["mismatches"] == 0 for row in installed["replay"])
+                assert {row["live_inventory"]["completed_update"] for row in installed["policy_begin"]} == {1}
+                sources_after_first = ray.get(
+                    [actor.__ray_call__.remote(policy_local_snapshot) for actor in policy._actor_handlers]
+                )
+                preserved_first = assert_source_preserved(sources_before_first, sources_after_first)
+
+                second_batch = _padded_batch(tokenizer.pad_token_id)
+                second_batch.metadata["global_step"] = 2
+                _train_step(policy, second_batch)
+                second_expected = rank0_validation_snapshot(policy, names)
+                assert any(not torch.equal(second_expected[name], expected[name]) for name in names)
+                expected = second_expected
+                sources_before_second = ray.get(
+                    [actor.__ray_call__.remote(policy_local_snapshot) for actor in policy._actor_handlers]
+                )
                 with pytest.raises(ValueError, match="wrong manifest, version or phase"):
                     await interval(2)
+                corrupted_install = [
+                    row
+                    for row in captures
+                    if row.get("phase") == "installed-before-replay" and row.get("publication_id") == 2
+                ][-1]["result"]
+                assert {row["live_inventory"]["completed_update"] for row in corrupted_install["policy_begin"]} == {2}
+                sources_after_second = ray.get(
+                    [actor.__ray_call__.remote(policy_local_snapshot) for actor in policy._actor_handlers]
+                )
+                preserved_second = assert_source_preserved(sources_before_second, sources_after_second)
                 returned = [row for row in captures if row.get("phase") == "replay-returned"][-1]["rows"]
                 bad = [row for row in returned if row["rank"] >= 2 and row["mismatches"] > 0]
                 assert len(bad) == 1 and bad[0]["rank"] == 2 + 2 * (receiver_replicas - 1) + 1
                 assert bad[0]["mismatches"] == 1 and bad[0]["compared_bytes"] == expected_bytes[bad[0]["rank"]]
                 assert all(row["coverage"] == 1.0 for row in returned if row["rank"] >= 2)
                 capture({"phase": "independent-oracle", "rows": oracle_rows, "corruption_rejected": True})
-                return plan, installed, returned, oracle_rows
+                return plan, installed, returned, oracle_rows, (preserved_first, preserved_second)
 
-        plan, installed, corruption_replay, independent_comparisons = asyncio.run(exercise())
-        sources_after = ray.get([actor.__ray_call__.remote(policy_local_snapshot) for actor in policy._actor_handlers])
-        preserved = assert_source_preserved(sources_before, sources_after)
+        plan, installed, corruption_replay, independent_comparisons, preserved = asyncio.run(exercise())
         sender_rows = {}
         for row in installed["policy_install"]:
             stream = row["stream"]["rows"]
@@ -208,7 +236,7 @@ def test_grug_shard_publication_is_bit_identical(tmp_path, receiver_replicas, mo
             "receiver_logical_expert_plus_replicated_wire_bytes": {
                 rank: expert_bytes + dense_wire_bytes for rank, _ in plan.expected_receiver_bytes
             },
-            "all_trainer_bytes_preserved": preserved,
+            "all_trainer_bytes_preserved": dict(zip((1, 2), preserved, strict=True)),
             "full_byte_replay": installed["replay"],
             "corruption_replay": corruption_replay,
             "independent_comparisons": independent_comparisons,
@@ -219,7 +247,7 @@ def test_grug_shard_publication_is_bit_identical(tmp_path, receiver_replicas, mo
         capture({"phase": "gate-complete", "result": receipt})
         print("K10_GRUG_MODEL_RECEIPT " + json.dumps(receipt, sort_keys=True), flush=True)
         print(
-            f"K10_GRUG_MODEL_GATE_PASS policy=2 receivers={2 * receiver_replicas} PP=1 EP=2 updates=1 byte_equal=true corruption_rejected=true source_preserved=true",
+            f"K10_GRUG_MODEL_GATE_PASS policy=2 receivers={2 * receiver_replicas} PP=1 EP=2 updates=2 byte_equal=true corruption_rejected=true source_preserved=true",
             flush=True,
         )
     finally:
