@@ -86,7 +86,7 @@ ADDITIVE_DYNAMIC_SAMPLING_FIELDS = {
     "min_reward_std": 0.0,
 }
 ADDITIVE_GROUP_ADMISSION_FIELDS = {
-    "max_sample_batches": 30,
+    "stall_timeout": None,
 }
 ADDITIVE_OVERLONG_FIELDS = {
     "penalty_scale": 1.0,

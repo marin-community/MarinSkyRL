@@ -7,14 +7,18 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 
 from skyrl_train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
-    GenerationStalledError,
     GeneratedOutputGroup,
     _AsyncDataloader,
     _AsyncStalenessManager,
     _GenerationQueues,
 )
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, resolve_dynamic_sampling_criteria
-from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
+from skyrl_train.group_admission import (
+    GroupAdmissionPolicy,
+    GroupAdmissionStalledError,
+    GroupAdvantageInvariant,
+    TrainingGroupInvariantError,
+)
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 
@@ -76,7 +80,7 @@ def _batch_assembly_state(
     trainer._dynamic_sampling_max_sample_batches = max_sample_batches
     trainer._dynamic_sampling_max_candidate_groups = max_sample_batches * mini_batch_size
     trainer._step_time_history = collections.deque([1000.0], maxlen=5)
-    trainer.admission_stall_timeout = 21_600
+    trainer.group_admission_stall_timeout = 21_600
     trainer._active_generator_tasks = []
     trainer._staleness_manager = _AsyncStalenessManager(
         max_concurrent_generation_groups=accepted,
@@ -232,14 +236,14 @@ async def test_batch_assembly_waits_for_fresh_replacement():
 
 
 @pytest.mark.asyncio
-async def test_batch_assembly_retries_fully_masked_group_and_waits_for_replacement():
+async def test_batch_assembly_skips_fully_masked_group_and_waits_for_fresh_prompt():
     trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
     queues.completed.put_nowait(_generated_group("retry-me", earliest_model_step=10, fully_masked=True))
 
     pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
     done, _ = await asyncio.wait({pending_batch}, timeout=0)
     assert pending_batch not in done
-    assert queues.retries.get_nowait()[0]["uid"] == "retry-me"
+    assert queues.retries.empty()
 
     async with queues.condition:
         queues.completed.put_nowait(_generated_group("replacement", earliest_model_step=10))
@@ -248,6 +252,20 @@ async def test_batch_assembly_retries_fully_masked_group_and_waits_for_replaceme
 
     assert [group.uid for group in batch] == ["replacement"]
     assert trainer.all_metrics["async/rejected_count/fully_masked"] == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_fails_fast_on_structural_group_corruption():
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
+    trainer._group_admission_policy = GroupAdmissionPolicy(
+        GroupAdvantageInvariant.exact_physical(physical_group_size=3),
+        max_staleness_steps=2,
+        rollout_logprobs_required=False,
+    )
+    queues.completed.put_nowait(_generated_group("wrong-size", earliest_model_step=10))
+
+    with pytest.raises(TrainingGroupInvariantError, match="physical_group_size"):
+        await trainer._get_admitted_generation_group_mini_batch(queues)
 
 
 @pytest.mark.asyncio
@@ -379,7 +397,7 @@ async def test_batch_assembly_scans_rejections_and_preserves_accepted_surplus():
     batch = await trainer._get_admitted_generation_group_mini_batch(queues)
 
     assert [group.uid for group in batch] == ["accepted-1", "accepted-2"]
-    assert queues.retries.get_nowait()[0]["uid"] == "masked-beyond-batch"
+    assert queues.retries.empty()
     assert queues.completed.get_nowait().uid == "accepted-surplus"
 
 
@@ -445,7 +463,7 @@ async def test_batch_assembly_prefers_eligible_duplicate_without_scheduling_a_re
 
 
 @pytest.mark.asyncio
-async def test_batch_assembly_retries_duplicate_uid_at_most_once_when_all_copies_are_masked():
+async def test_batch_assembly_skips_masked_duplicates_without_retrying_the_prompt():
     trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=3)
     queues.completed.put_nowait(_generated_group("masked", earliest_model_step=10, fully_masked=True))
     queues.completed.put_nowait(_generated_group("masked", earliest_model_step=10, fully_masked=True))
@@ -454,8 +472,7 @@ async def test_batch_assembly_retries_duplicate_uid_at_most_once_when_all_copies
     batch = await trainer._get_admitted_generation_group_mini_batch(queues)
 
     assert [group.uid for group in batch] == ["replacement"]
-    assert queues.retries.qsize() == 1
-    assert queues.retries.get_nowait()[0]["uid"] == "masked"
+    assert queues.retries.empty()
     assert trainer.all_metrics["async/rejected_count/fully_masked"] == 1
     assert trainer.all_metrics["async/rejected_count/duplicate_uid"] == 1
 
@@ -537,8 +554,8 @@ async def test_restore_continues_a_partially_admitted_batch(tmp_path):
 @pytest.mark.asyncio
 async def test_batch_assembly_rejected_only_progress_terminates_instead_of_livelocking():
     trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
-    trainer.admission_stall_timeout = 0.0
+    trainer.group_admission_stall_timeout = 1e-9
     queues.completed.put_nowait(_generated_group("always-masked", earliest_model_step=10, fully_masked=True))
 
-    with pytest.raises(GenerationStalledError):
+    with pytest.raises(GroupAdmissionStalledError):
         await trainer._get_admitted_generation_group_mini_batch(queues)

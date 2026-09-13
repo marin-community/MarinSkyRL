@@ -43,8 +43,9 @@ trainer:
   gradient_checkpointing_use_reentrant: false
   offload_optimizer_during_rollouts: true
   algorithm:
-    advantage_estimator: grpo
-    advantage_batch_normalize: true
+    advantage_estimator: rloo_n
+    group_advantage_min_size: 4
+    advantage_batch_normalize: false
     eps_clip_low: 0.2
     eps_clip_high: 0.2
     use_entropy_loss: false
@@ -126,6 +127,9 @@ generator:
     temperature: 1.0
     top_p: 1.0
     top_k: -1
+  engine_init_kwargs:
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
 
 environment:
   skyrl_gym:
