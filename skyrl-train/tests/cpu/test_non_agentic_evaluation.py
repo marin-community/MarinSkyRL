@@ -27,7 +27,13 @@ def test_endpoint_cannot_disable_intervention_on_a_training_or_wrong_protocol_re
         request_endpoint({"batch_metadata": BatchMetadata(25, phase), "non_agentic_evaluation_endpoint": mode}, parser)
 
 
-def setup_runner(*, intervention=False, shaped=False, parser=True):
+def setup_runner(
+    *,
+    intervention=False,
+    shaped=False,
+    parser=True,
+    processor_spec="skyrl_train.inference_engines.non_agentic_logits_processor:NonAgenticTokenProcessor",
+):
     words = ["[UNK]", "<|start_think|>", "<|end_think|>", "<|eot_id|>", "####", "41", "42", "question"]
     decoder = Tokenizer(WordLevel(dict(zip(words, range(len(words)), strict=True)), unk_token="[UNK]"))
     decoder.pre_tokenizer = WhitespaceSplit()
@@ -70,9 +76,7 @@ def setup_runner(*, intervention=False, shaped=False, parser=True):
             force_close_after=2,
         )
         cfg.generator.engine_init_kwargs = {
-            "logits_processors": [
-                "skyrl_train.inference_engines.non_agentic_logits_processor.NonAgenticTokenProcessor"
-            ],
+            "logits_processors": [processor_spec],
             "logprobs_mode": "raw_logprobs",
         }
     if shaped:
@@ -95,6 +99,14 @@ def setup_runner(*, intervention=False, shaped=False, parser=True):
         "batch_metadata": BatchMetadata(25, "eval"),
     }
     return runner, tokenizer, request, calls
+
+
+def test_intervention_rejects_dot_separated_logits_processor_path():
+    with pytest.raises(ValueError, match="module:qualname"):
+        setup_runner(
+            intervention=True,
+            processor_spec="skyrl_train.inference_engines.non_agentic_logits_processor.NonAgenticTokenProcessor",
+        )
 
 
 @pytest.mark.asyncio

@@ -52,7 +52,11 @@ from skyrl_train.trajectory_runners.projections import (
     TrajectoryProjection,
     WholeTrajectoryProjection,
 )
-from skyrl_train.trajectory_runners.non_agentic_interventions import TokenIntervention, intervention_trace
+from skyrl_train.trajectory_runners.non_agentic_interventions import (
+    NON_AGENTIC_TOKEN_PROCESSOR_FQCN,
+    TokenIntervention,
+    intervention_trace,
+)
 
 
 class WholeTrajectoryCollector:
@@ -225,8 +229,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             if self.token_intervention.eos_id != self.tokenizer.eos_token_id:
                 raise ValueError("Intervention EOS differs from the actual tokenizer")
             engine = trajectory_runner_cfg.engine_init_kwargs
-            processor = "skyrl_train.inference_engines.non_agentic_logits_processor.NonAgenticTokenProcessor"
-            if processor not in engine.get("logits_processors", []) or engine.get("logprobs_mode") != "raw_logprobs":
+            processor_specs = engine.get("logits_processors", [])
+            if any(spec.count(":") != 1 for spec in processor_specs):
+                raise ValueError("Native logits processors require module:qualname paths")
+            if NON_AGENTIC_TOKEN_PROCESSOR_FQCN not in processor_specs or engine.get("logprobs_mode") != "raw_logprobs":
                 raise ValueError("Token interventions require the registered native processor and raw logprobs")
             if trajectory_runner_cfg.sampling_params.logprobs is None:
                 raise ValueError("Token interventions require actual engine logprob evidence")
