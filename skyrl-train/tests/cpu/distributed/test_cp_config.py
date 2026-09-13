@@ -55,10 +55,10 @@ STAGE2_TRAINER_FIELDS = {
     },
 }
 DEBUG_MODE_TRAINER_FIELDS = {
-    "debug_mode": "off",
+    "debug_mode": "light",
 }
 RUNTIME_CONFIG_TRAINER_FIELDS = {
-    "collective_phase_diagnostics": False,
+    "collective_phase_diagnostics": None,
     "offload_optimizer_during_rollouts": False,
     "restore_dataloader_state": True,
     "distributed": {
@@ -86,7 +86,7 @@ ADDITIVE_DYNAMIC_SAMPLING_FIELDS = {
     "min_reward_std": 0.0,
 }
 ADDITIVE_GROUP_ADMISSION_FIELDS = {
-    "max_sample_batches": 30,
+    "stall_timeout": None,
 }
 ADDITIVE_OVERLONG_FIELDS = {
     "penalty_scale": 1.0,

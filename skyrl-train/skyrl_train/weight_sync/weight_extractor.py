@@ -10,12 +10,23 @@ from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, is_grug_router_bias
 from .base import WeightChunk
 
 
-def weight_sync_dtype(model_type: str, name: str, default: torch.dtype) -> torch.dtype:
+def weight_sync_dtype(model_type: str | None, name: str, default: torch.dtype) -> torch.dtype:
     """Return the wire dtype for one canonical HF state entry."""
 
     if is_grug_router_bias(model_type, name):
         return torch.float32
     return default
+
+
+def is_weight_sync_dtype_compatible(
+    model_type: str | None,
+    name: str,
+    wire_dtype: torch.dtype,
+    model_dtype: torch.dtype,
+) -> bool:
+    """Return whether one state entry has the dtype required by its wire contract."""
+
+    return wire_dtype == weight_sync_dtype(model_type, name, model_dtype)
 
 
 def prepare_weight_sync_tensor(

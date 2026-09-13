@@ -15,6 +15,7 @@ requires-python = ">=3.10"
 
 dependencies = [
     "func_timeout",
+    "loguru",
     "pandas", 
     "requests",
     "omegaconf",

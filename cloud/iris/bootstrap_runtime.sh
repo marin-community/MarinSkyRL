@@ -63,7 +63,7 @@ UV_PROJECT_ENVIRONMENT="$environment" uv sync --quiet \
   "${runtime_extras[@]}"
 
 python="$environment/bin/python"
-"$python" "$project_root/cloud/iris/env_vars.py" write-frozen-cuda-runtime "$runtime_file"
+"$python" "$project_root/marinskyrl/environment_contract.py" write-frozen-cuda-runtime "$runtime_file"
 source "$runtime_file"
 # Keep the development linker name in this environment, outside uv's package cache.
 ln -sf "$CUDA_HOME/lib/libcudart.so.13" "$environment/lib/libcudart.so"

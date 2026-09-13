@@ -42,8 +42,9 @@ trainer:
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   algorithm:
-    advantage_estimator: grpo
-    advantage_batch_normalize: true
+    advantage_estimator: rloo_n
+    group_advantage_min_size: 4
+    advantage_batch_normalize: false
     eps_clip_low: 0.2
     eps_clip_high: 0.2
     use_entropy_loss: false
@@ -107,7 +108,7 @@ generator:
   num_inference_engines: 8
   n_samples_per_prompt: 16
   eval_n_samples_per_prompt: 1
-  gpu_memory_utilization: 0.8
+  gpu_memory_utilization: 0.7
   max_num_seqs: 16
   max_num_batched_tokens: 16384
   enable_prefix_caching: true
@@ -122,6 +123,9 @@ generator:
     temperature: 1.0
     top_p: 1.0
     top_k: -1
+  engine_init_kwargs:
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
 
 environment:
   skyrl_gym:

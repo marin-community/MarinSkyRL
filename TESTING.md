@@ -37,7 +37,7 @@ the GPU type, world size, EP/FSDP dimensions, dependency image or lock revision,
 complete pass/fail result for on-demand distributed runs.
 
 The two-run debug artifact acceptance contract and its Jupiter command are documented in
-[`docs/distributed-debug-mode.md`](docs/distributed-debug-mode.md#jupiter-acceptance-test).
+[`docs/debug-modes.md`](docs/debug-modes.md#jupiter-acceptance-test).
 
 ## Before a PR
 

@@ -15,8 +15,9 @@ These tests pin the properties that make the Megatron logprob and entropy paths 
      the independent sequence positions, so it is exact, not approximate.)
   2. The composed base config defaults `logprob_chunk_size` to 1024 for BOTH the
      policy and ref megatron_config (the two keys the workers read).
-  3. Entropy and logprob losses can backpropagate through the same logits tensor,
-     and their combined gradient matches an independent PyTorch reference.
+  3. Entropy uses the same sequence bound, remains exact for packed and padded
+     logits, and can backpropagate alongside logprob loss with an independently
+     verified combined gradient.
 
 `model_utils` imports `megatron.core.parallel_state` at module load, but the functions
 under test only need one tensor-parallel group lookup. When megatron is not installed
@@ -172,7 +173,7 @@ def test_vocab_parallel_entropy_and_logprob_share_logits_without_corrupting_back
         chunk_size=3,
         inference_only=False,
     )
-    parallel_entropy = vocab_parallel_entropy(parallel_logits)
+    parallel_entropy = vocab_parallel_entropy(parallel_logits, chunk_size=3)
     (parallel_logprobs.sum() + 0.003 * parallel_entropy.sum()).backward()
 
     reference_logits = base_logits.clone().requires_grad_(True)
@@ -183,6 +184,21 @@ def test_vocab_parallel_entropy_and_logprob_share_logits_without_corrupting_back
     (reference_chosen.sum() + 0.003 * reference_entropy.sum()).backward()
 
     assert torch.allclose(parallel_logits.grad, reference_logits.grad, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize("shape", [(11, 24), (2, 11, 24)])
+def test_chunked_vocab_parallel_entropy_matches_unchunked_without_grad(single_rank_group, monkeypatch, shape):
+    """Metric-only entropy remains exact for packed and padded logits."""
+    monkeypatch.setattr(model_utils.mpu, "get_tensor_model_parallel_group", lambda: single_rank_group, raising=False)
+    torch.manual_seed(6)
+    logits = torch.randn(*shape, dtype=torch.float32)
+
+    with torch.no_grad():
+        unchunked = vocab_parallel_entropy(logits)
+        chunked = vocab_parallel_entropy(logits, chunk_size=3)
+
+    assert chunked.shape == unchunked.shape
+    assert torch.allclose(chunked, unchunked, atol=1e-6, rtol=1e-6)
 
 
 def test_packed_logprobs_preserve_left_padded_action_positions(single_rank_group):

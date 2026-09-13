@@ -184,5 +184,5 @@ idle allocation containing exactly four four-GPU nodes.
 `distributed_debug_artifact_contract.py` is the smaller two-node acceptance gate for the managed debug preset.
 It runs one successful cross-node NCCL collective and one deterministic rank-nonarrival failure after a
 successful communicator warmup, serially, and checks terminal state plus the complete durable artifact inventory. See
-[`docs/distributed-debug-mode.md`](../../../../docs/distributed-debug-mode.md#jupiter-acceptance-test) for the
+[`docs/debug-modes.md`](../../../../docs/debug-modes.md#jupiter-acceptance-test) for the
 launch command and expected artifact layout.

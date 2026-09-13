@@ -1144,7 +1144,7 @@ def _parse_partial_response_and_inplace_update_accum(
     choice = partial_response["choices"][0]
     finish_reason: str = choice["finish_reason"]
     stop_reason: Optional[str] = choice.get("stop_reason", None)
-    new_content: str = choice["message"]["content"]
+    new_content: Optional[str] = choice["message"]["content"]
 
     assert partial_response["usage"] is not None and partial_response["usage"]["completion_tokens"] is not None, (
         "partial_response['usage']['completion_tokens'] must be present"
@@ -1159,7 +1159,8 @@ def _parse_partial_response_and_inplace_update_accum(
     # If aborted without generating tokens, ignore this partial response.
     aborted_without_generating = finish_reason == ABORT_FINISH_REASON and new_completion_tokens == 0
     if not aborted_without_generating:
-        accum.content += new_content
+        if new_content is not None:
+            accum.content += new_content
         logprobs = choice.get("logprobs")
         if logprobs is not None and logprobs.get("content") is not None:
             accum.logprobs_content.extend(logprobs["content"])
