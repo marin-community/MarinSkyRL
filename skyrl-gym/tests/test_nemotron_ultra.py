@@ -1,6 +1,7 @@
 """Behavior checks for the NVIDIA NeMo Gym reward ports."""
 
 import json
+import threading
 
 import pytest
 import requests
@@ -15,6 +16,7 @@ from skyrl_gym.envs.nemotron_ultra.genrm_utils import (
     generate_comparison_pairs,
     parse_genrm_output,
 )
+from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group
 from skyrl_gym.envs.nemotron_ultra.instruction_following import grade_instruction_following
 from skyrl_gym.envs.nemotron_ultra.jailbreak import grade_jailbreak
 from skyrl_gym.envs.nemotron_ultra.judge import GenRMResponseTransport, OpenAIJudge
@@ -75,6 +77,57 @@ def test_genrm_utilities_match_nvidia_circular_tiebreaker():
 
     assert rewards == pytest.approx([4.0, 2.5, 4.0])
     assert metrics["tiebreak_usage_rate"] == pytest.approx(0.0)
+
+
+def test_genrm_group_limits_comparison_concurrency():
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+    two_workers_active = threading.Event()
+
+    class FakeJudge:
+        def generate_response(self, *args, **kwargs):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+                if active == 2:
+                    two_workers_active.set()
+            try:
+                assert two_workers_active.wait(timeout=1.0)
+                return '{"score_1": 4, "score_2": 3, "ranking": 2}'
+            finally:
+                with lock:
+                    active -= 1
+
+    response_objects = [
+        {"output": [{"type": "message", "content": [{"type": "output_text", "text": f"answer {index}"}]}]}
+        for index in range(8)
+    ]
+    rewards, _ = grade_genrm_group(
+        conversation_history=[{"role": "user", "content": "question"}],
+        response_objects=response_objects,
+        principle="Be correct.",
+        judge=FakeJudge(),
+        config={
+            "max_concurrent_comparisons": 2,
+            "group_answer_length_penalty_coeff": 0.1,
+        },
+    )
+
+    assert len(rewards) == 8
+    assert max_active == 2
+
+
+def test_genrm_group_rejects_nonpositive_comparison_concurrency():
+    with pytest.raises(ValueError, match="max_concurrent_comparisons must be at least 1"):
+        grade_genrm_group(
+            conversation_history=[],
+            response_objects=[{"output": []}, {"output": []}],
+            principle="Be correct.",
+            judge=object(),
+            config={"max_concurrent_comparisons": 0, "group_answer_length_penalty_coeff": 0.1},
+        )
 
 
 def test_genrm_chat_completions_transport_embeds_comparison_as_untrusted_data(monkeypatch):

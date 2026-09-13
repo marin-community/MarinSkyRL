@@ -48,6 +48,9 @@ def grade_genrm_group(
     default_score = float(config.get("default_score", 3.0))
     default_ranking = float(config.get("default_ranking", 3.5))
     pairs = generate_comparison_pairs("circular", len(response_objects))
+    max_workers = int(config.get("max_concurrent_comparisons", len(pairs)))
+    if max_workers < 1:
+        raise ValueError("max_concurrent_comparisons must be at least 1")
 
     def compare(pair: tuple[int, int]) -> tuple[float, float, float]:
         first, second = pair
@@ -73,7 +76,7 @@ def grade_genrm_group(
                     time.sleep(float(config.get("genrm_parse_retry_sleep_seconds", 0.2)))
         return default_score, default_score, default_ranking
 
-    with ThreadPoolExecutor(max_workers=len(pairs)) as executor:
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(pairs))) as executor:
         comparisons = list(executor.map(compare, pairs))
     metadata = [(first, second, 0) for first, second in pairs]
     rewards, metrics, _, _ = aggregate_scores(
