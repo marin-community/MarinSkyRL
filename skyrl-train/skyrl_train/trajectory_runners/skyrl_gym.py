@@ -21,6 +21,7 @@ from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequ
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
+from skyrl_train.error_treatment import ErrorTreatment
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
@@ -60,7 +61,13 @@ class WholeTrajectoryCollector:
         pass
 
     async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False):
-        return await collect_agent_loops(self._runner, request, self._runner.agent_loop, disable_tqdm=disable_tqdm)
+        return await collect_agent_loops(
+            self._runner,
+            request,
+            self._runner.agent_loop,
+            disable_tqdm=disable_tqdm,
+            on_error=lambda index, error: self._runner.failed_agent_loop_output(request, index, error),
+        )
 
 
 class BatchedTrajectoryCollector:
@@ -201,6 +208,50 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
             )
 
+    def failed_agent_loop_output(
+        self,
+        request: TrajectoryRequestBatch,
+        index: int,
+        error: Exception,
+    ) -> AgentLoopOutput:
+        """Turn one environment-loop failure into an aligned, fully masked row."""
+        exception_type = type(error).__name__
+        trajectory_ids = request.get("trajectory_ids")
+        trajectory_id = trajectory_ids[index] if trajectory_ids is not None else None
+        logger.warning(
+            "Trajectory {} failed in the SkyRL-Gym agent loop (NOT fatal; masking row): {}: {}",
+            trajectory_id.to_string() if trajectory_id is not None else index,
+            exception_type,
+            error,
+        )
+        token_rewards = None if self.use_conversation_multi_turn and self.custom_chat_template else (0.0,)
+        return AgentLoopOutput(
+            evidence=RolloutEvidence(
+                stop_reason="error",
+                generated_token_count=0,
+                prompt_token_ids=(0,),
+                response_token_ids=(0,),
+                behavior_logprobs=(0.0,),
+            ),
+            verification=VerificationResult.error(
+                "SkyRL-Gym agent loop failed",
+                diagnostics={"exception_type": exception_type},
+            ),
+            reward=RewardResult(
+                unshaped_reward=None,
+                optimization_reward=0.0,
+                token_rewards=token_rewards,
+            ),
+            disposition=TrainingDisposition.mask(
+                "SkyRL-Gym agent loop failed",
+                exception_type=exception_type,
+            ),
+            loss_mask=[0],
+            env_metrics={"agent_loop_error": 1.0},
+            captured_global_step=self.global_step_fn() if self.global_step_fn is not None else None,
+            error_treatment=ErrorTreatment.MASK.value,
+        )
+
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
             loop = asyncio.get_running_loop()
@@ -210,6 +261,37 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
     async def agent_loop(
         self,
+        prompt: ConversationType,
+        env_class: str,
+        env_extras: Dict[str, Any],
+        max_tokens: int,
+        max_input_length: int,
+        sampling_params: Optional[Dict[str, Any]] = None,
+        trajectory_id: Optional[TrajectoryID] = None,
+        global_step_fn: Optional[Callable[[], int]] = None,
+    ) -> AgentLoopOutput:
+        """Run one environment loop and always release its environment."""
+        env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
+        env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
+        env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
+        try:
+            return await self._run_agent_loop(
+                env,
+                prompt,
+                env_class,
+                env_extras,
+                max_tokens,
+                max_input_length,
+                sampling_params=sampling_params,
+                trajectory_id=trajectory_id,
+                global_step_fn=global_step_fn,
+            )
+        finally:
+            await self._run_in_executor_if_available(env.close)
+
+    async def _run_agent_loop(
+        self,
+        env,
         prompt: ConversationType,
         env_class: str,
         env_extras: Dict[str, Any],
@@ -248,11 +330,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         """
         retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
 
-        # Create a new environment instance
-        env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
-        env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
-        env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
-
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
@@ -289,7 +366,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 max_input_length,
             )
             env_metrics = env.get_metrics()
-            await self._run_in_executor_if_available(env.close)
             return AgentLoopOutput(
                 evidence=RolloutEvidence(
                     messages=tuple(chat_history),
@@ -526,9 +602,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
         # Get environment-specific metrics after the episode is done
         env_metrics = environment_metrics_from_step(env_step_output, env.get_metrics())
-        # Close the environment
-        await self._run_in_executor_if_available(env.close)
-
         prompt_ids = input_ids[:initial_prompt_length]
         if retokenize_chat_history:
             response_encodings = self.tokenizer.apply_chat_template(
