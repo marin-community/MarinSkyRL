@@ -789,10 +789,19 @@ def _daytona_rl_api_key_from_secret_manager() -> Optional[str]:
 
 
 def _resolve_daytona_rl_api_key() -> str:
-    """The canonical Secret Manager key, else a ``DAYTONA_API_KEY`` already in the
-    environment (e.g. from ``--secrets-env``) when Secret Manager is unreachable, else exit.
-    Lets an operator without Secret Manager access launch with a key they already hold; the
-    value is injected through the usual job-secret path."""
+    """Resolve the RL-org Daytona key from the launch environment or Secret Manager.
+
+    ``--secrets-env`` is loaded before this function runs. Keep its RL-specific name at
+    the launch boundary, then let the caller expose the resolved value as
+    ``DAYTONA_API_KEY`` because that is the name expected by Daytona and Harbor.
+    """
+    env_key = os.environ.get(DAYTONA_RL_SECRET_NAME)
+    if env_key:
+        print(
+            f"[rl-iris] Daytona: using {DAYTONA_RL_SECRET_NAME} from --secrets-env.",
+            flush=True,
+        )
+        return env_key
     value = _daytona_rl_api_key_from_secret_manager()
     if value:
         print(
@@ -801,18 +810,9 @@ def _resolve_daytona_rl_api_key() -> str:
             flush=True,
         )
         return value
-    env_key = os.environ.get("DAYTONA_API_KEY")
-    if env_key:
-        print(
-            "[rl-iris] Daytona: canonical Google Secret Manager key unavailable; using the "
-            "DAYTONA_API_KEY already in the environment (from --secrets-env).",
-            flush=True,
-        )
-        return env_key
     raise SystemExit(
-        "[rl-iris] no Daytona RL key available: Google Secret Manager was unreachable and no "
-        "DAYTONA_API_KEY is set. Authenticate gcloud for the Marin project, or provide "
-        "DAYTONA_API_KEY via --secrets-env, then retry."
+        "[rl-iris] no Daytona RL key available: provide DAYTONA_RL_API_KEY via --secrets-env "
+        "or authenticate gcloud for the Marin project, then retry."
     )
 
 
