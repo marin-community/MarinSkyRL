@@ -103,6 +103,13 @@ SkyRLGymPipeline = (
 )
 
 
+@dataclass
+class _CanonicalizedChatPrefix:
+    loss_mask: List[int]
+    rollout_logprobs: Optional[List[float]]
+    per_step_rewards: List[Tuple[float, Optional[int]]]
+
+
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
     def __init__(
         self,
@@ -216,12 +223,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         Multi-turn generation loop that executes a single trajectory.
 
         Note:
-            We ensure token-in-token-out generation. With two exceptions:
+            We ensure token-in-token-out generation. With three exceptions:
             - When calling Env.step() and BaseTextEnvStepOutput["postprocessed_action"] is not None.
               This will likely be deprecated soon.
             - When custom_chat_template = True and use_conversation_multi_turn = True. We always
               re-tokenize the entire chat history every turn and at the end. This is used for cases
               like removing Qwen3 thinking tokens in non-last-round assistant message.
+            - When the inference backend canonicalizes a structured tool call while rendering the
+              next turn. The re-rendered prior context is retained but excluded from optimization.
 
         Args:
             prompt: ConversationType
@@ -374,14 +383,22 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     raise RuntimeError("chat generation must return the structured assistant message")
                 if per_step_rewards:
                     if input_ids != rendered_prompt_ids[0][: len(input_ids)]:
-                        raise RuntimeError(
-                            "vLLM changed the tokenization of an earlier chat turn while rendering the next turn; "
-                            "behavior logprobs can no longer be aligned exactly"
+                        canonical_prefix = self._mask_canonicalized_chat_prefix(
+                            input_ids,
+                            rendered_prompt_ids[0],
+                            initial_prompt_length,
+                            rollout_logprobs,
+                            per_step_rewards,
                         )
-                    observation_token_count = len(rendered_prompt_ids[0]) - len(input_ids)
-                    loss_mask += [0] * observation_token_count
-                    if rollout_logprobs is not None:
-                        rollout_logprobs += [0.0] * observation_token_count
+                        loss_mask = canonical_prefix.loss_mask
+                        rollout_logprobs = canonical_prefix.rollout_logprobs
+                        per_step_rewards = canonical_prefix.per_step_rewards
+                        token_provenance = TokenProvenance.RECONSTRUCTED
+                    else:
+                        observation_token_count = len(rendered_prompt_ids[0]) - len(input_ids)
+                        loss_mask += [0] * observation_token_count
+                        if rollout_logprobs is not None:
+                            rollout_logprobs += [0.0] * observation_token_count
                 input_ids = rendered_prompt_ids[0]
 
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
@@ -533,7 +550,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             response_ids = input_ids[initial_prompt_length : response_end_idx + 1]
             if rollout_logprobs is not None:
                 rollout_logprobs = rollout_logprobs[: len(response_ids)]
-            per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
+            per_step_rewards = [
+                (reward, None if idx is None else idx - initial_prompt_length) for reward, idx in per_step_rewards
+            ]
         assert len(loss_mask) == len(response_ids), "loss_mask and response_ids should have the same length"
 
         if not self.use_conversation_multi_turn:
@@ -558,13 +577,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             optimization_reward = float(per_step_rewards[-1][0])
             token_rewards = None
         else:
-            # Build token-level rewards placed at assistant turn boundaries
-            token_level_rewards: List[float] = [0.0] * len(response_ids)
-            for step_reward, idx in per_step_rewards:
-                assert step_reward is not None
-                if idx >= len(response_ids):
-                    break
-                token_level_rewards[idx] += step_reward
+            token_level_rewards = self._place_step_rewards(response_ids, loss_mask, per_step_rewards)
             optimization_reward = float(sum(token_level_rewards))
             token_rewards = tuple(token_level_rewards)
 
@@ -750,6 +763,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         genrm_indices = [index for index in range(len(outputs)) if (ultra_at(index) or {}).get("agent") in genrm_agents]
         if not genrm_indices:
             return
+        batch_metadata = input_batch.get("batch_metadata")
+        if batch_metadata is not None and batch_metadata.training_phase == "eval":
+            for index in genrm_indices:
+                outputs[index].env_metrics["genrm/cohort_skipped_eval"] = 1.0
+            return
         if self.genrm_judge is None:
             raise RuntimeError("Nemotron Ultra GenRM rows require environment.skyrl_gym.nemotron_ultra.genrm.judge")
         trajectory_ids = input_batch.get("trajectory_ids")
@@ -807,9 +825,50 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 )
                 outputs[index].env_metrics.update({f"genrm/{name}": value for name, value in metrics.items()})
 
+    @staticmethod
+    def _mask_canonicalized_chat_prefix(
+        input_ids: List[int],
+        rendered_prompt_ids: List[int],
+        initial_prompt_length: int,
+        rollout_logprobs: Optional[List[float]],
+        per_step_rewards: List[Tuple[float, Optional[int]]],
+    ) -> _CanonicalizedChatPrefix:
+        """Mask reconstructed context and mark its reward positions for later placement."""
+        if input_ids[:initial_prompt_length] != rendered_prompt_ids[:initial_prompt_length]:
+            raise RuntimeError("vLLM changed the tokenization of the original prompt while rendering a later chat turn")
+
+        reconstructed_token_count = len(rendered_prompt_ids) - initial_prompt_length
+        loss_mask = [0] * reconstructed_token_count
+        if rollout_logprobs is not None:
+            rollout_logprobs = [0.0] * reconstructed_token_count
+        per_step_rewards = [(reward, None) for reward, _ in per_step_rewards]
+        return _CanonicalizedChatPrefix(loss_mask, rollout_logprobs, per_step_rewards)
+
+    @staticmethod
+    def _place_step_rewards(
+        response_ids: List[int],
+        loss_mask: List[int],
+        per_step_rewards: List[Tuple[float, Optional[int]]],
+    ) -> List[float]:
+        """Credit turn rewards at their boundaries, or at the last exact action after reconstruction."""
+        token_level_rewards = [0.0] * len(response_ids)
+        if not response_ids:
+            return token_level_rewards
+        fallback_index = next(
+            (index for index in range(len(loss_mask) - 1, -1, -1) if loss_mask[index]),
+            len(response_ids) - 1,
+        )
+        for step_reward, index in per_step_rewards:
+            reward_index = fallback_index if index is None else index
+            if reward_index >= len(response_ids):
+                break
+            token_level_rewards[reward_index] += step_reward
+        return token_level_rewards
+
     # ----------------------------------------------------------------------------
     # Three methods of managing chat history and input ids in `agent_loop()`
     # ----------------------------------------------------------------------------
+
     def _get_next_input_ids_by_retokenizing_chat_history(
         self,
         chat_history: ConversationType,
