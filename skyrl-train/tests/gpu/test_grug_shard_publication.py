@@ -176,9 +176,9 @@ def test_grug_shard_publication_is_bit_identical(tmp_path, receiver_replicas, mo
                 assert bad[0]["mismatches"] == 1 and bad[0]["compared_bytes"] == expected_bytes[bad[0]["rank"]]
                 assert all(row["coverage"] == 1.0 for row in returned if row["rank"] >= 2)
                 capture({"phase": "independent-oracle", "rows": oracle_rows, "corruption_rejected": True})
-                return plan, installed
+                return plan, installed, returned, oracle_rows
 
-        plan, installed = asyncio.run(exercise())
+        plan, installed, corruption_replay, independent_comparisons = asyncio.run(exercise())
         sources_after = ray.get([actor.__ray_call__.remote(policy_local_snapshot) for actor in policy._actor_handlers])
         preserved = assert_source_preserved(sources_before, sources_after)
         sender_rows = {}
@@ -199,6 +199,7 @@ def test_grug_shard_publication_is_bit_identical(tmp_path, receiver_replicas, mo
         )
         receipt = {
             "geometry": asdict(geometry),
+            "identity_rows": plan.identity_rows,
             "groups": [asdict(group) for group in plan.schedule.groups],
             "sender_bytes": sender_rows,
             "receiver_installed_bytes": dict(plan.expected_receiver_bytes),
@@ -209,6 +210,8 @@ def test_grug_shard_publication_is_bit_identical(tmp_path, receiver_replicas, mo
             },
             "all_trainer_bytes_preserved": preserved,
             "full_byte_replay": installed["replay"],
+            "corruption_replay": corruption_replay,
+            "independent_comparisons": independent_comparisons,
             "corruption_rejected": True,
             "physical_nic_bytes": "not measured by a single-node tiny gate",
             "nonroot_trainer_scope": "DP1/PP1 has one trainer owner per EP block; multi-owner scratch covered by CPU Gloo gate",
