@@ -2,6 +2,7 @@ import os
 import pickle
 import threading
 
+import skyrl_train.distributed.dispatch as dispatch_module
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.distributed.dispatch import (
     DispatchSettings,
@@ -131,6 +132,41 @@ def test_collect_actor_results_kills_blocked_gang_on_rank_error(failure_method):
     assert restored_error.mesh_rank == error.value.mesh_rank
     with pytest.raises(ray.exceptions.ActorDiedError):
         ray.get(actors[1].ping.remote(), timeout=5)
+
+
+def test_collect_actor_results_logs_initiating_remote_exception_before_teardown(monkeypatch) -> None:
+    actors = [RayActor.remote(0, 0), RayActor.remote(1, 1)]
+    actor_infos = [
+        ActorInfo(
+            actor,
+            MeshRank(dp=index, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1),
+        )
+        for index, actor in enumerate(actors)
+    ]
+    refs = [actors[0].raise_oom.remote(), actors[1].wait_without_progress.remote()]
+    events: list[tuple[str, object, object | None]] = []
+    original_kill = ray.kill
+
+    def capture_exception(context: str, error: BaseException) -> None:
+        events.append(("exception", context, error))
+
+    def capture_kill(actor, *, no_restart: bool) -> None:
+        events.append(("kill", actor, None))
+        original_kill(actor, no_restart=no_restart)
+
+    monkeypatch.setattr(dispatch_module, "log_exception_as_text", capture_exception)
+    monkeypatch.setattr(dispatch_module.ray, "kill", capture_kill)
+
+    with pytest.raises(WorkerGroupTaskError):
+        collect_actor_results(actor_infos, refs, operation="policy ppo_train")
+
+    event, context, remote_error = events[0]
+    assert event == "exception"
+    assert "policy ppo_train" in context
+    assert "actor index 0" in context
+    assert str(actor_infos[0].rank) in context
+    assert "injected policy-rank OOM" in str(remote_error)
+    assert all(event == "kill" for event, _, _ in events[1:])
 
 
 def test_mesh_dispatch_with_mixed():

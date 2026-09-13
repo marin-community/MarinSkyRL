@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 import ray
 from ray import ObjectRef
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 import inspect
 from loguru import logger
@@ -255,12 +256,19 @@ def collect_actor_results(actor_infos: List[ActorInfo], object_refs: List[Object
         try:
             results[actor_index] = ray.get(object_ref)
         except Exception as error:
+            mesh_rank = actor_infos[actor_index].rank
+            # This is the last point that still owns Ray's initiating remote exception.
+            # Peer teardown can otherwise leave only secondary actor-death and process-signal receipts.
+            log_exception_as_text(
+                f"{operation} failed on actor index {actor_index} ({mesh_rank}); terminating the worker group",
+                error,
+            )
             for actor_info in actor_infos:
                 try:
                     ray.kill(actor_info.handle, no_restart=True)
                 except Exception:
                     logger.exception("Failed to terminate a peer after a distributed actor task error")
-            raise WorkerGroupTaskError(operation, actor_index, actor_infos[actor_index].rank) from error
+            raise WorkerGroupTaskError(operation, actor_index, mesh_rank) from error
     return results
 
 
