@@ -61,38 +61,24 @@ def snapshot_shared_state_dict_tensors(state_dict: dict[str, torch.Tensor]) -> d
     FSDP2 replaces tied parameters while it shards a module. A state-dict view of
     those parameters otherwise keeps pointing at the storage FSDP2 is replacing,
     so the subsequent full-state loader can read partially initialized data.
-    Exact aliases reuse one clone; distinct views keep their own shape and offset.
-    Tensors with unshared storage are not copied.
     """
-    storage_counts: dict[tuple[str, int, int], int] = defaultdict(int)
-    storage_keys: dict[str, tuple[str, int, int] | None] = {}
+    storage_groups: dict[tuple[torch.device, int], list[tuple[str, torch.Tensor]]] = defaultdict(list)
     for name, tensor in state_dict.items():
-        if not isinstance(tensor, torch.Tensor) or tensor.device.type == "meta" or tensor.numel() == 0:
-            storage_keys[name] = None
+        if tensor.device.type == "meta" or tensor.numel() == 0:
             continue
         storage = tensor.untyped_storage()
-        key = (str(tensor.device), storage.data_ptr(), storage.nbytes())
-        storage_keys[name] = key
-        storage_counts[key] += 1
+        storage_groups[(tensor.device, storage.data_ptr())].append((name, tensor))
 
-    snapshots: dict[tuple[str, int, int, int, tuple[int, ...], tuple[int, ...], torch.dtype], torch.Tensor] = {}
-    result = copy.copy(state_dict)
-    for name, tensor in state_dict.items():
-        key = storage_keys[name]
-        if key is None or storage_counts[key] < 2:
+    result = state_dict.copy()
+    for tensors in storage_groups.values():
+        if len(tensors) < 2:
             continue
-        view_key = (
-            *key,
-            tensor.storage_offset(),
-            tuple(tensor.shape),
-            tuple(tensor.stride()),
-            tensor.dtype,
-        )
-        snapshot = snapshots.get(view_key)
-        if snapshot is None:
-            snapshot = tensor.detach().clone()
-            snapshots[view_key] = snapshot
-        result[name] = snapshot
+        snapshots: dict[tuple[int, tuple[int, ...], tuple[int, ...], torch.dtype], torch.Tensor] = {}
+        for name, tensor in tensors:
+            view = (tensor.storage_offset(), tuple(tensor.shape), tuple(tensor.stride()), tensor.dtype)
+            if view not in snapshots:
+                snapshots[view] = tensor.detach().clone()
+            result[name] = snapshots[view]
     return result
 
 
