@@ -40,8 +40,8 @@ def _fake_frozen_runtime(
         "harbor/models/trial",
         "harbor/trial",
         "harbor/utils",
-        "nvidia/cuda_runtime/lib",
-        "nvidia/cuda_nvrtc/lib",
+        "megatron/bridge",
+        "nvidia/cu13/lib",
         "quack",
         "skyrl_train/models",
         "transformer_engine/common",
@@ -57,6 +57,8 @@ def _fake_frozen_runtime(
         "harbor/models/trial",
         "harbor/trial",
         "harbor/utils",
+        "megatron",
+        "megatron/bridge",
         "quack",
         "skyrl_train",
         "skyrl_train/models",
@@ -71,9 +73,10 @@ def _fake_frozen_runtime(
     _write_module(site_packages, "flash_attn.py", "__version__ = '2.8.3'\n")
     _write_module(site_packages, "flash_attn_2_cuda.py")
     _write_module(site_packages, "memray.py")
-    _write_module(site_packages, "torch.py", "__version__ = '2.11.0+cu129'\n")
+    _write_module(site_packages, "megatron/bridge/__init__.py", "class AutoBridge: pass\n")
+    _write_module(site_packages, "torch.py", "__version__ = '2.13.0+cu132'\n")
     _write_module(site_packages, "vllm/__init__.py", "__version__ = 'test'\n")
-    _write_module(site_packages, "vllm/_C.py")
+    _write_module(site_packages, "vllm/_C_stable_libtorch.py")
     _write_module(site_packages, "vllm/cumem_allocator.py")
     _write_module(
         site_packages,
@@ -213,6 +216,7 @@ def test_bootstrap_uses_system_python_when_managed_pin_is_unresolvable(tmp_path:
         ("daytona.py", "No module named 'daytona'"),
         ("harbor/utils/traces_utils.py", "harbor.utils.traces_utils"),
         ("memray.py", "No module named 'memray'"),
+        ("megatron/bridge", "megatron.bridge"),
         ("transformer_engine/common", "transformer_engine.common"),
     ],
 )

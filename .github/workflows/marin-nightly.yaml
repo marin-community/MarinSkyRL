@@ -15,9 +15,6 @@ on:
       target_cluster:
         description: "Iris cluster to federate the job to"
         default: cw-rno2a
-      grug_target_cluster:
-        description: "ARM64 Iris cluster for the Marin vLLM Grug gate"
-        default: cw-us-east-08a
 
 concurrency:
   group: marin-nightly
@@ -43,14 +40,6 @@ jobs:
             iris_timeout: 5400
             task_script: skyrl-train/ci/marin_nightly/run_h100.sh
             log: nightly.log
-          - lane: grug-vllm-gb200
-            target_cluster: ${{ github.event.inputs.grug_target_cluster || 'cw-us-east-08a' }}
-            gpu: GB200x4
-            cpu: 64
-            memory: 512GB
-            iris_timeout: 3600
-            task_script: skyrl-train/ci/marin_nightly/run_grug_vllm.sh
-            log: grug-vllm.log
           - lane: grug-megatron-h100
             target_cluster: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
             gpu: H100x4
@@ -135,12 +124,12 @@ jobs:
     steps:
       - uses: marin-community/marin-style/actions/report-failure@5094279da60b47b9a8fa8effaf7f73cd13f1e96f  # v0.4.0
         with:
-          lane: gsm8k-h100-and-grug-vllm-gb200
+          lane: gsm8k-h100-and-grug-megatron-h100
           trigger-token: ${{ secrets.LOOM_TRIGGER_GH_TOKEN }}
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
           triage-notes: >-
-            The nightly runs dense H100 GRPO and a Grug GB200 rollout/train/broadcast
-            cycle through WIF-authenticated Iris jobs. Separate Iris or cluster failures
-            from lock, native-extension, and training regressions. A repository-local PR
-            that fixes the tracked failure must end its body with a Fixes link to this
-            issue. Use Part of only when the PR does not restore the lane.
+            The nightly runs dense H100 GRPO and a Grug H100 Megatron
+            rollout/train/broadcast cycle through WIF-authenticated Iris jobs. Separate
+            Iris or cluster failures from lock, native-extension, and training regressions.
+            A repository-local PR that fixes the tracked failure must end its body with a
+            Fixes link to this issue. Use Part of only when the PR does not restore the lane.

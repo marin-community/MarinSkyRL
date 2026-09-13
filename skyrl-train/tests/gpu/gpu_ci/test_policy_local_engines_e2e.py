@@ -25,6 +25,7 @@ def get_test_actor_config() -> DictConfig:
         # Override specific parameters
         cfg.trainer.policy.model.path = MODEL
         cfg.trainer.critic.model.path = ""
+        cfg.trainer.flash_attn = True
         cfg.trainer.placement.policy_num_gpus_per_node = 2
         cfg.generator.async_engine = True
         cfg.generator.num_inference_engines = 1
