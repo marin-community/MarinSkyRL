@@ -217,6 +217,7 @@ def main() -> None:
             assert comparison["mean_abs_diff"] <= MEAN_ABS_DIFF_LIMIT
         assert update.metrics["preupdate_logprob_max_abs_diff"] <= MAX_ABS_DIFF_LIMIT
         assert update.metrics["preupdate_logprob_mean_abs_diff"] <= MEAN_ABS_DIFF_LIMIT
+        assert 0.8 <= update.metrics["ppo_ratio_min"] <= update.metrics["ppo_ratio_max"] <= 1.2
         assert update.metrics["ppo_clip_ratio"] == 0.0
     finally:
         learner.close()

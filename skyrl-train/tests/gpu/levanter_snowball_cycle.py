@@ -526,6 +526,7 @@ def _phase_one(
         for update in (update_one, update_two):
             assert update["preupdate_logprob_max_abs_diff"] <= UNCHANGED_POLICY_MAX_ABS_DIFF
             assert update["preupdate_logprob_mean_abs_diff"] <= UNCHANGED_POLICY_MEAN_ABS_DIFF
+            assert 0.8 <= update["ppo_ratio_min"] <= update["ppo_ratio_max"] <= 1.2
             assert update["ppo_ratio_mean"] == pytest.approx(1.0, abs=1e-6)
             assert update["ppo_clip_ratio"] == 0.0
         assert all(math.isfinite(update[key]) for update in (update_one, update_two) for key in ("final_loss",))
@@ -605,6 +606,7 @@ def _phase_two(
         assert rollout["stop_reasons"] == ["length", "length"]
         assert update["preupdate_logprob_max_abs_diff"] <= UNCHANGED_POLICY_MAX_ABS_DIFF
         assert update["preupdate_logprob_mean_abs_diff"] <= UNCHANGED_POLICY_MEAN_ABS_DIFF
+        assert 0.8 <= update["ppo_ratio_min"] <= update["ppo_ratio_max"] <= 1.2
         assert update["ppo_ratio_mean"] == pytest.approx(1.0, abs=1e-6)
         assert update["ppo_clip_ratio"] == 0.0
         replay_differences = next_update_comparison["category_max_abs_diff"]
