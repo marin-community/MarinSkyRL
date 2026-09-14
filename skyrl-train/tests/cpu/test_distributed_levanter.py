@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import dataclasses
 import os
 from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
+
+from skyrl_train.learner import UpdateResult, UpdateStatus
 from skyrl_train.learners import distributed_levanter
 
 
@@ -31,6 +35,29 @@ def test_import_does_not_initialize_jax_or_levanter():
     )
 
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+
+def test_merge_update_results_checks_numerics_and_reduces_host_timings():
+    first = UpdateResult(
+        UpdateStatus.SUCCEEDED,
+        {"final_loss": 1.25, "forward_validation_seconds": 12.0, "training_update_seconds": 60.0},
+    )
+    second = UpdateResult(
+        UpdateStatus.SUCCEEDED,
+        {"final_loss": 1.25, "forward_validation_seconds": 13.5, "training_update_seconds": 58.0},
+    )
+
+    merged = distributed_levanter._merge_update_results([first, second])
+
+    assert merged.metrics == {
+        "final_loss": 1.25,
+        "forward_validation_seconds": 13.5,
+        "training_update_seconds": 60.0,
+    }
+    with pytest.raises(RuntimeError, match="different final_loss metric"):
+        distributed_levanter._merge_update_results(
+            [first, dataclasses.replace(second, metrics={**second.metrics, "final_loss": 2.0})]
+        )
 
 
 def test_facade_reserves_one_strict_spread_whole_node_bundle_per_process(monkeypatch):

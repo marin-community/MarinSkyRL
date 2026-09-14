@@ -8,6 +8,7 @@ node and all actors have a rendezvous address.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import socket
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,28 @@ from skyrl_train.utils import get_ray_pg_ready_with_timeout
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
     from skyrl_train.learner import LearnerBatch, LearnerConfig, LogProbResult, UpdateRequest, UpdateResult
+
+
+_PROCESS_LOCAL_TIMING_METRICS = frozenset({"forward_validation_seconds", "training_update_seconds"})
+
+
+def _merge_update_results(results: list[UpdateResult]) -> UpdateResult:
+    """Validate numerical agreement and report the slowest host timing."""
+
+    first = results[0]
+    for process_id, result in enumerate(results[1:], start=1):
+        if result.status != first.status or result.metrics.keys() != first.metrics.keys():
+            raise RuntimeError(f"JAX process {process_id} returned a different update result")
+        for name, value in result.metrics.items():
+            if name in _PROCESS_LOCAL_TIMING_METRICS:
+                continue
+            if not np.isclose(value, first.metrics[name], rtol=1e-6, atol=1e-8):
+                raise RuntimeError(f"JAX process {process_id} returned a different {name} metric")
+
+    metrics = dict(first.metrics)
+    for name in _PROCESS_LOCAL_TIMING_METRICS.intersection(metrics):
+        metrics[name] = max(float(result.metrics[name]) for result in results)
+    return dataclasses.replace(first, metrics=metrics)
 
 
 @ray.remote(max_restarts=0, max_task_retries=0)
@@ -194,15 +217,9 @@ class DistributedLevanterSnowballLearner:
         except BaseException:
             self._state = self._failed_state()
             raise
-        first_result = results[0][0]
-        for process_id, (result, _) in enumerate(results[1:], start=1):
-            if result.status != first_result.status or result.metrics.keys() != first_result.metrics.keys():
-                raise RuntimeError(f"JAX process {process_id} returned a different update result")
-            for name, value in result.metrics.items():
-                if not np.isclose(value, first_result.metrics[name], rtol=1e-6, atol=1e-8):
-                    raise RuntimeError(f"JAX process {process_id} returned a different {name} metric")
+        merged_result = _merge_update_results([result for result, _ in results])
         self._state = self._consistent_state([state for _, state in results], "update")
-        return first_result
+        return merged_result
 
     async def publish_policy(self) -> None:
         refs = [actor.publish_policy.remote() for actor in self._actors]
