@@ -30,7 +30,7 @@ from jax.experimental import multihost_utils
 from levanter.checkpoint import load_checkpoint, save_checkpoint
 from levanter.compat.hf_checkpoints import HFCheckpointConverter
 from levanter.distributed import DistributedConfig
-from levanter.grug.loss import fused_linear_softmax_cross_entropy_loss
+from levanter.grug.loss import BlockSizes, fused_linear_softmax_cross_entropy_loss
 from levanter.grug.sharding import compact_grug_mesh
 from levanter.metrics import Metric
 from levanter.metrics import fold as fold_metric
@@ -75,6 +75,7 @@ AutoConfig.register(GrugMoeConfig.model_type, GrugMoeConfig, exist_ok=True)
 
 
 _ROUTER_BIAS_SUFFIX = ".mlp.router.bias"
+_SNOWBALL_CE_BLOCK_SIZES = BlockSizes(b_block_size=8192, h_block_size=512, v_block_size=2048)
 
 
 class _SnowballTrainerConfig(TrainerConfig):
@@ -292,15 +293,18 @@ def _all_next_token_log_probs(model, tokens: hax.NamedArray, temperature: float)
     targets = tokens.array[:, 1:]
     # A direct log_softmax materializes [batch, sequence, vocabulary] and its
     # backward intermediates. The real 67B batch would require 456 GiB per
-    # H100. Levanter's GPU fused linear cross entropy streams vocabulary tiles
-    # and exposes the chosen-token negative log probability, including a
-    # custom backward that never creates the full logits tensor.
+    # H100. Keep this call on XLA's explicitly bounded batch/vocabulary stream.
+    # The default H100 batched_xla path switches to a full-vocabulary shortcut
+    # at 8192 flattened tokens; under this multi-host shard_map, XLA lifted that
+    # shortcut across the global batch and recreated the 456 GiB buffer.
     negative_log_probs = fused_linear_softmax_cross_entropy_loss(
         hidden[:, :-1] / jnp.asarray(temperature, dtype=hidden.dtype),
         model.get_lm_head().array,
         targets,
         reduction="none",
         dtype=jnp.float32,
+        implementation="xla",
+        block_sizes=_SNOWBALL_CE_BLOCK_SIZES,
     )
     # The fused Grug helper names the size-one expert mesh axis in its batch
     # spec. Normalize it back to this learner's compute batch spec so explicit

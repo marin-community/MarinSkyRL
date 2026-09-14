@@ -36,6 +36,8 @@ from skyrl_train.learner import (
 from skyrl_train.learners.levanter_config import LevanterSnowballRuntimeConfig
 from skyrl_train.learners.levanter_snowball import (
     LevanterSnowballLearner,
+    _SNOWBALL_CE_BLOCK_SIZES,
+    _all_next_token_log_probs,
     _parameter_probe,
     _replicated_host_copy,
     _regular_grpo_loss,
@@ -68,6 +70,47 @@ _MODEL_VALUES = {
 
 def test_import_preserves_msrl_grug_transformers_registration():
     assert type(AutoConfig.for_model("grug_moe")) is GrugMoeConfig
+
+
+def test_logprob_loss_forces_bounded_xla_stream(monkeypatch):
+    Batch = Axis("batch", 2)
+    Pos = Axis("position", 5)
+    Embed = Axis("embed", 3)
+    Vocab = Axis("vocab", 7)
+    tokens = hax.named(jnp.arange(Batch.size * Pos.size, dtype=jnp.int32).reshape(Batch.size, Pos.size), (Batch, Pos))
+
+    class Model:
+        def activations(self, _tokens):
+            return hax.named(jnp.ones((Batch.size, Pos.size, Embed.size), dtype=jnp.bfloat16), (Batch, Pos, Embed))
+
+        def get_lm_head(self):
+            return hax.named(jnp.ones((Embed.size, Vocab.size), dtype=jnp.bfloat16), (Embed, Vocab))
+
+    calls = []
+
+    def fused(hidden, lm_head, labels, **kwargs):
+        calls.append((hidden.shape, lm_head.shape, labels.shape, kwargs))
+        return jnp.ones(labels.shape, dtype=jnp.float32)
+
+    monkeypatch.setattr("skyrl_train.learners.levanter_snowball.fused_linear_softmax_cross_entropy_loss", fused)
+    monkeypatch.setattr(jax.sharding, "reshard", lambda value, _spec: value)
+
+    result = _all_next_token_log_probs(Model(), tokens, 1.0)
+
+    np.testing.assert_array_equal(result, -np.ones((Batch.size, Pos.size - 1), dtype=np.float32))
+    assert calls == [
+        (
+            (Batch.size, Pos.size - 1, Embed.size),
+            (Embed.size, Vocab.size),
+            (Batch.size, Pos.size - 1),
+            {
+                "reduction": "none",
+                "dtype": jnp.float32,
+                "implementation": "xla",
+                "block_sizes": _SNOWBALL_CE_BLOCK_SIZES,
+            },
+        )
+    ]
 
 
 def test_hub_model_is_resolved_to_the_pinned_local_snapshot(monkeypatch, tmp_path):
