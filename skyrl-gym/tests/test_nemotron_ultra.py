@@ -269,6 +269,15 @@ def test_calendar_reward_checks_all_events_constraints_and_overlaps():
     assert grade_calendar(overlap, expected) == (0.0, "conflicting_events")
 
 
+def test_calendar_reward_rejects_large_unclosed_json():
+    expected = {
+        "0": {"duration": 30, "constraint": None, "min_time": "09:00", "max_time": "12:00"},
+    }
+    malformed = "[" + "{}" * 10_000
+
+    assert grade_calendar(malformed, expected) == (0.0, "no_json_list")
+
+
 def test_format_rewards_match_nvidia_line_and_marker_rules():
     regex = {"type": "regex", "verify_regex": [r"^- "], "verify_min_matches": 2}
     markers = {"type": "string_match", "expected_markers": ["(ref 1)"], "patterns": [r"\(ref \d+\)"]}
