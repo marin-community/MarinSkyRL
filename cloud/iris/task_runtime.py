@@ -968,10 +968,14 @@ def head_succeeded(rendezvous_dir: str, gang_epoch: str) -> bool:
     """Whether the head published success for ``gang_epoch``."""
     uri = _done_uri(rendezvous_dir)
     fs, path = fs_and_path(uri)
-    if not fs.exists(path):
+    try:
+        if not fs.exists(path):
+            return False
+        with fs.open(path, "r") as source:
+            result = HeadResult.from_dict(json.load(source))
+    except OSError as error:
+        _log(f"head-result poll error (will retry): {error}")
         return False
-    with fs.open(path, "r") as source:
-        result = HeadResult.from_dict(json.load(source))
     return result.gang_epoch == gang_epoch
 
 
