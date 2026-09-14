@@ -69,7 +69,7 @@ cuda = [
     "torchvision==0.26.0 ; sys_platform == 'linux'",
 ]
 levanter = [
-    "marin-levanter @ git+https://github.com/marin-community/marin.git@63045c86fa4da42d2271e825751f0eec517c234f#subdirectory=lib/levanter",
+    "marin-levanter @ git+https://github.com/marin-community/marin.git@6be13f079ffddbf7a600f7755dce060946ad2fd8#subdirectory=lib/levanter",
 ]
 levanter-gpu = [
     # Keep Snowball's H100 FA4 backward dependency aligned with the pinned
@@ -78,7 +78,7 @@ levanter-gpu = [
     "flash-attn-4[cu13]==4.0.0b16 ; sys_platform == 'linux'",
     # Keep JAX on the same CUDA 12 package family as Torch and vLLM.
     "jax[cuda12]==0.11.1 ; sys_platform == 'linux'",
-    "marin-levanter @ git+https://github.com/marin-community/marin.git@63045c86fa4da42d2271e825751f0eec517c234f#subdirectory=lib/levanter ; sys_platform == 'linux'",
+    "marin-levanter @ git+https://github.com/marin-community/marin.git@6be13f079ffddbf7a600f7755dce060946ad2fd8#subdirectory=lib/levanter ; sys_platform == 'linux'",
 ]
 deepspeed = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",

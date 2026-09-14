@@ -117,6 +117,24 @@ def _snowball_microbatched(fn, Batch, microbatch_size, accum_axis_mapping, compu
         result_shape = eqx.filter_eval_shape(fn, model, *batch, **kwargs)
         accumulator = zeros_like_tree(result_shape, accum_axis_mapping)
 
+        def metric_identity(shape, zero):
+            if not isinstance(shape, Metric):
+                return zero
+            if shape.reduction is ReductionType.MIN:
+                value = jnp.full_like(zero._value, jnp.inf)
+            elif shape.reduction is ReductionType.MAX:
+                value = jnp.full_like(zero._value, -jnp.inf)
+            else:
+                value = zero._value
+            return Metric(_value=value, _count=zero._count, reduction=shape.reduction)
+
+        accumulator = jax.tree_util.tree_map(
+            metric_identity,
+            result_shape,
+            accumulator,
+            is_leaf=lambda value: isinstance(value, Metric),
+        )
+
         key = kwargs.get("key")
         if key is not None:
             key = jax.random.split(key, num_micro_steps)
@@ -378,7 +396,15 @@ def _regular_grpo_loss(
             jnp.max(jnp.where(selected, deviations, 0.0)),
             ReductionType.MAX,
         ),
+        "ppo_ratio_min": Metric.from_value(
+            jnp.min(jnp.where(selected, ratio, jnp.inf)),
+            ReductionType.MIN,
+        ),
         "ppo_ratio_mean": selected_mean(ratio),
+        "ppo_ratio_max": Metric.from_value(
+            jnp.max(jnp.where(selected, ratio, -jnp.inf)),
+            ReductionType.MAX,
+        ),
         "ppo_clip_ratio": selected_mean(clipped_tokens),
         "ppo_clip_ratio_low": selected_mean(clipped_low_tokens),
         "ppo_clip_ratio_high": selected_mean(clipped_high_tokens),
@@ -753,7 +779,9 @@ class LevanterSnowballLearner:
                 "valid_token_weight": valid_weight,
                 "preupdate_logprob_mean_abs_diff": float(info.loss_metrics["train/preupdate_logprob_mean_abs_diff"]),
                 "preupdate_logprob_max_abs_diff": float(info.loss_metrics["train/preupdate_logprob_max_abs_diff"]),
+                "ppo_ratio_min": float(info.loss_metrics["train/ppo_ratio_min"]),
                 "ppo_ratio_mean": float(info.loss_metrics["train/ppo_ratio_mean"]),
+                "ppo_ratio_max": float(info.loss_metrics["train/ppo_ratio_max"]),
                 "ppo_clip_ratio": float(info.loss_metrics["train/ppo_clip_ratio"]),
                 "ppo_clip_ratio_low": float(info.loss_metrics["train/ppo_clip_ratio_low"]),
                 "ppo_clip_ratio_high": float(info.loss_metrics["train/ppo_clip_ratio_high"]),

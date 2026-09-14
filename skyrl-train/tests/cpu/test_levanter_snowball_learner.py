@@ -890,7 +890,9 @@ def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
     assert evidence["first_update_max_abs_diff"] < 2e-6
     assert update.metrics["preupdate_logprob_max_abs_diff"] == pytest.approx(0.5, abs=1e-6)
     expected_ratios = np.exp(-offsets[selected])
+    assert update.metrics["ppo_ratio_min"] == pytest.approx(float(expected_ratios.min()), abs=1e-6)
     assert update.metrics["ppo_ratio_mean"] == pytest.approx(float(expected_ratios.mean()), abs=1e-6)
+    assert update.metrics["ppo_ratio_max"] == pytest.approx(float(expected_ratios.max()), abs=1e-6)
     assert update.metrics["ppo_clip_ratio"] == pytest.approx(0.2)
     assert update.metrics["ppo_clip_ratio_low"] == 0.0
     assert update.metrics["ppo_clip_ratio_high"] == pytest.approx(0.2)
