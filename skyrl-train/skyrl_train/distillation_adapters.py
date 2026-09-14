@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -13,9 +13,15 @@ from torch.nn.utils.rnn import pad_sequence
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation import (
     ChosenTokenTeacherEvidence,
+    DistillationInput,
+    INVALID_TOPK_INDEX,
     SampledReverseKLInput,
+    SparseForwardKLInput,
+    TeacherEvidenceBatch,
     TeacherScoreRequest,
+    TopKTeacherEvidence,
     prepare_sampled_reverse_kl,
+    prepare_sparse_forward_kl,
 )
 from skyrl_train.teacher_oracle import TeacherOracleCollection
 from skyrl_train.teacher_routing import RoutedTrajectoryBatch, TeacherRoute
@@ -63,8 +69,8 @@ class TeacherScoringWork:
 class ScoredDistillationBatch:
     """Validated evidence and the minimal payload consumed by the learner."""
 
-    evidence: ChosenTokenTeacherEvidence
-    distillation: SampledReverseKLInput
+    evidence: TeacherEvidenceBatch
+    distillation: DistillationInput
 
 
 @dataclass(frozen=True)
@@ -94,8 +100,85 @@ class RoutedScoredDistillationBatch:
     routes: tuple[TeacherRoute, ...]
     teacher_revisions: tuple[str, ...]
     plan_version: str
-    evidence: tuple[ChosenTokenTeacherEvidence, ...]
-    distillation: SampledReverseKLInput
+    evidence: tuple[TeacherEvidenceBatch, ...]
+    distillation: DistillationInput
+
+
+def _routed_assembly_shape(
+    work: RoutedTeacherScoringWork,
+    scored_partitions: tuple[ScoredDistillationBatch, ...],
+) -> tuple[int, int]:
+    if len(scored_partitions) != len(work.partitions):
+        raise ValueError("scored teacher partitions do not match routed work")
+    if not scored_partitions:
+        raise ValueError("routed scoring requires at least one teacher partition")
+    row_count = len(work.trajectory_ids)
+    aligned_metadata = {"routes": len(work.routes), "response_lengths": len(work.response_lengths)}
+    if any(length != row_count for length in aligned_metadata.values()):
+        raise ValueError(f"routed scoring metadata must align with {row_count} trajectories: {aligned_metadata}")
+    original_indices = sorted(index for partition in work.partitions for index in partition.original_indices)
+    if original_indices != list(range(row_count)):
+        raise ValueError("routed scoring partitions must cover every original trajectory exactly once")
+    return row_count, max(work.response_lengths)
+
+
+def _assemble_common_tensors(
+    work: RoutedTeacherScoringWork,
+    scored_partitions: tuple[ScoredDistillationBatch, ...],
+    shape: tuple[int, int],
+) -> tuple[torch.Tensor, torch.Tensor, tuple[str, ...]]:
+    valid_mask = torch.zeros(shape, dtype=torch.bool)
+    loss_weights = torch.zeros(shape, dtype=torch.float32)
+    teacher_revisions = [""] * shape[0]
+    for partition, scored in zip(work.partitions, scored_partitions, strict=True):
+        if scored.evidence.trajectory_ids != partition.work.request.trajectory_ids:
+            raise ValueError("scored teacher partition does not match its routed trajectories")
+        partition_width = scored.distillation.valid_mask.shape[1]
+        indices = torch.tensor(partition.original_indices, dtype=torch.long)
+        valid_mask[indices, :partition_width] = scored.distillation.valid_mask
+        loss_weights[indices, :partition_width] = scored.distillation.loss_weights
+        for index in partition.original_indices:
+            teacher_revisions[index] = scored.evidence.teacher_revision
+    return valid_mask, loss_weights, tuple(teacher_revisions)
+
+
+def _assemble_objective_payload(
+    work: RoutedTeacherScoringWork,
+    scored_partitions: tuple[ScoredDistillationBatch, ...],
+    shape: tuple[int, int],
+    valid_mask: torch.Tensor,
+    loss_weights: torch.Tensor,
+) -> DistillationInput:
+    first = scored_partitions[0].distillation
+    if isinstance(first, SampledReverseKLInput):
+        if not all(isinstance(scored.distillation, SampledReverseKLInput) for scored in scored_partitions):
+            raise ValueError("routed teacher partitions must return one distillation objective kind")
+        teacher_logprobs = torch.full(shape, torch.nan, dtype=torch.float32)
+        for partition, scored in zip(work.partitions, scored_partitions, strict=True):
+            payload = cast(SampledReverseKLInput, scored.distillation)
+            indices = torch.tensor(partition.original_indices, dtype=torch.long)
+            teacher_logprobs[indices, : payload.valid_mask.shape[1]] = payload.teacher_action_log_probs
+        return SampledReverseKLInput(teacher_logprobs, valid_mask, loss_weights)
+
+    if not isinstance(first, SparseForwardKLInput) or not all(
+        isinstance(scored.distillation, SparseForwardKLInput) for scored in scored_partitions
+    ):
+        raise ValueError("routed teacher partitions must return one distillation objective kind")
+    payloads = tuple(cast(SparseForwardKLInput, scored.distillation) for scored in scored_partitions)
+    topk_values = {payload.teacher_topk_indices.shape[-1] for payload in payloads}
+    if len(topk_values) != 1:
+        raise ValueError("routed sparse teacher partitions must use one top-K width")
+    topk = topk_values.pop()
+    teacher_indices = torch.full((*shape, topk), INVALID_TOPK_INDEX, dtype=torch.long)
+    teacher_logprobs = torch.full((*shape, topk), torch.nan, dtype=torch.float32)
+    retained_mass = torch.full(shape, torch.nan, dtype=torch.float32)
+    for partition, payload in zip(work.partitions, payloads, strict=True):
+        indices = torch.tensor(partition.original_indices, dtype=torch.long)
+        width = payload.valid_mask.shape[1]
+        teacher_indices[indices, :width] = payload.teacher_topk_indices
+        teacher_logprobs[indices, :width] = payload.teacher_topk_logprobs
+        retained_mass[indices, :width] = payload.retained_mass
+    return SparseForwardKLInput(teacher_indices, teacher_logprobs, retained_mass, valid_mask, loss_weights)
 
 
 def _pad_token_rows(token_rows: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -117,6 +200,7 @@ def build_teacher_scoring_work(
     coefficient: float,
     route_weights: tuple[float, ...],
     evidence: TeacherEvidenceKind = TeacherEvidenceKind.CHOSEN_TOKEN,
+    top_k: int | None = None,
 ) -> TeacherScoringWork:
     """Collate exact admitted rollout tokens into the shared oracle contract."""
     trajectory_ids = trajectory_batch.get("trajectory_ids")
@@ -152,6 +236,7 @@ def build_teacher_scoring_work(
         response_token_ids=padded_responses,
         response_mask=response_mask,
         evidence=evidence,
+        top_k=top_k,
     )
     return TeacherScoringWork(request=request, coefficient=coefficient, route_weights=loss_weights)
 
@@ -160,6 +245,7 @@ def build_routed_teacher_scoring_work(
     routed_batch: RoutedTrajectoryBatch,
     *,
     tokenizer_fingerprints: Mapping[str, str],
+    top_k_by_teacher: Mapping[str, int] | None = None,
 ) -> RoutedTeacherScoringWork:
     """Build one exact request per logical-teacher partition."""
     missing_fingerprints = sorted(
@@ -167,6 +253,13 @@ def build_routed_teacher_scoring_work(
     )
     if missing_fingerprints:
         raise ValueError(f"missing tokenizer fingerprints for teachers: {', '.join(missing_fingerprints)}")
+    top_k_by_teacher = top_k_by_teacher or {}
+    if routed_batch.evidence is TeacherEvidenceKind.TOPK_DISTRIBUTION:
+        missing_top_k = sorted(
+            {partition.teacher_id for partition in routed_batch.partitions} - top_k_by_teacher.keys()
+        )
+        if missing_top_k:
+            raise ValueError(f"missing top_k for teachers: {', '.join(missing_top_k)}")
 
     partitions = tuple(
         RoutedTeacherScoringPartition(
@@ -180,6 +273,7 @@ def build_routed_teacher_scoring_work(
                 coefficient=routed_batch.coefficient,
                 route_weights=tuple(route.weight for route in partition.routes),
                 evidence=routed_batch.evidence,
+                top_k=top_k_by_teacher.get(partition.teacher_id),
             ),
         )
         for partition in routed_batch.partitions
@@ -201,14 +295,22 @@ class TeacherEvidenceCoordinator:
 
     async def score(self, work: TeacherScoringWork) -> ScoredDistillationBatch:
         evidence = await self._oracle_owner.score(work.request.teacher_id, work.request)
-        if not isinstance(evidence, ChosenTokenTeacherEvidence):
-            raise ValueError("sampled reverse KL requires chosen-token teacher evidence")
-        distillation = prepare_sampled_reverse_kl(
-            work.request,
-            evidence,
-            coefficient=work.coefficient,
-            route_weights=work.route_weights,
-        )
+        if isinstance(evidence, ChosenTokenTeacherEvidence):
+            distillation = prepare_sampled_reverse_kl(
+                work.request,
+                evidence,
+                coefficient=work.coefficient,
+                route_weights=work.route_weights,
+            )
+        elif isinstance(evidence, TopKTeacherEvidence):
+            distillation = prepare_sparse_forward_kl(
+                work.request,
+                evidence,
+                coefficient=work.coefficient,
+                route_weights=work.route_weights,
+            )
+        else:
+            raise TypeError(f"unsupported teacher evidence type: {type(evidence).__name__}")
         return ScoredDistillationBatch(evidence=evidence, distillation=distillation)
 
     async def score_routed(self, work: RoutedTeacherScoringWork) -> RoutedScoredDistillationBatch:
@@ -219,52 +321,22 @@ class TeacherEvidenceCoordinator:
 
         return self.assemble_routed(work, tuple(scored_partitions))
 
+    @staticmethod
     def assemble_routed(
-        self,
         work: RoutedTeacherScoringWork,
         scored_partitions: tuple[ScoredDistillationBatch, ...],
     ) -> RoutedScoredDistillationBatch:
         """Restore independently scored partitions to the original mixed-batch coordinates."""
-        if len(scored_partitions) != len(work.partitions):
-            raise ValueError("scored teacher partitions do not match routed work")
-
-        row_count = len(work.trajectory_ids)
-        aligned_metadata = {
-            "routes": len(work.routes),
-            "response_lengths": len(work.response_lengths),
-        }
-        if any(length != row_count for length in aligned_metadata.values()):
-            raise ValueError(f"routed scoring metadata must align with {row_count} trajectories: {aligned_metadata}")
-        original_indices = sorted(index for partition in work.partitions for index in partition.original_indices)
-        if original_indices != list(range(row_count)):
-            raise ValueError("routed scoring partitions must cover every original trajectory exactly once")
-        response_width = max(work.response_lengths)
-        teacher_logprobs = torch.full((row_count, response_width), torch.nan, dtype=torch.float32)
-        valid_mask = torch.zeros((row_count, response_width), dtype=torch.bool)
-        loss_weights = torch.zeros((row_count, response_width), dtype=torch.float32)
-        teacher_revisions = [""] * row_count
-        for partition, scored in zip(work.partitions, scored_partitions, strict=True):
-            if scored.evidence.trajectory_ids != partition.work.request.trajectory_ids:
-                raise ValueError("scored teacher partition does not match its routed trajectories")
-            partition_width = scored.distillation.valid_mask.shape[1]
-            indices = torch.tensor(partition.original_indices, dtype=torch.long)
-            teacher_logprobs[indices, :partition_width] = scored.distillation.teacher_action_log_probs
-            valid_mask[indices, :partition_width] = scored.distillation.valid_mask
-            loss_weights[indices, :partition_width] = scored.distillation.loss_weights
-            for index in partition.original_indices:
-                teacher_revisions[index] = scored.evidence.teacher_revision
-
+        shape = _routed_assembly_shape(work, scored_partitions)
+        valid_mask, loss_weights, teacher_revisions = _assemble_common_tensors(work, scored_partitions, shape)
+        distillation = _assemble_objective_payload(work, scored_partitions, shape, valid_mask, loss_weights)
         return RoutedScoredDistillationBatch(
             trajectory_ids=work.trajectory_ids,
             routes=work.routes,
-            teacher_revisions=tuple(teacher_revisions),
+            teacher_revisions=teacher_revisions,
             plan_version=work.plan_version,
             evidence=tuple(scored.evidence for scored in scored_partitions),
-            distillation=SampledReverseKLInput(
-                teacher_action_log_probs=teacher_logprobs,
-                valid_mask=valid_mask,
-                loss_weights=loss_weights,
-            ),
+            distillation=distillation,
         )
 
     async def close(self) -> None:
@@ -276,6 +348,10 @@ class RayPPOTrainerDistillationAdapter:
 
     def __init__(self, coordinator: TeacherEvidenceCoordinator) -> None:
         self._coordinator = coordinator
+
+    @classmethod
+    def from_oracles(cls, oracles: TeacherOracleCollection) -> RayPPOTrainerDistillationAdapter:
+        return cls(TeacherEvidenceCoordinator(oracles))
 
     async def score_while_model_forwarding(
         self,

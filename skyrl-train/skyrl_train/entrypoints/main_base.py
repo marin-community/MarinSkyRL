@@ -111,6 +111,10 @@ def create_ray_wrapped_inference_engines_from_config(
     *,
     entrypoint: str = STANDARD_TRAINING_ENTRYPOINT,
 ):
+    from skyrl_train.inference_engines.configuration import (
+        InferenceEngineRoleConfig,
+        inference_engine_kwargs_from_config,
+    )
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 
     raw_speculative_decoding = cfg.generator.get("speculative_decoding")
@@ -138,40 +142,30 @@ def create_ray_wrapped_inference_engines_from_config(
             # capture must reconcile each target forward before the next schedule.
             engine_init_kwargs["async_scheduling"] = False
 
-    engine_kwargs = {
-        "num_inference_engines": cfg.generator.num_inference_engines,
-        "tensor_parallel_size": cfg.generator.inference_engine_tensor_parallel_size,
-        "pipeline_parallel_size": cfg.generator.inference_engine_pipeline_parallel_size,
-        "model_dtype": cfg.generator.model_dtype,
-        "pretrain": cfg.trainer.policy.model.path,
-        "seed": cfg.trainer.seed,
-        "vllm_v1_disable_multiproc": cfg.generator.vllm_v1_disable_multiproc,
-        "enable_prefix_caching": cfg.generator.enable_prefix_caching,
-        "enforce_eager": cfg.generator.enforce_eager,
-        "expert_parallel_size": cfg.generator.inference_engine_expert_parallel_size,
-        "data_parallel_size": cfg.generator.inference_engine_data_parallel_size,
+    role = InferenceEngineRoleConfig(
+        pretrain=cfg.trainer.policy.model.path,
+        backend=cfg.generator.backend,
+        num_inference_engines=cfg.generator.num_inference_engines,
+        tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+        pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
+        data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
+        expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
         # vLLM Decode Context Parallel (DCP). Default 1 (disabled) -> forwarded as the
         # signature default and (per ray_wrapped_inference_engine) NOT passed to the vLLM
         # engine, so flag-off engine init is byte-identical to today (G1). When > 1 it is
         # threaded into vllm.LLM / AsyncEngineArgs as a native EngineArgs kwarg. DCP rides
         # the TP GPUs and is NOT part of any GPU/placement math (G4). Reaches both the
         # standard and terminal_bench entrypoints via this shared config-assembly seam (G5).
-        "decode_context_parallel_size": cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
-        "shared_pg": colocate_pg,
-        "engine_init_timeout_seconds": cfg.generator.engine_init_timeout_seconds,
-        "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
-        "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
-        "async_engine": cfg.generator.async_engine,
-        "max_num_batched_tokens": cfg.generator.max_num_batched_tokens,
-        "max_num_seqs": cfg.generator.max_num_seqs,
-        "tokenizer": tokenizer,
-        "backend": cfg.generator.backend,
-        "vllm_attention_backend": cfg.generator.get("vllm_attention_backend", None),
-        "engine_init_kwargs": engine_init_kwargs,
-        # Opt-in mp executor backend (Qwen3-Next R3 capture hang workaround; default off).
-        "mp_backend": cfg.generator.get("inference_engine_mp_backend", False),
-        "placement_group_timeout_seconds": int(cfg.trainer.distributed.placement_group_timeout_seconds),
-    }
+        decode_context_parallel_size=cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
+        shared_pg=colocate_pg,
+        inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
+    )
+    engine_kwargs = inference_engine_kwargs_from_config(
+        cfg,
+        tokenizer,
+        role,
+        engine_init_kwargs=engine_init_kwargs,
+    )
 
     # Conditionally add LoRA parameters if LoRA is enabled
     if cfg.trainer.policy.model.lora.rank > 0:
@@ -189,11 +183,6 @@ def create_ray_wrapped_inference_engines_from_config(
                 "Automatically setting enforce_eager=false for better performance. "
             )
             engine_kwargs["enforce_eager"] = False
-
-    if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
-        engine_kwargs["rope_scaling"] = rope_scaling
-    if (rope_theta := cfg.generator.get("rope_theta", None)) is not None:
-        engine_kwargs["rope_theta"] = rope_theta
 
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
@@ -537,6 +526,12 @@ class BasePPOExp:
         tracker = self.get_tracker()
 
         tokenizer = self.tokenizer
+        from skyrl_train.local_teacher_runtime import (  # noqa: PLC0415
+            prepare_sync_distillation_runtime,
+            start_sync_distillation_runtime,
+        )
+
+        prepared_distillation = prepare_sync_distillation_runtime(self.cfg, tokenizer)
         inference_engine_client = self.create_inference_engine_client()
 
         trajectory_runner: TrajectoryRunner = self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client)
@@ -556,12 +551,19 @@ class BasePPOExp:
         # group (None unless `policy_strict_spread_pg` is enabled for an
         # eligible disaggregated no-ref run).
         logger.info("Starting policy workers: strategy={}", self.cfg.trainer.strategy)
-        trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
-        logger.info(
-            "Policy workers ready: strategy={} count={}",
-            self.cfg.trainer.strategy,
-            len(trainer.policy_model.actor_infos),
-        )
+        try:
+            trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
+            logger.info(
+                "Policy workers ready: strategy={} count={}",
+                self.cfg.trainer.strategy,
+                len(trainer.policy_model.actor_infos),
+            )
+            distillation_runtime = asyncio.run(start_sync_distillation_runtime(self.cfg, prepared_distillation))
+            if distillation_runtime is not None:
+                trainer.configure_sync_distillation(distillation_runtime)
+        except BaseException:
+            asyncio.run(trainer.shutdown())
+            raise
         return trainer
 
     def run(self):

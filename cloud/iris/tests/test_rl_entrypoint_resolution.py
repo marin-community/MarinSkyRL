@@ -77,7 +77,7 @@ teacher:
         parse_rl_config(str(config))
 
 
-def test_rl_config_compiles_distillation_plan_before_runtime_gate(tmp_path):
+def test_rl_config_rejects_unsupported_distillation_before_hydra_translation(tmp_path):
     config = tmp_path / "rl.yaml"
     config.write_text(
         """\
@@ -117,8 +117,59 @@ teacher_routing:
 
     assert parsed.distillation_plan is not None
     assert parsed.distillation_plan.teachers[0].source is TeacherSource.OPENAI_COMPATIBLE
-    with pytest.raises(ValueError, match="distillation runtime is disabled"):
+    with pytest.raises(ValueError, match="supports only reward_mode=add"):
         build_skyrl_hydra_args(parsed, {"num_nodes": 1}, SimpleNamespace(gpus_per_node=8))
+
+
+def test_supported_local_teacher_plan_crosses_cli_and_hydra_boundaries(tmp_path):
+    config = tmp_path / "rl.yaml"
+    config.write_text(
+        """\
+entrypoint: standard
+context_budget:
+  request_window_tokens: 2
+  max_new_tokens_per_turn: 1
+  max_turns: 1
+trainer:
+  algorithm:
+    distillation:
+      objective: sampled_reverse_kl
+      routing_plan: opd
+      coefficient: 0.25
+      reward_mode: add
+teachers:
+  primary:
+    source: local_inference
+    placement: pinned
+    model:
+      path: Qwen/teacher
+      revision: teacher-revision
+    backend: vllm
+    evidence: chosen_token
+    resources:
+      num_nodes: 1
+      gpus_per_node: 8
+      tensor_parallel_size: 8
+      colocation_group: teacher
+teacher_routing:
+  opd:
+    revision: route-revision
+    routes:
+      default:
+        teacher: primary
+        weight: 1.0
+"""
+    )
+
+    parsed = parse_rl_config(str(config))
+    hydra_args = build_skyrl_hydra_args(parsed, {"num_nodes": 2}, SimpleNamespace(gpus_per_node=8))
+
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=hydra_args)
+
+    assert cfg.trainer.algorithm.distillation.objective == "sampled_reverse_kl"
+    assert cfg.teachers.primary.model.revision == "teacher-revision"
+    assert cfg.teacher_routing.opd.routes.default.teacher == "primary"
 
 
 def test_terminal_bench_config_group_is_packaged_with_the_trainer():

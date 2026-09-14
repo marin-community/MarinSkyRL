@@ -126,6 +126,7 @@ from cloud.iris.rl_config_translation import (
     resolve_rl_entrypoint,
     resolve_rl_config_path,
 )
+from marinskyrl.distillation import LocalInferenceTeacherSpec, compile_distillation_plan
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
 from cloud.iris.protocol import LaunchMode, ModelRoleKind, SkyRLJobSpec
@@ -2133,6 +2134,15 @@ def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
             model_args.extend(["--model-warm-source", warm_source])
     if policy_chat_template:
         model_args.extend(["--policy-chat-template", policy_chat_template])
+    if offline:
+        plan = compile_distillation_plan(_load_rl_config_yaml(args.rl_config))
+        teacher_models = [
+            {"path": teacher.model.path, "revision": teacher.model.revision}
+            for teacher in (() if plan is None else plan.teachers)
+            if isinstance(teacher, LocalInferenceTeacherSpec)
+        ]
+        if teacher_models:
+            model_args.extend(["--prestage-teacher-models-json", json.dumps(teacher_models, sort_keys=True)])
     return model_args
 
 

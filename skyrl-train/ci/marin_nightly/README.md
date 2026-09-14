@@ -1,6 +1,7 @@
 # Nightly end-to-end gates
 
-The nightly runs dense Qwen GRPO on one H100, a tiny Grug RL cycle on four GB200s,
+The nightly runs dense Qwen GRPO on one H100, a teacher-sensitive synchronous OPD step on four H100s,
+a tiny Grug RL cycle on four GB200s,
 the Grug Megatron gates on four H100s, and an OpenCode agentic RL step on eight H100s,
 all from the frozen root environment. The
 GSM8K run is scored against a checked-in spec; the GB200 run proves the locked Marin
@@ -15,6 +16,7 @@ These are integration gates, not model-quality experiments.
 | file | role |
 | --- | --- |
 | `run_h100.sh` | sync the frozen root environment, slice GSM8K, train, and gate on H100 |
+| `run_opd_h100.sh` | run one sync OPD step with separate Qwen policy, rollout, and teacher roles |
 | `run_grug_vllm.sh` | run a tiny Grug rollout/train/broadcast/rollout cycle on four GB200s |
 | `run_grug_megatron.sh` | run the Grug Megatron parity, training, and serving gates on four H100s |
 | `run_opencode.sh` | submit, wait for, and gate the federated RNO2A OpenCode RL canary |

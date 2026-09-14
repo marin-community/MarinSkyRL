@@ -34,7 +34,7 @@ from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
-from marinskyrl.distillation import compile_distillation_plan, reject_disabled_distillation_runtime
+from marinskyrl.distillation import compile_distillation_plan_from_config, validate_distillation_runtime_support
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
@@ -577,10 +577,8 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
-    resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
-    assert isinstance(resolved_cfg, dict)
-    distillation_plan = compile_distillation_plan(resolved_cfg)
-    reject_disabled_distillation_runtime(distillation_plan)
+    distillation_plan = compile_distillation_plan_from_config(cfg)
+    validate_distillation_runtime_support(distillation_plan)
     trajectory_selector = trajectory_selector_from_config(cfg)
     if trajectory_selector is not None:
         if cfg.trainer.step_wise_training:

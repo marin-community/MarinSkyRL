@@ -45,6 +45,7 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
 )
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
+from skyrl_train.distillation import student_topk_logprobs
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import (
     GLOBAL_LOSS_DENOM_METADATA_KEY,
@@ -1171,6 +1172,36 @@ class PolicyWorkerBase(Worker):
         output.metadata = {"train_status": status_mean}
         return output
 
+    def _distillation_student_logprobs(
+        self,
+        experience: Experience,
+        output: dict[str, torch.Tensor],
+        num_actions: int,
+    ) -> Optional[torch.Tensor]:
+        if experience.distillation is None:
+            return None
+        token_ids = experience.distillation.student_token_ids()
+        if token_ids is None:
+            return None
+        fsdp_config = self.cfg.trainer.policy.get("fsdp_config", {})
+        if (
+            self.cfg.trainer.use_sample_packing
+            or self.sequence_parallel_size != 1
+            or int(fsdp_config.get("context_parallel_size", 1)) != 1
+        ):
+            raise ValueError(
+                "sparse forward KL on FSDP2/DeepSpeed does not yet support sample packing, "
+                "sequence parallelism, or context parallelism"
+            )
+        response_logits = output["logits"][:, -num_actions - 1 : -1]
+        if response_logits.shape[:2] != experience.distillation.valid_mask.shape:
+            raise ValueError(
+                "sparse forward KL requires response-aligned full-vocabulary logits; "
+                f"got {tuple(response_logits.shape[:2])} for "
+                f"{tuple(experience.distillation.valid_mask.shape)} response coordinates"
+            )
+        return student_topk_logprobs(response_logits, token_ids)
+
     def training_step(
         self,
         experience: Experience,
@@ -1226,6 +1257,7 @@ class PolicyWorkerBase(Worker):
                 assert grug_query_bias_window is not None
                 grug_query_bias_window.observe_microbatch()
             token_entropy = output["entropy"][:, -num_actions - 1 : -1]
+            sparse_student_logprobs = self._distillation_student_logprobs(experience, output, num_actions)
             objective = compute_policy_objective(
                 action_log_probs=action_log_probs,
                 old_action_log_probs=old_action_log_probs,
@@ -1241,6 +1273,7 @@ class PolicyWorkerBase(Worker):
                 scaling=LossScaling.CALLER,
                 global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
                 distillation=experience.distillation,
+                student_topk_logprobs=sparse_student_logprobs,
             )
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_EXIT)
         loss = objective.optimization_loss

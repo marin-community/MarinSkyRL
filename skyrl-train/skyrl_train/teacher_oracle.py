@@ -355,6 +355,18 @@ class RotatingTeacherOracleOwner:
         )
 
 
+def _require_teacher_oracle_entries(oracles: Mapping[str, object]) -> None:
+    if not oracles:
+        raise ValueError("teacher oracle owner requires at least one entry")
+    if any(not teacher_id.strip() for teacher_id in oracles):
+        raise ValueError("teacher oracle names must be non-empty strings")
+
+
+def _validate_teacher_oracle_identity(teacher_id: str, oracle: TeacherOracle) -> None:
+    if oracle.capabilities.teacher_id != teacher_id:
+        raise ValueError(f"teacher oracle {teacher_id!r} returned {oracle.capabilities.teacher_id!r}")
+
+
 class TeacherOracleOwner:
     """Own a set of logical oracles, including partial-startup cleanup."""
 
@@ -368,21 +380,23 @@ class TeacherOracleOwner:
         return frozenset(self._oracles)
 
     @classmethod
+    def from_oracles(cls, oracles: Mapping[str, TeacherOracle]) -> Self:
+        """Take ownership of already-created logical teacher oracles."""
+        _require_teacher_oracle_entries(oracles)
+        for teacher_id, oracle in oracles.items():
+            _validate_teacher_oracle_identity(teacher_id, oracle)
+        return cls({teacher_id: ValidatedTeacherOracle(oracle) for teacher_id, oracle in oracles.items()})
+
+    @classmethod
     async def create(cls, factories: Mapping[str, TeacherOracleFactory]) -> Self:
-        if not factories:
-            raise ValueError("teacher oracle owner requires at least one factory")
-        if any(not teacher_id.strip() for teacher_id in factories):
-            raise ValueError("teacher oracle factory names must be non-empty strings")
+        _require_teacher_oracle_entries(factories)
 
         oracles: dict[str, ValidatedTeacherOracle] = {}
         try:
             for teacher_id, factory in factories.items():
                 oracle = ValidatedTeacherOracle(await factory())
                 oracles[teacher_id] = oracle
-                if oracle.capabilities.teacher_id != teacher_id:
-                    raise ValueError(
-                        f"teacher oracle factory {teacher_id!r} returned {oracle.capabilities.teacher_id!r}"
-                    )
+                _validate_teacher_oracle_identity(teacher_id, oracle)
         except BaseException as startup_error:
             cleanup_errors = await _close_oracles(oracles.values())
             if cleanup_errors:

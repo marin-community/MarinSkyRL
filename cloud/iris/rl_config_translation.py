@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Mapping, Optional, Protocol
 import yaml
 
 from cloud.iris.paths import resolve_paths_in_dict
-from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, reject_disabled_distillation_runtime
+from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, validate_distillation_runtime_support
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
@@ -786,6 +786,7 @@ def format_hydra_arg(key: str, value: Any, prefix: str = "") -> str:
 
 
 _OPTIONAL_HYDRA_PATTERNS = {
+    ".distillation",
     ".engine_init_kwargs",
     ".speculative_decoding",
     ".hf_hub_",
@@ -874,7 +875,7 @@ def build_skyrl_hydra_args(
     num_inference_engines from the cluster config, flattens nested dicts to dotted
     Hydra keys, and applies data paths from the CLI.
     """
-    reject_disabled_distillation_runtime(parsed.distillation_plan)
+    validate_distillation_runtime_support(parsed.distillation_plan)
 
     args = []
 
@@ -1014,6 +1015,10 @@ def build_skyrl_hydra_args(
         for key, val in _flatten_dict(values, section).items():
             prefix = "++" if any(pattern in key for pattern in _OPTIONAL_HYDRA_PATTERNS) else ""
             args.append(format_hydra_arg(key, val, prefix=prefix))
+
+    for section in ("teachers", "teacher_routing"):
+        for key, val in _flatten_dict(dict(parsed.raw.get(section, {})), section).items():
+            args.append(format_hydra_arg(key, val, prefix="++"))
 
     # Terminal-Bench experiments may override packaged group keys or add new ones.
     if parsed.terminal_bench:

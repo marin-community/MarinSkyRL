@@ -56,6 +56,7 @@ from marinskyrl.environment_contract import (
 from cloud.iris.model_paths import unsupported_model_path_message
 from cloud.iris.telemetry_env import telemetry_environment
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
+from marinskyrl.distillation import TeacherModelSpec
 from marinskyrl.process_diagnostics import (
     ProcessOutcomeKind,
     initialize_process_diagnostics,
@@ -357,8 +358,8 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
     return True
 
 
-def stage_model(model_path: str, warm_source: str | None = None) -> None:
-    """Pre-download the policy model into this NODE's local HF cache on EVERY node.
+def stage_model(model_path: str, warm_source: str | None = None, revision: str | None = None) -> None:
+    """Pre-download one model revision into this NODE's local HF cache on EVERY node.
 
     The controller runs on every node before Ray bootstrap, so pre-download the
     weights ONCE PER NODE here (N pulls, not N*8) into the node-local HF cache.
@@ -383,9 +384,9 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     # there (in-datacenter, reliable) into the node-local HF cache INSTEAD of pulling
     # from HF Hub. On success the offline ranks + vLLM load from the warm cache as
     # after the HF prestage. On a missing/empty/incomplete source or ANY error we fall
-    # through to the HF snapshot_download prestage below (byte-identical). warm_source
-    # is None unless the launcher forwarded --model-warm-source.
-    if warm_source:
+    # through to the HF snapshot_download prestage below. Immutable historical
+    # revisions bypass this main-branch mirror because its bytes may differ.
+    if warm_source and revision is None:
         try:
             if _warm_sync_model_from_s3(model_path, warm_source):
                 return
@@ -414,7 +415,7 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     code = (
         "import sys\n"
         "from huggingface_hub import snapshot_download\n"
-        "p = snapshot_download(sys.argv[1], allow_patterns=sys.argv[2].split(','))\n"
+        "p = snapshot_download(sys.argv[1], revision=sys.argv[3] or None, allow_patterns=sys.argv[2].split(','))\n"
         "print('PRESTAGE_LOCAL_DIR=' + p)\n"
     )
     _log(f"Pre-staging model on this node (rank {_rank()}/{_num_tasks()}): {model_path}")
@@ -428,7 +429,7 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     for attempt in range(1, 7):
         try:
             proc = subprocess.run(
-                [sys.executable, "-c", code, model_path, ",".join(allow_patterns)],
+                [sys.executable, "-c", code, model_path, ",".join(allow_patterns), revision or ""],
                 env=child_env,
                 capture_output=True,
                 text=True,
@@ -967,10 +968,14 @@ def head_succeeded(rendezvous_dir: str, gang_epoch: str) -> bool:
     """Whether the head published success for ``gang_epoch``."""
     uri = _done_uri(rendezvous_dir)
     fs, path = fs_and_path(uri)
-    if not fs.exists(path):
+    try:
+        if not fs.exists(path):
+            return False
+        with fs.open(path, "r") as source:
+            result = HeadResult.from_dict(json.load(source))
+    except OSError as error:
+        _log(f"head-result poll error (will retry): {error}")
         return False
-    with fs.open(path, "r") as source:
-        result = HeadResult.from_dict(json.load(source))
     return result.gang_epoch == gang_epoch
 
 
@@ -2057,6 +2062,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "launcher (auto-derived from the repo id).",
     )
     parser.add_argument(
+        "--prestage-teacher-models-json",
+        default="[]",
+        help="JSON list of local teacher model paths and immutable revisions to stage before Ray starts.",
+    )
+    parser.add_argument(
         "--model-source-uri",
         default="",
         help="Object-store HF export to materialize on every node before Ray starts.",
@@ -2087,6 +2097,22 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     if not train_argv:
         parser.error("No training command given. Pass it after `--`.")
     return args, train_argv
+
+
+def teacher_model_specs_from_json(value: str) -> tuple[TeacherModelSpec, ...]:
+    """Decode immutable local-teacher model identities from the launcher boundary."""
+    raw_models = json.loads(value)
+    if not isinstance(raw_models, list):
+        raise ValueError("--prestage-teacher-models-json must encode a list")
+    models = []
+    for raw_model in raw_models:
+        if not isinstance(raw_model, dict):
+            raise ValueError("each pre-staged teacher model must be a JSON object")
+        try:
+            models.append(TeacherModelSpec(**raw_model))
+        except TypeError as error:
+            raise ValueError("each pre-staged teacher model must contain only path and revision") from error
+    return tuple(models)
 
 
 def _print_env_snapshot() -> None:
@@ -2148,6 +2174,8 @@ def main() -> None:
     # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:
         stage_model(args.prestage_model, warm_source=(args.model_warm_source or None))
+    for teacher_model in teacher_model_specs_from_json(args.prestage_teacher_models_json):
+        stage_model(teacher_model.path, revision=teacher_model.revision)
     # Force the policy chat template onto the staged Hub snapshot or materialized local
     # model on every node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:

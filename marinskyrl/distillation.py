@@ -9,6 +9,8 @@ from enum import StrEnum
 from typing import Protocol, TypeVar
 from urllib.parse import urlsplit
 
+from omegaconf import DictConfig, OmegaConf
+
 
 class DistillationObjectiveKind(StrEnum):
     SAMPLED_REVERSE_KL = "sampled_reverse_kl"
@@ -44,6 +46,15 @@ class TeacherModelSpec:
     path: str
     revision: str
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.path, str)
+            or not self.path.strip()
+            or not isinstance(self.revision, str)
+            or not self.revision.strip()
+        ):
+            raise ValueError("teacher model path and revision must be non-empty strings")
+
 
 @dataclass(frozen=True)
 class TeacherEndpointSpec:
@@ -66,6 +77,7 @@ class TeacherSpec(Protocol):
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
     resources: TeacherResourceSpec | None
+    top_k: int | None
 
 
 @dataclass(frozen=True)
@@ -77,6 +89,7 @@ class OpenAICompatibleTeacherSpec:
     evidence: TeacherEvidenceKind
     endpoints: tuple[TeacherEndpointSpec, ...]
     resources: TeacherResourceSpec | None = None
+    top_k: int | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +101,7 @@ class LocalInferenceTeacherSpec:
     evidence: TeacherEvidenceKind
     backend: str
     resources: TeacherResourceSpec | None = None
+    top_k: int | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +112,7 @@ class FrozenWorkerTeacherSpec:
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
     resources: TeacherResourceSpec | None = None
+    top_k: int | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +123,7 @@ class ResidentTeacherSpec:
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
     resources: TeacherResourceSpec | None = None
+    top_k: int | None = None
 
 
 @dataclass(frozen=True)
@@ -133,15 +149,27 @@ class DistillationPlan:
     routing: TeacherRoutingPlan
 
 
-DISTILLATION_RUNTIME_DISABLED_MESSAGE = (
-    "distillation runtime is disabled until teacher evidence is connected to the training objective"
-)
-
-
-def reject_disabled_distillation_runtime(plan: DistillationPlan | None) -> None:
-    """Keep valid plans behind one explicit gate until the runtime consumes them."""
-    if plan is not None:
-        raise ValueError(DISTILLATION_RUNTIME_DISABLED_MESSAGE)
+def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None:
+    """Fail before allocation unless the plan fits the first production runtime slice."""
+    if plan is None:
+        return
+    if plan.reward_mode is not DistillationRewardMode.ADD:
+        raise ValueError("the distillation runtime currently supports only reward_mode=add auxiliary losses")
+    if len(plan.teachers) != 1:
+        raise ValueError("the synchronous distillation runtime currently supports exactly one teacher")
+    teacher = plan.teachers[0]
+    if teacher.source is not TeacherSource.LOCAL_INFERENCE or teacher.placement is not TeacherPlacement.PINNED:
+        raise ValueError("the synchronous distillation runtime currently supports one pinned local_inference teacher")
+    if teacher.resources is None:
+        raise ValueError(f"teachers.{teacher.id}.resources is required for a local teacher runtime")
+    total_gpus = teacher.resources.num_nodes * teacher.resources.gpus_per_node
+    if total_gpus % teacher.resources.tensor_parallel_size != 0:
+        raise ValueError(
+            f"teachers.{teacher.id}.resources reserves {total_gpus} GPUs, which is not divisible by "
+            f"tensor_parallel_size={teacher.resources.tensor_parallel_size}"
+        )
+    if len(plan.routing.routes) != 1:
+        raise ValueError("the synchronous distillation runtime currently supports exactly one teacher route")
 
 
 _OBJECTIVE_EVIDENCE = {
@@ -257,7 +285,7 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
     config = _mapping(raw, path)
     _reject_unknown(
         config,
-        frozenset({"source", "placement", "model", "evidence", "endpoints", "backend", "resources"}),
+        frozenset({"source", "placement", "model", "evidence", "top_k", "endpoints", "backend", "resources"}),
         path,
     )
     source = _enum_value(TeacherSource, config, "source", path)
@@ -274,6 +302,7 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
         else _enum_value(TeacherPlacement, config, "placement", path)
     )
     evidence = _enum_value(TeacherEvidenceKind, config, "evidence", path)
+    top_k = None if config.get("top_k") is None else _positive_integer(config, "top_k", path)
     endpoints = _teacher_endpoints(config, path)
     backend = _optional_string(config, "backend", path)
     resources = _teacher_resources(config, path)
@@ -302,6 +331,10 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
         raise ValueError(f"{path}.placement must be pinned for frozen_worker teachers")
     if placement is TeacherPlacement.EXTERNAL and resources is not None:
         raise ValueError(f"{path}.resources cannot reserve Iris capacity for an external teacher")
+    if evidence is TeacherEvidenceKind.TOPK_DISTRIBUTION and top_k is None:
+        raise ValueError(f"{path}.top_k is required for topk_distribution evidence")
+    if evidence is TeacherEvidenceKind.CHOSEN_TOKEN and top_k is not None:
+        raise ValueError(f"{path}.top_k is only valid for topk_distribution evidence")
 
     common = {
         "id": teacher_id,
@@ -310,6 +343,7 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
         "model": _teacher_model(config, path),
         "evidence": evidence,
         "resources": resources,
+        "top_k": top_k,
     }
     if source is TeacherSource.OPENAI_COMPATIBLE:
         return OpenAICompatibleTeacherSpec(**common, endpoints=endpoints)
@@ -424,3 +458,10 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
         teachers=teachers,
         routing=routing,
     )
+
+
+def compile_distillation_plan_from_config(cfg: DictConfig) -> DistillationPlan | None:
+    """Compile a plan from one resolved OmegaConf boundary."""
+    resolved = OmegaConf.to_container(cfg, resolve=True)
+    assert isinstance(resolved, dict)
+    return compile_distillation_plan(resolved)

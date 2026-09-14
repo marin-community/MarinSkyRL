@@ -99,6 +99,16 @@ def test_unknown_head_result_outcome_fails_instead_of_parking_worker(tmp_path):
         head_succeeded(str(tmp_path), "gang-epoch")
 
 
+def test_head_result_object_store_error_keeps_worker_parked(monkeypatch):
+    class UnavailableStore:
+        def exists(self, _path):
+            raise OSError(16, "Service Unavailable")
+
+    monkeypatch.setattr(task_runtime, "fs_and_path", lambda _uri: (UnavailableStore(), "ray_head.done"))
+
+    assert not head_succeeded("s3://bucket/rendezvous", "gang-epoch")
+
+
 class _FakeRayLogSyncSession:
     def __init__(self, *_args):
         pass
