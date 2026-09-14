@@ -30,20 +30,22 @@ class SyncDistillationRuntime:
         *,
         tokenizer_fingerprints: dict[str, str],
     ) -> None:
-        if len(plan.routing.routes) != 1:
-            raise ValueError("the synchronous distillation runtime requires exactly one route")
         self._router = PlanTeacherRouter(plan)
         self._adapter = RayPPOTrainerDistillationAdapter.from_oracles(oracles)
         self._tokenizer_fingerprints = dict(tokenizer_fingerprints)
         self._top_k_by_teacher = {teacher.id: teacher.top_k for teacher in plan.teachers if teacher.top_k is not None}
-        self._default_route_key = plan.routing.routes[0].key
+        self._default_route_key = plan.routing.routes[0].key if len(plan.routing.routes) == 1 else None
 
     async def score_while_model_forwarding(
         self,
         trajectory_batch: TrajectoryBatch,
         model_forward: Callable[[], _ForwardResult],
     ) -> tuple[_ForwardResult, RoutedScoredDistillationBatch]:
-        route_keys = [self._default_route_key] * len(trajectory_batch["response_ids"])
+        route_keys = trajectory_batch.get("teacher_route_keys")
+        if route_keys is None:
+            if self._default_route_key is None:
+                raise ValueError("a multi-route distillation plan requires teacher_route_keys on the trajectory batch")
+            route_keys = [self._default_route_key] * len(trajectory_batch["response_ids"])
         routed = route_trajectory_batch(
             trajectory_batch,
             route_keys=tuple(route_keys),

@@ -22,6 +22,29 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import shape_traje
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
 
 
+def propagate_teacher_routes(input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> None:
+    """Carry explicit dataset routing through a trajectory-runner boundary."""
+    env_extras = input_batch.get("env_extras")
+    if not env_extras:
+        return
+    supplied = ["teacher_route" in extras for extras in env_extras]
+    if not any(supplied):
+        return
+    if not all(supplied):
+        raise ValueError("teacher_route must be present on every request row when teacher routing is used")
+
+    route_keys = [extras["teacher_route"] for extras in env_extras]
+    if any(not isinstance(route_key, str) or not route_key.strip() for route_key in route_keys):
+        raise ValueError("teacher_route must be a non-empty string on every request row")
+    if len(route_keys) != len(output["response_ids"]):
+        raise ValueError("teacher_route rows must align with trajectory runner output rows")
+
+    output_route_keys = output.get("teacher_route_keys")
+    if output_route_keys is not None and output_route_keys != route_keys:
+        raise ValueError("trajectory runner output teacher_route_keys do not match request metadata")
+    output["teacher_route_keys"] = route_keys
+
+
 class TrajectoryRunner(ABC):
     """Abstract base class for acquiring trainer-ready trajectories.
 
@@ -54,6 +77,7 @@ class TrajectoryRunner(ABC):
             if len(trajectory_ids) != len(output["response_ids"]):
                 raise ValueError("trajectory runner output rows must align with request trajectory IDs")
             output["trajectory_ids"] = list(trajectory_ids)
+        propagate_teacher_routes(input_batch, output)
         return await self._finalize_output(input_batch, output)
 
     async def _finalize_output(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> TrajectoryBatch:

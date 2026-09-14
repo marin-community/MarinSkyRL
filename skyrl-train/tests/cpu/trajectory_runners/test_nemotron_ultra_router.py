@@ -83,8 +83,12 @@ async def test_routes_only_swe_to_terminal_bench_and_restores_order(tmp_path):
         "prompts": [[{"role": "user", "content": str(index)}] for index in range(3)],
         "env_classes": ["nemotron_ultra"] * 3,
         "env_extras": [
-            {"extra_info": {"nemotron_ultra": {"blend": "rlvr1", "agent": "calendar_simple_agent", "route": "gym"}}},
             {
+                "teacher_route": "math",
+                "extra_info": {"nemotron_ultra": {"blend": "rlvr1", "agent": "calendar_simple_agent", "route": "gym"}},
+            },
+            {
+                "teacher_route": "code",
                 "extra_info": {
                     "nemotron_ultra": {
                         "blend": "rlvr1",
@@ -92,9 +96,12 @@ async def test_routes_only_swe_to_terminal_bench_and_restores_order(tmp_path):
                         "route": "terminal_bench",
                         "terminal_bench_instance_id": "swe-1",
                     }
-                }
+                },
             },
-            {"extra_info": {"nemotron_ultra": {"blend": "rlvr2", "agent": "calendar_simple_agent", "route": "gym"}}},
+            {
+                "teacher_route": "math",
+                "extra_info": {"nemotron_ultra": {"blend": "rlvr2", "agent": "calendar_simple_agent", "route": "gym"}},
+            },
         ],
         "sampling_params": None,
         "trajectory_ids": ids,
@@ -105,6 +112,7 @@ async def test_routes_only_swe_to_terminal_bench_and_restores_order(tmp_path):
 
     assert result["rewards"] == [[1.0], [2.0], [1.0]]
     assert result["trajectory_ids"] == ids
+    assert result["teacher_route_keys"] == ["math", "code", "math"]
     assert result["rollout_metrics"]["nemotron_ultra/coverage/rlvr1/calendar_simple_agent"] == 1
     assert (
         result["rollout_metrics"][

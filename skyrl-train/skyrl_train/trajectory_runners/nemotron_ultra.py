@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch
+from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryRequestBatch, propagate_teacher_routes
 from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunner
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
@@ -213,6 +213,7 @@ class NemotronUltraTrajectoryRouter:
         for extras in env_extras:
             key = _coverage_key(extras)
             rollout_metrics[key] = rollout_metrics.get(key, 0) + 1
+        propagate_teacher_routes(input_batch, result)
         if self.trajectory_sink is not None:
             await retain_trajectories(self.trajectory_sink, input_batch, result)
         return result

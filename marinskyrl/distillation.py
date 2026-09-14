@@ -168,8 +168,6 @@ def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None
             f"teachers.{teacher.id}.resources reserves {total_gpus} GPUs, which is not divisible by "
             f"tensor_parallel_size={teacher.resources.tensor_parallel_size}"
         )
-    if len(plan.routing.routes) != 1:
-        raise ValueError("the synchronous distillation runtime currently supports exactly one teacher route")
 
 
 _OBJECTIVE_EVIDENCE = {
