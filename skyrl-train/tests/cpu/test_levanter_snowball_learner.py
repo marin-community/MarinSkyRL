@@ -294,6 +294,33 @@ def test_microbatching_does_not_split_batch_sized_model_arrays(tmp_path):
     learner.close()
 
 
+def test_standalone_scoring_uses_compute_dtype(tmp_path):
+    runtime = replace(_runtime(tmp_path / "compute-dtype-logs"), compute_dtype="bfloat16")
+    model_config = _snowball_config()
+    learner = LevanterSnowballLearner(
+        runtime,
+        model_factory=lambda: SnowballLMHeadModel.init(
+            Axis("vocab", model_config.vocab_size),
+            model_config,
+            key=jax.random.key(7),
+        ),
+    )
+    learner.initialize(_learner_config())
+
+    score_dtypes = []
+
+    def score(model, tokens, _temperature):
+        score_dtypes.append(model.transformer.blocks[0].attn.w_q.dtype)
+        return jnp.zeros((tokens.array.shape[0], tokens.array.shape[1] - 1), dtype=jnp.float32)
+
+    learner._score_fn = score
+    result = learner.compute_log_probs(_batch())
+
+    assert score_dtypes == [jnp.bfloat16, jnp.bfloat16]
+    assert np.all(np.isfinite(result.policy_log_probs))
+    learner.close()
+
+
 def _four_device_learner_worker(log_dir: str) -> None:
     runtime = replace(
         _runtime(Path(log_dir)),

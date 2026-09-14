@@ -624,6 +624,11 @@ class LevanterSnowballLearner:
 
     def _score_prepared(self, prepared: _PreparedBatch) -> np.ndarray:
         assert self._score_fn is not None
+        # Trainer.train_step applies the mixed-precision policy before calling
+        # the objective. Standalone scoring bypasses Trainer, so cast the FP32
+        # parameter storage to the configured compute dtype here as Levanter's
+        # evaluation path does. FA4 accepts BF16/FP16 inputs only.
+        compute_model = self._trainer.mp.cast_to_compute(self._trainer_state.model)
         per_microbatch = self.runtime.training_gpus * self.runtime.micro_forward_batch_size_per_gpu
         batch_size, sequence_length = prepared.tokens.shape
         if batch_size % per_microbatch:
@@ -634,7 +639,7 @@ class LevanterSnowballLearner:
             Batch = Axis("batch", per_microbatch)
             Pos = Axis("position", sequence_length)
             tokens = hax.named(jnp.asarray(values, dtype=jnp.int32), (Batch, Pos))
-            result = self._score_fn(self._trainer_state.model, tokens, self._learner_config.logprob_temperature)
+            result = self._score_fn(compute_model, tokens, self._learner_config.logprob_temperature)
             if jax.process_count() > 1:
                 result = multihost_utils.process_allgather(result, tiled=True)
             outputs.append(np.asarray(jax.device_get(result), dtype=np.float32))
