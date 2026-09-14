@@ -1,4 +1,4 @@
-"""Build the first production teacher runtime from a compiled local-vLLM plan."""
+"""Build a production teacher runtime from a compiled local-vLLM plan."""
 
 from __future__ import annotations
 
@@ -186,8 +186,8 @@ async def start_sync_distillation_runtime(
         if rotating:
             rotating_owner = RotatingTeacherOracleOwner(
                 {teacher.spec.id: _teacher_factory(cfg, teacher) for teacher in rotating},
-                max_resident=1,
-                minimum_residency_seconds=0,
+                max_resident=prepared.plan.residency.max_resident,
+                minimum_residency_seconds=prepared.plan.residency.minimum_residency_seconds,
             )
         fleet = TeacherOracleFleet(fixed=fixed_owner, rotating=rotating_owner)
     except BaseException as startup_error:

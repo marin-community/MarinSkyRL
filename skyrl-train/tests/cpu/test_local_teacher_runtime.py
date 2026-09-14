@@ -101,6 +101,10 @@ def _config():
 
 def _two_teacher_config(*, placement: str):
     cfg = _config()
+    cfg.trainer.algorithm.distillation.residency = {
+        "max_resident": 1,
+        "minimum_residency_seconds": 0,
+    }
     cfg.teachers.primary.placement = placement
     cfg.teachers.secondary = {
         "source": "local_inference",
@@ -120,6 +124,19 @@ def _two_teacher_config(*, placement: str):
         "secondary": {"teacher": "secondary", "weight": 1.0},
     }
     return cfg
+
+
+async def _score_two_routes(runtime):
+    _, scored = await runtime.score_while_model_forwarding(
+        {
+            "trajectory_ids": [TrajectoryID("math", 0), TrajectoryID("code", 0)],
+            "teacher_route_keys": ["primary", "secondary"],
+            "prompt_token_ids": [[0, 1], [0, 2]],
+            "response_ids": [[2], [1]],
+        },
+        lambda: TrainingInputBatch({"policy": torch.tensor([1.0])}),
+    )
+    return scored
 
 
 @pytest.mark.asyncio
@@ -216,15 +233,7 @@ async def test_local_teacher_runtime_eagerly_owns_multiple_pinned_teachers(monke
     assert runtime is not None
     assert len(started_engines) == 2
 
-    _, scored = await runtime.score_while_model_forwarding(
-        {
-            "trajectory_ids": [TrajectoryID("math", 0), TrajectoryID("code", 0)],
-            "teacher_route_keys": ["primary", "secondary"],
-            "prompt_token_ids": [[0, 1], [0, 2]],
-            "response_ids": [[2], [1]],
-        },
-        lambda: TrainingInputBatch({"policy": torch.tensor([1.0])}),
-    )
+    scored = await _score_two_routes(runtime)
     await runtime.close()
 
     assert tuple(route.teacher_id for route in scored.routes) == ("primary", "secondary")
@@ -269,15 +278,7 @@ async def test_local_teacher_runtime_rotates_teachers_on_one_residency_slot(monk
     assert runtime is not None
     assert started_engines == []
 
-    _, scored = await runtime.score_while_model_forwarding(
-        {
-            "trajectory_ids": [TrajectoryID("math", 0), TrajectoryID("code", 0)],
-            "teacher_route_keys": ["primary", "secondary"],
-            "prompt_token_ids": [[0, 1], [0, 2]],
-            "response_ids": [[2], [1]],
-        },
-        lambda: TrainingInputBatch({"policy": torch.tensor([1.0])}),
-    )
+    scored = await _score_two_routes(runtime)
     await runtime.close()
 
     assert tuple(route.teacher_id for route in scored.routes) == ("primary", "secondary")
@@ -302,4 +303,14 @@ def test_local_teacher_runtime_rejects_unsafe_multi_teacher_resource_layouts(mon
     cfg.teachers.primary.resources.colocation_group, cfg.teachers.secondary.resources.colocation_group = groups
 
     with pytest.raises(ValueError, match=message):
+        prepare_sync_distillation_runtime(cfg, tokenizer)
+
+
+def test_local_teacher_runtime_rejects_unplanned_additional_residency_slots(monkeypatch):
+    tokenizer = _Tokenizer({"a": 0})
+    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    cfg = _two_teacher_config(placement="rotating")
+    cfg.trainer.algorithm.distillation.residency.max_resident = 2
+
+    with pytest.raises(ValueError, match="exactly one rotating residency slot"):
         prepare_sync_distillation_runtime(cfg, tokenizer)

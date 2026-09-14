@@ -164,6 +164,20 @@ def test_compile_distillation_plan_preserves_local_teacher_resource_claim():
     assert resources.colocation_group == "teacher-rotation"
 
 
+def test_compile_distillation_plan_preserves_teacher_residency_policy():
+    config = _mopd_config()
+    config["trainer"]["algorithm"]["distillation"]["residency"] = {
+        "max_resident": 1,
+        "minimum_residency_seconds": 300,
+    }
+
+    plan = compile_distillation_plan(config)
+
+    assert plan is not None
+    assert plan.residency.max_resident == 1
+    assert plan.residency.minimum_residency_seconds == 300
+
+
 def test_compile_distillation_plan_rejects_resource_claim_for_external_teacher():
     config = _mopd_config()
     config["teachers"]["math"]["resources"] = {
