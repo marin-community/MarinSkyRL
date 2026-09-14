@@ -52,7 +52,7 @@ class AsyncPPOExp(BasePPOExp):
 
         model_client = OpenAIHTTPModelClient(
             base_url=f"http://{cfg.generator.http_endpoint_host}:{cfg.generator.http_endpoint_port}",
-            model_name=cfg.trainer.policy.model.path,
+            model_name=inference_engine_client.model_name,
             tokenizer=tokenizer,
         )
         runner = SkyRLGymTrajectoryRunner(
