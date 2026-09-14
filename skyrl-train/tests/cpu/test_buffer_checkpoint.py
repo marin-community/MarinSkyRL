@@ -40,6 +40,7 @@ def _make_item(uid: str, step: int) -> GeneratedOutputGroup:
         uid=uid,
         earliest_model_step=step,
         source_prompts=[{"uid": uid}],
+        behavior_policy_versions=[step - 1],
     )
 
 
@@ -140,6 +141,7 @@ async def test_roundtrip_with_items():
         for i, item in enumerate(buffer_state.completed_groups):
             assert item.uid == f"uid_{i}"
             assert item.earliest_model_step == 5
+            assert item.behavior_policy_versions == [4]
             assert item.source_prompts == [{"uid": f"uid_{i}"}]
             assert item.trajectory_batch["prompt_token_ids"] == [[1, 2, 3]]
             assert item.trajectory_batch["rewards"] == [1.0]

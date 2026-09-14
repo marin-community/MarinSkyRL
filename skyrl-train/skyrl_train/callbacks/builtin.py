@@ -1076,6 +1076,7 @@ class BufferCheckpointCallback(TrainerCallback):
                 "uid": item.uid,
                 "earliest_model_step": item.earliest_model_step,
                 "source_prompts": item.source_prompts,
+                "behavior_policy_versions": item.behavior_policy_versions,
             }
             for item in groups
         ]
@@ -1162,6 +1163,7 @@ class BufferCheckpointCallback(TrainerCallback):
                         uid=entry["uid"],
                         earliest_model_step=entry["earliest_model_step"],
                         source_prompts=entry["source_prompts"],
+                        behavior_policy_versions=entry.get("behavior_policy_versions"),
                     )
                 )
             return groups

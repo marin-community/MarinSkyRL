@@ -180,7 +180,7 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
     monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
     save_observations = []
 
-    def save_checkpoints():
+    def stage_checkpoint():
         save_observations.append(
             (
                 trainer.policy_model.model_on_gpu,
@@ -191,13 +191,13 @@ def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_
         if save_error is not None:
             raise save_error
 
-    trainer.save_checkpoints = save_checkpoints
+    trainer._stage_checkpoint = stage_checkpoint
 
     if save_error is None:
-        asyncio.run(trainer._save_checkpoints_with_residency())
+        asyncio.run(trainer._stage_checkpoint_with_residency())
     else:
         with pytest.raises(RuntimeError, match="storage of size 0"):
-            asyncio.run(trainer._save_checkpoints_with_residency())
+            asyncio.run(trainer._stage_checkpoint_with_residency())
 
     assert save_observations == [(True, True, False)]
     assert not trainer.policy_model.model_on_gpu
@@ -213,8 +213,9 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
     trainer._checkpoint_save_failures = 0.0
     attempts = 0
     saved_steps = []
+    committed_steps = []
 
-    async def save_with_residency():
+    async def stage_with_residency():
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -225,7 +226,8 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
         saved_steps.append(state.global_step)
         return control
 
-    trainer._save_checkpoints_with_residency = save_with_residency
+    trainer._stage_checkpoint_with_residency = stage_with_residency
+    trainer._commit_checkpoint = lambda: committed_steps.append(state.global_step)
     trainer.callback_handler = SimpleNamespace(call_event_async=call_event_async)
     trainer._control = SimpleNamespace()
     state = SimpleNamespace(global_step=6)
@@ -234,6 +236,7 @@ def test_intermediate_checkpoint_failure_is_recorded_and_later_save_can_succeed(
     assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
     asyncio.run(trainer._save_intermediate_checkpoint(state))
     assert saved_steps == [6]
+    assert committed_steps == [6]
 
 
 def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
@@ -242,10 +245,10 @@ def test_intermediate_checkpoint_does_not_suppress_non_storage_failure():
     trainer.all_timings = {}
     trainer._checkpoint_save_failures = 0.0
 
-    async def fail_save():
+    async def fail_stage():
         raise ValueError("invalid checkpoint state")
 
-    trainer._save_checkpoints_with_residency = fail_save
+    trainer._stage_checkpoint_with_residency = fail_stage
     state = SimpleNamespace(global_step=6)
 
     with pytest.raises(ValueError, match="invalid checkpoint state"):
