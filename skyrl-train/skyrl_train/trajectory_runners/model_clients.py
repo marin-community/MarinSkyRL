@@ -202,11 +202,14 @@ class OpenAIHTTPModelClient:
         session_id,
         sampling_params: dict,
     ) -> tuple[str, str]:
+        request_sampling_params = dict(sampling_params)
+        if "max_generate_length" in request_sampling_params:
+            request_sampling_params["max_completion_tokens"] = request_sampling_params.pop("max_generate_length")
         payload = {
             "model": self._model_name,
             "messages": [{"role": message["role"], "content": message["content"]} for message in messages],
             "session_id": session_id,
-            **sampling_params,
+            **request_sampling_params,
         }
         async with session.post(
             f"{self._base_url}/v1/chat/completions",

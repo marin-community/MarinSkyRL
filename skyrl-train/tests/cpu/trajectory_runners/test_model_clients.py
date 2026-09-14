@@ -146,7 +146,7 @@ async def test_http_model_client_normalizes_chat_completion():
             {
                 "prompts": [[{"role": "user", "content": "question"}]],
                 "session_ids": ["trajectory-1"],
-                "sampling_params": {"temperature": 0.7},
+                "sampling_params": {"temperature": 0.7, "max_generate_length": 256},
             }
         )
     finally:
@@ -158,6 +158,7 @@ async def test_http_model_client_normalizes_chat_completion():
             "messages": [{"role": "user", "content": "question"}],
             "session_id": "trajectory-1",
             "temperature": 0.7,
+            "max_completion_tokens": 256,
         }
     ]
     assert output == {
