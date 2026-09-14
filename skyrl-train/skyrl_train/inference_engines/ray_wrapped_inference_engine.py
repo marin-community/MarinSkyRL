@@ -261,8 +261,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def begin_online_eagle_capture(self, config: Dict[str, Any]):
         return await self.inference_engine_actor.begin_online_eagle_capture.remote(config)
 
-    async def seal_online_eagle_capture(self, output_dir: str):
-        return await self.inference_engine_actor.seal_online_eagle_capture.remote(output_dir)
+    async def seal_online_eagle_capture(self, destination: str):
+        return await self.inference_engine_actor.seal_online_eagle_capture.remote(destination)
 
     async def refresh_online_eagle_speculator(self, candidate_uri: str, draft_revision: str):
         return await self.inference_engine_actor.refresh_online_eagle_speculator.remote(

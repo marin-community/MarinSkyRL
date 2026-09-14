@@ -3,6 +3,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
+    OnlineEagleResult,
 )
 from skyrl_train.inference_engines.vllm.stats import (
     HTTPBridgeStatsAccumulator,
@@ -342,15 +343,15 @@ class InferenceEngineClient(InferenceEngineInterface):
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
         )
 
-    async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[Any]:
+    async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
         """Begin the same capture interval on every live inference engine."""
         return await self._run_on_all_engines("begin_online_eagle_capture", config)
 
-    async def seal_online_eagle_capture(self, destination: str) -> List[Any]:
+    async def seal_online_eagle_capture(self, destination: str) -> List[OnlineEagleResult]:
         """Publish every engine's capture before target-weight synchronization."""
         return await self._run_on_all_engines("seal_online_eagle_capture", destination)
 
-    async def refresh_online_eagle_speculator(self, candidate_uri: str, draft_revision: str) -> List[Any]:
+    async def refresh_online_eagle_speculator(self, candidate_uri: str, draft_revision: str) -> List[OnlineEagleResult]:
         """Ask every live engine to best-effort refresh from a cloud checkpoint."""
         awaitables = [
             engine.refresh_online_eagle_speculator(candidate_uri, draft_revision)
@@ -873,7 +874,7 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def sleep(self, *args: Any, **kwargs: Any):
         return await self._run_on_all_engines("sleep", *args, **kwargs)
 
-    def _live_engine_communicator_offsets(self, rank_offset: int) -> list[tuple[Any, int]]:
+    def _live_engine_communicator_offsets(self, rank_offset: int) -> list[tuple[InferenceEngineInterface, int]]:
         offsets = []
         next_rank_offset = rank_offset
         for index, engine in enumerate(self.engines):

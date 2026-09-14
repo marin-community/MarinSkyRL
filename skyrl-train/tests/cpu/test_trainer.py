@@ -243,7 +243,7 @@ def test_online_speculator_update_overlaps_then_refreshes_at_boundary(monkeypatc
         assert job.capture_uri.endswith("/captures/step-2")
         assert job.target_revision == "policy-step-1"
         assert job.seed == 17
-        await trainer._finish_speculator_update()
+        await trainer._poll_speculator_lifecycle()
         await trainer._refresh_latest_speculator(wait=True)
 
     asyncio.run(scenario())
@@ -366,7 +366,7 @@ def test_online_speculator_pending_update_keeps_the_incumbent(monkeypatch) -> No
     monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda _ref: (False, None))
     monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
 
-    asyncio.run(trainer._finish_speculator_update())
+    asyncio.run(trainer._poll_speculator_lifecycle())
 
     assert trainer._speculator_revision == "draft-step-1"
     assert trainer.inference_engine_client.refreshes == []

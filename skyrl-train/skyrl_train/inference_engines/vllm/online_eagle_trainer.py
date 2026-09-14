@@ -41,9 +41,14 @@ ONLINE_EAGLE_TARGET_WEIGHTS_FILENAME = "target.safetensors"
 TRAINER_STATE_FILENAME = "trainer_state.pt"
 
 
-def capture_rank_directory(capture_root: str | Path, worker_rank: int) -> Path:
+def capture_rank_name(worker_rank: int) -> str:
+    """Return the stable per-rank capture object name."""
+    return f"rank-{worker_rank:05d}"
+
+
+def capture_rank_directory(capture_root: Path, worker_rank: int) -> Path:
     """Return the shared per-DP-rank capture directory."""
-    return Path(capture_root) / f"rank-{worker_rank:05d}"
+    return capture_root / capture_rank_name(worker_rank)
 
 
 @dataclass(frozen=True)
@@ -660,6 +665,7 @@ def _save_candidate(
     output_dir: Path,
     lineage: dict[str, Any],
     *,
+    device: torch.device,
     serving_dtype: torch.dtype,
     master_parameters: Mapping[str, torch.Tensor],
 ) -> dict[str, Any]:
@@ -685,9 +691,7 @@ def _save_candidate(
                 "served_parameter_dtype": str(serving_dtype),
                 "master_parameters": dict(master_parameters),
                 "optimizer": optimizer.state_dict(),
-                "torch_rng_state": torch.get_rng_state(),
-                "cuda_rng_state": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
-                "python_rng_state": random.getstate(),
+                **_capture_rng_states(device),
             },
             trainer_state_path,
         )
@@ -960,6 +964,7 @@ class OnlineEagleTrainerRuntime:
                         "training": asdict(training),
                         "metrics": result.to_mapping(),
                     },
+                    device=self.device,
                     serving_dtype=self.serving_dtype,
                     master_parameters=master_parameters,
                 )

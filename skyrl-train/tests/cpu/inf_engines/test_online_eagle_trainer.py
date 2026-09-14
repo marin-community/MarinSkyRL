@@ -1,11 +1,9 @@
 """Behavior tests for bounded online EAGLE training inputs."""
 
 import copy
-from contextlib import nullcontext
 import json
 from pathlib import Path
 import random
-from types import SimpleNamespace
 
 import pytest
 from safetensors.torch import save_file
@@ -14,7 +12,6 @@ import torch
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     OnlineEagleTrainerRuntime,
     _candidate_state,
-    _configure_exact_mask_attention,
     _convert_trainable_parameters,
     _load_batch,
     _load_window_group,
@@ -22,7 +19,6 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     _pack_windows,
     _restore_rng_states,
     _restore_trainable_master_state,
-    _sdpa_kernel_context,
     candidate_is_acceptable,
     merge_online_eagle_captures,
     partition_capture_windows,
@@ -281,19 +277,6 @@ def test_pack_windows_keeps_one_admitted_history_larger_than_target() -> None:
 def test_pack_windows_rejects_a_forward_above_the_window_bound() -> None:
     with pytest.raises(ValueError, match="request-long.*tokens=9 limit=8"):
         _pack_windows([{"request_id": "request-long", "tokens": 10}], max_tokens=4, max_window_tokens=8)
-
-
-def test_exact_mask_attention_uses_memory_efficient_sdpa(monkeypatch) -> None:
-    config = SimpleNamespace(transformer_layer_config=SimpleNamespace(_attn_implementation="eager"))
-    selected = []
-    monkeypatch.setattr(torch.nn.attention, "sdpa_kernel", lambda backend: selected.append(backend) or nullcontext())
-
-    _configure_exact_mask_attention(config)
-    with _sdpa_kernel_context(torch.device("cuda")):
-        pass
-
-    assert config.transformer_layer_config._attn_implementation == "sdpa"
-    assert selected == [torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION]
 
 
 def test_candidate_gate_enforces_loss_and_agreement_tolerances() -> None:

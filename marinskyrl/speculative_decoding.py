@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import StrEnum
 import math
 import re
@@ -158,22 +158,8 @@ class SpeculatorTrainingConfig:
     @classmethod
     def from_mapping(cls, value: object, *, context: str) -> "SpeculatorTrainingConfig":
         mapping = _mapping(value, context)
-        fields = {
-            "interval_steps",
-            "max_tokens_per_update",
-            "max_window_tokens",
-            "max_tokens_per_micro_batch",
-            "max_sequences_per_prompt_group",
-            "min_train_sequences",
-            "holdout_fraction",
-            "min_holdout_sequences",
-            "epochs_per_update",
-            "learning_rate",
-            "max_validation_loss_increase",
-            "max_validation_agreement_decrease",
-            "reserved_gpu_memory_gib",
-        }
-        _reject_unknown(mapping, fields, context)
+        field_names = {field.name for field in fields(cls)}
+        _reject_unknown(mapping, field_names, context)
         defaults = cls()
         return cls(
             interval_steps=_positive_integer(

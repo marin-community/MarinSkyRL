@@ -648,9 +648,16 @@ class RayPPOTrainer:
             and self.global_step % config.training.interval_steps == 0
         )
 
+    def _speculator_capture_uri(self) -> str:
+        return join_resource_path(
+            self._speculator_checkpoint_root,
+            "captures",
+            f"step-{self.global_step}",
+        )
+
     async def _begin_speculator_capture(self) -> None:
         """Start a bounded capture without making draft failures fatal to rollouts."""
-        await self._finish_speculator_update()
+        await self._poll_speculator_lifecycle()
         if self._speculator_capture_active or not self._should_update_speculator():
             return
         assert self.speculative_decoding is not None
@@ -665,16 +672,12 @@ class RayPPOTrainer:
             target_revision=_policy_revision(self.global_step - 1),
             draft_revision=self._speculator_revision,
             reserved_gpu_memory_gib=training.reserved_gpu_memory_gib,
-        ).to_mapping()
-        capture_uri = join_resource_path(
-            self._speculator_checkpoint_root,
-            "captures",
-            f"step-{self.global_step}",
         )
+        capture_uri = self._speculator_capture_uri()
         try:
             if await asyncio.to_thread(io.exists, capture_uri):
                 await asyncio.to_thread(io.remove, capture_uri)
-            results = await self.inference_engine_client.begin_online_eagle_capture(capture_config)
+            results = await self.inference_engine_client.begin_online_eagle_capture(capture_config.to_mapping())
         except Exception as error:
             logger.warning("Online EAGLE capture skipped at step {}: {}", self.global_step, error)
             self.all_metrics["speculator/capture_failures"] = 1.0
@@ -688,19 +691,15 @@ class RayPPOTrainer:
             "Online EAGLE capture started: step={} ranks={} target_revision={} draft_revision={}",
             self.global_step,
             len(active),
-            capture_config["target_revision"],
-            capture_config["draft_revision"],
+            capture_config.target_revision,
+            capture_config.draft_revision,
         )
 
     async def _seal_speculator_capture(self) -> None:
         """Publish the active capture and retain only its cloud URI."""
         if not self._speculator_capture_active:
             return
-        capture_uri = join_resource_path(
-            self._speculator_checkpoint_root,
-            "captures",
-            f"step-{self.global_step}",
-        )
+        capture_uri = self._speculator_capture_uri()
         self._speculator_capture_active = False
         try:
             manifests = await self.inference_engine_client.seal_online_eagle_capture(capture_uri)
@@ -844,7 +843,7 @@ class RayPPOTrainer:
             await self._speculator_refresh_task
             await self._finish_speculator_refresh()
 
-    async def _finish_speculator_update(self) -> None:
+    async def _poll_speculator_lifecycle(self) -> None:
         """Poll independent draft work and start any newly published refresh."""
         if self.speculative_decoding is None or self.speculative_decoding.training is None:
             return
@@ -863,7 +862,11 @@ class RayPPOTrainer:
                 return
             if ready:
                 self._draft_trainer_update_ref = None
-                result = OnlineEagleUpdateResult.from_mapping(payload)
+                result = (
+                    payload
+                    if isinstance(payload, OnlineEagleUpdateResult)
+                    else OnlineEagleUpdateResult.from_mapping(payload)
+                )
                 submitted_at = self._draft_trainer_submitted_at
                 self._draft_trainer_submitted_at = None
                 if submitted_at is not None:
@@ -1138,7 +1141,7 @@ class RayPPOTrainer:
                     )
 
                     # 5. sync weights to inference engines (must happen before callbacks)
-                    await self._finish_speculator_update()
+                    await self._poll_speculator_lifecycle()
                     await self._sync_policy_for_rollouts(reason="training_step")
 
                     # 6. Run callback-requested work before closing the inclusive step timer.

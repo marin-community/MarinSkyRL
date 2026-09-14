@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 import tempfile
 import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
@@ -23,6 +24,7 @@ from skyrl_train.config.behavior_logprobs import (
 )
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     capture_rank_directory,
+    capture_rank_name,
     per_worker_capture_token_credit,
 )
 from skyrl_train.io import io
@@ -377,13 +379,14 @@ class WorkerWrap:
         if not is_cloud_uri(destination):
             raise ValueError(f"Online EAGLE capture destination must be cloud-backed: {destination}")
         worker_rank = self.model_runner.parallel_config.data_parallel_rank
-        rank_destination = join_resource_path(destination, f"rank-{worker_rank:05d}")
+        rank_destination = join_resource_path(destination, capture_rank_name(worker_rank))
         try:
             with tempfile.TemporaryDirectory(prefix="marinskyrl-eagle-capture-") as scratch:
-                rank_output_dir = capture_rank_directory(scratch, worker_rank)
+                rank_output_dir = capture_rank_directory(Path(scratch), worker_rank)
                 result = self.model_runner.seal_online_eagle_capture(str(rank_output_dir))
                 io.upload_directory(str(rank_output_dir), rank_destination)
         except Exception as error:
+            logger.exception("Online EAGLE capture upload failed for worker rank {}", worker_rank)
             return {
                 "active": False,
                 "worker_rank": worker_rank,
@@ -396,6 +399,11 @@ class WorkerWrap:
         try:
             return self.model_runner.refresh_online_eagle_speculator(candidate_uri, draft_revision)
         except Exception as error:
+            logger.exception(
+                "Online EAGLE refresh failed for worker rank {} revision {}",
+                self.model_runner.parallel_config.data_parallel_rank,
+                draft_revision,
+            )
             return {
                 "active": False,
                 "worker_rank": self.model_runner.parallel_config.data_parallel_rank,

@@ -176,7 +176,6 @@ class TestDeriveRolePlan:
         assert plan.policy_mini_batch_size == 64
         assert plan.micro_train_batch_size_per_gpu == 2
         assert plan.n_samples_per_prompt == 16
-        assert plan.draft_trainer_num_gpus == 0
 
         claims = {claim.role_id: claim for claim in plan.claims}
         assert set(claims) == {"policy", "reference", "rollout"}
@@ -258,7 +257,6 @@ class TestRolePlanAccounting:
         assert draft_trainer.backend == "torch"
         assert draft_trainer.replicas == 1
         assert draft_trainer.colocation_group == "draft_trainer"
-        assert plan.draft_trainer_num_gpus == 1
         assert plan.bundles[-1].role_ids == ("draft_trainer",)
         assert derive_num_nodes(plan) == 6
 

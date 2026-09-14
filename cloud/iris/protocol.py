@@ -167,11 +167,6 @@ class SkyRLRolePlan:
         }
         return len(groups) == 1
 
-    @property
-    def draft_trainer_num_gpus(self) -> int:
-        """Return the logical GPU count reserved for the optional draft trainer."""
-        return sum(claim.replicas for claim in self.claims if claim.kind is ModelRoleKind.DRAFT_TRAINER)
-
 
 @dataclass(frozen=True)
 class SkyRLTopology:

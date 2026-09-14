@@ -153,8 +153,8 @@ def test_draft_trainer_publishes_checkpoint_before_latest_pointer(
     result = trainer.update(request)
 
     candidate_uri = "s3://bucket/run/drafts/checkpoints/draft-step-4"
-    assert result["accepted"] is True
-    assert result["candidate_uri"] == candidate_uri
+    assert result.accepted is True
+    assert result.candidate_uri == candidate_uri
     assert cloud.events[-3:] == [
         ("upload", candidate_uri),
         ("write", latest_draft_checkpoint_uri(checkpoint_root)),
@@ -197,7 +197,7 @@ def test_draft_trainer_restores_latest_checkpoint_once(
     trainer = DraftTrainer(initial_model=_initial_model(), checkpoint_root=checkpoint_root)
     result = trainer.update(request)
 
-    assert result["accepted"] is True
+    assert result.accepted is True
     assert _Runtime.instances[0].initial_job.parent_draft_revision == "draft-step-4"
     assert _Runtime.instances[0].restored_from is not None
 
@@ -242,7 +242,7 @@ def test_draft_trainer_failure_is_nonfatal_and_consumes_capture(
 
     result = trainer.update(request)
 
-    assert result == {
+    assert result.to_mapping() == {
         "accepted": False,
         "step": 4,
         "error": "RuntimeError: bad capture",

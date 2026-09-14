@@ -91,7 +91,6 @@ def test_standard_entrypoint_identity_survives_python_module_execution(monkeypat
     cfg.generator.speculative_decoding = {
         "method": "eagle3",
         "model": {
-            "path": "/tmp/marinskyrl-models/snowball-eagle3",
             "source_uri": "hf://laion/snowball-64k-eagle3-draft-r2egym",
             "source_identity": "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
         },
@@ -133,7 +132,6 @@ def test_online_eagle_training_uses_vllm_synchronous_scheduling(monkeypatch):
     cfg.generator.speculative_decoding = {
         "method": "eagle3",
         "model": {
-            "path": "/tmp/marinskyrl-models/snowball-eagle3",
             "source_uri": "hf://laion/snowball-64k-eagle3-draft-r2egym",
             "source_identity": "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
         },

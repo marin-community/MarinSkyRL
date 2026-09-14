@@ -73,7 +73,7 @@ def read_latest_draft_checkpoint(
     *,
     source_identity: str | None = None,
 ) -> DraftCheckpoint | None:
-    """Read the last completed draft publication, if one exists."""
+    """Read the latest publication matching the requested source lineage."""
     latest_uri = latest_draft_checkpoint_uri(checkpoint_root)
     if not io.exists(latest_uri):
         return None
@@ -98,7 +98,7 @@ class DraftTrainer:
         self._node_id = str(ray.get_runtime_context().get_node_id()) if ray.is_initialized() else None
         self._gpu_ids = [str(gpu_id) for gpu_id in ray.get_gpu_ids()] if ray.is_initialized() else []
 
-    def update(self, request: DraftUpdateRequest) -> dict[str, Any]:
+    def update(self, request: DraftUpdateRequest) -> OnlineEagleUpdateResult:
         """Consume a cloud capture, train, and publish a completed candidate."""
         if not is_cloud_uri(request.capture_uri):
             raise ValueError(f"Draft capture must be cloud-backed: {request.capture_uri}")
@@ -153,14 +153,14 @@ class DraftTrainer:
                     self._latest = checkpoint
                     self._accepted_revision = checkpoint.revision
                     result = replace(result, candidate_uri=candidate_uri)
-                return result.to_mapping()
+                return result
         except Exception as error:
             logger.exception("DraftTrainer update failed at step {}", request.step)
             return OnlineEagleUpdateResult(
                 accepted=False,
                 step=request.step,
                 error=f"{type(error).__name__}: {error}",
-            ).to_mapping()
+            )
         finally:
             try:
                 if io.exists(request.capture_uri):

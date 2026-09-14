@@ -3,6 +3,7 @@ from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
+OnlineEagleResult = Dict[str, Any] | List[Dict[str, Any]]
 
 
 class InferenceEngineInput(TypedDict):
@@ -146,14 +147,14 @@ class InferenceEngineInterface(ABC):
         """Resume the scheduler after a weight update."""
         raise NotImplementedError()
 
-    async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> Any:
+    async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> OnlineEagleResult:
         """Begin a bounded online-EAGLE capture interval when supported."""
         raise NotImplementedError()
 
-    async def seal_online_eagle_capture(self, destination: str) -> Any:
+    async def seal_online_eagle_capture(self, destination: str) -> OnlineEagleResult:
         """Publish the active capture to cloud storage."""
         raise NotImplementedError()
 
-    async def refresh_online_eagle_speculator(self, candidate_uri: str, draft_revision: str) -> Any:
+    async def refresh_online_eagle_speculator(self, candidate_uri: str, draft_revision: str) -> OnlineEagleResult:
         """Best-effort refresh the resident draft from cloud storage."""
         raise NotImplementedError()
