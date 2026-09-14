@@ -929,8 +929,11 @@ def test_megatron_export_stages_one_checkpoint_for_eight_local_readers(tmp_path,
     assert sorted(downloaded_paths) == sorted(f"{source_root}/{name}" for name in source_files)
 
 
-def test_megatron_resume_stages_one_checkpoint_for_eight_local_readers(tmp_path, monkeypatch, parse_hydra_overrides):
-    source_uri = "s3://checkpoint-fixture/run/global_step_100"
+@pytest.mark.parametrize("trailing_slash", ["", "/"])
+def test_megatron_resume_stages_one_checkpoint_for_eight_local_readers(
+    tmp_path, monkeypatch, parse_hydra_overrides, trailing_slash
+):
+    source_uri = "s3://checkpoint-fixture/run/global_step_100" + trailing_slash
     source_root = "/checkpoint-fixture/run/global_step_100"
     source_files = {
         "trainer_state.pt": b"completed step marker",
@@ -977,6 +980,8 @@ def test_megatron_resume_stages_one_checkpoint_for_eight_local_readers(tmp_path,
             assert Path(read_dir, "policy/__0_0.distcp").read_bytes() == source_files["policy/__0_0.distcp"]
             assert read_dir == local_path
 
+    assert Path(cfg.trainer.resume_path).name == "global_step_100"
+    assert Path(local_path, "trainer_state.pt").read_bytes() == source_files["trainer_state.pt"]
     assert overrides["trainer.resume_mode"] == "from_path"
     assert overrides["trainer.resume_path"] == local_path
     assert sorted(downloaded_paths) == sorted(f"{source_root}/{name}" for name in source_files)

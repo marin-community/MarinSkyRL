@@ -2223,7 +2223,9 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         and is_cloud_uri(resume_path)
     ):
         checkpoint_identity = hashlib.sha256(resume_path.rstrip("/").encode()).hexdigest()
-        local_checkpoint_path = str(Path(CHECKPOINT_STAGING_ROOT) / checkpoint_identity)
+        local_checkpoint_path = str(
+            Path(CHECKPOINT_STAGING_ROOT) / checkpoint_identity / Path(resume_path.rstrip("/")).name
+        )
         controller_cmd.extend(
             ["--checkpoint-source-uri", resume_path, "--checkpoint-local-path", local_checkpoint_path]
         )
