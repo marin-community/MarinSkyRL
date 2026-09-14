@@ -1,0 +1,25 @@
+{
+  "provenance": {
+    "what": "One synchronous OPD optimizer step with a Qwen3-0.6B policy, a separately allocated Qwen3-1.7B vLLM teacher, exact shared token IDs, and sampled reverse KL.",
+    "produced_by": "ci/marin_nightly/run_opd_h100.sh on one Iris H100x4 task",
+    "why_these_thresholds": [
+      "The gate requires the trainer to report teacher-scored tokens and a worker-side distillation loss, proving that evidence crossed the production trainer boundary rather than stopping at the oracle.",
+      "A positive raw gradient norm proves the combined objective reached the optimizer. The CPU numerical suite independently proves that changing teacher log-probabilities changes this gradient.",
+      "The wall-clock allowance covers cold downloads and vLLM graph capture while remaining a bounded startup and training check."
+    ]
+  },
+  "min_train_steps": 1,
+  "finite_metrics": [
+    "policy/final_loss",
+    "policy/distillation_loss",
+    "policy/raw_grad_norm",
+    "distillation/scored_tokens",
+    "distillation/teacher_count"
+  ],
+  "bounds": {
+    "policy/raw_grad_norm": { "minimum": 1e-12, "maximum": 1000000.0 },
+    "distillation/scored_tokens": { "minimum": 1.0, "maximum": 10000.0 },
+    "distillation/teacher_count": { "minimum": 1.0, "maximum": 1.0 }
+  },
+  "max_wall_clock_seconds": 1800
+}

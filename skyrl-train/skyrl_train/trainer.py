@@ -41,6 +41,7 @@ from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
 from skyrl_train.distillation import validate_distillation_attachment
+from skyrl_train.distillation_runtime import SyncDistillationRuntime
 from skyrl_train.utils import trainer_utils
 from skyrl_train.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
@@ -203,6 +204,7 @@ class RayPPOTrainer:
         self._pending_sync_prompts: List[Any] = []
         self._group_admission_watchdog: AdmissionProgressWatchdog | None = None
         self._step_time_history: deque[float] = deque(maxlen=5)
+        self._sync_distillation_runtime: Optional[SyncDistillationRuntime] = None
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         configure_ray_worker_logging()
@@ -216,6 +218,32 @@ class RayPPOTrainer:
 
         # Trainer control object for callback coordination
         self._control = TrainerControl()
+
+    def configure_sync_distillation(self, runtime: SyncDistillationRuntime) -> None:
+        """Install the config-compiled synchronous scoring adapter before training starts."""
+        if self._sync_distillation_runtime is not None:
+            raise RuntimeError("synchronous distillation runtime is already configured")
+        self._sync_distillation_runtime = runtime
+
+    async def _forward_with_optional_distillation(
+        self,
+        trajectory_batch: TrajectoryBatch,
+        training_input: TrainingInputBatch,
+    ) -> TrainingInputBatch:
+        if self._sync_distillation_runtime is None:
+            return self.fwd_logprobs_values_reward(training_input)
+        forwarded, scored = await self._sync_distillation_runtime.score_while_model_forwarding(
+            trajectory_batch,
+            lambda: self.fwd_logprobs_values_reward(training_input),
+        )
+        forwarded.update(scored.distillation.training_tensors())
+        self.all_metrics.update(
+            {
+                "distillation/teacher_count": float(len({route.teacher_id for route in scored.routes})),
+                "distillation/scored_tokens": float(scored.distillation.valid_mask.sum().item()),
+            }
+        )
+        return forwarded
 
     def _configure_training_schedule(self):
         """Set ``total_training_steps`` and any inputs required to execute that schedule."""
@@ -372,6 +400,12 @@ class RayPPOTrainer:
         3. Inference engine teardown – sends teardown RPC to each engine.
         4. Ray actor cleanup – force-kills remaining actors.
         """
+        if self._sync_distillation_runtime is not None:
+            await self._guarded_async(
+                self._sync_distillation_runtime.close(),
+                timeout=30,
+                label="Teacher oracle shutdown",
+            )
         if self.inference_engine_client is not None:
             self._guarded_sync(
                 self.inference_engine_client.shutdown_http_endpoint,
@@ -747,7 +781,10 @@ class RayPPOTrainer:
 
                     # 1.4 inference and calculate values, log probs, rewards, kl divergence
                     with Timer("fwd_logprobs_values_reward", self.all_timings):
-                        training_input = self.fwd_logprobs_values_reward(training_input)
+                        training_input = await self._forward_with_optional_distillation(
+                            trajectory_batch,
+                            training_input,
+                        )
 
                     # 1.5 apply kl divergence penalty to rewards
                     if self.cfg.trainer.algorithm.use_kl_in_reward:

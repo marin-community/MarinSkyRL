@@ -136,6 +136,41 @@ def test_behavior_logprobs_reject_multiturn_custom_template_retokenization():
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
 
 
+def test_distillation_rejects_fully_async_trainer_until_scored_buffer_wiring_exists():
+    cfg = _skyrl_config(use_tis=False)
+    OmegaConf.set_struct(cfg, False)
+    cfg.trainer.algorithm.distillation = {
+        "objective": "sampled_reverse_kl",
+        "routing_plan": "opd",
+        "coefficient": 0.5,
+        "reward_mode": "add",
+    }
+    cfg.teachers = {
+        "primary": {
+            "source": "local_inference",
+            "placement": "pinned",
+            "model": {"path": "Qwen/teacher", "revision": "teacher-revision"},
+            "backend": "vllm",
+            "evidence": "chosen_token",
+            "resources": {
+                "num_nodes": 1,
+                "gpus_per_node": 1,
+                "tensor_parallel_size": 1,
+                "colocation_group": "teacher",
+            },
+        }
+    }
+    cfg.teacher_routing = {
+        "opd": {
+            "revision": "route-revision",
+            "routes": {"default": {"teacher": "primary", "weight": 1.0}},
+        }
+    }
+
+    with pytest.raises(ValueError, match="only the synchronous SkyRL Gym trainer"):
+        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
+
+
 @pytest.mark.parametrize(
     ("mode", "agent_name", "version", "expected_runner"),
     [
