@@ -295,6 +295,11 @@ trainer:
   resume_mode: latest
   resume_path: null
   restore_dataloader_state: true
+  # Optional OPD stage boundary. Stops after the first optimizer batch whose
+  # cumulative teacher-scored tokens reach the budget.
+  distillation_token_budget: null
+  reset_distillation_token_count_on_resume: false
+  reset_global_step_on_resume: false
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
   ckpt_interval: 5

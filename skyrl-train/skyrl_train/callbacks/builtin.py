@@ -73,6 +73,17 @@ def register_callback(name: str):
     return decorator
 
 
+def _configured_distillation_token_budget(cfg: DictConfig) -> int | None:
+    value = cfg.trainer.get("distillation_token_budget")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("trainer.distillation_token_budget must be a positive integer")
+    if cfg.trainer.algorithm.get("distillation") is None:
+        raise ValueError("trainer.distillation_token_budget requires trainer.algorithm.distillation")
+    return value
+
+
 @register_callback(CHECKPOINT_CALLBACK_TYPE)
 class CheckpointCallback(TrainerCallback):
     """
@@ -109,6 +120,47 @@ class CheckpointCallback(TrainerCallback):
     ) -> Optional[TrainerControl]:
         if self.save_on_train_end and self.save_steps > 0:
             control.should_save = True
+        return control
+
+
+@register_callback("distillation_token_budget")
+class DistillationTokenBudgetCallback(TrainerCallback):
+    """Stop either trainer after reaching a cumulative teacher-scored-token budget."""
+
+    error_behavior = "raise"
+
+    def __init__(self, token_budget: int):
+        if token_budget <= 0:
+            raise ValueError("distillation token budget must be positive")
+        self.token_budget = token_budget
+
+    def on_step_end(
+        self,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ) -> Optional[TrainerControl]:
+        scored = state.metrics.get("distillation/scored_tokens")
+        if scored is None:
+            raise ValueError("distillation token budget requires teacher-scored token metrics")
+        scored_tokens = int(scored)
+        if scored_tokens < 0 or scored_tokens != scored:
+            raise ValueError(f"distillation/scored_tokens must be a non-negative integer, got {scored!r}")
+        trainer = kwargs["trainer"]
+        trainer.distillation_scored_tokens_total += scored_tokens
+        trainer.all_metrics.update(
+            {
+                "distillation/scored_tokens_total": float(trainer.distillation_scored_tokens_total),
+                "distillation/token_budget": float(self.token_budget),
+            }
+        )
+        if trainer.distillation_scored_tokens_total >= self.token_budget:
+            logger.info(
+                "Reached distillation token budget: scored_tokens={} budget={}",
+                trainer.distillation_scored_tokens_total,
+                self.token_budget,
+            )
+            control.should_training_stop = True
         return control
 
 
@@ -718,6 +770,19 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
     if has_explicit_callbacks(cfg):
         logger.info("Using explicit callback configuration from YAML")
         callbacks = create_callbacks_from_config(cfg)
+        token_budget = _configured_distillation_token_budget(cfg)
+        configured_budget_callbacks = [
+            callback for callback in callbacks if isinstance(callback, DistillationTokenBudgetCallback)
+        ]
+        if len(configured_budget_callbacks) > 1:
+            raise ValueError("explicit callback configuration contains multiple distillation token budgets")
+        if token_budget is not None:
+            if configured_budget_callbacks and any(
+                callback.token_budget != token_budget for callback in configured_budget_callbacks
+            ):
+                raise ValueError("explicit distillation token budget callback disagrees with trainer configuration")
+            if not configured_budget_callbacks:
+                callbacks.append(DistillationTokenBudgetCallback(token_budget))
         # Always add logging callback if not explicitly configured
         has_logging = any(isinstance(cb, LoggingCallback) for cb in callbacks)
         if not has_logging:
@@ -791,6 +856,10 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
                 log_to_tracker=True,
             )
         )
+
+    token_budget = _configured_distillation_token_budget(cfg)
+    if token_budget is not None:
+        callbacks.append(DistillationTokenBudgetCallback(token_budget))
 
     # Logging callback (always enabled)
     callbacks.append(LoggingCallback())

@@ -685,6 +685,48 @@ def test_load_checkpoints_restores_refill_state_only_with_dataloader_cursor(
     assert trainer._pending_sync_prompts == (pending_prompts if restore_pending_prompts else [])
 
 
+@pytest.mark.parametrize(
+    ("reset_stage_state", "expected_step", "expected_tokens"),
+    [(False, 12, 900), (True, 0, 0)],
+)
+def test_load_checkpoints_can_start_a_new_stage_with_continued_model_training_state(
+    tmp_path,
+    dummy_config,
+    reset_stage_state,
+    expected_step,
+    expected_tokens,
+):
+    checkpoint_path = tmp_path / "global_step_12"
+    checkpoint_path.mkdir()
+    torch.save(
+        {"global_step": 12, "distillation_scored_tokens_total": 900},
+        checkpoint_path / "trainer_state.pt",
+    )
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+    dummy_config.trainer.restore_dataloader_state = False
+    dummy_config.trainer.reset_global_step_on_resume = reset_stage_state
+    dummy_config.trainer.reset_distillation_token_count_on_resume = reset_stage_state
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.train_dataloader = _CursorDataLoader()
+    trainer.policy_model = MagicMock()
+    trainer.policy_model.async_run_ray_method.return_value = []
+    trainer.critic_model = None
+
+    with patch("skyrl_train.trainer.ray.get", return_value=None):
+        global_step, _ = trainer.load_checkpoints()
+
+    assert global_step == expected_step
+    assert trainer.distillation_scored_tokens_total == expected_tokens
+    trainer.policy_model.async_run_ray_method.assert_called_once_with(
+        "pass_through",
+        "load_checkpoint",
+        ckpt_dir=str(checkpoint_path / "policy"),
+        load_training_state=True,
+    )
+
+
 def test_calculate_kl_create_experience_batched(dummy_config, dummy_trajectory_runner):
     trainer = RayPPOTrainer(
         cfg=dummy_config,

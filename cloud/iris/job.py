@@ -248,11 +248,27 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--attempt-id", default=None)
     build_parser.add_argument("--out", default=None, help="Write JSON to this path; stdout if omitted.")
 
+    curriculum_parser = iris_commands.add_parser(
+        "run-opd-curriculum",
+        help="Run or resume a sequential OPD curriculum manifest.",
+    )
+    curriculum_parser.add_argument("--manifest", required=True, help="Path to the curriculum YAML manifest.")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = create_parser().parse_args(argv)
+
+    if args.action == "run-opd-curriculum":
+        from cloud.iris.opd_curriculum import load_curriculum_manifest, run_curriculum
+
+        manifest = load_curriculum_manifest(Path(args.manifest))
+        with contextlib.redirect_stdout(sys.stderr):
+            result = run_curriculum(manifest, execute_job)
+        json.dump(asdict(result), sys.stdout, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
 
     if args.action == "build-request":
         optional_fields = (

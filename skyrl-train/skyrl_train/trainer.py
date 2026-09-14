@@ -209,6 +209,7 @@ class RayPPOTrainer:
         self._group_admission_watchdog: AdmissionProgressWatchdog | None = None
         self._step_time_history: deque[float] = deque(maxlen=5)
         self._sync_distillation_runtime: Optional[SyncDistillationRuntime] = None
+        self.distillation_scored_tokens_total = 0
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         configure_ray_worker_logging()
@@ -2271,6 +2272,7 @@ class RayPPOTrainer:
             "global_step": self.global_step,
             "config": self.cfg,
             "pending_sync_prompts": self._pending_sync_prompts,
+            "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
         }
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
         with io.open_file(trainer_state_path, "wb") as f:
@@ -2398,6 +2400,10 @@ class RayPPOTrainer:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
         self._pending_sync_prompts = []
+        if self.cfg.trainer.get("reset_distillation_token_count_on_resume", False):
+            self.distillation_scored_tokens_total = 0
+        else:
+            self.distillation_scored_tokens_total = int(trainer_state.get("distillation_scored_tokens_total", 0))
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
@@ -2445,6 +2451,9 @@ class RayPPOTrainer:
             logger.info("Successfully loaded critic checkpoint")
 
         logger.info(f"Successfully loaded complete checkpoint state from global_step_{global_step}")
+        if self.cfg.trainer.get("reset_global_step_on_resume", False):
+            logger.info("Resetting the trainer step to 0 at the explicit stage boundary")
+            global_step = 0
         return global_step, str(checkpoint_path)
 
     def handle_hf_export(self) -> None:
