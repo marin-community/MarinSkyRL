@@ -12,7 +12,9 @@ def test_install_receipt_digest_is_ordered_and_nested_results_are_flattened():
         "received_name_digest": weight_name_digest(names),
         "loaded_parameter_count": 2,
         "loaded_parameter_digest": weight_name_digest(sorted(names)),
+        "loaded_expert_slices": [],
         "finalized": True,
+        "host": "worker-0",
     }
 
     assert list(flatten_install_receipts([[receipt], None])) == [receipt]

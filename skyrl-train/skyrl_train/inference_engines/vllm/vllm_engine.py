@@ -494,6 +494,7 @@ class WorkerWrap:
             initialize_layerwise_reload(model)
         self._skyrl_received_weight_names = []
         self._skyrl_loaded_parameters = set()
+        self._skyrl_loaded_expert_slices = set()
         self._skyrl_weight_update_active = True
 
     def skyrl_finish_weight_reload(self) -> WeightInstallReceipt:
@@ -524,6 +525,7 @@ class WorkerWrap:
         self._skyrl_weight_update_active = False
         received_names = getattr(self, "_skyrl_received_weight_names", [])
         loaded_parameters = getattr(self, "_skyrl_loaded_parameters", set())
+        loaded_expert_slices = getattr(self, "_skyrl_loaded_expert_slices", set())
         return {
             "kind": "weight_install_receipt",
             "finalized": True,
@@ -531,6 +533,7 @@ class WorkerWrap:
             "received_name_digest": weight_name_digest(received_names),
             "loaded_parameter_count": len(loaded_parameters),
             "loaded_parameter_digest": weight_name_digest(sorted(loaded_parameters)),
+            "loaded_expert_slices": sorted(loaded_expert_slices),
             "host": os.uname().nodename,
         }
 
@@ -710,7 +713,11 @@ class WorkerWrap:
                 gc.collect()
                 torch.cuda.empty_cache()
             else:
-                loaded_parameters = load_weights_into_vllm(model, self._accumulated_weights)
+                loaded_parameters = load_weights_into_vllm(
+                    model,
+                    self._accumulated_weights,
+                    loaded_expert_slices=self._skyrl_loaded_expert_slices,
+                )
                 installed = getattr(self, "_skyrl_loaded_parameters", set())
                 installed.update(loaded_parameters)
                 self._skyrl_loaded_parameters = installed
@@ -746,7 +753,11 @@ class WorkerWrap:
             del weight_list
         else:
             # Immediate mode (default): load right away
-            loaded_parameters = load_weights_into_vllm(self.model_runner.model, weight_list)
+            loaded_parameters = load_weights_into_vllm(
+                self.model_runner.model,
+                weight_list,
+                loaded_expert_slices=self._skyrl_loaded_expert_slices,
+            )
             installed = getattr(self, "_skyrl_loaded_parameters", set())
             installed.update(loaded_parameters)
             self._skyrl_loaded_parameters = installed

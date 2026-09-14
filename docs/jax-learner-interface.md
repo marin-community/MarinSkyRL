@@ -75,7 +75,8 @@ The four probability channels are distinct:
   admission. The live vLLM tagging adapter is still follow-up work, so a real async learner run fails if these serving
   observations are absent.
 - **Old-policy** log probabilities are recomputed by the learner immediately before the update. They name one stable
-  learner policy version and are the PPO clipping baseline for the regular objective.
+  learner policy version. The synchronous, one-epoch Snowball backend also records replay drift, but anchors the PPO
+  denominator to the same differentiable forward with `stop_gradient`, matching E6's exact-unit first-update ratio.
 - **Current-policy** log probabilities are recomputed with gradients inside the update. They are not supplied by MSRL.
   A real learner must compare them with the old or rollout channel according to the selected objective.
 - **Reference** log probabilities come from a fixed reference policy. They are absent when no KL-dependent feature is
@@ -120,11 +121,11 @@ single synchronous E6-derived workload documented in [Levanter Snowball training
 
 | Responsibility | Implementation | Evidence |
 | --- | --- | --- |
-| Initialize model, optimizer, RNG, mesh, and sharding | Levanter `Trainer`, `TrainerState`, the Snowball HF converter, and a one-node data mesh | A two-H100 learner task loaded a real tiny Snowball HF checkpoint and completed repeated sharded optimizer steps. |
+| Initialize model, optimizer, RNG, mesh, and sharding | Levanter `Trainer`, `TrainerState`, the Snowball HF converter, and a multi-host data mesh | A four-host, 32-H100 learner loaded Snowball 67B-A2B and completed two sharded optimizer steps; small two-process tests cover collectives. |
 | Token log probabilities and GRPO | Unpacked rows are compacted independently, response predictor positions are retained, and Levanter averages each sequence's masked token mean across devices and accumulation steps, matching E6's one-sequence GPU microbatches | Independent PyTorch comparisons cover unequal response lengths, log probabilities, loss, gradients, and the first AdamW update. Padding and two-device microbatch tests cover alignment and normalization. |
-| Publish a version to vLLM | The learner converts all parameters to HF names, sends Gloo chunks, and requires receipts with the exact source-name and installed-parameter counts and digests before advancing the installed version | The three-H100 gate reads dense, expert, language-head, and FP32 router-bias values back from the active vLLM worker after each final update and then generates. A chunk respects its byte limit unless one tensor alone exceeds it. |
-| Save and restore training state | Levanter TensorStore checkpoints contain model, optimizer, RNG, step, and policy version; MSRL writes a step-directory completion marker before updating the root latest marker, after learner, trainer, and dataloader state commit | A fresh Ray runtime and learner restore all 306 arrays byte exactly, reconcile vLLM before generation, replay the saved next batch within the accepted `1e-4` GPU bound, and resume the public trainer. The next-update maxima were `1.4142e-5` for parameters and `2.5635e-5` for optimizer state. Missing completion markers or dataloader state reject restore. |
+| Publish a version to vLLM | The learner converts all parameters to HF names, sends Gloo chunks, and requires exact source, parameter, and per-expert-slice receipts before advancing the installed version | The 67B run published to eight TP1/DP8/EP8 workers before a second generation. It predates the stronger slice receipt. CPU tests prove a missing local expert slice fails closed. |
+| Save and restore training state | Levanter TensorStore checkpoints contain model, optimizer, RNG, step, and policy version; MSRL writes a step-directory completion marker before updating the root latest marker, after learner, trainer, and dataloader state commit | Two fresh CPU JAX processes restore every model, optimizer, RNG, and step leaf byte exactly on both ranks and complete the next collective update. The 67B job committed checkpoints at steps 1 and 2; an exact target restore has not been run. |
 | Export and cleanup | The HF converter can export the current in-memory Levanter model after a completed checkpoint; trainer shutdown closes the learner and inference actors | CPU interface tests cover the converter call, incomplete-checkpoint rejection, and failure visibility. The GPU gate tears down both fresh processes, but it does not qualify an exported directory in a separate production consumer. |
 
 Async rollout tagging, KL or reference policies, sample packing, learner/inference colocation, other model families,
-multi-host execution, and full-size Snowball qualification remain outside this concrete implementation.
+a learning campaign, and a matched backend benchmark remain outside this concrete implementation.

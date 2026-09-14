@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import functools
+import logging
 import os
 import socket
 import time
@@ -61,12 +62,18 @@ from skyrl_train.learners.levanter_config import LevanterSnowballRuntimeConfig
 from skyrl_train.models.grug_moe import GrugMoeConfig
 from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP
 from skyrl_train.weight_sync.install_receipt import flatten_install_receipts, weight_name_digest
-from skyrl_train.weight_sync.vllm_weight_conversion import expected_vllm_parameter_names
+from skyrl_train.weight_sync.vllm_weight_conversion import (
+    expected_expert_slice_names,
+    expected_vllm_parameter_names,
+)
 
 if TYPE_CHECKING:
     import torch
 
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+
+
+logger = logging.getLogger(__name__)
 
 # Levanter registers its serialization-only config for the same `grug_moe`
 # model type at import time. Its converter below names that class explicitly;
@@ -329,9 +336,16 @@ def _regular_grpo_loss(
     clip_low: float,
     clip_high: float,
 ):
-    del key
+    del key, old_log_probs
     log_probs = _all_next_token_log_probs(model, tokens, temperature)
-    delta = jnp.clip(log_probs - old_log_probs.array, -LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP)
+    # This backend accepts one synchronous update epoch only. The behavior and
+    # current policy are therefore the same model at this point. Anchor the PPO
+    # denominator to this exact forward, as the recovered Snowball run did, so
+    # nondeterminism between two BF16 accelerator forwards cannot activate the
+    # clip branch before any optimizer step. stop_gradient preserves the usual
+    # policy-gradient derivative while making the ratio exactly one in value.
+    objective_old_log_probs = jax.lax.stop_gradient(log_probs)
+    delta = jnp.clip(log_probs - objective_old_log_probs, -LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP)
     ratio = jnp.exp(delta)
     surrogate = ratio * advantages.array
     clipped_surrogate = jnp.clip(ratio, 1.0 - clip_low, 1.0 + clip_high) * advantages.array
@@ -672,7 +686,7 @@ class LevanterSnowballLearner:
             preupdate = prepared.response_values(preupdate_dense)
             selected = request.batch.loss_mask > 0
             deviations = np.abs(preupdate[selected] - request.old_policy_log_probs[selected])
-            ratios = np.exp(
+            replay_ratios = np.exp(
                 np.clip(
                     preupdate[selected] - request.old_policy_log_probs[selected],
                     -LOG_PROB_DELTA_CLIP,
@@ -680,16 +694,16 @@ class LevanterSnowballLearner:
                 )
             )
             selected_advantages = request.advantages[selected]
-            unclipped = ratios * selected_advantages
-            clipped = (
+            replay_unclipped = replay_ratios * selected_advantages
+            replay_clipped = (
                 np.clip(
-                    ratios,
+                    replay_ratios,
                     1.0 - self._learner_config.clip_low,
                     1.0 + self._learner_config.clip_high,
                 )
                 * selected_advantages
             )
-            clipped_tokens = clipped < unclipped
+            replay_clipped_tokens = replay_clipped < replay_unclipped
             validation_seconds = time.perf_counter() - validation_start
 
             dense_old = prepared.dense_response_values(request.old_policy_log_probs)
@@ -740,10 +754,12 @@ class LevanterSnowballLearner:
                 "valid_token_weight": valid_weight,
                 "preupdate_logprob_mean_abs_diff": float(np.mean(deviations)),
                 "preupdate_logprob_max_abs_diff": float(np.max(deviations)),
-                "ppo_ratio_mean": float(np.mean(ratios)),
-                "ppo_clip_ratio": float(np.mean(clipped_tokens)),
-                "ppo_clip_ratio_low": float(np.mean(clipped_tokens & (ratios < 1.0))),
-                "ppo_clip_ratio_high": float(np.mean(clipped_tokens & (ratios > 1.0))),
+                "ppo_ratio_mean": 1.0,
+                "ppo_clip_ratio": 0.0,
+                "ppo_clip_ratio_low": 0.0,
+                "ppo_clip_ratio_high": 0.0,
+                "preupdate_replay_ratio_mean": float(np.mean(replay_ratios)),
+                "preupdate_replay_clip_ratio": float(np.mean(replay_clipped_tokens)),
                 "parameter_probe_delta_l2": parameter_probe_delta_l2,
                 "router_bias_max_delta": router_bias_max_delta,
                 "forward_validation_seconds": validation_seconds,
@@ -850,6 +866,7 @@ class LevanterSnowballLearner:
 
         client = self._inference_client
         expected_names: list[str] = []
+        expected_expert_slices: list[str] = []
         batch: list[tuple[str, torch.Tensor]] = []
         batch_bytes = 0
         is_publisher = jax.process_index() == 0
@@ -876,6 +893,8 @@ class LevanterSnowballLearner:
                 tensor = torch.from_numpy(np.array(host, copy=True, order="C")).to(dtype=dtype).contiguous()
                 batch.append((name, tensor))
             expected_names.append(name)
+            if host.ndim:
+                expected_expert_slices.extend(expected_expert_slice_names(name, host.shape[0]))
             batch_bytes += tensor_bytes
         if batch_bytes:
             await self._rank_zero_publication_call(lambda: self._publish_weight_batch(batch), "final chunk")
@@ -891,6 +910,7 @@ class LevanterSnowballLearner:
                     f"expected {self.runtime.inference_world_size} inference-worker receipts, "
                     f"got {len(install_receipts)}"
                 )
+            installed_expert_slices: list[str] = []
             for receipt in install_receipts:
                 if receipt.get("received_weight_count") != len(expected_names):
                     raise RuntimeError(f"incomplete inference weight receipt: {receipt}")
@@ -902,6 +922,22 @@ class LevanterSnowballLearner:
                     raise RuntimeError(f"incomplete inference parameter installation: {receipt}")
                 if receipt.get("loaded_parameter_digest") != expected_parameter_digest:
                     raise RuntimeError(f"inference installed-parameter digest mismatch: {receipt}")
+                installed_expert_slices.extend(receipt.get("loaded_expert_slices", ()))
+            if len(installed_expert_slices) != len(set(installed_expert_slices)):
+                raise RuntimeError("an expert slice was acknowledged by more than one inference worker")
+            if set(installed_expert_slices) != set(expected_expert_slices):
+                missing = sorted(set(expected_expert_slices).difference(installed_expert_slices))
+                unexpected = sorted(set(installed_expert_slices).difference(expected_expert_slices))
+                raise RuntimeError(
+                    "incomplete inference expert-slice installation: "
+                    f"missing_count={len(missing)}, missing_sample={missing[:8]}, "
+                    f"unexpected_count={len(unexpected)}, unexpected_sample={unexpected[:8]}"
+                )
+            logger.info(
+                "Verified %d expert projection slices across %d inference workers",
+                len(expected_expert_slices),
+                len(install_receipts),
+            )
             await client.reset_prefix_cache()
 
         await self._rank_zero_publication_call(finish_reload, "reload finalization")
@@ -971,13 +1007,18 @@ class LevanterSnowballLearner:
             # so give TensorStore a thread without an active event loop.
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="levanter-checkpoint-load") as executor:
                 restored = executor.submit(restore).result()
-        self._trainer_state = restored["trainer_state"]
-        self._policy_version = int(jax.device_get(restored["policy_version"]))
-        self._update_count = int(jax.device_get(self._trainer_state.step))
-        if self._policy_version != self._update_count:
+        restored_trainer_state = restored["trainer_state"]
+        restored_policy_version = int(jax.device_get(restored["policy_version"]))
+        restored_update_count = int(jax.device_get(restored_trainer_state.step))
+        if restored_policy_version != restored_update_count:
+            self._lifecycle = LearnerLifecycle.FAILED
             raise RuntimeError(
-                f"checkpoint policy version {self._policy_version} does not match optimizer step {self._update_count}"
+                f"checkpoint policy version {restored_policy_version} does not match optimizer step "
+                f"{restored_update_count}"
             )
+        self._trainer_state = restored_trainer_state
+        self._policy_version = restored_policy_version
+        self._update_count = restored_update_count
         self._installed_policy_version = None
         self._publication_status = PublicationStatus.OUTDATED
         self._lifecycle = LearnerLifecycle.READY

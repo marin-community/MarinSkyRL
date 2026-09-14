@@ -447,6 +447,22 @@ def test_async_checkpoint_commits_after_required_callbacks(tmp_path):
         incomplete._handle_hf_export()
 
 
+def test_levanter_hf_export_is_idempotent_within_one_run(tmp_path):
+    learner = StatefulFakeLearner()
+    trainer = _trainer(tmp_path, learner, use_reference=False)
+    trainer.global_step = 1
+    checkpoint = tmp_path / "global_step_1"
+    checkpoint.mkdir()
+    (checkpoint / CHECKPOINT_COMPLETE_FILENAME).write_text("1")
+    exports = []
+    learner.export_policy = lambda path: exports.append(path)
+
+    trainer._handle_hf_export()
+    trainer._handle_hf_export()
+
+    assert len(exports) == 1
+
+
 def test_learner_close_failure_is_reported_after_later_cleanup(tmp_path):
     learner = StatefulFakeLearner()
     trainer = _trainer(tmp_path, learner, use_reference=False)

@@ -92,6 +92,7 @@ class LevanterSnowballRuntimeConfig:
             (float(optimizer.max_grad_norm) == 0.5, "trainer.policy.optimizer_config.max_grad_norm=0.5"),
             (levanter.publication_backend == "gloo", "trainer.policy.levanter.publication_backend=gloo"),
             (generator.weight_sync_backend == "gloo", "generator.weight_sync_backend=gloo"),
+            (int(generator.inference_engine_tensor_parallel_size) == 1, "inference tensor parallel size 1"),
             (int(generator.inference_engine_pipeline_parallel_size) == 1, "inference pipeline parallel size 1"),
             (float(generator.sampling_params.temperature) == 1.0, "generator.sampling_params.temperature=1.0"),
             (levanter.parameter_dtype == "float32", "Levanter FP32 parameter storage"),

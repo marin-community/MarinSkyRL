@@ -46,7 +46,10 @@ from skyrl_train.learners.levanter_snowball import (
 )
 from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM
 from skyrl_train.weight_sync.install_receipt import weight_name_digest
-from skyrl_train.weight_sync.vllm_weight_conversion import expected_vllm_parameter_names
+from skyrl_train.weight_sync.vllm_weight_conversion import (
+    expected_expert_slice_names,
+    expected_vllm_parameter_names,
+)
 from transformers import AutoConfig
 
 _MODEL_VALUES = {
@@ -239,6 +242,55 @@ def test_publication_keeps_grug_experts_stacked_for_vllm(tmp_path):
     learner.close()
 
 
+def test_publication_rejects_one_missing_expert_slice_receipt(tmp_path):
+    learner = _make_learner(tmp_path / "missing-expert-receipt")
+    state_dict = learner.model.to_state_dict()
+    names = list(state_dict)
+    parameters = sorted(expected_vllm_parameter_names(names))
+    expert_slices = [
+        expert_slice
+        for name, value in state_dict.items()
+        for expert_slice in expected_expert_slice_names(name, value.shape[0])
+    ]
+    assert expert_slices
+
+    class FakeInferenceClient:
+        async def begin_weight_reload(self):
+            return None
+
+        async def finish_weight_reload(self):
+            return [
+                {
+                    "kind": "weight_install_receipt",
+                    "finalized": True,
+                    "received_weight_count": len(names),
+                    "received_name_digest": weight_name_digest(names),
+                    "loaded_parameter_count": len(parameters),
+                    "loaded_parameter_digest": weight_name_digest(parameters),
+                    "loaded_expert_slices": expert_slices[:-1],
+                    "host": "fake-worker",
+                }
+            ]
+
+        async def reset_prefix_cache(self):
+            return None
+
+    async def discard_publication(_batch):
+        return None
+
+    learner._inference_client = FakeInferenceClient()
+    learner._weight_group = object()
+    learner._publish_weight_batch = discard_publication
+
+    with pytest.raises(RuntimeError, match="rank-zero weight publication failed") as error:
+        asyncio.run(learner.publish_policy())
+    assert error.value.__cause__ is not None
+    assert "incomplete inference expert-slice installation" in str(error.value.__cause__)
+    assert learner.state.lifecycle.value == "failed"
+    learner._weight_group = None
+    learner.close()
+
+
 def _sharded_probe_worker() -> None:
     devices = np.asarray(jax.devices())
     assert devices.size == 2
@@ -402,6 +454,7 @@ def _multihost_learner_worker(
     log_dir: str,
     checkpoint_path: str,
     result_path: str,
+    mode: str,
 ) -> None:
     runtime = replace(
         _runtime(Path(log_dir)),
@@ -450,21 +503,32 @@ def _multihost_learner_worker(
         rollout_log_probs=None,
         behavior_policy_versions=np.zeros(16, dtype=np.int64),
     )
-    old_log_probs = learner.compute_log_probs(batch).policy_log_probs
-    update = learner.update(
-        UpdateRequest(
-            batch=batch,
-            advantages=np.tile(
-                np.asarray([[1.0, -0.5, 0.0], [0.25, -1.0, 0.5]], dtype=np.float32),
-                (repeats, 1),
-            ),
-            old_policy_log_probs=old_log_probs,
-            old_policy_version=0,
-            reference_log_probs=None,
-            global_step=0,
-            global_loss_denominator=None,
-        )
+    advantages = np.tile(
+        np.asarray([[1.0, -0.5, 0.0], [0.25, -1.0, 0.5]], dtype=np.float32),
+        (repeats, 1),
     )
+    if mode == "restore":
+        learner.load_checkpoint(checkpoint_path)
+        result = {f"restored::{name}": value for name, value in _multihost_state_arrays(learner).items()}
+        old_log_probs = learner.compute_log_probs(batch).policy_log_probs
+        update = learner.update(UpdateRequest(batch, advantages, old_log_probs, 1, None, 1, None))
+        result.update(
+            {
+                "log_probs": old_log_probs,
+                "final_loss": update.metrics["final_loss"],
+                "policy_version": learner.state.policy_version,
+                "update_count": learner.state.update_count,
+                "restored_publication_status": "outdated",
+            }
+        )
+        np.savez(result_path, **result)
+        learner.close()
+        return
+    if mode != "save":
+        raise ValueError(f"unknown multi-host checkpoint mode {mode!r}")
+
+    old_log_probs = learner.compute_log_probs(batch).policy_log_probs
+    update = learner.update(UpdateRequest(batch, advantages, old_log_probs, 0, None, 0, None))
 
     published_chunks = []
 
@@ -480,8 +544,14 @@ def _multihost_learner_worker(
                 return None
 
             async def finish_weight_reload(self):
-                names = list(learner.model.to_state_dict())
+                state_dict = learner.model.to_state_dict()
+                names = list(state_dict)
                 parameters = sorted(expected_vllm_parameter_names(names))
+                expert_slices = [
+                    expert_slice
+                    for name, value in state_dict.items()
+                    for expert_slice in expected_expert_slice_names(name, value.shape[0])
+                ]
                 return [
                     {
                         "kind": "weight_install_receipt",
@@ -490,6 +560,7 @@ def _multihost_learner_worker(
                         "received_name_digest": weight_name_digest(names),
                         "loaded_parameter_count": len(parameters),
                         "loaded_parameter_digest": weight_name_digest(parameters),
+                        "loaded_expert_slices": expert_slices,
                         "host": "fake-worker",
                     }
                 ]
@@ -506,17 +577,29 @@ def _multihost_learner_worker(
         assert published_chunks
         learner._weight_group = None
     learner.save_checkpoint(checkpoint_path)
-    learner.load_checkpoint(checkpoint_path)
-    np.savez(
-        result_path,
-        log_probs=old_log_probs,
-        final_loss=update.metrics["final_loss"],
-        policy_version=learner.state.policy_version,
-        update_count=learner.state.update_count,
-        publication_status=installed_publication_status,
-        restored_publication_status=learner.state.publication_status.value,
+    result = {f"checkpoint::{name}": value for name, value in _multihost_state_arrays(learner).items()}
+    result.update(
+        {
+            "log_probs": old_log_probs,
+            "final_loss": update.metrics["final_loss"],
+            "policy_version": learner.state.policy_version,
+            "update_count": learner.state.update_count,
+            "publication_status": installed_publication_status,
+        }
     )
+    np.savez(result_path, **result)
     learner.close()
+
+
+def _multihost_state_arrays(learner: LevanterSnowballLearner) -> dict[str, np.ndarray]:
+    arrays = {
+        f"parameter::{name}": _replicated_host_copy(value) for name, value in learner.model.to_state_dict().items()
+    }
+    arrays["training_key"] = _replicated_host_copy(jax.random.key_data(learner._trainer_state.training_key))
+    arrays["optimizer_step"] = _replicated_host_copy(learner._trainer_state.step)
+    for key_path, value in jax.tree_util.tree_flatten_with_path(learner._trainer_state.opt_state)[0]:
+        arrays[f"optimizer::{jax.tree_util.keystr(key_path)}"] = _replicated_host_copy(value)
+    return arrays
 
 
 def test_parameter_probe_gathers_a_bounded_slice_from_two_devices(tmp_path):
@@ -556,10 +639,6 @@ def test_four_device_learner_shards_parameters_and_updates(tmp_path):
 
 
 def test_two_process_learner_updates_and_checkpoints_collectively(tmp_path):
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        coordinator_address = f"127.0.0.1:{listener.getsockname()[1]}"
-
     source_root = Path(__file__).parents[2]
     environment = {
         **os.environ,
@@ -568,9 +647,12 @@ def test_two_process_learner_updates_and_checkpoints_collectively(tmp_path):
         "PYTHONPATH": os.pathsep.join(filter(None, (str(source_root), os.environ.get("PYTHONPATH")))),
     }
     checkpoint_path = tmp_path / "multihost-checkpoint"
-    processes = []
-    for process_id in range(2):
-        processes.append(
+
+    def run_group(mode: str) -> list[np.lib.npyio.NpzFile]:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            coordinator_address = f"127.0.0.1:{listener.getsockname()[1]}"
+        processes = [
             subprocess.Popen(
                 [
                     sys.executable,
@@ -578,9 +660,10 @@ def test_two_process_learner_updates_and_checkpoints_collectively(tmp_path):
                     "--multihost-learner-worker",
                     str(process_id),
                     coordinator_address,
-                    str(tmp_path / f"logs-{process_id}"),
+                    str(tmp_path / f"{mode}-logs-{process_id}"),
                     str(checkpoint_path),
-                    str(tmp_path / f"result-{process_id}.npz"),
+                    str(tmp_path / f"{mode}-result-{process_id}.npz"),
+                    mode,
                 ],
                 cwd=Path(__file__).parents[3],
                 env=environment,
@@ -588,29 +671,37 @@ def test_two_process_learner_updates_and_checkpoints_collectively(tmp_path):
                 stderr=subprocess.PIPE,
                 text=True,
             )
-        )
+            for process_id in range(2)
+        ]
+        outputs = []
+        try:
+            for process in processes:
+                outputs.append(process.communicate(timeout=240))
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+        for process_id, (process, (stdout, stderr)) in enumerate(zip(processes, outputs, strict=True)):
+            assert process.returncode == 0, f"mode={mode} process={process_id}\nstdout={stdout}\nstderr={stderr}"
+        return [np.load(tmp_path / f"{mode}-result-{process_id}.npz") for process_id in range(2)]
 
-    outputs = []
-    try:
-        for process in processes:
-            outputs.append(process.communicate(timeout=180))
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-
-    for process_id, (process, (stdout, stderr)) in enumerate(zip(processes, outputs, strict=True)):
-        assert process.returncode == 0, f"process={process_id}\nstdout={stdout}\nstderr={stderr}"
-
-    first = np.load(tmp_path / "result-0.npz")
-    second = np.load(tmp_path / "result-1.npz")
-    np.testing.assert_array_equal(first["log_probs"], second["log_probs"])
-    np.testing.assert_array_equal(first["final_loss"], second["final_loss"])
-    assert int(first["policy_version"]) == int(second["policy_version"]) == 1
-    assert int(first["update_count"]) == int(second["update_count"]) == 1
-    assert str(first["publication_status"]) == str(second["publication_status"]) == "installed"
-    assert str(first["restored_publication_status"]) == str(second["restored_publication_status"]) == "outdated"
+    saved = run_group("save")
+    restored = run_group("restore")
+    np.testing.assert_array_equal(saved[0]["log_probs"], saved[1]["log_probs"])
+    np.testing.assert_array_equal(saved[0]["final_loss"], saved[1]["final_loss"])
+    assert int(saved[0]["policy_version"]) == int(saved[1]["policy_version"]) == 1
+    assert int(saved[0]["update_count"]) == int(saved[1]["update_count"]) == 1
+    assert str(saved[0]["publication_status"]) == str(saved[1]["publication_status"]) == "installed"
+    assert int(restored[0]["policy_version"]) == int(restored[1]["policy_version"]) == 2
+    assert int(restored[0]["update_count"]) == int(restored[1]["update_count"]) == 2
+    assert str(restored[0]["restored_publication_status"]) == "outdated"
+    checkpoint_keys = [key for key in saved[0].files if key.startswith("checkpoint::")]
+    assert checkpoint_keys
+    for key in checkpoint_keys:
+        restored_key = key.replace("checkpoint::", "restored::", 1)
+        np.testing.assert_array_equal(saved[0][key], restored[0][restored_key], err_msg=key)
+        np.testing.assert_array_equal(saved[1][key], restored[1][restored_key], err_msg=key)
     assert (checkpoint_path / "manifest.json").is_file()
 
 
@@ -636,7 +727,8 @@ def _torch_loss(torch_model, tokens, old_log_probs, advantages, loss_mask):
     logits = torch_model(token_ids).logits.float()
     targets = token_ids[:, 1:]
     log_probs = torch.log_softmax(logits[:, :-1], dim=-1).gather(-1, targets[..., None])[..., 0]
-    old = torch.as_tensor(old_log_probs)
+    del old_log_probs
+    old = log_probs.detach()
     advantage = torch.as_tensor(advantages)
     mask = torch.as_tensor(loss_mask)
     ratio = torch.exp(torch.clamp(log_probs - old, -20.0, 20.0))
@@ -705,12 +797,13 @@ def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
     with learner._trainer_config.use_device_mesh():
         (levanter_loss, _), levanter_grad = eqx.filter_value_and_grad(objective, has_aux=True)(learner.model)
 
+    objective_old = torch_dense_log_probs.detach()
     global_token_mean = (
         -torch.minimum(
-            torch.exp(torch.clamp(torch_dense_log_probs - torch.as_tensor(dense_old), -20.0, 20.0))
+            torch.exp(torch.clamp(torch_dense_log_probs - objective_old, -20.0, 20.0))
             * torch.as_tensor(dense_advantages),
             torch.clamp(
-                torch.exp(torch.clamp(torch_dense_log_probs - torch.as_tensor(dense_old), -20.0, 20.0)),
+                torch.exp(torch.clamp(torch_dense_log_probs - objective_old, -20.0, 20.0)),
                 0.8,
                 1.2,
             )
@@ -773,6 +866,9 @@ def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
     assert evidence["gradient_max_abs_diff"] < 2e-6
     assert evidence["first_update_max_abs_diff"] < 2e-6
     assert update.metrics["preupdate_logprob_max_abs_diff"] == pytest.approx(0.5, abs=1e-6)
+    assert update.metrics["ppo_ratio_mean"] == 1.0
+    assert update.metrics["ppo_clip_ratio"] == 0.0
+    assert update.metrics["preupdate_replay_clip_ratio"] > 0
     assert update.metrics["parameter_probe_delta_l2"] > 0
     assert update.metrics["router_bias_max_delta"] == 0
     learner.close()

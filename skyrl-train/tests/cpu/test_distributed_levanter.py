@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from skyrl_train.learner import UpdateResult, UpdateStatus
+from skyrl_train.learner import LearnerLifecycle, LearnerState, PublicationStatus, UpdateResult, UpdateStatus
 from skyrl_train.learners import distributed_levanter
 
 
@@ -104,3 +104,60 @@ def test_facade_reserves_one_strict_spread_whole_node_bundle_per_process(monkeyp
     learner._release_ray_resources()
     assert killed == actors
     assert removed == [placement]
+
+
+class _RemoteCall:
+    def remote(self, *_args):
+        return object()
+
+
+class _FakeActor:
+    update = _RemoteCall()
+    load_checkpoint = _RemoteCall()
+
+
+def _ready_state(*, policy_version: int = 0) -> LearnerState:
+    return LearnerState(
+        lifecycle=LearnerLifecycle.READY,
+        policy_version=policy_version,
+        installed_policy_version=None,
+        update_count=policy_version,
+        publication_status=PublicationStatus.OUTDATED,
+    )
+
+
+def _facade_with_fake_actors() -> distributed_levanter.DistributedLevanterSnowballLearner:
+    learner = object.__new__(distributed_levanter.DistributedLevanterSnowballLearner)
+    learner._actors = [_FakeActor(), _FakeActor()]
+    learner._state = _ready_state()
+    return learner
+
+
+def test_facade_fails_closed_when_post_update_results_disagree(monkeypatch):
+    learner = _facade_with_fake_actors()
+    first = UpdateResult(UpdateStatus.SUCCEEDED, {"final_loss": 1.0})
+    second = UpdateResult(UpdateStatus.SUCCEEDED, {"final_loss": 2.0})
+    monkeypatch.setattr(
+        distributed_levanter.ray,
+        "get",
+        lambda _refs: [(first, _ready_state(policy_version=1)), (second, _ready_state(policy_version=1))],
+    )
+
+    with pytest.raises(RuntimeError, match="different final_loss metric"):
+        learner.update(SimpleNamespace())
+
+    assert learner.state.lifecycle is LearnerLifecycle.FAILED
+
+
+def test_facade_fails_closed_when_loaded_actor_states_disagree(monkeypatch):
+    learner = _facade_with_fake_actors()
+    monkeypatch.setattr(
+        distributed_levanter.ray,
+        "get",
+        lambda _refs: [_ready_state(policy_version=1), _ready_state(policy_version=2)],
+    )
+
+    with pytest.raises(RuntimeError, match="disagreed with process zero after checkpoint load"):
+        learner.load_checkpoint("checkpoint")
+
+    assert learner.state.lifecycle is LearnerLifecycle.FAILED

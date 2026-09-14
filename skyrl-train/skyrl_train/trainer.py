@@ -237,6 +237,7 @@ class RayPPOTrainer:
         self._shutdown_complete = False
         self.global_step = 0
         self._last_saved_step: int | None = None
+        self._last_hf_exported_step: int | None = None
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup | None = None
         self.critic_model: Optional[PPORayActorGroup] = None
@@ -2581,9 +2582,13 @@ class RayPPOTrainer:
             )
 
         if self.learner is not None:
+            if self._last_hf_exported_step == self.global_step:
+                logger.info(f"Levanter HF export for global_step_{self.global_step} already completed in this run")
+                return
             export_path = os.path.join(self.cfg.trainer.export_path, f"{GLOBAL_STEP_PREFIX}{self.global_step}")
             self._initialize_or_validate_learner()
             self.learner.export_policy(export_path)
+            self._last_hf_exported_step = self.global_step
             logger.info(f"Exported Levanter policy for global_step_{self.global_step} to {export_path}")
             return
 

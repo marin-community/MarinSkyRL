@@ -214,11 +214,11 @@ class DistributedLevanterSnowballLearner:
     def update(self, request: UpdateRequest) -> UpdateResult:
         try:
             results = ray.get([actor.update.remote(request) for actor in self._actors])
+            merged_result = _merge_update_results([result for result, _ in results])
+            self._state = self._consistent_state([state for _, state in results], "update")
         except BaseException:
             self._state = self._failed_state()
             raise
-        merged_result = _merge_update_results([result for result, _ in results])
-        self._state = self._consistent_state([state for _, state in results], "update")
         return merged_result
 
     async def publish_policy(self) -> None:
@@ -235,8 +235,12 @@ class DistributedLevanterSnowballLearner:
         self._state = self._consistent_state(states, "checkpoint save")
 
     def load_checkpoint(self, path: str) -> None:
-        states = ray.get([actor.load_checkpoint.remote(path) for actor in self._actors])
-        self._state = self._consistent_state(states, "checkpoint load")
+        try:
+            states = ray.get([actor.load_checkpoint.remote(path) for actor in self._actors])
+            self._state = self._consistent_state(states, "checkpoint load")
+        except BaseException:
+            self._state = self._failed_state()
+            raise
 
     def export_policy(self, path: str) -> None:
         states = ray.get([actor.export_policy.remote(path) for actor in self._actors])

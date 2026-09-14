@@ -4,15 +4,16 @@ The `skyrl_train.entrypoints.levanter_snowball` entrypoint runs one synchronous 
 orchestration and a Levanter learner. MSRL owns generation, rewards, advantages, and progress. Levanter owns the model,
 optimizer, random key, step, mesh, sharding, collectives, checkpoint, and Hugging Face export.
 
-This integration has been exercised with a small Snowball model on two H100 learner GPUs and one separate H100 vLLM
-GPU. It does not qualify the 67B-A2B checkpoint, more than one learner node, or a training campaign.
+The target integration ran two Snowball 67B-A2B steps on four eight-H100 JAX learner hosts with a separate
+eight-H100 vLLM TP1/DP8/EP8 host. The first updated policy was published before the second generation. This qualifies
+one real iteration boundary and a second update, but not a learning campaign or a throughput comparison.
 
 ## Supported workload
 
 Configuration validation runs before JAX or Torch is imported and before GPUs or inference actors are allocated. The
 entrypoint accepts this boundary:
 
-- one learner node, with the data mesh spread across its GPUs;
+- one or more learner nodes, with one JAX process per node and the data mesh spread across all learner GPUs;
 - separate local asynchronous vLLM inference engines;
 - synchronous GRPO with `policy_loss_type=regular`, `loss_reduction=token_mean`, clipping `0.2/0.2`, group standard
   deviation normalization, no batch advantage normalization, and one update epoch;
@@ -38,12 +39,11 @@ Launch the entrypoint through the same Hydra configuration path used by `main_ba
 skyrl_train.entrypoints.levanter_snowball
 ```
 
-Set `trainer.policy.levanter.*` for Levanter dtypes, reference kernels, publication chunks, timeout, and log directory.
+Set `trainer.policy.levanter.*` for Levanter dtypes, kernels, publication chunks, timeout, and log directory.
 The defaults are in `skyrl-train/skyrl_train/config/ppo_base_config.yaml`. The pinned Levanter revision is
-[`e49f36f2d7434776d9289a6bf3781f22b419ba39`](https://github.com/marin-community/marin/tree/e49f36f2d7434776d9289a6bf3781f22b419ba39).
-The GPU extra installs JAX 0.11.1 with CUDA 12, matching the Torch and vLLM runtime. It omits Levanter's optional
-Quack/CUTLASS GPU set because its versions conflict with the vLLM closure and this implementation selects Levanter's
-reference kernels.
+[`38d50bb33bc872f3763145945ed107173a174e0e`](https://github.com/marin-community/marin/tree/38d50bb33bc872f3763145945ed107173a174e0e).
+The GPU extra installs JAX 0.11.1 with CUDA 12, matching the Torch and vLLM runtime. The 67B run used segmented GPU
+FA4 attention and ring MoE dispatch; reference attention remains useful for the tiny numerical gate.
 
 ## E6 reference and tested derivative
 
@@ -85,9 +85,11 @@ bias tensors stay FP32; other tensors use the configured generator dtype.
 The learner marks a version installed only after every active vLLM worker returns a receiver-observed receipt. The
 receipt must match the complete source weight name count and digest, the expected top-level vLLM parameter count and
 digest, and completion of vLLM's layer-wise reload. Standard Qwen q/k/v and gate/up sources are loaded separately so a
-packed target name cannot hide a skipped sibling. The GPU gate also reads dense, expert, language-head, and router-bias
-values back from vLLM after each final update. Complete per-expert-slice acknowledgement still belongs in the full-size
-multi-host gate.
+packed target name cannot hide a skipped sibling. Grug expert tensors are loaded one projection and expert at a time;
+the receiver records only slices owned by that EP worker. Publication requires the union across workers to contain
+every expected slice exactly once. A negative CPU test drops one local slice and requires publication to fail. The
+original 67B run predates this stronger receipt, so its eight-worker success proves top-level installation but does not
+by itself qualify the new per-slice receipt.
 
 MSRL writes its completion marker only after Levanter's TensorStore checkpoint has committed. The payload includes the
 full model, Adam state, Levanter training key and step, and the learner policy version. The trainer stages learner,
@@ -96,11 +98,16 @@ marker before advancing `latest_ckpt_global_step.txt`; restore requires the mark
 clears the installed version. Generation remains blocked until the restored learner republishes and the vLLM receipts
 complete. An incomplete callback save cannot be loaded or exported.
 
-The fresh-process gate restarts Ray, creates a new learner and vLLM process, and compares every checkpoint array before
+The fresh-process GPU gate restarts Ray, creates a new learner and vLLM process, and compares every checkpoint array before
 publication. All 306 arrays restore byte exactly. The CPU subprocess restores exactly, including its next update in
 the current CPU runtime. On H100, the accepted absolute replay tolerance is `1e-4` for model and optimizer arrays. The
 measured next-update maxima were `1.4141202e-5` for model parameters and `2.5634421e-5` for optimizer state; step and
 random-key metadata remained exact.
+
+A separate two-process CPU test now stops both JAX processes after saving, starts two new processes, restores every
+model, optimizer, RNG, and step leaf byte exactly on both ranks, and completes the next collective update. The target
+67B job logged successful atomic TensorStore commits and MSRL completion markers, but the retained environment could
+not list or restore those S3 objects from the devbox.
 
 The implementation can export the current in-memory model with Levanter's Hugging Face converter after a completed
 checkpoint. Unit tests cover the call and reject export from an incomplete checkpoint. The real-GPU gate did not load
@@ -108,6 +115,19 @@ that exported directory into a separate production-sized consumer, so export int
 not qualified here.
 
 ## Validation evidence
+
+Iris `/romain/levanter-snowball-real-01a09cd0-r17` used the pinned 67B model, 32 learner H100s, and a separate
+eight-H100 vLLM host. All five tasks exited successfully with no retries or preemptions. Step 1 generated 417,012
+response tokens, completed a finite update with a nonzero parameter probe, published policy version 1, committed its
+native checkpoint, exported BF16 weights, and then generated 714,857 tokens with the installed policy. Step 2 also
+updated, published, checkpointed, and exported.
+
+The target run exposed BF16 replay drift between two forward passes of the unchanged policy: maximum absolute
+log-probability differences were 6.85 and 7.47, affecting 0.198% and 0.529% of selected tokens at the PPO clip bounds.
+The retained E6 run used an exact unit ratio for its one synchronous update epoch. The Levanter objective therefore
+anchors its denominator with `stop_gradient` to the same training forward. This keeps the intended policy-gradient
+derivative and makes the objective ratio exactly one; separately replayed old-policy scores remain visible as drift
+diagnostics and cannot activate clipping before an optimizer step.
 
 The independent CPU oracle builds the same tiny model in the native PyTorch Grug implementation. It compares selected
 response log probabilities, the masked loss, every gradient, and the first AdamW update:
@@ -188,21 +208,13 @@ complete MATH-500 result, and the timing is an inference measurement rather than
 
 ## Remaining scope
 
-The full checkpoint and DP8/EP8 inference now work, but no full-size Levanter learner was initialized. Multi-host
-checkpoint completion, learner collectives, a real update and publication, campaign learning quality, learner
-throughput, and end-to-end throughput remain untested. The small model uses reference attention and ring MoE, so its
-timings are diagnostic. There is no matched Megatron measurement for this geometry.
-
-The tiny end-to-end GPU gate predates the final CUDA 12 dependency selection and allocator-policy cleanup. The final
-dependency closure has an eight-H100 JAX collective smoke, not a Levanter update. The next full-size gate must also
-subsume that end-to-end runtime validation.
+Campaign learning quality, sustained learner throughput, a matched Megatron measurement, an exact restore of the
+retained 67B S3 checkpoint, and target qualification of the stronger per-expert receipt remain outside the completed
+r17 evidence. The tiny reference-kernel timings do not predict 67B throughput.
 
 With the currently resolved `marin-iris` package, Levanter cannot initialize its direct Iris metrics writer because
 that package lacks `iris.runtime.telemetry.resolve`. Levanter catches this failure and training continues; MSRL logs and
 the returned learner metrics remain available. Direct Levanter telemetry needs a compatible Iris package in a follow-up.
 
-The next expensive check is one finite 67B update on a credible multi-host learner topology, followed by checkpoint,
-restart, and sharded publication to a separate vLLM node. It should add source-component acknowledgement or exhaustive
-readback for fused expert slices. The small gate has already established orchestration, numerical semantics, local
-sharding on two GPUs, live installation, and resume mechanics. A full-model run is not needed to review this scoped
-integration.
+The next expensive checks are a bounded TP1/DP8/EP8 publication using the stronger slice receipt and, when the retained
+checkpoint is accessible from a launch environment, a fresh four-host restore followed by one collective operation.

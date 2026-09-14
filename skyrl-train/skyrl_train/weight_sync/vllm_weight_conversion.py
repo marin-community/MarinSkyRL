@@ -24,6 +24,7 @@ _EXPERT_SLICE_PATTERN = re.compile(
     r"^(?P<prefix>.+\.experts)\.(?P<expert_id>\d+)\."
     r"(?P<projection>gate_proj|up_proj|down_proj)\.weight$"
 )
+_STACKED_EXPERT_PATTERN = re.compile(r"^(?P<prefix>.+\.experts)\.(?P<projection>gate_proj|up_proj|down_proj)\.weight$")
 
 
 class VLLMWeightModel(Protocol):
@@ -57,6 +58,50 @@ def expected_vllm_parameter_names(names: Iterable[str]) -> frozenset[str]:
         else:
             expected.add(name)
     return frozenset(expected)
+
+
+def expected_expert_slice_names(name: str, num_experts: int) -> tuple[str, ...]:
+    """Name every expert projection carried by one stacked Snowball tensor."""
+
+    if _STACKED_EXPERT_PATTERN.match(name) is None:
+        return ()
+    return tuple(f"{name}#expert={expert_id}" for expert_id in range(num_experts))
+
+
+def _load_grug_stacked_experts(
+    model: VLLMWeightModel,
+    name: str,
+    tensor: torch.Tensor,
+) -> tuple[str, set[str]] | None:
+    """Load Grug experts directly and retain every locally written slice."""
+
+    match = _STACKED_EXPERT_PATTERN.match(name)
+    if match is None or tensor.ndim != 3 or not hasattr(model, "named_parameters"):
+        return None
+    projection = match.group("projection")
+    packed = "w13_weight" if projection in {"gate_proj", "up_proj"} else "w2_weight"
+    shard_id = {"gate_proj": "w1", "down_proj": "w2", "up_proj": "w3"}[projection]
+    mapped_name = f"{match.group('prefix')}.routed_experts.{packed}"
+    parameter = dict(model.named_parameters()).get(mapped_name)
+    if parameter is None:
+        return None
+    weight_loader = getattr(parameter, "weight_loader", None)
+    if weight_loader is None:
+        raise RuntimeError(f"Grug expert parameter {mapped_name!r} has no FusedMoE weight loader")
+
+    local_slices = set()
+    for expert_id, expert_tensor in enumerate(tensor.unbind(0)):
+        loaded = weight_loader(
+            parameter,
+            expert_tensor,
+            mapped_name,
+            shard_id=shard_id,
+            expert_id=expert_id,
+            return_success=True,
+        )
+        if loaded:
+            local_slices.add(f"{name}#expert={expert_id}")
+    return mapped_name, local_slices
 
 
 def convert_transformers_fused_moe_weights(
@@ -95,6 +140,8 @@ def convert_transformers_fused_moe_weights(
 def load_weights_into_vllm(
     model: VLLMWeightModel,
     weights: Iterable[tuple[str, torch.Tensor]],
+    *,
+    loaded_expert_slices: set[str] | None = None,
 ) -> set[str]:
     """Load one weight-sync batch and return its logical parameter receipt.
 
@@ -108,6 +155,13 @@ def load_weights_into_vllm(
     missing_parameters: set[str] = set()
 
     for name, tensor in conversion.weights:
+        grug_experts = _load_grug_stacked_experts(model, name, tensor)
+        if grug_experts is not None:
+            mapped_name, local_slices = grug_experts
+            acknowledged_parameters.add(mapped_name)
+            if loaded_expert_slices is not None:
+                loaded_expert_slices.update(local_slices)
+            continue
         candidates = _reported_parameter_candidates(name)
         if len(candidates) == 1:
             ordinary_weights.append((name, tensor))

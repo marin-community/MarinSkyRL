@@ -30,6 +30,34 @@ class PerSourceRecordingVLLMModel:
         return loaded
 
 
+class _ExpertParameter:
+    def __init__(self, owned_experts: set[int], ignored: set[tuple[int, str]]):
+        self.owned_experts = owned_experts
+        self.ignored = ignored
+        self.calls: list[tuple[int, str]] = []
+
+    def weight_loader(self, _parameter, _tensor, _name, *, shard_id, expert_id, return_success):
+        assert return_success
+        self.calls.append((expert_id, shard_id))
+        return expert_id in self.owned_experts and (expert_id, shard_id) not in self.ignored
+
+
+class GrugExpertRecordingModel:
+    def __init__(self, owned_experts: set[int], ignored: set[tuple[int, str]] | None = None):
+        ignored = ignored or set()
+        self.w13 = _ExpertParameter(owned_experts, ignored)
+        self.w2 = _ExpertParameter(owned_experts, ignored)
+
+    def named_parameters(self):
+        return [
+            ("model.layers.0.mlp.experts.routed_experts.w13_weight", self.w13),
+            ("model.layers.0.mlp.experts.routed_experts.w2_weight", self.w2),
+        ]
+
+    def load_weights(self, _weights):
+        raise AssertionError("stacked Grug experts must use the receipt-aware loader")
+
+
 def _packed_reported_names(name: str) -> set[str]:
     components = name.split(".")
     if len(components) >= 4 and components[-4] == "experts" and components[-3].isdigit():
@@ -142,6 +170,46 @@ def test_load_weights_into_vllm_requires_every_fused_expert_slice():
 
     assert len(model.calls) == 6
     assert all(len(call) == 1 for call in model.calls)
+
+
+def test_load_weights_into_vllm_records_each_locally_owned_grug_expert_slice():
+    model = GrugExpertRecordingModel({1})
+    loaded_expert_slices: set[str] = set()
+
+    loaded = load_weights_into_vllm(
+        model,
+        [
+            ("model.layers.0.mlp.experts.gate_proj.weight", torch.zeros(2, 3, 4)),
+            ("model.layers.0.mlp.experts.up_proj.weight", torch.zeros(2, 3, 4)),
+            ("model.layers.0.mlp.experts.down_proj.weight", torch.zeros(2, 4, 3)),
+        ],
+        loaded_expert_slices=loaded_expert_slices,
+    )
+
+    assert loaded == {
+        "model.layers.0.mlp.experts.routed_experts.w13_weight",
+        "model.layers.0.mlp.experts.routed_experts.w2_weight",
+    }
+    assert loaded_expert_slices == {
+        "model.layers.0.mlp.experts.gate_proj.weight#expert=1",
+        "model.layers.0.mlp.experts.up_proj.weight#expert=1",
+        "model.layers.0.mlp.experts.down_proj.weight#expert=1",
+    }
+    assert model.w13.calls == [(0, "w1"), (1, "w1"), (0, "w3"), (1, "w3")]
+    assert model.w2.calls == [(0, "w2"), (1, "w2")]
+
+
+def test_load_weights_into_vllm_does_not_acknowledge_a_skipped_local_expert_slice():
+    model = GrugExpertRecordingModel({1}, ignored={(1, "w3")})
+    loaded_expert_slices: set[str] = set()
+
+    load_weights_into_vllm(
+        model,
+        [("model.layers.0.mlp.experts.up_proj.weight", torch.zeros(2, 3, 4))],
+        loaded_expert_slices=loaded_expert_slices,
+    )
+
+    assert loaded_expert_slices == set()
 
 
 def test_load_weights_into_vllm_rejects_silently_skipped_ordinary_parameter():

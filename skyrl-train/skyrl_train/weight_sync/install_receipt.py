@@ -16,6 +16,7 @@ class WeightInstallReceipt(TypedDict):
     received_name_digest: str
     loaded_parameter_count: int
     loaded_parameter_digest: str
+    loaded_expert_slices: list[str]
     host: str
 
 
