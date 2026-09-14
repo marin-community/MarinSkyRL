@@ -30,6 +30,7 @@ from jax.experimental import multihost_utils
 from levanter.checkpoint import load_checkpoint, save_checkpoint
 from levanter.compat.hf_checkpoints import HFCheckpointConverter
 from levanter.distributed import DistributedConfig
+from levanter.grug.loss import fused_linear_softmax_cross_entropy_loss
 from levanter.grug.sharding import compact_grug_mesh
 from levanter.metrics import Metric
 from levanter.metrics import fold as fold_metric
@@ -287,9 +288,29 @@ def prepare_snowball_batch(batch: LearnerBatch, max_sequence_length: int) -> _Pr
 
 
 def _all_next_token_log_probs(model, tokens: hax.NamedArray, temperature: float) -> jax.Array:
-    logits = model(tokens).array.astype(jnp.float32) / jnp.asarray(temperature, dtype=jnp.float32)
+    hidden = model.activations(tokens).array
     targets = tokens.array[:, 1:]
-    return jnp.take_along_axis(jax.nn.log_softmax(logits[:, :-1], axis=-1), targets[..., None], axis=-1)[..., 0]
+    # A direct log_softmax materializes [batch, sequence, vocabulary] and its
+    # backward intermediates. The real 67B batch would require 456 GiB per
+    # H100. Levanter's GPU fused linear cross entropy streams vocabulary tiles
+    # and exposes the chosen-token negative log probability, including a
+    # custom backward that never creates the full logits tensor.
+    negative_log_probs = fused_linear_softmax_cross_entropy_loss(
+        hidden[:, :-1] / jnp.asarray(temperature, dtype=hidden.dtype),
+        model.get_lm_head().array,
+        targets,
+        reduction="none",
+        dtype=jnp.float32,
+    )
+    # The fused Grug helper names the size-one expert mesh axis in its batch
+    # spec. Normalize it back to this learner's compute batch spec so explicit
+    # sharding accepts the PPO elementwise operations that follow and the
+    # standalone score result remains distributed by batch.
+    negative_log_probs = jax.sharding.reshard(
+        negative_log_probs,
+        jax.sharding.PartitionSpec(("replica_dcn", "data"), None),
+    )
+    return -negative_log_probs
 
 
 def _regular_grpo_loss(
