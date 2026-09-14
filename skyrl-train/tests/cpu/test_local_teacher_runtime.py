@@ -115,6 +115,21 @@ async def test_local_teacher_runtime_rejects_tokenizer_mismatch_before_engine_al
     assert not allocation_attempted
 
 
+def test_local_teacher_runtime_accepts_multiple_routes_to_one_pinned_teacher(monkeypatch):
+    tokenizer = _Tokenizer({"a": 0})
+    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    cfg = _config()
+    cfg.teacher_routing.opd.routes.math = {"teacher": "primary", "weight": 0.75}
+
+    prepared = prepare_sync_distillation_runtime(cfg, tokenizer)
+
+    assert prepared is not None
+    assert [(route.key, route.teacher_id) for route in prepared.plan.routing.routes] == [
+        ("default", "primary"),
+        ("math", "primary"),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_local_teacher_runtime_scores_exact_rollout_tokens_and_owns_engine(monkeypatch):
     engine = _Engine()

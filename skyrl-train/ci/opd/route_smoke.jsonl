@@ -1,0 +1,2 @@
+{"data_source":"opd-route-smoke","prompt":[{"role":"user","content":"What is 2 + 3? Give the final answer after ####."}],"env_class":"gsm8k","reward_spec":{"method":"rule","ground_truth":"5"},"extra_info":{"split":"smoke","index":0},"teacher_route":"arithmetic"}
+{"data_source":"opd-route-smoke","prompt":[{"role":"user","content":"What is 7 - 4? Give the final answer after ####."}],"env_class":"gsm8k","reward_spec":{"method":"rule","ground_truth":"3"},"extra_info":{"split":"smoke","index":1},"teacher_route":"reasoning"}

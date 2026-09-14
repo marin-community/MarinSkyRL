@@ -112,6 +112,7 @@ class TrajectoryBatch(TypedDict):
     token_level_shaping: Optional[List[List[float]]]
     response_span_tags: Optional[List[List[int]]]
     trajectory_ids: Optional[List[TrajectoryID]]
+    teacher_route_keys: Optional[List[str]]
     is_last_step: Optional[List[bool]]
     exclude_from_baseline: Optional[List[bool]]
     actual_global_step: Optional[int]

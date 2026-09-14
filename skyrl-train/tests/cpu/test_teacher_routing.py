@@ -24,6 +24,7 @@ from skyrl_train.distillation_adapters import (
     TeacherEvidenceCoordinator,
     build_routed_teacher_scoring_work,
 )
+from skyrl_train.distillation_runtime import SyncDistillationRuntime
 from skyrl_train.teacher_oracle import (
     RotatingTeacherOracleOwner,
     TeacherCapabilities,
@@ -275,6 +276,54 @@ async def test_sync_adapter_fans_out_mixed_routes_during_model_forward():
     assert scored.trajectory_ids == routed_batch.trajectory_ids
     assert math.requests[0].trajectory_ids == ("math-a_0", "math-b_0")
     assert code.requests[0].trajectory_ids == ("code-a_0", "code-b_0")
+
+
+@pytest.mark.asyncio
+async def test_sync_runtime_routes_mixed_batch_from_trajectory_metadata():
+    math = RoutingTeacherService("math-teacher", "math-r7")
+    code = RoutingTeacherService("code-teacher", "code-r4")
+
+    async def start_math():
+        return math
+
+    async def start_code():
+        return code
+
+    runtime = SyncDistillationRuntime(
+        _plan(),
+        await TeacherOracleOwner.create({"math-teacher": start_math, "code-teacher": start_code}),
+        tokenizer_fingerprints={
+            "math-teacher": "sha256:shared-tokenizer",
+            "code-teacher": "sha256:shared-tokenizer",
+        },
+    )
+    trajectory_batch = _trajectory_batch()
+    trajectory_batch["teacher_route_keys"] = ["math", "code", "math", "code"]
+
+    forward_result, scored = await runtime.score_while_model_forwarding(
+        trajectory_batch,
+        lambda: "forward-complete",
+    )
+    await runtime.close()
+
+    assert forward_result == "forward-complete"
+    assert tuple(route.route_id for route in scored.routes) == ("math", "code", "math", "code")
+    assert math.requests[0].trajectory_ids == ("math-a_0", "math-b_0")
+    assert code.requests[0].trajectory_ids == ("code-a_0", "code-b_0")
+
+
+@pytest.mark.asyncio
+async def test_sync_runtime_requires_explicit_routes_for_multi_route_plan():
+    with pytest.raises(ValueError, match="requires teacher_route_keys"):
+        runtime = SyncDistillationRuntime(
+            _plan(),
+            {},
+            tokenizer_fingerprints={
+                "math-teacher": "sha256:shared-tokenizer",
+                "code-teacher": "sha256:shared-tokenizer",
+            },
+        )
+        await runtime.score_while_model_forwarding(_trajectory_batch(), lambda: "forward-complete")
 
 
 def test_router_rejects_unknown_route_before_partitioning():

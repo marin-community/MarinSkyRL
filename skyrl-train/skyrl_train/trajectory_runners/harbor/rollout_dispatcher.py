@@ -16,7 +16,12 @@ from typing import Any, List, Optional
 import ray
 from omegaconf import DictConfig, OmegaConf
 
-from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch, TrajectoryBatch
+from skyrl_train.trajectory_runners.base import (
+    TrajectoryBatch,
+    TrajectoryID,
+    TrajectoryRequestBatch,
+    propagate_teacher_routes,
+)
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
@@ -409,6 +414,7 @@ class RolloutDispatcher:
                 result["actual_global_step"] = min(observed_steps)
             self._restore_request_order(result, trajectory_ids)
 
+        propagate_teacher_routes(input_batch, result)
         # Outside the deadline: a slow sink write is not an unresponsive coordinator.
         if self._trajectory_sink is not None:
             await retain_trajectories(self._trajectory_sink, input_batch, result)
