@@ -43,6 +43,14 @@ jobs:
             iris_timeout: 5400
             task_script: skyrl-train/ci/marin_nightly/run_h100.sh
             log: nightly.log
+          - lane: opd-sync-h100
+            target_cluster: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
+            gpu: H100x4
+            cpu: 32
+            memory: 192GB
+            iris_timeout: 3600
+            task_script: skyrl-train/ci/marin_nightly/run_opd_h100.sh
+            log: opd-nightly.log
           - lane: grug-vllm-gb200
             target_cluster: ${{ github.event.inputs.grug_target_cluster || 'cw-us-east-08a' }}
             gpu: GB200x4

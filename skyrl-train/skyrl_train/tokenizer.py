@@ -8,12 +8,14 @@ def create_tokenizer(
     *,
     disable_fast_tokenizer: bool,
     padding_side: str = "left",
+    revision: str | None = None,
 ) -> PreTrainedTokenizerBase:
-    """Create the policy tokenizer with the repository's padding contract."""
+    """Create a model tokenizer with the repository's padding contract."""
     tokenizer = AutoTokenizer.from_pretrained(
         model_path,
         trust_remote_code=True,
         use_fast=not disable_fast_tokenizer,
+        revision=revision,
     )
     tokenizer.padding_side = padding_side
     if tokenizer.pad_token is None:

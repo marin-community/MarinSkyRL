@@ -349,6 +349,10 @@ class RayPPOTrainerDistillationAdapter:
     def __init__(self, coordinator: TeacherEvidenceCoordinator) -> None:
         self._coordinator = coordinator
 
+    @classmethod
+    def from_oracles(cls, oracles: TeacherOracleCollection) -> RayPPOTrainerDistillationAdapter:
+        return cls(TeacherEvidenceCoordinator(oracles))
+
     async def score_while_model_forwarding(
         self,
         work: TeacherScoringWork,

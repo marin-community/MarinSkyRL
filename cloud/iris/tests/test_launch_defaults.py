@@ -748,6 +748,51 @@ def test_task_local_model_source_is_materialized_without_hf_prestage(tmp_path):
     }
 
 
+def test_offline_local_teacher_revision_is_staged_before_ray(tmp_path):
+    args = _args(tmp_path, "opencode")
+    Path(args.rl_config).write_text(
+        """\
+extra_env:
+  HF_HUB_OFFLINE: '1'
+trainer:
+  algorithm:
+    distillation:
+      objective: sampled_reverse_kl
+      routing_plan: opd
+      coefficient: 0.5
+      reward_mode: add
+teachers:
+  primary:
+    source: local_inference
+    placement: pinned
+    model:
+      path: Qwen/teacher
+      revision: abc123
+    backend: vllm
+    evidence: chosen_token
+    resources:
+      num_nodes: 1
+      gpus_per_node: 8
+      tensor_parallel_size: 8
+      colocation_group: teacher
+teacher_routing:
+  opd:
+    revision: route-v1
+    routes:
+      default:
+        teacher: primary
+        weight: 1.0
+"""
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    staged = json.loads(options["--prestage-teacher-models-json"][0])
+    assert staged == [{"path": "Qwen/teacher", "revision": "abc123"}]
+
+
 def test_task_local_model_without_source_supports_chat_template_override(tmp_path):
     args = _args(tmp_path, "opencode", ["--model_path", "/models/preloaded-policy"])
     Path(args.rl_config).write_text("policy_chat_template: chat_templates/test.jinja2\n")

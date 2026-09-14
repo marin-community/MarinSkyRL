@@ -5,6 +5,8 @@ from enum import StrEnum
 
 from omegaconf import DictConfig
 
+from marinskyrl.distillation import compile_distillation_plan_from_config
+
 from marinskyrl.harbor_agent_names import (
     DEFAULT_HARBOR_AGENT_NAME,
     OPENCODE_HARBOR_AGENT_NAME,
@@ -206,6 +208,12 @@ def validate_trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRun
     # Keep launcher imports Torch-free. Importing a skyrl_train.utils submodule
     # executes that package's eager registration imports, including Torch.
     from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
+
+    distillation_plan = compile_distillation_plan_from_config(cfg)
+    if distillation_plan is not None and mode is not TrajectoryRunnerMode.SKYRL_GYM:
+        raise ValueError(
+            f"configured distillation currently supports only the synchronous SkyRL Gym trainer; got {mode.value}"
+        )
 
     algorithm = cfg.trainer.algorithm
     behavior_logprobs_required = rollout_logprobs_enabled(algorithm)
