@@ -960,24 +960,21 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         _fuse_weights = bool(self.cfg.generator.fuse_weights)
 
         # #1685 fix (FlashInfer-CUTLASS w13 swap skipped on RL update -> MoE token-salad):
-        # bracket the WHOLE multi-chunk sync with vLLM's layerwise reload so per-chunk
-        # model.load_weights DEFER processing and a single finalize re-runs
+        # bracket the WHOLE multi-chunk sync with vLLM's layerwise reload so model.load_weights
+        # defers processing and a single finalize re-runs
         # process_weights_after_loading (re-applying swap_w13_to_w31) EXACTLY once. PROVEN
         # by the disagg kernel-format diag: without this the engine holds checkpoint
         # [gate;up] while the FlashInfer CUTLASS kernel reads [up;gate]. Inert (swap-wise)
-        # on triton/dense backends, so byte-identical there.
-        _w13_bracket = not self.use_cuda_ipc and not _fuse_weights
+        # on triton/dense backends, so byte-identical there. CUDA IPC requires this too:
+        # transport changes how tensors arrive, not vLLM's kernel-layout contract.
+        _w13_bracket = not _fuse_weights
+
+        await self._begin_vllm_layerwise_weight_reload(inference_engine_client, enabled=_w13_bracket)
 
         if not self.use_cuda_ipc:
             # Signal engines to start accumulating weights (for FP8 batched quantization)
             if _fuse_weights and torch.distributed.get_rank() == 0:
                 await inference_engine_client.begin_weight_update()
-
-            # Open the layerwise-reload bracket (rank 0 drives the engine RPC).
-            if _w13_bracket and torch.distributed.get_rank() == 0:
-                await inference_engine_client.begin_weight_reload()
-            if _w13_bracket:
-                torch.distributed.barrier()
 
             # Broadcast path: one chunk per parameter
             for chunk in self.weight_extractor.extract_weights(generator_dtype):
@@ -1012,13 +1009,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             if _fuse_weights and torch.distributed.get_rank() == 0:
                 await inference_engine_client.end_weight_update()
 
-            # Close the layerwise-reload bracket: finalize_layerwise_reload re-runs
-            # process_weights_after_loading over every layer ONCE -> re-applies the
-            # FlashInfer-CUTLASS w13 [gate;up]->[up;gate] swap the per-chunk loads skipped.
-            if _w13_bracket:
-                torch.distributed.barrier()
-                if torch.distributed.get_rank() == 0:
-                    await inference_engine_client.finish_weight_reload()
         else:
             # CUDA IPC path: batched chunks (batching handled by extractor)
             from torch.multiprocessing.reductions import reduce_tensor
@@ -1058,6 +1048,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     torch.cuda.ipc_collect()
                 torch.distributed.barrier()
                 torch.cuda.synchronize()
+
+        # Finalize after every transport chunk so vLLM materializes and processes each layer
+        # exactly once. In particular, this restores FlashInfer-CUTLASS's w13 kernel layout.
+        await self._finish_vllm_layerwise_weight_reload(inference_engine_client, enabled=_w13_bracket)
 
         if cache_reset_task is not None:
             await cache_reset_task

@@ -522,7 +522,7 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
 
 @pytest.mark.vllm
 def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tmp_path):
-    """A sleep-level-2 CUDA-IPC sync restores every grouped expert tensor."""
+    """A sleep-level-2 CUDA-IPC sync preserves grouped experts and serving output."""
 
     world_size = 2
     require_hoppers(world_size)
@@ -542,8 +542,24 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
         str(model_path),
         shared_pg=shared_pg,
         inference_engine_enable_sleep=True,
+        moe_backend="flashinfer_cutlass",
     )
     try:
+        asyncio.run(client.wake_up())
+        prompts = [[1, 17, 29, 5, 11, 3], [1, 19, 31, 7, 13, 3]]
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params.update({"temperature": 0.0, "max_tokens": 1, "prompt_logprobs": 1})
+        target_tokens = [47, 53]
+        score_prompts = [prompt + [target] for prompt, target in zip(prompts, target_tokens, strict=True)]
+        score_input = InferenceEngineInput(prompt_token_ids=score_prompts, sampling_params=sampling_params)
+
+        def target_logprobs(result) -> torch.Tensor:
+            return torch.tensor(
+                [row[-1][target] for row, target in zip(result["prompt_logprobs"], target_tokens, strict=True)]
+            )
+
+        before_logprobs = target_logprobs(asyncio.run(client.generate(score_input)))
+
         policy = init_worker_with_type(
             "policy",
             shared_pg=shared_pg,
@@ -552,14 +568,32 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
             num_nodes=1,
             cfg=cfg,
         )
-        sync_names = [*SERVING_EXPERT_INDEX_BY_NAME, LM_HEAD_NAME, ROUTER_NAME]
-        training = rank0_validation_snapshot(policy, [STACKED_EXPERT_NAME, LM_HEAD_NAME, ROUTER_NAME])
+        # Expert storage is deliberately reordered by FlashInfer-CUTLASS finalization, so raw
+        # readback is not an HF-layout invariant. Serving parity below exercises the experts in
+        # their actual kernel layout; keep bytewise readback for layout-neutral weights.
+        sync_names = [LM_HEAD_NAME, ROUTER_NAME]
+        training = rank0_validation_snapshot(policy, sync_names)
 
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        ray.get(
+            policy.async_run_ray_method("pass_through", "offload_to_cpu", offload_optimizer=True, offload_model=False)
+        )
         asyncio.run(client.wake_up(tags=["weights"]))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
 
-        assert_engine_weights(client, sync_names, training, [], SERVING_EXPERT_INDEX_BY_NAME)
+        assert_engine_weights(client, sync_names, training, [], {})
+
+        ray.get(
+            policy.async_run_ray_method("pass_through", "offload_to_cpu", offload_optimizer=False, offload_model=True)
+        )
+        asyncio.run(client.wake_up(tags=["kv_cache"]))
+        after_logprobs = target_logprobs(asyncio.run(client.generate(score_input)))
+        torch.testing.assert_close(
+            after_logprobs,
+            before_logprobs,
+            rtol=0,
+            atol=LOGPROB_MAX_ABS_TOLERANCE,
+        )
     finally:
         ray.util.remove_placement_group(shared_pg)
         ray.shutdown()
