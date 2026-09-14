@@ -33,6 +33,7 @@ GPU_COUNT = 8
 TRAIN_BATCH_SIZE = 16
 SEQUENCE_LENGTH = int(os.environ.get("SNOWBALL_NUMERICAL_SEQUENCE_LENGTH", "4096"))
 ATTENTION_IMPLEMENTATION = os.environ.get("SNOWBALL_NUMERICAL_ATTENTION_IMPLEMENTATION", "gpu_fa4_cute")
+MICROBATCH_PER_GPU = int(os.environ.get("SNOWBALL_NUMERICAL_MICROBATCH_PER_GPU", "1"))
 RESPONSE_LENGTH = 256
 MAX_ABS_DIFF_LIMIT = 1e-5
 MEAN_ABS_DIFF_LIMIT = 1e-7
@@ -55,8 +56,8 @@ def _runtime(output_dir: Path) -> LevanterSnowballRuntimeConfig:
         training_gpus=GPU_COUNT,
         inference_world_size=1,
         train_batch_size=TRAIN_BATCH_SIZE,
-        micro_train_batch_size_per_gpu=1,
-        micro_forward_batch_size_per_gpu=1,
+        micro_train_batch_size_per_gpu=MICROBATCH_PER_GPU,
+        micro_forward_batch_size_per_gpu=MICROBATCH_PER_GPU,
         num_train_steps=1,
         learning_rate=1e-5,
         adam_beta1=0.9,
@@ -131,6 +132,11 @@ def _difference(left: np.ndarray, right: np.ndarray, selected: np.ndarray) -> di
 def main() -> None:
     if SEQUENCE_LENGTH < RESPONSE_LENGTH:
         raise ValueError(f"SNOWBALL_NUMERICAL_SEQUENCE_LENGTH={SEQUENCE_LENGTH} must be at least {RESPONSE_LENGTH}")
+    global_microbatch = GPU_COUNT * MICROBATCH_PER_GPU
+    if global_microbatch <= 0:
+        raise ValueError("SNOWBALL_NUMERICAL_MICROBATCH_PER_GPU must be positive")
+    if TRAIN_BATCH_SIZE % global_microbatch:
+        raise ValueError(f"train batch {TRAIN_BATCH_SIZE} must be divisible by global microbatch {global_microbatch}")
     if jax.default_backend() != "gpu":
         raise RuntimeError(f"expected GPU backend, got {jax.default_backend()}")
     if jax.device_count() != GPU_COUNT:
@@ -185,8 +191,8 @@ def main() -> None:
                 "experts_per_token": config.num_experts_per_token,
                 "sequence_length": SEQUENCE_LENGTH,
                 "train_batch_size": TRAIN_BATCH_SIZE,
-                "microbatch_per_gpu": 1,
-                "gradient_accumulation_steps": TRAIN_BATCH_SIZE // GPU_COUNT,
+                "microbatch_per_gpu": MICROBATCH_PER_GPU,
+                "gradient_accumulation_steps": TRAIN_BATCH_SIZE // (GPU_COUNT * MICROBATCH_PER_GPU),
                 "attention_implementation": config.attention_implementation,
                 "moe_implementation": config.moe_implementation,
             },
