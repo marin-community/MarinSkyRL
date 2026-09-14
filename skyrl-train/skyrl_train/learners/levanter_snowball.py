@@ -30,7 +30,6 @@ from jax.experimental import multihost_utils
 from levanter.checkpoint import load_checkpoint, save_checkpoint
 from levanter.compat.hf_checkpoints import HFCheckpointConverter
 from levanter.distributed import DistributedConfig
-from levanter.grad_accum import _reshape_for_microbatch
 from levanter.grug.sharding import compact_grug_mesh
 from levanter.metrics import Metric
 from levanter.metrics import fold as fold_metric
@@ -122,7 +121,7 @@ def _snowball_microbatched(fn, Batch, microbatch_size, accum_axis_mapping, compu
             return is_named_array(value) or isinstance(value, hq.CustomGradientAccumulation)
 
         batched_inputs, unbatched_inputs = eqx.partition((batch, kwargs), is_batched, is_leaf=is_input_leaf)
-        batched_inputs = _reshape_for_microbatch(
+        batched_inputs = _reshape_named_batches_for_microbatch(
             Batch,
             Microbatch,
             AccumStep,
@@ -161,6 +160,34 @@ def _snowball_microbatched(fn, Batch, microbatch_size, accum_axis_mapping, compu
         return (loss, metrics), gradients
 
     return wrapped_fn
+
+
+def _reshape_named_batches_for_microbatch(Batch, Microbatch, AccumStep, inputs, axis_mapping):
+    """Split named batches while preserving explicit global sharding.
+
+    On GPU, JAX requires ``lax.reshape`` to name the output sharding when a
+    dimension is split under an explicit mesh. The accumulation axis stays
+    replicated and the old batch partition moves to the microbatch axis.
+    """
+
+    def reshape(value):
+        if not isinstance(value, hax.NamedArray) or not value.has_axis(Batch.name):
+            return value
+        batch_index = value.axis_indices(Batch)
+        assert batch_index is not None
+        output_axes = value.axes[:batch_index] + (AccumStep, Microbatch) + value.axes[batch_index + 1 :]
+        output_shape = tuple(axis.size for axis in output_axes)
+
+        sharding = jax.typeof(value.array).sharding
+        out_sharding = None
+        if isinstance(sharding, jax.sharding.NamedSharding):
+            input_spec = tuple(sharding.spec) + (None,) * (value.array.ndim - len(sharding.spec))
+            output_spec = input_spec[:batch_index] + (None, input_spec[batch_index]) + input_spec[batch_index + 1 :]
+            out_sharding = jax.sharding.PartitionSpec(*output_spec)
+        array = jax.lax.reshape(value.array, output_shape, out_sharding=out_sharding)
+        return hax.shard(hax.named(array, output_axes), axis_mapping)
+
+    return jax.tree_util.tree_map(reshape, inputs, is_leaf=is_named_array)
 
 
 class _SnowballTrainer(Trainer):

@@ -338,7 +338,7 @@ def _multihost_learner_worker(
         training_nodes=2,
         training_gpus_per_node=2,
         training_gpus=4,
-        train_batch_size=4,
+        train_batch_size=16,
     )
     model_config = _snowball_config()
     learner = LevanterSnowballLearner(
@@ -371,21 +371,22 @@ def _multihost_learner_worker(
     assert not global_values.is_fully_addressable
     np.testing.assert_array_equal(_replicated_host_copy(global_values), np.arange(8, dtype=np.float32))
     original = _batch()
+    repeats = 8
     batch = LearnerBatch(
-        sequences=np.concatenate((original.sequences, original.sequences)),
-        attention_mask=np.concatenate((original.attention_mask, original.attention_mask)),
-        response_mask=np.concatenate((original.response_mask, original.response_mask)),
-        loss_mask=np.concatenate((original.loss_mask, original.loss_mask)),
+        sequences=np.concatenate((original.sequences,) * repeats),
+        attention_mask=np.concatenate((original.attention_mask,) * repeats),
+        response_mask=np.concatenate((original.response_mask,) * repeats),
+        loss_mask=np.concatenate((original.loss_mask,) * repeats),
         rollout_log_probs=None,
-        behavior_policy_versions=np.zeros(4, dtype=np.int64),
+        behavior_policy_versions=np.zeros(16, dtype=np.int64),
     )
     old_log_probs = learner.compute_log_probs(batch).policy_log_probs
     update = learner.update(
         UpdateRequest(
             batch=batch,
-            advantages=np.asarray(
-                [[1.0, -0.5, 0.0], [0.25, -1.0, 0.5], [1.0, -0.5, 0.0], [0.25, -1.0, 0.5]],
-                dtype=np.float32,
+            advantages=np.tile(
+                np.asarray([[1.0, -0.5, 0.0], [0.25, -1.0, 0.5]], dtype=np.float32),
+                (repeats, 1),
             ),
             old_policy_log_probs=old_log_probs,
             old_policy_version=0,
