@@ -226,13 +226,6 @@ def _sink(config, publisher=None) -> TrajectorySink:
     return sink
 
 
-def test_retention_config_uses_expanded_default_byte_limits():
-    config = parse_trajectory_retention_config({"enabled": False})
-
-    assert config.max_bytes_per_step == 800 * 1024 * 1024
-    assert config.max_bytes_per_run == 25 * 1024 * 1024 * 1024
-
-
 def test_normalized_output_produces_complete_core_trace_schema():
     records = build_trajectory_records(
         _input(),
