@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import os
 from pathlib import Path
@@ -147,6 +148,57 @@ def test_facade_fails_closed_when_post_update_results_disagree(monkeypatch):
         learner.update(SimpleNamespace())
 
     assert learner.state.lifecycle is LearnerLifecycle.FAILED
+
+
+def test_facade_rejects_operations_after_uncertain_update_until_restore(monkeypatch):
+    class RecordingRemoteCall:
+        def __init__(self):
+            self.calls = []
+
+        def remote(self, *args):
+            self.calls.append(args)
+            return object()
+
+    class RecordingActor:
+        def __init__(self):
+            self.compute_log_probs = RecordingRemoteCall()
+            self.update = RecordingRemoteCall()
+            self.publish_policy = RecordingRemoteCall()
+            self.save_checkpoint = RecordingRemoteCall()
+            self.load_checkpoint = RecordingRemoteCall()
+            self.export_policy = RecordingRemoteCall()
+
+    learner = _facade_with_fake_actors()
+    learner._actors = [RecordingActor(), RecordingActor()]
+    first = UpdateResult(UpdateStatus.SUCCEEDED, {"final_loss": 1.0})
+    second = UpdateResult(UpdateStatus.SUCCEEDED, {"final_loss": 2.0})
+    monkeypatch.setattr(
+        distributed_levanter.ray,
+        "get",
+        lambda _refs: [(first, _ready_state(policy_version=1)), (second, _ready_state(policy_version=1))],
+    )
+
+    with pytest.raises(RuntimeError, match="different final_loss metric"):
+        learner.update(SimpleNamespace())
+
+    attempted_operations = (
+        (lambda: learner.compute_log_probs(SimpleNamespace()), "compute_log_probs"),
+        (lambda: learner.update(SimpleNamespace()), "update"),
+        (lambda: asyncio.run(learner.publish_policy()), "publish_policy"),
+        (lambda: learner.save_checkpoint("checkpoint"), "save_checkpoint"),
+        (lambda: learner.export_policy("export"), "export_policy"),
+    )
+    for operation, actor_method in attempted_operations:
+        calls_before = [len(getattr(actor, actor_method).calls) for actor in learner._actors]
+        with pytest.raises(RuntimeError, match="lifecycle failed; restore it first"):
+            operation()
+        assert [len(getattr(actor, actor_method).calls) for actor in learner._actors] == calls_before
+
+    recovered = _ready_state(policy_version=1)
+    monkeypatch.setattr(distributed_levanter.ray, "get", lambda _refs: [recovered, recovered])
+    learner.load_checkpoint("checkpoint")
+    assert learner.state == recovered
+    assert [len(actor.load_checkpoint.calls) for actor in learner._actors] == [1, 1]
 
 
 def test_facade_fails_closed_when_loaded_actor_states_disagree(monkeypatch):

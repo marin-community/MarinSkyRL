@@ -198,20 +198,26 @@ class DistributedLevanterSnowballLearner:
             raise
 
     def compute_log_probs(self, batch: LearnerBatch) -> LogProbResult:
-        results = ray.get([actor.compute_log_probs.remote(batch) for actor in self._actors])
-        first = results[0]
-        for process_id, result in enumerate(results[1:], start=1):
-            if result.policy_version != first.policy_version:
-                raise RuntimeError(
-                    f"JAX process {process_id} returned policy version {result.policy_version}; "
-                    f"process zero returned {first.policy_version}"
-                )
-            np.testing.assert_array_equal(result.policy_log_probs, first.policy_log_probs)
-            if result.reference_log_probs is not None or first.reference_log_probs is not None:
-                raise RuntimeError("the Snowball learner unexpectedly returned reference log probabilities")
+        self._require_ready("score")
+        try:
+            results = ray.get([actor.compute_log_probs.remote(batch) for actor in self._actors])
+            first = results[0]
+            for process_id, result in enumerate(results[1:], start=1):
+                if result.policy_version != first.policy_version:
+                    raise RuntimeError(
+                        f"JAX process {process_id} returned policy version {result.policy_version}; "
+                        f"process zero returned {first.policy_version}"
+                    )
+                np.testing.assert_array_equal(result.policy_log_probs, first.policy_log_probs)
+                if result.reference_log_probs is not None or first.reference_log_probs is not None:
+                    raise RuntimeError("the Snowball learner unexpectedly returned reference log probabilities")
+        except BaseException:
+            self._state = self._failed_state()
+            raise
         return first
 
     def update(self, request: UpdateRequest) -> UpdateResult:
+        self._require_ready("update")
         try:
             results = ray.get([actor.update.remote(request) for actor in self._actors])
             merged_result = _merge_update_results([result for result, _ in results])
@@ -222,6 +228,7 @@ class DistributedLevanterSnowballLearner:
         return merged_result
 
     async def publish_policy(self) -> None:
+        self._require_ready("publish")
         refs = [actor.publish_policy.remote() for actor in self._actors]
         try:
             states = await asyncio.to_thread(ray.get, refs)
@@ -231,10 +238,17 @@ class DistributedLevanterSnowballLearner:
             raise
 
     def save_checkpoint(self, path: str) -> None:
-        states = ray.get([actor.save_checkpoint.remote(path) for actor in self._actors])
-        self._state = self._consistent_state(states, "checkpoint save")
+        self._require_ready("save a checkpoint")
+        try:
+            states = ray.get([actor.save_checkpoint.remote(path) for actor in self._actors])
+            self._state = self._consistent_state(states, "checkpoint save")
+        except BaseException:
+            self._state = self._failed_state()
+            raise
 
     def load_checkpoint(self, path: str) -> None:
+        if self._state.lifecycle not in {LearnerLifecycle.READY, LearnerLifecycle.FAILED}:
+            raise RuntimeError(f"cannot restore learner in lifecycle {self._state.lifecycle.value}")
         try:
             states = ray.get([actor.load_checkpoint.remote(path) for actor in self._actors])
             self._state = self._consistent_state(states, "checkpoint load")
@@ -243,8 +257,13 @@ class DistributedLevanterSnowballLearner:
             raise
 
     def export_policy(self, path: str) -> None:
-        states = ray.get([actor.export_policy.remote(path) for actor in self._actors])
-        self._state = self._consistent_state(states, "policy export")
+        self._require_ready("export")
+        try:
+            states = ray.get([actor.export_policy.remote(path) for actor in self._actors])
+            self._state = self._consistent_state(states, "policy export")
+        except BaseException:
+            self._state = self._failed_state()
+            raise
 
     def close(self) -> None:
         if self._state.lifecycle is LearnerLifecycle.CLOSED:
@@ -276,6 +295,12 @@ class DistributedLevanterSnowballLearner:
         if self._placement_group is not None:
             remove_placement_group(self._placement_group)
             self._placement_group = None
+
+    def _require_ready(self, operation: str) -> None:
+        if self._state.lifecycle is not LearnerLifecycle.READY:
+            raise RuntimeError(
+                f"cannot {operation} learner in lifecycle {self._state.lifecycle.value}; restore it first"
+            )
 
     def _consistent_state(self, states: list[LearnerState], operation: str) -> LearnerState:
         if not states:

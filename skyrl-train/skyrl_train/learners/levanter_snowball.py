@@ -336,15 +336,9 @@ def _regular_grpo_loss(
     clip_low: float,
     clip_high: float,
 ):
-    del key, old_log_probs
+    del key
     log_probs = _all_next_token_log_probs(model, tokens, temperature)
-    # This backend accepts one synchronous update epoch only. The behavior and
-    # current policy are therefore the same model at this point. Anchor the PPO
-    # denominator to this exact forward, as the recovered Snowball run did, so
-    # nondeterminism between two BF16 accelerator forwards cannot activate the
-    # clip branch before any optimizer step. stop_gradient preserves the usual
-    # policy-gradient derivative while making the ratio exactly one in value.
-    objective_old_log_probs = jax.lax.stop_gradient(log_probs)
+    objective_old_log_probs = jax.lax.stop_gradient(old_log_probs.array)
     delta = jnp.clip(log_probs - objective_old_log_probs, -LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP)
     ratio = jnp.exp(delta)
     surrogate = ratio * advantages.array
@@ -686,7 +680,7 @@ class LevanterSnowballLearner:
             preupdate = prepared.response_values(preupdate_dense)
             selected = request.batch.loss_mask > 0
             deviations = np.abs(preupdate[selected] - request.old_policy_log_probs[selected])
-            replay_ratios = np.exp(
+            ratios = np.exp(
                 np.clip(
                     preupdate[selected] - request.old_policy_log_probs[selected],
                     -LOG_PROB_DELTA_CLIP,
@@ -694,16 +688,18 @@ class LevanterSnowballLearner:
                 )
             )
             selected_advantages = request.advantages[selected]
-            replay_unclipped = replay_ratios * selected_advantages
-            replay_clipped = (
+            unclipped_surrogate = ratios * selected_advantages
+            clipped_surrogate = (
                 np.clip(
-                    replay_ratios,
+                    ratios,
                     1.0 - self._learner_config.clip_low,
                     1.0 + self._learner_config.clip_high,
                 )
                 * selected_advantages
             )
-            replay_clipped_tokens = replay_clipped < replay_unclipped
+            clipped_tokens = clipped_surrogate < unclipped_surrogate
+            clipped_low_tokens = (ratios < 1.0 - self._learner_config.clip_low) & (selected_advantages < 0)
+            clipped_high_tokens = (ratios > 1.0 + self._learner_config.clip_high) & (selected_advantages > 0)
             validation_seconds = time.perf_counter() - validation_start
 
             dense_old = prepared.dense_response_values(request.old_policy_log_probs)
@@ -754,12 +750,10 @@ class LevanterSnowballLearner:
                 "valid_token_weight": valid_weight,
                 "preupdate_logprob_mean_abs_diff": float(np.mean(deviations)),
                 "preupdate_logprob_max_abs_diff": float(np.max(deviations)),
-                "ppo_ratio_mean": 1.0,
-                "ppo_clip_ratio": 0.0,
-                "ppo_clip_ratio_low": 0.0,
-                "ppo_clip_ratio_high": 0.0,
-                "preupdate_replay_ratio_mean": float(np.mean(replay_ratios)),
-                "preupdate_replay_clip_ratio": float(np.mean(replay_clipped_tokens)),
+                "ppo_ratio_mean": float(np.mean(ratios)),
+                "ppo_clip_ratio": float(np.mean(clipped_tokens)),
+                "ppo_clip_ratio_low": float(np.mean(clipped_low_tokens)),
+                "ppo_clip_ratio_high": float(np.mean(clipped_high_tokens)),
                 "parameter_probe_delta_l2": parameter_probe_delta_l2,
                 "router_bias_max_delta": router_bias_max_delta,
                 "forward_validation_seconds": validation_seconds,

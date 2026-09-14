@@ -727,8 +727,7 @@ def _torch_loss(torch_model, tokens, old_log_probs, advantages, loss_mask):
     logits = torch_model(token_ids).logits.float()
     targets = token_ids[:, 1:]
     log_probs = torch.log_softmax(logits[:, :-1], dim=-1).gather(-1, targets[..., None])[..., 0]
-    del old_log_probs
-    old = log_probs.detach()
+    old = torch.as_tensor(old_log_probs)
     advantage = torch.as_tensor(advantages)
     mask = torch.as_tensor(loss_mask)
     ratio = torch.exp(torch.clamp(log_probs - old, -20.0, 20.0))
@@ -797,13 +796,12 @@ def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
     with learner._trainer_config.use_device_mesh():
         (levanter_loss, _), levanter_grad = eqx.filter_value_and_grad(objective, has_aux=True)(learner.model)
 
-    objective_old = torch_dense_log_probs.detach()
     global_token_mean = (
         -torch.minimum(
-            torch.exp(torch.clamp(torch_dense_log_probs - objective_old, -20.0, 20.0))
+            torch.exp(torch.clamp(torch_dense_log_probs - torch.as_tensor(dense_old), -20.0, 20.0))
             * torch.as_tensor(dense_advantages),
             torch.clamp(
-                torch.exp(torch.clamp(torch_dense_log_probs - objective_old, -20.0, 20.0)),
+                torch.exp(torch.clamp(torch_dense_log_probs - torch.as_tensor(dense_old), -20.0, 20.0)),
                 0.8,
                 1.2,
             )
@@ -866,9 +864,11 @@ def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
     assert evidence["gradient_max_abs_diff"] < 2e-6
     assert evidence["first_update_max_abs_diff"] < 2e-6
     assert update.metrics["preupdate_logprob_max_abs_diff"] == pytest.approx(0.5, abs=1e-6)
-    assert update.metrics["ppo_ratio_mean"] == 1.0
-    assert update.metrics["ppo_clip_ratio"] == 0.0
-    assert update.metrics["preupdate_replay_clip_ratio"] > 0
+    expected_ratios = np.exp(-offsets[selected])
+    assert update.metrics["ppo_ratio_mean"] == pytest.approx(float(expected_ratios.mean()), abs=1e-6)
+    assert update.metrics["ppo_clip_ratio"] == pytest.approx(0.2)
+    assert update.metrics["ppo_clip_ratio_low"] == 0.0
+    assert update.metrics["ppo_clip_ratio_high"] == pytest.approx(0.2)
     assert update.metrics["parameter_probe_delta_l2"] > 0
     assert update.metrics["router_bias_max_delta"] == 0
     learner.close()
