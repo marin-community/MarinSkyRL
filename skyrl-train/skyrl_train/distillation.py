@@ -12,6 +12,7 @@ from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.tensor_math import masked_mean, safe_exp_delta
 
 INVALID_TOPK_INDEX = -1
+RETAINED_MASS_ATOL = 1e-6
 
 
 @dataclass(frozen=True)
@@ -268,7 +269,9 @@ def _validate_topk_distribution(
     valid_mass = retained_mass[valid_mask]
     if torch.any(valid_indices < 0):
         raise ValueError("valid teacher top-K indices must be non-negative")
-    if not torch.all(torch.isfinite(valid_mass)) or torch.any((valid_mass <= 0) | (valid_mass > 1)):
+    if not torch.all(torch.isfinite(valid_mass)) or torch.any(
+        (valid_mass <= 0) | (valid_mass > 1 + RETAINED_MASS_ATOL)
+    ):
         raise ValueError("valid teacher retained_mass must lie in (0, 1]")
     if not torch.all(torch.isnan(retained_mass[~valid_mask])):
         raise ValueError("invalid teacher retained_mass must be NaN")
@@ -279,7 +282,7 @@ def _validate_topk_distribution(
         if torch.any(sorted_indices[..., 1:] == sorted_indices[..., :-1]):
             raise ValueError("valid teacher top-K indices must be unique per token")
     observed_mass = valid_logprobs.float().exp().sum(dim=-1)
-    if not torch.allclose(observed_mass, valid_mass.float(), rtol=1e-4, atol=1e-6):
+    if not torch.allclose(observed_mass, valid_mass.float(), rtol=1e-4, atol=RETAINED_MASS_ATOL):
         raise ValueError("teacher retained_mass must equal the probability mass of top-K logprobs")
 
 

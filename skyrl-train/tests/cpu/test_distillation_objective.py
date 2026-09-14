@@ -14,6 +14,7 @@ from skyrl_train.distillation import (
     distillation_input_from_tensors,
     prepare_sampled_reverse_kl,
     prepare_sparse_forward_kl,
+    sparse_forward_kl_loss,
     student_topk_logprobs,
     validate_sampled_reverse_kl_attachment,
     validate_teacher_evidence,
@@ -193,6 +194,26 @@ def test_sparse_forward_kl_full_vocabulary_matches_dense_kl_and_gradient():
     torch.testing.assert_close(student_logits.grad, student_logits.softmax(dim=-1) - teacher_probs)
     assert objective.metrics["distillation_retained_mass_mean"] == pytest.approx(1.0)
     assert objective.metrics["distillation_topk"] == 4
+
+
+def test_sparse_forward_kl_accepts_full_mass_float_roundoff():
+    teacher_probs = torch.tensor([[[0.6, 0.4]]], dtype=torch.float64)
+    teacher_indices = torch.tensor([[[0, 1]]])
+    distillation = SparseForwardKLInput(
+        teacher_topk_indices=teacher_indices,
+        teacher_topk_logprobs=teacher_probs.log(),
+        retained_mass=torch.tensor([[1.0 + 1e-12]], dtype=torch.float64),
+        valid_mask=torch.ones((1, 1), dtype=torch.bool),
+        loss_weights=torch.ones((1, 1), dtype=torch.float64),
+    )
+
+    loss, _ = sparse_forward_kl_loss(
+        student_topk_logprobs(torch.zeros_like(teacher_probs), teacher_indices),
+        distillation,
+        torch.ones((1, 1)),
+    )
+
+    assert torch.isfinite(loss)
 
 
 def test_sparse_forward_kl_reports_top20_top256_and_full_retained_mass_and_learns():
