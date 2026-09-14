@@ -44,8 +44,6 @@ from tests.gpu.utils import get_test_actor_config
 ACTIVE_GPUS = 4
 LEARNER_GPUS = 2
 GPU_REPLAY_ATOL = 1e-4
-UNCHANGED_POLICY_MAX_ABS_DIFF = 1e-5
-UNCHANGED_POLICY_MEAN_ABS_DIFF = 1e-7
 ROUTER_BIAS_NAME = "model.layers.0.mlp.router.bias"
 QUERY_NAME = "model.layers.0.self_attn.q_proj.weight"
 EXPERT_ZERO_NAME = "model.layers.0.mlp.experts.0.gate_proj.weight"
@@ -524,10 +522,11 @@ def _phase_one(
         assert update_one["query_delta_beyond_first_step_weight_decay_l2"] > 1e-8
         assert update_one["router_bias_max_delta"] == update_two["router_bias_max_delta"] == 0
         for update in (update_one, update_two):
-            assert update["preupdate_logprob_max_abs_diff"] <= UNCHANGED_POLICY_MAX_ABS_DIFF
-            assert update["preupdate_logprob_mean_abs_diff"] <= UNCHANGED_POLICY_MEAN_ABS_DIFF
-            assert 0.8 <= update["ppo_ratio_min"] <= update["ppo_ratio_max"] <= 1.2
-            assert update["ppo_ratio_mean"] == pytest.approx(1.0, abs=1e-6)
+            assert update["preupdate_logprob_max_abs_diff"] == 0.0
+            assert update["preupdate_logprob_mean_abs_diff"] == 0.0
+            assert update["ppo_ratio_min"] == 1.0
+            assert update["ppo_ratio_mean"] == 1.0
+            assert update["ppo_ratio_max"] == 1.0
             assert update["ppo_clip_ratio"] == 0.0
         assert all(math.isfinite(update[key]) for update in (update_one, update_two) for key in ("final_loss",))
         assert abs(publication_probe_scores[2] - publication_probe_scores[0]) > 1e-7
@@ -604,10 +603,11 @@ def _phase_two(
         token = rollout["response_ids"][0][0]
         score = asyncio.run(_score_token(client, cfg, prompt, token))
         assert rollout["stop_reasons"] == ["length", "length"]
-        assert update["preupdate_logprob_max_abs_diff"] <= UNCHANGED_POLICY_MAX_ABS_DIFF
-        assert update["preupdate_logprob_mean_abs_diff"] <= UNCHANGED_POLICY_MEAN_ABS_DIFF
-        assert 0.8 <= update["ppo_ratio_min"] <= update["ppo_ratio_max"] <= 1.2
-        assert update["ppo_ratio_mean"] == pytest.approx(1.0, abs=1e-6)
+        assert update["preupdate_logprob_max_abs_diff"] == 0.0
+        assert update["preupdate_logprob_mean_abs_diff"] == 0.0
+        assert update["ppo_ratio_min"] == 1.0
+        assert update["ppo_ratio_mean"] == 1.0
+        assert update["ppo_ratio_max"] == 1.0
         assert update["ppo_clip_ratio"] == 0.0
         replay_differences = next_update_comparison["category_max_abs_diff"]
         # A fresh XLA process may choose a different GPU reduction order. The

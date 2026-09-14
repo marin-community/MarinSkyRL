@@ -357,7 +357,7 @@ def test_microbatching_does_not_split_batch_sized_model_arrays(tmp_path):
     learner.close()
 
 
-def test_standalone_scoring_uses_compute_dtype(tmp_path):
+def test_scoring_uses_the_training_step_without_mutating_state(tmp_path):
     runtime = replace(_runtime(tmp_path / "compute-dtype-logs"), compute_dtype="bfloat16")
     model_config = _snowball_config()
     learner = LevanterSnowballLearner(
@@ -370,17 +370,51 @@ def test_standalone_scoring_uses_compute_dtype(tmp_path):
     )
     learner.initialize(_learner_config())
 
-    score_dtypes = []
+    before = _learner_state_arrays(learner)
+    score_one = learner.compute_log_probs(_batch()).policy_log_probs
+    after_one = _learner_state_arrays(learner)
+    score_two = learner.compute_log_probs(_batch()).policy_log_probs
+    after_two = _learner_state_arrays(learner)
 
-    def score(model, tokens, _temperature):
-        score_dtypes.append(model.transformer.blocks[0].attn.w_q.dtype)
-        return jnp.zeros((tokens.array.shape[0], tokens.array.shape[1] - 1), dtype=jnp.float32)
+    assert np.all(np.isfinite(score_one))
+    np.testing.assert_array_equal(score_two, score_one)
+    for name, expected in before.items():
+        np.testing.assert_array_equal(after_one[name], expected, err_msg=name)
+        np.testing.assert_array_equal(after_two[name], expected, err_msg=name)
 
-    learner._score_fn = score
-    result = learner.compute_log_probs(_batch())
+    update = learner.update(
+        UpdateRequest(
+            _batch(),
+            np.asarray([[1.0, -0.5, 0.0], [0.25, -1.0, 0.5]], dtype=np.float32),
+            score_one,
+            0,
+            None,
+            0,
+            None,
+        )
+    )
+    assert update.metrics["preupdate_logprob_max_abs_diff"] == 0.0
+    assert update.metrics["preupdate_logprob_mean_abs_diff"] == 0.0
+    assert update.metrics["ppo_ratio_min"] == 1.0
+    assert update.metrics["ppo_ratio_mean"] == 1.0
+    assert update.metrics["ppo_ratio_max"] == 1.0
+    assert update.metrics["ppo_clip_ratio"] == 0.0
+    learner.close()
 
-    assert score_dtypes == [jnp.bfloat16, jnp.bfloat16]
-    assert np.all(np.isfinite(result.policy_log_probs))
+
+def test_scoring_failure_invalidates_the_donated_learner_state(tmp_path):
+    learner = _make_learner(tmp_path / "score-failure-logs")
+
+    def fail_score(*_args, **_kwargs):
+        raise RuntimeError("injected scoring failure")
+
+    learner._trainer.train_step_with_metrics = fail_score
+    with pytest.raises(RuntimeError, match="injected scoring failure"):
+        learner.compute_log_probs(_batch())
+
+    assert learner.state.lifecycle.value == "failed"
+    with pytest.raises(RuntimeError, match="got failed"):
+        learner.compute_log_probs(_batch())
     learner.close()
 
 
@@ -415,31 +449,19 @@ def _four_device_learner_worker(log_dir: str) -> None:
         rollout_log_probs=None,
         behavior_policy_versions=np.zeros(4, dtype=np.int64),
     )
-    old_log_probs = learner.compute_log_probs(batch).policy_log_probs
-    prepared = prepare_snowball_batch(batch, max_sequence_length=16)
-    Batch = Axis("batch", 4)
-    Pos = Axis("position", prepared.tokens.shape[1])
-    dense_log_probs = learner._score_fn(
-        learner.model,
-        hax.named(jnp.asarray(prepared.tokens, dtype=jnp.int32), (Batch, Pos)),
-        1.0,
-    )
-    batch_spec = dense_log_probs.sharding.spec[0]
-    batch_axes = (batch_spec,) if isinstance(batch_spec, str) else batch_spec
-    assert "data" in batch_axes
-    assert len(dense_log_probs.addressable_shards) == 4
-    assert all(shard.data.shape == (1, prepared.tokens.shape[1] - 1) for shard in dense_log_probs.addressable_shards)
+    train_step = learner._trainer.train_step_with_metrics
+    apply_update_calls = []
 
-    train_step = learner._trainer.train_step
-
-    def train_step_with_sharding_check(state, *training_batch):
+    def train_step_with_sharding_check(state, *training_batch, apply_update):
         for value in training_batch:
             batch_spec = value.array.sharding.spec[0]
             batch_axes = (batch_spec,) if isinstance(batch_spec, str) else batch_spec
             assert "data" in batch_axes
-        return train_step(state, *training_batch)
+        apply_update_calls.append(apply_update)
+        return train_step(state, *training_batch, apply_update=apply_update)
 
-    learner._trainer.train_step = train_step_with_sharding_check
+    learner._trainer.train_step_with_metrics = train_step_with_sharding_check
+    old_log_probs = learner.compute_log_probs(batch).policy_log_probs
     result = learner.update(
         UpdateRequest(
             batch=batch,
@@ -454,7 +476,9 @@ def _four_device_learner_worker(log_dir: str) -> None:
             global_loss_denominator=None,
         )
     )
+    assert apply_update_calls == [False, True]
     assert result.status.value == "succeeded"
+    assert result.metrics["preupdate_logprob_max_abs_diff"] == 0.0
     assert np.isfinite(result.metrics["final_loss"])
     learner.close()
 
@@ -812,10 +836,12 @@ def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
             hax.named(jnp.asarray(dense_old), (Batch, Prediction)),
             hax.named(jnp.asarray(dense_advantages), (Batch, Prediction)),
             hax.named(jnp.asarray(dense_mask), (Batch, Prediction)),
+            hax.named(jnp.arange(Batch.size, dtype=jnp.int32), (Batch,)),
             key=jax.random.key(0),
             temperature=1.0,
             clip_low=0.2,
             clip_high=0.2,
+            full_batch_size=Batch.size,
         )
 
     with learner._trainer_config.use_device_mesh():

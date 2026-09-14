@@ -35,8 +35,7 @@ SEQUENCE_LENGTH = int(os.environ.get("SNOWBALL_NUMERICAL_SEQUENCE_LENGTH", "4096
 ATTENTION_IMPLEMENTATION = os.environ.get("SNOWBALL_NUMERICAL_ATTENTION_IMPLEMENTATION", "gpu_fa4_cute")
 MICROBATCH_PER_GPU = int(os.environ.get("SNOWBALL_NUMERICAL_MICROBATCH_PER_GPU", "1"))
 RESPONSE_LENGTH = 256
-MAX_ABS_DIFF_LIMIT = 1e-5
-MEAN_ABS_DIFF_LIMIT = 1e-7
+REQUIRED_ABS_DIFF = 0.0
 
 
 def _model_config() -> SnowballConfig:
@@ -204,8 +203,8 @@ def main() -> None:
                 "update_seconds": update_seconds,
             },
             "limits": {
-                "max_abs_diff": MAX_ABS_DIFF_LIMIT,
-                "mean_abs_diff": MEAN_ABS_DIFF_LIMIT,
+                "max_abs_diff": REQUIRED_ABS_DIFF,
+                "mean_abs_diff": REQUIRED_ABS_DIFF,
             },
         }
         evidence_path = output_dir / "snowball-numerical-replay.json"
@@ -213,12 +212,16 @@ def main() -> None:
         print(json.dumps(evidence, sort_keys=True), flush=True)
 
         for comparison in (score_repeat, score_training):
-            assert comparison["max_abs_diff"] <= MAX_ABS_DIFF_LIMIT
-            assert comparison["mean_abs_diff"] <= MEAN_ABS_DIFF_LIMIT
-        assert update.metrics["preupdate_logprob_max_abs_diff"] <= MAX_ABS_DIFF_LIMIT
-        assert update.metrics["preupdate_logprob_mean_abs_diff"] <= MEAN_ABS_DIFF_LIMIT
-        assert 0.8 <= update.metrics["ppo_ratio_min"] <= update.metrics["ppo_ratio_max"] <= 1.2
+            assert comparison["max_abs_diff"] == REQUIRED_ABS_DIFF
+            assert comparison["mean_abs_diff"] == REQUIRED_ABS_DIFF
+        assert update.metrics["preupdate_logprob_max_abs_diff"] == REQUIRED_ABS_DIFF
+        assert update.metrics["preupdate_logprob_mean_abs_diff"] == REQUIRED_ABS_DIFF
+        assert update.metrics["ppo_ratio_min"] == 1.0
+        assert update.metrics["ppo_ratio_mean"] == 1.0
+        assert update.metrics["ppo_ratio_max"] == 1.0
         assert update.metrics["ppo_clip_ratio"] == 0.0
+        assert update.metrics["ppo_clip_ratio_low"] == 0.0
+        assert update.metrics["ppo_clip_ratio_high"] == 0.0
     finally:
         learner.close()
 
