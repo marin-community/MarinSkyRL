@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import os
 import socket
 import time
@@ -17,23 +18,29 @@ from typing import TYPE_CHECKING
 
 import equinox as eqx
 import haliax as hax
+import haliax.quantization as hq
 import jax
 import jax.numpy as jnp
 import jmp
 import numpy as np
 from haliax import Axis
+from haliax.util import is_named_array
 from huggingface_hub import snapshot_download
 from jax.experimental import multihost_utils
 from levanter.checkpoint import load_checkpoint, save_checkpoint
 from levanter.compat.hf_checkpoints import HFCheckpointConverter
 from levanter.distributed import DistributedConfig
+from levanter.grad_accum import _reshape_for_microbatch
 from levanter.grug.sharding import compact_grug_mesh
+from levanter.metrics import Metric
+from levanter.metrics import fold as fold_metric
 from levanter.models.snowball import GrugMoeHfConfig, SnowballConfig, SnowballLMHeadModel
 from levanter.optim.config import AdamConfig
 from levanter.tracker import NoopConfig
-from levanter.trainer import Trainer, TrainerConfig
+from levanter.trainer import Trainer, TrainerConfig, _resolve_axis_in_tree
 from levanter.trainer import initialize as initialize_levanter
 from levanter.utils.mesh import MeshConfig
+from levanter.utils.jax_utils import zeros_like_tree
 from transformers import AutoConfig
 
 from skyrl_train.learner import (
@@ -84,6 +91,94 @@ class _SnowballTrainerConfig(TrainerConfig):
     @property
     def device_mesh(self) -> jax.sharding.Mesh:
         return compact_grug_mesh(expert_axis_size=1, replica_axis_size=1)
+
+
+def _snowball_microbatched(fn, Batch, microbatch_size, accum_axis_mapping, compute_axis_mapping):
+    """Accumulate named training batches without treating model arrays as batch inputs."""
+
+    if microbatch_size >= Batch.size:
+        return fn
+    num_micro_steps = Batch.size // microbatch_size
+    if num_micro_steps * microbatch_size != Batch.size:
+        raise ValueError(f"batch size {Batch.size} must be divisible by microbatch size {microbatch_size}")
+    Microbatch = Batch.resize(microbatch_size)
+    AccumStep = Axis("accum_step", num_micro_steps)
+
+    @functools.wraps(fn)
+    def wrapped_fn(model, *batch, **kwargs):
+        result_shape = eqx.filter_eval_shape(fn, model, *batch, **kwargs)
+        accumulator = zeros_like_tree(result_shape, accum_axis_mapping)
+
+        key = kwargs.get("key")
+        if key is not None:
+            key = jax.random.split(key, num_micro_steps)
+            kwargs = kwargs.copy()
+            kwargs.pop("key")
+
+        def is_batched(value):
+            return isinstance(value, hax.NamedArray) and value.has_axis(Batch.name)
+
+        def is_input_leaf(value):
+            return is_named_array(value) or isinstance(value, hq.CustomGradientAccumulation)
+
+        batched_inputs, unbatched_inputs = eqx.partition((batch, kwargs), is_batched, is_leaf=is_input_leaf)
+        batched_inputs = _reshape_for_microbatch(
+            Batch,
+            Microbatch,
+            AccumStep,
+            batched_inputs,
+            compute_axis_mapping,
+        )
+
+        def loop(acc, microbatch_and_key):
+            microbatch_inputs, microbatch_key = microbatch_and_key
+            microbatch, microbatch_kwargs = eqx.combine(
+                microbatch_inputs,
+                unbatched_inputs,
+                is_leaf=is_input_leaf,
+            )
+            microbatch_kwargs = microbatch_kwargs.copy()
+            if microbatch_key is not None:
+                microbatch_kwargs["key"] = microbatch_key
+            (loss, metrics), gradients = fn(model, *microbatch, **microbatch_kwargs)
+            (acc_loss, acc_metrics), acc_gradients = acc
+            metrics = jax.tree_util.tree_map(
+                fold_metric,
+                acc_metrics,
+                metrics,
+                is_leaf=lambda value: isinstance(value, Metric),
+            )
+            gradients = hq.accumulate_gradients(acc_gradients, gradients)
+            return hax.shard(((acc_loss + loss, metrics), gradients), accum_axis_mapping)
+
+        (loss, metrics), gradients = hax.fold(loop, AccumStep)(accumulator, (batched_inputs, key))
+        loss = loss / num_micro_steps
+        gradients = jax.tree_util.tree_map(
+            lambda value: value if isinstance(value, hq.CustomGradientAccumulation) else value / num_micro_steps,
+            gradients,
+            is_leaf=lambda value: isinstance(value, hq.CustomGradientAccumulation),
+        )
+        return (loss, metrics), gradients
+
+    return wrapped_fn
+
+
+class _SnowballTrainer(Trainer):
+    def _compute_gradients_microbatched(self, loss_fn, model, *batch, **batch_kwargs):
+        Batch = _resolve_axis_in_tree((batch, batch_kwargs), self.config.batch_axis_name)
+        grad_fn = eqx.filter_value_and_grad(loss_fn, has_aux=True)
+        microbatch_size = self.config.microbatch_size
+        if microbatch_size is not None:
+            grad_fn = _snowball_microbatched(
+                grad_fn,
+                Batch,
+                microbatch_size,
+                self.parameter_axis_mapping,
+                self.compute_axis_mapping,
+            )
+        with hax.axis_mapping(self.compute_axis_mapping):
+            (loss, metrics), gradients = grad_fn(model, *batch, **batch_kwargs)
+        return loss, gradients, metrics
 
 
 def _resolve_local_model_snapshot(model_path: str, revision: str | None) -> str:
@@ -438,7 +533,7 @@ class LevanterSnowballLearner:
             clip_low=config.clip_low,
             clip_high=config.clip_high,
         )
-        trainer = Trainer(trainer_config, optimizer, objective, add_default_hooks=False)
+        trainer = _SnowballTrainer(trainer_config, optimizer, objective, add_default_hooks=False)
         trainer.__enter__()
         self._trainer_entered = True
         try:

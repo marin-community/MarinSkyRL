@@ -205,6 +205,52 @@ def _sharded_probe_worker() -> None:
     np.testing.assert_array_equal(_parameter_probe({"parameter": parameter}, size=3), np.arange(3))
 
 
+def test_microbatching_does_not_split_batch_sized_model_arrays(tmp_path):
+    runtime = replace(_runtime(tmp_path / "microbatch-logs"), train_batch_size=4)
+    model_config = _snowball_config()
+    learner = LevanterSnowballLearner(
+        runtime,
+        model_factory=lambda: SnowballLMHeadModel.init(
+            Axis("vocab", model_config.vocab_size),
+            model_config,
+            key=jax.random.key(7),
+        ),
+    )
+    learner.initialize(_learner_config())
+    assert any(
+        isinstance(value, jax.Array) and value.ndim > 0 and value.shape[0] == runtime.train_batch_size
+        for value in jax.tree_util.tree_leaves(learner.model)
+    )
+
+    original = _batch()
+    batch = LearnerBatch(
+        sequences=np.concatenate((original.sequences, original.sequences)),
+        attention_mask=np.concatenate((original.attention_mask, original.attention_mask)),
+        response_mask=np.concatenate((original.response_mask, original.response_mask)),
+        loss_mask=np.concatenate((original.loss_mask, original.loss_mask)),
+        rollout_log_probs=None,
+        behavior_policy_versions=np.zeros(4, dtype=np.int64),
+    )
+    old_log_probs = learner.compute_log_probs(batch).policy_log_probs
+    update = learner.update(
+        UpdateRequest(
+            batch=batch,
+            advantages=np.asarray(
+                [[1.0, -0.5, 0.0], [0.25, -1.0, 0.5], [1.0, -0.5, 0.0], [0.25, -1.0, 0.5]],
+                dtype=np.float32,
+            ),
+            old_policy_log_probs=old_log_probs,
+            old_policy_version=0,
+            reference_log_probs=None,
+            global_step=0,
+            global_loss_denominator=None,
+        )
+    )
+    assert update.status.value == "succeeded"
+    assert np.isfinite(update.metrics["final_loss"])
+    learner.close()
+
+
 def _four_device_learner_worker(log_dir: str) -> None:
     runtime = replace(
         _runtime(Path(log_dir)),
