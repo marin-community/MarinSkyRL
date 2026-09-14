@@ -112,6 +112,37 @@ def test_compile_distillation_plan_defaults_hosted_teacher_to_external():
     assert plan.teachers[0].placement is TeacherPlacement.EXTERNAL
 
 
+def test_compile_distillation_plan_preserves_local_teacher_resource_claim():
+    config = _mopd_config()
+    config["teachers"]["swe"]["resources"] = {
+        "num_nodes": 2,
+        "gpus_per_node": 8,
+        "tensor_parallel_size": 8,
+        "colocation_group": "teacher-rotation",
+    }
+
+    plan = compile_distillation_plan(config)
+
+    assert plan is not None
+    resources = next(teacher.resources for teacher in plan.teachers if teacher.id == "swe")
+    assert resources is not None
+    assert (resources.num_nodes, resources.gpus_per_node, resources.tensor_parallel_size) == (2, 8, 8)
+    assert resources.colocation_group == "teacher-rotation"
+
+
+def test_compile_distillation_plan_rejects_resource_claim_for_external_teacher():
+    config = _mopd_config()
+    config["teachers"]["math"]["resources"] = {
+        "num_nodes": 1,
+        "gpus_per_node": 8,
+        "tensor_parallel_size": 8,
+        "colocation_group": "teacher",
+    }
+
+    with pytest.raises(ValueError, match="external teacher"):
+        compile_distillation_plan(config)
+
+
 def test_compile_distillation_plan_rejects_misspelled_contract_fields():
     config = _mopd_config()
     config["teachers"]["math"]["endponts"] = config["teachers"]["math"].pop("endpoints")

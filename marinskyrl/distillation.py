@@ -51,12 +51,21 @@ class TeacherEndpointSpec:
     auth: str | None
 
 
+@dataclass(frozen=True)
+class TeacherResourceSpec:
+    num_nodes: int
+    gpus_per_node: int
+    tensor_parallel_size: int
+    colocation_group: str
+
+
 class TeacherSpec(Protocol):
     id: str
     source: TeacherSource
     placement: TeacherPlacement
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
+    resources: TeacherResourceSpec | None
 
 
 @dataclass(frozen=True)
@@ -67,6 +76,7 @@ class OpenAICompatibleTeacherSpec:
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
     endpoints: tuple[TeacherEndpointSpec, ...]
+    resources: TeacherResourceSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +87,7 @@ class LocalInferenceTeacherSpec:
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
     backend: str
+    resources: TeacherResourceSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +97,7 @@ class FrozenWorkerTeacherSpec:
     placement: TeacherPlacement
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
+    resources: TeacherResourceSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +107,7 @@ class ResidentTeacherSpec:
     placement: TeacherPlacement
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
+    resources: TeacherResourceSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +198,31 @@ def _positive_float(config: Mapping[str, object], key: str, path: str) -> float:
     return result
 
 
+def _positive_integer(config: Mapping[str, object], key: str, path: str) -> int:
+    value = config.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{path}.{key} must be a positive integer")
+    return value
+
+
+def _teacher_resources(config: Mapping[str, object], path: str) -> TeacherResourceSpec | None:
+    raw = config.get("resources")
+    if raw is None:
+        return None
+    resources = _mapping(raw, f"{path}.resources")
+    _reject_unknown(
+        resources,
+        frozenset({"num_nodes", "gpus_per_node", "tensor_parallel_size", "colocation_group"}),
+        f"{path}.resources",
+    )
+    return TeacherResourceSpec(
+        num_nodes=_positive_integer(resources, "num_nodes", f"{path}.resources"),
+        gpus_per_node=_positive_integer(resources, "gpus_per_node", f"{path}.resources"),
+        tensor_parallel_size=_positive_integer(resources, "tensor_parallel_size", f"{path}.resources"),
+        colocation_group=_required_string(resources, "colocation_group", f"{path}.resources"),
+    )
+
+
 def _teacher_model(config: Mapping[str, object], path: str) -> TeacherModelSpec:
     model = _mapping(config.get("model"), f"{path}.model")
     _reject_unknown(model, frozenset({"path", "revision"}), f"{path}.model")
@@ -219,7 +257,7 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
     config = _mapping(raw, path)
     _reject_unknown(
         config,
-        frozenset({"source", "placement", "model", "evidence", "endpoints", "backend"}),
+        frozenset({"source", "placement", "model", "evidence", "endpoints", "backend", "resources"}),
         path,
     )
     source = _enum_value(TeacherSource, config, "source", path)
@@ -238,6 +276,7 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
     evidence = _enum_value(TeacherEvidenceKind, config, "evidence", path)
     endpoints = _teacher_endpoints(config, path)
     backend = _optional_string(config, "backend", path)
+    resources = _teacher_resources(config, path)
 
     if source is TeacherSource.OPENAI_COMPATIBLE:
         if not endpoints:
@@ -261,6 +300,8 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
         raise ValueError(f"{path}.placement must be co_resident for resident teachers")
     if source is TeacherSource.FROZEN_WORKER and placement is not TeacherPlacement.PINNED:
         raise ValueError(f"{path}.placement must be pinned for frozen_worker teachers")
+    if placement is TeacherPlacement.EXTERNAL and resources is not None:
+        raise ValueError(f"{path}.resources cannot reserve Iris capacity for an external teacher")
 
     common = {
         "id": teacher_id,
@@ -268,6 +309,7 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
         "placement": placement,
         "model": _teacher_model(config, path),
         "evidence": evidence,
+        "resources": resources,
     }
     if source is TeacherSource.OPENAI_COMPATIBLE:
         return OpenAICompatibleTeacherSpec(**common, endpoints=endpoints)

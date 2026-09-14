@@ -78,6 +78,7 @@ from iris.cluster.constraints import (
 from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_level
 from iris.cluster.types import CoschedulingConfig, ResourceSpec, gpu_device
 from iris.resources.state import JobState
+
 from iris.rpc import job_pb2
 
 from cloud.iris.paths import PROJECT_ROOT
@@ -127,7 +128,8 @@ from cloud.iris.rl_config_translation import (
 )
 from cloud.iris.secrets_env import load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
-from cloud.iris.protocol import LaunchMode, SkyRLJobSpec
+from cloud.iris.protocol import LaunchMode, ModelRoleKind, SkyRLJobSpec
+from cloud.iris.request_builder import derive_num_nodes, derive_role_plan, role_plan_is_configured
 from marinskyrl.task_sources import DataSource, DirectoryDataSource, TaskTroveParquetSource
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
@@ -292,19 +294,42 @@ def job_launch_argv(spec: SkyRLJobSpec, config_path: str, *, mode: LaunchMode = 
     execution = spec.execution
     data_sources = [asdict(locator) for locator in (*request.train_data, *request.validation_data)]
     role_plan = request.topology.role_plan
-    role_overrides = (
+    policy_claim = role_plan.claim(ModelRoleKind.POLICY)
+    rollout_claim = role_plan.claim(ModelRoleKind.ROLLOUT)
+    reference_claim = next((claim for claim in role_plan.claims if claim.kind is ModelRoleKind.REFERENCE), None)
+    critic_claim = next((claim for claim in role_plan.claims if claim.kind is ModelRoleKind.CRITIC), None)
+    colocate_policy_ref = reference_claim is not None and (
+        reference_claim.colocation_group == policy_claim.colocation_group
+    )
+    role_overrides = [
         f"++trainer.placement.colocate_all={str(role_plan.colocate_all).lower()}",
-        f"++trainer.placement.policy_num_nodes={role_plan.policy_num_nodes}",
-        f"++trainer.placement.ref_num_nodes={role_plan.policy_num_nodes}",
-        f"++trainer.placement.policy_num_gpus_per_node={role_plan.policy_num_gpus_per_node}",
-        f"++trainer.placement.ref_num_gpus_per_node={role_plan.policy_num_gpus_per_node}",
-        f"++generator.num_inference_engines={role_plan.num_inference_engines}",
-        f"++generator.inference_engine_tensor_parallel_size={role_plan.inference_engine_tensor_parallel_size}",
+        f"++trainer.placement.colocate_policy_ref={str(colocate_policy_ref).lower()}",
+        f"++trainer.placement.policy_num_nodes={policy_claim.num_nodes}",
+        f"++trainer.placement.policy_num_gpus_per_node={policy_claim.gpus_per_node}",
+        f"++generator.num_inference_engines={rollout_claim.replicas}",
+        f"++generator.inference_engine_tensor_parallel_size={rollout_claim.tensor_parallel_size}",
+        f"++generator.inference_engine_pipeline_parallel_size={rollout_claim.pipeline_parallel_size}",
+        f"++generator.inference_engine_data_parallel_size={rollout_claim.data_parallel_size}",
+        f"++generator.inference_engine_expert_parallel_size={rollout_claim.expert_parallel_size}",
         f"++trainer.train_batch_size={role_plan.train_batch_size}",
         f"++trainer.policy_mini_batch_size={role_plan.policy_mini_batch_size}",
         f"++trainer.micro_train_batch_size_per_gpu={role_plan.micro_train_batch_size_per_gpu}",
         f"++generator.n_samples_per_prompt={role_plan.n_samples_per_prompt}",
-    )
+    ]
+    if reference_claim is not None:
+        role_overrides.extend(
+            (
+                f"++trainer.placement.ref_num_nodes={reference_claim.num_nodes}",
+                f"++trainer.placement.ref_num_gpus_per_node={reference_claim.gpus_per_node}",
+            )
+        )
+    if critic_claim is not None:
+        role_overrides.extend(
+            (
+                f"++trainer.placement.critic_num_nodes={critic_claim.num_nodes}",
+                f"++trainer.placement.critic_num_gpus_per_node={critic_claim.gpus_per_node}",
+            )
+        )
     argv = [
         "--rl_config",
         config_path,
@@ -397,6 +422,7 @@ class IrisBackend:
         """Run and verify the export requested by the terminal checkpoint."""
         request = spec.request
         execution = spec.execution
+        policy_claim = request.topology.role_plan.claim(ModelRoleKind.POLICY)
         submit_terminal_policy_export(
             TerminalPolicyExport(
                 checkpoint_root=request.output.checkpoint_root,
@@ -405,8 +431,8 @@ class IrisBackend:
                 model_path=request.model.local_path,
                 model_source_uri=request.model.uri,
                 model_source_identity=request.model.identity,
-                policy_num_nodes=request.topology.role_plan.policy_num_nodes,
-                policy_num_gpus_per_node=request.topology.role_plan.policy_num_gpus_per_node,
+                policy_num_nodes=policy_claim.num_nodes,
+                policy_num_gpus_per_node=policy_claim.gpus_per_node,
                 cluster=execution.cluster,
                 priority=execution.priority,
                 job_name=execution.job_name,
@@ -882,44 +908,34 @@ def _purge_stale_daytona_snapshots(api_key: str) -> None:
 
 
 def _validate_rl_config_topology(args: argparse.Namespace) -> None:
-    """Reject a gang size incompatible with explicit trainer placement metadata.
-
-    SkyRL placement is intentionally optional because colocated and legacy configs
-    derive topology at runtime.  When both policy and reference node counts are
-    declared, however, their disaggregated gang is a stable public contract.
-    """
+    """Reject a gang size that disagrees with the shared role-plan compiler."""
     try:
         with open(args.rl_config) as f:
             config = yaml.safe_load(f) or {}
     except OSError:
         return
-    trainer = config.get("trainer") if isinstance(config, dict) else None
-    placement = trainer.get("placement") if isinstance(trainer, dict) else None
-    if not isinstance(placement, dict) or placement.get("colocate_all") is True:
+    if not isinstance(config, dict):
         return
-
-    policy_nodes = placement.get("policy_num_nodes")
-    ref_nodes = placement.get("ref_num_nodes")
-    policy_gpus = placement.get("policy_num_gpus_per_node")
-    ref_gpus = placement.get("ref_num_gpus_per_node")
-    if not all(isinstance(value, int) and value > 0 for value in (policy_nodes, ref_nodes)):
+    if not role_plan_is_configured(config):
         return
+    plan = derive_role_plan(config)
     checkpoint_export = _is_checkpoint_export(args)
-    expected_nodes = policy_nodes if checkpoint_export else policy_nodes + ref_nodes
+    policy_claim = plan.claim(ModelRoleKind.POLICY)
+    expected_nodes = policy_claim.num_nodes if checkpoint_export else derive_num_nodes(plan)
     if args.num_nodes != expected_nodes:
         topology_description = (
-            f"policy_num_nodes = {expected_nodes}"
+            f"policy={expected_nodes}"
             if checkpoint_export
-            else f"policy_num_nodes + ref_num_nodes = {expected_nodes}"
+            else "+".join(f"{bundle.name}={bundle.num_nodes}" for bundle in plan.bundles)
         )
         raise SystemExit(
-            f"--num-nodes={args.num_nodes} conflicts with {args.rl_config}'s disaggregated placement "
+            f"--num-nodes={args.num_nodes} conflicts with {args.rl_config}'s resolved role bundles "
             f"({topology_description})."
         )
-    declared_gpus = {value for value in (policy_gpus, ref_gpus) if isinstance(value, int) and value > 0}
-    if declared_gpus and (len(declared_gpus) != 1 or args.gpus_per_node not in declared_gpus):
+    declared_gpus = {bundle.gpus_per_node for bundle in plan.bundles}
+    if declared_gpus and args.gpus_per_node not in declared_gpus:
         raise SystemExit(
-            f"--gpus-per-node={args.gpus_per_node} conflicts with {args.rl_config}'s placement "
+            f"--gpus-per-node={args.gpus_per_node} conflicts with {args.rl_config}'s resolved role bundles "
             f"GPU count(s): {sorted(declared_gpus)}."
         )
 
