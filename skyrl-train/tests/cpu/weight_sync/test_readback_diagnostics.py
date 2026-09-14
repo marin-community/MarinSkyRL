@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import itertools
 import json
 import io
 from datetime import timedelta
@@ -28,6 +29,8 @@ from skyrl_train.weight_sync.readback_diagnostics import (
     tensor_sha256,
     validate_replica_digests,
     network_log_readback,
+    persist_readback,
+    FULL_READBACK_EVERY,
 )
 from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
 from skyrl_train.utils.tracking import Tracking
@@ -346,3 +349,94 @@ async def test_zero_update_lifecycle_reads_installed_weights_without_training(ca
         json.loads(line.removeprefix("WEIGHT_SYNC_PRE_GROUP_CHUNK ")) for line in capsys.readouterr().out.splitlines()
     ]
     assert reassemble_receipt(failed_chunks) == receipt["pre_sync_environment"]
+
+
+def _object_store(monkeypatch, *, etag_of=None, on_stat=None):
+    """An in-memory stand-in for S3 that records how each object was verified."""
+    from skyrl_train.weight_sync import readback_diagnostics as module
+
+    stored: dict[str, bytes] = {}
+    reads: list[str] = []
+
+    def write(path, payload):
+        stored[path] = payload
+
+    def read(path):
+        reads.append(path)
+        return stored[path]
+
+    def stat(path):
+        if on_stat is not None:
+            on_stat(path)
+        payload = stored[path]
+        etag = etag_of(payload) if etag_of else hashlib.md5(payload).hexdigest()
+        return {"ETag": f'"{etag}"', "size": len(payload)}
+
+    monkeypatch.setattr(module, "write_bytes_atomic", write)
+    monkeypatch.setattr(module, "read_bytes", read)
+    monkeypatch.setattr(module, "stat_object", stat)
+    monkeypatch.setattr(module, "_RECEIPTS_WRITTEN", itertools.count(1))
+    return stored, reads
+
+
+def test_matching_etag_verifies_the_stored_object_without_transferring_it(monkeypatch):
+    stored, reads = _object_store(monkeypatch)
+    receipt = persist_readback("s3://bucket/prefix", "stage", {"rows": list(range(64))})
+    assert receipt["verify"] == "etag-md5"
+    assert receipt["etag"] == receipt["md5"] == hashlib.md5(stored[receipt["uri"]]).hexdigest()
+    assert receipt["sha256"] == hashlib.sha256(stored[receipt["uri"]]).hexdigest()
+    assert reads == [], "the cheap verify must not read the object back"
+
+
+def test_one_receipt_in_every_full_readback_every_is_still_read_in_full(monkeypatch):
+    _, reads = _object_store(monkeypatch)
+    verifies = [persist_readback("s3://bucket/p", f"s{i}", {"i": i})["verify"] for i in range(2 * FULL_READBACK_EVERY)]
+    assert verifies.count("full-readback-sampled") == 2
+    assert len(reads) == 2 and verifies[FULL_READBACK_EVERY - 1] == "full-readback-sampled"
+
+
+@pytest.mark.parametrize(
+    "etag_of",
+    [
+        pytest.param(lambda payload: hashlib.md5(payload).hexdigest() + "-3", id="multipart"),
+        pytest.param(lambda payload: hashlib.sha256(payload).hexdigest(), id="not-a-payload-md5"),
+        pytest.param(lambda payload: "", id="absent"),
+    ],
+)
+def test_an_unusable_etag_falls_back_to_the_full_read_rather_than_failing(monkeypatch, etag_of):
+    _, reads = _object_store(monkeypatch, etag_of=etag_of)
+    receipt = persist_readback("s3://bucket/prefix", "stage", {"rows": [1, 2, 3]})
+    assert receipt["verify"] == "full-readback-after-etag-unusable"
+    assert reads == [receipt["uri"]]
+
+
+def test_metadata_failure_does_not_fail_the_write(monkeypatch):
+    def boom(path):
+        raise TimeoutError("head timed out")
+
+    _, reads = _object_store(monkeypatch, on_stat=boom)
+    receipt = persist_readback("s3://bucket/prefix", "stage", {"rows": [1]})
+    assert receipt["verify"] == "full-readback-after-etag-unusable"
+    assert reads == [receipt["uri"]]
+
+
+def test_corruption_is_still_rejected_on_both_paths(monkeypatch):
+    from skyrl_train.weight_sync import readback_diagnostics as module
+
+    stored, _ = _object_store(monkeypatch)
+    original_write = module.write_bytes_atomic
+
+    def corrupting_write(path, payload):
+        original_write(path, payload[:-1] + b" ")
+
+    monkeypatch.setattr(module, "write_bytes_atomic", corrupting_write)
+    # The cheap path sees a digest that does not match, falls through, and the full
+    # read-back -- still the authority -- rejects it.
+    with pytest.raises(ValueError, match="differs from the original receipt"):
+        persist_readback("s3://bucket/prefix", "stage", {"rows": [1, 2, 3]})
+
+
+def test_a_local_path_keeps_the_full_read_back(monkeypatch, tmp_path):
+    receipt = persist_readback(str(tmp_path), "stage", {"rows": [7]})
+    assert receipt["verify"] in ("full-readback", "full-readback-sampled")
+    assert "etag" not in receipt
