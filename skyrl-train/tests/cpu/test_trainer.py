@@ -668,6 +668,24 @@ def test_sync_group_admission_uses_elapsed_time_instead_of_batch_count():
             trainer.handle_group_admission(fully_masked, ["masked", "masked"])
 
 
+def test_sync_group_refill_requests_only_missing_prompts_without_losing_order():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"train_batch_size": 4}})
+    trainer.group_admission_state = {"num_prompts_in_batch": 3}
+    trainer._pending_sync_prompts = []
+
+    refill = trainer._select_sync_generation_prompts([{"uid": uid} for uid in ["d", "e", "f", "g"]])
+
+    assert [prompt["uid"] for prompt in refill] == ["d"]
+    assert [prompt["uid"] for prompt in trainer._pending_sync_prompts] == ["e", "f", "g"]
+
+    trainer.group_admission_state = None
+    next_batch = trainer._select_sync_generation_prompts([{"uid": uid} for uid in ["h", "i", "j", "k"]])
+
+    assert [prompt["uid"] for prompt in next_batch] == ["e", "f", "g", "h"]
+    assert [prompt["uid"] for prompt in trainer._pending_sync_prompts] == ["i", "j", "k"]
+
+
 _TEST_PROGRESS_CONFIG = {
     "mode": "tqdm",
     "min_interval_seconds": 0.5,
@@ -1252,14 +1270,28 @@ class _CursorDataLoader:
         return value
 
 
-def test_load_checkpoints_can_restart_a_replacement_dataset(tmp_path, dummy_config):
+@pytest.mark.parametrize(
+    ("restore_dataloader_state", "expected_row", "restore_pending_prompts"),
+    [(False, "row-0", False), (True, "row-7", True)],
+)
+def test_load_checkpoints_restores_refill_state_only_with_dataloader_cursor(
+    tmp_path,
+    dummy_config,
+    restore_dataloader_state,
+    expected_row,
+    restore_pending_prompts,
+):
     checkpoint_path = tmp_path / "global_step_12"
     checkpoint_path.mkdir()
-    torch.save({"global_step": 12}, checkpoint_path / "trainer_state.pt")
+    pending_prompts = [{"uid": "prompt-7"}, {"uid": "prompt-8"}]
+    torch.save(
+        {"global_step": 12, "pending_sync_prompts": pending_prompts},
+        checkpoint_path / "trainer_state.pt",
+    )
     torch.save({"cursor": 7}, checkpoint_path / "data.pt")
 
     dummy_config.trainer.resume_path = str(checkpoint_path)
-    dummy_config.trainer.restore_dataloader_state = False
+    dummy_config.trainer.restore_dataloader_state = restore_dataloader_state
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = dummy_config
     trainer.resume_mode = ResumeMode.FROM_PATH
@@ -1274,7 +1306,8 @@ def test_load_checkpoints_can_restart_a_replacement_dataset(tmp_path, dummy_conf
 
     assert global_step == 12
     assert loaded_path == str(checkpoint_path)
-    assert next(trainer.train_dataloader) == "row-0"
+    assert next(trainer.train_dataloader) == expected_row
+    assert trainer._pending_sync_prompts == (pending_prompts if restore_pending_prompts else [])
 
 
 def test_calculate_kl_create_experience_batched(dummy_config, dummy_trajectory_runner):
