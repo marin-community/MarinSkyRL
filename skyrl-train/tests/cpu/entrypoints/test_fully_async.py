@@ -26,9 +26,7 @@ def test_trajectory_runner_uses_resolved_served_model_name(monkeypatch):
     monkeypatch.setattr(fully_async, "OpenAIHTTPModelClient", create_model_client)
     monkeypatch.setattr(fully_async, "SkyRLGymTrajectoryRunner", create_runner)
 
-    result = fully_async.AsyncPPOExp.get_trajectory_runner(
-        MagicMock(), cfg, tokenizer, inference_engine_client
-    )
+    result = fully_async.AsyncPPOExp.get_trajectory_runner(MagicMock(), cfg, tokenizer, inference_engine_client)
 
     assert result is runner
     create_model_client.assert_called_once_with(
