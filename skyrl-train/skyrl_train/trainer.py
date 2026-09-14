@@ -639,7 +639,7 @@ class RayPPOTrainer:
                 with Timer("step", self.all_timings) as step_timer:
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
 
-                    # 0. truncate data to have even shards
+                    # 0. select ordered prompts and truncate complete batches to even shards
                     rand_prompts = self._select_sync_generation_prompts(rand_prompts)
                     if self.group_admission_state is None:
                         rand_prompts = self._remove_tail_data(rand_prompts)
