@@ -106,3 +106,7 @@ data:
 extra_env:
   HF_HUB_OFFLINE: "1"
   NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
+  # The compile-time fusion autotuner allocates full pre-SPMD expert tensors
+  # as redzone buffers; the 67B expert projections exceed one H100 before the
+  # data-axis partitioner can lower them to local shards.
+  XLA_FLAGS: "--xla_gpu_autotune_level=0"
