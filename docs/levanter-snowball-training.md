@@ -41,8 +41,9 @@ skyrl_train.entrypoints.levanter_snowball
 Set `trainer.policy.levanter.*` for Levanter dtypes, reference kernels, publication chunks, timeout, and log directory.
 The defaults are in `skyrl-train/skyrl_train/config/ppo_base_config.yaml`. The pinned Levanter revision is
 [`e49f36f2d7434776d9289a6bf3781f22b419ba39`](https://github.com/marin-community/marin/tree/e49f36f2d7434776d9289a6bf3781f22b419ba39).
-The GPU extra installs JAX 0.11.1 with CUDA 13. It omits Levanter's optional Quack/CUTLASS GPU set because its versions
-conflict with the vLLM closure and this implementation selects Levanter's reference kernels.
+The GPU extra installs JAX 0.11.1 with CUDA 12, matching the Torch and vLLM runtime. It omits Levanter's optional
+Quack/CUTLASS GPU set because its versions conflict with the vLLM closure and this implementation selects Levanter's
+reference kernels.
 
 ## E6 reference and tested derivative
 
@@ -54,7 +55,7 @@ and contains the [resolved configuration](https://huggingface.co/datasets/penfev
 | Setting | E6 reproduction A | H100 integration gate |
 | --- | --- | --- |
 | Model | Snowball 67B-A2B, `marin-community/grug-67b-a2b-sft-s2-thinking-step630` | Local 5-layer Snowball, hidden size 64, 8 experts, top 2, vocabulary 64 |
-| Model revision | Artifact report names `6808fe5c219471517bd51df35addefd38ebebf89` | Locally generated from seed 17 |
+| Model revision | `6808fe5c219471517bd51df35addefd38ebebf89` | Locally generated from seed 17 |
 | Data | `s3://marin-us-east-02a/iris/rl-data/snowball-67b-a2b-rlvrmath-7498/train.parquet` | Four distinct 6-token prompts; each iteration consumes two prompts and samples two responses per prompt |
 | Request geometry | 1,664 prompt + up to 6,528 generated tokens; window 8,192 | 6 prompt + 4 generated tokens; window 128 |
 | GRPO geometry | Batch 256, 16 responses per prompt | Batch 2, 2 responses per prompt |
@@ -67,9 +68,11 @@ and contains the [resolved configuration](https://huggingface.co/datasets/penfev
 | Weight transport | NCCL | Gloo, with BF16 model tensors and FP32 router biases |
 | Updates | 20 | Two public-trainer updates, then a fresh process restores the step-1 checkpoint and repeats the saved second update |
 
-The retained run log resolves the model cache to `a822321c2c21af099189e7116104b3cf5142c119`, which differs from the
-`6808...` revision named in the artifact report. The integration gate does not use either revision. Treat the report
-revision as the E6 identity until a full-checkpoint validation resolves that discrepancy.
+The retained run log resolves a regional cache directory named
+`a822321c2c21af099189e7116104b3cf5142c119`. That identifier is not a revision in the public model repository. A later
+full-checkpoint diagnostic read and hashed all 39 cached weight shards, totaling 134,157,827,064 bytes. Every SHA-256
+matched the Git LFS object in public revision `6808...`. The cache directory name was stale; the weight identity is now
+resolved to the public revision above.
 
 ## Weight publication and resume
 
@@ -92,11 +95,10 @@ clears the installed version. Generation remains blocked until the restored lear
 complete. An incomplete callback save cannot be loaded or exported.
 
 The fresh-process gate restarts Ray, creates a new learner and vLLM process, and compares every checkpoint array before
-publication. All 306 arrays restore byte exactly. The CPU subprocess also restores exactly; its next update differs by
-at most `1.5866011e-5` in parameters and `0.0034856563` in optimizer moments after recompilation in a fresh XLA process.
-On H100, the accepted absolute replay tolerance is `1e-4` for model and optimizer arrays. The measured next-update
-maxima were `1.4141202e-5` for model parameters and `2.5634421e-5` for optimizer state; step and random-key metadata
-remained exact.
+publication. All 306 arrays restore byte exactly. The CPU subprocess restores exactly, including its next update in
+the current CPU runtime. On H100, the accepted absolute replay tolerance is `1e-4` for model and optimizer arrays. The
+measured next-update maxima were `1.4141202e-5` for model parameters and `2.5634421e-5` for optimizer state; step and
+random-key metadata remained exact.
 
 The implementation can export the current in-memory model with Levanter's Hugging Face converter after a completed
 checkpoint. Unit tests cover the call and reject export from an incomplete checkpoint. The real-GPU gate did not load
@@ -140,11 +142,11 @@ steps 1 and 2. Phase two starts a fresh Ray process, restores step 1 through the
 checkpoint arrays and dataloader position, republishes before generation, replays the saved second batch, and completes
 the public second update. The resumed trajectory UIDs and response token IDs exactly match the saved batch.
 
-The final gate was Iris job `/romain/dev-gpu-levsnow-fix-01a09cd0`. It passed in 155.32 seconds of test time. The
+The tiny-model gate was Iris job `/romain/dev-gpu-levsnow-fix-01a09cd0`. It passed in 155.32 seconds of test time. The
 whole-node allocation lasted 22 minutes 45.79 seconds, or 3.035 allocated H100-hours, with three of the eight H100s
-active. Seven bounded allocations, including failed setup and debugging attempts, totaled 47 minutes 5.48 seconds or
-6.279 allocated H100-hours. Iris had garbage-collected the first six job records by the final accounting; their terminal
-durations were captured before collection: `5:06.50`, `5:51.09`, `2:32.28`, `2:31.52`, `4:13.20`, and `4:05.10`.
+active. The original accounting omitted an earlier incarnation because the name `/romain/dev-gpu-levsnow-01a09cd` was
+reused. The transcript bounds that missing allocation at 6:00.41-6:34.37. Charging its entire 6:49.28 allocation
+command gives a conservative corrected total of 7.188 H100-hours across eight allocation incarnations.
 
 | Measurement | Seconds |
 | --- | ---: |
@@ -165,11 +167,30 @@ addressable `[2, 8]` shards. A `[128, 64]` query weight used `P('model', 'data')
 shards. Timings include device synchronization before the learner reports completion. They describe this tiny
 reference-kernel gate and do not predict 67B throughput.
 
+## Full-size inference diagnostic
+
+A later inference-only diagnostic loaded the pinned 67B-A2B checkpoint on one eight-H100 node with vLLM TP1/DP8/EP8.
+It used the exact public config and tokenizer plus the 39 byte-verified cached weight shards. Model loading took 3.50
+seconds and 18.35 GiB per rank. The initialized server occupied 71,175-71,273 MiB on each H100.
+
+On a deterministic 128-example sample of `HuggingFaceH4/MATH-500` revision
+`6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be`, the initial policy produced 346,374 tokens in 75.02 seconds, or 4,617
+output tokens/second across the node. `math-verify==0.8.0` scored 100/128 answers correct (78.1%, Wilson 95% interval
+70.2%-84.4%). Ninety correct answers also completed normally; ten correct answers appeared before a later length stop.
+Overall, 96/128 responses completed normally and 32/128 reached the 6,528-token limit. This fixed sample is a pilot
+cohort, not a complete MATH-500 result, and the timing is an inference measurement rather than an MSRL iteration.
+
+The MSRL AIME reward protocol accepted only 10/128 of those responses and parsed only 17/128. Many responses contained
+an equivalent boxed answer but did not use the protocol's exact `Answer:` extraction near the end. That raw reward is
+therefore recorded separately from held-out answer accuracy; changing it would change the recovered E6 training
+semantics.
+
 ## Remaining scope
 
-No full 67B checkpoint was loaded. Multi-host checkpoint completion, multi-host collectives, DP8/EP8 inference,
-campaign learning quality, and full-size throughput remain untested. The small model uses reference attention and ring
-MoE, so its timings are diagnostic. There is no matched Megatron measurement for this geometry.
+The full checkpoint and DP8/EP8 inference now work, but no full-size Levanter learner was initialized. Multi-host
+checkpoint completion, learner collectives, a real update and publication, campaign learning quality, learner
+throughput, and end-to-end throughput remain untested. The small model uses reference attention and ring MoE, so its
+timings are diagnostic. There is no matched Megatron measurement for this geometry.
 
 With the currently resolved `marin-iris` package, Levanter cannot initialize its direct Iris metrics writer because
 that package lacks `iris.runtime.telemetry.resolve`. Levanter catches this failure and training continues; MSRL logs and

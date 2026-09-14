@@ -449,33 +449,9 @@ def test_checkpoint_resume_in_a_fresh_process_matches_the_next_update(tmp_path):
         np.testing.assert_array_equal(restored[f"checkpoint::{name}"], expected)
     np.testing.assert_array_equal(restored["training_key"], expected_state["training_key"])
     assert int(restored["policy_version"]) == int(restored["optimizer_step"]) == 2
-    category_max_deviation = {"parameter": 0.0, "optimizer": 0.0, "metadata": 0.0}
-    category_max_deviation_name: dict[str, str | None] = dict.fromkeys(category_max_deviation)
     for name, expected in expected_state.items():
         actual = restored[name]
-        if not np.issubdtype(expected.dtype, np.inexact):
-            np.testing.assert_array_equal(actual, expected)
-            continue
-        deviation = float(np.max(np.abs(actual - expected)))
-        category = name.partition("::")[0] if "::" in name else "metadata"
-        if deviation > category_max_deviation[category]:
-            category_max_deviation[category] = deviation
-            category_max_deviation_name[category] = name
-    print(
-        json.dumps(
-            {
-                "fresh_process_next_update_category_max_abs_diff": category_max_deviation,
-                "fresh_process_next_update_category_max_abs_diff_name": category_max_deviation_name,
-            }
-        )
-    )
-    # Fresh XLA CPU processes can select slightly different floating-point
-    # reduction orders. The checkpoint itself is exact above. At E6's 1e-5
-    # learning rate, the replayed model update stays within 2e-5; Adam moment
-    # arrays record the underlying gradient variation directly.
-    assert category_max_deviation["metadata"] == 0.0
-    assert category_max_deviation["parameter"] <= 2e-5
-    assert category_max_deviation["optimizer"] <= 5e-3
+        np.testing.assert_array_equal(actual, expected, err_msg=name)
 
 
 if __name__ == "__main__":

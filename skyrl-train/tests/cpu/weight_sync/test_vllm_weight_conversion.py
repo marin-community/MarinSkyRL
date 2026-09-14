@@ -106,6 +106,28 @@ def test_load_weights_into_vllm_rejects_silently_skipped_ordinary_parameter():
         )
 
 
+def test_load_weights_into_vllm_accepts_qwen_packed_parameter_names():
+    model = RecordingVLLMModel(
+        {
+            "model.layers.0.self_attn.qkv_proj.weight",
+            "model.layers.0.mlp.gate_up_proj.weight",
+        }
+    )
+
+    loaded = load_weights_into_vllm(
+        model,
+        [
+            ("model.layers.0.self_attn.q_proj.weight", torch.zeros(4, 4)),
+            ("model.layers.0.self_attn.k_proj.weight", torch.zeros(4, 4)),
+            ("model.layers.0.self_attn.v_proj.weight", torch.zeros(4, 4)),
+            ("model.layers.0.mlp.gate_proj.weight", torch.zeros(4, 4)),
+            ("model.layers.0.mlp.up_proj.weight", torch.zeros(4, 4)),
+        ],
+    )
+
+    assert loaded == model.loaded_parameters
+
+
 def test_expected_parameter_names_cover_grug_stacked_experts():
     assert expected_vllm_parameter_names(
         [

@@ -12,6 +12,13 @@ _GRUG_EXPERT_PARAMETER_MAPPING = (
     ("experts.up_proj.weight", "experts.routed_experts.w13_weight"),
     ("experts.down_proj.weight", "experts.routed_experts.w2_weight"),
 )
+_PACKED_PARAMETER_MAPPING = (
+    ("self_attn.q_proj", "self_attn.qkv_proj"),
+    ("self_attn.k_proj", "self_attn.qkv_proj"),
+    ("self_attn.v_proj", "self_attn.qkv_proj"),
+    ("mlp.gate_proj", "mlp.gate_up_proj"),
+    ("mlp.up_proj", "mlp.gate_up_proj"),
+)
 
 
 class VLLMWeightModel(Protocol):
@@ -87,8 +94,21 @@ def load_weights_into_vllm(
     """Load one weight-sync batch and reject every silently skipped parameter."""
     conversion = convert_transformers_fused_moe_weights(weights)
     loaded_parameters = model.load_weights(iter(conversion.weights))
-    missing_parameters = conversion.expected_parameters.difference(loaded_parameters)
+    missing_parameters = {
+        expected
+        for expected in conversion.expected_parameters
+        if not _reported_parameter_candidates(expected).intersection(loaded_parameters)
+    }
     if missing_parameters:
         missing = ", ".join(sorted(missing_parameters))
         raise RuntimeError(f"vLLM did not load required parameters: {missing}")
     return loaded_parameters
+
+
+def _reported_parameter_candidates(expected: str) -> frozenset[str]:
+    """Return direct and packed parameter names that vLLM may report."""
+    candidates = {expected}
+    for source, target in _PACKED_PARAMETER_MAPPING:
+        if source in expected:
+            candidates.add(expected.replace(source, target))
+    return frozenset(candidates)

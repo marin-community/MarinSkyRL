@@ -15,10 +15,6 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-# Ray reserves the learner GPUs before importing this module. Avoid JAX claiming
-# their entire memory so a bounded Torch staging tensor can coexist with it.
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-
 import equinox as eqx
 import haliax as hax
 import jax

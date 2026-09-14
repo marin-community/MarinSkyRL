@@ -75,7 +75,8 @@ levanter-gpu = [
     # The full Levanter GPU extra carries newer Quack/CUTLASS kernels than the
     # vLLM runtime. Snowball uses its reference attention and ring MoE paths in
     # this integration, so it only needs Levanter's tested JAX CUDA runtime.
-    "jax[cuda13]==0.11.1 ; sys_platform == 'linux'",
+    # Keep JAX on the same CUDA 12 package family as Torch and vLLM.
+    "jax[cuda12]==0.11.1 ; sys_platform == 'linux'",
     "marin-levanter @ git+https://github.com/marin-community/marin.git@e49f36f2d7434776d9289a6bf3781f22b419ba39#subdirectory=lib/levanter ; sys_platform == 'linux'",
 ]
 deepspeed = [
@@ -173,6 +174,7 @@ prerelease = "allow"
 required-version = ">=0.8.10"
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }],
+    [{ extra = "cpu" }, { extra = "levanter-gpu" }],
     [{ extra = "cpu" }, { extra = "deepspeed" }],
     [{ extra = "cpu" }, { extra = "megatron" }],
     [{ extra = "cpu" }, { extra = "vllm" }],
