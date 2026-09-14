@@ -94,6 +94,16 @@ def find_files(path: str) -> dict[str, int]:
     return {str(file_path): int(detail["size"]) for file_path, detail in details.items()}
 
 
+def stat_object(path: str) -> dict:
+    """Return one object's metadata without transferring its bytes."""
+    filesystem = _get_filesystem(path)
+    normalized = filesystem._strip_protocol(path) if is_cloud_path(path) else path
+    if path.startswith("s3://"):
+        # refresh: a cached entry from the write would defeat the point of asking.
+        return dict(call_with_s3_retry(filesystem, filesystem.info, normalized, refresh=True))
+    return dict(filesystem.info(normalized))
+
+
 def makedirs(path: str, exist_ok: bool = True) -> None:
     """Create directories. Only applies to local filesystem paths."""
     if not is_cloud_path(path):

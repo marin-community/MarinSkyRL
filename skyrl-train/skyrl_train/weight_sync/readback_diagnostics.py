@@ -1,6 +1,7 @@
 """Bounded, read-only diagnostics for an opt-in initial weight sync."""
 
 import hashlib
+import itertools
 import json
 import os
 import socket
@@ -8,11 +9,15 @@ import time
 from pathlib import Path
 
 import torch
-from skyrl_train.io.io import read_bytes, write_bytes_atomic
+from skyrl_train.io.io import read_bytes, stat_object, write_bytes_atomic
 
 
 HASH_CHUNK_BYTES = 1 << 20
 RECEIPT_CHUNK_BYTES = 3072
+# One receipt in this many is still re-read in full, so the cheap verify is
+# audited against the expensive one it replaces rather than trusted outright.
+FULL_READBACK_EVERY = 8
+_RECEIPTS_WRITTEN = itertools.count()
 ENVIRONMENT_KEYS = (
     "NCCL_DEBUG",
     "NCCL_DEBUG_SUBSYS",
@@ -77,14 +82,68 @@ def network_log_readback() -> dict:
     }
 
 
+def _verify_written_object(uri: str, payload: bytes) -> dict:
+    """Establish that the stored object is exactly the payload, preferring not to move it.
+
+    A single-part S3 object's ETag is the MD5 of exactly the bytes stored, so comparing
+    it against a locally computed MD5 proves what re-reading the object proves, for the
+    cost of a HEAD. These receipts are megabytes -- 6.13 MB median at P32/I8 -- and at
+    that size the re-read costs about three times the write and sits on the trainer's
+    critical path after resume.
+
+    The cheap path can only ever accelerate, never weaken, the claim. Anything that makes
+    the ETag unusable -- a local or non-S3 path, a multipart or server-side-encrypted
+    object whose ETag is not a payload digest, a missing ETag, a size disagreement, or a
+    digest that simply does not match -- falls through to the full re-read, which remains
+    the authority. A sampled fraction is re-read in full regardless, so the cheap verify
+    is audited against the expensive one rather than trusted outright.
+    """
+    sampled = next(_RECEIPTS_WRITTEN) % FULL_READBACK_EVERY == 0
+    verify = "full-readback-sampled" if sampled else "full-readback"
+    if not sampled and uri.startswith("s3://"):
+        digest = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+        try:
+            detail = stat_object(uri)
+        except Exception as error:  # metadata is an optimisation; never fail the write on it
+            detail = {"error": f"{type(error).__name__}: {error}"}
+        etag = str(detail.get("ETag", "")).strip('"')
+        if etag and "-" not in etag and detail.get("size") == len(payload) and etag == digest:
+            return {
+                "verify": "etag-md5",
+                "etag": etag,
+                "md5": digest,
+                "full_readback_every": FULL_READBACK_EVERY,
+                "verify_scope": "stored-object digest equals written payload; bytes not transferred",
+            }
+        # A mismatch here is not yet a failure: the ETag may simply not be a payload
+        # digest. Record why the cheap path was abandoned so a systematic cause is
+        # visible in the receipts instead of silently costing a full re-read forever.
+        verify = "full-readback-after-etag-unusable"
+        etag_detail = {"etag": etag or None, "stored_bytes": detail.get("size"), "md5": digest}
+    else:
+        etag_detail = {}
+    if read_bytes(uri) != payload:
+        raise ValueError("Durable native readback differs from the original receipt")
+    return {
+        "verify": verify,
+        "full_readback_every": FULL_READBACK_EVERY,
+        "verify_scope": "stored object re-read in full and compared byte for byte",
+        **etag_detail,
+    }
+
+
 def persist_readback(output_uri: str, stage: str, receipt: dict) -> dict:
-    """Write and read back native evidence before advancing to the next phase."""
+    """Write and verify native evidence before advancing to the next phase."""
     payload = json.dumps(receipt, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
     uri = f"{output_uri.rstrip('/')}/{stage}-{socket.gethostname()}-{os.getpid()}.json"
     write_bytes_atomic(uri, payload)
-    if read_bytes(uri) != payload:
-        raise ValueError("Durable native readback differs from the original receipt")
-    return {"uri": uri, "sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload)}
+    verification = _verify_written_object(uri, payload)
+    return {
+        "uri": uri,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+        **verification,
+    }
 
 
 def tensor_sha256(tensor: torch.Tensor) -> str:
