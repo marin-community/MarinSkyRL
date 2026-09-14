@@ -1,12 +1,15 @@
 """Retain native shard preparation across configured learner publications."""
 
 import asyncio
-from copy import deepcopy
 import time
 
 import ray
 
-from skyrl_train.weight_sync.readback_diagnostics import persist_readback
+from skyrl_train.weight_sync.readback_diagnostics import (
+    persist_payload,
+    persist_readback,
+    serialize_receipt,
+)
 from skyrl_train.weight_sync.bucket_qualification import mark_measurement_once
 from skyrl_train.weight_sync.shard_interval import GenerationBoundary, ShardLifecycle, run_shard_interval, settled
 from skyrl_train.weight_sync.shard_preparation import PreparationOptions, ShardGeometry
@@ -57,12 +60,21 @@ class ShardTrainingPublication:
 
     def capture(self, row):
         if self.deferred_rows is not None:
-            # The interval result gains finish/timing fields later. Preserve the
-            # exact state at capture, never an alias to the mutable live result.
-            self.deferred_rows.append(deepcopy(row))
+            # The interval result gains finish/timing fields later, so what is kept here must
+            # not alias the live structure. Serializing now freezes it to bytes -- a stronger
+            # snapshot than a deep copy, and a far cheaper one inside the pause: the rank rows
+            # make this receipt megabytes, where deepcopy allocates every object again and
+            # json.dumps writes a buffer. The write after resume then reuses these exact bytes
+            # instead of serializing a second time.
+            self.deferred_rows.append(serialize_receipt(row))
             return None
         self.receipt_index += 1
         return persist_readback(self.output_uri, f"shard-driver-{self.preparation_id}-{self.receipt_index}", row)
+
+    def capture_payload(self, payload):
+        """Write a receipt frozen earlier by capture()."""
+        self.receipt_index += 1
+        return persist_payload(self.output_uri, f"shard-driver-{self.preparation_id}-{self.receipt_index}", payload)
 
     def diagnostics_outside_pause(self, publication_id):
         """Keep startup and full proof gates inline; optimize later proofs-off syncs."""
@@ -100,7 +112,7 @@ class ShardTrainingPublication:
         # Await I/O, so failure is visible and shutdown cannot lose writes. The
         # thread lets the driver's generation coroutines progress after resume.
         for row in rows:
-            await settled(asyncio.to_thread(self.capture, row))
+            await settled(asyncio.to_thread(self.capture_payload, row))
         result["outside_pause_seconds"]["interval_capture"] = time.perf_counter() - started
         started = time.perf_counter()
         result["durable_receipt"] = (
@@ -214,9 +226,11 @@ class ShardTrainingPublication:
             # A failed installation stays paused. Retain the immutable partial
             # evidence before closing; success-path latency rules do not apply.
             rows, self.deferred_rows = self.deferred_rows, None
+            # These were frozen to bytes by capture(); write them as bytes. Routing them
+            # back through capture() would serialize an already-serialized payload.
             for row in rows or ():
                 try:
-                    self.capture(row)
+                    self.capture_payload(row)
                 except BaseException as error:
                     primary.add_note(f"Shard partial receipt: {type(error).__name__}: {error}")
             try:
@@ -242,8 +256,9 @@ class ShardTrainingPublication:
             if self.pending_result is not None:
                 publication_id, result, rows = self.pending_result
                 self.pending_result = None
+                # Frozen to bytes by capture(); write them as bytes, as after_resume does.
                 for row in rows:
-                    await settled(asyncio.to_thread(self.capture, row))
+                    await settled(asyncio.to_thread(self.capture_payload, row))
                 await settled(
                     asyncio.to_thread(
                         self.capture,
