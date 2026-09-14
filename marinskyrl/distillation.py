@@ -141,33 +141,65 @@ class TeacherRoutingPlan:
 
 
 @dataclass(frozen=True)
+class TeacherResidencySpec:
+    max_resident: int = 1
+    minimum_residency_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
 class DistillationPlan:
     objective: DistillationObjectiveKind
     coefficient: float
     reward_mode: DistillationRewardMode
     teachers: tuple[TeacherSpec, ...]
     routing: TeacherRoutingPlan
+    residency: TeacherResidencySpec = TeacherResidencySpec()
 
 
 def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None:
-    """Fail before allocation unless the plan fits the first production runtime slice."""
+    """Fail before allocation unless the plan fits the production local-teacher runtime."""
     if plan is None:
         return
     if plan.reward_mode is not DistillationRewardMode.ADD:
         raise ValueError("the distillation runtime currently supports only reward_mode=add auxiliary losses")
-    if len(plan.teachers) != 1:
-        raise ValueError("the synchronous distillation runtime currently supports exactly one teacher")
-    teacher = plan.teachers[0]
-    if teacher.source is not TeacherSource.LOCAL_INFERENCE or teacher.placement is not TeacherPlacement.PINNED:
-        raise ValueError("the synchronous distillation runtime currently supports one pinned local_inference teacher")
-    if teacher.resources is None:
-        raise ValueError(f"teachers.{teacher.id}.resources is required for a local teacher runtime")
-    total_gpus = teacher.resources.num_nodes * teacher.resources.gpus_per_node
-    if total_gpus % teacher.resources.tensor_parallel_size != 0:
-        raise ValueError(
-            f"teachers.{teacher.id}.resources reserves {total_gpus} GPUs, which is not divisible by "
-            f"tensor_parallel_size={teacher.resources.tensor_parallel_size}"
-        )
+    if plan.residency.max_resident != 1:
+        raise ValueError("the local teacher resource plan currently supports exactly one rotating residency slot")
+    pinned_groups: set[str] = set()
+    rotating_groups: set[str] = set()
+    rotating_footprint: TeacherResourceSpec | None = None
+    for teacher in plan.teachers:
+        if teacher.source is not TeacherSource.LOCAL_INFERENCE or teacher.placement not in {
+            TeacherPlacement.PINNED,
+            TeacherPlacement.ROTATING,
+        }:
+            raise ValueError(
+                "the synchronous distillation runtime currently supports pinned or rotating local_inference teachers"
+            )
+        if teacher.resources is None:
+            raise ValueError(f"teachers.{teacher.id}.resources is required for a local teacher runtime")
+        total_gpus = teacher.resources.num_nodes * teacher.resources.gpus_per_node
+        if total_gpus % teacher.resources.tensor_parallel_size != 0:
+            raise ValueError(
+                f"teachers.{teacher.id}.resources reserves {total_gpus} GPUs, which is not divisible by "
+                f"tensor_parallel_size={teacher.resources.tensor_parallel_size}"
+            )
+
+        group = teacher.resources.colocation_group
+        if teacher.placement is TeacherPlacement.PINNED:
+            if group in pinned_groups:
+                raise ValueError(f"pinned local teachers must use distinct colocation groups; duplicate {group!r}")
+            pinned_groups.add(group)
+            continue
+
+        rotating_groups.add(group)
+        if rotating_footprint is None:
+            rotating_footprint = teacher.resources
+        elif teacher.resources != rotating_footprint:
+            raise ValueError("rotating local teachers must share one identical resource footprint and colocation group")
+    overlapping_groups = pinned_groups & rotating_groups
+    if overlapping_groups:
+        group = min(overlapping_groups)
+        raise ValueError(f"pinned and rotating local teachers cannot share colocation group {group!r}")
 
 
 _OBJECTIVE_EVIDENCE = {
@@ -229,6 +261,29 @@ def _positive_integer(config: Mapping[str, object], key: str, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{path}.{key} must be a positive integer")
     return value
+
+
+def _nonnegative_float(config: Mapping[str, object], key: str, path: str) -> float:
+    value = config.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{path}.{key} must be a non-negative number")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise ValueError(f"{path}.{key} must be a non-negative number; got {value!r}")
+    return result
+
+
+def _teacher_residency(config: Mapping[str, object]) -> TeacherResidencySpec:
+    raw = config.get("residency")
+    if raw is None:
+        return TeacherResidencySpec()
+    path = "trainer.algorithm.distillation.residency"
+    residency = _mapping(raw, path)
+    _reject_unknown(residency, frozenset({"max_resident", "minimum_residency_seconds"}), path)
+    return TeacherResidencySpec(
+        max_resident=_positive_integer(residency, "max_resident", path),
+        minimum_residency_seconds=_nonnegative_float(residency, "minimum_residency_seconds", path),
+    )
 
 
 def _teacher_resources(config: Mapping[str, object], path: str) -> TeacherResourceSpec | None:
@@ -406,7 +461,7 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
     distillation = _mapping(raw_distillation, "trainer.algorithm.distillation")
     _reject_unknown(
         distillation,
-        frozenset({"objective", "routing_plan", "coefficient", "reward_mode"}),
+        frozenset({"objective", "routing_plan", "coefficient", "reward_mode", "residency"}),
         "trainer.algorithm.distillation",
     )
     objective = _enum_value(
@@ -423,6 +478,7 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
     )
     coefficient = _positive_float(distillation, "coefficient", "trainer.algorithm.distillation")
     routing_name = _required_string(distillation, "routing_plan", "trainer.algorithm.distillation")
+    residency = _teacher_residency(distillation)
 
     if not raw_teachers:
         raise ValueError("teachers must contain at least one teacher when distillation is configured")
@@ -455,6 +511,7 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
         reward_mode=reward_mode,
         teachers=teachers,
         routing=routing,
+        residency=residency,
     )
 
 
