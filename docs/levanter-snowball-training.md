@@ -83,9 +83,11 @@ expert matrices stay stacked because the Grug vLLM loader unbinds their expert d
 bias tensors stay FP32; other tensors use the configured generator dtype.
 
 The learner marks a version installed only after every active vLLM worker returns a receiver-observed receipt. The
-receipt must match the complete source weight name count and digest, the exact expected installed vLLM parameter count
-and digest, and completion of vLLM's layer-wise reload. The GPU gate also reads dense, expert, language-head, and
-router-bias values back from vLLM after each final update.
+receipt must match the complete source weight name count and digest, the expected top-level vLLM parameter count and
+digest, and completion of vLLM's layer-wise reload. Standard Qwen q/k/v and gate/up sources are loaded separately so a
+packed target name cannot hide a skipped sibling. The GPU gate also reads dense, expert, language-head, and router-bias
+values back from vLLM after each final update. Complete per-expert-slice acknowledgement still belongs in the full-size
+multi-host gate.
 
 MSRL writes its completion marker only after Levanter's TensorStore checkpoint has committed. The payload includes the
 full model, Adam state, Levanter training key and step, and the learner policy version. The trainer stages learner,
@@ -174,15 +176,15 @@ seconds and 18.35 GiB per rank. The initialized server occupied 71,175-71,273 Mi
 
 On a deterministic 128-example sample of `HuggingFaceH4/MATH-500` revision
 `6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be`, the initial policy produced 346,374 tokens in 75.02 seconds, or 4,617
-output tokens/second across the node. `math-verify==0.8.0` scored 100/128 answers correct (78.1%, Wilson 95% interval
-70.2%-84.4%). Ninety correct answers also completed normally; ten correct answers appeared before a later length stop.
-Overall, 96/128 responses completed normally and 32/128 reached the 6,528-token limit. This fixed sample is a pilot
-cohort, not a complete MATH-500 result, and the timing is an inference measurement rather than an MSRL iteration.
+output tokens/second across the node. The frozen evaluator was the recovered E6 `AIMEVerifier`. It accepted 10/128
+responses and parsed 17/128, for mean reward -0.84375. Many equivalent boxed answers did not use its exact trailing
+`Answer:` form.
 
-The MSRL AIME reward protocol accepted only 10/128 of those responses and parsed only 17/128. Many responses contained
-an equivalent boxed answer but did not use the protocol's exact `Answer:` extraction near the end. That raw reward is
-therefore recorded separately from held-out answer accuracy; changing it would change the recovered E6 training
-semantics.
+A post-hoc `math-verify==0.8.0` answer-equivalence audit scored 100/128 answers correct (78.1%, Wilson 95% interval
+70.2%-84.4%). Ninety correct answers also completed normally; ten correct answers appeared before a later length stop.
+Overall, 96/128 responses completed normally and 32/128 reached the 6,528-token limit. This exploratory audit was not
+the frozen evaluator, and neither result is JAX learning evidence. The fixed sample is a pilot cohort rather than a
+complete MATH-500 result, and the timing is an inference measurement rather than an MSRL iteration.
 
 ## Remaining scope
 
@@ -191,10 +193,16 @@ checkpoint completion, learner collectives, a real update and publication, campa
 throughput, and end-to-end throughput remain untested. The small model uses reference attention and ring MoE, so its
 timings are diagnostic. There is no matched Megatron measurement for this geometry.
 
+The tiny end-to-end GPU gate predates the final CUDA 12 dependency selection and allocator-policy cleanup. The final
+dependency closure has an eight-H100 JAX collective smoke, not a Levanter update. The next full-size gate must also
+subsume that end-to-end runtime validation.
+
 With the currently resolved `marin-iris` package, Levanter cannot initialize its direct Iris metrics writer because
 that package lacks `iris.runtime.telemetry.resolve`. Levanter catches this failure and training continues; MSRL logs and
 the returned learner metrics remain available. Direct Levanter telemetry needs a compatible Iris package in a follow-up.
 
-The next expensive check would be a targeted 67B forward, one update, or one publication, chosen to answer a concrete
-memory or conversion question. The small gate has already established orchestration, numerical semantics, sharding on
-two GPUs, live installation, and resume mechanics. A full-model run is not needed to review this scoped integration.
+The next expensive check is one finite 67B update on a credible multi-host learner topology, followed by checkpoint,
+restart, and sharded publication to a separate vLLM node. It should add source-component acknowledgement or exhaustive
+readback for fused expert slices. The small gate has already established orchestration, numerical semantics, local
+sharding on two GPUs, live installation, and resume mechanics. A full-model run is not needed to review this scoped
+integration.
