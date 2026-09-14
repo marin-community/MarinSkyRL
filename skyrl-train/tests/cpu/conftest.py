@@ -11,7 +11,9 @@ from omegaconf import OmegaConf
 os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 
 import ray  # noqa: E402
+import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402
+from skyrl_train.distillation import ChosenTokenTeacherEvidence  # noqa: E402
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: E402
 from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestCollection  # noqa: E402
 
@@ -32,6 +34,19 @@ def harbor_runner_spec() -> HarborRunnerSpec:
         }
     )
     return HarborRunnerSpec(config, OmegaConf.create({}), OmegaConf.create({}))
+
+
+@pytest.fixture
+def chosen_teacher_evidence() -> ChosenTokenTeacherEvidence:
+    return ChosenTokenTeacherEvidence(
+        trajectory_ids=("math_0", "swe_0"),
+        route_ids=("math", "swe"),
+        teacher_id="teacher-a",
+        teacher_revision="teacher-revision",
+        plan_version="mopd-v1",
+        valid_mask=torch.tensor([[True, True, False], [True, False, False]]),
+        chosen_logprobs=torch.tensor([[-0.5, -2.0, torch.nan], [-0.25, torch.nan, torch.nan]]),
+    )
 
 
 @pytest.fixture

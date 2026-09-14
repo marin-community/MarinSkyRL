@@ -24,6 +24,7 @@ class AdvantageEstimator(StrEnum):
     RLOO = "rloo"
     RLOO_N = "rloo_n"  # RLOO-Neutral: excludes masked samples from baseline
     REINFORCE_PP = "reinforce++"
+    UNIFORM = "uniform"
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ class PolicyLossType(StrEnum):
     CLIP_COV = "clip_cov"
     KL_COV = "kl_cov"
     SAPO = "sapo"
+    SFT = "sft"
 
 
 def policy_loss_requires_rollout_logprobs(policy_loss_type: str) -> bool:

@@ -39,6 +39,8 @@ from skyrl_train.models.grug_query_bias import (
 )
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
 import numpy as np
+from skyrl_train.distillation import SampledReverseKLInput
+from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.config.utils import get_default_config
@@ -1450,6 +1452,46 @@ def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_t
         batch["loop_advantages"],
         torch.tensor([[0.0, -0.1, -0.1], [-0.2, 0.0, 0.0]]),
     )
+    assert "teacher_action_log_probs" not in batch
+    assert "teacher_valid_mask" not in batch
+    assert "distillation_loss_weights" not in batch
+
+
+def test_teacher_evidence_is_validated_and_collated_with_response_tokens(
+    dummy_config,
+    dummy_tokenizer,
+    chosen_teacher_evidence,
+):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = dummy_tokenizer
+    trainer.pad_batch = lambda batch: batch
+    evidence = chosen_teacher_evidence
+    distillation = SampledReverseKLInput(
+        teacher_action_log_probs=evidence.chosen_logprobs,
+        valid_mask=evidence.valid_mask,
+        loss_weights=torch.tensor([[0.2, 0.2, 0.2], [0.3, 0.3, 0.3]]),
+    )
+    trajectory_batch = {
+        "prompt_token_ids": [[1, 2], [3]],
+        "response_ids": [[4, 5, 6], [7]],
+        "rewards": [[0.0, 0.0, 0.0], [0.0]],
+        "loss_masks": [[1, 1, 1], [1]],
+        "rollout_logprobs": None,
+        "trajectory_ids": [
+            TrajectoryID(instance_id="math", repetition_id=0),
+            TrajectoryID(instance_id="swe", repetition_id=0),
+        ],
+        "teacher_evidence": evidence,
+        "distillation": distillation,
+    }
+
+    batch = trainer.convert_to_training_input(trajectory_batch, ["math", "swe"])
+
+    torch.testing.assert_close(batch["teacher_action_log_probs"], evidence.chosen_logprobs, equal_nan=True)
+    assert torch.equal(batch["teacher_valid_mask"], evidence.valid_mask)
+    torch.testing.assert_close(batch["distillation_loss_weights"], distillation.loss_weights)
 
 
 def test_normalize_mini_batch_size():

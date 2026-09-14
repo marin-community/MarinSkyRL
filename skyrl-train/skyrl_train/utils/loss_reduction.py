@@ -10,7 +10,8 @@ from typing import Literal, Optional, TypeAlias
 
 import torch
 
-from skyrl_train.utils.policy_math import masked_mean, right_pad_to_match
+from skyrl_train.tensor_math import masked_mean
+from skyrl_train.utils.policy_math import right_pad_to_match
 
 
 SPAN_THINK_TAG: int = 1  # mirrors span_tagger.SPAN_THINK (kept local to avoid a torch-free import cycle)

@@ -2,7 +2,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
 
+
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
+from skyrl_train.distillation import ChosenTokenTeacherEvidence, SampledReverseKLInput
 from skyrl_train.inference_engines.base import ConversationType
 
 
@@ -105,6 +107,8 @@ class TrajectoryBatch(TypedDict):
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
     rollout_routed_experts: Optional[List[List[List[List[int]]]]]
+    teacher_evidence: Optional[ChosenTokenTeacherEvidence]
+    distillation: Optional[SampledReverseKLInput]
     token_level_shaping: Optional[List[List[float]]]
     response_span_tags: Optional[List[List[int]]]
     trajectory_ids: Optional[List[TrajectoryID]]

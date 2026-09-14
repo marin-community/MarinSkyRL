@@ -991,10 +991,29 @@ def test_resolve_launch_defaults_rejects_declared_disaggregated_placement_mismat
 trainer:
   placement:
     colocate_all: false
+    colocate_policy_ref: false
     policy_num_nodes: 2
     ref_num_nodes: 2
     policy_num_gpus_per_node: 8
     ref_num_gpus_per_node: 8
+  train_batch_size: 8
+  policy_mini_batch_size: 8
+  micro_train_batch_size_per_gpu: 1
+  algorithm:
+    use_kl_loss: true
+    use_kl_in_reward: false
+  critic:
+    model:
+      path: null
+generator:
+  run_engines_locally: false
+  num_inference_engines: 1
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_pipeline_parallel_size: 1
+  inference_engine_data_parallel_size: 1
+  inference_engine_expert_parallel_size: 1
+  n_samples_per_prompt: 1
+  backend: vllm
 """
     )
     args = create_parser().parse_args(
@@ -1010,7 +1029,7 @@ trainer:
         ]
     )
 
-    with pytest.raises(SystemExit, match=r"policy_num_nodes \+ ref_num_nodes = 4"):
+    with pytest.raises(SystemExit, match=r"policy=2\+reference=2"):
         resolve_launch_defaults(args)
 
 
@@ -1022,10 +1041,29 @@ trainer:
   strategy: fsdp2
   placement:
     colocate_all: false
+    colocate_policy_ref: false
     policy_num_nodes: 2
     ref_num_nodes: 2
     policy_num_gpus_per_node: 8
     ref_num_gpus_per_node: 8
+  train_batch_size: 8
+  policy_mini_batch_size: 8
+  micro_train_batch_size_per_gpu: 1
+  algorithm:
+    use_kl_loss: true
+    use_kl_in_reward: false
+  critic:
+    model:
+      path: null
+generator:
+  run_engines_locally: false
+  num_inference_engines: 1
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_pipeline_parallel_size: 1
+  inference_engine_data_parallel_size: 1
+  inference_engine_expert_parallel_size: 1
+  n_samples_per_prompt: 1
+  backend: vllm
 """
     )
     args = create_parser().parse_args(
@@ -1043,5 +1081,5 @@ trainer:
         ]
     )
 
-    with pytest.raises(SystemExit, match=r"policy_num_nodes = 2"):
+    with pytest.raises(SystemExit, match=r"policy=2"):
         resolve_launch_defaults(args)

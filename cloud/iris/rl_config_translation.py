@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Mapping, Optional, Protocol
 import yaml
 
 from cloud.iris.paths import resolve_paths_in_dict
+from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, reject_disabled_distillation_runtime
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
@@ -481,6 +482,7 @@ class ParsedRLConfig:
     raw: Dict[str, Any]
     context_budget: ContextBudget
     entrypoint: str
+    distillation_plan: DistillationPlan | None = None
     config_groups: Dict[str, str] = field(default_factory=dict)
     trainer: Dict[str, Any] = field(default_factory=dict)
     generator: Dict[str, Any] = field(default_factory=dict)
@@ -594,6 +596,7 @@ def parse_rl_config(
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
 
+    distillation_plan = compile_distillation_plan(raw)
     context_budget = resolve_context_budget(raw, path)
 
     entrypoint = resolve_rl_entrypoint(raw.get("entrypoint"), config_path=path)
@@ -602,12 +605,6 @@ def parse_rl_config(
     data = dict(raw.get("data", {}))
     environment = raw.get("environment", {})
     trajectory_runner = raw.get("trajectory_runner", {})
-    if "teacher" in raw:
-        raise ValueError(
-            f"{path}: teacher configuration is not supported by any Iris RL entrypoint. "
-            "OPD entrypoints are disabled until teacher scores are connected to a validated training objective."
-        )
-
     # data.kind is a launcher-only routing key (parquet vs. terminal_bench tasks); pop it
     # so it never leaks into the flattened Hydra args (SkyRL's `data` has no `kind` field).
     data_kind = data.pop("kind", "tasks")
@@ -650,6 +647,7 @@ def parse_rl_config(
         raw=materialized_raw,
         context_budget=context_budget,
         entrypoint=entrypoint,
+        distillation_plan=distillation_plan,
         config_groups=config_groups,
         trainer=trainer,
         generator=generator,
@@ -876,6 +874,8 @@ def build_skyrl_hydra_args(
     num_inference_engines from the cluster config, flattens nested dicts to dotted
     Hydra keys, and applies data paths from the CLI.
     """
+    reject_disabled_distillation_runtime(parsed.distillation_plan)
+
     args = []
 
     # Config groups (+ prefix for Hydra).

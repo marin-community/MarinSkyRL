@@ -27,6 +27,16 @@ from skyrl_train.utils.policy_math import masked_whiten, right_pad_to_match
 from skyrl_train.group_admission import GroupAdvantageInvariant, GroupAdvantageKind
 
 
+@register_advantage_estimator(AdvantageEstimator.UNIFORM, group_contract=NoGroupAdvantage())
+def compute_uniform_advantage(
+    token_level_rewards: torch.Tensor,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Give every selected response token unit SFT weight."""
+    ones = torch.ones_like(token_level_rewards)
+    return ones, ones
+
+
 @register_advantage_estimator(AdvantageEstimator.REINFORCE_PP, group_contract=NoGroupAdvantage())
 def compute_reinforce_plus_plus_outcome_advantage(
     token_level_rewards: torch.Tensor,

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 
@@ -21,14 +20,54 @@ def _time_to_minutes(value: str) -> int:
 
 
 def _extract_json_list(text: str) -> list[Any] | None:
-    pattern = r"\[(?:[^\[\]]|\{[^}]*\})*\{(?:[^\[\]]|\{[^}]*\})*\}(?:[^\[\]]|\{[^}]*\})*\]"
-    match = re.search(pattern, text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
+    start: int | None = None
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+
+    for index, character in enumerate(text):
+        if start is None:
+            if character == "[":
+                start = index
+                stack.append(character)
+            continue
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+
+        if character == '"':
+            in_string = True
+            continue
+        if character in "[{":
+            stack.append(character)
+            continue
+        if character not in "]}":
+            continue
+
+        expected = "[" if character == "]" else "{"
+        if not stack or stack[-1] != expected:
+            start = None
+            stack.clear()
+            continue
+        stack.pop()
+        if stack:
+            continue
+
+        candidate = text[start : index + 1]
+        start = None
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list) and any(isinstance(item, dict) for item in parsed):
+            return parsed
+    return None
 
 
 def _conflicts(events: list[dict[str, Any]], event: dict[str, Any]) -> bool:

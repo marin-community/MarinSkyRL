@@ -37,13 +37,17 @@ def _make_config(
     policy_num_nodes: int = 2,
     policy_num_gpus_per_node: int = 8,
     num_inference_engines: int = 4,
-    tp: int = 1,
+    tp: int = 4,
     strategy: str | None = "fsdp2",
     train_batch_size: int = 64,
     policy_mini_batch_size: int = 32,
     micro_train_batch_size_per_gpu: int = 1,
     n_samples_per_prompt: int = 8,
     online_draft_training: bool = False,
+    colocate_policy_ref: bool = True,
+    use_reference: bool = True,
+    critic: bool = False,
+    run_engines_locally: bool = True,
 ) -> dict:
     config: dict = {
         "trainer": {
@@ -51,7 +55,14 @@ def _make_config(
                 "colocate_all": colocate_all,
                 "policy_num_nodes": policy_num_nodes,
                 "policy_num_gpus_per_node": policy_num_gpus_per_node,
+                "colocate_policy_ref": colocate_policy_ref,
+                "ref_num_nodes": policy_num_nodes,
+                "ref_num_gpus_per_node": policy_num_gpus_per_node,
+                "critic_num_nodes": policy_num_nodes,
+                "critic_num_gpus_per_node": policy_num_gpus_per_node,
             },
+            "algorithm": {"use_kl_loss": use_reference, "use_kl_in_reward": False},
+            "critic": {"model": {"path": "critic" if critic else None}},
             "train_batch_size": train_batch_size,
             "policy_mini_batch_size": policy_mini_batch_size,
             "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
@@ -59,7 +70,12 @@ def _make_config(
         "generator": {
             "num_inference_engines": num_inference_engines,
             "inference_engine_tensor_parallel_size": tp,
+            "inference_engine_pipeline_parallel_size": 1,
+            "inference_engine_data_parallel_size": 1,
+            "inference_engine_expert_parallel_size": 1,
             "n_samples_per_prompt": n_samples_per_prompt,
+            "backend": "vllm",
+            "run_engines_locally": run_engines_locally,
         },
     }
     if strategy is not None:
@@ -73,6 +89,23 @@ def _write_config(tmp_path: Path, config: dict) -> Path:
     path = tmp_path / "cell.yaml"
     path.write_text(yaml.safe_dump(config))
     return path
+
+
+def _with_distillation(config: dict, teachers: dict) -> dict:
+    config["trainer"]["algorithm"]["distillation"] = {
+        "objective": "sampled_reverse_kl",
+        "routing_plan": "mopd_v1",
+        "coefficient": 1.0,
+        "reward_mode": "replace",
+    }
+    config["teachers"] = teachers
+    config["teacher_routing"] = {
+        "mopd_v1": {
+            "revision": "routes-v1",
+            "routes": {teacher_id: {"teacher": teacher_id, "weight": 1.0 / len(teachers)} for teacher_id in teachers},
+        }
+    }
+    return config
 
 
 def _launcher_source() -> LauncherSource:
@@ -133,15 +166,23 @@ class TestDeriveRolePlan:
         plan = derive_role_plan(config)
 
         assert plan.colocate_all is False
-        assert plan.policy_num_nodes == 3
-        assert plan.policy_num_gpus_per_node == 8
-        assert plan.num_inference_engines == 4
-        assert plan.inference_engine_tensor_parallel_size == 2
+        policy = plan.claim("policy")
+        rollout = plan.claim("rollout")
+        assert policy.num_nodes == 3
+        assert policy.gpus_per_node == 8
+        assert rollout.replicas == 4
+        assert rollout.tensor_parallel_size == 2
         assert plan.train_batch_size == 128
         assert plan.policy_mini_batch_size == 64
         assert plan.micro_train_batch_size_per_gpu == 2
         assert plan.n_samples_per_prompt == 16
         assert plan.draft_trainer_num_gpus == 0
+
+        claims = {claim.role_id: claim for claim in plan.claims}
+        assert set(claims) == {"policy", "reference", "rollout"}
+        assert claims["policy"].colocation_group == "policy"
+        assert claims["reference"].colocation_group == "policy"
+        assert claims["rollout"].colocation_group == "rollout"
 
     def test_colocate_all_coerced_to_bool(self):
         config = _make_config()
@@ -174,9 +215,9 @@ class TestDeriveRolePlan:
 # ---------------------------------------------------------------------------
 
 
-class TestDeriveNumNodes:
+class TestRolePlanAccounting:
     def test_colocated_uses_policy_nodes_only(self):
-        plan = derive_role_plan(_make_config(colocate_all=True, policy_num_nodes=4, num_inference_engines=8))
+        plan = derive_role_plan(_make_config(colocate_all=True, policy_num_nodes=4, num_inference_engines=8, tp=4))
         assert derive_num_nodes(plan) == 4
 
     def test_disaggregated_adds_inference_engines(self):
@@ -184,8 +225,20 @@ class TestDeriveNumNodes:
         assert derive_num_nodes(plan) == 6
 
     def test_colocated_with_one_engine(self):
-        plan = derive_role_plan(_make_config(colocate_all=True, policy_num_nodes=1, num_inference_engines=1))
+        plan = derive_role_plan(_make_config(colocate_all=True, policy_num_nodes=1, num_inference_engines=1, tp=8))
         assert derive_num_nodes(plan) == 1
+
+    def test_colocated_rollout_geometry_must_fill_policy_bundle(self):
+        with pytest.raises(ValueError, match="consume the policy bundle exactly"):
+            derive_role_plan(
+                _make_config(
+                    colocate_all=True,
+                    policy_num_nodes=2,
+                    policy_num_gpus_per_node=8,
+                    num_inference_engines=2,
+                    tp=4,
+                )
+            )
 
     def test_disaggregated_with_one_engine(self):
         plan = derive_role_plan(_make_config(colocate_all=False, policy_num_nodes=1, num_inference_engines=1))
@@ -201,8 +254,177 @@ class TestDeriveNumNodes:
             )
         )
 
+        draft_trainer = plan.claim("draft_trainer")
+        assert draft_trainer.backend == "torch"
+        assert draft_trainer.replicas == 1
+        assert draft_trainer.colocation_group == "draft_trainer"
         assert plan.draft_trainer_num_gpus == 1
+        assert plan.bundles[-1].role_ids == ("draft_trainer",)
         assert derive_num_nodes(plan) == 6
+
+    def test_policy_reference_colocation_and_rollout_resolve_to_ten_nodes(self):
+        plan = derive_role_plan(
+            _make_config(
+                colocate_all=False,
+                colocate_policy_ref=True,
+                policy_num_nodes=8,
+                num_inference_engines=2,
+            )
+        )
+
+        assert derive_num_nodes(plan) == 10
+        assert [(bundle.name, bundle.role_ids, bundle.num_nodes) for bundle in plan.bundles] == [
+            ("policy", ("policy", "reference"), 8),
+            ("rollout", ("rollout",), 2),
+        ]
+
+    def test_disjoint_policy_reference_and_rollout_resolve_to_eighteen_nodes(self):
+        plan = derive_role_plan(
+            _make_config(
+                colocate_all=False,
+                colocate_policy_ref=False,
+                policy_num_nodes=8,
+                num_inference_engines=2,
+            )
+        )
+
+        assert derive_num_nodes(plan) == 18
+        assert {bundle.name for bundle in plan.bundles} == {"policy", "reference", "rollout"}
+
+    def test_inactive_reference_and_critic_do_not_claim_resources(self):
+        plan = derive_role_plan(
+            _make_config(
+                colocate_all=False,
+                colocate_policy_ref=False,
+                policy_num_nodes=3,
+                num_inference_engines=2,
+                use_reference=False,
+                critic=False,
+            )
+        )
+
+        assert {claim.role_id for claim in plan.claims} == {"policy", "rollout"}
+        assert derive_num_nodes(plan) == 5
+
+    def test_active_critic_receives_a_separate_disaggregated_bundle(self):
+        plan = derive_role_plan(
+            _make_config(
+                colocate_all=False,
+                policy_num_nodes=2,
+                num_inference_engines=1,
+                use_reference=False,
+                critic=True,
+            )
+        )
+
+        critic = plan.claim("critic")
+        assert critic.colocation_group == "critic"
+        assert derive_num_nodes(plan) == 5
+
+    def test_omitted_reference_dimensions_inherit_policy_dimensions(self):
+        config = _make_config(
+            colocate_all=False,
+            colocate_policy_ref=True,
+            policy_num_nodes=8,
+            policy_num_gpus_per_node=8,
+            num_inference_engines=2,
+        )
+        del config["trainer"]["placement"]["ref_num_nodes"]
+        del config["trainer"]["placement"]["ref_num_gpus_per_node"]
+
+        reference = derive_role_plan(config).claim("reference")
+
+        assert (reference.num_nodes, reference.gpus_per_node) == (8, 8)
+
+    def test_named_colocation_group_rejects_incompatible_footprints(self):
+        config = _make_config(colocate_all=False, colocate_policy_ref=True, policy_num_nodes=8)
+        config["trainer"]["placement"]["ref_num_nodes"] = 4
+
+        with pytest.raises(ValueError, match="colocation group 'policy'.*incompatible"):
+            derive_role_plan(config)
+
+    def test_remote_rollout_claim_reserves_no_iris_bundle(self):
+        plan = derive_role_plan(
+            _make_config(
+                colocate_all=False,
+                policy_num_nodes=2,
+                num_inference_engines=4,
+                run_engines_locally=False,
+            )
+        )
+
+        rollout = plan.claim("rollout")
+        assert rollout.execution == "remote"
+        assert rollout.colocation_group is None
+        assert derive_num_nodes(plan) == 2
+
+    def test_external_teacher_claim_reserves_no_iris_bundle(self):
+        config = _with_distillation(
+            _make_config(colocate_all=False, policy_num_nodes=2, num_inference_engines=1),
+            {
+                "math": {
+                    "source": "openai_compatible",
+                    "placement": "external",
+                    "model": {"path": "Qwen/math", "revision": "rev"},
+                    "endpoints": [{"url": "https://teacher.example/v1"}],
+                    "evidence": "chosen_token",
+                }
+            },
+        )
+
+        plan = derive_role_plan(config)
+
+        teacher = next(claim for claim in plan.claims if claim.role_id == "teacher:math")
+        assert teacher.execution == "remote"
+        assert teacher.colocation_group is None
+        assert all("teacher:math" not in bundle.role_ids for bundle in plan.bundles)
+        assert derive_num_nodes(plan) == 3
+
+    def test_local_teacher_requires_explicit_resource_geometry(self):
+        config = _with_distillation(
+            _make_config(),
+            {
+                "math": {
+                    "source": "local_inference",
+                    "placement": "pinned",
+                    "model": {"path": "Qwen/math", "revision": "rev"},
+                    "backend": "vllm",
+                    "evidence": "chosen_token",
+                }
+            },
+        )
+
+        with pytest.raises(ValueError, match="teachers.math.resources.*local teacher"):
+            derive_role_plan(config)
+
+    def test_rotating_local_teachers_share_one_named_bundle(self):
+        resources = {
+            "num_nodes": 1,
+            "gpus_per_node": 8,
+            "tensor_parallel_size": 8,
+            "colocation_group": "teacher-rotation",
+        }
+        config = _with_distillation(
+            _make_config(colocate_all=False, policy_num_nodes=2, num_inference_engines=1),
+            {
+                teacher_id: {
+                    "source": "local_inference",
+                    "placement": "rotating",
+                    "model": {"path": f"Qwen/{teacher_id}", "revision": f"{teacher_id}-rev"},
+                    "backend": "vllm",
+                    "evidence": "chosen_token",
+                    "resources": resources,
+                }
+                for teacher_id in ("math", "code")
+            },
+        )
+
+        plan = derive_role_plan(config)
+
+        teacher_bundle = next(bundle for bundle in plan.bundles if bundle.name == "teacher-rotation")
+        assert teacher_bundle.role_ids == ("teacher:code", "teacher:math")
+        assert teacher_bundle.num_nodes == 1
+        assert derive_num_nodes(plan) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -291,9 +513,9 @@ class TestBuildJobSpec:
         )
         plan = spec.request.topology.role_plan
         assert plan.colocate_all is False
-        assert plan.policy_num_nodes == 2
-        assert plan.policy_num_gpus_per_node == 8
-        assert plan.num_inference_engines == 4
+        assert plan.claim("policy").num_nodes == 2
+        assert plan.claim("policy").gpus_per_node == 8
+        assert plan.claim("rollout").replicas == 4
         assert plan.train_batch_size == 128
 
     def test_topology_num_nodes_matches_role_plan(self, tmp_path):
@@ -328,6 +550,69 @@ class TestBuildJobSpec:
         spec = _build_basic_spec(tmp_path, run_id="round-trip")
         parsed = job_spec(asdict(spec))
         assert parsed == spec
+
+    def test_online_draft_role_round_trips_through_job_spec(self, tmp_path):
+        spec = _build_basic_spec(
+            tmp_path,
+            config_overrides={"online_draft_training": True},
+        )
+
+        parsed = job_spec(asdict(spec))
+
+        assert parsed == spec
+        assert parsed.request.topology.role_plan.claim("draft_trainer").replicas == 1
+
+    def test_serialized_plan_rejects_bundle_geometry_that_disagrees_with_claims(self, tmp_path):
+        spec = _build_basic_spec(tmp_path)
+        payload = asdict(spec)
+        payload["request"]["topology"]["role_plan"]["bundles"][0]["num_nodes"] += 1
+
+        with pytest.raises(ValueError, match="physical geometry does not match bundle"):
+            job_spec(payload)
+
+    def test_legacy_scalar_role_plan_upgrades_during_protocol_parse(self, tmp_path):
+        spec = _build_basic_spec(tmp_path)
+        payload = asdict(spec)
+        payload["request"]["topology"]["role_plan"] = {
+            "colocate_all": True,
+            "policy_num_nodes": 2,
+            "policy_num_gpus_per_node": 8,
+            "num_inference_engines": 4,
+            "inference_engine_tensor_parallel_size": 4,
+            "train_batch_size": 64,
+            "policy_mini_batch_size": 32,
+            "micro_train_batch_size_per_gpu": 1,
+            "n_samples_per_prompt": 8,
+        }
+
+        parsed = job_spec(payload)
+
+        assert parsed.request.topology.role_plan.claim("reference").colocation_group == "all"
+        assert parsed.request.topology.role_plan.bundles[0].role_ids == ("policy", "reference", "rollout")
+
+    def test_legacy_draft_trainer_reservation_upgrades_during_protocol_parse(self, tmp_path):
+        spec = _build_basic_spec(
+            tmp_path,
+            config_overrides={"online_draft_training": True},
+        )
+        payload = asdict(spec)
+        payload["request"]["topology"]["role_plan"] = {
+            "colocate_all": True,
+            "policy_num_nodes": 2,
+            "policy_num_gpus_per_node": 8,
+            "num_inference_engines": 4,
+            "inference_engine_tensor_parallel_size": 4,
+            "train_batch_size": 64,
+            "policy_mini_batch_size": 32,
+            "micro_train_batch_size_per_gpu": 1,
+            "n_samples_per_prompt": 8,
+            "draft_trainer_num_gpus": 1,
+        }
+
+        parsed = job_spec(payload)
+
+        assert parsed.request.topology.role_plan.claim("draft_trainer").replicas == 1
+        assert parsed.request.topology.num_nodes == 3
 
     def test_round_trips_with_validation_data_and_overrides(self, tmp_path):
         spec = _build_basic_spec(

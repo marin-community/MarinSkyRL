@@ -9,6 +9,7 @@ from omegaconf import OmegaConf
 
 from cloud.iris.iris_backend import create_parser, normalize
 from cloud.iris.rl_config_translation import build_skyrl_hydra_args, parse_rl_config
+from marinskyrl.distillation import TeacherSource
 from cloud.iris.training_driver import parse_list_arg
 from skyrl_train.entrypoints.main_base import config_dir
 
@@ -72,8 +73,52 @@ teacher:
 """
     )
 
-    with pytest.raises(ValueError, match="teacher configuration is not supported"):
+    with pytest.raises(ValueError, match="legacy teacher configuration is not supported"):
         parse_rl_config(str(config))
+
+
+def test_rl_config_compiles_distillation_plan_before_runtime_gate(tmp_path):
+    config = tmp_path / "rl.yaml"
+    config.write_text(
+        """\
+entrypoint: standard
+context_budget:
+  request_window_tokens: 2
+  max_new_tokens_per_turn: 1
+  max_turns: 1
+trainer:
+  algorithm:
+    distillation:
+      objective: sampled_reverse_kl
+      routing_plan: opd
+      coefficient: 1.0
+      reward_mode: replace
+teachers:
+  primary:
+    source: openai_compatible
+    placement: external
+    model:
+      path: Qwen/teacher
+      revision: teacher-revision
+    endpoints:
+      - url: https://teacher.example/v1
+    evidence: chosen_token
+teacher_routing:
+  opd:
+    revision: route-revision
+    routes:
+      default:
+        teacher: primary
+        weight: 1.0
+"""
+    )
+
+    parsed = parse_rl_config(str(config))
+
+    assert parsed.distillation_plan is not None
+    assert parsed.distillation_plan.teachers[0].source is TeacherSource.OPENAI_COMPATIBLE
+    with pytest.raises(ValueError, match="distillation runtime is disabled"):
+        build_skyrl_hydra_args(parsed, {"num_nodes": 1}, SimpleNamespace(gpus_per_node=8))
 
 
 def test_terminal_bench_config_group_is_packaged_with_the_trainer():

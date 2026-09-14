@@ -24,6 +24,7 @@ from skyrl_train.curriculum import CurriculumSampler
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.trajectory_selection import trajectory_selector_from_config
 from skyrl_train.trajectory_runners.base import (
     TrajectoryRequestBatch,
     TrajectoryBatch,
@@ -40,10 +41,12 @@ from skyrl_train.dataset.preprocess import (
     collate_response_token_channel,
     convert_prompts_responses_to_batch_tensors,
 )
+from skyrl_train.distillation import validate_sampled_reverse_kl_attachment
 from skyrl_train.utils import trainer_utils
 from skyrl_train.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
-from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
+from skyrl_train.tensor_math import masked_mean
+from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
 from skyrl_train.utils.loss_reduction import (
@@ -199,6 +202,33 @@ def _policy_revision(step: int) -> str:
     return f"policy-step-{step}"
 
 
+def _validated_distillation_tensors(
+    trajectory_batch: TrajectoryBatch,
+    response_mask: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Validate optional teacher evidence and return its learner-only tensors."""
+    evidence = trajectory_batch.get("teacher_evidence")
+    distillation = trajectory_batch.get("distillation")
+    if evidence is None and distillation is None:
+        return {}
+    if evidence is None or distillation is None:
+        raise ValueError("trajectory batches must carry teacher_evidence and prepared distillation together")
+    trajectory_ids = trajectory_batch.get("trajectory_ids")
+    if trajectory_ids is None:
+        raise ValueError("teacher evidence requires stable trajectory_ids")
+    validate_sampled_reverse_kl_attachment(
+        evidence,
+        distillation,
+        trajectory_ids=tuple(trajectory_id.to_string() for trajectory_id in trajectory_ids),
+        response_mask=response_mask.to(torch.bool),
+    )
+    return {
+        "teacher_action_log_probs": distillation.teacher_action_log_probs,
+        "teacher_valid_mask": distillation.valid_mask,
+        "distillation_loss_weights": distillation.loss_weights,
+    }
+
+
 class RayPPOTrainer:
     def __init__(
         self,
@@ -223,6 +253,7 @@ class RayPPOTrainer:
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.trajectory_runner = trajectory_runner
+        self.trajectory_selector = trajectory_selector_from_config(cfg)
         self.trajectory_sink = make_trajectory_sink(cfg.generator, tokenizer)
         self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
         self.train_dataloader = None
@@ -1386,6 +1417,7 @@ class RayPPOTrainer:
                     # 1.2 postprocess rewards
                     with Timer("postprocess_trajectory_batch", self.all_timings):
                         trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
+                        trajectory_batch, uids = self.select_trajectories(trajectory_batch, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
@@ -1982,6 +2014,7 @@ class RayPPOTrainer:
             assert rollout_routed_experts_tensor.shape[:2] == loss_masks_tensor.shape, (
                 "routed_experts response axis should look like responses"
             )
+        distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -2001,6 +2034,7 @@ class RayPPOTrainer:
         # exactly the same keys as today (TensorBatch.__eq__ compares key sets).
         if rollout_routed_experts_tensor is not None:
             training_input["rollout_routed_experts"] = rollout_routed_experts_tensor
+        training_input.update(distillation_tensors)
         # Stage B (F5/F4): attach the per-token shaping channel + span tags ONLY
         # when present, so the flag-off batch dict has exactly the same keys as
         # today (TensorBatch.__eq__ compares key sets).
@@ -2162,6 +2196,16 @@ class RayPPOTrainer:
         # re-assign reward but now it's per token rewards
         trajectory_batch["rewards"] = per_token_rewards
         return trajectory_batch
+
+    def select_trajectories(
+        self, trajectory_batch: TrajectoryBatch, uids: List[str]
+    ) -> tuple[TrajectoryBatch, List[str]]:
+        """Apply the configured shared selector before scoring or learner conversion."""
+        if self.trajectory_selector is None:
+            return trajectory_batch, uids
+        selection = self.trajectory_selector.select(trajectory_batch, uids)
+        self.all_metrics.update(selection.metrics)
+        return selection.trajectory_batch, selection.uids
 
     def _update_curriculum_sampler(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> None:
         """Feed this step's per-sample rewards to the curriculum sampler, if one is active.
