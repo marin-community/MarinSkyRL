@@ -6,10 +6,10 @@ import pytest
 import ray
 from ray.util.queue import Queue
 
+from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation, TrajectoryRunnerMode
 from skyrl_train.entrypoints import ray_lifecycle
 from skyrl_train.entrypoints.main_base import EntrypointSupervisor, resolve_entrypoint_node_id, run_ray_driver
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.utils import utils as trainer_utils
 
 
@@ -88,6 +88,23 @@ def test_runner_evidence_rejection_happens_before_ray_initialization(monkeypatch
 
     with pytest.raises(ValueError, match="mini-swe cannot supply exact sampled completion"):
         run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.MINI_SWE)
+
+    initialize_ray.assert_not_called()
+
+
+def test_generate_only_distillation_rejection_happens_before_ray_initialization(monkeypatch, local_distillation_config):
+    cfg = local_distillation_config(get_default_config())
+    cfg.trainer.logger = "console"
+    initialize_ray = Mock()
+    monkeypatch.setattr(trainer_utils, "initialize_ray", initialize_ray)
+
+    with pytest.raises(ValueError, match="training-only"):
+        run_ray_driver(
+            cfg,
+            Mock(),
+            TrajectoryRunnerMode.HARBOR,
+            operation=EntrypointOperation.GENERATE,
+        )
 
     initialize_ray.assert_not_called()
 
