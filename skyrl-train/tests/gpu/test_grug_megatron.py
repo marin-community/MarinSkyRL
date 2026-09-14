@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 import ray
 import torch
+from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
@@ -516,4 +517,49 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
         second_logprob = asyncio.run(client.generate(score_input))["prompt_logprobs"][0][-1][first_token]
         assert abs(second_logprob - first_logprob) > 1e-7
     finally:
+        ray.shutdown()
+
+
+@pytest.mark.vllm
+def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tmp_path):
+    """A sleep-level-2 CUDA-IPC sync restores every grouped expert tensor."""
+
+    world_size = 2
+    require_hoppers(world_size)
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    _write_tiny_checkpoint(model_path)
+    cfg = _config(str(model_path), world_size=world_size, pp=1, ep=2)
+    cfg.trainer.placement.colocate_all = True
+    # Force each completed tensor into its own transport chunk. Before grouped-export-safe
+    # chunking, this threshold split the conversion tasks and silently omitted the experts.
+    cfg.generator.weight_transfer_threshold_cuda_ipc_GB = 1e-9
+    initialize_ray(cfg)
+    shared_pg = placement_group([{"GPU": 1, "CPU": 1}] * world_size, strategy="PACK")
+    ray.get(shared_pg.ready(), timeout=120)
+    client = grug_engine_client(
+        cfg,
+        str(model_path),
+        shared_pg=shared_pg,
+        inference_engine_enable_sleep=True,
+    )
+    try:
+        policy = init_worker_with_type(
+            "policy",
+            shared_pg=shared_pg,
+            colocate_all=True,
+            num_gpus_per_node=world_size,
+            num_nodes=1,
+            cfg=cfg,
+        )
+        sync_names = [*SERVING_EXPERT_INDEX_BY_NAME, LM_HEAD_NAME, ROUTER_NAME]
+        training = rank0_validation_snapshot(policy, [STACKED_EXPERT_NAME, LM_HEAD_NAME, ROUTER_NAME])
+
+        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        asyncio.run(client.wake_up(tags=["weights"]))
+        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+
+        assert_engine_weights(client, sync_names, training, [], SERVING_EXPERT_INDEX_BY_NAME)
+    finally:
+        ray.util.remove_placement_group(shared_pg)
         ray.shutdown()
