@@ -31,7 +31,7 @@ from skyrl_train.learners.levanter_snowball import (
 
 GPU_COUNT = 8
 TRAIN_BATCH_SIZE = 16
-SEQUENCE_LENGTH = 4096
+SEQUENCE_LENGTH = int(os.environ.get("SNOWBALL_NUMERICAL_SEQUENCE_LENGTH", "4096"))
 RESPONSE_LENGTH = 256
 MAX_ABS_DIFF_LIMIT = 1e-5
 MEAN_ABS_DIFF_LIMIT = 1e-7
@@ -128,6 +128,8 @@ def _difference(left: np.ndarray, right: np.ndarray, selected: np.ndarray) -> di
 
 
 def main() -> None:
+    if SEQUENCE_LENGTH < RESPONSE_LENGTH:
+        raise ValueError(f"SNOWBALL_NUMERICAL_SEQUENCE_LENGTH={SEQUENCE_LENGTH} must be at least {RESPONSE_LENGTH}")
     if jax.default_backend() != "gpu":
         raise RuntimeError(f"expected GPU backend, got {jax.default_backend()}")
     if jax.device_count() != GPU_COUNT:
