@@ -257,6 +257,10 @@ class Logprob:
 def setup_envvars_for_vllm(kwargs, bundle_indices):
     noset_visible_devices = kwargs.pop("noset_visible_devices")
     os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"  # TODO(Charlie): may not be needed.
+    # Runtime images do not ship nvcc, but current vLLM enables a FlashInfer
+    # all-reduce path that JIT-compiles on first TP>1 use. Keep the packaged
+    # custom/NCCL paths as the default while allowing an explicit opt-in.
+    os.environ.setdefault("VLLM_ALLREDUCE_USE_FLASHINFER", "0")
 
     # When custom all-reduce is disabled (e.g. for TP=2 on H100 where
     # SymmMemCommunicator rendezvous fails), also disable symmetric memory

@@ -137,6 +137,22 @@ def _build_cpu_offload_numa_diagnostics(rank: int, page_sample: _ParameterPageSa
     )
 
 
+def _omit_tied_lm_head_weight(params, config):
+    """Keep only the canonical input embedding when the output head is tied to it.
+
+    vLLM rejects an alias such as ``lm_head.weight`` when a weight-sync chunk does
+    not also contain its canonical ``model.embed_tokens.weight``. The canonical
+    embedding is sufficient because vLLM restores the tied parameter after loading.
+    """
+    if not getattr(config, "tie_word_embeddings", False):
+        return params
+    return type(params)(
+        (name, param)
+        for name, param in params.items()
+        if name != "lm_head.weight" and not name.endswith(".lm_head.weight")
+    )
+
+
 class FSDPWeightExtractor(WeightExtractor):
     """Extracts weights from FSDP-sharded models.
 
@@ -222,6 +238,7 @@ class FSDPWeightExtractor(WeightExtractor):
 
         # Get state dict (handles FSDP sharding)
         params = self.model.state_dict()
+        params = _omit_tied_lm_head_weight(params, getattr(self.model, "config", None))
 
         # Stage 7 (80B) — STREAMED grouped gather. For grouped-swapped models the old
         # path eagerly `full_tensor()`-gathered EVERY layer's grouped `experts.w1/w2/w3`
