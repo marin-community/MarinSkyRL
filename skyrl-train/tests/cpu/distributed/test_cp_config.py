@@ -61,6 +61,7 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
     "collective_phase_diagnostics": None,
     "offload_optimizer_during_rollouts": False,
     "restore_dataloader_state": True,
+    "trajectory_selector": {"type": None},
     "distributed": {
         "placement_group_timeout_seconds": 180,
         "worker_collective_timeout_seconds": 1800,

@@ -1095,3 +1095,25 @@ def test_validate_cfg_rejects_behavior_clip_top_p_filter():
 
     with pytest.raises(ValueError, match="top_p=0.95"):
         validate_cfg(cfg)
+
+
+def test_validate_cfg_best_of_n_uses_selected_batch_geometry():
+    cfg = _validatable_dummy_config()
+    OmegaConf.update(cfg, "trainer.trajectory_selector.type", "best_of_n", force_add=True)
+    cfg.generator.n_samples_per_prompt = 4
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.inference_engine_expert_parallel_size = 1
+    cfg.trainer.algorithm.advantage_estimator = "uniform"
+    validate_cfg(cfg)
+
+    assert cfg.trainer.algorithm.resolved_group_advantage.physical_group_size == 1
+
+
+def test_validate_cfg_rejects_best_of_n_with_group_relative_advantages():
+    cfg = _validatable_dummy_config()
+    OmegaConf.update(cfg, "trainer.trajectory_selector.type", "best_of_n", force_add=True)
+    cfg.generator.n_samples_per_prompt = 4
+    cfg.trainer.algorithm.advantage_estimator = "grpo"
+
+    with pytest.raises(ValueError, match="no-group advantage"):
+        validate_cfg(cfg)

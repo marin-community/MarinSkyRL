@@ -23,6 +23,7 @@ from skyrl_train.curriculum import CurriculumSampler
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.trajectory_selection import trajectory_selector_from_config
 from skyrl_train.trajectory_runners.base import (
     TrajectoryRequestBatch,
     TrajectoryBatch,
@@ -172,6 +173,7 @@ class RayPPOTrainer:
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.trajectory_runner = trajectory_runner
+        self.trajectory_selector = trajectory_selector_from_config(cfg)
         self.trajectory_sink = make_trajectory_sink(cfg.generator, tokenizer)
         self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
         self.train_dataloader = None
@@ -719,6 +721,7 @@ class RayPPOTrainer:
                     # 1.2 postprocess rewards
                     with Timer("postprocess_trajectory_batch", self.all_timings):
                         trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
+                        trajectory_batch, uids = self.select_trajectories(trajectory_batch, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
@@ -1495,6 +1498,16 @@ class RayPPOTrainer:
         # re-assign reward but now it's per token rewards
         trajectory_batch["rewards"] = per_token_rewards
         return trajectory_batch
+
+    def select_trajectories(
+        self, trajectory_batch: TrajectoryBatch, uids: List[str]
+    ) -> tuple[TrajectoryBatch, List[str]]:
+        """Apply the configured shared selector before scoring or learner conversion."""
+        if self.trajectory_selector is None:
+            return trajectory_batch, uids
+        selection = self.trajectory_selector.select(trajectory_batch, uids)
+        self.all_metrics.update(selection.metrics)
+        return selection.trajectory_batch, selection.uids
 
     def _update_curriculum_sampler(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> None:
         """Feed this step's per-sample rewards to the curriculum sampler, if one is active.

@@ -40,7 +40,7 @@ MINI_BATCH_SIZE=512
 EVAL_N_SAMPLES_PER_PROMPT=32
 LR=1e-5
 
-python -m examples.best_of_n_distillation.main_best_of_n \
+python -m skyrl_train.entrypoints.main_base \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator=$ADVANTAGE_ESTIMATOR \
@@ -81,6 +81,7 @@ python -m examples.best_of_n_distillation.main_best_of_n \
   generator.batched=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  trainer.trajectory_selector.type=best_of_n \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="best_of_n_distillation" \
