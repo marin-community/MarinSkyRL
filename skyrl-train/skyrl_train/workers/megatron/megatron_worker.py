@@ -48,7 +48,7 @@ from skyrl_train.workers.worker import (
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper, MegatronPolicyMicroBatch
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
-from skyrl_train.workers.megatron.weight_extractor import MegatronWeightExtractor
+from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, MegatronWeightExtractor
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 
 
@@ -402,13 +402,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # transfer strategy, we can enable it for other strategies as well.
         model_type = self.strategy.hf_config.model_type
         validate_weight_sync_mode(model_type, fuse_weights=bool(self.cfg.generator.fuse_weights))
-        self.weight_extractor = MegatronWeightExtractor(
-            bridge=self.bridge,
-            actor_module=self.actor_module,
-            model_type=model_type,
-            enable_bucketing=self.use_cuda_ipc,
-            bucket_size_threshold_GB=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB,
-        )
+        if self.use_cuda_ipc:
+            self.weight_extractor = BucketedMegatronWeightExtractor(
+                bridge=self.bridge,
+                actor_module=self.actor_module,
+                model_type=model_type,
+                bucket_size_threshold_GB=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB,
+            )
+        else:
+            self.weight_extractor = MegatronWeightExtractor(
+                bridge=self.bridge,
+                actor_module=self.actor_module,
+                model_type=model_type,
+            )
 
         self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
 

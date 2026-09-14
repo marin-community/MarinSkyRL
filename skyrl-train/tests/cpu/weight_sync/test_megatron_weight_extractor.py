@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from skyrl_train.workers.megatron.weight_extractor import MegatronWeightExtractor
+from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor
 
 
 class _GroupedExpertBridge:
@@ -42,11 +42,10 @@ class _IncompleteGroupedExpertBridge(_GroupedExpertBridge):
 
 def test_bucketed_extraction_preserves_grouped_expert_exports(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_device", lambda: torch.device("cpu"))
-    extractor = MegatronWeightExtractor(
+    extractor = BucketedMegatronWeightExtractor(
         bridge=_GroupedExpertBridge(),
         actor_module=object(),
         model_type="test",
-        enable_bucketing=True,
         bucket_size_threshold_GB=16 / 1024**3,
     )
 
@@ -62,11 +61,10 @@ def test_bucketed_extraction_preserves_grouped_expert_exports(monkeypatch):
 
 def test_bucketed_extraction_rejects_missing_grouped_expert_exports(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_device", lambda: torch.device("cpu"))
-    extractor = MegatronWeightExtractor(
+    extractor = BucketedMegatronWeightExtractor(
         bridge=_IncompleteGroupedExpertBridge(),
         actor_module=object(),
         model_type="test",
-        enable_bucketing=True,
     )
 
     with pytest.raises(RuntimeError, match="omitted grouped weight exports"):
