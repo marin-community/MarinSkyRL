@@ -22,7 +22,10 @@ from skyrl_train.inference_engines.utils import (
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorResponse,
 )
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.inference_engine_client import (
+    ABORT_GENERATION_GRACE_PERIOD_SECONDS,
+    InferenceEngineClient,
+)
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from omegaconf import OmegaConf
 import asyncio
@@ -1145,6 +1148,41 @@ async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes(monkeyp
 
     await client.resume_generation()
     assert not engine.scheduler_paused
+
+
+@pytest.mark.asyncio
+async def test_idle_weight_sync_skips_generation_grace_period(monkeypatch):
+    engine = _MockWeightSyncEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    sleeps = []
+
+    async def record_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("skyrl_train.inference_engines.inference_engine_client.asyncio.sleep", record_sleep)
+
+    await client.pause_generation()
+
+    assert sleeps == []
+    assert engine.scheduler_paused
+
+
+@pytest.mark.asyncio
+async def test_active_weight_sync_keeps_generation_grace_period(monkeypatch):
+    engine = _MockWeightSyncEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    sleeps = []
+
+    async def record_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("skyrl_train.inference_engines.inference_engine_client.asyncio.sleep", record_sleep)
+    client._inc_inflight(0)
+
+    await client.pause_generation()
+
+    assert sleeps == [ABORT_GENERATION_GRACE_PERIOD_SECONDS]
+    assert engine.scheduler_paused
 
 
 @pytest.mark.asyncio
