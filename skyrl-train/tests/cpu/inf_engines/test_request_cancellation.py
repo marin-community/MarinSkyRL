@@ -71,17 +71,9 @@ class OnlineEagleActor:
     def __init__(self):
         self.calls = []
         for name in (
-            "init_draft_transfer_communicator",
             "begin_online_eagle_capture",
             "seal_online_eagle_capture",
-            "catalog_online_eagle_capture",
-            "transfer_online_eagle_capture",
-            "discard_online_eagle_capture",
-            "load_online_eagle_speculator",
-            "cleanup_online_eagle_scratch",
-            "install_online_eagle_speculator",
-            "publish_online_eagle_speculator",
-            "restore_online_eagle_speculator",
+            "refresh_online_eagle_speculator",
         ):
             setattr(self, name, RecordingRemoteMethod(name, self.calls))
 
@@ -144,31 +136,12 @@ async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
     actor = OnlineEagleActor()
     engine = RayWrappedInferenceEngine(actor)
 
-    await engine.init_draft_transfer_communicator("10.0.0.1", 1234, 1, 3, "draft", "nccl", 120)
     await engine.begin_online_eagle_capture({"step": 3})
-    await engine.seal_online_eagle_capture("/tmp/capture")
-    await engine.catalog_online_eagle_capture()
-    await engine.transfer_online_eagle_capture({"transfer": "capture"})
-    await engine.discard_online_eagle_capture()
-    await engine.load_online_eagle_speculator({"transfer": True})
-    await engine.cleanup_online_eagle_scratch("/tmp/marinskyrl-online-eagle/process")
-    await engine.install_online_eagle_speculator("/tmp/candidate")
-    await engine.publish_online_eagle_speculator("/tmp/candidate", "s3://bucket/draft", "draft-3", "policy-3")
-    await engine.restore_online_eagle_speculator("s3://bucket/draft", "/tmp/restored")
+    await engine.seal_online_eagle_capture("s3://bucket/captures/step-3")
+    await engine.refresh_online_eagle_speculator("s3://bucket/drafts/draft-3", "draft-3")
 
     assert actor.calls == [
-        ("init_draft_transfer_communicator", ("10.0.0.1", 1234, 1, 3, "draft", "nccl", 120)),
         ("begin_online_eagle_capture", ({"step": 3},)),
-        ("seal_online_eagle_capture", ("/tmp/capture",)),
-        ("catalog_online_eagle_capture", ()),
-        ("transfer_online_eagle_capture", ({"transfer": "capture"},)),
-        ("discard_online_eagle_capture", ()),
-        ("load_online_eagle_speculator", ({"transfer": True},)),
-        ("cleanup_online_eagle_scratch", ("/tmp/marinskyrl-online-eagle/process",)),
-        ("install_online_eagle_speculator", ("/tmp/candidate",)),
-        (
-            "publish_online_eagle_speculator",
-            ("/tmp/candidate", "s3://bucket/draft", "draft-3", "policy-3"),
-        ),
-        ("restore_online_eagle_speculator", ("s3://bucket/draft", "/tmp/restored")),
+        ("seal_online_eagle_capture", ("s3://bucket/captures/step-3",)),
+        ("refresh_online_eagle_speculator", ("s3://bucket/drafts/draft-3", "draft-3")),
     ]

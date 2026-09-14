@@ -14,10 +14,7 @@ for source_root in (_REPO_ROOT, _REPO_ROOT / "skyrl-train"):
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
 
-from cloud.iris import task_runtime  # noqa: E402
-from cloud.iris.iris_backend import _speculator_bootstrap_args  # noqa: E402
 from cloud.iris.rl_config_translation import build_skyrl_hydra_args, parse_rl_config  # noqa: E402
-from marinskyrl.hf_model import validate_speculator_model_files  # noqa: E402
 from marinskyrl.speculative_decoding import (  # noqa: E402
     SpeculativeDecodingConfigError,
     parse_speculative_decoding_config,
@@ -43,14 +40,12 @@ def _base_config() -> dict:
             "speculative_decoding": {
                 "method": "eagle3",
                 "model": {
-                    "path": "/tmp/marinskyrl-models/snowball-eagle3",
                     "source_uri": "hf://laion/snowball-64k-eagle3-draft-r2egym",
                     "source_identity": _DRAFT_REVISION,
                 },
                 "num_speculative_tokens": 3,
                 "training": {
                     "interval_steps": 1,
-                    "transfer_timeout_seconds": 47,
                     "reserved_gpu_memory_gib": 8,
                 },
             },
@@ -85,12 +80,12 @@ def test_managed_speculator_reaches_hydra_with_immutable_source_unchanged(tmp_pa
     assert resolved is not None
     assert resolved.vllm_speculative_config() == {
         "method": "eagle3",
-        "model": "/tmp/marinskyrl-models/snowball-eagle3",
+        "model": "laion/snowball-64k-eagle3-draft-r2egym",
         "num_speculative_tokens": 3,
+        "revision": _DRAFT_REVISION,
     }
     assert resolved.training is not None
     assert resolved.training.interval_steps == 1
-    assert resolved.training.transfer_timeout_seconds == 47
     assert resolved.training.reserved_gpu_memory_gib == 8
 
 
@@ -123,11 +118,44 @@ def test_frozen_object_store_speculator_is_supported(tmp_path: Path) -> None:
     assert parsed.generator["speculative_decoding"]["training"] is None
     assert parsed.generator["speculative_decoding"]["model"] == model
 
+    resolved = parse_speculative_decoding_config(
+        parsed.generator["speculative_decoding"],
+        backend="vllm",
+        run_engines_locally=True,
+        entrypoint="skyrl_train.entrypoints.main_base",
+        colocate_all=False,
+    )
+    assert resolved is not None
+    assert resolved.vllm_speculative_config() == {
+        "method": "eagle3",
+        "model": "s3://models/snowball/eagle3",
+        "num_speculative_tokens": 3,
+        "draft_load_config": {"load_format": "runai_streamer"},
+    }
+
+
+def test_gcs_alias_is_normalized_for_vllm_runai_loading(tmp_path: Path) -> None:
+    config = _base_config()
+    model = config["generator"]["speculative_decoding"]["model"]
+    model["source_uri"] = "gcs://models/snowball/eagle3"
+    model["source_identity"] = "snowball-eagle3@step-1888"
+
+    parsed = parse_rl_config(str(_write_config(tmp_path, config)))
+    resolved = parse_speculative_decoding_config(
+        parsed.generator["speculative_decoding"],
+        backend="vllm",
+        run_engines_locally=True,
+        entrypoint="skyrl_train.entrypoints.main_base",
+        colocate_all=False,
+    )
+
+    assert resolved is not None
+    assert resolved.vllm_speculative_config()["model"] == "gs://models/snowball/eagle3"
+
 
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("path", "relative/draft", "absolute task-local path"),
         ("source_uri", "laion/draft", "must use hf://"),
         ("source_uri", "hf://laion", "must have the form"),
         ("source_identity", "main", "full 40-character"),
@@ -201,7 +229,6 @@ def test_raw_vllm_speculative_config_is_reserved(tmp_path: Path) -> None:
     ("field", "value"),
     [
         ("interval_steps", 0),
-        ("transfer_timeout_seconds", 0),
         ("max_window_tokens", 0),
         ("max_tokens_per_micro_batch", 0),
         ("holdout_fraction", 1),
@@ -227,60 +254,3 @@ def test_speculator_rejects_unknown_public_fields(tmp_path: Path) -> None:
 
     with pytest.raises(SpeculativeDecodingConfigError, match="publish_interval_steps"):
         parse_rl_config(str(_write_config(tmp_path, config)))
-
-
-def test_embedding_free_speculator_export_does_not_require_a_tokenizer() -> None:
-    validate_speculator_model_files({"config.json", "model.safetensors", "d2t.npy", "t2d.npy"}, "draft")
-
-
-def test_exact_hub_speculator_snapshot_is_installed_atomically_and_reused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[list[str]] = []
-    destination = tmp_path / "draft"
-
-    def download(command: list[str], **_kwargs) -> SimpleNamespace:
-        calls.append(command)
-        staging = Path(command[5])
-        (staging / "config.json").write_text("{}")
-        (staging / "model.safetensors").write_bytes(b"draft weights")
-        (staging / "d2t.npy").write_bytes(b"vocabulary map")
-        (staging / ".cache" / "huggingface").mkdir(parents=True)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(task_runtime.subprocess, "run", download)
-    task_runtime.stage_speculator_model(
-        "hf://laion/snowball-64k-eagle3-draft-r2egym",
-        str(destination),
-        _DRAFT_REVISION,
-    )
-    task_runtime.stage_speculator_model(
-        "hf://laion/snowball-64k-eagle3-draft-r2egym",
-        str(destination),
-        _DRAFT_REVISION,
-    )
-
-    assert len(calls) == 1
-    assert calls[0][3:5] == ["laion/snowball-64k-eagle3-draft-r2egym", _DRAFT_REVISION]
-    assert (destination / "model.safetensors").read_bytes() == b"draft weights"
-    assert not (destination / ".cache").exists()
-    manifest = yaml.safe_load((destination / ".marinskyrl-source.json").read_text())
-    assert manifest["source_uri"] == "hf://laion/snowball-64k-eagle3-draft-r2egym"
-    assert manifest["source_identity"] == _DRAFT_REVISION
-    weights = next(entry for entry in manifest["files"] if entry["path"] == "model.safetensors")
-    assert weights["sha256"] == "6533063de8195c9a6cb6a952bf5d2d438ddaa7d8d532d2fef80c99a283ea97ba"
-
-
-def test_launcher_forwards_speculator_source_to_every_task_controller(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config_path = _write_config(tmp_path, _base_config())
-
-    arguments = _speculator_bootstrap_args(SimpleNamespace(rl_config=str(config_path), entrypoint=None))
-    monkeypatch.setattr(sys, "argv", ["task-runtime", *arguments, "--", "true"])
-    parsed, command = task_runtime.parse_args()
-
-    assert parsed.speculator_source_uri == "hf://laion/snowball-64k-eagle3-draft-r2egym"
-    assert parsed.speculator_local_path == "/tmp/marinskyrl-models/snowball-eagle3"
-    assert parsed.speculator_source_identity == _DRAFT_REVISION
-    assert command == ["true"]

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 import math
-from pathlib import Path
 import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -16,7 +15,6 @@ from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id
 _HF_SOURCE_SCHEME = "hf"
 _HF_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 STANDARD_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
-ONLINE_EAGLE_COORDINATOR_RANK = 0
 
 
 class SpeculativeDecodingMethod(StrEnum):
@@ -80,27 +78,32 @@ def hugging_face_repo_from_source_uri(source_uri: str) -> str | None:
     return repo_id
 
 
+def runai_model_uri(source_uri: str) -> str:
+    """Return an object-store URI accepted by vLLM's RunAI loader."""
+    if source_uri.startswith("gcs://"):
+        return f"gs://{source_uri.removeprefix('gcs://')}"
+    if source_uri.startswith(("s3://", "gs://")):
+        return source_uri
+    raise SpeculativeDecodingConfigError(f"RunAI model loading requires an s3:// or gs:// URI, got {source_uri!r}")
+
+
 @dataclass(frozen=True)
 class SpeculatorModelConfig:
-    """One immutable source materialized at a task-local draft-model path."""
+    """One immutable Hugging Face or object-store draft model."""
 
-    path: str
     source_uri: str
     source_identity: str
 
     @classmethod
     def from_mapping(cls, value: object, *, context: str) -> "SpeculatorModelConfig":
         mapping = _mapping(value, context)
-        _reject_unknown(mapping, {"path", "source_uri", "source_identity"}, context)
-        missing = {field for field in ("path", "source_uri", "source_identity") if not mapping.get(field)}
+        _reject_unknown(mapping, {"source_uri", "source_identity"}, context)
+        missing = {field for field in ("source_uri", "source_identity") if not mapping.get(field)}
         if missing:
             raise SpeculativeDecodingConfigError(f"missing {context} fields: {', '.join(sorted(missing))}")
 
-        path = mapping["path"]
         source_uri = mapping["source_uri"]
         source_identity = mapping["source_identity"]
-        if not isinstance(path, str) or not Path(path).is_absolute():
-            raise SpeculativeDecodingConfigError(f"{context}.path must be an absolute task-local path")
         if not isinstance(source_uri, str):
             raise SpeculativeDecodingConfigError(f"{context}.source_uri must be a string")
         if not isinstance(source_identity, str) or not source_identity.strip():
@@ -121,7 +124,7 @@ class SpeculatorModelConfig:
             if not parsed.netloc or not parsed.path.strip("/") or parsed.query or parsed.fragment:
                 raise SpeculativeDecodingConfigError(f"{context}.source_uri is not a complete object-store URI")
 
-        return cls(path=path, source_uri=source_uri, source_identity=source_identity)
+        return cls(source_uri=source_uri, source_identity=source_identity)
 
     @property
     def hugging_face_repo_id(self) -> str | None:
@@ -133,7 +136,6 @@ class SpeculatorTrainingConfig:
     """Bounded single-rank online EAGLE update settings."""
 
     interval_steps: int = 1
-    transfer_timeout_seconds: int = 120
     # Bound the deterministic all-DP merge while leaving enough admission
     # headroom for rollout response lengths to vary between steps.
     max_tokens_per_update: int = 16_384
@@ -158,7 +160,6 @@ class SpeculatorTrainingConfig:
         mapping = _mapping(value, context)
         fields = {
             "interval_steps",
-            "transfer_timeout_seconds",
             "max_tokens_per_update",
             "max_window_tokens",
             "max_tokens_per_micro_batch",
@@ -177,10 +178,6 @@ class SpeculatorTrainingConfig:
         return cls(
             interval_steps=_positive_integer(
                 mapping.get("interval_steps", defaults.interval_steps), f"{context}.interval_steps"
-            ),
-            transfer_timeout_seconds=_positive_integer(
-                mapping.get("transfer_timeout_seconds", defaults.transfer_timeout_seconds),
-                f"{context}.transfer_timeout_seconds",
             ),
             max_tokens_per_update=_positive_integer(
                 mapping.get("max_tokens_per_update", defaults.max_tokens_per_update),
@@ -270,13 +267,19 @@ class SpeculativeDecodingConfig:
             training=training,
         )
 
-    def vllm_speculative_config(self) -> dict[str, str | int]:
-        """Return only the serving fields understood by vLLM."""
-        return {
+    def vllm_speculative_config(self) -> dict[str, Any]:
+        """Return the serving fields understood by vLLM."""
+        model = self.model.hugging_face_repo_id or runai_model_uri(self.model.source_uri)
+        result: dict[str, Any] = {
             "method": self.method.value,
-            "model": self.model.path,
+            "model": model,
             "num_speculative_tokens": self.num_speculative_tokens,
         }
+        if self.model.hugging_face_repo_id is not None:
+            result["revision"] = self.model.source_identity
+        else:
+            result["draft_load_config"] = {"load_format": "runai_streamer"}
+        return result
 
 
 def parse_speculative_decoding_config(

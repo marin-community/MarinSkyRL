@@ -105,12 +105,6 @@ class InferenceEngineInterface(ABC):
     ):
         raise NotImplementedError()
 
-    async def init_draft_transfer_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, timeout_seconds
-    ) -> Any:
-        """Join a persistent DraftTrainer-to-serving transfer group."""
-        raise NotImplementedError()
-
     @abstractmethod
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         raise NotImplementedError()
@@ -156,44 +150,10 @@ class InferenceEngineInterface(ABC):
         """Begin a bounded online-EAGLE capture interval when supported."""
         raise NotImplementedError()
 
-    async def seal_online_eagle_capture(self, output_dir: str) -> Any:
-        """Seal the active capture into an immutable local artifact."""
+    async def seal_online_eagle_capture(self, destination: str) -> Any:
+        """Publish the active capture to cloud storage."""
         raise NotImplementedError()
 
-    async def catalog_online_eagle_capture(self) -> Any:
-        """Return a metadata-only catalog for a sealed capture."""
-        raise NotImplementedError()
-
-    async def transfer_online_eagle_capture(self, transfer_plan: Dict[str, Any]) -> Any:
-        """Send selected capture tensors directly to DraftTrainer."""
-        raise NotImplementedError()
-
-    async def load_online_eagle_speculator(self, transfer_manifest: Dict[str, Any]) -> Any:
-        """Receive and install one complete accepted draft state."""
-        raise NotImplementedError()
-
-    async def discard_online_eagle_capture(self) -> Any:
-        """Discard the active capture interval after a failed rollout."""
-        raise NotImplementedError()
-
-    async def cleanup_online_eagle_scratch(self, scratch_root: str) -> Any:
-        """Remove node-local online-EAGLE scratch when supported."""
-        raise NotImplementedError()
-
-    async def install_online_eagle_speculator(self, candidate_dir: str) -> Any:
-        """Install a complete draft candidate across the serving engine."""
-        raise NotImplementedError()
-
-    async def publish_online_eagle_speculator(
-        self,
-        source_dir: str,
-        destination: str,
-        draft_revision: str,
-        served_target_revision: str,
-    ) -> Any:
-        """Publish the exact served draft beside a policy checkpoint."""
-        raise NotImplementedError()
-
-    async def restore_online_eagle_speculator(self, source: str, destination: str) -> Any:
-        """Restore the draft paired with a resumed policy checkpoint."""
+    async def refresh_online_eagle_speculator(self, candidate_uri: str, draft_revision: str) -> Any:
+        """Best-effort refresh the resident draft from cloud storage."""
         raise NotImplementedError()

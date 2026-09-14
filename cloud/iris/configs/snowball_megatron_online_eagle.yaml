@@ -2,7 +2,7 @@
 # PP2 x EP8 Megatron nodes; one DP8/EP8 vLLM node serves while a dedicated
 # DraftTrainer actor runs on the extra node derived by the Iris request builder.
 # The exact target revision is supplied to the launcher, while the immutable
-# public draft is staged from Hugging Face. Every fourth step captures up to
+# public draft loads directly from Hugging Face. Every fourth step captures up to
 # 131,072 tokens for an asynchronous update. Candidates that pass the holdout
 # gate become the accepted draft and refresh serving ranks at the next boundary.
 entrypoint: standard
@@ -72,13 +72,11 @@ generator:
   speculative_decoding:
     method: eagle3
     model:
-      path: /tmp/marinskyrl-models/snowball-64k-eagle3-draft-r2egym
       source_uri: hf://laion/snowball-64k-eagle3-draft-r2egym
       source_identity: 4bdb47c08e5b5190bea3c7a93c3e14470230e469
     num_speculative_tokens: 3
     training:
       interval_steps: 4
-      transfer_timeout_seconds: 120
       max_tokens_per_update: 131072
       max_window_tokens: 16384
       max_tokens_per_micro_batch: 8192

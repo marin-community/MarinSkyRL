@@ -12,6 +12,7 @@ Uses fsspec for cloud storage abstraction.
 import fcntl
 import hashlib
 import os
+import shutil
 import tempfile
 from contextlib import contextmanager
 from collections.abc import Sequence
@@ -282,63 +283,33 @@ def local_read_dir(input_path: str):
         yield input_path
 
 
-def _release_directory_page_cache(directory: Path) -> None:
-    """Release clean cached pages after a large immutable checkpoint read."""
-    if not hasattr(os, "posix_fadvise") or not hasattr(os, "POSIX_FADV_DONTNEED"):
-        return
-    released_files = 0
-    failed_files = 0
-    for path in directory.rglob("*"):
-        if not path.is_file():
-            continue
-        descriptor = None
-        try:
-            descriptor = os.open(path, os.O_RDONLY)
-            os.posix_fadvise(descriptor, 0, 0, os.POSIX_FADV_DONTNEED)
-            released_files += 1
-        except OSError:
-            failed_files += 1
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-    if failed_files:
-        logger.warning(
-            f"Released checkpoint page cache for {released_files} files under {directory}; "
-            f"{failed_files} files could not be advised"
-        )
-    else:
-        logger.info(f"Released checkpoint page cache for {released_files} files under {directory}")
-
-
 @contextmanager
-def node_cached_local_read_dir(input_path: str, cache_root: str | None = None):
-    """Stage one immutable cloud directory once per node and retain it for the job."""
+def node_cached_read_dir(input_path: str, cache_root: str):
+    """Provide a reusable node-local copy without exposing partial downloads."""
     if not is_cloud_path(input_path):
         with local_read_dir(input_path) as read_dir:
             yield read_dir
         return
 
-    root = Path(cache_root or tempfile.gettempdir()) / "marinskyrl-node-checkpoint-cache"
-    root.mkdir(parents=True, exist_ok=True)
+    cache_root_path = Path(cache_root)
+    cache_root_path.mkdir(parents=True, exist_ok=True)
     cache_key = hashlib.sha256(input_path.encode()).hexdigest()
-    cache_dir = root / cache_key
-    complete_marker = cache_dir / ".complete"
-    lock_path = root / f"{cache_key}.lock"
+    cached_path = cache_root_path / cache_key
+    lock_path = cache_root_path / f"{cache_key}.lock"
 
     with lock_path.open("a+b") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        if not complete_marker.is_file():
-            if cache_dir.exists():
-                raise RuntimeError(f"Incomplete node checkpoint cache exists at {cache_dir}")
-            with tempfile.TemporaryDirectory(prefix=f".{cache_key}.", dir=root) as staging_dir:
-                download_directory(input_path, staging_dir)
-                (Path(staging_dir) / ".complete").write_text(input_path)
-                os.replace(staging_dir, cache_dir)
-            logger.info(f"Cached immutable checkpoint directory {input_path} at {cache_dir}")
-        elif complete_marker.read_text() != input_path:
-            raise RuntimeError(f"Node checkpoint cache identity mismatch at {cache_dir}")
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            if not cached_path.is_dir():
+                staging_path = Path(tempfile.mkdtemp(prefix=f".{cache_key}.", dir=cache_root_path))
+                try:
+                    download_directory(input_path, str(staging_path))
+                    staging_path.rename(cached_path)
+                finally:
+                    if staging_path.exists():
+                        shutil.rmtree(staging_path)
+                logger.info(f"Cached directory contents from {input_path} at {cached_path}")
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
-    try:
-        yield str(cache_dir)
-    finally:
-        _release_directory_page_cache(cache_dir)
+    yield str(cached_path)

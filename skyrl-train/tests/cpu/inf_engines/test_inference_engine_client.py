@@ -509,69 +509,47 @@ def _make_min_cfg():
     )
 
 
-class _DraftLoadEngine:
+class _DraftRefreshEngine:
     def __init__(self, result):
         self.result = result
         self.calls = []
 
-    async def load_online_eagle_speculator(self, transfer_manifest):
-        self.calls.append(transfer_manifest)
+    async def refresh_online_eagle_speculator(self, candidate_uri, draft_revision):
+        self.calls.append((candidate_uri, draft_revision))
         if isinstance(self.result, BaseException):
             raise self.result
         return self.result
 
 
-class _HangingDraftLoadEngine:
-    def __init__(self):
-        self.calls = []
-
-    async def load_online_eagle_speculator(self, transfer_manifest):
-        self.calls.append(transfer_manifest)
-        await asyncio.Future()
-
-
 @pytest.mark.asyncio
-async def test_draft_load_retains_per_engine_exceptions() -> None:
-    manifest = {"revision": "draft-step-4"}
+async def test_draft_refresh_retains_per_engine_exceptions() -> None:
     engines = [
-        _DraftLoadEngine({"active": True, "draft_revision": "draft-step-4"}),
-        _DraftLoadEngine(RuntimeError("load failed")),
+        _DraftRefreshEngine({"active": True, "draft_revision": "draft-step-4"}),
+        _DraftRefreshEngine(RuntimeError("load failed")),
     ]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
-    coverage = await client.load_online_eagle_speculator(manifest, timeout_seconds=1)
+    coverage = await client.refresh_online_eagle_speculator("s3://bucket/drafts/draft-step-4", "draft-step-4")
 
     assert coverage == [
-        {"engine_index": 0, "active": True, "draft_revision": "draft-step-4"},
-        {"engine_index": 1, "active": False, "error": "RuntimeError: load failed"},
+        {"active": True, "draft_revision": "draft-step-4"},
+        {"active": False, "error": "RuntimeError: load failed"},
     ]
-    assert [engine.calls for engine in engines] == [[manifest], [manifest]]
+    expected_call = [("s3://bucket/drafts/draft-step-4", "draft-step-4")]
+    assert [engine.calls for engine in engines] == [expected_call, expected_call]
 
 
 @pytest.mark.asyncio
-async def test_draft_load_refuses_partial_collective_after_engine_death() -> None:
-    engines = [_DraftLoadEngine({"active": True}), _DraftLoadEngine({"active": True})]
+async def test_draft_refresh_skips_dead_engines() -> None:
+    engines = [_DraftRefreshEngine({"active": True}), _DraftRefreshEngine({"active": True})]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
     client._dead_engines.add(1)
 
-    with pytest.raises(RuntimeError, match="refusing a partial collective"):
-        await client.load_online_eagle_speculator({"revision": "draft-step-4"}, timeout_seconds=1)
+    coverage = await client.refresh_online_eagle_speculator("s3://bucket/drafts/draft-step-4", "draft-step-4")
 
-    assert [engine.calls for engine in engines] == [[], []]
-
-
-@pytest.mark.asyncio
-async def test_draft_load_timeout_permanently_breaks_collective() -> None:
-    engine = _HangingDraftLoadEngine()
-    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-    manifest = {"revision": "draft-step-4"}
-
-    with pytest.raises(RuntimeError, match="communicator is unusable"):
-        await client.load_online_eagle_speculator(manifest, timeout_seconds=0.001)
-    with pytest.raises(RuntimeError, match="refusing a partial collective"):
-        await client.load_online_eagle_speculator(manifest, timeout_seconds=0.001)
-
-    assert engine.calls == [manifest]
+    assert coverage == [{"active": True}]
+    assert engines[0].calls == [("s3://bucket/drafts/draft-step-4", "draft-step-4")]
+    assert engines[1].calls == []
 
 
 @pytest.mark.parametrize(

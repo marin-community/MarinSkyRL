@@ -12,7 +12,6 @@ import torch
 
 from skyrl_train.hf_model_io import local_hf_model_dir
 from skyrl_train.io.io import (
-    _release_directory_page_cache,
     is_cloud_path,
     makedirs,
     exists,
@@ -21,7 +20,7 @@ from skyrl_train.io.io import (
     download_directory,
     local_work_dir,
     local_read_dir,
-    node_cached_local_read_dir,
+    node_cached_read_dir,
     list_dir,
 )
 from skyrl_train.checkpoint_listing import list_checkpoint_dirs
@@ -405,43 +404,41 @@ class TestContextManagers:
         with local_read_dir("s3://bucket/checkpoints/global_step_12/policy") as read_dir:
             assert (Path(read_dir) / ".metadata").is_file()
 
-    @patch("skyrl_train.io.io.download_directory")
-    @patch("skyrl_train.io.io.is_cloud_path", return_value=True)
-    def test_node_cached_local_read_dir_downloads_immutable_checkpoint_once(
-        self, _mock_is_cloud_path, mock_download_directory, tmp_path
-    ):
+    def test_node_cached_read_dir_reuses_completed_download(self, tmp_path):
         cloud_path = "s3://bucket/checkpoints/global_step_12/policy"
+        cache_root = tmp_path / "cache"
 
-        with node_cached_local_read_dir(cloud_path, str(tmp_path)) as first_read_dir:
-            first_read_path = Path(first_read_dir)
-            assert first_read_path.is_dir()
-            assert (first_read_path / ".complete").read_text() == cloud_path
+        def download(_cloud_path, local_path):
+            assert _cloud_path == cloud_path
+            (Path(local_path) / ".metadata").write_text("checkpoint metadata")
 
-        with node_cached_local_read_dir(cloud_path, str(tmp_path)) as second_read_dir:
-            assert second_read_dir == first_read_dir
+        with patch("skyrl_train.io.io.download_directory", side_effect=download) as mock_download:
+            with node_cached_read_dir(cloud_path, str(cache_root)) as first_read_dir:
+                assert (Path(first_read_dir) / ".metadata").read_text() == "checkpoint metadata"
 
-        mock_download_directory.assert_called_once()
+            with node_cached_read_dir(cloud_path, str(cache_root)) as second_read_dir:
+                assert second_read_dir == first_read_dir
 
-    def test_checkpoint_page_cache_release_advises_every_file(self, monkeypatch, tmp_path):
-        (tmp_path / "first.distcp").write_bytes(b"first")
-        nested = tmp_path / "nested"
-        nested.mkdir()
-        (nested / "second.distcp").write_bytes(b"second")
-        advice_calls = []
-        monkeypatch.setattr(
-            os,
-            "posix_fadvise",
-            lambda descriptor, offset, length, advice: advice_calls.append((descriptor, offset, length, advice)),
-            raising=False,
-        )
-        monkeypatch.setattr(os, "POSIX_FADV_DONTNEED", 4, raising=False)
+        mock_download.assert_called_once()
+        assert Path(first_read_dir).is_dir()
 
-        _release_directory_page_cache(tmp_path)
+    def test_node_cached_read_dir_does_not_publish_failed_download(self, tmp_path):
+        cloud_path = "s3://bucket/checkpoints/global_step_12/policy"
+        cache_root = tmp_path / "cache"
 
-        assert len(advice_calls) == 2
-        assert all(
-            (offset, length, advice) == (0, 0, os.POSIX_FADV_DONTNEED) for _, offset, length, advice in advice_calls
-        )
+        with patch("skyrl_train.io.io.download_directory", side_effect=RuntimeError("download failed")):
+            with pytest.raises(RuntimeError, match="download failed"):
+                with node_cached_read_dir(cloud_path, str(cache_root)):
+                    pass
+
+        def download(_cloud_path, local_path):
+            (Path(local_path) / ".metadata").write_text("checkpoint metadata")
+
+        with patch("skyrl_train.io.io.download_directory", side_effect=download) as mock_download:
+            with node_cached_read_dir(cloud_path, str(cache_root)) as read_dir:
+                assert (Path(read_dir) / ".metadata").read_text() == "checkpoint metadata"
+
+        mock_download.assert_called_once()
 
 
 class FakeHFCloudFilesystem:

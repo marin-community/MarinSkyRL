@@ -1,269 +1,250 @@
-"""Behavior tests for dedicated draft-training transport and lifecycle primitives."""
+"""Behavior tests for the independent cloud-backed DraftTrainer."""
 
-from __future__ import annotations
-
+import json
 from pathlib import Path
 import shutil
 
 import pytest
-from safetensors.torch import load_file
-import torch
 
 import skyrl_train.draft_trainer as draft_trainer_module
+from marinskyrl.speculative_decoding import SpeculatorModelConfig, SpeculatorTrainingConfig
 from skyrl_train.draft_trainer import (
+    DraftCheckpoint,
     DraftTrainer,
+    DraftUpdateRequest,
+    latest_draft_checkpoint_uri,
+    read_latest_draft_checkpoint,
 )
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import OnlineEagleUpdateResult
 
 
-def test_draft_trainer_materializes_direct_capture_transfer(tmp_path: Path, monkeypatch) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    trainer = DraftTrainer(
-        initial_draft_dir=str(initial),
-        initial_draft_revision="draft-initial",
-        process_id="process",
-    )
-    trainer._process_root = tmp_path / "process"
-    trainer._draft_transfer_group = object()
-    received = {
-        "window-000000.safetensors::input_ids": torch.tensor([1, 2, 3]),
-        "target.safetensors::model.embed_tokens.weight": torch.ones(2, 2),
-        "target.safetensors::lm_head.weight": torch.ones(2, 2),
-    }
-    monkeypatch.setattr(draft_trainer_module, "transfer_tensor_operations", lambda *_args, **_kwargs: received)
-    plan = {
-        "format": "marinskyrl-online-eagle-capture-transfer",
-        "format_version": 1,
-        "total_bytes": 56,
-        "operations": [{"operation": "metadata-only"}],
-        "files": [
-            {
-                "destination_path": "window-000000.safetensors",
-                "tensors": [{"name": "input_ids"}],
-            },
-            {
-                "destination_path": "target.safetensors",
-                "tensors": [{"name": "lm_head.weight"}, {"name": "model.embed_tokens.weight"}],
-            },
-        ],
-        "target_config_json": '{"model_type":"test"}',
-        "capture_manifest": {
-            "windows": [{"path": "window-000000.safetensors", "sha256": "source"}],
-            "captured_rows": 3,
-            "dropped_windows": 0,
-            "oversized_windows": 0,
-            "unselected_windows": 0,
-            "target": {
-                "weights_path": "target.safetensors",
-                "weights_sha256": "source",
-                "config_path": "target-config.json",
-                "config_sha256": "source",
-            },
-        },
-    }
+_DRAFT_REVISION = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
 
-    result = trainer.receive_capture(plan, str(tmp_path / "process" / "step-4" / "merged"))
 
-    assert result["captured_rows"] == 3
-    assert result["transfer_bytes"] == 56
-    assert torch.equal(
-        load_file(Path(result["capture_dir"]) / "window-000000.safetensors")["input_ids"],
-        received["window-000000.safetensors::input_ids"],
+class _CloudFixture:
+    def __init__(self, root: Path):
+        self.root = root
+        self.events: list[tuple[str, str]] = []
+
+    def path(self, uri: str) -> Path:
+        assert uri.startswith("s3://bucket/")
+        return self.root / uri.removeprefix("s3://bucket/")
+
+    def exists(self, uri: str) -> bool:
+        return self.path(uri).exists()
+
+    def read_bytes(self, uri: str) -> bytes:
+        return self.path(uri).read_bytes()
+
+    def write_bytes_atomic(self, uri: str, value: bytes) -> None:
+        path = self.path(uri)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(value)
+        self.events.append(("write", uri))
+
+    def upload_directory(self, source: str, uri: str) -> None:
+        destination = self.path(uri)
+        shutil.copytree(source, destination)
+        self.events.append(("upload", uri))
+
+    def download_directory(self, uri: str, destination: str) -> None:
+        shutil.copytree(self.path(uri), destination)
+        self.events.append(("download", uri))
+
+    def remove(self, uri: str) -> None:
+        path = self.path(uri)
+        shutil.rmtree(path) if path.is_dir() else path.unlink()
+        self.events.append(("remove", uri))
+
+
+@pytest.fixture
+def cloud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _CloudFixture:
+    fixture = _CloudFixture(tmp_path / "cloud")
+    for name in ("exists", "read_bytes", "write_bytes_atomic", "upload_directory", "download_directory", "remove"):
+        monkeypatch.setattr(draft_trainer_module.io, name, getattr(fixture, name))
+    return fixture
+
+
+def _initial_model() -> SpeculatorModelConfig:
+    return SpeculatorModelConfig(
+        source_uri="hf://laion/snowball-64k-eagle3-draft-r2egym",
+        source_identity=_DRAFT_REVISION,
     )
 
 
-def _training_job(tmp_path: Path, *, step: int, parent_draft_revision: str) -> dict:
-    candidate_dir = tmp_path / "process" / "candidates" / f"step-{step}"
-    capture_dir = tmp_path / "process" / f"step-{step}" / "merged"
-    capture_dir.mkdir(parents=True, exist_ok=True)
-    return {
-        "step": step,
-        "capture_dir": str(capture_dir),
-        "draft_model_dir": str(tmp_path / "ignored-driver-path"),
-        "initial_draft_source_identity": "hf://draft@revision",
-        "parent_draft_revision": parent_draft_revision,
-        "target_revision": f"policy-step-{step - 1}",
-        "target_weights_sha256": f"target-{step - 1}",
-        "output_dir": str(candidate_dir),
-        "failure_artifact_path": str(tmp_path / "failures" / f"step-{step}"),
-        "num_speculative_tokens": 3,
-        "seed": 42,
-        "training": {},
-    }
-
-
-def test_draft_trainer_acceptance_immediately_advances_owned_lineage(tmp_path: Path, monkeypatch) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    runtime_initializations = []
-    observed_draft_dirs = []
-
-    class Runtime:
-        def __init__(self, job, capture_dir):
-            runtime_initializations.append((job.draft_model_dir, capture_dir))
-
-        def update(self, job):
-            observed_draft_dirs.append(job.draft_model_dir)
-            candidate = Path(job.output_dir)
-            candidate.mkdir(parents=True)
-            (candidate / "model.safetensors").write_bytes(b"weights")
-            return OnlineEagleUpdateResult(
-                accepted=True,
-                step=job.step,
-                parent_draft_revision=job.parent_draft_revision,
-                trained_against_target_revision=job.target_revision,
-                trained_against_target_weights_sha256=job.target_weights_sha256,
-                candidate_dir=job.output_dir,
-                draft_revision=f"draft-step-{job.step}",
-                weights_sha256=f"draft-digest-{job.step}",
-            )
-
-    monkeypatch.setattr(draft_trainer_module, "OnlineEagleTrainerRuntime", Runtime)
-
-    def validate(path):
-        step = Path(path).name.removeprefix("step-")
-        return {
-            "weights_path": "model.safetensors",
-            "draft_revision": f"draft-step-{step}",
-            "weights_sha256": f"draft-digest-{step}",
-        }
-
-    monkeypatch.setattr(draft_trainer_module, "validate_online_eagle_serving_candidate", validate)
-    candidate_tensors = {"draft.weight": torch.arange(4, dtype=torch.bfloat16).reshape(2, 2)}
-    monkeypatch.setattr(draft_trainer_module, "load_file", lambda _path: candidate_tensors)
-    monkeypatch.setattr(
-        draft_trainer_module,
-        "remove_online_eagle_scratch",
-        lambda path: shutil.rmtree(path, ignore_errors=True),
+def _request(step: int = 4) -> DraftUpdateRequest:
+    return DraftUpdateRequest(
+        step=step,
+        capture_uri=f"s3://bucket/run/drafts/captures/step-{step}",
+        target_revision=f"policy-step-{step - 1}",
+        num_speculative_tokens=3,
+        seed=7,
+        training=SpeculatorTrainingConfig(
+            min_train_sequences=1,
+            min_holdout_sequences=1,
+        ),
     )
-    published = []
 
-    def publish(source, destination, *, draft_revision, served_target_revision, install_coverage=None):
-        published.append((source, destination, draft_revision, served_target_revision, install_coverage))
-        return {"complete": True, "path": f"{destination}/manifest.json"}
 
-    monkeypatch.setattr(draft_trainer_module, "publish_speculator_checkpoint", publish)
+def _publish_capture(cloud: _CloudFixture, request: DraftUpdateRequest) -> None:
+    capture = cloud.path(request.capture_uri)
+    capture.mkdir(parents=True)
+    (capture / "capture.txt").write_text("capture")
 
-    trainer = DraftTrainer(
-        initial_draft_dir=str(initial),
-        initial_draft_revision="draft-initial",
-        process_id="process",
-    )
-    trainer._process_root = tmp_path / "process"
-    trainer._draft_transfer_group = object()
-    broadcasts = []
-    monkeypatch.setattr(
-        draft_trainer_module,
-        "broadcast_tensor_payload",
-        lambda manifest, *, tensors, group: broadcasts.append((manifest, tensors, group)),
-    )
-    first = trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-initial"))
-    assert first["transfer_manifest"]["revision"] == "draft-step-4"
-    assert first["transfer_manifest"]["total_bytes"] == 8
-    assert trainer.status()["accepted_draft_revision"] == "draft-step-4"
-    trainer.broadcast_candidate(first["transfer_manifest"])
-    assert broadcasts[0][2] is trainer._draft_transfer_group
-    assert trainer.status()["accepted_transfer_ready"] is False
-    trainer.publish(str(tmp_path / "published"), "draft-step-4", "policy-step-7")
 
-    second = trainer.update(_training_job(tmp_path, step=8, parent_draft_revision="draft-step-4"))
+class _Runtime:
+    instances: list["_Runtime"] = []
 
-    assert observed_draft_dirs == [str(initial), str(tmp_path / "process" / "candidates" / "step-4")]
-    assert runtime_initializations == [(str(initial), tmp_path / "process" / "step-4" / "merged")]
-    assert published == [
-        (
-            str(tmp_path / "process" / "candidates" / "step-4"),
-            str(tmp_path / "published"),
-            "draft-step-4",
-            "policy-step-7",
-            None,
+    def __init__(self, job, capture_dir):
+        self.initial_job = job
+        self.capture_dir = capture_dir
+        self.restored_from = None
+        self.instances.append(self)
+
+    def restore(self, checkpoint_dir):
+        self.restored_from = checkpoint_dir
+
+    def update(self, job):
+        candidate = Path(job.output_dir)
+        candidate.mkdir()
+        (candidate / "config.json").write_text("{}")
+        (candidate / "model.safetensors").write_bytes(b"draft")
+        (candidate / "trainer_state.pt").write_bytes(b"state")
+        return OnlineEagleUpdateResult(
+            accepted=True,
+            step=job.step,
+            draft_revision=f"draft-step-{job.step}",
         )
+
+
+def _patch_training(monkeypatch: pytest.MonkeyPatch) -> None:
+    _Runtime.instances.clear()
+    monkeypatch.setattr(draft_trainer_module, "OnlineEagleTrainerRuntime", _Runtime)
+
+    def merge(_capture_root, output_dir, **_kwargs):
+        output_dir.mkdir()
+        return {"active": True}
+
+    monkeypatch.setattr(draft_trainer_module, "merge_online_eagle_captures", merge)
+
+
+def test_draft_checkpoint_requires_cloud_uri() -> None:
+    with pytest.raises(ValueError, match="cloud-backed"):
+        DraftCheckpoint.from_mapping(
+            {
+                "step": 4,
+                "revision": "draft-step-4",
+                "uri": "/tmp/draft",
+                "source_identity": _DRAFT_REVISION,
+            }
+        )
+
+
+def test_draft_trainer_publishes_checkpoint_before_latest_pointer(
+    cloud: _CloudFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_training(monkeypatch)
+    request = _request()
+    _publish_capture(cloud, request)
+    checkpoint_root = "s3://bucket/run/drafts/checkpoints"
+    trainer = DraftTrainer(initial_model=_initial_model(), checkpoint_root=checkpoint_root)
+
+    result = trainer.update(request)
+
+    candidate_uri = "s3://bucket/run/drafts/checkpoints/draft-step-4"
+    assert result["accepted"] is True
+    assert result["candidate_uri"] == candidate_uri
+    assert cloud.events[-3:] == [
+        ("upload", candidate_uri),
+        ("write", latest_draft_checkpoint_uri(checkpoint_root)),
+        ("remove", request.capture_uri),
     ]
-    assert Path(second["result"]["candidate_dir"]).exists()
-    assert not (tmp_path / "process" / "candidates" / "step-4").exists()
-    status = trainer.status()
-    assert status["accepted_draft_dir"] == str(tmp_path / "process" / "candidates" / "step-8")
-    assert status["accepted_draft_revision"] == "draft-step-8"
-    assert status["accepted_transfer_ready"] is True
+    latest = read_latest_draft_checkpoint(checkpoint_root)
+    assert latest == DraftCheckpoint(
+        step=4,
+        revision="draft-step-4",
+        uri=candidate_uri,
+        source_identity=_DRAFT_REVISION,
+    )
+    assert _Runtime.instances[0].initial_job.draft_model_source == _initial_model().source_uri
 
 
-def test_draft_trainer_rejects_parent_outside_its_accepted_lineage(tmp_path: Path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    trainer = DraftTrainer(
-        initial_draft_dir=str(initial),
-        initial_draft_revision="draft-initial",
-        process_id="process",
+def test_draft_trainer_restores_latest_checkpoint_once(
+    cloud: _CloudFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_training(monkeypatch)
+    checkpoint_root = "s3://bucket/run/drafts/checkpoints"
+    checkpoint_uri = f"{checkpoint_root}/draft-step-4"
+    checkpoint_dir = cloud.path(checkpoint_uri)
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "trainer_state.pt").write_bytes(b"state")
+    cloud.write_bytes_atomic(
+        latest_draft_checkpoint_uri(checkpoint_root),
+        json.dumps(
+            {
+                "step": 4,
+                "revision": "draft-step-4",
+                "uri": checkpoint_uri,
+                "source_identity": _DRAFT_REVISION,
+            }
+        ).encode(),
+    )
+    request = _request(step=8)
+    _publish_capture(cloud, request)
+
+    trainer = DraftTrainer(initial_model=_initial_model(), checkpoint_root=checkpoint_root)
+    result = trainer.update(request)
+
+    assert result["accepted"] is True
+    assert _Runtime.instances[0].initial_job.parent_draft_revision == "draft-step-4"
+    assert _Runtime.instances[0].restored_from is not None
+
+
+def test_latest_checkpoint_from_another_initial_draft_is_ignored(
+    cloud: _CloudFixture,
+) -> None:
+    checkpoint_root = "s3://bucket/run/drafts/checkpoints"
+    cloud.write_bytes_atomic(
+        latest_draft_checkpoint_uri(checkpoint_root),
+        json.dumps(
+            {
+                "step": 4,
+                "revision": "draft-step-4",
+                "uri": f"{checkpoint_root}/draft-step-4",
+                "source_identity": "different-draft",
+            }
+        ).encode(),
     )
 
-    with pytest.raises(RuntimeError, match="accepted lineage"):
-        trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-other"))
+    assert (
+        read_latest_draft_checkpoint(
+            checkpoint_root,
+            source_identity=_DRAFT_REVISION,
+        )
+        is None
+    )
 
 
-def test_draft_trainer_reports_training_failure_and_preserves_its_artifact(tmp_path: Path, monkeypatch) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-
-    failure_dir = tmp_path / "preserved-failure"
-
-    class FailingRuntime:
-        def __init__(self, _job, _capture_dir):
-            pass
-
-        def update(self, _job):
-            raise RuntimeError("training failed")
-
-    monkeypatch.setattr(draft_trainer_module, "OnlineEagleTrainerRuntime", FailingRuntime)
+def test_draft_trainer_failure_is_nonfatal_and_consumes_capture(
+    cloud: _CloudFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request()
+    _publish_capture(cloud, request)
     monkeypatch.setattr(
         draft_trainer_module,
-        "preserve_online_eagle_failure",
-        lambda _job, _error: str(failure_dir),
+        "merge_online_eagle_captures",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bad capture")),
     )
-    monkeypatch.setattr(
-        draft_trainer_module,
-        "publish_online_eagle_failure_bundle",
-        lambda _source, destination: {"path": f"{destination}/manifest.json"},
-    )
-    monkeypatch.setattr(draft_trainer_module, "remove_online_eagle_scratch", lambda _path: None)
-    trainer = DraftTrainer(
-        initial_draft_dir=str(initial),
-        initial_draft_revision="draft-initial",
-        process_id="process",
-    )
+    trainer = DraftTrainer(initial_model=_initial_model(), checkpoint_root="s3://bucket/run/drafts/checkpoints")
 
-    update = trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-initial"))
+    result = trainer.update(request)
 
-    assert update["transfer_manifest"] is None
-    assert update["result"] == {
+    assert result == {
         "accepted": False,
         "step": 4,
-        "error": "RuntimeError: training failed",
-        "failure_dir": str(failure_dir),
-        "failure_artifact_path": f"{tmp_path}/failures/step-4/manifest.json",
+        "error": "RuntimeError: bad capture",
     }
-
-
-def test_draft_trainer_cleanup_releases_its_process_scratch(tmp_path: Path, monkeypatch) -> None:
-    scratch = tmp_path / "scratch"
-    process_root = scratch / "process"
-    process_root.mkdir(parents=True)
-    (process_root / "capture.bin").write_bytes(b"capture")
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    monkeypatch.setattr(draft_trainer_module, "ONLINE_EAGLE_SCRATCH_ROOT", scratch)
-    monkeypatch.setattr(
-        draft_trainer_module,
-        "remove_online_eagle_scratch",
-        lambda path: shutil.rmtree(path, ignore_errors=True),
-    )
-    trainer = DraftTrainer(
-        initial_draft_dir=str(initial),
-        initial_draft_revision="draft-initial",
-        process_id="process",
-    )
-
-    result = trainer.cleanup()
-
-    assert result == {"path": str(process_root)}
-    assert not process_root.exists()
+    assert not cloud.exists(request.capture_uri)

@@ -209,13 +209,6 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing
         )
 
-    async def init_draft_transfer_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, timeout_seconds
-    ):
-        return await self.inference_engine_actor.init_draft_transfer_communicator.remote(
-            master_addr, master_port, rank_offset, world_size, group_name, backend, timeout_seconds
-        )
-
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
@@ -271,40 +264,11 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def seal_online_eagle_capture(self, output_dir: str):
         return await self.inference_engine_actor.seal_online_eagle_capture.remote(output_dir)
 
-    async def catalog_online_eagle_capture(self):
-        return await self.inference_engine_actor.catalog_online_eagle_capture.remote()
-
-    async def transfer_online_eagle_capture(self, transfer_plan: Dict[str, Any]):
-        return await self.inference_engine_actor.transfer_online_eagle_capture.remote(transfer_plan)
-
-    async def load_online_eagle_speculator(self, transfer_manifest: Dict[str, Any]):
-        return await self.inference_engine_actor.load_online_eagle_speculator.remote(transfer_manifest)
-
-    async def discard_online_eagle_capture(self):
-        return await self.inference_engine_actor.discard_online_eagle_capture.remote()
-
-    async def cleanup_online_eagle_scratch(self, scratch_root: str):
-        return await self.inference_engine_actor.cleanup_online_eagle_scratch.remote(scratch_root)
-
-    async def install_online_eagle_speculator(self, candidate_dir: str):
-        return await self.inference_engine_actor.install_online_eagle_speculator.remote(candidate_dir)
-
-    async def publish_online_eagle_speculator(
-        self,
-        source_dir: str,
-        destination: str,
-        draft_revision: str,
-        served_target_revision: str,
-    ):
-        return await self.inference_engine_actor.publish_online_eagle_speculator.remote(
-            source_dir,
-            destination,
+    async def refresh_online_eagle_speculator(self, candidate_uri: str, draft_revision: str):
+        return await self.inference_engine_actor.refresh_online_eagle_speculator.remote(
+            candidate_uri,
             draft_revision,
-            served_target_revision,
         )
-
-    async def restore_online_eagle_speculator(self, source: str, destination: str):
-        return await self.inference_engine_actor.restore_online_eagle_speculator.remote(source, destination)
 
     async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET):
         """Return throughput, latency, cache, token, and request statistics."""
