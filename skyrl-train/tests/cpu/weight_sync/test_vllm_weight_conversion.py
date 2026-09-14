@@ -3,7 +3,7 @@ import torch
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
-from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
+from skyrl_train.weight_sync.vllm_weight_conversion import expected_vllm_parameter_names, load_weights_into_vllm
 
 
 class RecordingVLLMModel:
@@ -91,6 +91,34 @@ def test_load_weights_into_vllm_rejects_silently_skipped_fused_experts():
                 ("model.layers.0.mlp.experts.down_proj", torch.zeros(2, 4, 3)),
             ],
         )
+
+
+def test_load_weights_into_vllm_rejects_silently_skipped_ordinary_parameter():
+    model = RecordingVLLMModel({"model.embed_tokens.weight"})
+
+    with pytest.raises(RuntimeError, match=r"model\.norm\.weight"):
+        load_weights_into_vllm(
+            model,
+            [
+                ("model.embed_tokens.weight", torch.zeros(4, 4)),
+                ("model.norm.weight", torch.zeros(4)),
+            ],
+        )
+
+
+def test_expected_parameter_names_cover_grug_stacked_experts():
+    assert expected_vllm_parameter_names(
+        [
+            "model.layers.0.mlp.experts.gate_proj.weight",
+            "model.layers.0.mlp.experts.up_proj.weight",
+            "model.layers.0.mlp.experts.down_proj.weight",
+            "model.layers.0.self_attn.q_proj.weight",
+        ]
+    ) == {
+        "model.layers.0.mlp.experts.routed_experts.w13_weight",
+        "model.layers.0.mlp.experts.routed_experts.w2_weight",
+        "model.layers.0.self_attn.q_proj.weight",
+    }
 
 
 @pytest.mark.parametrize(

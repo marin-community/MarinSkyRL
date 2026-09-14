@@ -70,7 +70,7 @@ from skyrl_train.sync_group_admission import (
     admit_or_collect_replacements,
 )
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
+from marinskyrl.checkpoint_paths import CHECKPOINT_COMPLETE_FILENAME, GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
@@ -614,7 +614,7 @@ class RayPPOTrainer:
     async def _sync_policy_for_rollouts(self, *, reason: str) -> None:
         with Timer("publish_policy_weights", log_events=False) as update_timer:
             if self.learner is not None:
-                self._publish_learner_policy()
+                await self._publish_learner_policy()
             elif self.colocate_all:
                 try:
                     self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
@@ -628,10 +628,10 @@ class RayPPOTrainer:
                     ray.get(self.sync_policy_weights_to_inference_engines())
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
 
-    def _publish_learner_policy(self):
+    async def _publish_learner_policy(self):
         assert self.learner is not None
         self._initialize_or_validate_learner()
-        self.learner.publish_policy()
+        await self.learner.publish_policy()
         state = self.learner.state
         if not state.ready_for_rollouts:
             raise LearnerPublicationIncomplete(
@@ -2316,6 +2316,9 @@ class RayPPOTrainer:
         critic_save_dir = os.path.join(global_step_folder, "critic")
 
         io.makedirs(global_step_folder, exist_ok=True)
+        completion_marker = os.path.join(global_step_folder, CHECKPOINT_COMPLETE_FILENAME)
+        if io.exists(completion_marker):
+            io.remove(completion_marker)
 
         # Save policy checkpoint
         if self.learner is not None:
@@ -2374,10 +2377,12 @@ class RayPPOTrainer:
 
     def _commit_checkpoint(self) -> None:
         """Publish a staged checkpoint after every required artifact exists."""
+        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
+        completion_marker = os.path.join(global_step_folder, CHECKPOINT_COMPLETE_FILENAME)
+        io.write_bytes_atomic(completion_marker, str(self.global_step).encode())
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
         io.write_bytes_atomic(latest_checkpoint_file, str(self.global_step).encode())
 
-        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{self.global_step}")
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
         self._last_saved_step = self.global_step
 
@@ -2487,8 +2492,11 @@ class RayPPOTrainer:
         critic_ckpt_dir = os.path.join(checkpoint_path, "critic")
         trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
         dataloader_state_path = os.path.join(checkpoint_path, "data.pt")
+        completion_marker = os.path.join(checkpoint_path, CHECKPOINT_COMPLETE_FILENAME)
 
         # Validate that required checkpoint files exist
+        if self.learner is not None and not io.exists(completion_marker):
+            raise RuntimeError(f"Learner checkpoint is incomplete: completion marker is missing at {completion_marker}")
         if not io.exists(trainer_state_path):
             raise FileNotFoundError(f"Trainer state file not found: {trainer_state_path}")
 
@@ -2510,11 +2518,16 @@ class RayPPOTrainer:
                 self.train_dataloader.load_state_dict(dataloader_state)
                 logger.info("Successfully loaded dataloader state")
             except Exception as e:
+                if self.learner is not None:
+                    raise RuntimeError(
+                        f"Failed to restore learner dataloader state from {dataloader_state_path}"
+                    ) from e
                 logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
         else:
-            logger.warning(
-                f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
-            )
+            message = f"No dataloader state found at {dataloader_state_path}"
+            if self.learner is not None:
+                raise FileNotFoundError(message)
+            logger.warning(f"{message}. Dataloader will start from beginning.")
 
         # 3. Load policy checkpoint
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")
@@ -2559,11 +2572,20 @@ class RayPPOTrainer:
     def _handle_hf_export(self) -> None:
         checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{self.global_step}")
         trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
-        if not io.exists(trainer_state_path):
+        completion_marker = os.path.join(checkpoint_path, CHECKPOINT_COMPLETE_FILENAME)
+        required_marker = completion_marker if self.learner is not None else trainer_state_path
+        if not io.exists(required_marker):
             raise RuntimeError(
                 f"Cannot request HF export for global_step_{self.global_step}: "
-                f"completed checkpoint marker is missing at {trainer_state_path}"
+                f"completed checkpoint marker is missing at {required_marker}"
             )
+
+        if self.learner is not None:
+            export_path = os.path.join(self.cfg.trainer.export_path, f"{GLOBAL_STEP_PREFIX}{self.global_step}")
+            self._initialize_or_validate_learner()
+            self.learner.export_policy(export_path)
+            logger.info(f"Exported Levanter policy for global_step_{self.global_step} to {export_path}")
+            return
 
         existing = read_hf_export_request(checkpoint_path)
         if existing is not None:

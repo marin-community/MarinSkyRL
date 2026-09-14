@@ -73,6 +73,7 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.inference_engines.opencode_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync import WeightLoader
+from skyrl_train.weight_sync.install_receipt import WeightInstallReceipt, weight_name_digest
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
 from skyrl_train.weight_sync.weight_extractor import is_weight_sync_dtype_compatible
 from skyrl_train.inference_engines.vllm.utils import (
@@ -491,9 +492,11 @@ class WorkerWrap:
         model = self.model_runner.model
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             initialize_layerwise_reload(model)
+        self._skyrl_received_weight_names = []
+        self._skyrl_loaded_parameters = set()
         self._skyrl_weight_update_active = True
 
-    def skyrl_finish_weight_reload(self) -> None:
+    def skyrl_finish_weight_reload(self) -> WeightInstallReceipt:
         """RENAMED from ``finish_weight_update`` + NOW WIRED — see
         ``skyrl_begin_weight_reload`` for the collision + root-cause rationale.
 
@@ -503,6 +506,9 @@ class WorkerWrap:
         set exactly once -> re-applies the FlashInfer-CUTLASS ``swap_w13_to_w31`` the
         per-chunk ``model.load_weights`` skips. Must be called after every chunk's
         ``load_weights`` (and after ``end_weight_update``'s fused flush).
+
+        Returns a receipt with the received-name digest and installed-parameter
+        count so the publisher can verify every worker completed the reload.
         """
         if not getattr(self, "_skyrl_weight_update_active", False):
             raise RuntimeError("skyrl_begin_weight_reload must be called before skyrl_finish_weight_reload.")
@@ -516,6 +522,17 @@ class WorkerWrap:
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             finalize_layerwise_reload(model, self.model_config)
         self._skyrl_weight_update_active = False
+        received_names = getattr(self, "_skyrl_received_weight_names", [])
+        loaded_parameters = getattr(self, "_skyrl_loaded_parameters", set())
+        return {
+            "kind": "weight_install_receipt",
+            "finalized": True,
+            "received_weight_count": len(received_names),
+            "received_name_digest": weight_name_digest(received_names),
+            "loaded_parameter_count": len(loaded_parameters),
+            "loaded_parameter_digest": weight_name_digest(sorted(loaded_parameters)),
+            "host": os.uname().nodename,
+        }
 
     def begin_weight_update(self) -> None:
         """Start accumulating weights for batched load_weights call.
@@ -693,7 +710,10 @@ class WorkerWrap:
                 gc.collect()
                 torch.cuda.empty_cache()
             else:
-                load_weights_into_vllm(model, self._accumulated_weights)
+                loaded_parameters = load_weights_into_vllm(model, self._accumulated_weights)
+                installed = getattr(self, "_skyrl_loaded_parameters", set())
+                installed.update(loaded_parameters)
+                self._skyrl_loaded_parameters = installed
             self._accumulated_weights.clear()
             del self._accumulated_weights
             gc.collect()
@@ -715,7 +735,10 @@ class WorkerWrap:
         weight_list = []
         for name, tensor in self._weight_receiver.receive_weights(request):
             weight_list.append((name, tensor))
-
+        received_names = [name for name, _ in weight_list]
+        all_received_names = getattr(self, "_skyrl_received_weight_names", [])
+        all_received_names.extend(received_names)
+        self._skyrl_received_weight_names = all_received_names
         if hasattr(self, "_accumulated_weights"):
             # Batched mode: move to CPU and accumulate for later flush
             for name, tensor in weight_list:
@@ -723,7 +746,10 @@ class WorkerWrap:
             del weight_list
         else:
             # Immediate mode (default): load right away
-            load_weights_into_vllm(self.model_runner.model, weight_list)
+            loaded_parameters = load_weights_into_vllm(self.model_runner.model, weight_list)
+            installed = getattr(self, "_skyrl_loaded_parameters", set())
+            installed.update(loaded_parameters)
+            self._skyrl_loaded_parameters = installed
             for weight in weight_list:
                 del weight
 
@@ -2283,6 +2309,8 @@ class VLLMWeightTransferReceiver:
     def _receive_broadcast(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via torch.distributed.broadcast."""
         _fuse = bool(request.get("packed", False))
+        backend = str(torch.distributed.get_backend(self.model_update_group)).lower()
+        receive_device = "cpu" if "gloo" in backend else self.device
         for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
             dtype = str_to_torch_dtype(dtype_str)
             if not _fuse:
@@ -2290,8 +2318,10 @@ class VLLMWeightTransferReceiver:
                     f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
                 )
             # Always receive in sender's dtype, load_weights handles conversion
-            weight = torch.empty(shape, dtype=dtype, device="cuda")
+            weight = torch.empty(shape, dtype=dtype, device=receive_device)
             torch.distributed.broadcast(weight, 0, group=self.model_update_group)
+            if receive_device == "cpu":
+                weight = weight.to(device=self.device)
             yield name, weight
 
     def _receive_ipc(self, request: NamedWeightsUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:

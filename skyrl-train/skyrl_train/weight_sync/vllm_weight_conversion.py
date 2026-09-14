@@ -7,6 +7,11 @@ import torch
 
 _FUSED_GATE_UP_SUFFIX = ".experts.gate_up_proj"
 _FUSED_DOWN_SUFFIX = ".experts.down_proj"
+_GRUG_EXPERT_PARAMETER_MAPPING = (
+    ("experts.gate_proj.weight", "experts.routed_experts.w13_weight"),
+    ("experts.up_proj.weight", "experts.routed_experts.w13_weight"),
+    ("experts.down_proj.weight", "experts.routed_experts.w2_weight"),
+)
 
 
 class VLLMWeightModel(Protocol):
@@ -16,11 +21,30 @@ class VLLMWeightModel(Protocol):
 @dataclass(frozen=True)
 class VLLMWeightConversion:
     weights: tuple[tuple[str, torch.Tensor], ...]
-    required_parameters: frozenset[str]
+    expected_parameters: frozenset[str]
 
 
 def _fused_expert_prefix(name: str, suffix: str) -> str:
     return name[: -len(suffix)]
+
+
+def expected_vllm_parameter_names(names: Iterable[str]) -> frozenset[str]:
+    """Map source checkpoint names to the parameters vLLM reports installed."""
+    expected: set[str] = set()
+    for name in names:
+        if name.endswith(_FUSED_GATE_UP_SUFFIX):
+            expected.add(f"{_fused_expert_prefix(name, _FUSED_GATE_UP_SUFFIX)}.experts.w13_weight")
+            continue
+        if name.endswith(_FUSED_DOWN_SUFFIX):
+            expected.add(f"{_fused_expert_prefix(name, _FUSED_DOWN_SUFFIX)}.experts.w2_weight")
+            continue
+        for source, target in _GRUG_EXPERT_PARAMETER_MAPPING:
+            if source in name:
+                expected.add(name.replace(source, target))
+                break
+        else:
+            expected.add(name)
+    return frozenset(expected)
 
 
 def convert_transformers_fused_moe_weights(
@@ -28,9 +52,10 @@ def convert_transformers_fused_moe_weights(
 ) -> VLLMWeightConversion:
     """Convert Transformers fused MoE tensors to vLLM checkpoint names."""
     converted: list[tuple[str, torch.Tensor]] = []
-    required_parameters: set[str] = set()
+    source_names: list[str] = []
 
     for name, tensor in weights:
+        source_names.append(name)
         if name.endswith(_FUSED_GATE_UP_SUFFIX):
             if tensor.ndim != 3 or tensor.shape[1] % 2:
                 raise ValueError(f"Invalid fused MoE weight {name!r} with shape {tuple(tensor.shape)}")
@@ -40,7 +65,6 @@ def convert_transformers_fused_moe_weights(
                 expert_prefix = f"{prefix}.experts.{expert_id}"
                 converted.append((f"{expert_prefix}.gate_proj.weight", gate_weight))
                 converted.append((f"{expert_prefix}.up_proj.weight", up_weight))
-            required_parameters.add(f"{prefix}.experts.w13_weight")
             continue
 
         if name.endswith(_FUSED_DOWN_SUFFIX):
@@ -49,23 +73,22 @@ def convert_transformers_fused_moe_weights(
             prefix = _fused_expert_prefix(name, _FUSED_DOWN_SUFFIX)
             for expert_id, down_weight in enumerate(tensor.unbind(0)):
                 converted.append((f"{prefix}.experts.{expert_id}.down_proj.weight", down_weight))
-            required_parameters.add(f"{prefix}.experts.w2_weight")
             continue
 
         converted.append((name, tensor))
 
-    return VLLMWeightConversion(tuple(converted), frozenset(required_parameters))
+    return VLLMWeightConversion(tuple(converted), expected_vllm_parameter_names(source_names))
 
 
 def load_weights_into_vllm(
     model: VLLMWeightModel,
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> set[str]:
-    """Load one weight-sync batch and reject skipped fused MoE parameters."""
+    """Load one weight-sync batch and reject every silently skipped parameter."""
     conversion = convert_transformers_fused_moe_weights(weights)
     loaded_parameters = model.load_weights(iter(conversion.weights))
-    missing_parameters = conversion.required_parameters.difference(loaded_parameters)
+    missing_parameters = conversion.expected_parameters.difference(loaded_parameters)
     if missing_parameters:
         missing = ", ".join(sorted(missing_parameters))
-        raise RuntimeError(f"vLLM did not load required fused MoE parameters: {missing}")
+        raise RuntimeError(f"vLLM did not load required parameters: {missing}")
     return loaded_parameters

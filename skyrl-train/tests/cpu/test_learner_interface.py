@@ -7,7 +7,11 @@ import pytest
 import torch
 from omegaconf import OmegaConf, open_dict
 
-from marinskyrl.checkpoint_paths import LATEST_CHECKPOINT_FILE, POLICY_CHECKPOINT_SUBDIRECTORY
+from marinskyrl.checkpoint_paths import (
+    CHECKPOINT_COMPLETE_FILENAME,
+    LATEST_CHECKPOINT_FILE,
+    POLICY_CHECKPOINT_SUBDIRECTORY,
+)
 from skyrl_train.callbacks.base import TrainerState
 from skyrl_train.entrypoints.main_base import BasePPOExp
 from skyrl_train.fully_async_trainer import (
@@ -158,6 +162,7 @@ def test_msrl_learner_round_trip_restores_the_next_update(tmp_path):
     trainer.save_checkpoints()
     checkpoint_path = tmp_path / "global_step_1"
     assert (checkpoint_path / POLICY_CHECKPOINT_SUBDIRECTORY / "fake_learner_state.json").is_file()
+    assert (checkpoint_path / CHECKPOINT_COMPLETE_FILENAME).read_text() == "1"
     assert (tmp_path / LATEST_CHECKPOINT_FILE).read_text() == "1"
 
     restored = StatefulFakeLearner(initial_parameter=99.0)
@@ -213,6 +218,16 @@ def test_learner_failures_never_report_completion(tmp_path):
     with pytest.raises(FakeLearnerError):
         trainer.save_checkpoints()
     assert not (tmp_path / LATEST_CHECKPOINT_FILE).exists()
+    assert not (tmp_path / "global_step_2" / CHECKPOINT_COMPLETE_FILENAME).exists()
+    incomplete = StatefulFakeLearner()
+    incomplete_trainer = _trainer(tmp_path, incomplete, use_reference=False)
+    incomplete_trainer.resume_mode = ResumeMode.FROM_PATH
+    incomplete_trainer.cfg.trainer.resume_path = str(tmp_path / "global_step_2")
+    with pytest.raises(RuntimeError, match="completion marker is missing"):
+        incomplete_trainer.load_checkpoints()
+    incomplete_trainer.global_step = 2
+    with pytest.raises(RuntimeError, match="completed checkpoint marker is missing"):
+        incomplete_trainer._handle_hf_export()
     trainer.save_checkpoints()
 
     fresh = StatefulFakeLearner()
@@ -418,8 +433,18 @@ def test_async_checkpoint_commits_after_required_callbacks(tmp_path):
         asyncio.run(trainer._save_intermediate_checkpoint(state))
 
     assert (tmp_path / LATEST_CHECKPOINT_FILE).read_text() == "0"
+    assert not (tmp_path / "global_step_1" / CHECKPOINT_COMPLETE_FILENAME).exists()
     assert trainer._last_saved_step == 0
     assert previous_checkpoint.is_dir()
+
+    incomplete = _trainer(tmp_path, StatefulFakeLearner(), use_reference=False)
+    incomplete.resume_mode = ResumeMode.FROM_PATH
+    incomplete.cfg.trainer.resume_path = str(tmp_path / "global_step_1")
+    with pytest.raises(RuntimeError, match="completion marker is missing"):
+        incomplete.load_checkpoints()
+    incomplete.global_step = 1
+    with pytest.raises(RuntimeError, match="completed checkpoint marker is missing"):
+        incomplete._handle_hf_export()
 
 
 def test_learner_close_failure_is_reported_after_later_cleanup(tmp_path):

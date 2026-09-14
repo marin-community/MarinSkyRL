@@ -1205,7 +1205,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     async def async_sync_policy_weights_to_inference_engines(self):
         if self.learner is not None:
-            return await asyncio.to_thread(self._publish_learner_policy)
+            return await self._publish_learner_policy()
         # Pre-broadcast drain: hard-sync every policy shard rank's event loop BEFORE the
         # weight-extract gather that broadcast_to_inference_engines runs. extract_weights
         # fires mesh_fsdp `_all_gather_base` collectives (fsdp_worker._gather_tensor) on a

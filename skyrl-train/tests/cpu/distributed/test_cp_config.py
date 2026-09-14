@@ -108,6 +108,18 @@ ADDITIVE_POLICY_MODEL_FIELDS = {
 ADDITIVE_POLICY_FIELDS = {
     "grug_query_bias_interpolation_weight": None,
     "grug_query_bias_update_rate": None,
+    "levanter": {
+        "parameter_dtype": "float32",
+        "compute_dtype": "bfloat16",
+        "output_dtype": "float32",
+        "attention_implementation": "reference",
+        "moe_implementation": "ring",
+        "publication_backend": "gloo",
+        "publication_max_chunk_bytes": 67108864,
+        "publication_timeout_seconds": 300,
+        "require_accelerator": True,
+        "log_dir": "/tmp/marinskyrl-levanter",
+    },
 }
 # Additive MoE fsdp_config key (runtime grouped-mm MoE swap). Flag-off no-op
 # (default == False) and unrelated to CP; it landed after the pre-CP golden was

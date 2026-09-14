@@ -21,7 +21,9 @@ The concrete baseline is Ben Feuer's representative E6 reproduction run A,
 [Snowball math campaign](https://github.com/marin-community/marin/issues/7786) and the versioned [August 27
 report](https://storage.googleapis.com/marin-public/benjaminfeuer/snowball-67b-a2b-math-rl/2026.08.27.1/index.html).
 The report identifies this reproduction as the representative comparator; reward alone is not a held-out quality
-measure. The run's exact launch Git SHA is not present in the retained report.
+measure. The retained run log records MarinSkyRL source
+[`1f7ed486beef9566a6077de49425f483148f1ff8`](https://github.com/marin-community/MarinSkyRL/tree/1f7ed486beef9566a6077de49425f483148f1ff8)
+and the full resolved configuration.
 
 The resolved `LearnerConfig` evidence for that exact run is:
 
@@ -29,17 +31,19 @@ The resolved `LearnerConfig` evidence for that exact run is:
 | --- | --- | --- |
 | Objective | `grpo` | Reported directly; this boundary only supports GRPO. |
 | `policy_loss` | `regular` | Reported as unregularized GRPO; no DAPO or behavior-clipped objective is named. |
-| `loss_normalization` | unknown | The report says advantages are standard-deviation normalized, which does not identify the policy-loss reduction. |
+| `loss_normalization` | `token_mean` | Resolved run configuration. |
 | `requires_reference_log_probs` | `false` | No KL term. |
-| `clip_low`, `clip_high`, `dual_clip_ratio` | unknown | The resolved clip values are not retained in the report. |
+| `clip_low`, `clip_high`, `dual_clip_ratio` | `0.2`, `0.2`, irrelevant for regular GRPO | Resolved run configuration. |
 | `reference_kl_coefficient`, `kl_estimator_type`, `use_absolute_kl` | coefficient absent; estimator and absolute-KL setting irrelevant and unresolved | The run has no KL term. |
 | `use_rollout_importance_sampling` | `false` | TIS first appears as a later E10 ablation, not in E6. Its disabled cap is irrelevant and unresolved. |
-| `update_epochs` | unknown | The report does not retain the resolved value. |
+| `update_epochs` | `1` | Resolved run configuration. |
 | `logprob_temperature` | `1.0` | Reported directly for the campaign's 256 prompts × 16 responses setup. |
 | `max_sequence_length` | `8192` | Reported as the E6 request window. |
 
-The same evidence fixes FSDP2, expert parallelism 1, no entropy term, and no sample packing. Unknown values stay
-explicit here so the next parity goal can recover the launch artifact rather than silently substitute current defaults.
+The same evidence fixes FSDP2, expert parallelism 1, no entropy term, no sample packing, a frozen router bias, and
+AdamW at learning rate `1e-5`, betas `0.9/0.999`, epsilon `1e-8`, weight decay `0.01`, maximum gradient norm `0.5`,
+and a zero-warmup constant schedule. The [Levanter Snowball reference](levanter-snowball-training.md) records the
+recovered artifacts, the implemented subset, and the real-GPU evidence.
 
 The interface also carries three scenarios that change the boundary:
 
@@ -87,7 +91,7 @@ admission, rewards, advantages, callback progress, and dataloader state. The lea
 step, JAX meshes, sharding, collectives, and framework-specific checkpoint data.
 
 An update returns `succeeded` only after state changes are complete. It returns `skipped` for a valid no-update batch,
-such as an all-zero loss mask, without advancing the policy version. Exceptions are failures and never advance fake
+such as an all-zero loss mask, without advancing the policy version. Exceptions are failures and never advance learner
 state. A backend that has partially mutated durable state before an exception must enter `failed` lifecycle state and
 remain unusable until a checkpoint restore. A successful update makes the installed inference version outdated.
 
@@ -97,10 +101,11 @@ rollout-ready. MSRL resumes generation only when the installed and current polic
 
 A learner checkpoint contains resumable model, optimizer, RNG, and learner-step state. It is different from a weight
 snapshot installed in inference. MSRL stages that state with its trainer, dataloader, data-consumption, and async-buffer
-artifacts. It atomically writes the latest checkpoint marker and begins retention cleanup only after every required
-save callback succeeds. Loading a learner checkpoint deliberately clears the fake receiver's installed version; an
-initial publication must reconcile inference before generation. Exact replay of arbitrary in-flight async work is
-outside this learner contract and remains an MSRL concern.
+artifacts after removing any stale completion marker. After every required save callback succeeds, it writes the
+step-directory completion marker, atomically advances the root latest marker, and then begins retention cleanup. The
+Levanter path requires that completion marker and dataloader state on restore. Loading a learner checkpoint deliberately
+clears the installed inference version; an initial publication must reconcile inference before generation. Exact replay
+of arbitrary in-flight async work is outside this learner contract and remains an MSRL concern.
 
 The deterministic CPU fake lives under
 [`skyrl_train.testing`](../skyrl-train/skyrl_train/testing/stateful_fake_learner.py). Its log probabilities depend on
@@ -108,22 +113,18 @@ tokens and fake parameters, updates depend on masked advantages and fake state, 
 update exactly. Tests can request one-shot log-probability, update, publication, save, load, or close failures, and can
 leave a publication pending. This behavior is only an orchestration oracle; it does not model real GRPO gradients.
 
-## Levanter mapping
+## Concrete Levanter mapping
 
-The mapping below was checked read-only at `marin` revision
-[`e49f36f2d7434776d9289a6bf3781f22b419ba39`](https://github.com/marin-community/marin/tree/e49f36f2d7434776d9289a6bf3781f22b419ba39).
+The optional implementation lives in `skyrl_train.learners.levanter_snowball`. It narrows the general interface to the
+single synchronous E6-derived workload documented in [Levanter Snowball training](levanter-snowball-training.md).
 
-| Responsibility | Reusable Levanter operation | Remaining adapter glue | Runtime assumption still unresolved |
-| --- | --- | --- | --- |
-| Initialize model, optimizer, RNG, step, mesh, and sharding | [`Trainer`](https://github.com/marin-community/marin/blob/e49f36f2d7434776d9289a6bf3781f22b419ba39/lib/levanter/src/levanter/trainer.py#L269) and [`TrainerState`](https://github.com/marin-community/marin/blob/e49f36f2d7434776d9289a6bf3781f22b419ba39/lib/levanter/src/levanter/trainer_state.py#L38) already own these objects. | Build one long-lived learner service, lower `LearnerConfig`, and reject unsupported Snowball options before JAX allocation. | Iris/JAX process startup and all-rank service ordering have not been exercised through this interface. |
-| Current and reference token log probabilities | `LmHeadModel.compute_next_token_loss(reduction=None)` exposes per-position cross entropy, and Snowball has an HF converter. | Convert unpacked NumPy rows to named arrays, apply temperature, select the shifted response tokens, and retain a separate reference state when requested. | Snowball `activations` still [ignores its supplied attention mask](https://github.com/marin-community/marin/blob/e49f36f2d7434776d9289a6bf3781f22b419ba39/lib/levanter/src/levanter/models/snowball.py#L703). One example per row prevents cross-example packing leakage, but padded-token behavior needs a CPU JAX check. |
-| One GRPO-oriented update | [`Trainer.train_step`](https://github.com/marin-community/marin/blob/e49f36f2d7434776d9289a6bf3781f22b419ba39/lib/levanter/src/levanter/trainer.py#L517) accepts a JIT-able loss; [`TrainerState.take_step`](https://github.com/marin-community/marin/blob/e49f36f2d7434776d9289a6bf3781f22b419ba39/lib/levanter/src/levanter/trainer_state.py#L126) updates optimizer, model, RNG, and optimizer-step state. | Implement the selected PPO/behavior clipping, optional TIS and KL term, masks, and exact MSRL normalization as a Levanter loss. MSRL `global_step` names orchestration progress. The adapter owns one `update_count` and `policy_version` per complete `UpdateRequest`, even if update epochs require several Levanter optimizer steps. Persist both adapter counters beside `TrainerState`, advance them only after the whole request commits, and enter failed lifecycle state after partial mutation until restore. | No value or gradient parity has been established between this loss and MSRL for Snowball. The transaction boundary around several Levanter steps has not been exercised. |
-| Publish a version to vLLM | Snowball's `HFCheckpointConverter` maps Levanter parameters to HF names, and [`save_pretrained`](https://github.com/marin-community/marin/blob/e49f36f2d7434776d9289a6bf3781f22b419ba39/lib/levanter/src/levanter/compat/hf_checkpoints.py#L1055) already plans bounded shards. | Gather or stream a complete stable HF-named snapshot, preserve dtype and router bias, call MSRL's live vLLM receiver, and update `LearnerState` only after installation. Tag every served async segment with that installed version; reject a trajectory that spans versions. | HF disk export does not prove a memory-safe, atomic, low-latency live publication path for sharded Snowball, and the serving tag has no live vLLM implementation yet. |
-| Save and restore training state | Levanter's [`save_checkpoint`](https://github.com/marin-community/marin/blob/e49f36f2d7434776d9289a6bf3781f22b419ba39/lib/levanter/src/levanter/checkpoint.py#L781) is JAX-array aware; [`load_checkpoint`](https://github.com/marin-community/marin/blob/e49f36f2d7434776d9289a6bf3781f22b419ba39/lib/levanter/src/levanter/checkpoint.py#L897) restores against an exemplar tree. | Make MSRL wait for Levanter's async checkpoint commit before writing its latest marker, restore `LearnerState`, and force inference reconciliation. | Multi-host completion, failure propagation, and restart behavior have not been tested with an MSRL checkpoint directory. |
-| Cleanup | `Trainer.__exit__` waits for in-flight checkpoint serialization and closes tracker and mesh contexts. | Tie service shutdown to MSRL teardown and surface cleanup failure without reporting a successful unfinished operation. | Ray actor and JAX process termination ordering has not been exercised. |
+| Responsibility | Implementation | Evidence |
+| --- | --- | --- |
+| Initialize model, optimizer, RNG, mesh, and sharding | Levanter `Trainer`, `TrainerState`, the Snowball HF converter, and a one-node data mesh | A two-H100 learner task loaded a real tiny Snowball HF checkpoint and completed repeated sharded optimizer steps. |
+| Token log probabilities and GRPO | Unpacked rows are compacted independently, response predictor positions are retained, and Levanter averages each sequence's masked token mean across devices and accumulation steps, matching E6's one-sequence GPU microbatches | Independent PyTorch comparisons cover unequal response lengths, log probabilities, loss, gradients, and the first AdamW update. Padding and two-device microbatch tests cover alignment and normalization. |
+| Publish a version to vLLM | The learner converts all parameters to HF names, sends Gloo chunks, and requires receipts with the exact source-name and installed-parameter counts and digests before advancing the installed version | The three-H100 gate reads dense, expert, language-head, and FP32 router-bias values back from the active vLLM worker after each final update and then generates. A chunk respects its byte limit unless one tensor alone exceeds it. |
+| Save and restore training state | Levanter TensorStore checkpoints contain model, optimizer, RNG, step, and policy version; MSRL writes a step-directory completion marker before updating the root latest marker, after learner, trainer, and dataloader state commit | A fresh Ray runtime and learner restore all 306 arrays byte exactly, reconcile vLLM before generation, replay the saved next batch within the accepted `1e-4` GPU bound, and resume the public trainer. The next-update maxima were `1.4142e-5` for parameters and `2.5635e-5` for optimizer state. Missing completion markers or dataloader state reject restore. |
+| Export and cleanup | The HF converter can export the current in-memory Levanter model after a completed checkpoint; trainer shutdown closes the learner and inference actors | CPU interface tests cover the converter call, incomplete-checkpoint rejection, and failure visibility. The GPU gate tears down both fresh processes, but it does not qualify an exported directory in a separate production consumer. |
 
-The smallest next implementation test is a single-process JAX CPU test with a tiny Snowball-shaped model and two
-unpacked, differently padded rows. It should compute response log probabilities, take one masked GRPO update, save and
-restore `TrainerState`, and reproduce the next update exactly. That test should compare log probabilities, loss, and
-gradients against an independent small Torch or NumPy reference. Live vLLM publication and any accelerator execution
-come later.
+Async rollout tagging, KL or reference policies, sample packing, learner/inference colocation, other model families,
+multi-host execution, and full-size Snowball qualification remain outside this concrete implementation.

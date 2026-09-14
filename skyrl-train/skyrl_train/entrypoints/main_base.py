@@ -350,6 +350,8 @@ class BasePPOExp:
             policy_strict_spread_eligible,
         )  # noqa: PLC0415
 
+        if self.learner is not None:
+            return None
         timeout = int(self.cfg.trainer.distributed.placement_group_timeout_seconds) if timeout is None else timeout
         if not policy_strict_spread_eligible(self.cfg):
             return None
@@ -493,7 +495,9 @@ class BasePPOExp:
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
-        if self.cfg.trainer.strategy == "deepspeed":
+        if self.learner is not None:
+            PolicyWorker = CriticWorker = RefWorker = None
+        elif self.cfg.trainer.strategy == "deepspeed":
             from skyrl_train.workers.deepspeed.deepspeed_worker import (
                 PolicyWorker,
                 CriticWorker,

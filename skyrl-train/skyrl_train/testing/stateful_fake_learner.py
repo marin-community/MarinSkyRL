@@ -144,7 +144,7 @@ class StatefulFakeLearner:
             metrics=self._metrics(request, denominator, update_signal),
         )
 
-    def publish_policy(self) -> None:
+    async def publish_policy(self) -> None:
         self._require_ready()
         if FakeLearnerOperation.PUBLISH in self._failures:
             self._failures.remove(FakeLearnerOperation.PUBLISH)
@@ -179,6 +179,12 @@ class StatefulFakeLearner:
         self._update_count = int(payload["update_count"])
         self._installed_policy_version = None
         self._publication_status = PublicationStatus.OUTDATED
+
+    def export_policy(self, path: str) -> None:
+        self._require_ready()
+        export_dir = Path(path)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        (export_dir / "fake_policy.json").write_text(json.dumps({"parameter": self._parameter}, sort_keys=True))
 
     def close(self) -> None:
         self._maybe_fail(FakeLearnerOperation.CLOSE)

@@ -68,6 +68,16 @@ cuda = [
     "torchdata ; sys_platform == 'linux'",
     "torchvision==0.26.0 ; sys_platform == 'linux'",
 ]
+levanter = [
+    "marin-levanter @ git+https://github.com/marin-community/marin.git@e49f36f2d7434776d9289a6bf3781f22b419ba39#subdirectory=lib/levanter",
+]
+levanter-gpu = [
+    # The full Levanter GPU extra carries newer Quack/CUTLASS kernels than the
+    # vLLM runtime. Snowball uses its reference attention and ring MoE paths in
+    # this integration, so it only needs Levanter's tested JAX CUDA runtime.
+    "jax[cuda13]==0.11.1 ; sys_platform == 'linux'",
+    "marin-levanter @ git+https://github.com/marin-community/marin.git@e49f36f2d7434776d9289a6bf3781f22b419ba39#subdirectory=lib/levanter ; sys_platform == 'linux'",
+]
 deepspeed = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "deepspeed==0.17.6 ; sys_platform == 'linux'",
@@ -177,6 +187,13 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
+    # A Levanter git subdirectory is part of Marin's uv workspace. Keep MSRL's
+    # independently released runtime packages on the versions this lockfile
+    # already used instead of letting uv substitute older workspace members.
+    "marin-finelog==0.2.28.dev31271949117",
+    "marin-finestore==0.2.91.dev32816546334",
+    "marin-iris==0.2.91.dev32816546334",
+    "marin-rigging==0.2.91.dev32816546334",
     "transformer-engine-cu13 ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
     "fsspec==2026.4.0",
