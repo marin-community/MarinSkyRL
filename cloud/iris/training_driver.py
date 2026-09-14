@@ -60,6 +60,7 @@ class LocalRLConfig:
     job_name: str
     model_path: str
     entrypoint: str | None = None
+    model_revision: str | None = None
     model_source_uri: str | None = None
     model_source_identity: str | None = None
     train_data: List[str | dict[str, Any]] = field(default_factory=list)
@@ -457,6 +458,7 @@ class LocalRLRunner:
             "job_name": self.config.job_name,
             "experiments_dir": self.config.experiments_dir,
             "model_path": self.config.model_path,
+            "model_revision": self.config.model_revision,
             "model_source_uri": self.config.model_source_uri,
             "model_source_identity": self.config.model_source_identity,
             "train_data": self.config.train_data,
@@ -567,6 +569,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--model_path", required=True, help="Model path or HuggingFace ID.")
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
+    parser.add_argument("--model-revision", "--model_revision", dest="model_revision")
     parser.add_argument("--model-source-uri")
     parser.add_argument("--model-source-identity")
 
@@ -683,6 +686,7 @@ def main() -> None:
         rl_config_path=args.rl_config,
         job_name=args.job_name,
         model_path=args.model_path,
+        model_revision=args.model_revision,
         entrypoint=args.entrypoint,
         model_source_uri=args.model_source_uri,
         model_source_identity=args.model_source_identity,

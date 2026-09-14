@@ -40,6 +40,7 @@ class LevanterSnowballRuntimeConfig:
     generator_dtype: str
     require_accelerator: bool
     log_dir: str
+    model_revision: str | None = None
 
     @classmethod
     def from_msrl(cls, cfg: DictConfig) -> LevanterSnowballRuntimeConfig:
@@ -177,4 +178,5 @@ class LevanterSnowballRuntimeConfig:
             generator_dtype=str(generator.model_dtype),
             require_accelerator=bool(levanter.require_accelerator),
             log_dir=str(levanter.log_dir),
+            model_revision=(str(policy.model.revision) if policy.model.get("revision") else None),
         )

@@ -38,6 +38,7 @@ from skyrl_train.learners.levanter_snowball import (
     LevanterSnowballLearner,
     _parameter_probe,
     _regular_grpo_loss,
+    _resolve_local_model_snapshot,
     prepare_snowball_batch,
 )
 from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM
@@ -66,6 +67,26 @@ _MODEL_VALUES = {
 
 def test_import_preserves_msrl_grug_transformers_registration():
     assert type(AutoConfig.for_model("grug_moe")) is GrugMoeConfig
+
+
+def test_hub_model_is_resolved_to_the_pinned_local_snapshot(monkeypatch, tmp_path):
+    revision = "6808fe5c219471517bd51df35addefd38ebebf89"
+    calls = []
+
+    def resolve(repo_id, **kwargs):
+        calls.append((repo_id, kwargs))
+        return "/cache/exact-snapshot"
+
+    monkeypatch.setattr("skyrl_train.learners.levanter_snowball.snapshot_download", resolve)
+
+    assert _resolve_local_model_snapshot("marin-community/model", revision) == "/cache/exact-snapshot"
+    assert calls == [
+        (
+            "marin-community/model",
+            {"revision": revision, "local_files_only": True},
+        )
+    ]
+    assert _resolve_local_model_snapshot(str(tmp_path), revision) == str(tmp_path)
 
 
 def _snowball_config() -> SnowballConfig:

@@ -205,11 +205,20 @@ def test_nemotron_ultra_judge_secret_reference_composes():
 
 
 def test_snowball_levanter_real_iteration_config_composes_and_lowers():
+    revision = "6808fe5c219471517bd51df35addefd38ebebf89"
     parsed = parse_rl_config(
         str(_REPO_ROOT / "cloud/iris/configs/snowball_levanter_real_iteration.yaml"),
         model_override="marin-community/grug-67b-a2b-sft-s2-thinking-step630",
     )
-    hydra_args = build_skyrl_hydra_args(parsed, {"num_nodes": 5}, SimpleNamespace(gpus_per_node=8))
+    hydra_args = build_skyrl_hydra_args(
+        parsed,
+        {
+            "num_nodes": 5,
+            "model_path": "marin-community/grug-67b-a2b-sft-s2-thinking-step630",
+            "model_revision": revision,
+        },
+        SimpleNamespace(gpus_per_node=8),
+    )
 
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="ppo_base_config", overrides=hydra_args)
@@ -220,3 +229,5 @@ def test_snowball_levanter_real_iteration_config_composes_and_lowers():
     assert runtime.training_gpus == 32
     assert runtime.inference_world_size == 8
     assert runtime.train_batch_size == 128
+    assert runtime.model_revision == revision
+    assert cfg.generator.engine_init_kwargs.revision == revision

@@ -22,6 +22,7 @@ import jax.numpy as jnp
 import jmp
 import numpy as np
 from haliax import Axis
+from huggingface_hub import snapshot_download
 from jax.experimental import multihost_utils
 from levanter.checkpoint import load_checkpoint, save_checkpoint
 from levanter.compat.hf_checkpoints import HFCheckpointConverter
@@ -66,6 +67,14 @@ AutoConfig.register(GrugMoeConfig.model_type, GrugMoeConfig, exist_ok=True)
 
 
 _ROUTER_BIAS_SUFFIX = ".mlp.router.bias"
+
+
+def _resolve_local_model_snapshot(model_path: str, revision: str | None) -> str:
+    """Resolve a staged Hub commit before Levanter opens any weight shard."""
+
+    if os.path.isdir(model_path):
+        return model_path
+    return snapshot_download(model_path, revision=revision, local_files_only=True)
 
 
 @dataclass(frozen=True)
@@ -358,18 +367,19 @@ class LevanterSnowballLearner:
             )
 
         if self._model_factory is None:
-            hf_config = GrugMoeHfConfig.from_pretrained(self.runtime.model_path)
+            model_ref = _resolve_local_model_snapshot(self.runtime.model_path, self.runtime.model_revision)
+            hf_config = GrugMoeHfConfig.from_pretrained(model_ref, local_files_only=True)
             model_config = SnowballConfig.from_hf_config(hf_config)
             model_config = dataclasses.replace(
                 model_config,
                 attention_implementation=self.runtime.attention_implementation,
                 moe_implementation=self.runtime.moe_implementation,
             )
-            converter = model_config.hf_checkpoint_converter(self.runtime.model_path)
+            converter = model_config.hf_checkpoint_converter(model_ref)
             with trainer_config.use_device_mesh():
                 model = converter.load_pretrained(
                     SnowballLMHeadModel,
-                    ref=self.runtime.model_path,
+                    ref=model_ref,
                     config=model_config,
                     axis_mapping=trainer_config.parameter_axis_mapping,
                     dtype=trainer_config.mp.compute_dtype,

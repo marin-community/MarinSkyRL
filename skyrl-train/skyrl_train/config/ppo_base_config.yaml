@@ -82,6 +82,7 @@ trainer:
     grug_query_bias_update_rate: null
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
+      revision: null
       source_uri: null
       source_identity: null
       lora:

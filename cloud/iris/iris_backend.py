@@ -1373,6 +1373,13 @@ def create_parser() -> argparse.ArgumentParser:
         help="Hugging Face repo ID (e.g., Qwen/Qwen3-8B) or a directory available inside every task.",
     )
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--model-revision",
+        "--model_revision",
+        dest="model_revision",
+        default=None,
+        help="Immutable 40-character Hugging Face model commit used by staging, training, and inference.",
+    )
 
     parser.add_argument(
         "--model-source-uri",
@@ -1996,6 +2003,11 @@ def normalize(args: argparse.Namespace) -> None:
     """Resolve the RL config and validate the requested worker topology."""
     if is_cloud_uri(args.model_path):
         raise SystemExit(unsupported_model_path_message(args.model_path))
+    if args.model_revision:
+        if not is_hugging_face_repo_id(args.model_path):
+            raise SystemExit("--model-revision requires a Hugging Face repo ID in --model_path")
+        if re.fullmatch(r"[0-9a-f]{40}", args.model_revision) is None:
+            raise SystemExit("--model-revision must be an immutable lowercase 40-character commit")
     try:
         model_source_for_path(args.model_path, args.model_source_uri, args.model_source_identity)
     except ModelLocatorError as error:
@@ -2101,6 +2113,8 @@ def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
     task-local models are used directly after optional object-store materialization.
     """
     model_args = model_source_cli_args(args.model_source_uri, args.model_source_identity)
+    if args.model_revision:
+        model_args.extend(["--model-revision", args.model_revision])
     is_hub_model = is_hugging_face_repo_id(args.model_path)
     if args.model_source_uri or not is_hub_model:
         model_args.extend(["--model-local-path", args.model_path])
@@ -2158,6 +2172,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         "--ray_port",
         str(args.ray_port),
     ]
+    if args.model_revision:
+        train_cmd.extend(["--model-revision", args.model_revision])
     if args.entrypoint:
         train_cmd.extend(["--entrypoint", args.entrypoint])
     train_cmd.extend(model_source_cli_args(args.model_source_uri, args.model_source_identity))
@@ -2332,7 +2348,8 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     )
     print(f"[rl-iris] Per node:   cpu={args.cpu} memory={args.memory} disk={args.disk}", flush=True)
     print(f"[rl-iris] Priority:   {args.priority}", flush=True)
-    print(f"[rl-iris] RL config:  {args.rl_config}  model={args.model_path}", flush=True)
+    model_display = args.model_path + (f"@{args.model_revision}" if args.model_revision else "")
+    print(f"[rl-iris] RL config:  {args.rl_config}  model={model_display}", flush=True)
     storage_paths = args.storage_paths
     if not _is_checkpoint_export(args):
         print(

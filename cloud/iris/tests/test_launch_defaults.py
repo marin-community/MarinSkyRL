@@ -688,6 +688,30 @@ def test_controller_rejects_object_store_model_path_before_staging():
         stage_model("s3://models/policy")
 
 
+def test_model_revision_is_immutable_and_forwarded_to_staging_and_training(tmp_path):
+    revision = "6" * 40
+    args = _args(tmp_path, "opencode", ["--model-revision", revision])
+    Path(args.rl_config).write_text("extra_env:\n  HF_HUB_OFFLINE: '1'\n")
+
+    normalize(args)
+    resolve_launch_defaults(args)
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert options["--model-revision"] == [revision, revision]
+
+
+def test_model_revision_rejects_a_mutable_ref(tmp_path):
+    args = _args(tmp_path, "opencode", ["--model-revision", "main"])
+
+    with pytest.raises(SystemExit, match="immutable lowercase 40-character commit"):
+        normalize(args)
+
+
+def test_controller_rejects_a_mutable_model_revision():
+    with pytest.raises(ValueError, match="immutable lowercase 40-character commit"):
+        stage_model("org/model", revision="main")
+
+
 def test_task_local_model_source_is_materialized_without_hf_prestage(tmp_path):
     args = _args(
         tmp_path,
