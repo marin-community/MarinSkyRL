@@ -20,6 +20,7 @@ from skyrl_train.io.io import (
     download_directory,
     local_work_dir,
     local_read_dir,
+    node_cached_read_dir,
     list_dir,
 )
 from skyrl_train.checkpoint_listing import list_checkpoint_dirs
@@ -402,6 +403,42 @@ class TestContextManagers:
 
         with local_read_dir("s3://bucket/checkpoints/global_step_12/policy") as read_dir:
             assert (Path(read_dir) / ".metadata").is_file()
+
+    def test_node_cached_read_dir_reuses_completed_download(self, tmp_path):
+        cloud_path = "s3://bucket/checkpoints/global_step_12/policy"
+        cache_root = tmp_path / "cache"
+
+        def download(_cloud_path, local_path):
+            assert _cloud_path == cloud_path
+            (Path(local_path) / ".metadata").write_text("checkpoint metadata")
+
+        with patch("skyrl_train.io.io.download_directory", side_effect=download) as mock_download:
+            with node_cached_read_dir(cloud_path, str(cache_root)) as first_read_dir:
+                assert (Path(first_read_dir) / ".metadata").read_text() == "checkpoint metadata"
+
+            with node_cached_read_dir(cloud_path, str(cache_root)) as second_read_dir:
+                assert second_read_dir == first_read_dir
+
+        mock_download.assert_called_once()
+        assert Path(first_read_dir).is_dir()
+
+    def test_node_cached_read_dir_does_not_publish_failed_download(self, tmp_path):
+        cloud_path = "s3://bucket/checkpoints/global_step_12/policy"
+        cache_root = tmp_path / "cache"
+
+        with patch("skyrl_train.io.io.download_directory", side_effect=RuntimeError("download failed")):
+            with pytest.raises(RuntimeError, match="download failed"):
+                with node_cached_read_dir(cloud_path, str(cache_root)):
+                    pass
+
+        def download(_cloud_path, local_path):
+            (Path(local_path) / ".metadata").write_text("checkpoint metadata")
+
+        with patch("skyrl_train.io.io.download_directory", side_effect=download) as mock_download:
+            with node_cached_read_dir(cloud_path, str(cache_root)) as read_dir:
+                assert (Path(read_dir) / ".metadata").read_text() == "checkpoint metadata"
+
+        mock_download.assert_called_once()
 
 
 class FakeHFCloudFilesystem:

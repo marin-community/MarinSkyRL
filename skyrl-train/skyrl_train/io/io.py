@@ -9,7 +9,10 @@ This module provides a unified interface for file operations that works with:
 Uses fsspec for cloud storage abstraction.
 """
 
+import fcntl
+import hashlib
 import os
+import shutil
 import tempfile
 from contextlib import contextmanager
 from collections.abc import Sequence
@@ -278,3 +281,35 @@ def local_read_dir(input_path: str):
         if not exists(input_path):
             raise FileNotFoundError(f"Path does not exist: {input_path}")
         yield input_path
+
+
+@contextmanager
+def node_cached_read_dir(input_path: str, cache_root: str):
+    """Provide a reusable node-local copy without exposing partial downloads."""
+    if not is_cloud_path(input_path):
+        with local_read_dir(input_path) as read_dir:
+            yield read_dir
+        return
+
+    cache_root_path = Path(cache_root)
+    cache_root_path.mkdir(parents=True, exist_ok=True)
+    cache_key = hashlib.sha256(input_path.encode()).hexdigest()
+    cached_path = cache_root_path / cache_key
+    lock_path = cache_root_path / f"{cache_key}.lock"
+
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            if not cached_path.is_dir():
+                staging_path = Path(tempfile.mkdtemp(prefix=f".{cache_key}.", dir=cache_root_path))
+                try:
+                    download_directory(input_path, str(staging_path))
+                    staging_path.rename(cached_path)
+                finally:
+                    if staging_path.exists():
+                        shutil.rmtree(staging_path)
+                logger.info(f"Cached directory contents from {input_path} at {cached_path}")
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+    yield str(cached_path)

@@ -71,6 +71,8 @@ _MEGATRON_OPTIM_CKPT_METADATA = {
     "distrib_optim_fully_reshardable_mem_efficient": True,
 }
 
+_NODE_LOCAL_CHECKPOINT_CACHE = os.path.join(tempfile.gettempdir(), "marinskyrl-megatron-checkpoints")
+
 
 class MegatronStrategy(DistributedStrategy):
     """
@@ -269,7 +271,7 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler and load_training_state:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
-        with io.local_read_dir(ckpt_dir) as read_dir:
+        with io.node_cached_read_dir(ckpt_dir, _NODE_LOCAL_CHECKPOINT_CACHE) as read_dir:
             # Load the checkpoint in parallel.
             load_strategy = get_default_load_sharded_strategy(read_dir)
             load_strategy = FullyParallelLoadStrategyWrapper(
