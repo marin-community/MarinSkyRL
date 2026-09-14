@@ -661,11 +661,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         finally:
             async_distillation_runtime = getattr(self, "_async_distillation_runtime", None)
             if async_distillation_runtime is not None:
-                await self._guarded_async(
-                    async_distillation_runtime.close(),
-                    timeout=30,
-                    label="Teacher oracle shutdown",
-                )
+                await self._close_distillation_runtime(async_distillation_runtime)
             await super().shutdown()
 
     async def train(self):

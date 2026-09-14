@@ -55,7 +55,13 @@ class PreparedLocalDistillationRuntime:
     plan: DistillationPlan
     teachers: tuple[PreparedLocalTeacher, ...]
     student_fingerprint: str
-    async_teacher_limits: AsyncTeacherQueueLimits | None = None
+
+
+@dataclass(frozen=True)
+class PreparedAsyncLocalDistillationRuntime(PreparedLocalDistillationRuntime):
+    """Local teacher inputs plus validated fully-async queue limits."""
+
+    teacher_limits: AsyncTeacherQueueLimits
 
 
 async def _close_engines(engines: Sequence[InferenceEngineInterface]) -> None:
@@ -69,26 +75,17 @@ async def _close_engines(engines: Sequence[InferenceEngineInterface]) -> None:
         raise BaseExceptionGroup("local teacher engine cleanup failed", errors)
 
 
-def prepare_local_distillation_runtime(
-    cfg: DictConfig,
-    student_tokenizer: PreTrainedTokenizerBase,
-    *,
-    fully_async: bool = False,
-) -> PreparedLocalDistillationRuntime | None:
-    """Validate every local teacher before any training actors are allocated."""
+def _validated_distillation_plan(cfg: DictConfig) -> DistillationPlan | None:
     plan = compile_distillation_plan_from_config(cfg)
     validate_distillation_runtime_support(plan)
-    if plan is None:
-        return None
+    return plan
 
-    async_teacher_limits = None
-    if fully_async:
-        scoring = cfg.trainer.fully_async.teacher_scoring
-        async_teacher_limits = AsyncTeacherQueueLimits(
-            max_queued=scoring.max_queued_per_teacher,
-            workers=scoring.workers_per_teacher,
-        )
 
+def _prepare_local_distillation_runtime(
+    cfg: DictConfig,
+    student_tokenizer: PreTrainedTokenizerBase,
+    plan: DistillationPlan,
+) -> PreparedLocalDistillationRuntime:
     student_fingerprint = tokenizer_vocabulary_fingerprint(student_tokenizer)
     prepared_teachers: list[PreparedLocalTeacher] = []
     for teacher in plan.teachers:
@@ -106,11 +103,40 @@ def prepare_local_distillation_runtime(
             )
         prepared_teachers.append(PreparedLocalTeacher(teacher, teacher_tokenizer))
 
-    return PreparedLocalDistillationRuntime(
-        plan,
-        tuple(prepared_teachers),
-        student_fingerprint,
-        async_teacher_limits,
+    return PreparedLocalDistillationRuntime(plan, tuple(prepared_teachers), student_fingerprint)
+
+
+def prepare_local_distillation_runtime(
+    cfg: DictConfig,
+    student_tokenizer: PreTrainedTokenizerBase,
+) -> PreparedLocalDistillationRuntime | None:
+    """Validate local teachers for synchronous training before actor allocation."""
+    plan = _validated_distillation_plan(cfg)
+    if plan is None:
+        return None
+    return _prepare_local_distillation_runtime(cfg, student_tokenizer, plan)
+
+
+def prepare_async_local_distillation_runtime(
+    cfg: DictConfig,
+    student_tokenizer: PreTrainedTokenizerBase,
+) -> PreparedAsyncLocalDistillationRuntime | None:
+    """Validate local teachers and async queue limits before actor allocation."""
+    plan = _validated_distillation_plan(cfg)
+    if plan is None:
+        return None
+    scoring = cfg.trainer.fully_async.teacher_scoring
+    teacher_limits = AsyncTeacherQueueLimits(
+        max_queued=scoring.max_queued_per_teacher,
+        workers=scoring.workers_per_teacher,
+    )
+    prepared = _prepare_local_distillation_runtime(cfg, student_tokenizer, plan)
+    assert prepared is not None
+    return PreparedAsyncLocalDistillationRuntime(
+        prepared.plan,
+        prepared.teachers,
+        prepared.student_fingerprint,
+        teacher_limits,
     )
 
 
@@ -201,20 +227,18 @@ async def start_sync_distillation_runtime(
 
 async def start_async_distillation_runtime(
     cfg: DictConfig,
-    prepared: PreparedLocalDistillationRuntime | None,
+    prepared: PreparedAsyncLocalDistillationRuntime | None,
 ) -> AsyncDistillationRuntime | None:
     """Allocate the shared teacher fleet and bounded fully-async score queues."""
     if prepared is None:
         return None
 
     fleet = await _start_teacher_fleet(cfg, prepared)
-    if prepared.async_teacher_limits is None:
-        raise ValueError("fully-async distillation must be prepared with fully_async=True before actor allocation")
     runtime = AsyncDistillationRuntime(
         prepared.plan,
         fleet,
         tokenizer_fingerprints={teacher.spec.id: prepared.student_fingerprint for teacher in prepared.teachers},
-        teacher_limits={teacher.spec.id: prepared.async_teacher_limits for teacher in prepared.teachers},
+        teacher_limits={teacher.spec.id: prepared.teacher_limits for teacher in prepared.teachers},
     )
     return runtime
 

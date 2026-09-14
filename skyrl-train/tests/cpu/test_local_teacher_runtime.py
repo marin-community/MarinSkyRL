@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 
 import skyrl_train.local_teacher_runtime as runtime_module
 from skyrl_train.local_teacher_runtime import (
+    prepare_async_local_distillation_runtime,
     prepare_local_distillation_runtime,
     start_async_distillation_runtime,
     start_sync_distillation_runtime,
@@ -190,7 +191,7 @@ def test_fully_async_teacher_queue_limits_fail_before_teacher_initialization(mon
     cfg.trainer.fully_async.teacher_scoring.max_queued_per_teacher = 0
 
     with pytest.raises(ValueError, match="queue and worker limits must be positive"):
-        prepare_local_distillation_runtime(cfg, _Tokenizer({"a": 0}), fully_async=True)
+        prepare_async_local_distillation_runtime(cfg, _Tokenizer({"a": 0}))
 
     assert not tokenizer_initialized
 
@@ -229,7 +230,7 @@ async def test_local_teacher_runtime_feeds_fully_async_admitted_groups(monkeypat
     monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", lambda **_kwargs: [engine])
     cfg = _config()
-    prepared = prepare_local_distillation_runtime(cfg, tokenizer, fully_async=True)
+    prepared = prepare_async_local_distillation_runtime(cfg, tokenizer)
     runtime = await start_async_distillation_runtime(cfg, prepared)
     assert runtime is not None
     await runtime.start()

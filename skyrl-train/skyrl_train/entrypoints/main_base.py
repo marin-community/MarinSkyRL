@@ -499,16 +499,18 @@ class BasePPOExp:
 
         tokenizer = self.tokenizer
         from skyrl_train.local_teacher_runtime import (  # noqa: PLC0415
+            prepare_async_local_distillation_runtime,
             prepare_local_distillation_runtime,
             start_async_distillation_runtime,
             start_sync_distillation_runtime,
         )
 
-        prepared_distillation = prepare_local_distillation_runtime(
-            self.cfg,
-            tokenizer,
-            fully_async=self.uses_fully_async_trainer(),
+        prepare_distillation_runtime = (
+            prepare_async_local_distillation_runtime
+            if self.uses_fully_async_trainer()
+            else prepare_local_distillation_runtime
         )
+        prepared_distillation = prepare_distillation_runtime(self.cfg, tokenizer)
         inference_engine_client = self.create_inference_engine_client()
 
         trajectory_runner: TrajectoryRunner = self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client)

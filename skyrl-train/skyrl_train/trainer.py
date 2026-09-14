@@ -5,7 +5,7 @@ import os
 import shutil
 import threading
 import time
-from typing import Any, List, Optional, Dict, Tuple, Union
+from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -123,6 +123,10 @@ from skyrl_train.hf_export_schema import (
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
 
+class _ClosableDistillationRuntime(Protocol):
+    async def close(self) -> None: ...
+
+
 def _validated_distillation_tensors(
     trajectory_batch: TrajectoryBatch,
     response_mask: torch.Tensor,
@@ -224,6 +228,13 @@ class RayPPOTrainer:
         if self._sync_distillation_runtime is not None:
             raise RuntimeError("synchronous distillation runtime is already configured")
         self._sync_distillation_runtime = runtime
+
+    async def _close_distillation_runtime(self, runtime: _ClosableDistillationRuntime) -> None:
+        await self._guarded_async(
+            runtime.close(),
+            timeout=30,
+            label="Teacher oracle shutdown",
+        )
 
     async def _forward_with_optional_distillation(
         self,
@@ -401,11 +412,7 @@ class RayPPOTrainer:
         4. Ray actor cleanup – force-kills remaining actors.
         """
         if self._sync_distillation_runtime is not None:
-            await self._guarded_async(
-                self._sync_distillation_runtime.close(),
-                timeout=30,
-                label="Teacher oracle shutdown",
-            )
+            await self._close_distillation_runtime(self._sync_distillation_runtime)
         if self.inference_engine_client is not None:
             self._guarded_sync(
                 self.inference_engine_client.shutdown_http_endpoint,

@@ -220,6 +220,10 @@ def _validate_exact_sampled_completion(capabilities: TrajectoryRunnerCapabilitie
             f"{capabilities.action_tokens.value}"
         )
 
+    _validate_capability_requirements(capabilities, consumer=consumer)
+
+
+def _validate_capability_requirements(capabilities: TrajectoryRunnerCapabilities, *, consumer: str) -> None:
     unmet = [requirement for requirement in capabilities.requirements if not requirement.satisfied]
     if unmet:
         settings = ", ".join(f"{requirement.config_path}={requirement.expected_value}" for requirement in unmet)
@@ -227,17 +231,14 @@ def _validate_exact_sampled_completion(capabilities: TrajectoryRunnerCapabilitie
 
 
 def _validate_teacher_scoreable_tokens(capabilities: TrajectoryRunnerCapabilities) -> None:
-    """Require stable learner token coordinates, without requiring sampling provenance."""
+    """Accept exact or reconstructed learner tokens and reject missing token sequences."""
     if capabilities.sampled_completion is EvidenceFidelity.UNAVAILABLE or (
         capabilities.action_tokens is ActionTokenHandling.UNAVAILABLE
     ):
         raise ValueError(
             f"{capabilities.runner} cannot supply tokenized learner actions required by teacher-scored distillation"
         )
-    unmet = [requirement for requirement in capabilities.requirements if not requirement.satisfied]
-    if unmet:
-        settings = ", ".join(f"{requirement.config_path}={requirement.expected_value}" for requirement in unmet)
-        raise ValueError(f"teacher-scored distillation with {capabilities.runner} requires {settings}")
+    _validate_capability_requirements(capabilities, consumer="teacher-scored distillation")
 
 
 def validate_trajectory_runner_capabilities(

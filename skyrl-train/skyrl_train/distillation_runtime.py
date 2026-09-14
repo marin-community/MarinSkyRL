@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import TypeVar
 
-import torch
-
 from marinskyrl.distillation import DistillationPlan
 from skyrl_train.distillation_adapters import (
     AsyncRoutedTeacherScoreTicket,
@@ -16,9 +14,9 @@ from skyrl_train.distillation_adapters import (
     RoutedScoredDistillationBatch,
     RoutedTeacherScoringWork,
     TeacherEvidenceCoordinator,
+    assemble_distillation_inputs,
     build_routed_teacher_scoring_work,
 )
-from skyrl_train.distillation import INVALID_TOPK_INDEX, SampledReverseKLInput, SparseForwardKLInput
 from skyrl_train.teacher_oracle import TeacherOracleCollection
 from skyrl_train.teacher_routing import PlanTeacherRouter, route_trajectory_batch
 from skyrl_train.training_batch import TrainingInputBatch
@@ -118,67 +116,38 @@ class AsyncDistillationRuntime:
             raise ValueError("fully-async distillation requires at least one scored group")
         response_shape = training_input["response_mask"].shape
         row_count = sum(len(scored.trajectory_ids) for scored in scored_groups)
-        pad_size = int(training_input.metadata.get("pad_size", 0))
+        if "pad_size" not in training_input.metadata:
+            raise ValueError("learner batch is missing required pad_size metadata")
+        pad_size = int(training_input.metadata["pad_size"])
         if row_count + pad_size != response_shape[0]:
             raise ValueError(
                 "scored distillation rows must match the unpadded learner batch: "
                 f"scored={row_count}, padding={pad_size}, learner={response_shape[0]}"
             )
-        inputs = [scored.distillation for scored in scored_groups]
-        first = inputs[0]
-        shape = tuple(response_shape)
-        valid_mask = torch.zeros(shape, dtype=torch.bool)
-        loss_weights = torch.zeros(shape, dtype=torch.float32)
+        indexed_inputs = []
         offset = 0
-
-        if isinstance(first, SampledReverseKLInput):
-            if not all(isinstance(item, SampledReverseKLInput) for item in inputs):
-                raise ValueError("scored groups must use one distillation objective kind")
-            teacher_logprobs = torch.full(shape, torch.nan, dtype=torch.float32)
-            for item in inputs:
-                rows, width = item.valid_mask.shape
-                if width > shape[1]:
-                    raise ValueError("teacher evidence is wider than the learner response batch")
-                target = slice(offset, offset + rows)
-                valid_mask[target, :width] = item.valid_mask
-                loss_weights[target, :width] = item.loss_weights
-                teacher_logprobs[target, :width] = item.teacher_action_log_probs
-                offset += rows
-            training_input.update(SampledReverseKLInput(teacher_logprobs, valid_mask, loss_weights).training_tensors())
-        else:
-            if not isinstance(first, SparseForwardKLInput) or not all(
-                isinstance(item, SparseForwardKLInput) for item in inputs
-            ):
-                raise ValueError("scored groups must use one distillation objective kind")
-            top_k_values = {item.teacher_topk_indices.shape[-1] for item in inputs}
-            if len(top_k_values) != 1:
-                raise ValueError("scored groups must use one teacher top-K width")
-            top_k = top_k_values.pop()
-            indices = torch.full((*shape, top_k), INVALID_TOPK_INDEX, dtype=torch.long)
-            logprobs = torch.full((*shape, top_k), torch.nan, dtype=torch.float32)
-            retained_mass = torch.full(shape, torch.nan, dtype=torch.float32)
-            for item in inputs:
-                rows, width = item.valid_mask.shape
-                if width > shape[1]:
-                    raise ValueError("teacher evidence is wider than the learner response batch")
-                target = slice(offset, offset + rows)
-                valid_mask[target, :width] = item.valid_mask
-                loss_weights[target, :width] = item.loss_weights
-                indices[target, :width] = item.teacher_topk_indices
-                logprobs[target, :width] = item.teacher_topk_logprobs
-                retained_mass[target, :width] = item.retained_mass
-                offset += rows
-            training_input.update(
-                SparseForwardKLInput(indices, logprobs, retained_mass, valid_mask, loss_weights).training_tensors()
-            )
-
-        training_input.metadata["distillation_plan_versions"] = tuple(scored.plan_version for scored in scored_groups)
-        training_input.metadata["distillation_teacher_revisions"] = tuple(
-            revision for scored in scored_groups for revision in scored.teacher_revisions
-        )
-        training_input.metadata["distillation_route_ids"] = tuple(
-            route.route_id for scored in scored_groups for route in scored.routes
-        )
+        for scored in scored_groups:
+            next_offset = offset + len(scored.trajectory_ids)
+            indexed_inputs.append((tuple(range(offset, next_offset)), scored.distillation))
+            offset = next_offset
+        assembled = assemble_distillation_inputs(indexed_inputs, tuple(response_shape))
+        training_input.update(assembled.training_tensors())
+        training_input.metadata.update(_distillation_provenance(scored_groups))
 
     async def close(self) -> None:
         await self._adapter.close()
+
+
+def _distillation_provenance(
+    scored_groups: Sequence[RoutedScoredDistillationBatch],
+) -> dict[str, tuple[str, ...]]:
+    """Return row-aligned route, teacher, and plan revisions for learner diagnostics."""
+    return {
+        "distillation_plan_versions": tuple(
+            scored.plan_version for scored in scored_groups for _ in scored.trajectory_ids
+        ),
+        "distillation_teacher_revisions": tuple(
+            revision for scored in scored_groups for revision in scored.teacher_revisions
+        ),
+        "distillation_route_ids": tuple(route.route_id for scored in scored_groups for route in scored.routes),
+    }
