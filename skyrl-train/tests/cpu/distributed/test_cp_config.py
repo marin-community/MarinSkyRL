@@ -89,6 +89,12 @@ ADDITIVE_DYNAMIC_SAMPLING_FIELDS = {
 ADDITIVE_GROUP_ADMISSION_FIELDS = {
     "stall_timeout": None,
 }
+ADDITIVE_FULLY_ASYNC_FIELDS = {
+    "teacher_scoring": {
+        "max_queued_per_teacher": 8,
+        "workers_per_teacher": 1,
+    },
+}
 ADDITIVE_OVERLONG_FIELDS = {
     "penalty_scale": 1.0,
 }
@@ -179,6 +185,8 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         container["trainer"]["algorithm"]["dynamic_sampling"].pop(k, None)
     for k in ADDITIVE_GROUP_ADMISSION_FIELDS:
         container["trainer"]["algorithm"]["group_admission"].pop(k, None)
+    for k in ADDITIVE_FULLY_ASYNC_FIELDS:
+        container["trainer"]["fully_async"].pop(k, None)
     if not container["trainer"]["algorithm"]["group_admission"]:
         container["trainer"]["algorithm"].pop("group_admission")
     for k in ADDITIVE_GENERATOR_FIELDS:

@@ -10,6 +10,9 @@ from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMo
 
 
 class TerminalBenchExp(BasePPOExp):
+    def uses_fully_async_trainer(self) -> bool:
+        return self.cfg.trainer.placement.colocate_all is False
+
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
         del inference_engine_client
         # Harbor is an optional agent-harness dependency and is absent from the CPU launcher environment.

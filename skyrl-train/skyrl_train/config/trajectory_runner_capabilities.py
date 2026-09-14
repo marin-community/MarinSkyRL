@@ -226,6 +226,20 @@ def _validate_exact_sampled_completion(capabilities: TrajectoryRunnerCapabilitie
         raise ValueError(f"{consumer} with {capabilities.runner} requires {settings}")
 
 
+def _validate_teacher_scoreable_tokens(capabilities: TrajectoryRunnerCapabilities) -> None:
+    """Require stable learner token coordinates, without requiring sampling provenance."""
+    if capabilities.sampled_completion is EvidenceFidelity.UNAVAILABLE or (
+        capabilities.action_tokens is ActionTokenHandling.UNAVAILABLE
+    ):
+        raise ValueError(
+            f"{capabilities.runner} cannot supply tokenized learner actions required by teacher-scored distillation"
+        )
+    unmet = [requirement for requirement in capabilities.requirements if not requirement.satisfied]
+    if unmet:
+        settings = ", ".join(f"{requirement.config_path}={requirement.expected_value}" for requirement in unmet)
+        raise ValueError(f"teacher-scored distillation with {capabilities.runner} requires {settings}")
+
+
 def validate_trajectory_runner_capabilities(
     cfg: DictConfig,
     mode: TrajectoryRunnerMode,
@@ -241,13 +255,7 @@ def validate_trajectory_runner_capabilities(
     if distillation_plan is not None:
         if operation is not EntrypointOperation.TRAIN:
             raise ValueError("teacher-scored distillation is training-only and cannot be configured for generation")
-        if mode in {TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM, TrajectoryRunnerMode.MINI_SWE}:
-            raise ValueError(f"configured distillation does not support the {capabilities.runner} trainer")
-        if mode is TrajectoryRunnerMode.HARBOR and not bool(cfg.trainer.placement.colocate_all):
-            raise ValueError(
-                "configured distillation does not yet support the fully asynchronous Terminal-Bench trainer"
-            )
-        _validate_exact_sampled_completion(capabilities, consumer="teacher-scored distillation")
+        _validate_teacher_scoreable_tokens(capabilities)
 
     algorithm = cfg.trainer.algorithm
     behavior_logprobs_required = rollout_logprobs_enabled(algorithm)

@@ -410,7 +410,14 @@ class AsyncTeacherQueueLimits:
     workers: int
 
     def __post_init__(self) -> None:
-        if self.max_queued <= 0 or self.workers <= 0:
+        if (
+            isinstance(self.max_queued, bool)
+            or not isinstance(self.max_queued, int)
+            or self.max_queued <= 0
+            or isinstance(self.workers, bool)
+            or not isinstance(self.workers, int)
+            or self.workers <= 0
+        ):
             raise ValueError("teacher queue and worker limits must be positive")
 
 

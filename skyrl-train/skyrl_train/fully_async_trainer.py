@@ -54,6 +54,8 @@ from skyrl_train.dynamic_sampling import (
     GroupSelectionResult,
     resolve_dynamic_sampling_criteria,
 )
+from skyrl_train.distillation_adapters import AsyncRoutedTeacherScoreTicket, RoutedScoredDistillationBatch
+from skyrl_train.distillation_runtime import AsyncDistillationRuntime
 from skyrl_train.group_admission import (
     AdmissionAction,
     AdmissionDecision,
@@ -550,6 +552,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._groups_rejected_since_step = 0
         self._rejection_reasons_since_step: collections.Counter[str] = collections.Counter()
         self._groups_inspected_since_step = 0
+        self._async_distillation_runtime: AsyncDistillationRuntime | None = None
+        self._async_distillation_tickets: dict[str, AsyncRoutedTeacherScoreTicket] = {}
+
+    def configure_async_distillation(self, runtime: AsyncDistillationRuntime) -> None:
+        """Install admitted-group teacher scoring before the training loop starts."""
+        if self._async_distillation_runtime is not None:
+            raise RuntimeError("fully-async distillation runtime is already configured")
+        if self._sync_distillation_runtime is not None:
+            raise RuntimeError("cannot combine synchronous and fully-async distillation runtimes")
+        self._async_distillation_runtime = runtime
 
     def _configure_training_schedule(self):
         """
@@ -647,6 +659,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         try:
             await self._flush_generation_buffer_on_shutdown()
         finally:
+            async_distillation_runtime = getattr(self, "_async_distillation_runtime", None)
+            if async_distillation_runtime is not None:
+                await self._guarded_async(
+                    async_distillation_runtime.close(),
+                    timeout=30,
+                    label="Teacher oracle shutdown",
+                )
             await super().shutdown()
 
     async def train(self):
@@ -656,6 +675,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.global_step = 0
 
         try:
+            async_distillation_runtime = getattr(self, "_async_distillation_runtime", None)
+            if async_distillation_runtime is not None:
+                await async_distillation_runtime.start()
             await self._startup_trajectory_runner()
             await self._train_loop()
         except Exception as e:
@@ -810,11 +832,33 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             generation_queues,
                         )
 
+                    scored_distillation = None
+                    if self._async_distillation_runtime is not None:
+                        with Timer("wait_for_teacher_evidence", self.all_timings):
+                            scored_distillation = await self._await_admitted_teacher_evidence(
+                                cur_generation_group_mini_batch
+                            )
+
                     # 2. Post-process the complete generated mini-batch and convert it to training format.
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input = await asyncio.to_thread(
                             self.convert_generation_group_mini_batch_to_training_input,
                             cur_generation_group_mini_batch,
+                        )
+                    if scored_distillation is not None:
+                        self._async_distillation_runtime.attach_to_training_input(
+                            training_input,
+                            scored_distillation,
+                        )
+                        self.all_metrics.update(
+                            {
+                                "distillation/teacher_count": float(
+                                    len({route.teacher_id for scored in scored_distillation for route in scored.routes})
+                                ),
+                                "distillation/scored_tokens": float(
+                                    sum(scored.distillation.valid_mask.sum().item() for scored in scored_distillation)
+                                ),
+                            }
                         )
                     response_ids = [
                         response_ids
@@ -1409,6 +1453,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         rejection_counts_since_admission: collections.Counter[str] = collections.Counter()
         dynamic_candidate_metrics = _DynamicSamplingCandidateMetrics()
         dynamic_discarded_count = 0
+        await self._submit_admitted_groups_for_teacher_scoring(accepted_groups)
 
         while True:
             async with queues.condition:
@@ -1481,6 +1526,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     batch = None
                 queues.condition.notify_all()
 
+            await self._submit_admitted_groups_for_teacher_scoring(selection.admitted_groups)
+
             self._record_admission_scan(
                 partition.rejected_groups + partition.discarded_groups,
                 inspected_count=len(completed_groups),
@@ -1510,6 +1557,50 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             dynamic_discarded_count=dynamic_discarded_count,
         )
         return batch
+
+    def _group_for_teacher_scoring(self, group: GeneratedOutputGroup) -> TrajectoryBatch:
+        """Apply the learner's row selector without duplicating its metric side effects."""
+        if getattr(self, "trajectory_selector", None) is None:
+            return group.trajectory_batch
+        row_count = len(group.trajectory_batch["response_ids"])
+        return self.trajectory_selector.select(group.trajectory_batch, [group.uid] * row_count).trajectory_batch
+
+    async def _submit_admitted_groups_for_teacher_scoring(self, groups: List[GeneratedOutputGroup]) -> None:
+        """Enqueue newly admitted groups, letting bounded teacher queues backpressure admission."""
+        runtime = getattr(self, "_async_distillation_runtime", None)
+        if runtime is None:
+            return
+        for group in groups:
+            if group.uid in self._async_distillation_tickets:
+                continue
+            self._async_distillation_tickets[group.uid] = await runtime.submit_before_batch_assembly(
+                self._group_for_teacher_scoring(group)
+            )
+
+    async def _await_admitted_teacher_evidence(
+        self,
+        groups: List[GeneratedOutputGroup],
+    ) -> tuple[RoutedScoredDistillationBatch, ...]:
+        """Gate learner batch assembly on every admitted group's teacher evidence."""
+        missing = [group.uid for group in groups if group.uid not in self._async_distillation_tickets]
+        if missing:
+            raise RuntimeError(f"admitted groups are missing teacher score tickets: {missing}")
+        scored = tuple(
+            await asyncio.gather(*(self._async_distillation_tickets[group.uid].result() for group in groups))
+        )
+        for group, scored_group in zip(groups, scored, strict=True):
+            selected_group = self._group_for_teacher_scoring(group)
+            trajectory_ids = selected_group.get("trajectory_ids")
+            if trajectory_ids is None:
+                raise ValueError("teacher scoring requires stable trajectory IDs on admitted groups")
+            expected_ids = tuple(trajectory_id.to_string() for trajectory_id in trajectory_ids)
+            if scored_group.trajectory_ids != expected_ids:
+                raise ValueError(
+                    f"teacher evidence row order does not match admitted group {group.uid!r}: "
+                    f"expected={expected_ids}, scored={scored_group.trajectory_ids}"
+                )
+            del self._async_distillation_tickets[group.uid]
+        return scored
 
     def convert_generation_group_mini_batch_to_training_input(
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]

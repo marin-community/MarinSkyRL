@@ -14,6 +14,9 @@ import ray
 
 
 class AsyncPPOExp(BasePPOExp):
+    def uses_fully_async_trainer(self) -> bool:
+        return True
+
     def get_trainer(
         self,
         cfg,

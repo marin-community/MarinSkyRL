@@ -138,11 +138,10 @@ def test_behavior_logprobs_reject_multiturn_custom_template_retokenization():
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
 
 
-def test_distillation_rejects_fully_async_trainer_until_scored_buffer_wiring_exists(local_distillation_config):
+def test_distillation_accepts_reconstructed_fully_async_learner_tokens(local_distillation_config):
     cfg = local_distillation_config(_skyrl_config(use_tis=False))
 
-    with pytest.raises(ValueError, match="fully-async SkyRL Gym"):
-        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
+    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
 
 
 @pytest.mark.parametrize(("agent_name", "version"), [("terminus-2", None), ("opencode", "1.18.2"), ("pi", None)])
@@ -157,17 +156,16 @@ def test_distillation_rejects_harbor_without_exact_token_evidence(local_distilla
     cfg = local_distillation_config(_harbor_config("codex"))
     cfg.trainer.algorithm.use_tis = False
 
-    with pytest.raises(ValueError, match="Harbor codex cannot supply exact sampled completion"):
+    with pytest.raises(ValueError, match="Harbor codex cannot supply tokenized learner actions"):
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
 
 
-def test_distillation_rejects_fully_async_harbor_before_allocation(local_distillation_config):
+def test_distillation_accepts_fully_async_harbor_with_exact_token_evidence(local_distillation_config):
     cfg = local_distillation_config(_harbor_config("terminus-2"))
     cfg.trainer.algorithm.use_tis = False
     cfg.trainer.placement.colocate_all = False
 
-    with pytest.raises(ValueError, match="fully asynchronous Terminal-Bench"):
-        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
+    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
 
 
 def test_distillation_rejects_mini_swe_before_allocation(local_distillation_config):
