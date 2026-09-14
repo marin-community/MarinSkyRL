@@ -11,6 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
+    "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
     "debugpy==1.8.0",
@@ -28,6 +29,7 @@ dependencies = [
     "marin-finelog-server",
     "marin-iris",
     "marin-iris-native",
+    "marin-rigging[secrets]",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",

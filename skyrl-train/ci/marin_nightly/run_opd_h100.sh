@@ -8,6 +8,7 @@ NIGHTLY_RL_ENV="${NIGHTLY_RL_ENV:-$REPOSITORY_ROOT/.iris-nightly-opd-env}"
 POLICY_MODEL="${POLICY_MODEL:-Qwen/Qwen3-0.6B}"
 TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3-1.7B}"
 TEACHER_REVISION="${TEACHER_REVISION:-70d244cc86ccca08cf5af4e1e306ecf908b1ad5e}"
+TEACHER_SOURCE="${TEACHER_SOURCE:-local_inference}"
 DATA_DIR="${DATA_DIR:-$HOME/data/gsm8k_opd_nightly}"
 LOG="${LOG:-$PWD/opd-nightly-run.log}"
 SPEC="${SPEC:-ci/marin_nightly/specs/opd-qwen3-sync.json}"
@@ -19,6 +20,70 @@ rm -rf skyrl-gym
 cp -R ../skyrl-gym skyrl-gym
 export PYTHONPATH="$PWD/skyrl-gym:$PWD:$REPOSITORY_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export VLLM_USE_DEEP_GEMM=0
+
+TEACHER_ARGS=()
+teacher_pid=""
+cleanup_teacher() {
+  if [[ -n "$teacher_pid" ]]; then
+    kill "$teacher_pid" >/dev/null 2>&1 || true
+    wait "$teacher_pid" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_teacher EXIT
+
+case "$TEACHER_SOURCE" in
+  local_inference)
+    TEACHER_ARGS=(
+      ++teachers.primary.source=local_inference
+      ++teachers.primary.placement=pinned
+      ++teachers.primary.model.path="$TEACHER_MODEL"
+      ++teachers.primary.model.revision="$TEACHER_REVISION"
+      ++teachers.primary.backend=vllm
+      ++teachers.primary.evidence=chosen_token
+      ++teachers.primary.resources.num_nodes=1
+      ++teachers.primary.resources.gpus_per_node=1
+      ++teachers.primary.resources.tensor_parallel_size=1
+      ++teachers.primary.resources.colocation_group=teacher
+    )
+    ;;
+  openai_compatible)
+    TOKENIZER_FINGERPRINT=$("$PYTHON" -c \
+      'import sys; from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint; from skyrl_train.tokenizer import create_tokenizer; print(tokenizer_vocabulary_fingerprint(create_tokenizer(sys.argv[1], disable_fast_tokenizer=False)))' \
+      "$POLICY_MODEL")
+    "$PYTHON" tests/fixtures/opd_http_teacher.py --port 18080 &
+    teacher_pid=$!
+    "$PYTHON" - <<'PY'
+import time
+import urllib.error
+import urllib.request
+
+for _ in range(100):
+    try:
+        urllib.request.urlopen("http://127.0.0.1:18080", timeout=1)
+    except urllib.error.HTTPError:
+        break
+    except OSError:
+        time.sleep(0.1)
+else:
+    raise RuntimeError("remote teacher fixture did not start")
+PY
+    TEACHER_ARGS=(
+      ++teachers.primary.source=openai_compatible
+      ++teachers.primary.placement=external
+      ++teachers.primary.model.path="$TEACHER_MODEL"
+      ++teachers.primary.model.revision="$TEACHER_REVISION"
+      ++teachers.primary.endpoints="[{url:http://127.0.0.1:18080/v1,max_concurrency:8}]"
+      ++teachers.primary.tokenizer_fingerprint="$TOKENIZER_FINGERPRINT"
+      ++teachers.primary.max_sequence_length=32768
+      ++teachers.primary.request_timeout_seconds=120
+      ++teachers.primary.evidence=chosen_token
+    )
+    ;;
+  *)
+    echo "unsupported TEACHER_SOURCE: $TEACHER_SOURCE" >&2
+    exit 2
+    ;;
+esac
 
 echo "::: GPU and driver"
 nvidia-smi --query-gpu=name,driver_version --format=csv
@@ -51,16 +116,7 @@ START=$(date +%s)
   ++trainer.algorithm.distillation.routing_plan=opd \
   ++trainer.algorithm.distillation.coefficient=0.5 \
   ++trainer.algorithm.distillation.reward_mode=add \
-  ++teachers.primary.source=local_inference \
-  ++teachers.primary.placement=pinned \
-  ++teachers.primary.model.path="$TEACHER_MODEL" \
-  ++teachers.primary.model.revision="$TEACHER_REVISION" \
-  ++teachers.primary.backend=vllm \
-  ++teachers.primary.evidence=chosen_token \
-  ++teachers.primary.resources.num_nodes=1 \
-  ++teachers.primary.resources.gpus_per_node=1 \
-  ++teachers.primary.resources.tensor_parallel_size=1 \
-  ++teachers.primary.resources.colocation_group=teacher \
+  "${TEACHER_ARGS[@]}" \
   ++teacher_routing.opd.revision=qwen3-sync-v1 \
   ++teacher_routing.opd.routes.default.teacher=primary \
   ++teacher_routing.opd.routes.default.weight=1.0 \

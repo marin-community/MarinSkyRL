@@ -45,7 +45,10 @@ def _teacher_spec(teacher_id: str, revision: str) -> OpenAICompatibleTeacherSpec
         placement=TeacherPlacement.EXTERNAL,
         model=TeacherModelSpec(path=f"test/{teacher_id}", revision=revision),
         evidence=TeacherEvidenceKind.CHOSEN_TOKEN,
-        endpoints=(TeacherEndpointSpec(url=f"https://{teacher_id}.example/v1", auth=None),),
+        endpoints=(TeacherEndpointSpec(url=f"https://{teacher_id}.example/v1", auth=None, max_concurrency=2),),
+        tokenizer_fingerprint=f"sha256:{'a' * 64}",
+        max_sequence_length=16,
+        request_timeout_seconds=30,
     )
 
 

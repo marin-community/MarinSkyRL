@@ -28,7 +28,10 @@ def _mopd_config() -> dict:
                 "source": "openai_compatible",
                 "placement": "external",
                 "model": {"path": "Qwen/math-teacher", "revision": "math-revision"},
-                "endpoints": [{"url": "https://math.example/v1", "auth": "secret://math-api"}],
+                "endpoints": [{"url": "https://math.example/v1", "auth": "env:MATH_API_KEY", "max_concurrency": 8}],
+                "tokenizer_fingerprint": f"sha256:{'a' * 64}",
+                "max_sequence_length": 32768,
+                "request_timeout_seconds": 120,
                 "evidence": "chosen_token",
             },
             "swe": {
@@ -144,6 +147,30 @@ def test_compile_distillation_plan_defaults_hosted_teacher_to_external():
 
     assert plan is not None
     assert plan.teachers[0].placement is TeacherPlacement.EXTERNAL
+
+
+def test_compile_distillation_plan_rejects_plaintext_teacher_auth():
+    config = _mopd_config()
+    config["teachers"]["math"]["endpoints"][0]["auth"] = "plaintext-key"
+
+    with pytest.raises(ValueError, match="auth must be an env:, file:, or versioned gcp-secret:// reference"):
+        compile_distillation_plan(config)
+
+
+def test_compile_distillation_plan_rejects_non_base_completion_url():
+    config = _mopd_config()
+    config["teachers"]["math"]["endpoints"][0]["url"] = "https://math.example/v1/completions"
+
+    with pytest.raises(ValueError, match=r"must be an HTTP\(S\) /v1 base endpoint"):
+        compile_distillation_plan(config)
+
+
+def test_compile_distillation_plan_rejects_invalid_external_tokenizer_fingerprint():
+    config = _mopd_config()
+    config["teachers"]["math"]["tokenizer_fingerprint"] = "Qwen/math-tokenizer"
+
+    with pytest.raises(ValueError, match="tokenizer_fingerprint must be a sha256: fingerprint"):
+        compile_distillation_plan(config)
 
 
 def test_compile_distillation_plan_preserves_local_teacher_resource_claim():

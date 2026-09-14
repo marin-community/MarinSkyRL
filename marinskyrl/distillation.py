@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -10,6 +11,7 @@ from typing import Protocol, TypeVar
 from urllib.parse import urlsplit
 
 from omegaconf import DictConfig, OmegaConf
+from rigging.secrets import is_secret_reference
 
 
 class DistillationObjectiveKind(StrEnum):
@@ -60,6 +62,7 @@ class TeacherModelSpec:
 class TeacherEndpointSpec:
     url: str
     auth: str | None
+    max_concurrency: int
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,9 @@ class OpenAICompatibleTeacherSpec:
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
     endpoints: tuple[TeacherEndpointSpec, ...]
+    tokenizer_fingerprint: str
+    max_sequence_length: int
+    request_timeout_seconds: float
     resources: TeacherResourceSpec | None = None
     top_k: int | None = None
 
@@ -157,24 +163,27 @@ class DistillationPlan:
 
 
 def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None:
-    """Fail before allocation unless the plan fits the production local-teacher runtime."""
+    """Fail before allocation unless every teacher has a production scoring adapter."""
     if plan is None:
         return
     if plan.reward_mode is not DistillationRewardMode.ADD:
         raise ValueError("the distillation runtime currently supports only reward_mode=add auxiliary losses")
-    if plan.residency.max_resident != 1:
+    rotating_teachers = tuple(teacher for teacher in plan.teachers if teacher.placement is TeacherPlacement.ROTATING)
+    if rotating_teachers and plan.residency.max_resident != 1:
         raise ValueError("the local teacher resource plan currently supports exactly one rotating residency slot")
     pinned_groups: set[str] = set()
     rotating_groups: set[str] = set()
     rotating_footprint: TeacherResourceSpec | None = None
     for teacher in plan.teachers:
-        if teacher.source is not TeacherSource.LOCAL_INFERENCE or teacher.placement not in {
-            TeacherPlacement.PINNED,
-            TeacherPlacement.ROTATING,
-        }:
+        if teacher.source is TeacherSource.OPENAI_COMPATIBLE:
+            assert isinstance(teacher, OpenAICompatibleTeacherSpec)
+            continue
+        if teacher.source is not TeacherSource.LOCAL_INFERENCE:
             raise ValueError(
-                "the local distillation runtime currently supports pinned or rotating local_inference teachers"
+                "the distillation runtime currently supports openai_compatible and local_inference teachers"
             )
+        if teacher.placement not in {TeacherPlacement.PINNED, TeacherPlacement.ROTATING}:
+            raise ValueError("local_inference teachers must use pinned or rotating placement")
         if teacher.resources is None:
             raise ValueError(f"teachers.{teacher.id}.resources is required for a local teacher runtime")
         total_gpus = teacher.resources.num_nodes * teacher.resources.gpus_per_node
@@ -206,6 +215,10 @@ _OBJECTIVE_EVIDENCE = {
     DistillationObjectiveKind.SAMPLED_REVERSE_KL: TeacherEvidenceKind.CHOSEN_TOKEN,
     DistillationObjectiveKind.SPARSE_FORWARD_KL: TeacherEvidenceKind.TOPK_DISTRIBUTION,
 }
+_TOKENIZER_FINGERPRINT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+_GCP_SECRET_REFERENCE_PATTERN = re.compile(
+    r"^gcp-secret://projects/[^/]+/secrets/[^/]+/versions/(?:[1-9][0-9]*|latest)$"
+)
 _EnumT = TypeVar("_EnumT", bound=StrEnum)
 
 
@@ -321,16 +334,41 @@ def _teacher_endpoints(config: Mapping[str, object], path: str) -> tuple[Teacher
     for index, raw_endpoint in enumerate(raw_endpoints):
         endpoint_path = f"{path}.endpoints[{index}]"
         endpoint = _mapping(raw_endpoint, endpoint_path)
-        _reject_unknown(endpoint, frozenset({"url", "auth"}), endpoint_path)
+        _reject_unknown(endpoint, frozenset({"url", "auth", "max_concurrency"}), endpoint_path)
         url = _required_string(endpoint, "url", endpoint_path)
         parsed = urlsplit(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError(f"{endpoint_path}.url must be an HTTP(S) endpoint; got {url!r}")
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.path.rstrip("/").split("/")[-1] != "v1"
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(f"{endpoint_path}.url must be an HTTP(S) /v1 base endpoint; got {url!r}")
         auth = _optional_string(endpoint, "auth", endpoint_path)
-        if auth is not None and not auth.startswith("secret://"):
-            raise ValueError(f"{endpoint_path}.auth must be a secret:// reference")
-        endpoints.append(TeacherEndpointSpec(url=url, auth=auth))
+        if auth is not None:
+            valid_auth = (
+                (auth.startswith("env:") and len(auth) > len("env:"))
+                or (auth.startswith("file:") and len(auth) > len("file:"))
+                or _GCP_SECRET_REFERENCE_PATTERN.fullmatch(auth) is not None
+            )
+            if not is_secret_reference(auth) or not valid_auth:
+                raise ValueError(f"{endpoint_path}.auth must be an env:, file:, or versioned gcp-secret:// reference")
+        endpoints.append(
+            TeacherEndpointSpec(
+                url=url.rstrip("/"),
+                auth=auth,
+                max_concurrency=_positive_integer(endpoint, "max_concurrency", endpoint_path),
+            )
+        )
     return tuple(endpoints)
+
+
+def _tokenizer_fingerprint(config: Mapping[str, object], path: str) -> str:
+    fingerprint = _required_string(config, "tokenizer_fingerprint", path)
+    if not _TOKENIZER_FINGERPRINT_PATTERN.fullmatch(fingerprint):
+        raise ValueError(f"{path}.tokenizer_fingerprint must be a sha256: fingerprint")
+    return fingerprint
 
 
 def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
@@ -338,7 +376,21 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
     config = _mapping(raw, path)
     _reject_unknown(
         config,
-        frozenset({"source", "placement", "model", "evidence", "top_k", "endpoints", "backend", "resources"}),
+        frozenset(
+            {
+                "source",
+                "placement",
+                "model",
+                "evidence",
+                "top_k",
+                "endpoints",
+                "backend",
+                "resources",
+                "tokenizer_fingerprint",
+                "max_sequence_length",
+                "request_timeout_seconds",
+            }
+        ),
         path,
     )
     source = _enum_value(TeacherSource, config, "source", path)
@@ -363,10 +415,16 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
     if source is TeacherSource.OPENAI_COMPATIBLE:
         if not endpoints:
             raise ValueError(f"{path}.endpoints must contain at least one endpoint for openai_compatible teachers")
-        if placement not in {TeacherPlacement.EXTERNAL, TeacherPlacement.PINNED}:
-            raise ValueError(f"{path}.placement must be external or pinned for openai_compatible teachers")
+        if placement is not TeacherPlacement.EXTERNAL:
+            raise ValueError(f"{path}.placement must be external for openai_compatible teachers")
     elif endpoints:
         raise ValueError(f"{path}.endpoints is only valid for openai_compatible teachers")
+
+    external_fields = ("tokenizer_fingerprint", "max_sequence_length", "request_timeout_seconds")
+    if source is not TeacherSource.OPENAI_COMPATIBLE:
+        unexpected_external_fields = [field for field in external_fields if config.get(field) is not None]
+        if unexpected_external_fields:
+            raise ValueError(f"{path}.{unexpected_external_fields[0]} is only valid for openai_compatible teachers")
 
     if source is TeacherSource.LOCAL_INFERENCE:
         if backend == "sglang":
@@ -399,7 +457,13 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
         "top_k": top_k,
     }
     if source is TeacherSource.OPENAI_COMPATIBLE:
-        return OpenAICompatibleTeacherSpec(**common, endpoints=endpoints)
+        return OpenAICompatibleTeacherSpec(
+            **common,
+            endpoints=endpoints,
+            tokenizer_fingerprint=_tokenizer_fingerprint(config, path),
+            max_sequence_length=_positive_integer(config, "max_sequence_length", path),
+            request_timeout_seconds=_positive_float(config, "request_timeout_seconds", path),
+        )
     if source is TeacherSource.LOCAL_INFERENCE:
         assert backend is not None
         return LocalInferenceTeacherSpec(**common, backend=backend)

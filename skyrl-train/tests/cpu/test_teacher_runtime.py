@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import pytest
 import torch
+from aiohttp import web
 from omegaconf import OmegaConf
+from rigging.secrets import SecretResolutionError
 
-import skyrl_train.local_teacher_runtime as runtime_module
-from skyrl_train.local_teacher_runtime import (
-    prepare_async_local_distillation_runtime,
-    prepare_local_distillation_runtime,
+import skyrl_train.teacher_runtime as runtime_module
+from skyrl_train.teacher_runtime import (
+    prepare_async_distillation_runtime,
+    prepare_distillation_runtime,
     start_async_distillation_runtime,
     start_sync_distillation_runtime,
 )
+from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.types import TrajectoryID
+from tests.fixtures.opd_http_teacher import application
 
 
 @dataclass
@@ -132,6 +137,46 @@ def _two_teacher_config(*, placement: str):
     return cfg
 
 
+def _add_external_teacher(cfg, teacher_id: str, base_url: str, tokenizer: _Tokenizer):
+    cfg.teachers[teacher_id] = {
+        "source": "openai_compatible",
+        "placement": "external",
+        "model": {"path": "Qwen/remote-teacher", "revision": "remote-revision"},
+        "endpoints": [
+            {
+                "url": base_url,
+                "auth": "env:REMOTE_TEACHER_API_KEY",
+                "max_concurrency": 2,
+            }
+        ],
+        "tokenizer_fingerprint": tokenizer_vocabulary_fingerprint(tokenizer),
+        "max_sequence_length": 32,
+        "request_timeout_seconds": 5,
+        "evidence": "chosen_token",
+    }
+    return cfg
+
+
+def _external_teacher_config(base_url: str, tokenizer: _Tokenizer):
+    return _add_external_teacher(_config(), "primary", base_url, tokenizer)
+
+
+def _mixed_teacher_config(base_url: str, tokenizer: _Tokenizer):
+    return _add_external_teacher(_two_teacher_config(placement="pinned"), "secondary", base_url, tokenizer)
+
+
+@asynccontextmanager
+async def _remote_teacher_server(port: int, requests: list[dict]):
+    app = application(-0.75, requests=requests, bearer_token="test-api-key")
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    try:
+        yield f"http://127.0.0.1:{port}/v1"
+    finally:
+        await runner.cleanup()
+
+
 async def _score_two_routes(runtime):
     _, scored = await runtime.score_while_model_forwarding(
         {
@@ -158,7 +203,7 @@ async def test_local_teacher_runtime_rejects_tokenizer_mismatch_before_engine_al
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engines)
 
     with pytest.raises(ValueError, match="tokenizer vocabulary does not match"):
-        prepare_local_distillation_runtime(_config(), _Tokenizer({"a": 0}))
+        prepare_distillation_runtime(_config(), _Tokenizer({"a": 0}))
 
     assert not allocation_attempted
 
@@ -169,7 +214,7 @@ def test_local_teacher_runtime_accepts_multiple_routes_to_one_pinned_teacher(mon
     cfg = _config()
     cfg.teacher_routing.opd.routes.math = {"teacher": "primary", "weight": 0.75}
 
-    prepared = prepare_local_distillation_runtime(cfg, tokenizer)
+    prepared = prepare_distillation_runtime(cfg, tokenizer)
 
     assert prepared is not None
     assert [(route.key, route.teacher_id) for route in prepared.plan.routing.routes] == [
@@ -191,7 +236,7 @@ def test_fully_async_teacher_queue_limits_fail_before_teacher_initialization(mon
     cfg.trainer.fully_async.teacher_scoring.max_queued_per_teacher = 0
 
     with pytest.raises(ValueError, match="queue and worker limits must be positive"):
-        prepare_async_local_distillation_runtime(cfg, _Tokenizer({"a": 0}))
+        prepare_async_distillation_runtime(cfg, _Tokenizer({"a": 0}))
 
     assert not tokenizer_initialized
 
@@ -203,7 +248,7 @@ async def test_local_teacher_runtime_scores_exact_rollout_tokens_and_owns_engine
     monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", lambda **_kwargs: [engine])
     cfg = _config()
-    prepared = prepare_local_distillation_runtime(cfg, tokenizer)
+    prepared = prepare_distillation_runtime(cfg, tokenizer)
     runtime = await start_sync_distillation_runtime(cfg, prepared)
     assert runtime is not None
 
@@ -230,7 +275,7 @@ async def test_local_teacher_runtime_feeds_fully_async_admitted_groups(monkeypat
     monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", lambda **_kwargs: [engine])
     cfg = _config()
-    prepared = prepare_async_local_distillation_runtime(cfg, tokenizer)
+    prepared = prepare_async_distillation_runtime(cfg, tokenizer)
     runtime = await start_async_distillation_runtime(cfg, prepared)
     assert runtime is not None
     await runtime.start()
@@ -256,13 +301,88 @@ async def test_local_teacher_runtime_feeds_fully_async_admitted_groups(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_teacher_runtime_composes_remote_and_local_routes(monkeypatch, unused_tcp_port):
+    engine = _Engine()
+    tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
+    remote_requests = []
+    monkeypatch.setenv("REMOTE_TEACHER_API_KEY", "test-api-key")
+    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", lambda **_kwargs: [engine])
+
+    async with _remote_teacher_server(unused_tcp_port, remote_requests) as base_url:
+        cfg = _mixed_teacher_config(base_url, tokenizer)
+        prepared = prepare_distillation_runtime(cfg, tokenizer)
+        runtime = await start_sync_distillation_runtime(cfg, prepared)
+        assert runtime is not None
+        scored = await _score_two_routes(runtime)
+        await runtime.close()
+
+    torch.testing.assert_close(
+        scored.distillation.teacher_action_log_probs,
+        torch.tensor([[-0.25], [-0.75]]),
+    )
+    assert tuple(route.teacher_id for route in scored.routes) == ("primary", "secondary")
+    assert remote_requests[0]["prompt"] == [[0, 2, 1]]
+    assert engine.teardown_count == 1
+
+
+def test_remote_teacher_runtime_rejects_tokenizer_mismatch_before_startup():
+    tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
+    cfg = _external_teacher_config("https://teacher.example/v1", tokenizer)
+    cfg.teachers.primary.tokenizer_fingerprint = f"sha256:{'f' * 64}"
+
+    with pytest.raises(ValueError, match="tokenizer fingerprint does not match"):
+        prepare_distillation_runtime(cfg, tokenizer)
+
+
+@pytest.mark.asyncio
+async def test_remote_teacher_runtime_rejects_missing_auth_secret(monkeypatch):
+    tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
+    cfg = _external_teacher_config("https://teacher.example/v1", tokenizer)
+    monkeypatch.delenv("REMOTE_TEACHER_API_KEY", raising=False)
+    prepared = prepare_distillation_runtime(cfg, tokenizer)
+
+    with pytest.raises(SecretResolutionError, match="no secret source produced a value"):
+        await start_sync_distillation_runtime(cfg, prepared)
+
+
+@pytest.mark.asyncio
+async def test_remote_teacher_runtime_feeds_fully_async_admitted_groups(monkeypatch, unused_tcp_port):
+    tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
+    remote_requests = []
+    monkeypatch.setenv("REMOTE_TEACHER_API_KEY", "test-api-key")
+
+    async with _remote_teacher_server(unused_tcp_port, remote_requests) as base_url:
+        cfg = _external_teacher_config(base_url, tokenizer)
+        prepared = prepare_async_distillation_runtime(cfg, tokenizer)
+        runtime = await start_async_distillation_runtime(cfg, prepared)
+        assert runtime is not None
+        await runtime.start()
+        ticket = await runtime.submit_before_batch_assembly(
+            {
+                "trajectory_ids": [TrajectoryID("math", 0)],
+                "prompt_token_ids": [[0, 1]],
+                "response_ids": [[2, 1]],
+            }
+        )
+        scored = await ticket.result()
+        training_input = TrainingInputBatch({"response_mask": torch.ones((1, 2), dtype=torch.bool)})
+        training_input.metadata = {"pad_size": 0}
+        runtime.attach_to_training_input(training_input, (scored,))
+        await runtime.close()
+
+    torch.testing.assert_close(training_input["teacher_action_log_probs"], torch.tensor([[-0.75, -0.75]]))
+    assert remote_requests[0]["prompt"] == [[0, 1, 2, 1]]
+
+
+@pytest.mark.asyncio
 async def test_local_teacher_runtime_cleans_engine_when_oracle_startup_fails(monkeypatch):
     engine = _Engine(model_max_len=None)
     tokenizer = _Tokenizer({"a": 0})
     monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", lambda **_kwargs: [engine])
     cfg = _config()
-    prepared = prepare_local_distillation_runtime(cfg, tokenizer)
+    prepared = prepare_distillation_runtime(cfg, tokenizer)
 
     with pytest.raises(ValueError, match="maximum model length"):
         await start_sync_distillation_runtime(cfg, prepared)
@@ -284,7 +404,7 @@ async def test_local_teacher_runtime_eagerly_owns_multiple_pinned_teachers(monke
     monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engines)
     cfg = _two_teacher_config(placement="pinned")
-    prepared = prepare_local_distillation_runtime(cfg, tokenizer)
+    prepared = prepare_distillation_runtime(cfg, tokenizer)
     runtime = await start_sync_distillation_runtime(cfg, prepared)
     assert runtime is not None
     assert len(started_engines) == 2
@@ -307,7 +427,7 @@ async def test_local_teacher_runtime_cleans_started_pinned_teacher_when_later_st
         runtime_module, "create_ray_wrapped_inference_engines", lambda **_kwargs: [pending_engines.pop(0)]
     )
     cfg = _two_teacher_config(placement="pinned")
-    prepared = prepare_local_distillation_runtime(cfg, tokenizer)
+    prepared = prepare_distillation_runtime(cfg, tokenizer)
 
     with pytest.raises(ValueError, match="maximum model length"):
         await start_sync_distillation_runtime(cfg, prepared)
@@ -329,7 +449,7 @@ async def test_local_teacher_runtime_rotates_teachers_on_one_residency_slot(monk
     monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engines)
     cfg = _two_teacher_config(placement="rotating")
-    prepared = prepare_local_distillation_runtime(cfg, tokenizer)
+    prepared = prepare_distillation_runtime(cfg, tokenizer)
     runtime = await start_sync_distillation_runtime(cfg, prepared)
     assert runtime is not None
     assert started_engines == []
@@ -359,7 +479,7 @@ def test_local_teacher_runtime_rejects_unsafe_multi_teacher_resource_layouts(mon
     cfg.teachers.primary.resources.colocation_group, cfg.teachers.secondary.resources.colocation_group = groups
 
     with pytest.raises(ValueError, match=message):
-        prepare_local_distillation_runtime(cfg, tokenizer)
+        prepare_distillation_runtime(cfg, tokenizer)
 
 
 def test_local_teacher_runtime_rejects_unplanned_additional_residency_slots(monkeypatch):
@@ -369,4 +489,4 @@ def test_local_teacher_runtime_rejects_unplanned_additional_residency_slots(monk
     cfg.trainer.algorithm.distillation.residency.max_resident = 2
 
     with pytest.raises(ValueError, match="exactly one rotating residency slot"):
-        prepare_local_distillation_runtime(cfg, tokenizer)
+        prepare_distillation_runtime(cfg, tokenizer)
