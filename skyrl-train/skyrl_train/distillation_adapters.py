@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar, cast
 
@@ -122,49 +122,41 @@ def _routed_assembly_shape(
     return row_count, max(work.response_lengths)
 
 
-def _assemble_common_tensors(
-    work: RoutedTeacherScoringWork,
-    scored_partitions: tuple[ScoredDistillationBatch, ...],
+def assemble_distillation_inputs(
+    indexed_inputs: Sequence[tuple[tuple[int, ...], DistillationInput]],
     shape: tuple[int, int],
-) -> tuple[torch.Tensor, torch.Tensor, tuple[str, ...]]:
+) -> DistillationInput:
+    """Scatter homogeneous learner inputs into an explicitly sized batch."""
+    if not indexed_inputs:
+        raise ValueError("distillation assembly requires at least one input")
     valid_mask = torch.zeros(shape, dtype=torch.bool)
     loss_weights = torch.zeros(shape, dtype=torch.float32)
-    teacher_revisions = [""] * shape[0]
-    for partition, scored in zip(work.partitions, scored_partitions, strict=True):
-        if scored.evidence.trajectory_ids != partition.work.request.trajectory_ids:
-            raise ValueError("scored teacher partition does not match its routed trajectories")
-        partition_width = scored.distillation.valid_mask.shape[1]
-        indices = torch.tensor(partition.original_indices, dtype=torch.long)
-        valid_mask[indices, :partition_width] = scored.distillation.valid_mask
-        loss_weights[indices, :partition_width] = scored.distillation.loss_weights
-        for index in partition.original_indices:
-            teacher_revisions[index] = scored.evidence.teacher_revision
-    return valid_mask, loss_weights, tuple(teacher_revisions)
+    first = indexed_inputs[0][1]
+    for original_indices, distillation in indexed_inputs:
+        width = distillation.valid_mask.shape[1]
+        if width > shape[1]:
+            raise ValueError("teacher evidence is wider than the destination response batch")
+        indices = torch.tensor(original_indices, dtype=torch.long)
+        if len(indices) != distillation.valid_mask.shape[0]:
+            raise ValueError("distillation row indices must match their learner input")
+        valid_mask[indices, :width] = distillation.valid_mask
+        loss_weights[indices, :width] = distillation.loss_weights
 
-
-def _assemble_objective_payload(
-    work: RoutedTeacherScoringWork,
-    scored_partitions: tuple[ScoredDistillationBatch, ...],
-    shape: tuple[int, int],
-    valid_mask: torch.Tensor,
-    loss_weights: torch.Tensor,
-) -> DistillationInput:
-    first = scored_partitions[0].distillation
     if isinstance(first, SampledReverseKLInput):
-        if not all(isinstance(scored.distillation, SampledReverseKLInput) for scored in scored_partitions):
+        if not all(isinstance(distillation, SampledReverseKLInput) for _, distillation in indexed_inputs):
             raise ValueError("routed teacher partitions must return one distillation objective kind")
         teacher_logprobs = torch.full(shape, torch.nan, dtype=torch.float32)
-        for partition, scored in zip(work.partitions, scored_partitions, strict=True):
-            payload = cast(SampledReverseKLInput, scored.distillation)
-            indices = torch.tensor(partition.original_indices, dtype=torch.long)
+        for original_indices, distillation in indexed_inputs:
+            payload = cast(SampledReverseKLInput, distillation)
+            indices = torch.tensor(original_indices, dtype=torch.long)
             teacher_logprobs[indices, : payload.valid_mask.shape[1]] = payload.teacher_action_log_probs
         return SampledReverseKLInput(teacher_logprobs, valid_mask, loss_weights)
 
     if not isinstance(first, SparseForwardKLInput) or not all(
-        isinstance(scored.distillation, SparseForwardKLInput) for scored in scored_partitions
+        isinstance(distillation, SparseForwardKLInput) for _, distillation in indexed_inputs
     ):
         raise ValueError("routed teacher partitions must return one distillation objective kind")
-    payloads = tuple(cast(SparseForwardKLInput, scored.distillation) for scored in scored_partitions)
+    payloads = tuple(cast(SparseForwardKLInput, distillation) for _, distillation in indexed_inputs)
     topk_values = {payload.teacher_topk_indices.shape[-1] for payload in payloads}
     if len(topk_values) != 1:
         raise ValueError("routed sparse teacher partitions must use one top-K width")
@@ -172,8 +164,8 @@ def _assemble_objective_payload(
     teacher_indices = torch.full((*shape, topk), INVALID_TOPK_INDEX, dtype=torch.long)
     teacher_logprobs = torch.full((*shape, topk), torch.nan, dtype=torch.float32)
     retained_mass = torch.full(shape, torch.nan, dtype=torch.float32)
-    for partition, payload in zip(work.partitions, payloads, strict=True):
-        indices = torch.tensor(partition.original_indices, dtype=torch.long)
+    for (original_indices, _), payload in zip(indexed_inputs, payloads, strict=True):
+        indices = torch.tensor(original_indices, dtype=torch.long)
         width = payload.valid_mask.shape[1]
         teacher_indices[indices, :width] = payload.teacher_topk_indices
         teacher_logprobs[indices, :width] = payload.teacher_topk_logprobs
@@ -328,12 +320,19 @@ class TeacherEvidenceCoordinator:
     ) -> RoutedScoredDistillationBatch:
         """Restore independently scored partitions to the original mixed-batch coordinates."""
         shape = _routed_assembly_shape(work, scored_partitions)
-        valid_mask, loss_weights, teacher_revisions = _assemble_common_tensors(work, scored_partitions, shape)
-        distillation = _assemble_objective_payload(work, scored_partitions, shape, valid_mask, loss_weights)
+        teacher_revisions = [""] * shape[0]
+        indexed_inputs = []
+        for partition, scored in zip(work.partitions, scored_partitions, strict=True):
+            if scored.evidence.trajectory_ids != partition.work.request.trajectory_ids:
+                raise ValueError("scored teacher partition does not match its routed trajectories")
+            indexed_inputs.append((partition.original_indices, scored.distillation))
+            for index in partition.original_indices:
+                teacher_revisions[index] = scored.evidence.teacher_revision
+        distillation = assemble_distillation_inputs(indexed_inputs, shape)
         return RoutedScoredDistillationBatch(
             trajectory_ids=work.trajectory_ids,
             routes=work.routes,
-            teacher_revisions=teacher_revisions,
+            teacher_revisions=tuple(teacher_revisions),
             plan_version=work.plan_version,
             evidence=tuple(scored.evidence for scored in scored_partitions),
             distillation=distillation,
@@ -410,7 +409,14 @@ class AsyncTeacherQueueLimits:
     workers: int
 
     def __post_init__(self) -> None:
-        if self.max_queued <= 0 or self.workers <= 0:
+        if (
+            isinstance(self.max_queued, bool)
+            or not isinstance(self.max_queued, int)
+            or self.max_queued <= 0
+            or isinstance(self.workers, bool)
+            or not isinstance(self.workers, int)
+            or self.workers <= 0
+        ):
             raise ValueError("teacher queue and worker limits must be positive")
 
 

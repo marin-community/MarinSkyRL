@@ -282,6 +282,13 @@ trainer:
 
     num_parallel_generation_workers: 768
 
+    # Bound teacher-scoring work independently for each logical teacher. Queue
+    # backpressure is applied when a rollout group is admitted, before learner
+    # batch assembly.
+    teacher_scoring:
+      max_queued_per_teacher: 8
+      workers_per_teacher: 1
+
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   seed: 42

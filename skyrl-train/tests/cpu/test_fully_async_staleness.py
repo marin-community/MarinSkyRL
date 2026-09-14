@@ -19,6 +19,7 @@ from skyrl_train.group_admission import (
     GroupAdvantageInvariant,
     TrainingGroupInvariantError,
 )
+from skyrl_train.trajectory_selection import BestOfNTrajectorySelector
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 
@@ -82,6 +83,9 @@ def _batch_assembly_state(
     trainer._step_time_history = collections.deque([1000.0], maxlen=5)
     trainer.group_admission_stall_timeout = 21_600
     trainer._active_generator_tasks = []
+    trainer.trajectory_selector = None
+    trainer._async_distillation_runtime = None
+    trainer._async_distillation_tickets = {}
     trainer._staleness_manager = _AsyncStalenessManager(
         max_concurrent_generation_groups=accepted,
         mini_batch_size=mini_batch_size,
@@ -102,6 +106,20 @@ def _batch_assembly_state(
         active_producers=1,
     )
     return trainer, queues
+
+
+class _TeacherTicket:
+    async def result(self):
+        raise AssertionError("batch admission must not wait for teacher evidence")
+
+
+class _RecordingAsyncDistillationRuntime:
+    def __init__(self):
+        self.submitted = asyncio.Queue()
+
+    async def submit_before_batch_assembly(self, trajectory_batch):
+        await self.submitted.put(trajectory_batch)
+        return _TeacherTicket()
 
 
 class _DatasetRows:
@@ -233,6 +251,45 @@ async def test_batch_assembly_waits_for_fresh_replacement():
     batch = await asyncio.wait_for(pending_batch, timeout=1)
 
     assert [group.uid for group in batch] == ["retry-me"]
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_submits_each_admitted_group_before_the_batch_is_complete():
+    trainer, queues = _batch_assembly_state(mini_batch_size=2, accepted=2)
+    runtime = _RecordingAsyncDistillationRuntime()
+    trainer._async_distillation_runtime = runtime
+    queues.completed.put_nowait(_generated_group("first", earliest_model_step=10))
+
+    pending_batch = asyncio.create_task(trainer._get_admitted_generation_group_mini_batch(queues))
+    first = await asyncio.wait_for(runtime.submitted.get(), timeout=1)
+
+    assert first["trajectory_ids"][0].instance_id == "first"
+    assert not pending_batch.done()
+
+    async with queues.condition:
+        queues.completed.put_nowait(_generated_group("second", earliest_model_step=10))
+        queues.condition.notify_all()
+    batch = await asyncio.wait_for(pending_batch, timeout=1)
+    second = await asyncio.wait_for(runtime.submitted.get(), timeout=1)
+
+    assert [group.uid for group in batch] == ["first", "second"]
+    assert second["trajectory_ids"][0].instance_id == "second"
+
+
+@pytest.mark.asyncio
+async def test_batch_assembly_scores_only_learner_selected_rows():
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
+    runtime = _RecordingAsyncDistillationRuntime()
+    trainer._async_distillation_runtime = runtime
+    trainer.trajectory_selector = BestOfNTrajectorySelector(2)
+    queues.completed.put_nowait(_generated_group("best", earliest_model_step=10, rewards=[0.25, 0.75]))
+
+    batch = await trainer._get_admitted_generation_group_mini_batch(queues)
+    submitted = await runtime.submitted.get()
+
+    assert [group.uid for group in batch] == ["best"]
+    assert submitted["response_ids"] == [[3]]
+    assert submitted["trajectory_ids"][0].repetition_id == 1
 
 
 @pytest.mark.asyncio

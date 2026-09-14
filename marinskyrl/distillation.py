@@ -173,7 +173,7 @@ def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None
             TeacherPlacement.ROTATING,
         }:
             raise ValueError(
-                "the synchronous distillation runtime currently supports pinned or rotating local_inference teachers"
+                "the local distillation runtime currently supports pinned or rotating local_inference teachers"
             )
         if teacher.resources is None:
             raise ValueError(f"teachers.{teacher.id}.resources is required for a local teacher runtime")

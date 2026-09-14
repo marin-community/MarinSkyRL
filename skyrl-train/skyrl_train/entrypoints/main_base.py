@@ -215,6 +215,10 @@ class BasePPOExp:
         logger.info("Inference engines ready: mode={} count={}", engine_mode, len(inference_engines))
         return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
 
+    def uses_fully_async_trainer(self) -> bool:
+        """Return whether this entrypoint schedules learner batches fully asynchronously."""
+        return False
+
     def _configure_log_level(self):
         """Configure loguru log level from trainer config."""
         import sys
@@ -495,11 +499,18 @@ class BasePPOExp:
 
         tokenizer = self.tokenizer
         from skyrl_train.local_teacher_runtime import (  # noqa: PLC0415
-            prepare_sync_distillation_runtime,
+            prepare_async_local_distillation_runtime,
+            prepare_local_distillation_runtime,
+            start_async_distillation_runtime,
             start_sync_distillation_runtime,
         )
 
-        prepared_distillation = prepare_sync_distillation_runtime(self.cfg, tokenizer)
+        prepare_distillation_runtime = (
+            prepare_async_local_distillation_runtime
+            if self.uses_fully_async_trainer()
+            else prepare_local_distillation_runtime
+        )
+        prepared_distillation = prepare_distillation_runtime(self.cfg, tokenizer)
         inference_engine_client = self.create_inference_engine_client()
 
         trajectory_runner: TrajectoryRunner = self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client)
@@ -526,9 +537,15 @@ class BasePPOExp:
                 self.cfg.trainer.strategy,
                 len(trainer.policy_model.actor_infos),
             )
-            distillation_runtime = asyncio.run(start_sync_distillation_runtime(self.cfg, prepared_distillation))
+            start_distillation_runtime = (
+                start_async_distillation_runtime if self.uses_fully_async_trainer() else start_sync_distillation_runtime
+            )
+            distillation_runtime = asyncio.run(start_distillation_runtime(self.cfg, prepared_distillation))
             if distillation_runtime is not None:
-                trainer.configure_sync_distillation(distillation_runtime)
+                if self.uses_fully_async_trainer():
+                    trainer.configure_async_distillation(distillation_runtime)
+                else:
+                    trainer.configure_sync_distillation(distillation_runtime)
         except BaseException:
             asyncio.run(trainer.shutdown())
             raise

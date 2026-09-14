@@ -14,6 +14,9 @@ import ray
 
 
 class AsyncPPOExp(BasePPOExp):
+    def uses_fully_async_trainer(self) -> bool:
+        return True
+
     def get_trainer(
         self,
         cfg,
@@ -49,7 +52,7 @@ class AsyncPPOExp(BasePPOExp):
 
         model_client = OpenAIHTTPModelClient(
             base_url=f"http://{cfg.generator.http_endpoint_host}:{cfg.generator.http_endpoint_port}",
-            model_name=cfg.trainer.policy.model.path,
+            model_name=inference_engine_client.model_name,
             tokenizer=tokenizer,
         )
         runner = SkyRLGymTrajectoryRunner(
