@@ -30,6 +30,7 @@ def _valid_config():
         "trainer.policy.optimizer_config.max_grad_norm": 0.5,
         "trainer.policy.optimizer_config.optimizer_kwargs": {"eps": 1e-8},
         "generator.weight_sync_backend": "gloo",
+        "generator.inference_engine_tensor_parallel_size": 1,
     }
     for path, value in updates.items():
         OmegaConf.update(cfg, path, value, force_add=True)
@@ -44,7 +45,7 @@ def test_supported_config_lowers_without_importing_the_concrete_learner():
     assert runtime.training_gpus_per_node == 1
     assert runtime.train_batch_size == 2
     assert runtime.publication_backend == "gloo"
-    assert runtime.inference_world_size == 4
+    assert runtime.inference_world_size == 1
 
 
 def test_h100_flash_attention_config_lowers():
@@ -77,6 +78,7 @@ def test_h100_flash_attention_config_lowers():
         ("trainer.policy.optimizer_config.weight_decay", 0.0, "optimizer_config.weight_decay=0.01"),
         ("trainer.policy.optimizer_config.max_grad_norm", 1.0, "optimizer_config.max_grad_norm=0.5"),
         ("generator.inference_engine_pipeline_parallel_size", 2, "pipeline parallel size 1"),
+        ("generator.inference_engine_tensor_parallel_size", 2, "tensor parallel size 1"),
         ("generator.sampling_params.temperature", 0.7, "sampling_params.temperature=1.0"),
     ],
 )
