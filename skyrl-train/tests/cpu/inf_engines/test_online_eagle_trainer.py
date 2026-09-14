@@ -393,7 +393,14 @@ def test_candidate_gate_enforces_declared_loss_and_agreement_tolerances() -> Non
 
 
 def test_candidate_state_must_equal_declared_serving_dtype() -> None:
-    model = torch.nn.Linear(2, 2, bias=False).to(dtype=torch.float32)
+    class Draft(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.owned = torch.nn.Linear(2, 2, bias=False)
+            self.frozen = torch.nn.Parameter(torch.ones(2), requires_grad=False)
+            self.register_buffer("vocabulary_map", torch.arange(2))
+
+    model = Draft().to(dtype=torch.float32)
 
     with pytest.raises(ValueError, match=r"dtype torch.float32, expected torch.bfloat16"):
         _candidate_state(model, serving_dtype=torch.bfloat16)
@@ -401,7 +408,8 @@ def test_candidate_state_must_equal_declared_serving_dtype() -> None:
     _convert_trainable_parameters(model, torch.bfloat16)
     state = _candidate_state(model, serving_dtype=torch.bfloat16)
 
-    assert state["weight"].dtype == torch.bfloat16
+    assert set(state) == {"owned.weight"}
+    assert state["owned.weight"].dtype == torch.bfloat16
 
 
 def test_optimizer_state_is_offloaded_before_candidate_evaluation() -> None:

@@ -1033,10 +1033,10 @@ def _evaluate(
 
 
 def _candidate_state(model: nn.Module, *, serving_dtype: torch.dtype) -> dict[str, torch.Tensor]:
+    trainable_names = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
     state = {}
     for name, value in model.state_dict().items():
-        target_owned = "embed_tokens" in name or name == "lm_head.weight" or name.startswith("verifier_")
-        if not target_owned:
+        if name in trainable_names:
             if value.is_floating_point() and value.dtype != serving_dtype:
                 raise ValueError(
                     f"Online EAGLE candidate tensor {name} has dtype {value.dtype}, expected {serving_dtype}"
