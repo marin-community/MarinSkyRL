@@ -268,7 +268,6 @@ class OnlineEagleEvaluation:
 class OnlineEagleUpdateResult:
     """Typed result envelope shared by DraftTrainer and its coordinator."""
 
-    active: bool
     accepted: bool
     step: int | None = None
     parent_draft_revision: str | None = None
@@ -1354,7 +1353,6 @@ class OnlineEagleTrainerRuntime:
                 max_agreement_decrease=max_agreement_decrease,
             )
             result = OnlineEagleUpdateResult(
-                active=True,
                 accepted=accepted,
                 step=job.step,
                 parent_draft_revision=manifest["draft_revision"],

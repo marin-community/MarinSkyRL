@@ -3,8 +3,8 @@
 # DraftTrainer actor runs on the extra node derived by the Iris request builder.
 # The exact target revision is supplied to the launcher, while the immutable
 # public draft is staged from Hugging Face. Every fourth step captures up to
-# 131,072 tokens for an asynchronous update. Candidates that finish within the
-# staleness bound and pass the holdout gate replace the served draft.
+# 131,072 tokens for an asynchronous update. Candidates that pass the holdout
+# gate become the accepted draft and refresh serving ranks at the next boundary.
 entrypoint: standard
 
 context_budget:

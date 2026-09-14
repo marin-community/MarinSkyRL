@@ -109,7 +109,6 @@ def test_draft_trainer_acceptance_immediately_advances_owned_lineage(tmp_path: P
             candidate.mkdir(parents=True)
             (candidate / "model.safetensors").write_bytes(b"weights")
             return OnlineEagleUpdateResult(
-                active=True,
                 accepted=True,
                 step=job.step,
                 parent_draft_revision=job.parent_draft_revision,
@@ -237,7 +236,6 @@ def test_draft_trainer_reports_training_failure_and_preserves_its_artifact(tmp_p
 
     assert update["transfer_manifest"] is None
     assert update["result"] == {
-        "active": True,
         "accepted": False,
         "step": 4,
         "error": "RuntimeError: training failed",

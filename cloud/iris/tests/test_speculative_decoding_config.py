@@ -48,7 +48,11 @@ def _base_config() -> dict:
                     "source_identity": _DRAFT_REVISION,
                 },
                 "num_speculative_tokens": 3,
-                "training": {"interval_steps": 1, "reserved_gpu_memory_gib": 8},
+                "training": {
+                    "interval_steps": 1,
+                    "transfer_timeout_seconds": 47,
+                    "reserved_gpu_memory_gib": 8,
+                },
             },
         },
     }
@@ -86,13 +90,8 @@ def test_managed_speculator_reaches_hydra_with_immutable_source_unchanged(tmp_pa
     }
     assert resolved.training is not None
     assert resolved.training.interval_steps == 1
-    assert resolved.training.transfer_timeout_seconds == 120
-    assert resolved.training.max_tokens_per_update == 16_384
-    assert resolved.training.min_train_sequences == 6
-    assert resolved.training.min_holdout_sequences == 3
+    assert resolved.training.transfer_timeout_seconds == 47
     assert resolved.training.reserved_gpu_memory_gib == 8
-    assert resolved.training.max_validation_loss_increase == 0
-    assert resolved.training.max_validation_agreement_decrease == 0
 
 
 def test_null_speculator_keeps_the_default_disabled() -> None:

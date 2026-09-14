@@ -136,18 +136,19 @@ from skyrl_train.hf_export_schema import (
 )
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
-
-
-def _single_active_online_eagle_result(results: list[Any], operation: str) -> dict[str, Any]:
-    """Return the one DP-rank result that owns online EAGLE state."""
-    active = [item for engine_results in results for item in engine_results if item.get("active", False)]
-    if len(active) != 1:
-        raise RuntimeError(f"Expected one active online EAGLE rank for {operation}, got {len(active)}")
-    return active[0]
+_DRAFT_TRANSFER_WAIT_GRACE_SECONDS = 5
 
 
 def _active_online_eagle_results(results: list[Any]) -> list[dict[str, Any]]:
     return [item for engine_results in results for item in engine_results if item.get("active", False)]
+
+
+def _single_active_online_eagle_result(results: list[Any], operation: str) -> dict[str, Any]:
+    """Return the one DP-rank result that owns online EAGLE state."""
+    active = _active_online_eagle_results(results)
+    if len(active) != 1:
+        raise RuntimeError(f"Expected one active online EAGLE rank for {operation}, got {len(active)}")
+    return active[0]
 
 
 def _validate_online_eagle_transfer_ranks(
@@ -1047,7 +1048,7 @@ class RayPPOTrainer:
                             ),
                             broadcast_ref,
                         ),
-                        timeout=training.transfer_timeout_seconds + 5,
+                        timeout=training.transfer_timeout_seconds + _DRAFT_TRANSFER_WAIT_GRACE_SECONDS,
                     )
                 except TimeoutError:
                     raise RuntimeError(
@@ -1190,7 +1191,7 @@ class RayPPOTrainer:
                         ),
                         broadcast_ref,
                     ),
-                    timeout=training.transfer_timeout_seconds + 5,
+                    timeout=training.transfer_timeout_seconds + _DRAFT_TRANSFER_WAIT_GRACE_SECONDS,
                 )
             except TimeoutError:
                 raise RuntimeError(

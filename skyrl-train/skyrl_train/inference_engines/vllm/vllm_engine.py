@@ -409,10 +409,7 @@ class WorkerWrap:
 
     def install_online_eagle_speculator(self, candidate_dir, source_rank):
         """Install a complete candidate in place on every inference rank."""
-        result = self.model_runner.install_online_eagle_speculator(candidate_dir, source_rank)
-        if self.model_runner.parallel_config.data_parallel_rank == source_rank:
-            self._online_eagle_served_candidate_dir = candidate_dir
-        return result
+        return self.model_runner.install_online_eagle_speculator(candidate_dir, source_rank)
 
     def init_draft_transfer_communicator(
         self,
@@ -533,6 +530,8 @@ class WorkerWrap:
                     tensors,
                 )
             except Exception as error:
+                # The draft is a performance-only cache. A later accepted state
+                # overwrites its complete mutable tensor set.
                 return {
                     "active": False,
                     "worker_rank": self.model_runner.parallel_config.data_parallel_rank,
@@ -540,7 +539,6 @@ class WorkerWrap:
                     "draft_revision": manifest.revision,
                     "error": f"{type(error).__name__}: {error}",
                 }
-            self._online_eagle_active_transfer_manifest = manifest.to_mapping()
         finally:
             tensors = None
         return {**result, "transfer_rank": self._draft_transfer_rank}
@@ -580,11 +578,6 @@ class WorkerWrap:
             return {"active": False, "worker_rank": worker_rank}
         requested_root = Path(scratch_root).resolve()
         remove_online_eagle_scratch(requested_root)
-        served_candidate_dir = getattr(self, "_online_eagle_served_candidate_dir", None)
-        if served_candidate_dir is not None:
-            served_candidate = Path(served_candidate_dir).resolve()
-            if served_candidate == requested_root or served_candidate.is_relative_to(requested_root):
-                self._online_eagle_served_candidate_dir = None
         return {"active": True, "worker_rank": worker_rank, "path": str(requested_root)}
 
     def init_weight_update_communicator(
@@ -1241,9 +1234,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         self._tp_size = kwargs.get("tensor_parallel_size", 1)
         self._pp_size = kwargs.get("pipeline_parallel_size", 1)
         self._dp_size = kwargs.get("data_parallel_size", 1)
-        self._dp_rank = kwargs.get("data_parallel_rank", 0)
         self._is_lora = kwargs.get("enable_lora", False)
-        self._online_eagle_active_draft_revision = None
 
         if "rope_scaling" in kwargs:
             kwargs.pop("rope_scaling")
@@ -1454,16 +1445,6 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             engine.collective_rpc,
             "init_weight_update_communicator",
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
-        )
-
-    async def init_draft_transfer_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, timeout_seconds
-    ):
-        """Join every local worker to the dedicated draft-transfer group."""
-        return await asyncio.to_thread(
-            self._get_engine().collective_rpc,
-            "init_draft_transfer_communicator",
-            args=(master_addr, master_port, rank_offset, world_size, group_name, backend, timeout_seconds),
         )
 
     async def _load_lora_from_disk(self, lora_path: str):
@@ -2250,8 +2231,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             args=(transfer_manifest,),
         )
         active = all(result.get("active", False) for result in worker_results)
-        if active:
-            self._online_eagle_active_draft_revision = manifest.revision
         response = {
             "active": active,
             "draft_revision": manifest.revision,
@@ -2280,7 +2259,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         revisions = {item["draft_revision"] for item in worker_results if item.get("active", False)}
         if len(revisions) != 1:
             raise RuntimeError(f"Restored online EAGLE candidate reported inconsistent revisions: {revisions}")
-        self._online_eagle_active_draft_revision = revisions.pop()
         return worker_results
 
     async def cleanup_online_eagle_scratch(self, scratch_root: str):

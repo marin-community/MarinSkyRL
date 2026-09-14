@@ -47,12 +47,6 @@ def _positive_integer(value: object, field: str) -> int:
     return value
 
 
-def _nonnegative_integer(value: object, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise SpeculativeDecodingConfigError(f"{field} must be a nonnegative integer, got {value!r}")
-    return value
-
-
 def _positive_number(value: object, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
         raise SpeculativeDecodingConfigError(f"{field} must be a positive finite number, got {value!r}")

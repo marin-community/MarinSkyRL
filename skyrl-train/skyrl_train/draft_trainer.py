@@ -198,7 +198,6 @@ class DraftTrainer:
                 failure_artifact_path = job.failure_artifact_path
                 preservation_error = f"{type(failure_error).__name__}: {failure_error}"
             result = OnlineEagleUpdateResult(
-                active=True,
                 accepted=False,
                 step=job.step,
                 error=f"{type(error).__name__}: {error}",
