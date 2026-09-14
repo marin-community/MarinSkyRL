@@ -226,6 +226,13 @@ def _sink(config, publisher=None) -> TrajectorySink:
     return sink
 
 
+def test_retention_config_uses_expanded_default_byte_limits():
+    config = parse_trajectory_retention_config({"enabled": False})
+
+    assert config.max_bytes_per_step == 800 * 1024 * 1024
+    assert config.max_bytes_per_run == 25 * 1024 * 1024 * 1024
+
+
 def test_normalized_output_produces_complete_core_trace_schema():
     records = build_trajectory_records(
         _input(),
@@ -465,6 +472,28 @@ def test_retention_is_deterministic_and_enforces_compressed_byte_bound_before_wr
     assert first["generate/trajectory_retention/dropped_by_bounds"] == 3.0
     assert second == first
     assert _records(tmp_path) == []
+
+
+def test_unlimited_byte_bounds_retain_every_selected_record(tmp_path):
+    input_batch, output = _select_batch_rows(range(256))
+    trajectory_ids = [TrajectoryID(instance_id=f"sample-{index}", repetition_id=0) for index in range(256)]
+    input_batch["trajectory_ids"] = trajectory_ids
+    output["trajectory_ids"] = trajectory_ids
+    config = _config(
+        tmp_path,
+        sample_count_per_step=256,
+        always_retain_failures=False,
+        always_retain_non_terminating=False,
+        always_retain_loops=False,
+        max_bytes_per_step=None,
+        max_bytes_per_run=None,
+    )
+
+    metrics = _sink(config).retain(input_batch, output)
+
+    assert metrics["generate/trajectory_retention/written"] == 256.0
+    assert metrics["generate/trajectory_retention/dropped_by_bounds"] == 0.0
+    assert len(_records(tmp_path)) == 256
 
 
 def test_retention_publishes_a_full_training_batch_as_one_archive(tmp_path):

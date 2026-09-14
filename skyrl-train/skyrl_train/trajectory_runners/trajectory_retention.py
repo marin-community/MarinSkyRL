@@ -909,15 +909,17 @@ class TrajectorySink:
 
         first = selected[0].record
         step_key = self._step_key(first)
-        max_payload_bytes = min(
-            self.config.max_bytes_per_step - ledger.step_bytes.get(step_key, 0),
-            self.config.max_bytes_per_run - ledger.total_bytes,
-        )
+        remaining_limits = []
+        if self.config.max_bytes_per_step is not None:
+            remaining_limits.append(self.config.max_bytes_per_step - ledger.step_bytes.get(step_key, 0))
+        if self.config.max_bytes_per_run is not None:
+            remaining_limits.append(self.config.max_bytes_per_run - ledger.total_bytes)
+        max_payload_bytes = min(remaining_limits) if remaining_limits else None
         retained = []
         retained_payload_bytes = 0
         for selected_record in selected:
             candidate_bytes = retained_payload_bytes + len(selected_record.payload)
-            if candidate_bytes > max_payload_bytes:
+            if max_payload_bytes is not None and candidate_bytes > max_payload_bytes:
                 break
             retained.append(selected_record)
             retained_payload_bytes = candidate_bytes

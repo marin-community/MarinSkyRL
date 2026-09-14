@@ -364,8 +364,9 @@ generator:
     accepted_stop_reasons: ${generator.trajectory_reward_shaping.non_termination.accepted_stop_reasons}
     reward_below: null
     reward_above: null
-    max_bytes_per_step: 8388608
-    max_bytes_per_run: 268435456
+    # Set either bound to null to make that dimension unlimited.
+    max_bytes_per_step: 838860800
+    max_bytes_per_run: 26843545600
     required: false
     publish_timeout_seconds: 120
     shutdown_timeout_seconds: 30
