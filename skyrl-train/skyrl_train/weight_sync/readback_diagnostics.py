@@ -3,6 +3,7 @@
 import hashlib
 import itertools
 import json
+import logging
 import os
 import socket
 import time
@@ -11,6 +12,8 @@ from pathlib import Path
 import torch
 from skyrl_train.io.io import read_bytes, stat_object, write_bytes_atomic
 
+
+logger = logging.getLogger(__name__)
 
 HASH_CHUNK_BYTES = 1 << 20
 RECEIPT_CHUNK_BYTES = 3072
@@ -85,29 +88,51 @@ def network_log_readback() -> dict:
 def _verify_written_object(uri: str, payload: bytes) -> dict:
     """Establish that the stored object is exactly the payload, preferring not to move it.
 
-    A single-part S3 object's ETag is the MD5 of exactly the bytes stored, so comparing
-    it against a locally computed MD5 proves what re-reading the object proves, for the
-    cost of a HEAD. These receipts are megabytes -- 6.13 MB median at P32/I8 -- and at
-    that size the re-read costs about three times the write and sits on the trainer's
-    critical path after resume.
+    A single-part S3 object's ETag is the MD5 of exactly the bytes stored, so comparing it
+    against a locally computed MD5 proves what re-reading the object proves, for the cost of
+    a HEAD. These receipts are megabytes -- 6.13 MB median at P32/I8 -- and at that size the
+    re-read costs about three times the write, on the trainer's critical path after resume.
 
-    The cheap path can only ever accelerate, never weaken, the claim. Anything that makes
-    the ETag unusable -- a local or non-S3 path, a multipart or server-side-encrypted
-    object whose ETag is not a payload digest, a missing ETag, a size disagreement, or a
-    digest that simply does not match -- falls through to the full re-read, which remains
-    the authority. A sampled fraction is re-read in full regardless, so the cheap verify
-    is audited against the expensive one rather than trusted outright.
+    The cheap path can only accelerate, never weaken, the claim: every condition that makes
+    the ETag unusable falls through to the full re-read, which remains the authority, and a
+    sampled fraction is re-read in full regardless.
+
+    Each fallback is classified and reported, because they do not mean the same thing. A
+    non-S3 store and the sampling schedule are by design and say nothing. A multipart or
+    absent ETag means the optimisation is off for a structural reason worth knowing about at
+    this scale. A size or digest disagreement means the store holds something other than what
+    was written, which the full re-read then adjudicates -- and if the re-read passes, the
+    ETag itself is untrustworthy on this store, which is a louder signal than a slow write.
     """
     sampled = next(_RECEIPTS_WRITTEN) % FULL_READBACK_EVERY == 0
-    verify = "full-readback-sampled" if sampled else "full-readback"
-    if not sampled and uri.startswith("s3://"):
+    detail: dict = {}
+    reason = None
+    digest = None
+
+    if sampled:
+        verify = "full-readback-sampled"          # by design, audits the cheap path
+    elif not uri.startswith("s3://"):
+        verify, reason = "full-readback", "non-s3-store"   # by design, no ETag contract
+    else:
         digest = hashlib.md5(payload, usedforsecurity=False).hexdigest()
         try:
             detail = stat_object(uri)
         except Exception as error:  # metadata is an optimisation; never fail the write on it
-            detail = {"error": f"{type(error).__name__}: {error}"}
+            detail = {}
+            reason = f"metadata-unavailable:{type(error).__name__}"
         etag = str(detail.get("ETag", "")).strip('"')
-        if etag and "-" not in etag and detail.get("size") == len(payload) and etag == digest:
+        stored = detail.get("size")
+        if reason is not None:
+            pass
+        elif not etag:
+            reason = "etag-absent"
+        elif "-" in etag:
+            reason = "etag-multipart"
+        elif stored != len(payload):
+            reason = "stored-size-differs"
+        elif etag != digest:
+            reason = "etag-digest-differs"
+        if reason is None:
             return {
                 "verify": "etag-md5",
                 "etag": etag,
@@ -115,20 +140,34 @@ def _verify_written_object(uri: str, payload: bytes) -> dict:
                 "full_readback_every": FULL_READBACK_EVERY,
                 "verify_scope": "stored-object digest equals written payload; bytes not transferred",
             }
-        # A mismatch here is not yet a failure: the ETag may simply not be a payload
-        # digest. Record why the cheap path was abandoned so a systematic cause is
-        # visible in the receipts instead of silently costing a full re-read forever.
         verify = "full-readback-after-etag-unusable"
-        etag_detail = {"etag": etag or None, "stored_bytes": detail.get("size"), "md5": digest}
-    else:
-        etag_detail = {}
+        detail = {"etag": etag or None, "stored_bytes": stored, "md5": digest, "fallback_reason": reason}
+        # Structural reasons cost speed and are worth surfacing once they appear at scale;
+        # content reasons say the store disagrees about the bytes and are louder.
+        if reason in ("etag-absent", "etag-multipart") or reason.startswith("metadata-unavailable"):
+            logger.warning(
+                "Receipt verify fell back to a full read-back (%s) for %s: the cheap digest check is "
+                "unavailable on this object, so every receipt now costs a full transfer. "
+                "Objects above the client's multipart threshold have no payload-MD5 ETag.",
+                reason, uri,
+            )
+        else:
+            logger.error(
+                "Receipt verify fell back to a full read-back (%s) for %s: the store reports "
+                "%s bytes and ETag %r against a written %s bytes and MD5 %s. The full re-read "
+                "below is authoritative; if it passes, this store's ETag is not a payload digest "
+                "and the cheap path should be disabled rather than retried per object.",
+                reason, uri, stored, etag or None, len(payload), digest,
+            )
+
     if read_bytes(uri) != payload:
         raise ValueError("Durable native readback differs from the original receipt")
     return {
         "verify": verify,
         "full_readback_every": FULL_READBACK_EVERY,
         "verify_scope": "stored object re-read in full and compared byte for byte",
-        **etag_detail,
+        **({"fallback_reason": reason} if reason and not detail else {}),
+        **detail,
     }
 
 

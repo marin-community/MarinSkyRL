@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import logging
 import itertools
 import json
 import io
@@ -500,3 +501,61 @@ def test_deferred_rows_round_trip_as_payloads_including_the_failure_path(monkeyp
     assert json.loads(stored[written["uri"]]) == row
     with pytest.raises(TypeError):
         ShardTrainingPublication.capture(stub, rows[0])
+
+
+@pytest.mark.parametrize(
+    "etag_of,reason,level",
+    [
+        pytest.param(lambda p: hashlib.md5(p).hexdigest() + "-3", "etag-multipart", "WARNING", id="multipart"),
+        pytest.param(lambda p: "", "etag-absent", "WARNING", id="absent"),
+        pytest.param(lambda p: hashlib.sha256(p).hexdigest(), "etag-digest-differs", "ERROR", id="digest-differs"),
+    ],
+)
+def test_each_fallback_is_classified_and_reported_at_its_own_level(monkeypatch, caplog, etag_of, reason, level):
+    _object_store(monkeypatch, etag_of=etag_of)
+    with caplog.at_level(logging.WARNING, logger="skyrl_train.weight_sync.readback_diagnostics"):
+        receipt = persist_readback("s3://bucket/prefix", "stage", {"rows": [1, 2, 3]})
+    assert receipt["verify"] == "full-readback-after-etag-unusable"
+    assert receipt["fallback_reason"] == reason
+    assert [r.levelname for r in caplog.records] == [level]
+    assert reason in caplog.records[0].getMessage()
+
+
+def test_a_size_disagreement_is_reported_as_a_content_problem(monkeypatch, caplog):
+    from skyrl_train.weight_sync import readback_diagnostics as module
+
+    _object_store(monkeypatch)
+    monkeypatch.setattr(module, "stat_object", lambda p: {"ETag": '"' + "0" * 32 + '"', "size": 1})
+    with caplog.at_level(logging.WARNING, logger="skyrl_train.weight_sync.readback_diagnostics"):
+        receipt = persist_readback("s3://bucket/prefix", "stage", {"rows": [1]})
+    assert receipt["fallback_reason"] == "stored-size-differs"
+    assert caplog.records[0].levelname == "ERROR"
+
+
+def test_metadata_failure_is_a_warning_not_an_error(monkeypatch, caplog):
+    def boom(path):
+        raise TimeoutError("head timed out")
+
+    _object_store(monkeypatch, on_stat=boom)
+    with caplog.at_level(logging.WARNING, logger="skyrl_train.weight_sync.readback_diagnostics"):
+        receipt = persist_readback("s3://bucket/prefix", "stage", {"rows": [1]})
+    assert receipt["fallback_reason"] == "metadata-unavailable:TimeoutError"
+    assert caplog.records[0].levelname == "WARNING"
+
+
+def test_by_design_fallbacks_are_silent(monkeypatch, caplog, tmp_path):
+    # A non-S3 store and the sampling schedule are expected, not degradations.
+    _object_store(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="skyrl_train.weight_sync.readback_diagnostics"):
+        local = persist_readback(str(tmp_path), "stage", {"rows": [1]})
+        first = persist_readback("s3://bucket/prefix", "sampled", {"rows": [2]})
+    assert local["fallback_reason"] == "non-s3-store"
+    assert first["verify"] in ("etag-md5", "full-readback-sampled")
+    assert caplog.records == []
+
+
+def test_the_cheap_path_logs_nothing(monkeypatch, caplog):
+    _object_store(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="skyrl_train.weight_sync.readback_diagnostics"):
+        receipt = persist_readback("s3://bucket/prefix", "stage", {"rows": list(range(8))})
+    assert receipt["verify"] == "etag-md5" and caplog.records == []
