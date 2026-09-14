@@ -11,10 +11,7 @@ import os
 import time
 from pathlib import Path
 
-import equinox as eqx
-import haliax as hax
 import jax
-import jax.numpy as jnp
 import numpy as np
 from haliax import Axis
 from levanter.models.snowball import SnowballConfig, SnowballLMHeadModel
@@ -29,8 +26,6 @@ from skyrl_train.learner import (
 from skyrl_train.learners.levanter_config import LevanterSnowballRuntimeConfig
 from skyrl_train.learners.levanter_snowball import (
     LevanterSnowballLearner,
-    _all_next_token_log_probs,
-    prepare_snowball_batch,
 )
 
 
@@ -132,24 +127,6 @@ def _difference(left: np.ndarray, right: np.ndarray, selected: np.ndarray) -> di
     }
 
 
-def _training_forward_scores(learner: LevanterSnowballLearner, tokens: np.ndarray) -> np.ndarray:
-    batch_size = tokens.shape[0]
-    Batch = Axis("batch", batch_size)
-    Pos = Axis("position", tokens.shape[1])
-    named_tokens = hax.named(jnp.asarray(tokens, dtype=jnp.int32), (Batch, Pos))
-    compute_model = learner._trainer.mp.cast_to_compute(learner._trainer_state.model)
-
-    def objective(model):
-        scores = _all_next_token_log_probs(model, named_tokens, temperature=1.0)
-        return jnp.mean(scores), scores
-
-    training_forward = eqx.filter_jit(eqx.filter_value_and_grad(objective, has_aux=True))
-    with learner._trainer_config.use_device_mesh(), hax.axis_mapping(learner._trainer.compute_axis_mapping):
-        (_loss, scores), gradients = training_forward(compute_model)
-        jax.block_until_ready((scores, gradients))
-    return np.asarray(jax.device_get(scores), dtype=np.float32)
-
-
 def main() -> None:
     if jax.default_backend() != "gpu":
         raise RuntimeError(f"expected GPU backend, got {jax.default_backend()}")
@@ -180,24 +157,8 @@ def main() -> None:
         score_two = learner.compute_log_probs(batch).policy_log_probs
         repeat_seconds = time.perf_counter() - repeat_started
 
-        prepared_batch = prepare_snowball_batch(batch, SEQUENCE_LENGTH)
-        microbatch_tokens = prepared_batch.tokens[:GPU_COUNT]
-        training_started = time.perf_counter()
-        training_dense = _training_forward_scores(learner, microbatch_tokens)
-        training_seconds = time.perf_counter() - training_started
-        training_scores = np.take_along_axis(
-            training_dense,
-            prepared_batch.response_positions[:GPU_COUNT],
-            axis=1,
-        )
-        training_scores = np.where(prepared_batch.response_mask[:GPU_COUNT], training_scores, 0.0)
         selected = batch.response_mask.astype(bool)
         score_repeat = _difference(score_one, score_two, selected)
-        score_training = _difference(
-            score_one[:GPU_COUNT],
-            training_scores,
-            selected[:GPU_COUNT],
-        )
         advantages = np.where(
             (np.arange(TRAIN_BATCH_SIZE)[:, None] + np.arange(RESPONSE_LENGTH)[None, :]) % 2,
             -1.0,
@@ -206,6 +167,10 @@ def main() -> None:
         update_started = time.perf_counter()
         update = learner.update(UpdateRequest(batch, advantages, score_one, 0, None, 0, None))
         update_seconds = time.perf_counter() - update_started
+        score_training = {
+            "max_abs_diff": update.metrics["preupdate_logprob_max_abs_diff"],
+            "mean_abs_diff": update.metrics["preupdate_logprob_mean_abs_diff"],
+        }
 
         evidence = {
             "topology": {
@@ -227,7 +192,6 @@ def main() -> None:
             "update_metrics": update.metrics,
             "timings": {
                 "repeated_score_seconds": repeat_seconds,
-                "training_forward_seconds": training_seconds,
                 "update_seconds": update_seconds,
             },
             "limits": {

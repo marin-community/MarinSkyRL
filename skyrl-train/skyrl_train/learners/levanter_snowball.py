@@ -33,7 +33,7 @@ from levanter.compat.hf_checkpoints import HFCheckpointConverter
 from levanter.distributed import DistributedConfig
 from levanter.grug.loss import BlockSizes, fused_linear_softmax_cross_entropy_loss
 from levanter.grug.sharding import compact_grug_mesh
-from levanter.metrics import Metric
+from levanter.metrics import Metric, ReductionType
 from levanter.metrics import fold as fold_metric
 from levanter.models.snowball import GrugMoeHfConfig, SnowballConfig, SnowballLMHeadModel
 from levanter.optim.config import AdamConfig
@@ -216,6 +216,11 @@ class _SnowballTrainer(Trainer):
             (loss, metrics), gradients = grad_fn(model, *batch, **batch_kwargs)
         return loss, gradients, metrics
 
+    def train_step_with_metrics(self, state, *batch):
+        """Run one compiled step and retain the differentiated loss metrics."""
+
+        return self._jit_train_step_fn_no_hook(state, batch, {})
+
 
 def _resolve_local_model_snapshot(model_path: str, revision: str | None) -> str:
     """Resolve a staged Hub commit before Levanter opens any weight shard."""
@@ -344,6 +349,20 @@ def _regular_grpo_loss(
     surrogate = ratio * advantages.array
     clipped_surrogate = jnp.clip(ratio, 1.0 - clip_low, 1.0 + clip_high) * advantages.array
     token_loss = -jnp.minimum(surrogate, clipped_surrogate)
+    selected = loss_mask.array > 0
+    valid_count = jnp.sum(selected)
+    deviations = jnp.abs(log_probs - objective_old_log_probs)
+    clipped_tokens = clipped_surrogate < surrogate
+    clipped_low_tokens = (ratio < 1.0 - clip_low) & (advantages.array < 0)
+    clipped_high_tokens = (ratio > 1.0 + clip_high) & (advantages.array > 0)
+
+    def selected_mean(values: jax.Array) -> Metric:
+        return Metric(
+            _value=jnp.sum(jnp.where(selected, values, 0.0)),
+            _count=valid_count,
+            reduction=ReductionType.MEAN,
+        )
+
     # E6 used one sequence per GPU microbatch. MSRL's token_mean therefore
     # averages each sequence's masked token mean across devices and gradient
     # accumulation steps. Preserve that reduction when Levanter sees the full
@@ -352,7 +371,18 @@ def _regular_grpo_loss(
     per_sequence_count = jnp.sum(loss_mask.array, axis=-1)
     per_sequence_loss = jnp.sum(masked_token_loss, axis=-1) / jnp.maximum(per_sequence_count, 1.0)
     policy_loss = jnp.mean(per_sequence_loss)
-    return policy_loss, {"policy_loss": policy_loss}
+    return policy_loss, {
+        "policy_loss": policy_loss,
+        "preupdate_logprob_mean_abs_diff": selected_mean(deviations),
+        "preupdate_logprob_max_abs_diff": Metric.from_value(
+            jnp.max(jnp.where(selected, deviations, 0.0)),
+            ReductionType.MAX,
+        ),
+        "ppo_ratio_mean": selected_mean(ratio),
+        "ppo_clip_ratio": selected_mean(clipped_tokens),
+        "ppo_clip_ratio_low": selected_mean(clipped_low_tokens),
+        "ppo_clip_ratio_high": selected_mean(clipped_high_tokens),
+    }
 
 
 def _router_biases(model: SnowballLMHeadModel) -> tuple[jax.Array, ...]:
@@ -675,33 +705,6 @@ class LevanterSnowballLearner:
 
         prepared = prepare_snowball_batch(request.batch, self._learner_config.max_sequence_length)
         try:
-            validation_start = time.perf_counter()
-            preupdate_dense = self._score_prepared(prepared)
-            preupdate = prepared.response_values(preupdate_dense)
-            selected = request.batch.loss_mask > 0
-            deviations = np.abs(preupdate[selected] - request.old_policy_log_probs[selected])
-            ratios = np.exp(
-                np.clip(
-                    preupdate[selected] - request.old_policy_log_probs[selected],
-                    -LOG_PROB_DELTA_CLIP,
-                    LOG_PROB_DELTA_CLIP,
-                )
-            )
-            selected_advantages = request.advantages[selected]
-            unclipped_surrogate = ratios * selected_advantages
-            clipped_surrogate = (
-                np.clip(
-                    ratios,
-                    1.0 - self._learner_config.clip_low,
-                    1.0 + self._learner_config.clip_high,
-                )
-                * selected_advantages
-            )
-            clipped_tokens = clipped_surrogate < unclipped_surrogate
-            clipped_low_tokens = (ratios < 1.0 - self._learner_config.clip_low) & (selected_advantages < 0)
-            clipped_high_tokens = (ratios > 1.0 + self._learner_config.clip_high) & (selected_advantages > 0)
-            validation_seconds = time.perf_counter() - validation_start
-
             dense_old = prepared.dense_response_values(request.old_policy_log_probs)
             dense_advantages = prepared.dense_response_values(request.advantages)
             dense_loss_mask = prepared.dense_response_values(request.batch.loss_mask)
@@ -721,15 +724,15 @@ class LevanterSnowballLearner:
             before_probe = _parameter_probe(self._trainer_state.model)
             before_biases = _router_bias_host_copy(self._trainer_state.model)
             update_start = time.perf_counter()
-            info = self._trainer.train_step(
+            info = self._trainer.train_step_with_metrics(
                 self._trainer_state,
                 tokens,
                 old_log_probs,
                 advantages,
                 loss_mask,
             )
-            self._trainer_state = info.state
-            jax.block_until_ready(info.state)
+            self._trainer_state = info.new_state
+            jax.block_until_ready(info)
             update_seconds = time.perf_counter() - update_start
             parameter_probe_delta_l2 = float(np.linalg.norm(_parameter_probe(self._trainer_state.model) - before_probe))
             after_biases = _router_bias_host_copy(self._trainer_state.model)
@@ -748,15 +751,14 @@ class LevanterSnowballLearner:
                 "final_loss": float(info.loss),
                 "policy_loss": float(info.loss),
                 "valid_token_weight": valid_weight,
-                "preupdate_logprob_mean_abs_diff": float(np.mean(deviations)),
-                "preupdate_logprob_max_abs_diff": float(np.max(deviations)),
-                "ppo_ratio_mean": float(np.mean(ratios)),
-                "ppo_clip_ratio": float(np.mean(clipped_tokens)),
-                "ppo_clip_ratio_low": float(np.mean(clipped_low_tokens)),
-                "ppo_clip_ratio_high": float(np.mean(clipped_high_tokens)),
+                "preupdate_logprob_mean_abs_diff": float(info.loss_metrics["train/preupdate_logprob_mean_abs_diff"]),
+                "preupdate_logprob_max_abs_diff": float(info.loss_metrics["train/preupdate_logprob_max_abs_diff"]),
+                "ppo_ratio_mean": float(info.loss_metrics["train/ppo_ratio_mean"]),
+                "ppo_clip_ratio": float(info.loss_metrics["train/ppo_clip_ratio"]),
+                "ppo_clip_ratio_low": float(info.loss_metrics["train/ppo_clip_ratio_low"]),
+                "ppo_clip_ratio_high": float(info.loss_metrics["train/ppo_clip_ratio_high"]),
                 "parameter_probe_delta_l2": parameter_probe_delta_l2,
                 "router_bias_max_delta": router_bias_max_delta,
-                "forward_validation_seconds": validation_seconds,
                 "training_update_seconds": update_seconds,
                 "optimizer_step": float(self._update_count),
             },
