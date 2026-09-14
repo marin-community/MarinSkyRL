@@ -329,17 +329,6 @@ def _all_next_token_log_probs(model, tokens: hax.NamedArray, temperature: float)
     return -negative_log_probs
 
 
-def _all_next_token_log_probs_for_training(model, tokens: hax.NamedArray, temperature: float) -> jax.Array:
-    """Evaluate scores with the same differentiated-forward semantics as the PPO loss."""
-
-    def score_objective(current_model):
-        log_probs = _all_next_token_log_probs(current_model, tokens, temperature)
-        return jnp.sum(log_probs), log_probs
-
-    (_, log_probs), _ = eqx.filter_value_and_grad(score_objective, has_aux=True)(model)
-    return log_probs
-
-
 def _regular_grpo_loss(
     model,
     tokens: hax.NamedArray,
@@ -657,7 +646,7 @@ class LevanterSnowballLearner:
         # and a 67B forward tries to materialize the entire global logits tensor
         # on each H100.
         self._score_fn = hax.named_jit(
-            _all_next_token_log_probs_for_training,
+            _all_next_token_log_probs,
             axis_resources=trainer.compute_axis_mapping,
         )
 
