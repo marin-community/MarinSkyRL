@@ -457,16 +457,13 @@ def test_offloaded_adam_state_round_trip_matches_continuous_training() -> None:
         assert torch.equal(continuous, resumed)
 
 
-def test_persistent_runtime_rollback_restores_master_and_optimizer_state() -> None:
+def test_persistent_runtime_local_recovery_restores_master_and_optimizer_state() -> None:
     runtime = OnlineEagleTrainerRuntime.__new__(OnlineEagleTrainerRuntime)
     runtime.device = torch.device("cpu")
     runtime.serving_dtype = torch.float32
     runtime.model = torch.nn.Linear(3, 2)
     runtime.trainable = list(runtime.model.parameters())
     runtime.optimizer = torch.optim.AdamW(runtime.trainable, lr=1e-3)
-    runtime._pending_revision = None
-    runtime._pending_incumbent = None
-
     runtime.optimizer.zero_grad(set_to_none=True)
     runtime.model(torch.ones(2, 3)).square().sum().backward()
     runtime.optimizer.step()
@@ -478,9 +475,7 @@ def test_persistent_runtime_rollback_restores_master_and_optimizer_state() -> No
     with torch.no_grad():
         for parameter in runtime.model.parameters():
             parameter.add_(10)
-    runtime._pending_revision = "draft-step-4"
-    runtime._pending_incumbent = incumbent
-    runtime.rollback("draft-step-4")
+    runtime._restore(incumbent)
 
     assert all(torch.equal(runtime.model.state_dict()[name], value) for name, value in incumbent_parameters.items())
     assert runtime.optimizer.state_dict()["param_groups"] == incumbent_optimizer["param_groups"]
@@ -491,8 +486,6 @@ def test_persistent_runtime_rollback_restores_master_and_optimizer_state() -> No
     ):
         assert restored.keys() == expected.keys()
         assert all(torch.equal(restored[name], expected[name]) for name in restored)
-    assert runtime._pending_revision is None
-    assert runtime._pending_incumbent is None
 
 
 def test_fp32_master_must_round_to_the_served_checkpoint() -> None:

@@ -106,7 +106,7 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     async def init_draft_transfer_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend
+        self, master_addr, master_port, rank_offset, world_size, group_name, backend, timeout_seconds
     ) -> Any:
         """Join a persistent DraftTrainer-to-serving transfer group."""
         raise NotImplementedError()
@@ -168,27 +168,8 @@ class InferenceEngineInterface(ABC):
         """Send selected capture tensors directly to DraftTrainer."""
         raise NotImplementedError()
 
-    async def stage_online_eagle_speculator(
-        self,
-        transfer_manifest: Dict[str, Any],
-        incumbent_draft_revision: str,
-    ) -> Any:
-        """Validate a candidate on the serving node without activating it."""
-        raise NotImplementedError()
-
-    async def activate_online_eagle_speculator(
-        self,
-        transfer_manifest: Dict[str, Any],
-    ) -> Any:
-        """Activate the staged candidate on every rank."""
-        raise NotImplementedError()
-
-    async def commit_online_eagle_speculator(self, draft_revision: str) -> Any:
-        """Commit a successful all-engine activation."""
-        raise NotImplementedError()
-
-    async def rollback_online_eagle_speculator(self, draft_revision: str) -> Any:
-        """Restore the prior draft after a failed activation."""
+    async def load_online_eagle_speculator(self, transfer_manifest: Dict[str, Any]) -> Any:
+        """Receive and install one complete accepted draft state."""
         raise NotImplementedError()
 
     async def discard_online_eagle_capture(self) -> Any:

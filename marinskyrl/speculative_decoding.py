@@ -139,7 +139,7 @@ class SpeculatorTrainingConfig:
     """Bounded single-rank online EAGLE update settings."""
 
     interval_steps: int = 1
-    max_candidate_staleness_steps: int = 2
+    transfer_timeout_seconds: int = 120
     # Bound the deterministic all-DP merge while leaving enough admission
     # headroom for rollout response lengths to vary between steps.
     max_tokens_per_update: int = 16_384
@@ -164,7 +164,7 @@ class SpeculatorTrainingConfig:
         mapping = _mapping(value, context)
         fields = {
             "interval_steps",
-            "max_candidate_staleness_steps",
+            "transfer_timeout_seconds",
             "max_tokens_per_update",
             "max_window_tokens",
             "max_tokens_per_micro_batch",
@@ -184,9 +184,9 @@ class SpeculatorTrainingConfig:
             interval_steps=_positive_integer(
                 mapping.get("interval_steps", defaults.interval_steps), f"{context}.interval_steps"
             ),
-            max_candidate_staleness_steps=_nonnegative_integer(
-                mapping.get("max_candidate_staleness_steps", defaults.max_candidate_staleness_steps),
-                f"{context}.max_candidate_staleness_steps",
+            transfer_timeout_seconds=_positive_integer(
+                mapping.get("transfer_timeout_seconds", defaults.transfer_timeout_seconds),
+                f"{context}.transfer_timeout_seconds",
             ),
             max_tokens_per_update=_positive_integer(
                 mapping.get("max_tokens_per_update", defaults.max_tokens_per_update),

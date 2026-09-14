@@ -76,6 +76,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.enable_opencode_exact_continuation = opencode_exact_continuation_enabled(full_config)
         self.generation_paused_event = threading.Event()
         self._dead_engines: set[int] = set()
+        self._draft_transfer_group_broken = False
 
         # ---- Load-aware session routing state ----
         # Per-engine count of requests this client has dispatched but not yet gotten a
@@ -104,6 +105,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         """Mark an engine as dead and log a warning."""
         if engine_idx not in self._dead_engines:
             self._dead_engines.add(engine_idx)
+            self._draft_transfer_group_broken = True
             remaining = len(self.engines) - len(self._dead_engines)
             logger.warning(
                 f"Inference engine {engine_idx} died ({type(error).__name__}). "
@@ -217,6 +219,16 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in live_engines]
         return await asyncio.gather(*awaitables)
+
+    def draft_transfer_group_ready(self) -> bool:
+        """Return whether every fixed member of the draft-transfer group is reachable."""
+        return not self._draft_transfer_group_broken and not self._dead_engines
+
+    def _require_complete_draft_transfer_group(self) -> None:
+        if not self.draft_transfer_group_ready():
+            raise RuntimeError(
+                "Draft transfer group is broken because an inference engine died; refusing a partial collective"
+            )
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         if self.generation_paused_event.is_set():
@@ -356,37 +368,42 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     async def transfer_online_eagle_capture(self, transfer_plan: Dict[str, Any]) -> List[Any]:
         """Run the same canonical direct-transfer plan on every serving rank."""
+        self._require_complete_draft_transfer_group()
         return await self._run_on_all_engines("transfer_online_eagle_capture", transfer_plan)
 
-    async def stage_online_eagle_speculator(
+    async def load_online_eagle_speculator(
         self,
         transfer_manifest: Dict[str, Any],
-        incumbent_draft_revision: str,
-    ) -> List[Any]:
-        """Stage and validate the candidate on every live engine."""
-        return await self._run_on_all_engines(
-            "stage_online_eagle_speculator",
-            transfer_manifest,
-            incumbent_draft_revision,
-        )
-
-    async def activate_online_eagle_speculator(
-        self,
-        transfer_manifest: Dict[str, Any],
-    ) -> List[Any]:
-        """Activate one staged revision on every live engine."""
-        return await self._run_on_all_engines(
-            "activate_online_eagle_speculator",
-            transfer_manifest,
-        )
-
-    async def commit_online_eagle_speculator(self, draft_revision: str) -> List[Any]:
-        """Commit an all-engine activation and release the prior revision."""
-        return await self._run_on_all_engines("commit_online_eagle_speculator", draft_revision)
-
-    async def rollback_online_eagle_speculator(self, draft_revision: str) -> List[Any]:
-        """Restore the prior revision after any activation failure."""
-        return await self._run_on_all_engines("rollback_online_eagle_speculator", draft_revision)
+        timeout_seconds: int,
+    ) -> list[dict[str, Any]]:
+        """Load one complete draft on every fixed member and retain per-engine failures."""
+        self._require_complete_draft_transfer_group()
+        awaitables = [engine.load_online_eagle_speculator(transfer_manifest) for engine in self.engines]
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*awaitables, return_exceptions=True),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            self._draft_transfer_group_broken = True
+            raise RuntimeError(
+                f"Draft install collective exceeded its {timeout_seconds}-second timeout; communicator is unusable"
+            ) from None
+        coverage = []
+        for engine_index, result in enumerate(results):
+            if isinstance(result, BaseException):
+                if isinstance(result, (ray.exceptions.ActorDiedError, ray.exceptions.RayActorError)):
+                    self._mark_engine_dead(engine_index, result)
+                coverage.append(
+                    {
+                        "engine_index": engine_index,
+                        "active": False,
+                        "error": f"{type(result).__name__}: {result}",
+                    }
+                )
+            else:
+                coverage.append({"engine_index": engine_index, **result})
+        return coverage
 
     async def discard_online_eagle_capture(self) -> List[Any]:
         """Discard capture buffers on every live inference engine."""
@@ -976,6 +993,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         world_size,
         group_name,
         backend,
+        timeout_seconds,
     ):
         tasks = []
         for engine, engine_rank_offset in self._live_engine_communicator_offsets(rank_offset):
@@ -987,6 +1005,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                     world_size=world_size,
                     group_name=group_name,
                     backend=backend,
+                    timeout_seconds=timeout_seconds,
                 )
             )
         await asyncio.gather(*tasks)

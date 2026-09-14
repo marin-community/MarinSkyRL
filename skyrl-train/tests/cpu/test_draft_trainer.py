@@ -24,6 +24,7 @@ def test_draft_trainer_materializes_direct_capture_transfer(tmp_path: Path, monk
         initial_draft_revision="draft-initial",
         process_id="process",
     )
+    trainer._process_root = tmp_path / "process"
     trainer._draft_transfer_group = object()
     received = {
         "window-000000.safetensors::input_ids": torch.tensor([1, 2, 3]),
@@ -92,7 +93,7 @@ def _training_job(tmp_path: Path, *, step: int, parent_draft_revision: str) -> d
     }
 
 
-def test_draft_trainer_owns_served_lineage_across_commit_and_rollback(tmp_path: Path, monkeypatch) -> None:
+def test_draft_trainer_acceptance_immediately_advances_owned_lineage(tmp_path: Path, monkeypatch) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     runtime_initializations = []
@@ -119,18 +120,17 @@ def test_draft_trainer_owns_served_lineage_across_commit_and_rollback(tmp_path: 
                 weights_sha256=f"draft-digest-{job.step}",
             )
 
-        def commit(self, _draft_revision):
-            return None
-
-        def rollback(self, _draft_revision):
-            return None
-
     monkeypatch.setattr(draft_trainer_module, "OnlineEagleTrainerRuntime", Runtime)
-    monkeypatch.setattr(
-        draft_trainer_module,
-        "validate_online_eagle_serving_candidate",
-        lambda _path: {"weights_path": "model.safetensors"},
-    )
+
+    def validate(path):
+        step = Path(path).name.removeprefix("step-")
+        return {
+            "weights_path": "model.safetensors",
+            "draft_revision": f"draft-step-{step}",
+            "weights_sha256": f"draft-digest-{step}",
+        }
+
+    monkeypatch.setattr(draft_trainer_module, "validate_online_eagle_serving_candidate", validate)
     candidate_tensors = {"draft.weight": torch.arange(4, dtype=torch.bfloat16).reshape(2, 2)}
     monkeypatch.setattr(draft_trainer_module, "load_file", lambda _path: candidate_tensors)
     monkeypatch.setattr(
@@ -140,8 +140,8 @@ def test_draft_trainer_owns_served_lineage_across_commit_and_rollback(tmp_path: 
     )
     published = []
 
-    def publish(source, destination, *, draft_revision, served_target_revision):
-        published.append((source, destination, draft_revision, served_target_revision))
+    def publish(source, destination, *, draft_revision, served_target_revision, install_coverage=None):
+        published.append((source, destination, draft_revision, served_target_revision, install_coverage))
         return {"complete": True, "path": f"{destination}/manifest.json"}
 
     monkeypatch.setattr(draft_trainer_module, "publish_speculator_checkpoint", publish)
@@ -151,14 +151,24 @@ def test_draft_trainer_owns_served_lineage_across_commit_and_rollback(tmp_path: 
         initial_draft_revision="draft-initial",
         process_id="process",
     )
+    trainer._process_root = tmp_path / "process"
+    trainer._draft_transfer_group = object()
+    broadcasts = []
+    monkeypatch.setattr(
+        draft_trainer_module,
+        "broadcast_tensor_payload",
+        lambda manifest, *, tensors, group: broadcasts.append((manifest, tensors, group)),
+    )
     first = trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-initial"))
     assert first["transfer_manifest"]["revision"] == "draft-step-4"
     assert first["transfer_manifest"]["total_bytes"] == 8
-    trainer.commit("draft-step-4")
+    assert trainer.status()["accepted_draft_revision"] == "draft-step-4"
+    trainer.broadcast_candidate(first["transfer_manifest"])
+    assert broadcasts[0][2] is trainer._draft_transfer_group
+    assert trainer.status()["accepted_transfer_ready"] is False
     trainer.publish(str(tmp_path / "published"), "draft-step-4", "policy-step-7")
 
     second = trainer.update(_training_job(tmp_path, step=8, parent_draft_revision="draft-step-4"))
-    trainer.rollback("draft-step-8")
 
     assert observed_draft_dirs == [str(initial), str(tmp_path / "process" / "candidates" / "step-4")]
     assert runtime_initializations == [(str(initial), tmp_path / "process" / "step-4" / "merged")]
@@ -168,17 +178,18 @@ def test_draft_trainer_owns_served_lineage_across_commit_and_rollback(tmp_path: 
             str(tmp_path / "published"),
             "draft-step-4",
             "policy-step-7",
+            None,
         )
     ]
-    assert not Path(second["result"]["candidate_dir"]).exists()
+    assert Path(second["result"]["candidate_dir"]).exists()
+    assert not (tmp_path / "process" / "candidates" / "step-4").exists()
     status = trainer.status()
-    assert status["served_draft_dir"] == str(tmp_path / "process" / "candidates" / "step-4")
-    assert status["served_draft_revision"] == "draft-step-4"
-    assert status["pending_candidate_dir"] is None
-    assert status["pending_draft_revision"] is None
+    assert status["accepted_draft_dir"] == str(tmp_path / "process" / "candidates" / "step-8")
+    assert status["accepted_draft_revision"] == "draft-step-8"
+    assert status["accepted_transfer_ready"] is True
 
 
-def test_draft_trainer_rejects_parent_outside_its_served_lineage(tmp_path: Path) -> None:
+def test_draft_trainer_rejects_parent_outside_its_accepted_lineage(tmp_path: Path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     trainer = DraftTrainer(
@@ -187,7 +198,7 @@ def test_draft_trainer_rejects_parent_outside_its_served_lineage(tmp_path: Path)
         process_id="process",
     )
 
-    with pytest.raises(RuntimeError, match="served lineage"):
+    with pytest.raises(RuntimeError, match="accepted lineage"):
         trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-other"))
 
 

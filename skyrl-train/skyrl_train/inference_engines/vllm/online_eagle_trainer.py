@@ -330,8 +330,9 @@ def publish_speculator_checkpoint(
     *,
     draft_revision: str,
     served_target_revision: str,
+    install_coverage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Publish the exact served draft, writing its completion manifest last."""
+    """Publish a complete draft state, writing its completion manifest last."""
     source = Path(source_dir)
     if not source.is_dir():
         raise FileNotFoundError(f"Served online EAGLE checkpoint does not exist: {source}")
@@ -362,6 +363,8 @@ def publish_speculator_checkpoint(
         "lineage": lineage,
         "inventory": inventory,
     }
+    if install_coverage is not None:
+        manifest["install_coverage"] = dict(install_coverage)
     manifest_path = join_resource_path(destination, ONLINE_EAGLE_MANIFEST_FILENAME)
     if io.exists(manifest_path):
         existing = json.loads(io.read_bytes(manifest_path))
@@ -1155,7 +1158,7 @@ def _capture_rng_states(device: torch.device) -> dict[str, Any]:
 
 
 class OnlineEagleTrainerRuntime:
-    """Persistent draft model, FP32 masters, optimizer, and transactional state."""
+    """Persistent accepted draft model, FP32 masters, optimizer, and RNG state."""
 
     def __init__(self, job: OnlineEagleTrainingJob, capture_dir: Path):
         seed = job.seed + job.step
@@ -1170,9 +1173,6 @@ class OnlineEagleTrainerRuntime:
         from speculators.losses import resolve_loss_config  # noqa: PLC0415
 
         self.loss_config = resolve_loss_config("kl_div", "fused" if self.device.type == "cuda" else "eager")
-        self._pending_revision: str | None = None
-        self._pending_incumbent: dict[str, Any] | None = None
-
         prior_trainer_state = Path(job.draft_model_dir) / TRAINER_STATE_FILENAME
         if prior_trainer_state.exists():
             saved_state = torch.load(prior_trainer_state, map_location=self.device, weights_only=False)
@@ -1234,9 +1234,7 @@ class OnlineEagleTrainerRuntime:
             _restore_trainable_master_state(self.model, masters, serving_dtype=self.serving_dtype)
 
     def update(self, job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
-        """Train one candidate while retaining an exact rollback snapshot."""
-        if self._pending_revision is not None:
-            raise RuntimeError(f"Online EAGLE runtime has uncommitted candidate {self._pending_revision}")
+        """Train and accept one candidate, restoring the incumbent on local rejection or failure."""
         started_at = time.perf_counter()
         capture_dir = Path(job.capture_dir)
         output_dir = Path(job.output_dir)
@@ -1406,8 +1404,6 @@ class OnlineEagleTrainerRuntime:
                     master_parameters,
                     serving_dtype=self.serving_dtype,
                 )
-            self._pending_revision = draft_revision
-            self._pending_incumbent = incumbent_snapshot
             return replace(
                 result,
                 candidate_dir=str(output_dir),
@@ -1417,20 +1413,3 @@ class OnlineEagleTrainerRuntime:
         except BaseException:
             self._restore(incumbent_snapshot)
             raise
-
-    def commit(self, draft_revision: str) -> None:
-        if self._pending_revision != draft_revision:
-            raise RuntimeError(
-                f"Online EAGLE runtime cannot commit {draft_revision!r}; pending={self._pending_revision!r}"
-            )
-        self._pending_revision = None
-        self._pending_incumbent = None
-
-    def rollback(self, draft_revision: str) -> None:
-        if self._pending_revision != draft_revision or self._pending_incumbent is None:
-            raise RuntimeError(
-                f"Online EAGLE runtime cannot roll back {draft_revision!r}; pending={self._pending_revision!r}"
-            )
-        self._restore(self._pending_incumbent)
-        self._pending_revision = None
-        self._pending_incumbent = None

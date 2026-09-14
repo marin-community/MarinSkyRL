@@ -57,11 +57,12 @@ class _SpeculatorCaptureClient:
         self.cleanups = []
         self.exports = []
         self.transfers = []
-        self.stages = []
-        self.activations = []
-        self.commits = []
-        self.rollbacks = []
+        self.loads = []
+        self.transfer_ready = True
         self.engines = [object(), object()]
+
+    def draft_transfer_group_ready(self):
+        return self.transfer_ready
 
     async def begin_online_eagle_capture(self, config):
         self.begins.append(config)
@@ -133,67 +134,42 @@ class _SpeculatorCaptureClient:
             ]
         ]
 
-    async def stage_online_eagle_speculator(self, transfer_manifest, incumbent_draft_revision):
-        self.stages.append((transfer_manifest, incumbent_draft_revision))
-        return [
-            [
-                {
-                    "active": True,
-                    "draft_revision": transfer_manifest["revision"],
-                    "source_weights_sha256": transfer_manifest["source_weights_sha256"],
-                    "payload_sha256": transfer_manifest["payload_sha256"],
-                }
-            ],
-            [
-                {
-                    "active": True,
-                    "draft_revision": transfer_manifest["revision"],
-                    "source_weights_sha256": transfer_manifest["source_weights_sha256"],
-                    "payload_sha256": transfer_manifest["payload_sha256"],
-                }
-            ],
-        ]
-
-    async def activate_online_eagle_speculator(self, transfer_manifest):
-        self.activations.append(transfer_manifest)
+    async def load_online_eagle_speculator(self, transfer_manifest, timeout_seconds):
+        self.loads.append((transfer_manifest, timeout_seconds))
         draft_revision = transfer_manifest["revision"]
         payload_sha256 = transfer_manifest["payload_sha256"]
         return [
-            [
-                {
-                    "active": True,
-                    "draft_revision": draft_revision,
-                    "worker_results": [
-                        {
-                            "worker_rank": 0,
-                            "transfer_rank": 1,
-                            "draft_revision": draft_revision,
-                            "weights_sha256": payload_sha256,
-                        },
-                    ],
-                }
-            ],
-            [
-                {
-                    "active": True,
-                    "draft_revision": draft_revision,
-                    "worker_results": [
-                        {
-                            "worker_rank": 1,
-                            "transfer_rank": 2,
-                            "draft_revision": draft_revision,
-                            "weights_sha256": payload_sha256,
-                        },
-                    ],
-                }
-            ],
+            {
+                "engine_index": 0,
+                "active": True,
+                "draft_revision": draft_revision,
+                "payload_sha256": payload_sha256,
+                "worker_results": [
+                    {
+                        "active": True,
+                        "worker_rank": 0,
+                        "transfer_rank": 1,
+                        "draft_revision": draft_revision,
+                        "weights_sha256": payload_sha256,
+                    },
+                ],
+            },
+            {
+                "engine_index": 1,
+                "active": True,
+                "draft_revision": draft_revision,
+                "payload_sha256": payload_sha256,
+                "worker_results": [
+                    {
+                        "active": True,
+                        "worker_rank": 1,
+                        "transfer_rank": 2,
+                        "draft_revision": draft_revision,
+                        "weights_sha256": payload_sha256,
+                    },
+                ],
+            },
         ]
-
-    async def commit_online_eagle_speculator(self, draft_revision):
-        self.commits.append(draft_revision)
-
-    async def rollback_online_eagle_speculator(self, draft_revision):
-        self.rollbacks.append(draft_revision)
 
     async def publish_online_eagle_speculator(self, *args):
         self.publishes.append(args)
@@ -239,15 +215,11 @@ class _DraftTrainer:
     def __init__(self):
         self.updates = []
         self.receives = []
-        self.commits = []
-        self.rollbacks = []
         self.restores = []
         self.publishes = []
         self.update = _RemoteMethod(self._update)
         self.receive_capture = _RemoteMethod(self._receive_capture)
         self.broadcast_candidate = _RemoteMethod(self._broadcast_candidate)
-        self.commit = _RemoteMethod(self._commit)
-        self.rollback = _RemoteMethod(self._rollback)
         self.restore = _RemoteMethod(self._restore)
         self.publish = _RemoteMethod(self._publish)
 
@@ -300,21 +272,23 @@ class _DraftTrainer:
             "total_bytes": transfer_manifest["total_bytes"],
         }
 
-    def _commit(self, draft_revision):
-        self.commits.append(draft_revision)
-
-    def _rollback(self, draft_revision):
-        self.rollbacks.append(draft_revision)
-
     def _restore(self, source, destination):
         self.restores.append((source, destination))
+        transfer_manifest = TensorTransferManifest.from_tensors(
+            transfer_id="restore-draft-step-2",
+            revision="draft-step-2",
+            source_weights_sha256="restored-weights",
+            tensors={"draft.weight": torch.arange(4, dtype=torch.bfloat16)},
+        ).to_mapping()
         return {
             "draft_revision": "draft-step-2",
             "served_target_revision": "policy-step-2",
+            "lineage": {"initial_source_identity": "4bdb47c08e5b5190bea3c7a93c3e14470230e469"},
+            "transfer_manifest": transfer_manifest,
         }
 
-    def _publish(self, destination, draft_revision, served_target_revision):
-        self.publishes.append((destination, draft_revision, served_target_revision))
+    def _publish(self, destination, draft_revision, served_target_revision, install_coverage):
+        self.publishes.append((destination, draft_revision, served_target_revision, install_coverage))
         return {"complete": True, "path": f"{destination}/manifest.json"}
 
 
@@ -336,9 +310,9 @@ def _online_speculator_trainer(interval_steps=1):
     trainer._speculator_capture_active = False
     trainer._speculator_capture_transfer_ranks = None
     trainer._speculator_process_id = "process-id"
-    trainer._served_draft_revision = "draft-step-1"
+    trainer._speculator_revision = "draft-step-1"
     trainer._sealed_speculator_capture_dir = None
-    trainer._served_draft_path = "/tmp/draft"
+    trainer._speculator_path = "/tmp/draft"
     trainer._speculator_update_inflight = False
     trainer._draft_trainer = _DraftTrainer()
     trainer._draft_trainer_update_ref = None
@@ -347,7 +321,8 @@ def _online_speculator_trainer(interval_steps=1):
     trainer._speculator_update_failures = 0
     trainer._speculator_boundary_deferrals = 0
     trainer._speculator_install_count = 0
-    trainer._speculator_stale_candidate_count = 0
+    trainer._speculator_install_failures = 0
+    trainer._last_speculator_install_coverage = None
     trainer.inference_engine_client = _SpeculatorCaptureClient()
     trainer.all_metrics = {}
     trainer.all_timings = {}
@@ -403,7 +378,7 @@ def test_online_speculator_capture_cadence_and_discard_are_idempotent():
     assert trainer.inference_engine_client.discards == 1
 
 
-def test_online_speculator_update_overlaps_then_installs_at_boundary(monkeypatch):
+def test_online_speculator_update_overlaps_then_refreshes_at_boundary(monkeypatch):
     trainer = _online_speculator_trainer()
     transfer_plan = {"format": "test-capture-plan"}
     monkeypatch.setattr(trainer_module, "plan_online_eagle_capture_transfer", lambda *_args, **_kwargs: transfer_plan)
@@ -434,21 +409,19 @@ def test_online_speculator_update_overlaps_then_installs_at_boundary(monkeypatch
     monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda ref: (True, ref.value))
     asyncio.run(trainer._finish_speculator_update())
 
-    assert len(trainer.inference_engine_client.stages) == 1
-    transfer_manifest, incumbent_revision = trainer.inference_engine_client.stages[0]
+    assert len(trainer.inference_engine_client.loads) == 1
+    transfer_manifest, timeout_seconds = trainer.inference_engine_client.loads[0]
     assert transfer_manifest["revision"] == "draft-step-2"
     assert transfer_manifest["source_weights_sha256"] == "abc"
-    assert incumbent_revision == "draft-step-1"
-    assert trainer.inference_engine_client.activations == [transfer_manifest]
-    assert trainer.inference_engine_client.commits == ["draft-step-2"]
-    assert trainer._draft_trainer.commits == ["draft-step-2"]
-    assert trainer._served_draft_path.endswith("/process-id/candidates/step-2")
-    assert trainer._served_draft_revision == "draft-step-2"
+    assert timeout_seconds == 120
+    assert trainer._speculator_path.endswith("/process-id/candidates/step-2")
+    assert trainer._speculator_revision == "draft-step-2"
     assert trainer.all_metrics["speculator/install_count"] == 1.0
+    assert trainer.all_metrics["speculator/install_coverage"] == 1.0
     assert trainer.all_metrics["speculator/candidate_accepted"] == 1.0
 
 
-def test_online_speculator_stage_disagreement_rolls_back_every_owner(monkeypatch):
+def test_online_speculator_failed_rank_is_recorded_without_rejecting_accepted_revision(monkeypatch):
     trainer = _online_speculator_trainer()
     monkeypatch.setattr(
         trainer_module,
@@ -459,29 +432,40 @@ def test_online_speculator_stage_disagreement_rolls_back_every_owner(monkeypatch
     asyncio.run(trainer._seal_speculator_capture())
     asyncio.run(trainer._start_speculator_update())
 
-    async def disagree(*_args):
+    async def fail_one_rank(transfer_manifest, _timeout_seconds):
+        payload_sha256 = transfer_manifest["payload_sha256"]
         return [
-            [
-                {
-                    "active": True,
-                    "draft_revision": "draft-step-2",
-                    "source_weights_sha256": "wrong",
-                    "payload_sha256": "wrong",
-                }
-            ]
+            {
+                "engine_index": 0,
+                "active": True,
+                "draft_revision": "draft-step-2",
+                "payload_sha256": payload_sha256,
+                "worker_results": [
+                    {
+                        "active": True,
+                        "worker_rank": 0,
+                        "transfer_rank": 1,
+                        "draft_revision": "draft-step-2",
+                        "weights_sha256": payload_sha256,
+                    }
+                ],
+            },
+            {"engine_index": 1, "active": False, "error": "RuntimeError: draft load failed"},
         ]
 
-    trainer.inference_engine_client.stage_online_eagle_speculator = disagree
+    trainer.inference_engine_client.load_online_eagle_speculator = fail_one_rank
     monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda ref: (True, ref.value))
 
-    with pytest.raises(RuntimeError, match="staged inconsistent candidate hashes"):
-        asyncio.run(trainer._finish_speculator_update())
+    asyncio.run(trainer._finish_speculator_update())
 
-    assert trainer.inference_engine_client.rollbacks == ["draft-step-2"]
-    assert trainer._draft_trainer.rollbacks == ["draft-step-2"]
+    assert trainer._speculator_revision == "draft-step-2"
+    assert trainer.all_metrics["speculator/install_successful_ranks"] == 1.0
+    assert trainer.all_metrics["speculator/install_failed_ranks"] == 1.0
+    assert trainer.all_metrics["speculator/install_coverage"] == 0.5
+    assert trainer.all_metrics["speculator/install_failures"] == 1.0
 
 
-def test_online_speculator_discards_candidate_beyond_staleness_limit(monkeypatch):
+def test_online_speculator_stale_accepted_revision_still_refreshes_serving(monkeypatch):
     trainer = _online_speculator_trainer()
     monkeypatch.setattr(
         trainer_module,
@@ -496,12 +480,19 @@ def test_online_speculator_discards_candidate_beyond_staleness_limit(monkeypatch
 
     asyncio.run(trainer._finish_speculator_update())
 
-    assert trainer._draft_trainer.rollbacks == ["draft-step-2"]
-    assert trainer.inference_engine_client.stages == []
+    assert trainer._speculator_revision == "draft-step-2"
+    assert len(trainer.inference_engine_client.loads) == 1
     assert trainer.all_metrics["speculator/candidate_staleness_steps"] == 3.0
-    assert trainer.all_metrics["speculator/stale_candidate_count"] == 1.0
-    assert trainer.inference_engine_client.activations == []
-    assert trainer.inference_engine_client.commits == []
+
+
+def test_online_speculator_broken_transfer_group_skips_capture() -> None:
+    trainer = _online_speculator_trainer()
+    trainer.inference_engine_client.transfer_ready = False
+
+    asyncio.run(trainer._begin_speculator_capture())
+
+    assert trainer.inference_engine_client.begins == []
+    assert trainer.all_metrics["speculator/transfer_group_broken"] == 1.0
 
 
 def test_online_speculator_capture_accepts_cross_node_transfer_ranks() -> None:
@@ -557,7 +548,7 @@ def test_online_speculator_boundary_deferral_keeps_the_incumbent(monkeypatch) ->
 
     asyncio.run(trainer._finish_speculator_update())
 
-    assert trainer._served_draft_revision == "draft-step-1"
+    assert trainer._speculator_revision == "draft-step-1"
     assert trainer.inference_engine_client.installs == []
     assert trainer._speculator_update_inflight is True
     assert trainer.all_metrics["speculator/update_pending"] == 1.0
@@ -575,35 +566,64 @@ def test_online_speculator_checkpoint_pairs_exact_served_target_and_draft():
             "/checkpoints/global_step_2/speculator",
             "draft-step-1",
             "policy-step-2",
+            None,
         )
     ]
     assert trainer.inference_engine_client.publishes == []
 
     asyncio.run(trainer._restore_speculator_checkpoint("/source/checkpoints/global_step_2"))
 
-    assert trainer.inference_engine_client.restores == [
+    assert trainer._draft_trainer.restores == [
         (
             "/source/checkpoints/global_step_2/speculator",
             "/tmp/marinskyrl-online-eagle/process-id/resume",
         )
     ]
-    assert trainer._served_draft_revision == "draft-step-2"
-    assert trainer._served_draft_path.endswith("/process-id/resume")
+    assert trainer.inference_engine_client.restores == []
+    assert len(trainer.inference_engine_client.loads) == 1
+    assert trainer._speculator_revision == "draft-step-2"
+    assert trainer._speculator_path.endswith("/process-id/resume")
+
+
+def test_online_speculator_resume_requires_every_serving_rank() -> None:
+    trainer = _online_speculator_trainer()
+
+    async def miss_one_rank(transfer_manifest, _timeout_seconds):
+        payload_sha256 = transfer_manifest["payload_sha256"]
+        return [
+            {
+                "engine_index": 0,
+                "active": True,
+                "draft_revision": "draft-step-2",
+                "payload_sha256": payload_sha256,
+                "worker_results": [
+                    {
+                        "active": True,
+                        "worker_rank": 0,
+                        "transfer_rank": 1,
+                        "draft_revision": "draft-step-2",
+                        "weights_sha256": payload_sha256,
+                    }
+                ],
+            },
+            {"engine_index": 1, "active": False, "error": "RuntimeError: load failed"},
+        ]
+
+    trainer.inference_engine_client.load_online_eagle_speculator = miss_one_rank
+
+    with pytest.raises(RuntimeError, match="did not install on every serving rank"):
+        asyncio.run(trainer._restore_speculator_checkpoint("/source/checkpoints/global_step_2"))
 
 
 def test_online_speculator_restore_rejects_a_different_initial_source() -> None:
     trainer = _online_speculator_trainer()
-    trainer.inference_engine_client.restore_online_eagle_speculator = AsyncMock(
-        return_value=[
-            [
-                {
-                    "active": True,
-                    "draft_revision": "draft-step-2",
-                    "served_target_revision": "policy-step-2",
-                    "lineage": {"initial_source_identity": "different-source"},
-                }
-            ]
-        ]
+    trainer._draft_trainer.restore = _RemoteMethod(
+        lambda _source, _destination: {
+            "draft_revision": "draft-step-2",
+            "served_target_revision": "policy-step-2",
+            "lineage": {"initial_source_identity": "different-source"},
+            "transfer_manifest": {"not": "used"},
+        }
     )
 
     with pytest.raises(RuntimeError, match="source lineage mismatch"):

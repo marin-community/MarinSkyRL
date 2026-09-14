@@ -210,10 +210,10 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         )
 
     async def init_draft_transfer_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend
+        self, master_addr, master_port, rank_offset, world_size, group_name, backend, timeout_seconds
     ):
         return await self.inference_engine_actor.init_draft_transfer_communicator.remote(
-            master_addr, master_port, rank_offset, world_size, group_name, backend
+            master_addr, master_port, rank_offset, world_size, group_name, backend, timeout_seconds
         )
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
@@ -277,29 +277,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def transfer_online_eagle_capture(self, transfer_plan: Dict[str, Any]):
         return await self.inference_engine_actor.transfer_online_eagle_capture.remote(transfer_plan)
 
-    async def stage_online_eagle_speculator(
-        self,
-        transfer_manifest: Dict[str, Any],
-        incumbent_draft_revision: str,
-    ):
-        return await self.inference_engine_actor.stage_online_eagle_speculator.remote(
-            transfer_manifest,
-            incumbent_draft_revision,
-        )
-
-    async def activate_online_eagle_speculator(
-        self,
-        transfer_manifest: Dict[str, Any],
-    ):
-        return await self.inference_engine_actor.activate_online_eagle_speculator.remote(
-            transfer_manifest,
-        )
-
-    async def commit_online_eagle_speculator(self, draft_revision: str):
-        return await self.inference_engine_actor.commit_online_eagle_speculator.remote(draft_revision)
-
-    async def rollback_online_eagle_speculator(self, draft_revision: str):
-        return await self.inference_engine_actor.rollback_online_eagle_speculator.remote(draft_revision)
+    async def load_online_eagle_speculator(self, transfer_manifest: Dict[str, Any]):
+        return await self.inference_engine_actor.load_online_eagle_speculator.remote(transfer_manifest)
 
     async def discard_online_eagle_capture(self):
         return await self.inference_engine_actor.discard_online_eagle_capture.remote()
