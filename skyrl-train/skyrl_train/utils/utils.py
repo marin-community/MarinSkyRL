@@ -33,6 +33,7 @@ from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, DEBUG_MODE_ENV, EnvVarM
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
+from marinskyrl.distillation import compile_distillation_plan, reject_disabled_distillation_runtime
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
@@ -581,10 +582,10 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
-    if "teacher" in cfg:
-        raise ValueError(
-            "teacher configuration is unsupported until teacher scores are connected to a validated training objective"
-        )
+    resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
+    assert isinstance(resolved_cfg, dict)
+    distillation_plan = compile_distillation_plan(resolved_cfg)
+    reject_disabled_distillation_runtime(distillation_plan)
     resolve_dynamic_sampling_criteria(
         cfg.trainer.algorithm.dynamic_sampling.informative_on,
         float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
