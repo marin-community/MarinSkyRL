@@ -37,7 +37,7 @@ from skyrl_train.models.grug_query_bias import (
     next_query_bias,
 )
 import numpy as np
-from skyrl_train.distillation import SampledReverseKLInput
+from skyrl_train.distillation import SampledReverseKLInput, SparseForwardKLInput, TopKTeacherEvidence
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl_train.utils.utils import validate_batch_sizes
@@ -865,6 +865,54 @@ def test_teacher_evidence_is_validated_and_collated_with_response_tokens(
     torch.testing.assert_close(batch["teacher_action_log_probs"], evidence.chosen_logprobs, equal_nan=True)
     assert torch.equal(batch["teacher_valid_mask"], evidence.valid_mask)
     torch.testing.assert_close(batch["distillation_loss_weights"], distillation.loss_weights)
+
+
+def test_topk_teacher_evidence_is_collated_without_dense_vocabulary_tensors(dummy_config, dummy_tokenizer):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = dummy_tokenizer
+    trainer.pad_batch = lambda batch: batch
+    valid_mask = torch.tensor([[True, True, True], [True, False, False]])
+    evidence = TopKTeacherEvidence(
+        trajectory_ids=("math_0", "swe_0"),
+        route_ids=("math", "swe"),
+        teacher_id="teacher-a",
+        teacher_revision="teacher-revision",
+        plan_version="mopd-v1",
+        valid_mask=valid_mask,
+        topk_indices=torch.tensor([[[1, 2], [3, 4], [5, 6]], [[7, 8], [-1, -1], [-1, -1]]]),
+        topk_logprobs=torch.log(
+            torch.tensor(
+                [[[0.7, 0.2], [0.6, 0.2], [0.5, 0.1]], [[0.8, 0.15], [torch.nan, torch.nan], [torch.nan, torch.nan]]]
+            )
+        ),
+        retained_mass=torch.tensor([[0.9, 0.8, 0.6], [0.95, torch.nan, torch.nan]]),
+    )
+    distillation = SparseForwardKLInput(
+        teacher_topk_indices=evidence.topk_indices,
+        teacher_topk_logprobs=evidence.topk_logprobs,
+        retained_mass=evidence.retained_mass,
+        valid_mask=evidence.valid_mask,
+        loss_weights=torch.tensor([[0.2, 0.2, 0.2], [0.3, 0.0, 0.0]]),
+    )
+    trajectory_batch = {
+        "prompt_token_ids": [[1, 2], [3]],
+        "response_ids": [[4, 5, 6], [7]],
+        "rewards": [[0.0, 0.0, 0.0], [0.0]],
+        "loss_masks": [[1, 1, 1], [1]],
+        "rollout_logprobs": None,
+        "trajectory_ids": [TrajectoryID("math", 0), TrajectoryID("swe", 0)],
+        "teacher_evidence": evidence,
+        "distillation": distillation,
+    }
+
+    batch = trainer.convert_to_training_input(trajectory_batch, ["math", "swe"])
+
+    assert "teacher_action_log_probs" not in batch
+    torch.testing.assert_close(batch["teacher_topk_indices"], evidence.topk_indices)
+    torch.testing.assert_close(batch["teacher_topk_logprobs"], evidence.topk_logprobs, equal_nan=True)
+    torch.testing.assert_close(batch["teacher_retained_mass"], evidence.retained_mass, equal_nan=True)
 
 
 def test_normalize_mini_batch_size():

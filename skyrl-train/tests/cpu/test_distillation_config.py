@@ -78,6 +78,39 @@ def test_compile_distillation_plan_preserves_multi_teacher_routes():
     ]
 
 
+def test_compile_distillation_plan_accepts_sparse_forward_kl_with_topk_teachers():
+    config = _mopd_config()
+    config["trainer"]["algorithm"]["distillation"]["objective"] = "sparse_forward_kl"
+    for teacher in config["teachers"].values():
+        teacher["evidence"] = "topk_distribution"
+        teacher["top_k"] = 20
+
+    plan = compile_distillation_plan(config)
+
+    assert plan is not None
+    assert plan.objective is DistillationObjectiveKind.SPARSE_FORWARD_KL
+    assert {teacher.evidence for teacher in plan.teachers} == {TeacherEvidenceKind.TOPK_DISTRIBUTION}
+
+
+def test_compile_distillation_plan_requires_top_k_for_topk_evidence():
+    config = _mopd_config()
+    config["trainer"]["algorithm"]["distillation"]["objective"] = "sparse_forward_kl"
+    for teacher in config["teachers"].values():
+        teacher["evidence"] = "topk_distribution"
+    config["teachers"]["swe"]["top_k"] = 20
+
+    with pytest.raises(ValueError, match="teachers.math.top_k.*required"):
+        compile_distillation_plan(config)
+
+
+def test_compile_distillation_plan_rejects_top_k_for_chosen_token_evidence():
+    config = _mopd_config()
+    config["teachers"]["math"]["top_k"] = 20
+
+    with pytest.raises(ValueError, match="teachers.math.top_k.*only valid"):
+        compile_distillation_plan(config)
+
+
 def test_compile_distillation_plan_rejects_route_to_unknown_teacher():
     config = _mopd_config()
     config["teacher_routing"]["mopd_v1"]["routes"]["math"]["teacher"] = "missing"
@@ -89,6 +122,7 @@ def test_compile_distillation_plan_rejects_route_to_unknown_teacher():
 def test_compile_distillation_plan_rejects_teacher_evidence_that_cannot_feed_objective():
     config = _mopd_config()
     config["teachers"]["math"]["evidence"] = "topk_distribution"
+    config["teachers"]["math"]["top_k"] = 20
 
     with pytest.raises(ValueError, match="teachers.math.evidence.*chosen_token"):
         compile_distillation_plan(config)

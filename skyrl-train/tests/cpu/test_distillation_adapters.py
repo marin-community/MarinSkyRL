@@ -1,20 +1,31 @@
 import asyncio
 import threading
+from dataclasses import replace
 
 import pytest
 import torch
 
 from marinskyrl.distillation import TeacherEvidenceKind
-from skyrl_train.distillation import ChosenTokenTeacherEvidence, TeacherScoreRequest
+from skyrl_train.distillation import (
+    ChosenTokenTeacherEvidence,
+    SparseForwardKLInput,
+    TeacherScoreRequest,
+    TopKTeacherEvidence,
+    prepare_sparse_forward_kl,
+)
 from skyrl_train.distillation_adapters import (
     AsyncTeacherQueueLimits,
     FullyAsyncRayPPOTrainerDistillationAdapter,
     RayPPOTrainerDistillationAdapter,
+    RoutedTeacherScoringPartition,
+    RoutedTeacherScoringWork,
+    ScoredDistillationBatch,
     TeacherEvidenceCoordinator,
     TeacherScoringWork,
     build_teacher_scoring_work,
 )
 from skyrl_train.teacher_oracle import TeacherCapabilities, TeacherOracleOwner
+from skyrl_train.teacher_routing import TeacherRoute
 from skyrl_train.trajectory_runners.types import TrajectoryID
 
 
@@ -83,6 +94,99 @@ async def _coordinator(*services: ControlledTeacherService) -> TeacherEvidenceCo
         factories[service.capabilities.teacher_id] = start_service
     owner = await TeacherOracleOwner.create(factories)
     return TeacherEvidenceCoordinator(owner)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_prepares_sparse_forward_kl_from_the_same_scoring_contract():
+    class TopKTeacherService:
+        capabilities = TeacherCapabilities(
+            teacher_id="teacher-a",
+            teacher_revision="teacher-revision-8",
+            tokenizer_fingerprint="sha256:shared-tokenizer",
+            evidence_kinds=frozenset({TeacherEvidenceKind.TOPK_DISTRIBUTION}),
+            max_sequence_length=8,
+            supports_prompt_token_scoring=True,
+            max_concurrency=4,
+        )
+
+        async def score(self, request: TeacherScoreRequest) -> TopKTeacherEvidence:
+            return TopKTeacherEvidence(
+                trajectory_ids=request.trajectory_ids,
+                route_ids=request.route_ids,
+                teacher_id=request.teacher_id,
+                teacher_revision=self.capabilities.teacher_revision,
+                plan_version=request.plan_version,
+                valid_mask=request.response_mask,
+                topk_indices=torch.tensor([[[1, 2], [3, 4]]]),
+                topk_logprobs=torch.log(torch.tensor([[[0.7, 0.2], [0.6, 0.2]]])),
+                retained_mass=torch.tensor([[0.9, 0.8]]),
+            )
+
+        async def close(self) -> None:
+            return None
+
+    service = TopKTeacherService()
+
+    async def start_service():
+        return service
+
+    owner = await TeacherOracleOwner.create({"teacher-a": start_service})
+    coordinator = TeacherEvidenceCoordinator(owner)
+    request = replace(_request(), evidence=TeacherEvidenceKind.TOPK_DISTRIBUTION, top_k=2)
+    scored = await coordinator.score(TeacherScoringWork(request, 0.5, torch.tensor([[1.0, 0.25]])))
+    await coordinator.close()
+
+    assert isinstance(scored.distillation, SparseForwardKLInput)
+    torch.testing.assert_close(scored.distillation.retained_mass, torch.tensor([[0.9, 0.8]]))
+    torch.testing.assert_close(scored.distillation.loss_weights, torch.tensor([[0.5, 0.125]]))
+
+
+def test_routed_sparse_evidence_reassembles_original_row_order():
+    requests = (
+        replace(_request("trajectory-b", "teacher-b"), evidence=TeacherEvidenceKind.TOPK_DISTRIBUTION, top_k=2),
+        replace(_request("trajectory-a", "teacher-a"), evidence=TeacherEvidenceKind.TOPK_DISTRIBUTION, top_k=2),
+    )
+    topk_indices = (torch.tensor([[[3, 4], [5, 6]]]), torch.tensor([[[1, 2], [7, 8]]]))
+    topk_probs = (torch.tensor([[[0.6, 0.2], [0.5, 0.2]]]), torch.tensor([[[0.7, 0.2], [0.8, 0.1]]]))
+    scored = []
+    partitions = []
+    for original_index, request, indices, probs in zip((1, 0), requests, topk_indices, topk_probs, strict=True):
+        evidence = TopKTeacherEvidence(
+            trajectory_ids=request.trajectory_ids,
+            route_ids=request.route_ids,
+            teacher_id=request.teacher_id,
+            teacher_revision=f"{request.teacher_id}-revision",
+            plan_version=request.plan_version,
+            valid_mask=request.response_mask,
+            topk_indices=indices,
+            topk_logprobs=probs.log(),
+            retained_mass=probs.sum(dim=-1),
+        )
+        work = TeacherScoringWork(request, 0.5, torch.ones(1, 2))
+        partitions.append(RoutedTeacherScoringPartition((original_index,), work))
+        scored.append(
+            ScoredDistillationBatch(
+                evidence,
+                prepare_sparse_forward_kl(request, evidence, coefficient=0.5, route_weights=torch.ones(1, 2)),
+            )
+        )
+    routed_work = RoutedTeacherScoringWork(
+        trajectory_ids=("trajectory-a", "trajectory-b"),
+        routes=(
+            TeacherRoute("math", "teacher-a", "sparse_forward_kl", 1.0, "routing-v3"),
+            TeacherRoute("math", "teacher-b", "sparse_forward_kl", 1.0, "routing-v3"),
+        ),
+        response_lengths=(2, 2),
+        plan_version="routing-v3",
+        partitions=tuple(partitions),
+    )
+
+    assembled = TeacherEvidenceCoordinator.assemble_routed(routed_work, tuple(scored))
+
+    assert isinstance(assembled.distillation, SparseForwardKLInput)
+    torch.testing.assert_close(assembled.distillation.teacher_topk_indices[0], topk_indices[1][0])
+    torch.testing.assert_close(assembled.distillation.teacher_topk_indices[1], topk_indices[0][0])
+    assert assembled.teacher_revisions == ("teacher-a-revision", "teacher-b-revision")
 
 
 def test_teacher_scoring_work_collates_exact_rollout_coordinates_and_route_weights():
