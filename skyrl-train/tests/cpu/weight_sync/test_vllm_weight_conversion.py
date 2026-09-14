@@ -12,8 +12,35 @@ class RecordingVLLMModel:
         self.weights: dict[str, torch.Tensor] = {}
 
     def load_weights(self, weights):
-        self.weights = dict(weights)
+        self.weights.update(weights)
         return self.loaded_parameters
+
+
+class PerSourceRecordingVLLMModel:
+    def __init__(self, ignored_sources: set[str] | None = None):
+        self.ignored_sources = ignored_sources or set()
+        self.calls: list[set[str]] = []
+
+    def load_weights(self, weights):
+        names = {name for name, _ in weights}
+        self.calls.append(names)
+        loaded = set()
+        for name in names - self.ignored_sources:
+            loaded.update(_packed_reported_names(name))
+        return loaded
+
+
+def _packed_reported_names(name: str) -> set[str]:
+    for source, target in (
+        ("self_attn.q_proj", "self_attn.qkv_proj"),
+        ("self_attn.k_proj", "self_attn.qkv_proj"),
+        ("self_attn.v_proj", "self_attn.qkv_proj"),
+        ("mlp.gate_proj", "mlp.gate_up_proj"),
+        ("mlp.up_proj", "mlp.gate_up_proj"),
+    ):
+        if source in name:
+            return {name.replace(source, target)}
+    return {name}
 
 
 def test_load_weights_into_vllm_expands_transformers_fused_moe_weights():
@@ -107,28 +134,38 @@ def test_load_weights_into_vllm_rejects_silently_skipped_ordinary_parameter():
 
 
 def test_load_weights_into_vllm_accepts_qwen_packed_parameter_names():
-    model = RecordingVLLMModel(
-        {
-            "model.layers.0.self_attn.qkv_proj.weight",
-            "model.layers.0.mlp.gate_up_proj.weight",
-        }
-    )
+    model = PerSourceRecordingVLLMModel()
+    source_names = {
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.layers.0.self_attn.k_proj.weight",
+        "model.layers.0.self_attn.v_proj.weight",
+        "model.layers.0.mlp.gate_proj.weight",
+        "model.layers.0.mlp.up_proj.weight",
+    }
 
     loaded = load_weights_into_vllm(
         model,
-        [
-            ("model.layers.0.self_attn.q_proj.weight", torch.zeros(4, 4)),
-            ("model.layers.0.self_attn.k_proj.weight", torch.zeros(4, 4)),
-            ("model.layers.0.self_attn.v_proj.weight", torch.zeros(4, 4)),
-            ("model.layers.0.mlp.gate_proj.weight", torch.zeros(4, 4)),
-            ("model.layers.0.mlp.up_proj.weight", torch.zeros(4, 4)),
-        ],
+        [(name, torch.zeros(4, 4)) for name in sorted(source_names)],
     )
 
-    assert loaded == {
-        "model.layers.0.self_attn.qkv_proj.weight",
-        "model.layers.0.mlp.gate_up_proj.weight",
-    }
+    assert loaded == source_names
+    assert len(model.calls) == len(source_names)
+    assert all(len(call) == 1 for call in model.calls)
+
+
+def test_load_weights_into_vllm_rejects_one_skipped_qwen_packed_source():
+    skipped = "model.layers.0.self_attn.k_proj.weight"
+    model = PerSourceRecordingVLLMModel({skipped})
+
+    with pytest.raises(RuntimeError, match=r"model\.layers\.0\.self_attn\.k_proj\.weight"):
+        load_weights_into_vllm(
+            model,
+            [
+                ("model.layers.0.self_attn.q_proj.weight", torch.zeros(4, 4)),
+                (skipped, torch.zeros(4, 4)),
+                ("model.layers.0.self_attn.v_proj.weight", torch.zeros(4, 4)),
+            ],
+        )
 
 
 def test_expected_parameter_names_cover_grug_stacked_experts():

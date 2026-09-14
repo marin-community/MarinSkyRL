@@ -91,18 +91,37 @@ def load_weights_into_vllm(
     model: VLLMWeightModel,
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> set[str]:
-    """Load one weight-sync batch and reject every silently skipped parameter."""
+    """Load one weight-sync batch and return its logical parameter receipt.
+
+    vLLM reports the same packed parameter name after loading each q/k/v or
+    gate/up source tensor. Load those source tensors separately so one successful
+    sibling cannot hide another sibling that the loader silently skipped.
+    """
     conversion = convert_transformers_fused_moe_weights(weights)
-    loaded_parameters = model.load_weights(iter(conversion.weights))
-    missing_parameters = {
-        expected
-        for expected in conversion.expected_parameters
-        if not _reported_parameter_candidates(expected).intersection(loaded_parameters)
-    }
+    ordinary_weights: list[tuple[str, torch.Tensor]] = []
+    acknowledged_parameters: set[str] = set()
+    missing_parameters: set[str] = set()
+
+    for name, tensor in conversion.weights:
+        candidates = _reported_parameter_candidates(name)
+        if len(candidates) == 1:
+            ordinary_weights.append((name, tensor))
+            continue
+        loaded_parameters = model.load_weights(iter(((name, tensor),)))
+        if candidates.isdisjoint(loaded_parameters):
+            missing_parameters.add(name)
+        else:
+            acknowledged_parameters.add(name)
+
+    if ordinary_weights:
+        loaded_parameters = model.load_weights(iter(ordinary_weights))
+        missing_parameters.update(
+            conversion.expected_parameters.difference(acknowledged_parameters | loaded_parameters)
+        )
     if missing_parameters:
         missing = ", ".join(sorted(missing_parameters))
         raise RuntimeError(f"vLLM did not load required parameters: {missing}")
-    return loaded_parameters
+    return set(conversion.expected_parameters)
 
 
 def _reported_parameter_candidates(expected: str) -> frozenset[str]:
