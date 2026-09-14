@@ -37,6 +37,7 @@ from skyrl_train.learners.levanter_config import LevanterSnowballRuntimeConfig
 from skyrl_train.learners.levanter_snowball import (
     LevanterSnowballLearner,
     _parameter_probe,
+    _replicated_host_copy,
     _regular_grpo_loss,
     _resolve_local_model_snapshot,
     prepare_snowball_batch,
@@ -305,6 +306,13 @@ def _multihost_learner_worker(
     assert w_q.sharding.spec == jax.sharding.PartitionSpec("data", "model")
     assert len(w_q.addressable_shards) == 2
     assert all(shard.data.shape == (3, 16) for shard in w_q.addressable_shards)
+    global_values = jax.make_array_from_callback(
+        (8,),
+        jax.sharding.NamedSharding(learner._trainer_config.device_mesh, jax.sharding.PartitionSpec("data")),
+        lambda index: np.arange(8, dtype=np.float32)[index],
+    )
+    assert not global_values.is_fully_addressable
+    np.testing.assert_array_equal(_replicated_host_copy(global_values), np.arange(8, dtype=np.float32))
     original = _batch()
     batch = LearnerBatch(
         sequences=np.concatenate((original.sequences, original.sequences)),
@@ -391,6 +399,9 @@ def test_parameter_probe_gathers_a_bounded_slice_from_two_devices(tmp_path):
             **os.environ,
             "JAX_PLATFORMS": "cpu",
             "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
+            "PYTHONPATH": os.pathsep.join(
+                filter(None, (str(Path(__file__).parents[2]), os.environ.get("PYTHONPATH")))
+            ),
         },
         capture_output=True,
         text=True,

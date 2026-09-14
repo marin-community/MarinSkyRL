@@ -204,6 +204,18 @@ def _router_biases(model: SnowballLMHeadModel) -> tuple[jax.Array, ...]:
     return tuple(block.mlp.router_bias for block in model.transformer.blocks)
 
 
+def _replicated_host_copy(value: jax.Array) -> np.ndarray:
+    """Copy a small global array through an explicitly replicated result."""
+
+    if not value.is_fully_addressable:
+        value = multihost_utils.process_allgather(value, tiled=True)
+    return np.asarray(jax.device_get(value))
+
+
+def _router_bias_host_copy(model: SnowballLMHeadModel) -> np.ndarray:
+    return _replicated_host_copy(jnp.stack(_router_biases(model)))
+
+
 def _restore_router_bias_storage_dtype(model: SnowballLMHeadModel) -> SnowballLMHeadModel:
     for layer in range(model.config.num_layers):
         model = eqx.tree_at(
@@ -540,9 +552,7 @@ class LevanterSnowballLearner:
             loss_mask = hax.named(jnp.asarray(dense_loss_mask), (Batch, Prediction))
 
             before_probe = _parameter_probe(self._trainer_state.model)
-            before_biases = tuple(
-                np.asarray(jax.device_get(value)) for value in _router_biases(self._trainer_state.model)
-            )
+            before_biases = _router_bias_host_copy(self._trainer_state.model)
             update_start = time.perf_counter()
             info = self._trainer.train_step(
                 self._trainer_state,
@@ -555,12 +565,8 @@ class LevanterSnowballLearner:
             jax.block_until_ready(info.state)
             update_seconds = time.perf_counter() - update_start
             parameter_probe_delta_l2 = float(np.linalg.norm(_parameter_probe(self._trainer_state.model) - before_probe))
-            after_biases = tuple(
-                np.asarray(jax.device_get(value)) for value in _router_biases(self._trainer_state.model)
-            )
-            router_bias_max_delta = max(
-                float(np.max(np.abs(after - before))) for before, after in zip(before_biases, after_biases, strict=True)
-            )
+            after_biases = _router_bias_host_copy(self._trainer_state.model)
+            router_bias_max_delta = float(np.max(np.abs(after_biases - before_biases)))
         except Exception:
             self._lifecycle = LearnerLifecycle.FAILED
             raise
