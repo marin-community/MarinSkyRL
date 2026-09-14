@@ -410,9 +410,7 @@ def test_parameter_probe_gathers_a_bounded_slice_from_two_devices(tmp_path):
             **os.environ,
             "JAX_PLATFORMS": "cpu",
             "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
-            "PYTHONPATH": os.pathsep.join(
-                filter(None, (str(Path(__file__).parents[2]), os.environ.get("PYTHONPATH")))
-            ),
+            "PYTHONPATH": os.pathsep.join(filter(None, (str(Path(__file__).parents[2]), os.environ.get("PYTHONPATH")))),
         },
         capture_output=True,
         text=True,
