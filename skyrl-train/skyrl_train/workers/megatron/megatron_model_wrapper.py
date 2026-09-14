@@ -16,6 +16,7 @@ from skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
+from skyrl_train.distillation import SampledReverseKLInput
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
 
@@ -51,6 +52,7 @@ class MegatronPolicyMicroBatch:
     rollout_action_logprobs: Optional[torch.Tensor]
     response_span_tags: Optional[torch.Tensor]
     global_loss_denom: Optional[float]
+    distillation: Optional[SampledReverseKLInput] = None
 
 
 class MegatronModelWrapper:
@@ -304,6 +306,7 @@ class MegatronModelWrapper:
                 accumulation_steps=len(micro_batches),
                 scaling=LossScaling.MEGATRON_PIPELINE,
                 global_loss_denom=data.global_loss_denom,
+                distillation=data.distillation,
             )
             if log_ratio_monitor is None:
                 log_ratio_monitor = LogRatioMonitor(action_log_probs.device)

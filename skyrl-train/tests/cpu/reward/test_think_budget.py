@@ -25,7 +25,7 @@ from omegaconf import OmegaConf
 
 from skyrl_train.utils.loss_reduction import build_think_weighted_loss_mask, reduce_loss
 from skyrl_train.utils.policy_losses import ppo_policy_loss
-from skyrl_train.utils.policy_math import masked_mean
+from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.think_budget import compute_think_token_cost
 
 # Span-tag constants (mirror skyrl_train.utils.span_tagger; duplicated here to

@@ -12,10 +12,8 @@ import torch
 from jaxtyping import Float
 from omegaconf import DictConfig
 
+from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean
 from skyrl_train.training_batch import TrainingInputBatch
-
-
-LOG_PROB_DELTA_CLIP = 20.0
 
 
 def right_pad_to_match(
@@ -31,18 +29,6 @@ def right_pad_to_match(
     aligned = torch.zeros_like(reference, dtype=dtype or tensor.dtype)
     aligned[..., :width] = tensor[..., :width]
     return aligned
-
-
-def safe_exp_delta(delta: torch.Tensor, clip: float = LOG_PROB_DELTA_CLIP, out_dtype=None) -> torch.Tensor:
-    """Exponentiate a bounded log-probability delta without low-precision overflow."""
-    result = torch.exp(delta.float().clamp(min=-clip, max=clip))
-    return result.to(out_dtype or delta.dtype)
-
-
-def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: Optional[int] = None) -> torch.Tensor:
-    if mask is None:
-        return tensor.mean(axis=dim)
-    return (tensor * mask).sum(axis=dim) / mask.sum(axis=dim).clamp(min=1.0)
 
 
 def differentiable_approx_kl(

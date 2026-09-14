@@ -39,10 +39,12 @@ from skyrl_train.dataset.preprocess import (
     collate_response_token_channel,
     convert_prompts_responses_to_batch_tensors,
 )
+from skyrl_train.distillation import validate_sampled_reverse_kl_attachment
 from skyrl_train.utils import trainer_utils
 from skyrl_train.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
-from skyrl_train.utils.policy_math import compute_approx_kl, masked_mean, normalize_advantages_dict
+from skyrl_train.tensor_math import masked_mean
+from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
 from skyrl_train.utils.loss_reduction import (
@@ -117,6 +119,33 @@ from skyrl_train.hf_export_schema import (
 )
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
+
+
+def _validated_distillation_tensors(
+    trajectory_batch: TrajectoryBatch,
+    response_mask: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Validate optional teacher evidence and return its learner-only tensors."""
+    evidence = trajectory_batch.get("teacher_evidence")
+    distillation = trajectory_batch.get("distillation")
+    if evidence is None and distillation is None:
+        return {}
+    if evidence is None or distillation is None:
+        raise ValueError("trajectory batches must carry teacher_evidence and prepared distillation together")
+    trajectory_ids = trajectory_batch.get("trajectory_ids")
+    if trajectory_ids is None:
+        raise ValueError("teacher evidence requires stable trajectory_ids")
+    validate_sampled_reverse_kl_attachment(
+        evidence,
+        distillation,
+        trajectory_ids=tuple(trajectory_id.to_string() for trajectory_id in trajectory_ids),
+        response_mask=response_mask.to(torch.bool),
+    )
+    return {
+        "teacher_action_log_probs": distillation.teacher_action_log_probs,
+        "teacher_valid_mask": distillation.valid_mask,
+        "distillation_loss_weights": distillation.loss_weights,
+    }
 
 
 class RayPPOTrainer:
@@ -1284,6 +1313,7 @@ class RayPPOTrainer:
             assert rollout_routed_experts_tensor.shape[:2] == loss_masks_tensor.shape, (
                 "routed_experts response axis should look like responses"
             )
+        distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -1303,6 +1333,7 @@ class RayPPOTrainer:
         # exactly the same keys as today (TensorBatch.__eq__ compares key sets).
         if rollout_routed_experts_tensor is not None:
             training_input["rollout_routed_experts"] = rollout_routed_experts_tensor
+        training_input.update(distillation_tensors)
         # Stage B (F5/F4): attach the per-token shaping channel + span tags ONLY
         # when present, so the flag-off batch dict has exactly the same keys as
         # today (TensorBatch.__eq__ compares key sets).

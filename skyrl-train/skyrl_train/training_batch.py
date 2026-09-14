@@ -9,6 +9,7 @@ import torch
 from jaxtyping import Float, Integer
 
 from skyrl_train.dataset.replay_buffer import Experience
+from skyrl_train.distillation import sampled_reverse_kl_input_from_tensors
 
 DictType = TypeVar("DictType")
 GLOBAL_LOSS_DENOM_METADATA_KEY = "global_loss_denom"
@@ -356,6 +357,9 @@ class TrainingInput(TypedDict, total=False):
     kl: Float[torch.Tensor, "batch_size seq_len"]
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    teacher_action_log_probs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    teacher_valid_mask: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
+    distillation_loss_weights: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     # MoE router-replay capture rail (Stage 1): per-token expert-selection indices
     # captured from vLLM, [batch, response_len, L, K] (L = MoE layers, K = top-k).
     # Present only when trainer.policy.fsdp_config.moe_router_replay is True.
@@ -421,6 +425,11 @@ class TrainingBatchIterator(Iterator[Experience]):
             action_mask=batch["response_mask"],
             num_actions=batch.metadata["response_length"],
             rollout_logprobs=batch.get("rollout_logprobs"),
+            distillation=sampled_reverse_kl_input_from_tensors(
+                batch.get("teacher_action_log_probs"),
+                batch.get("teacher_valid_mask"),
+                batch.get("distillation_loss_weights"),
+            ),
             rollout_routed_experts=batch.get("rollout_routed_experts"),
             response_span_tags=batch.get("response_span_tags"),
             info={},

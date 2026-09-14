@@ -8,7 +8,7 @@ from typing import Optional
 import torch
 from loguru import logger
 
-from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
+from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
 
 
 TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log_ratio_abs_mean")

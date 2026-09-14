@@ -631,6 +631,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         loss_mask=experience.loss_mask,
                         rollout_action_logprobs=experience.rollout_logprobs,
                         response_span_tags=experience.response_span_tags,
+                        distillation=experience.distillation,
                         global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
                     )
                 )

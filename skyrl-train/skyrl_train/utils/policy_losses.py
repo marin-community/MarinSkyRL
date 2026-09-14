@@ -14,6 +14,7 @@ import loguru
 import torch
 from omegaconf import DictConfig
 
+from skyrl_train.distillation import SampledReverseKLInput, sampled_reverse_kl_loss
 from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics
 from skyrl_train.utils.loss_reduction import (
     GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
@@ -24,7 +25,8 @@ from skyrl_train.utils.loss_reduction import (
     reduce_loss,
 )
 from skyrl_train.utils.algorithm_registry import PolicyLossType, register_policy_loss
-from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP, differentiable_approx_kl, masked_mean, safe_exp_delta
+from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
+from skyrl_train.utils.policy_math import differentiable_approx_kl
 
 
 @dataclass(frozen=True)
@@ -217,6 +219,7 @@ def compute_policy_objective(
     accumulation_steps: int,
     scaling: LossScaling,
     global_loss_denom: Optional[float] = None,
+    distillation: Optional[SampledReverseKLInput] = None,
 ) -> PolicyObjective:
     """Build a policy objective independent of the backend execution loop.
 
@@ -254,10 +257,21 @@ def compute_policy_objective(
         loss_mask=loss_mask,
         config=config,
     )
-    unscaled_loss = policy_loss + auxiliary.loss
+    distillation_loss = None
+    combined_auxiliary_loss = auxiliary.loss
+    if distillation is not None:
+        distillation_loss = sampled_reverse_kl_loss(
+            action_log_probs,
+            old_action_log_probs,
+            distillation,
+            loss_mask,
+        )
+        combined_auxiliary_loss = combined_auxiliary_loss + distillation_loss
+
+    unscaled_loss = policy_loss + combined_auxiliary_loss
     optimization_loss = _scale_policy_objective(
         policy_loss,
-        auxiliary.loss,
+        combined_auxiliary_loss,
         accumulation_steps=accumulation_steps,
         scaling=scaling,
         loss_reduction=config.loss_reduction,
@@ -269,6 +283,8 @@ def compute_policy_objective(
         loss_mask=loss_mask,
         config=config,
     )
+    if distillation_loss is not None:
+        metrics["distillation_loss"] = distillation_loss.detach().item()
     return PolicyObjective(
         optimization_loss=optimization_loss,
         unscaled_loss=unscaled_loss,
