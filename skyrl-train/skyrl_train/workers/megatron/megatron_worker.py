@@ -28,11 +28,11 @@ from skyrl_train.distributed.megatron.optimizer import (
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
+from skyrl_train.distributed.megatron.megatron_utils import print_model_size
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
 from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
 import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
-from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, is_grug_router_bias, validate_grug_training_strategy
+from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from skyrl_train.training_batch import (
     GLOBAL_LOSS_DENOM_METADATA_KEY,
     TrainingBatchIterator,
@@ -47,174 +47,14 @@ from skyrl_train.workers.worker import (
 )
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper, MegatronPolicyMicroBatch
 from skyrl_train.utils.profiler import Profiler
-from skyrl_train.weight_sync import WeightExtractor, WeightChunk
-from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode, weight_sync_dtype
+from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
+from skyrl_train.workers.megatron.weight_extractor import MegatronWeightExtractor
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 
 
 class _MegatronInitMode(StrEnum):
     TRAINING = "training"
     CHECKPOINT_EXPORT = "checkpoint-export"
-
-
-class MegatronWeightExtractor(WeightExtractor):
-    """Extracts weights from Megatron model-parallel models.
-
-    Uses Megatron's bridge to export weights in HuggingFace format.
-
-    Args:
-        bridge: Megatron AutoBridge instance for weight conversion
-        actor_module: The actor module to extract weights from
-        model_type: HF ``model_type`` of the policy; selects per-tensor wire dtypes (Grug's router bias stays fp32)
-        enable_bucketing: If True, group parameters into size-based buckets for packing
-        bucket_size_threshold_GB: Size threshold in GB for bucketing (only used if enable_bucketing=True)
-        training_dtype: Training dtype for size calculation (only used if enable_bucketing=True)
-    """
-
-    def __init__(
-        self,
-        bridge,
-        actor_module,
-        model_type: str,
-        enable_bucketing: bool = False,
-        bucket_size_threshold_GB: float = 1.0,
-        training_dtype: torch.dtype = torch.bfloat16,
-    ):
-        self.bridge = bridge
-        self.actor_module = actor_module
-        self.model_type = model_type
-        self.enable_bucketing = enable_bucketing
-        self.bucket_size_threshold_GB = bucket_size_threshold_GB
-        self.training_dtype = training_dtype
-
-        # Initialize bucketing if enabled
-        if enable_bucketing:
-            self._init_param_buckets()
-        else:
-            self.param_buckets = None
-
-    def _init_param_buckets(self):
-        """Initialize parameter buckets for packing."""
-        # Get conversion tasks from bridge
-        weight_conversion_tasks = self.bridge.get_conversion_tasks(self.actor_module)
-
-        # Calculate size for each parameter
-        param_info = []
-
-        def calculate_size_in_bytes(param, tp_size, ep_size):
-            if param is None:
-                # need to broadcast for other pp ranks
-                size_in_bytes = None
-            else:
-                # Calculate size for this parameter
-                prec_to_bytes = {
-                    torch.bfloat16: 2,
-                    torch.float32: 4,
-                }
-                scale = prec_to_bytes[self.training_dtype] / prec_to_bytes[param.dtype]
-                size_in_bytes = param.element_size() * param.numel() * tp_size * ep_size * scale
-
-            # Broadcast size_in_bytes across pipeline parallel ranks
-            return broadcast_object_across_pp_ranks(size_in_bytes)
-
-        for task in weight_conversion_tasks:
-            param_info.append(
-                (
-                    task,
-                    calculate_size_in_bytes(
-                        task.param_weight,
-                        task.mapping.tp_size,
-                        task.mapping.ep_size if task.mapping.is_expert else 1,
-                    ),
-                )
-            )
-
-        # Group parameters into buckets based on size threshold. Each bucket is packed into one
-        # buffer of a single dtype, so tensors with a non-default wire dtype get their own bucket.
-        self.param_buckets = [[]]
-        curr_size = 0
-        for task, size in param_info:
-            separate = self._has_special_wire_dtype(task)
-            if separate or curr_size + size > self.bucket_size_threshold_GB * 1024**3:
-                self.param_buckets.append([])
-                curr_size = 0
-            self.param_buckets[-1].append(task)
-            curr_size += size
-            if separate:
-                self.param_buckets.append([])
-                curr_size = 0
-        self.param_buckets = [bucket for bucket in self.param_buckets if bucket]
-
-    def _has_special_wire_dtype(self, task) -> bool:
-        hf_names = task.mapping.hf_param
-        if isinstance(hf_names, dict):
-            hf_names = hf_names.values()
-        else:
-            hf_names = [hf_names]
-        return any(is_grug_router_bias(self.model_type, name) for name in hf_names)
-
-    def _wire_tensor(self, name: str, tensor: torch.Tensor, dtype: torch.dtype, device) -> torch.Tensor:
-        return tensor.to(device=device, dtype=weight_sync_dtype(self.model_type, name, dtype), non_blocking=True)
-
-    def extract_weights(self, dtype: torch.dtype):
-        """Extract weights from Megatron model.
-
-        Args:
-            dtype: Target dtype for inference
-
-        Yields:
-            WeightChunk objects (one per parameter, or one per bucket if bucketing enabled)
-        """
-        device = torch.cuda.current_device()
-
-        if not self.enable_bucketing:
-            # No bucketing: yield one chunk per parameter
-            hf_params_generator = self.bridge.export_hf_weights(
-                self.actor_module,
-                show_progress=False,
-                conversion_tasks=None,
-            )
-
-            for name, tensor in hf_params_generator:
-                tensor = self._wire_tensor(name, tensor, dtype, device)
-
-                yield WeightChunk(
-                    names=[name],
-                    dtypes=[str(tensor.dtype)],
-                    shapes=[list(tensor.shape)],
-                    tensors=[tensor],
-                )
-        else:
-            # Bucketing mode: iterate over buckets, yield one chunk per bucket
-            for bucket in self.param_buckets:
-                hf_params_generator = self.bridge.export_hf_weights(
-                    self.actor_module,
-                    show_progress=False,
-                    conversion_tasks=bucket,
-                )
-
-                # Collect all parameters in this bucket into one chunk
-                names = []
-                dtypes_list = []
-                shapes = []
-                tensors = []
-
-                for name, tensor in hf_params_generator:
-                    tensor = self._wire_tensor(name, tensor, dtype, device)
-
-                    names.append(name)
-                    dtypes_list.append(str(tensor.dtype))
-                    shapes.append(list(tensor.shape))
-                    tensors.append(tensor)
-
-                # Yield one chunk containing all parameters in this bucket
-                if tensors:
-                    yield WeightChunk(
-                        names=names,
-                        dtypes=dtypes_list,
-                        shapes=shapes,
-                        tensors=tensors,
-                    )
 
 
 class MegatronWorker:
@@ -568,7 +408,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             model_type=model_type,
             enable_bucketing=self.use_cuda_ipc,
             bucket_size_threshold_GB=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB,
-            training_dtype=torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32,
         )
 
         self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache

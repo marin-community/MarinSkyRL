@@ -18,8 +18,14 @@ ROUTER_NAME = "model.layers.0.mlp.router.weight"
 ADVANTAGE_PATTERN = torch.tensor([[-1.0, -0.25, 0.5, 1.0], [1.0, 0.5, -0.25, -1.0]])
 
 
-def grug_engine_client(cfg, model_path: str) -> InferenceEngineClient:
-    """Start eager, non-sleeping vLLM engines for a tiny Grug checkpoint on their own GPUs."""
+def grug_engine_client(
+    cfg,
+    model_path: str,
+    *,
+    shared_pg=None,
+    inference_engine_enable_sleep: bool = False,
+) -> InferenceEngineClient:
+    """Start eager vLLM engines for a tiny Grug checkpoint."""
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     engines = create_ray_wrapped_inference_engines(
         num_inference_engines=cfg.generator.num_inference_engines,
@@ -33,9 +39,9 @@ def grug_engine_client(cfg, model_path: str) -> InferenceEngineClient:
         enable_prefix_caching=False,
         enforce_eager=True,
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
-        shared_pg=None,
+        shared_pg=shared_pg,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
-        inference_engine_enable_sleep=False,
+        inference_engine_enable_sleep=inference_engine_enable_sleep,
         async_engine=True,
         max_num_batched_tokens=MAX_MODEL_LEN * cfg.generator.inference_engine_data_parallel_size,
         max_num_seqs=cfg.trainer.train_batch_size,
