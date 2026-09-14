@@ -50,6 +50,44 @@ def chosen_teacher_evidence() -> ChosenTokenTeacherEvidence:
 
 
 @pytest.fixture
+def local_distillation_config():
+    """Attach the supported single-teacher distillation plan to a test config."""
+
+    def configure(config):
+        OmegaConf.set_struct(config, False)
+        config.trainer.algorithm.distillation = {
+            "objective": "sampled_reverse_kl",
+            "routing_plan": "opd",
+            "coefficient": 0.5,
+            "reward_mode": "add",
+        }
+        config.teachers = {
+            "primary": {
+                "source": "local_inference",
+                "placement": "pinned",
+                "model": {"path": "Qwen/teacher", "revision": "teacher-revision"},
+                "backend": "vllm",
+                "evidence": "chosen_token",
+                "resources": {
+                    "num_nodes": 1,
+                    "gpus_per_node": 1,
+                    "tensor_parallel_size": 1,
+                    "colocation_group": "teacher",
+                },
+            }
+        }
+        config.teacher_routing = {
+            "opd": {
+                "revision": "route-revision",
+                "routes": {"default": {"teacher": "primary", "weight": 1.0}},
+            }
+        }
+        return config
+
+    return configure
+
+
+@pytest.fixture
 def verifier_test_collection_factory():
     def build(trial: int, outcomes: dict[str, str], *, complete: bool = True) -> VerifierTestCollection:
         return {

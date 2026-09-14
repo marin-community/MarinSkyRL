@@ -24,6 +24,7 @@ import asyncio
 import multiprocessing as mp
 
 from skyrl_train.config.trajectory_runner_capabilities import (
+    EntrypointOperation,
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
@@ -604,6 +605,7 @@ def run_ray_driver(
     entrypoint: RemoteFunction,
     runner_mode: TrajectoryRunnerMode,
     *,
+    operation: EntrypointOperation = EntrypointOperation.TRAIN,
     failure_message: str = "Training failed",
 ) -> None:
     """Run one packaged experiment entrypoint with the shared Ray driver lifecycle."""
@@ -615,7 +617,7 @@ def run_ray_driver(
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
 
     validate_cfg(cfg)
-    validate_trajectory_runner_capabilities(cfg, runner_mode)
+    validate_trajectory_runner_capabilities(cfg, runner_mode, operation)
     configure_progress(cfg.trainer.progress)
 
     initialize_ray(cfg)
