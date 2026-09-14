@@ -24,11 +24,13 @@ class _Engine:
     def __init__(self, *, model_max_len: int | None = 32) -> None:
         self.model_max_len = model_max_len
         self.teardown_count = 0
+        self.requests = []
 
     def get_model_max_len(self):
         return self.model_max_len
 
     async def generate(self, request):
+        self.requests.append(request)
         prompt_logprobs = []
         for sequence in request["prompt_token_ids"]:
             prompt_logprobs.append([None, *({token_id: -0.25} for token_id in sequence[1:])])
@@ -95,6 +97,29 @@ def _config():
             },
         }
     )
+
+
+def _two_teacher_config(*, placement: str):
+    cfg = _config()
+    cfg.teachers.primary.placement = placement
+    cfg.teachers.secondary = {
+        "source": "local_inference",
+        "placement": placement,
+        "model": {"path": "Qwen/teacher-secondary", "revision": "teacher-secondary-revision"},
+        "backend": "vllm",
+        "evidence": "chosen_token",
+        "resources": {
+            "num_nodes": 1,
+            "gpus_per_node": 1,
+            "tensor_parallel_size": 1,
+            "colocation_group": "teacher" if placement == "rotating" else "teacher-secondary",
+        },
+    }
+    cfg.teacher_routing.opd.routes = {
+        "primary": {"teacher": "primary", "weight": 1.0},
+        "secondary": {"teacher": "secondary", "weight": 1.0},
+    }
+    return cfg
 
 
 @pytest.mark.asyncio
@@ -170,3 +195,111 @@ async def test_local_teacher_runtime_cleans_engine_when_oracle_startup_fails(mon
         await start_sync_distillation_runtime(cfg, prepared)
 
     assert engine.teardown_count == 1
+
+
+@pytest.mark.asyncio
+async def test_local_teacher_runtime_eagerly_owns_multiple_pinned_teachers(monkeypatch):
+    tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
+    pending_engines = [_Engine(), _Engine()]
+    started_engines = []
+
+    def create_engines(**_kwargs):
+        engine = pending_engines.pop(0)
+        started_engines.append(engine)
+        return [engine]
+
+    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engines)
+    cfg = _two_teacher_config(placement="pinned")
+    prepared = prepare_sync_distillation_runtime(cfg, tokenizer)
+    runtime = await start_sync_distillation_runtime(cfg, prepared)
+    assert runtime is not None
+    assert len(started_engines) == 2
+
+    _, scored = await runtime.score_while_model_forwarding(
+        {
+            "trajectory_ids": [TrajectoryID("math", 0), TrajectoryID("code", 0)],
+            "teacher_route_keys": ["primary", "secondary"],
+            "prompt_token_ids": [[0, 1], [0, 2]],
+            "response_ids": [[2], [1]],
+        },
+        lambda: TrainingInputBatch({"policy": torch.tensor([1.0])}),
+    )
+    await runtime.close()
+
+    assert tuple(route.teacher_id for route in scored.routes) == ("primary", "secondary")
+    assert [len(engine.requests) for engine in started_engines] == [1, 1]
+    assert [engine.teardown_count for engine in started_engines] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_local_teacher_runtime_cleans_started_pinned_teacher_when_later_startup_fails(monkeypatch):
+    tokenizer = _Tokenizer({"a": 0})
+    engines = [_Engine(), _Engine(model_max_len=None)]
+    pending_engines = list(engines)
+    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    monkeypatch.setattr(
+        runtime_module, "create_ray_wrapped_inference_engines", lambda **_kwargs: [pending_engines.pop(0)]
+    )
+    cfg = _two_teacher_config(placement="pinned")
+    prepared = prepare_sync_distillation_runtime(cfg, tokenizer)
+
+    with pytest.raises(ValueError, match="maximum model length"):
+        await start_sync_distillation_runtime(cfg, prepared)
+
+    assert pending_engines == []
+    assert [engine.teardown_count for engine in engines] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_local_teacher_runtime_rotates_teachers_on_one_residency_slot(monkeypatch):
+    tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
+    started_engines = []
+
+    def create_engines(**_kwargs):
+        engine = _Engine()
+        started_engines.append(engine)
+        return [engine]
+
+    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engines)
+    cfg = _two_teacher_config(placement="rotating")
+    prepared = prepare_sync_distillation_runtime(cfg, tokenizer)
+    runtime = await start_sync_distillation_runtime(cfg, prepared)
+    assert runtime is not None
+    assert started_engines == []
+
+    _, scored = await runtime.score_while_model_forwarding(
+        {
+            "trajectory_ids": [TrajectoryID("math", 0), TrajectoryID("code", 0)],
+            "teacher_route_keys": ["primary", "secondary"],
+            "prompt_token_ids": [[0, 1], [0, 2]],
+            "response_ids": [[2], [1]],
+        },
+        lambda: TrainingInputBatch({"policy": torch.tensor([1.0])}),
+    )
+    await runtime.close()
+
+    assert tuple(route.teacher_id for route in scored.routes) == ("primary", "secondary")
+    assert len(started_engines) == 2
+    assert [len(engine.requests) for engine in started_engines] == [1, 1]
+    assert [engine.teardown_count for engine in started_engines] == [1, 1]
+
+
+@pytest.mark.parametrize(
+    ("placements", "groups", "message"),
+    [
+        (("pinned", "pinned"), ("teacher", "teacher"), "pinned local teachers must use distinct"),
+        (("rotating", "rotating"), ("teacher", "other"), "share one identical resource footprint"),
+        (("pinned", "rotating"), ("teacher", "teacher"), "cannot share colocation group"),
+    ],
+)
+def test_local_teacher_runtime_rejects_unsafe_multi_teacher_resource_layouts(monkeypatch, placements, groups, message):
+    tokenizer = _Tokenizer({"a": 0})
+    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    cfg = _two_teacher_config(placement="rotating")
+    cfg.teachers.primary.placement, cfg.teachers.secondary.placement = placements
+    cfg.teachers.primary.resources.colocation_group, cfg.teachers.secondary.resources.colocation_group = groups
+
+    with pytest.raises(ValueError, match=message):
+        prepare_sync_distillation_runtime(cfg, tokenizer)

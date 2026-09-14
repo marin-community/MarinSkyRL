@@ -150,24 +150,47 @@ class DistillationPlan:
 
 
 def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None:
-    """Fail before allocation unless the plan fits the first production runtime slice."""
+    """Fail before allocation unless the plan fits the production local-teacher runtime."""
     if plan is None:
         return
     if plan.reward_mode is not DistillationRewardMode.ADD:
         raise ValueError("the distillation runtime currently supports only reward_mode=add auxiliary losses")
-    if len(plan.teachers) != 1:
-        raise ValueError("the synchronous distillation runtime currently supports exactly one teacher")
-    teacher = plan.teachers[0]
-    if teacher.source is not TeacherSource.LOCAL_INFERENCE or teacher.placement is not TeacherPlacement.PINNED:
-        raise ValueError("the synchronous distillation runtime currently supports one pinned local_inference teacher")
-    if teacher.resources is None:
-        raise ValueError(f"teachers.{teacher.id}.resources is required for a local teacher runtime")
-    total_gpus = teacher.resources.num_nodes * teacher.resources.gpus_per_node
-    if total_gpus % teacher.resources.tensor_parallel_size != 0:
-        raise ValueError(
-            f"teachers.{teacher.id}.resources reserves {total_gpus} GPUs, which is not divisible by "
-            f"tensor_parallel_size={teacher.resources.tensor_parallel_size}"
-        )
+    pinned_groups: set[str] = set()
+    rotating_groups: set[str] = set()
+    rotating_footprint: TeacherResourceSpec | None = None
+    for teacher in plan.teachers:
+        if teacher.source is not TeacherSource.LOCAL_INFERENCE or teacher.placement not in {
+            TeacherPlacement.PINNED,
+            TeacherPlacement.ROTATING,
+        }:
+            raise ValueError(
+                "the synchronous distillation runtime currently supports pinned or rotating local_inference teachers"
+            )
+        if teacher.resources is None:
+            raise ValueError(f"teachers.{teacher.id}.resources is required for a local teacher runtime")
+        total_gpus = teacher.resources.num_nodes * teacher.resources.gpus_per_node
+        if total_gpus % teacher.resources.tensor_parallel_size != 0:
+            raise ValueError(
+                f"teachers.{teacher.id}.resources reserves {total_gpus} GPUs, which is not divisible by "
+                f"tensor_parallel_size={teacher.resources.tensor_parallel_size}"
+            )
+
+        group = teacher.resources.colocation_group
+        if teacher.placement is TeacherPlacement.PINNED:
+            if group in pinned_groups:
+                raise ValueError(f"pinned local teachers must use distinct colocation groups; duplicate {group!r}")
+            pinned_groups.add(group)
+            continue
+
+        rotating_groups.add(group)
+        if rotating_footprint is None:
+            rotating_footprint = teacher.resources
+        elif teacher.resources != rotating_footprint:
+            raise ValueError("rotating local teachers must share one identical resource footprint and colocation group")
+    overlapping_groups = pinned_groups & rotating_groups
+    if overlapping_groups:
+        group = min(overlapping_groups)
+        raise ValueError(f"pinned and rotating local teachers cannot share colocation group {group!r}")
 
 
 _OBJECTIVE_EVIDENCE = {
