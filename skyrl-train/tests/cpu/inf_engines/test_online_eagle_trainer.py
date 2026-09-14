@@ -29,6 +29,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     export_served_speculator_checkpoint,
     OnlineEagleTrainerRuntime,
     partition_capture_windows,
+    per_worker_capture_token_credit,
     plan_online_eagle_capture_transfer,
     preserve_online_eagle_failure,
     publish_speculator_checkpoint,
@@ -37,6 +38,37 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
 )
 
 from marinskyrl.hf_model import sha256_file
+
+
+def test_per_worker_capture_credit_has_bounded_fragmentation_slack() -> None:
+    credits = [
+        per_worker_capture_token_credit(
+            global_max_tokens=131_072,
+            max_window_tokens=16_384,
+            worker_count=8,
+            worker_index=index,
+        )
+        for index in range(8)
+    ]
+
+    assert credits == [32_768] * 8
+    assert sum(credits) == 131_072 + 8 * 16_384
+    assert credits[0] >= 2 * 16_384
+
+
+def test_per_worker_capture_credit_distributes_global_remainder() -> None:
+    credits = [
+        per_worker_capture_token_credit(
+            global_max_tokens=10,
+            max_window_tokens=4,
+            worker_count=3,
+            worker_index=index,
+        )
+        for index in range(3)
+    ]
+
+    assert credits == [8, 7, 7]
+    assert sum(credits) == 10 + 3 * 4
 
 
 def _write_rank_capture(

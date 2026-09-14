@@ -222,6 +222,7 @@ class OnlineEagleCaptureConfig:
 
     step: int
     max_tokens: int
+    max_window_tokens: int
     max_sequences_per_prompt_group: int
     target_revision: str
     draft_revision: str
@@ -229,6 +230,30 @@ class OnlineEagleCaptureConfig:
 
     def to_mapping(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def per_worker_capture_token_credit(
+    *,
+    global_max_tokens: int,
+    max_window_tokens: int,
+    worker_count: int,
+    worker_index: int,
+) -> int:
+    """Bound local reservation while leaving room for one packing-fragment window.
+
+    vLLM must reserve a request's maximum possible window before generation, but
+    the global selector charges the much smaller realized window. Giving each
+    rank only its exact share can therefore admit just one request even when the
+    realized captures would fit comfortably. One additional maximum-size window
+    bounds aggregate host staging by ``global + workers * max_window`` while the
+    later NCCL transfer remains strictly bounded by ``global``.
+    """
+    if global_max_tokens <= 0 or max_window_tokens <= 0 or worker_count <= 0:
+        raise ValueError("Online EAGLE capture credit bounds must be positive")
+    if worker_index < 0 or worker_index >= worker_count:
+        raise ValueError(f"Online EAGLE worker index is out of range: {worker_index}")
+    token_credit, remainder = divmod(global_max_tokens, worker_count)
+    return token_credit + int(worker_index < remainder) + max_window_tokens
 
 
 @dataclass(frozen=True)

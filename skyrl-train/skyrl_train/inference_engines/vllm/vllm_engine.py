@@ -26,6 +26,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     ONLINE_EAGLE_CAPTURE_TRANSFER_FORMAT,
     catalog_online_eagle_capture,
     capture_rank_directory,
+    per_worker_capture_token_credit,
     publish_speculator_checkpoint,
     remove_online_eagle_scratch,
     restore_speculator_checkpoint,
@@ -358,8 +359,12 @@ class WorkerWrap:
         if global_token_budget < transfer_workers:
             raise ValueError("Online EAGLE capture token budget must cover every transfer rank")
         worker_index = self._draft_transfer_rank - 1
-        token_credit, remainder = divmod(global_token_budget, transfer_workers)
-        resolved["max_tokens"] = token_credit + int(worker_index < remainder)
+        resolved["max_tokens"] = per_worker_capture_token_credit(
+            global_max_tokens=global_token_budget,
+            max_window_tokens=int(resolved["max_window_tokens"]),
+            worker_count=transfer_workers,
+            worker_index=worker_index,
+        )
         resolved["capture_target_snapshot"] = self._draft_transfer_rank == 1
         # The patched vLLM capture contract retains this wire name. It identifies
         # the rank that owns the local target snapshot, not the remote DraftTrainer.
