@@ -313,7 +313,7 @@ class LevanterSnowballLearner:
             axes={"data": -1, "replica": 1, "expert": 1, "model": 1},
             dcn_axes={"replica_dcn": -1},
             compute_mapping={"batch": ["replica_dcn", "data"]},
-            param_mapping={},
+            param_mapping={"embed": "data"},
         )
         trainer_config = TrainerConfig(
             id=(

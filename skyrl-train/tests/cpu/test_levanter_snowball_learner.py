@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -39,6 +41,8 @@ from skyrl_train.learners.levanter_snowball import (
     prepare_snowball_batch,
 )
 from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM
+from skyrl_train.weight_sync.install_receipt import weight_name_digest
+from skyrl_train.weight_sync.vllm_weight_conversion import expected_vllm_parameter_names
 from transformers import AutoConfig
 
 _MODEL_VALUES = {
@@ -179,6 +183,162 @@ def _sharded_probe_worker() -> None:
     np.testing.assert_array_equal(_parameter_probe({"parameter": parameter}, size=3), np.arange(3))
 
 
+def _four_device_learner_worker(log_dir: str) -> None:
+    runtime = replace(
+        _runtime(Path(log_dir)),
+        training_gpus_per_node=4,
+        training_gpus=4,
+        train_batch_size=4,
+    )
+    model_config = _snowball_config()
+    learner = LevanterSnowballLearner(
+        runtime,
+        model_factory=lambda: SnowballLMHeadModel.init(
+            Axis("vocab", model_config.vocab_size),
+            model_config,
+            key=jax.random.key(7),
+        ),
+    )
+    learner.initialize(_learner_config())
+
+    w_q = learner.model.transformer.blocks[0].attn.w_q
+    assert w_q.sharding.spec == jax.sharding.PartitionSpec("data", "model")
+    assert w_q.addressable_shards[0].data.shape == (3, 16)
+
+    original = _batch()
+    batch = LearnerBatch(
+        sequences=np.concatenate((original.sequences, original.sequences)),
+        attention_mask=np.concatenate((original.attention_mask, original.attention_mask)),
+        response_mask=np.concatenate((original.response_mask, original.response_mask)),
+        loss_mask=np.concatenate((original.loss_mask, original.loss_mask)),
+        rollout_log_probs=None,
+        behavior_policy_versions=np.zeros(4, dtype=np.int64),
+    )
+    old_log_probs = learner.compute_log_probs(batch).policy_log_probs
+    result = learner.update(
+        UpdateRequest(
+            batch=batch,
+            advantages=np.asarray(
+                [[1.0, -0.5, 0.0], [0.25, -1.0, 0.5], [1.0, -0.5, 0.0], [0.25, -1.0, 0.5]],
+                dtype=np.float32,
+            ),
+            old_policy_log_probs=old_log_probs,
+            old_policy_version=0,
+            reference_log_probs=None,
+            global_step=0,
+            global_loss_denominator=None,
+        )
+    )
+    assert result.status.value == "succeeded"
+    assert np.isfinite(result.metrics["final_loss"])
+    learner.close()
+
+
+def _multihost_learner_worker(
+    process_id: str,
+    coordinator_address: str,
+    log_dir: str,
+    checkpoint_path: str,
+    result_path: str,
+) -> None:
+    runtime = replace(
+        _runtime(Path(log_dir)),
+        training_nodes=2,
+        training_gpus_per_node=2,
+        training_gpus=4,
+        train_batch_size=4,
+    )
+    model_config = _snowball_config()
+    learner = LevanterSnowballLearner(
+        runtime,
+        model_factory=lambda: SnowballLMHeadModel.init(
+            Axis("vocab", model_config.vocab_size),
+            model_config,
+            key=jax.random.key(7),
+        ),
+        distributed_coordinator_address=coordinator_address,
+        distributed_process_id=int(process_id),
+        distributed_process_count=2,
+    )
+    learner.initialize(_learner_config())
+    original = _batch()
+    batch = LearnerBatch(
+        sequences=np.concatenate((original.sequences, original.sequences)),
+        attention_mask=np.concatenate((original.attention_mask, original.attention_mask)),
+        response_mask=np.concatenate((original.response_mask, original.response_mask)),
+        loss_mask=np.concatenate((original.loss_mask, original.loss_mask)),
+        rollout_log_probs=None,
+        behavior_policy_versions=np.zeros(4, dtype=np.int64),
+    )
+    old_log_probs = learner.compute_log_probs(batch).policy_log_probs
+    update = learner.update(
+        UpdateRequest(
+            batch=batch,
+            advantages=np.asarray(
+                [[1.0, -0.5, 0.0], [0.25, -1.0, 0.5], [1.0, -0.5, 0.0], [0.25, -1.0, 0.5]],
+                dtype=np.float32,
+            ),
+            old_policy_log_probs=old_log_probs,
+            old_policy_version=0,
+            reference_log_probs=None,
+            global_step=0,
+            global_loss_denominator=None,
+        )
+    )
+
+    published_chunks = []
+
+    async def record_publication(batch):
+        published_chunks.append([name for name, _ in batch])
+
+    learner._publish_weight_batch = record_publication
+
+    if int(process_id) == 0:
+
+        class FakeInferenceClient:
+            async def begin_weight_reload(self):
+                return None
+
+            async def finish_weight_reload(self):
+                names = list(learner.model.to_state_dict())
+                parameters = sorted(expected_vllm_parameter_names(names))
+                return [
+                    {
+                        "kind": "weight_install_receipt",
+                        "finalized": True,
+                        "received_weight_count": len(names),
+                        "received_name_digest": weight_name_digest(names),
+                        "loaded_parameter_count": len(parameters),
+                        "loaded_parameter_digest": weight_name_digest(parameters),
+                        "host": "fake-worker",
+                    }
+                ]
+
+            async def reset_prefix_cache(self):
+                return None
+
+        learner._inference_client = FakeInferenceClient()
+        learner._weight_group = object()
+
+    asyncio.run(learner.publish_policy())
+    installed_publication_status = learner.state.publication_status.value
+    if int(process_id) == 0:
+        assert published_chunks
+        learner._weight_group = None
+    learner.save_checkpoint(checkpoint_path)
+    learner.load_checkpoint(checkpoint_path)
+    np.savez(
+        result_path,
+        log_probs=old_log_probs,
+        final_loss=update.metrics["final_loss"],
+        policy_version=learner.state.policy_version,
+        update_count=learner.state.update_count,
+        publication_status=installed_publication_status,
+        restored_publication_status=learner.state.publication_status.value,
+    )
+    learner.close()
+
+
 def test_parameter_probe_gathers_a_bounded_slice_from_two_devices(tmp_path):
     result = subprocess.run(
         [sys.executable, __file__, "--sharded-probe-worker"],
@@ -194,6 +354,83 @@ def test_parameter_probe_gathers_a_bounded_slice_from_two_devices(tmp_path):
         check=False,
     )
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+
+def test_four_device_learner_shards_parameters_and_updates(tmp_path):
+    result = subprocess.run(
+        [sys.executable, __file__, "--four-device-learner-worker", str(tmp_path / "four-device-logs")],
+        cwd=Path(__file__).parents[3],
+        env={
+            **os.environ,
+            "JAX_PLATFORMS": "cpu",
+            "XLA_FLAGS": "--xla_force_host_platform_device_count=4",
+            "PYTHONPATH": os.pathsep.join(filter(None, (str(Path(__file__).parents[2]), os.environ.get("PYTHONPATH")))),
+        },
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+
+
+def test_two_process_learner_updates_and_checkpoints_collectively(tmp_path):
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        coordinator_address = f"127.0.0.1:{listener.getsockname()[1]}"
+
+    source_root = Path(__file__).parents[2]
+    environment = {
+        **os.environ,
+        "JAX_PLATFORMS": "cpu",
+        "XLA_FLAGS": "--xla_force_host_platform_device_count=2",
+        "PYTHONPATH": os.pathsep.join(filter(None, (str(source_root), os.environ.get("PYTHONPATH")))),
+    }
+    checkpoint_path = tmp_path / "multihost-checkpoint"
+    processes = []
+    for process_id in range(2):
+        processes.append(
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    __file__,
+                    "--multihost-learner-worker",
+                    str(process_id),
+                    coordinator_address,
+                    str(tmp_path / f"logs-{process_id}"),
+                    str(checkpoint_path),
+                    str(tmp_path / f"result-{process_id}.npz"),
+                ],
+                cwd=Path(__file__).parents[3],
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        )
+
+    outputs = []
+    try:
+        for process in processes:
+            outputs.append(process.communicate(timeout=180))
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+    for process_id, (process, (stdout, stderr)) in enumerate(zip(processes, outputs, strict=True)):
+        assert process.returncode == 0, f"process={process_id}\nstdout={stdout}\nstderr={stderr}"
+
+    first = np.load(tmp_path / "result-0.npz")
+    second = np.load(tmp_path / "result-1.npz")
+    np.testing.assert_array_equal(first["log_probs"], second["log_probs"])
+    np.testing.assert_array_equal(first["final_loss"], second["final_loss"])
+    assert int(first["policy_version"]) == int(second["policy_version"]) == 1
+    assert int(first["update_count"]) == int(second["update_count"]) == 1
+    assert str(first["publication_status"]) == str(second["publication_status"]) == "installed"
+    assert str(first["restored_publication_status"]) == str(second["restored_publication_status"]) == "outdated"
+    assert (checkpoint_path / "manifest.json").is_file()
 
 
 def _dense_channels(batch: LearnerBatch, old_log_probs: np.ndarray, advantages: np.ndarray):
@@ -465,3 +702,7 @@ if __name__ == "__main__":
         _checkpoint_worker(*sys.argv[2:])
     elif sys.argv[1] == "--sharded-probe-worker":
         _sharded_probe_worker()
+    elif sys.argv[1] == "--four-device-learner-worker":
+        _four_device_learner_worker(sys.argv[2])
+    elif sys.argv[1] == "--multihost-learner-worker":
+        _multihost_learner_worker(*sys.argv[2:])
