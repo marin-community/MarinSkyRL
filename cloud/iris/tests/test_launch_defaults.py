@@ -403,6 +403,19 @@ def test_task_command_stages_training_and_validation_selectors_on_every_node(tmp
     assert options["--val-data"] == [json.dumps([val_selector])]
 
 
+def test_task_command_leaves_standard_parquet_for_the_training_driver(tmp_path):
+    train_data = json.dumps(["s3://bucket/standard-rl.parquet"])
+    args = _args(tmp_path, "standard", ["--train-data", train_data])
+    Path(args.rl_config).write_text("entrypoint: levanter_snowball\ntrainer:\n  strategy: fsdp2\n")
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert "--train-data" not in options
+    assert options["--train_data"] == [train_data]
+
+
 def test_task_command_stages_terminal_bench_sidechannel_on_every_node(tmp_path):
     selector = "fixture-org/nemotron-ultra-swe@immutable::train"
     args = _args(tmp_path, "opencode")

@@ -2249,9 +2249,10 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # on rank 0, while Ray may schedule rollout and evaluation workers on any node.
     # Forward both roles to the controller so every pod has identical task-local data.
     # Object-store locators use the separate typed materialization path below.
-    if args.train_data and args.train_data != EMPTY_JSON_LIST and not args.data_sources_json:
+    stage_task_selectors = _rl_config_is_agentic(args.rl_config)
+    if stage_task_selectors and args.train_data and args.train_data != EMPTY_JSON_LIST and not args.data_sources_json:
         controller_cmd.extend(["--train-data", args.train_data])
-    if args.val_data and args.val_data != EMPTY_JSON_LIST and not args.data_sources_json:
+    if stage_task_selectors and args.val_data and args.val_data != EMPTY_JSON_LIST and not args.data_sources_json:
         controller_cmd.extend(["--val-data", args.val_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
