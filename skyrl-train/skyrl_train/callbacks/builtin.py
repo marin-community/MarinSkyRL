@@ -107,7 +107,7 @@ class CheckpointCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ) -> Optional[TrainerControl]:
-        if self.save_on_train_end and self.save_steps > 0:
+        if self.save_on_train_end:
             control.should_save = True
         return control
 
