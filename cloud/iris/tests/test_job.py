@@ -18,7 +18,7 @@ from marinskyrl.training_completion import CompletionMode, NativeCheckpoint, Che
 
 from cloud.iris import job, runtime_environment  # noqa: E402
 from cloud.iris import runtime_bundle  # noqa: E402
-from cloud.iris.job import JobBackend, execute_job  # noqa: E402
+from cloud.iris.job import JobBackend, execute_job, validate_cross_region_io  # noqa: E402
 from cloud.iris.protocol import (  # noqa: E402
     AttemptState,
     DataLocator,
@@ -783,6 +783,72 @@ def test_cli_reports_launch_state_as_json(
         "state": state,
     }
     assert "human launcher log" in captured.err
+
+
+def test_rno_east_request_requires_explicit_cross_region_opt_in(tmp_path: Path, monkeypatch, capsys) -> None:
+    envelope = _spec(tmp_path)
+    east_root = "s3://marin-us-east-02a/marin/users/ahmad/e9-heldout"
+    envelope = replace(
+        envelope,
+        request=replace(
+            envelope.request,
+            model=replace(envelope.request.model, uri=f"{east_root}/model"),
+            train_data=(replace(envelope.request.train_data[0], uri=f"{east_root}/data"),),
+            output=SkyRLOutputPaths(
+                checkpoint_root=f"{east_root}/checkpoints",
+                export_root=f"{east_root}/exports",
+                attempts_root=f"{east_root}/attempts",
+                resolved_config_uri=f"{east_root}/resolved-skyrl.json",
+                terminal_manifest_uri=f"{east_root}/terminal.json",
+            ),
+            overrides=(
+                *envelope.request.overrides,
+                f"++trainer.resume_path={east_root}/source/global_step_100",
+            ),
+        ),
+        execution=replace(envelope.execution, cluster="cw-rno2a"),
+    )
+
+    request_path = tmp_path / "rno-east-request.json"
+    request_path.write_text(json.dumps(asdict(envelope)))
+    with pytest.raises(ValueError, match="requires --allow-cross-region-io"):
+        job.main(["iris", "launch", "--request", str(request_path), "--dry-run"])
+
+    monkeypatch.setattr(
+        job,
+        "execute_job",
+        lambda spec, *, mode: SkyRLLaunchResponse(
+            run_id=spec.request.run_id,
+            attempt_id=spec.request.attempt_id,
+            state=AttemptState.PREPARED,
+            iris_job_id=None,
+            iris_job_state=None,
+            runtime=spec.request.runtime,
+            training=None,
+            failure=None,
+        ),
+    )
+    assert (
+        job.main(
+            [
+                "iris",
+                "launch",
+                "--request",
+                str(request_path),
+                "--allow-cross-region-io",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["state"] == "prepared"
+
+    mutated = replace(
+        envelope,
+        request=replace(envelope.request, model=replace(envelope.request.model, uri="s3://other-region/model")),
+    )
+    with pytest.raises(ValueError, match="only permits east S3"):
+        validate_cross_region_io(mutated, allowed=True)
 
 
 def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeypatch) -> None:

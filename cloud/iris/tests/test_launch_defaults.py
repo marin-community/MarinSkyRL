@@ -929,6 +929,90 @@ def test_megatron_export_stages_one_checkpoint_for_eight_local_readers(tmp_path,
     assert sorted(downloaded_paths) == sorted(f"{source_root}/{name}" for name in source_files)
 
 
+def test_megatron_resume_stages_one_checkpoint_for_eight_local_readers(tmp_path, monkeypatch, parse_hydra_overrides):
+    source_uri = "s3://checkpoint-fixture/run/global_step_100"
+    source_root = "/checkpoint-fixture/run/global_step_100"
+    source_files = {
+        "trainer_state.pt": b"completed step marker",
+        "policy/.metadata": b"checkpoint metadata",
+        "policy/__0_0.distcp": b"weights and optimizer",
+    }
+    filesystem = MemoryFileSystem()
+    for name, payload in source_files.items():
+        filesystem.pipe(f"{source_root}/{name}", payload)
+    downloaded_paths = []
+    original_get_file = filesystem.get_file
+
+    def download(source, destination, **kwargs):
+        downloaded_paths.append(source)
+        return original_get_file(source, destination, **kwargs)
+
+    monkeypatch.setattr(filesystem, "get_file", download)
+    monkeypatch.setattr(artifacts, "fs_and_path", lambda uri: (filesystem, source_root))
+    monkeypatch.setattr(task_runtime, "fs_and_path", lambda uri: (filesystem, source_root))
+    monkeypatch.setattr(iris_backend, "CHECKPOINT_STAGING_ROOT", str(tmp_path / "node-checkpoints"))
+    args = _strategy_args(
+        tmp_path,
+        "megatron",
+        [
+            "--entrypoint",
+            "fully_async",
+            "--skyrl_override",
+            "++trainer.resume_mode=from_path",
+            "--skyrl_override",
+            f"++trainer.resume_path={source_uri}",
+        ],
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+    options = _shell_options(build_task_command(args)[-1])
+    overrides = parse_hydra_overrides(options["--skyrl_override"])
+    local_path = options["--checkpoint-local-path"][0]
+    with hydra.initialize_config_dir(config_dir=str(_REPO_ROOT / "skyrl-train/skyrl_train/config"), version_base=None):
+        cfg = hydra.compose(config_name="ppo_base_config", overrides=options["--skyrl_override"])
+
+    task_runtime.materialize_checkpoint(options["--checkpoint-source-uri"][0], local_path)
+    for _ in range(8):
+        with io.local_read_dir(cfg.trainer.resume_path) as read_dir:
+            assert Path(read_dir, "policy/__0_0.distcp").read_bytes() == source_files["policy/__0_0.distcp"]
+            assert read_dir == local_path
+
+    assert overrides["trainer.resume_mode"] == "from_path"
+    assert overrides["trainer.resume_path"] == local_path
+    assert sorted(downloaded_paths) == sorted(f"{source_root}/{name}" for name in source_files)
+    assert sum(filesystem.size(path) for path in downloaded_paths) == sum(map(len, source_files.values()))
+    assert len(list((tmp_path / "node-checkpoints").iterdir())) == 1
+
+
+@pytest.mark.parametrize(
+    ("strategy", "resume_mode", "resume_path"),
+    [
+        ("fsdp2", "from_path", "s3://checkpoint-fixture/global_step_100"),
+        ("megatron", "latest", "s3://checkpoint-fixture/global_step_100"),
+        ("megatron", "from_path", "/checkpoint/global_step_100"),
+    ],
+)
+def test_resume_checkpoint_staging_rejects_nonmatching_execution_paths(tmp_path, strategy, resume_mode, resume_path):
+    args = _strategy_args(
+        tmp_path,
+        strategy,
+        [
+            "--entrypoint",
+            "fully_async",
+            "--skyrl_override",
+            f"++trainer.resume_mode={resume_mode}",
+            "--skyrl_override",
+            f"++trainer.resume_path={resume_path}",
+        ],
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert "--checkpoint-source-uri" not in options
+    assert "--checkpoint-local-path" not in options
+
+
 @pytest.mark.parametrize(
     ("entrypoint", "strategy", "checkpoint_path"),
     [

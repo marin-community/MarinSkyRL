@@ -981,6 +981,17 @@ def _rl_training_strategy(args: argparse.Namespace) -> Optional[str]:
     return strategy.strip().lower() if isinstance(strategy, str) and strategy.strip() else None
 
 
+def _effective_trainer_value(args: argparse.Namespace, key: str) -> str | None:
+    """Read one effective trainer value with Hydra override precedence."""
+    dotted_key = f"trainer.{key}"
+    override = hydra_override_value(getattr(args, "skyrl_override", None) or [], dotted_key)
+    if override is not None:
+        return override
+    trainer = _load_rl_config_yaml(args.rl_config).get("trainer")
+    value = trainer.get(key) if isinstance(trainer, dict) else None
+    return str(value) if value is not None else None
+
+
 def _effective_gdn_backend(args: argparse.Namespace) -> str:
     """Resolve the GDN backend with the same precedence as the training command."""
     if args.gdn_flashqla is not None:
@@ -2202,6 +2213,26 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     if args.run_id:
         controller_cmd.extend(["--run-id", args.run_id])
     controller_cmd.extend(_model_bootstrap_args(args))
+    resume_mode = _effective_trainer_value(args, "resume_mode")
+    resume_path = _effective_trainer_value(args, "resume_path")
+    if (
+        not checkpoint_export
+        and _rl_training_strategy(args) == "megatron"
+        and resume_mode == "from_path"
+        and resume_path
+        and is_cloud_uri(resume_path)
+    ):
+        checkpoint_identity = hashlib.sha256(resume_path.rstrip("/").encode()).hexdigest()
+        local_checkpoint_path = str(Path(CHECKPOINT_STAGING_ROOT) / checkpoint_identity)
+        controller_cmd.extend(
+            ["--checkpoint-source-uri", resume_path, "--checkpoint-local-path", local_checkpoint_path]
+        )
+        train_cmd.extend(
+            [
+                "--skyrl_override",
+                format_hydra_arg("trainer.resume_path", local_checkpoint_path, prefix="++"),
+            ]
+        )
     if checkpoint_export and _rl_training_strategy(args) == "megatron":
         checkpoint_path = hydra_override_value(args.skyrl_override or [], "checkpoint_export.checkpoint_path")
         if checkpoint_path is None:

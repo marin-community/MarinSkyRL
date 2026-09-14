@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import re
 import sys
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from iris.client.client import JobFailedError
 
@@ -31,6 +33,10 @@ from cloud.iris.protocol import (
     job_spec,
 )
 from cloud.iris.request_builder import build_job_spec
+
+EAST_S3_BUCKET = "marin-us-east-02a"
+RNO_CLUSTER = "cw-rno2a"
+REMOTE_URI_PATTERN = re.compile(r"(?:s3|gs|gcs|https?)://[^\s'\"\],}]+")
 
 
 class JobBackend(Protocol):
@@ -58,6 +64,37 @@ def _write_json(uri: str, value: dict[str, Any]) -> None:
 def _path_exists(uri: str) -> bool:
     filesystem, path = fs_and_path(uri)
     return filesystem.exists(path)
+
+
+def _request_remote_uris(request: SkyRLLaunchRequest) -> tuple[str, ...]:
+    structured = (
+        request.model.uri,
+        *(locator.uri for locator in request.train_data),
+        *(locator.uri for locator in request.validation_data),
+        *asdict(request.output).values(),
+    )
+    embedded = REMOTE_URI_PATTERN.findall(request.config_yaml + "\n" + "\n".join(request.overrides))
+    return tuple(dict.fromkeys((*structured, *embedded)))
+
+
+def validate_cross_region_io(spec: SkyRLJobSpec, *, allowed: bool) -> None:
+    """Require an explicit, bounded opt-in for RNO access to east S3 artifacts."""
+    uris = _request_remote_uris(spec.request)
+    east_s3 = [uri for uri in uris if (parsed := urlparse(uri)).scheme == "s3" and parsed.netloc == EAST_S3_BUCKET]
+    if spec.execution.cluster == RNO_CLUSTER and east_s3 and not allowed:
+        raise ValueError("RNO access to east S3 artifacts requires --allow-cross-region-io")
+    if not allowed:
+        return
+    if spec.execution.cluster != RNO_CLUSTER:
+        raise ValueError("--allow-cross-region-io requires cluster cw-rno2a")
+    invalid = [
+        uri
+        for uri in uris
+        if (parsed := urlparse(uri)).scheme in {"s3", "gs", "gcs", "http", "https"}
+        and (parsed.scheme != "s3" or parsed.netloc != EAST_S3_BUCKET)
+    ]
+    if invalid:
+        raise ValueError("--allow-cross-region-io only permits east S3 artifact paths")
 
 
 def _attempt_uri(request: SkyRLLaunchRequest) -> str:
@@ -158,6 +195,11 @@ def create_parser() -> argparse.ArgumentParser:
 
     launch_parser = iris_commands.add_parser("launch")
     launch_parser.add_argument("--request", required=True)
+    launch_parser.add_argument(
+        "--allow-cross-region-io",
+        action="store_true",
+        help="Authorize an RNO launch whose complete remote artifact surface is in the east S3 bucket.",
+    )
     launch_mode = launch_parser.add_mutually_exclusive_group()
     launch_mode.add_argument("--dry-run", action="store_true")
     launch_mode.add_argument("--no-wait", action="store_true", help="Submit and return without following job logs.")
@@ -267,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with open(args.request) as source:
         spec = job_spec(json.load(source))
+    validate_cross_region_io(spec, allowed=args.allow_cross_region_io)
     if args.dry_run:
         mode = LaunchMode.PREPARE
     elif args.no_wait:
