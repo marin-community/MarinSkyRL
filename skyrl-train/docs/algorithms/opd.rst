@@ -30,9 +30,10 @@ the exact requested token IDs. A matching tokenizer family name is not sufficien
 
 FSDP/DeepSpeed and Megatron objective adapters have CPU integration coverage. Only
 FSDP2 with an unquantized local vLLM teacher is covered by the recurring production
-model gate. Quantized local teachers and SGLang teacher scoring are not supported;
-their configuration is rejected rather than treated as covered. Other policy/backend
-combinations should be treated as experimental until they gain targeted GPU coverage.
+model gate. No quantized local-teacher configuration is currently defined or
+production-gated. SGLang teacher scoring is rejected because it cannot provide the
+required prompt logprobs. Other policy/backend combinations should be treated as
+experimental until they gain targeted GPU coverage.
 
 Routing and residency
 ---------------------
@@ -41,5 +42,5 @@ Routes map each admitted trajectory to one logical teacher and a loss weight. Mu
 remote replicas of a teacher are selected by pending token load and retryable failures
 cool down an unhealthy endpoint. A fleet may combine remote teachers, pinned local
 teachers, and local teachers that rotate through one drained residency slot. This is
-the MOPD mechanism: route selection remains independent of endpoint placement and
-trainer regime.
+the Multi-Teacher On-Policy Distillation (MOPD) mechanism: each admitted trajectory can
+use its domain-specific teacher without coupling teacher placement to the trainer.

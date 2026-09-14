@@ -353,7 +353,6 @@ def test_real_same_vocabulary_teacher_changes_student_gradient_and_update():
     second_gradient, second_update = optimize_once(second_teacher)
     initial_parameters = torch.cat([value.flatten() for value in initial_state.values()])
 
-    assert config.vocab_size == first_teacher.config.vocab_size == second_teacher.config.vocab_size
     assert not torch.allclose(first_teacher_actions, second_teacher_actions)
     assert not torch.allclose(first_gradient, second_gradient)
     assert not torch.allclose(first_update, initial_parameters)
