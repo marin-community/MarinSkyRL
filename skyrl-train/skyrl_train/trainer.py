@@ -173,6 +173,7 @@ class RayPPOTrainer:
 
         self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
         self.group_admission_state: Optional[GroupAdmissionSamplingState] = None
+        self._pending_sync_prompts: List[Any] = []
         self._group_admission_watchdog: AdmissionProgressWatchdog | None = None
         self._step_time_history: deque[float] = deque(maxlen=5)
 
@@ -639,7 +640,9 @@ class RayPPOTrainer:
                     # for colocate_all=true, inference engine is always on GPU when starting the training step
 
                     # 0. truncate data to have even shards
-                    rand_prompts = self._remove_tail_data(rand_prompts)
+                    rand_prompts = self._select_sync_generation_prompts(rand_prompts)
+                    if self.group_admission_state is None:
+                        rand_prompts = self._remove_tail_data(rand_prompts)
                     trajectory_request, uids = prepare_trajectory_request(
                         rand_prompts,
                         self.cfg.generator.n_samples_per_prompt,
@@ -840,6 +843,19 @@ class RayPPOTrainer:
         if self.ref_model is not None:
             dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
         return entries[: (len(entries) // dp_size) * dp_size]
+
+    def _select_sync_generation_prompts(self, entries: List[Any]) -> List[Any]:
+        """Take the ordered prompts needed for the next synchronous generation request."""
+        available = [*self._pending_sync_prompts, *entries]
+        request_count = int(self.cfg.trainer.train_batch_size)
+        if self.group_admission_state is not None:
+            collected_count = int(self.group_admission_state.get("num_prompts_in_batch", 0))
+            request_count -= collected_count
+            assert request_count > 0
+
+        selected = available[:request_count]
+        self._pending_sync_prompts = available[request_count:]
+        return selected
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker, policy_pg: Optional[PlacementGroup] = None):
         """
@@ -2095,10 +2111,11 @@ class RayPPOTrainer:
         self.group_admission_state = result.state
         if rejected_count:
             rejection_summary = {reason.value: count for reason, count in result.rejection_counts.items() if count}
+            remaining_count = int(self.cfg.trainer.train_batch_size) - accepted_count
             logger.warning(
                 f"Rejected synchronous rollout groups before step {self.global_step}; "
                 f"reasons={rejection_summary}. "
-                f"Waiting for a complete {self.cfg.trainer.train_batch_size}-group replacement batch."
+                f"Requesting {remaining_count} replacement groups while retaining {accepted_count} accepted groups."
             )
         if not result.keep_sampling:
             self._group_admission_watchdog = None
@@ -2169,6 +2186,7 @@ class RayPPOTrainer:
         trainer_state = {
             "global_step": self.global_step,
             "config": self.cfg,
+            "pending_sync_prompts": self._pending_sync_prompts,
         }
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
         with io.open_file(trainer_state_path, "wb") as f:
@@ -2295,6 +2313,7 @@ class RayPPOTrainer:
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
+        self._pending_sync_prompts = []
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
@@ -2307,6 +2326,7 @@ class RayPPOTrainer:
                 with io.open_file(dataloader_state_path, "rb") as f:
                     dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
                 self.train_dataloader.load_state_dict(dataloader_state)
+                self._pending_sync_prompts = trainer_state.get("pending_sync_prompts", [])
                 logger.info("Successfully loaded dataloader state")
             except Exception as e:
                 logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
