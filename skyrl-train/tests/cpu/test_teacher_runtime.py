@@ -19,6 +19,7 @@ from skyrl_train.teacher_runtime import (
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.types import TrajectoryID
+from tests.fixtures.opd_http_teacher import application
 
 
 @dataclass
@@ -136,9 +137,7 @@ def _two_teacher_config(*, placement: str):
     return cfg
 
 
-def _external_teacher_config(base_url: str, tokenizer: _Tokenizer, *, two_teachers: bool):
-    cfg = _two_teacher_config(placement="pinned") if two_teachers else _config()
-    teacher_id = "secondary" if two_teachers else "primary"
+def _add_external_teacher(cfg, teacher_id: str, base_url: str, tokenizer: _Tokenizer):
     cfg.teachers[teacher_id] = {
         "source": "openai_compatible",
         "placement": "external",
@@ -155,37 +154,21 @@ def _external_teacher_config(base_url: str, tokenizer: _Tokenizer, *, two_teache
         "request_timeout_seconds": 5,
         "evidence": "chosen_token",
     }
-    if not two_teachers:
-        cfg.teacher_routing.opd.routes = {"default": {"teacher": "primary", "weight": 1.0}}
     return cfg
+
+
+def _external_teacher_config(base_url: str, tokenizer: _Tokenizer):
+    return _add_external_teacher(_config(), "primary", base_url, tokenizer)
+
+
+def _mixed_teacher_config(base_url: str, tokenizer: _Tokenizer):
+    return _add_external_teacher(_two_teacher_config(placement="pinned"), "secondary", base_url, tokenizer)
 
 
 @asynccontextmanager
 async def _remote_teacher_server(port: int, requests: list[dict]):
-    async def score(request: web.Request):
-        assert request.headers["Authorization"] == "Bearer test-api-key"
-        body = await request.json()
-        requests.append(body)
-        choices = []
-        for index, sequence in enumerate(body["prompt"]):
-            choices.append(
-                {
-                    "index": index,
-                    "text": "",
-                    "finish_reason": "length",
-                    "logprobs": {
-                        "tokens": [f"token_id:{token_id}" for token_id in sequence],
-                        "token_logprobs": [None, *([-0.75] * (len(sequence) - 1))],
-                        "top_logprobs": [None, *({} for _ in sequence[1:])],
-                        "text_offset": [0] * len(sequence),
-                    },
-                }
-            )
-        return web.json_response({"choices": choices})
-
-    application = web.Application()
-    application.router.add_post("/v1/completions", score)
-    runner = web.AppRunner(application)
+    app = application(-0.75, requests=requests, bearer_token="test-api-key")
+    runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", port).start()
     try:
@@ -327,7 +310,7 @@ async def test_teacher_runtime_composes_remote_and_local_routes(monkeypatch, unu
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", lambda **_kwargs: [engine])
 
     async with _remote_teacher_server(unused_tcp_port, remote_requests) as base_url:
-        cfg = _external_teacher_config(base_url, tokenizer, two_teachers=True)
+        cfg = _mixed_teacher_config(base_url, tokenizer)
         prepared = prepare_distillation_runtime(cfg, tokenizer)
         runtime = await start_sync_distillation_runtime(cfg, prepared)
         assert runtime is not None
@@ -345,7 +328,7 @@ async def test_teacher_runtime_composes_remote_and_local_routes(monkeypatch, unu
 
 def test_remote_teacher_runtime_rejects_tokenizer_mismatch_before_startup():
     tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
-    cfg = _external_teacher_config("https://teacher.example/v1", tokenizer, two_teachers=False)
+    cfg = _external_teacher_config("https://teacher.example/v1", tokenizer)
     cfg.teachers.primary.tokenizer_fingerprint = f"sha256:{'f' * 64}"
 
     with pytest.raises(ValueError, match="tokenizer fingerprint does not match"):
@@ -355,7 +338,7 @@ def test_remote_teacher_runtime_rejects_tokenizer_mismatch_before_startup():
 @pytest.mark.asyncio
 async def test_remote_teacher_runtime_rejects_missing_auth_secret(monkeypatch):
     tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
-    cfg = _external_teacher_config("https://teacher.example/v1", tokenizer, two_teachers=False)
+    cfg = _external_teacher_config("https://teacher.example/v1", tokenizer)
     monkeypatch.delenv("REMOTE_TEACHER_API_KEY", raising=False)
     prepared = prepare_distillation_runtime(cfg, tokenizer)
 
@@ -370,7 +353,7 @@ async def test_remote_teacher_runtime_feeds_fully_async_admitted_groups(monkeypa
     monkeypatch.setenv("REMOTE_TEACHER_API_KEY", "test-api-key")
 
     async with _remote_teacher_server(unused_tcp_port, remote_requests) as base_url:
-        cfg = _external_teacher_config(base_url, tokenizer, two_teachers=False)
+        cfg = _external_teacher_config(base_url, tokenizer)
         prepared = prepare_async_distillation_runtime(cfg, tokenizer)
         runtime = await start_async_distillation_runtime(cfg, prepared)
         assert runtime is not None

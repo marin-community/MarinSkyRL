@@ -18,6 +18,7 @@ from marinskyrl.distillation import (
 from skyrl_train.distillation import ChosenTokenTeacherEvidence, TeacherScoreRequest, TopKTeacherEvidence
 from skyrl_train.inference_engines.openai_teacher_oracle import OpenAICompatibleTeacherOracle
 from skyrl_train.teacher_oracle import TeacherEndpointUnavailable
+from tests.fixtures.opd_http_teacher import application, completion_choice
 
 _FINGERPRINT = f"sha256:{'a' * 64}"
 
@@ -54,10 +55,8 @@ def _request(evidence: TeacherEvidenceKind) -> TeacherScoreRequest:
 
 
 @asynccontextmanager
-async def _server(handler, port: int):
-    application = web.Application()
-    application.router.add_post("/v1/completions", handler)
-    runner = web.AppRunner(application)
+async def _server(app: web.Application, port: int):
+    runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
@@ -68,6 +67,7 @@ async def _server(handler, port: int):
 
 
 def _choice(prompt: list[int]) -> dict:
+    choice = completion_choice(0, prompt, math.log(0.5))
     chosen_scores = [None, math.log(0.8), math.log(0.6), math.log(0.5)]
     top_scores = [
         None,
@@ -75,30 +75,22 @@ def _choice(prompt: list[int]) -> dict:
         {"token_id:2": math.log(0.6), "token_id:1": math.log(0.25)},
         {"token_id:1": math.log(0.5), "token_id:2": math.log(0.3)},
     ]
-    return {
-        "index": 0,
-        "text": "",
-        "finish_reason": "length",
-        "logprobs": {
-            "tokens": [f"token_id:{token_id}" for token_id in prompt],
-            "token_logprobs": chosen_scores,
-            "top_logprobs": top_scores,
-            "text_offset": [0] * len(prompt),
-        },
-    }
+    choice["logprobs"]["token_logprobs"] = chosen_scores
+    choice["logprobs"]["top_logprobs"] = top_scores
+    return choice
 
 
 @pytest.mark.asyncio
 async def test_openai_teacher_oracle_scores_exact_tokens_with_bearer_auth(unused_tcp_port):
     requests = []
 
-    async def handle(request: web.Request):
-        assert request.headers["Authorization"] == "Bearer private-key"
-        body = await request.json()
-        requests.append(body)
-        return web.json_response({"choices": [_choice(body["prompt"][0])]})
-
-    async with _server(handle, unused_tcp_port) as base_url:
+    app = application(
+        -0.25,
+        requests=requests,
+        bearer_token="private-key",
+        choice_factory=lambda _index, sequence: _choice(sequence),
+    )
+    async with _server(app, unused_tcp_port) as base_url:
         endpoint = TeacherEndpointSpec(url=base_url, auth=None, max_concurrency=3)
         oracle = OpenAICompatibleTeacherOracle(
             teacher=_teacher(TeacherEvidenceKind.CHOSEN_TOKEN),
@@ -129,11 +121,8 @@ async def test_openai_teacher_oracle_scores_exact_tokens_with_bearer_auth(unused
 
 @pytest.mark.asyncio
 async def test_openai_teacher_oracle_normalizes_topk_evidence(unused_tcp_port):
-    async def handle(request: web.Request):
-        body = await request.json()
-        return web.json_response({"choices": [_choice(body["prompt"][0])]})
-
-    async with _server(handle, unused_tcp_port) as base_url:
+    app = application(-0.25, choice_factory=lambda _index, sequence: _choice(sequence))
+    async with _server(app, unused_tcp_port) as base_url:
         oracle = OpenAICompatibleTeacherOracle(
             teacher=_teacher(TeacherEvidenceKind.TOPK_DISTRIBUTION),
             endpoint=TeacherEndpointSpec(url=base_url, auth=None, max_concurrency=2),
@@ -149,11 +138,8 @@ async def test_openai_teacher_oracle_normalizes_topk_evidence(unused_tcp_port):
 
 @pytest.mark.asyncio
 async def test_openai_teacher_oracle_rejects_changed_token_identity(unused_tcp_port):
-    async def handle(_request: web.Request):
-        choice = _choice([0, 1, 2, 0])
-        return web.json_response({"choices": [choice]})
-
-    async with _server(handle, unused_tcp_port) as base_url:
+    app = application(-0.25, choice_factory=lambda _index, _sequence: _choice([0, 1, 2, 0]))
+    async with _server(app, unused_tcp_port) as base_url:
         oracle = OpenAICompatibleTeacherOracle(
             teacher=_teacher(TeacherEvidenceKind.CHOSEN_TOKEN),
             endpoint=TeacherEndpointSpec(url=base_url, auth=None, max_concurrency=1),
@@ -169,7 +155,9 @@ async def test_openai_teacher_oracle_marks_http_failures_retryable(unused_tcp_po
     async def handle(_request: web.Request):
         return web.json_response({"error": "capacity"}, status=503)
 
-    async with _server(handle, unused_tcp_port) as base_url:
+    app = web.Application()
+    app.router.add_post("/v1/completions", handle)
+    async with _server(app, unused_tcp_port) as base_url:
         oracle = OpenAICompatibleTeacherOracle(
             teacher=_teacher(TeacherEvidenceKind.CHOSEN_TOKEN),
             endpoint=TeacherEndpointSpec(url=base_url, auth=None, max_concurrency=1),

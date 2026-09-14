@@ -42,7 +42,11 @@ def _choice_prompt_logprobs(
     raw_tokens = raw_logprobs.get("tokens")
     raw_chosen_scores = raw_logprobs.get("token_logprobs")
     raw_top_scores = raw_logprobs.get("top_logprobs")
-    if not isinstance(raw_tokens, list) or not isinstance(raw_chosen_scores, list) or not isinstance(raw_top_scores, list):
+    if (
+        not isinstance(raw_tokens, list)
+        or not isinstance(raw_chosen_scores, list)
+        or not isinstance(raw_top_scores, list)
+    ):
         raise ValueError(f"remote teacher returned an incomplete completion-logprob payload for row {row}")
     if not (len(raw_tokens) == len(raw_chosen_scores) == len(raw_top_scores) == len(expected_tokens)):
         raise ValueError(f"remote teacher returned misaligned completion logprobs for row {row}")
@@ -93,8 +97,7 @@ def _response_prompt_logprobs(
     if set(choices_by_index) != set(range(len(full_sequences))):
         raise TeacherEndpointUnavailable("remote teacher did not return exactly one choice per request row")
     return [
-        _choice_prompt_logprobs(choices_by_index[row], sequence, row)
-        for row, sequence in enumerate(full_sequences)
+        _choice_prompt_logprobs(choices_by_index[row], sequence, row) for row, sequence in enumerate(full_sequences)
     ]
 
 

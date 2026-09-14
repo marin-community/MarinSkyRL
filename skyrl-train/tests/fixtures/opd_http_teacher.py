@@ -1,14 +1,18 @@
-"""Deterministic OpenAI-compatible teacher used by Iris OPD smoke runs."""
+"""Deterministic OpenAI-compatible teacher test server."""
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from typing import Any
 
 from aiohttp import web
 
 
-def _completion_choice(index: int, sequence: list[int], logprob: float) -> dict[str, Any]:
+ChoiceFactory = Callable[[int, list[int]], dict[str, Any]]
+
+
+def completion_choice(index: int, sequence: list[int], logprob: float) -> dict[str, Any]:
     return {
         "index": index,
         "text": "",
@@ -22,10 +26,18 @@ def _completion_choice(index: int, sequence: list[int], logprob: float) -> dict[
     }
 
 
-def application(logprob: float) -> web.Application:
+def application(
+    logprob: float,
+    *,
+    requests: list[dict[str, Any]] | None = None,
+    bearer_token: str | None = None,
+    choice_factory: ChoiceFactory | None = None,
+) -> web.Application:
     """Return a server that assigns one fixed logprob to every supplied token."""
 
     async def completions(request: web.Request) -> web.Response:
+        if bearer_token is not None and request.headers.get("Authorization") != f"Bearer {bearer_token}":
+            return web.json_response({"error": "unauthorized"}, status=401)
         body = await request.json()
         prompts = body.get("prompt")
         if not isinstance(prompts, list) or not all(
@@ -33,7 +45,10 @@ def application(logprob: float) -> web.Application:
             for sequence in prompts
         ):
             return web.json_response({"error": "prompt must be a non-empty batch of token-ID sequences"}, status=400)
-        choices = [_completion_choice(index, sequence, logprob) for index, sequence in enumerate(prompts)]
+        if requests is not None:
+            requests.append(body)
+        make_choice = choice_factory or (lambda index, sequence: completion_choice(index, sequence, logprob))
+        choices = [make_choice(index, sequence) for index, sequence in enumerate(prompts)]
         return web.json_response({"choices": choices})
 
     app = web.Application()

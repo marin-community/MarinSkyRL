@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Iterable, Sequence
 from dataclasses import dataclass
 
 from omegaconf import DictConfig, OmegaConf
@@ -69,14 +69,17 @@ class PreparedAsyncDistillationRuntime(PreparedDistillationRuntime):
 
 
 async def _close_engines(engines: Sequence[InferenceEngineInterface]) -> None:
-    errors: list[BaseException] = []
-    for engine in reversed(engines):
-        try:
-            await close_owned_inference_engine(engine)
-        except BaseException as error:
-            errors.append(error)
+    await _gather_cleanup(
+        (close_owned_inference_engine(engine) for engine in reversed(engines)),
+        message="local teacher engine cleanup failed",
+    )
+
+
+async def _gather_cleanup(awaitables: Iterable[Awaitable[None]], *, message: str) -> None:
+    results = await asyncio.gather(*awaitables, return_exceptions=True)
+    errors = [result for result in results if isinstance(result, BaseException)]
     if errors:
-        raise BaseExceptionGroup("local teacher engine cleanup failed", errors)
+        raise BaseExceptionGroup(message, errors)
 
 
 def _validated_distillation_plan(cfg: DictConfig) -> DistillationPlan | None:
@@ -268,16 +271,12 @@ async def _start_teacher_fleet(
 ) -> TeacherOracleFleet:
     """Start one mixed teacher fleet shared by sync and fully-async schedulers."""
 
-    pinned = tuple(
-        teacher for teacher in prepared.local_teachers if teacher.spec.placement is TeacherPlacement.PINNED
-    )
+    pinned = tuple(teacher for teacher in prepared.local_teachers if teacher.spec.placement is TeacherPlacement.PINNED)
     rotating = tuple(
         teacher for teacher in prepared.local_teachers if teacher.spec.placement is TeacherPlacement.ROTATING
     )
     fixed_factories = {teacher.spec.id: _teacher_factory(cfg, teacher) for teacher in pinned}
-    fixed_factories.update(
-        {teacher.id: _external_teacher_factory(teacher) for teacher in prepared.external_teachers}
-    )
+    fixed_factories.update({teacher.id: _external_teacher_factory(teacher) for teacher in prepared.external_teachers})
     fixed_owner: TeacherOracleOwner | None = None
     rotating_owner: RotatingTeacherOracleOwner | None = None
     try:
@@ -292,12 +291,15 @@ async def _start_teacher_fleet(
         fleet = TeacherOracleFleet(fixed=fixed_owner, rotating=rotating_owner)
     except BaseException as startup_error:
         owners = tuple(owner for owner in (rotating_owner, fixed_owner) if owner is not None)
-        results = await asyncio.gather(*(owner.close() for owner in owners), return_exceptions=True)
-        cleanup_errors = [result for result in results if isinstance(result, BaseException)]
-        if cleanup_errors:
+        try:
+            await _gather_cleanup(
+                (owner.close() for owner in owners),
+                message="teacher fleet cleanup failed",
+            )
+        except BaseException as cleanup_error:
             raise BaseExceptionGroup(
                 "teacher fleet startup and cleanup failed",
-                [startup_error, *cleanup_errors],
+                [startup_error, cleanup_error],
             )
         raise
 
@@ -325,15 +327,15 @@ def _external_teacher_factory(teacher: OpenAICompatibleTeacherSpec) -> TeacherOr
                 )
             return TeacherEndpointPool(tuple(endpoints))
         except BaseException as startup_error:
-            results = await asyncio.gather(
-                *(endpoint.oracle.close() for endpoint in endpoints),
-                return_exceptions=True,
-            )
-            cleanup_errors = [result for result in results if isinstance(result, BaseException)]
-            if cleanup_errors:
+            try:
+                await _gather_cleanup(
+                    (endpoint.oracle.close() for endpoint in endpoints),
+                    message="external teacher cleanup failed",
+                )
+            except BaseException as cleanup_error:
                 raise BaseExceptionGroup(
                     "external teacher startup and cleanup failed",
-                    [startup_error, *cleanup_errors],
+                    [startup_error, cleanup_error],
                 )
             raise
 
