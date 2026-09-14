@@ -1,5 +1,6 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
+import re
 from typing import Protocol
 
 import torch
@@ -18,6 +19,10 @@ _PACKED_PARAMETER_MAPPING = (
     ("self_attn.v_proj", "self_attn.qkv_proj"),
     ("mlp.gate_proj", "mlp.gate_up_proj"),
     ("mlp.up_proj", "mlp.gate_up_proj"),
+)
+_EXPERT_SLICE_PATTERN = re.compile(
+    r"^(?P<prefix>.+\.experts)\.(?P<expert_id>\d+)\."
+    r"(?P<projection>gate_proj|up_proj|down_proj)\.weight$"
 )
 
 
@@ -127,6 +132,11 @@ def load_weights_into_vllm(
 def _reported_parameter_candidates(expected: str) -> frozenset[str]:
     """Return direct and packed parameter names that vLLM may report."""
     candidates = {expected}
+    expert_slice = _EXPERT_SLICE_PATTERN.match(expected)
+    if expert_slice is not None:
+        projection = expert_slice.group("projection")
+        packed = "w13_weight" if projection in {"gate_proj", "up_proj"} else "w2_weight"
+        candidates.add(f"{expert_slice.group('prefix')}.{packed}")
     for source, target in _PACKED_PARAMETER_MAPPING:
         if source in expected:
             candidates.add(expected.replace(source, target))

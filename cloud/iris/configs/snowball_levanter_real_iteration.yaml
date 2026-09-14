@@ -1,0 +1,108 @@
+# One real Snowball 67B-A2B MSRL iteration followed by a generation from the
+# installed update. The launch must pin model revision
+# 6808fe5c219471517bd51df35addefd38ebebf89 and use the retained RLVR-math data.
+entrypoint: levanter_snowball
+
+context_budget:
+  request_window_tokens: 8192
+  max_new_tokens_per_turn: 6528
+  max_turns: 1
+
+environment:
+  env_class: aime
+
+trainer:
+  strategy: fsdp2
+  seed: 42
+  flash_attn: false
+  use_sample_packing: false
+  step_wise_training: false
+  gradient_checkpointing: true
+  algorithm:
+    advantage_estimator: grpo
+    policy_loss_type: regular
+    loss_reduction: token_mean
+    use_kl_loss: false
+    use_kl_in_reward: false
+    use_entropy_loss: false
+    use_tis: false
+    eps_clip_low: 0.2
+    eps_clip_high: 0.2
+    grpo_norm_by_std: true
+    advantage_batch_normalize: false
+  epochs: 1
+  # Step one proves update/checkpoint/publication. Step two starts only after a
+  # subsequent generation from the installed policy.
+  max_steps: 2
+  update_epochs_per_batch: 1
+  train_batch_size: 32
+  policy_mini_batch_size: 32
+  eval_batch_size: 32
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  eval_before_train: false
+  eval_interval: -1
+  ckpt_interval: 1
+  max_ckpts_to_keep: 2
+  resume_mode: none
+  restore_dataloader_state: true
+  logger: console
+  policy:
+    grug_query_bias_update_mode: frozen
+    optimizer_config:
+      optimizer: AdamW
+      scheduler: constant_with_warmup
+      lr: 1.0e-5
+      adam_betas: [0.9, 0.999]
+      weight_decay: 0.01
+      max_grad_norm: 0.5
+      num_warmup_steps: 0
+      optimizer_kwargs:
+        eps: 1.0e-8
+    fsdp_config:
+      expert_model_parallel_size: 1
+    levanter:
+      parameter_dtype: float32
+      compute_dtype: bfloat16
+      output_dtype: float32
+      attention_implementation: reference
+      moe_implementation: ring
+      publication_backend: gloo
+      publication_max_chunk_bytes: 67108864
+      publication_timeout_seconds: 1800
+      require_accelerator: true
+      log_dir: /tmp/marinskyrl-levanter
+  placement:
+    colocate_all: false
+    policy_num_nodes: 4
+    policy_num_gpus_per_node: 8
+
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_pipeline_parallel_size: 1
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  num_inference_engines: 1
+  n_samples_per_prompt: 4
+  gpu_memory_utilization: 0.75
+  enforce_eager: false
+  max_num_batched_tokens: 16384
+  run_engines_locally: true
+  weight_sync_backend: gloo
+  fuse_weights: false
+  async_engine: true
+  batched: false
+  sampling_params:
+    temperature: 1.0
+    top_p: 1.0
+
+data:
+  kind: parquet
+  train_data: []
+  val_data: []
+
+extra_env:
+  HF_HUB_OFFLINE: "1"
+  NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"

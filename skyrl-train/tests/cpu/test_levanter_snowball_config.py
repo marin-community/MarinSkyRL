@@ -40,6 +40,8 @@ def test_supported_config_lowers_without_importing_the_concrete_learner():
     runtime = LevanterSnowballRuntimeConfig.from_msrl(_valid_config())
 
     assert runtime.training_gpus == 1
+    assert runtime.training_nodes == 1
+    assert runtime.training_gpus_per_node == 1
     assert runtime.train_batch_size == 2
     assert runtime.publication_backend == "gloo"
     assert runtime.inference_world_size == 4
@@ -97,4 +99,21 @@ def test_runtime_train_batch_counts_generated_trajectories():
 
     runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
 
+    assert runtime.train_batch_size == 4
+
+
+def test_multi_host_runtime_counts_all_learner_gpus():
+    cfg = _valid_config()
+    cfg.trainer.placement.policy_num_nodes = 2
+    cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.trainer.train_batch_size = 2
+    cfg.trainer.policy_mini_batch_size = 2
+    cfg.generator.n_samples_per_prompt = 2
+    cfg.trainer.algorithm.resolved_group_advantage.physical_group_size = 2
+
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.training_nodes == 2
+    assert runtime.training_gpus_per_node == 2
+    assert runtime.training_gpus == 4
     assert runtime.train_batch_size == 4

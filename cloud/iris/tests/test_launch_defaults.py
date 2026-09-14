@@ -899,6 +899,27 @@ def test_fsdp_config_selects_the_fsdp_profile(tmp_path):
     assert args.runtime_profile is RuntimeProfile.FSDP
 
 
+def test_levanter_entrypoint_selects_the_levanter_profile(tmp_path):
+    config = tmp_path / "levanter.yaml"
+    config.write_text("entrypoint: levanter_snowball\ntrainer:\n  strategy: fsdp2\n")
+    args = create_parser().parse_args(
+        [
+            "--rl_config",
+            str(config),
+            "--model_path",
+            "Qwen/Model-30B",
+            "--cluster-config",
+            str(_cluster_config(tmp_path)),
+            "--num-nodes",
+            "2",
+        ]
+    )
+
+    resolve_launch_defaults(args)
+
+    assert args.runtime_profile is RuntimeProfile.LEVANTER
+
+
 @pytest.mark.parametrize(
     "strategy, expected_profile",
     [

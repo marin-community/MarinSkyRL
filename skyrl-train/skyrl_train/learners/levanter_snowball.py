@@ -7,7 +7,7 @@ import dataclasses
 import os
 import socket
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import timedelta
@@ -22,6 +22,7 @@ import jax.numpy as jnp
 import jmp
 import numpy as np
 from haliax import Axis
+from jax.experimental import multihost_utils
 from levanter.checkpoint import load_checkpoint, save_checkpoint
 from levanter.compat.hf_checkpoints import HFCheckpointConverter
 from levanter.distributed import DistributedConfig
@@ -222,9 +223,16 @@ class LevanterSnowballLearner:
         runtime: LevanterSnowballRuntimeConfig,
         *,
         model_factory: Callable[[], SnowballLMHeadModel] | None = None,
+        distributed_coordinator_address: str | None = None,
+        distributed_process_id: int = 0,
+        distributed_process_count: int = 1,
     ) -> None:
         self.runtime = runtime
         self._model_factory = model_factory
+        self._distributed_coordinator_address = distributed_coordinator_address
+        self._distributed_process_id = distributed_process_id
+        self._distributed_process_count = distributed_process_count
+        self._jax_distributed_initialized = False
         self._learner_config: LearnerConfig | None = None
         self._trainer: Trainer | None = None
         self._trainer_state = None
@@ -291,6 +299,16 @@ class LevanterSnowballLearner:
             )
 
     def _initialize_levanter(self, config: LearnerConfig) -> None:
+        if self._distributed_process_count > 1:
+            if self._distributed_coordinator_address is None:
+                raise ValueError("multi-host Levanter requires a distributed coordinator address")
+            jax.distributed.initialize(
+                coordinator_address=self._distributed_coordinator_address,
+                num_processes=self._distributed_process_count,
+                process_id=self._distributed_process_id,
+                initialization_timeout=30 * 60,
+            )
+            self._jax_distributed_initialized = True
         mesh = MeshConfig(
             axes={"data": -1, "replica": 1, "expert": 1, "model": 1},
             dcn_axes={"replica_dcn": -1},
@@ -298,7 +316,11 @@ class LevanterSnowballLearner:
             param_mapping={},
         )
         trainer_config = TrainerConfig(
-            id=f"msrl-levanter-{os.getpid()}",
+            id=(
+                f"msrl-levanter-{self._distributed_coordinator_address.replace(':', '-')}"
+                if self._distributed_coordinator_address is not None
+                else f"msrl-levanter-{os.getpid()}"
+            ),
             tracker=NoopConfig(),
             log_dir=Path(self.runtime.log_dir),
             mesh=mesh,
@@ -319,6 +341,20 @@ class LevanterSnowballLearner:
         if jax.device_count() != self.runtime.training_gpus:
             raise RuntimeError(
                 f"Ray reserved {self.runtime.training_gpus} learner GPUs but JAX sees {jax.device_count()} devices"
+            )
+        if jax.local_device_count() != self.runtime.training_gpus_per_node:
+            raise RuntimeError(
+                f"Ray reserved {self.runtime.training_gpus_per_node} local learner GPUs but JAX sees "
+                f"{jax.local_device_count()} local devices"
+            )
+        if (
+            jax.process_count() != self._distributed_process_count
+            or jax.process_index() != self._distributed_process_id
+        ):
+            raise RuntimeError(
+                "JAX distributed identity mismatch: "
+                f"expected process {self._distributed_process_id}/{self._distributed_process_count}, got "
+                f"{jax.process_index()}/{jax.process_count()}"
             )
 
         if self._model_factory is None:
@@ -403,6 +439,8 @@ class LevanterSnowballLearner:
             Pos = Axis("position", sequence_length)
             tokens = hax.named(jnp.asarray(values, dtype=jnp.int32), (Batch, Pos))
             result = self._score_fn(self._trainer_state.model, tokens, self._learner_config.logprob_temperature)
+            if jax.process_count() > 1:
+                result = multihost_utils.process_allgather(result, tiled=True)
             outputs.append(np.asarray(jax.device_get(result), dtype=np.float32))
         return np.concatenate(outputs, axis=0)
 
@@ -516,11 +554,11 @@ class LevanterSnowballLearner:
 
     async def publish_policy(self) -> None:
         self._require_ready()
-        if self._inference_client is None:
+        if jax.process_index() == 0 and self._inference_client is None:
             raise RuntimeError("the inference engine must be connected before publishing")
         self._publication_status = PublicationStatus.PENDING
         try:
-            await self._ensure_weight_group()
+            await self._rank_zero_publication_call(self._ensure_weight_group, "communicator setup")
             await self._publish_all_weights()
         except Exception:
             self._publication_status = PublicationStatus.FAILED
@@ -528,6 +566,24 @@ class LevanterSnowballLearner:
             raise
         self._installed_policy_version = self._policy_version
         self._publication_status = PublicationStatus.INSTALLED
+
+    async def _rank_zero_publication_call(
+        self,
+        operation: Callable[[], Awaitable[None]],
+        stage: str,
+    ) -> None:
+        """Run one inference operation on rank zero and report failure collectively."""
+
+        error: BaseException | None = None
+        if jax.process_index() == 0:
+            try:
+                await operation()
+            except BaseException as exc:
+                error = exc
+        succeeded = np.asarray(0 if error is not None else 1, dtype=np.int32)
+        succeeded = multihost_utils.broadcast_one_to_all(succeeded)
+        if not bool(np.asarray(succeeded).item()):
+            raise RuntimeError(f"rank-zero weight publication failed during {stage}") from error
 
     async def _ensure_weight_group(self) -> None:
         if self._weight_group is not None:
@@ -566,14 +622,20 @@ class LevanterSnowballLearner:
             timeout=self.runtime.publication_timeout_seconds,
         )
 
+    def _iter_publication_host_arrays(self) -> Iterator[tuple[str, np.ndarray]]:
+        for name, value in self._trainer_state.model.to_state_dict().items():
+            if jax.process_count() > 1:
+                value = multihost_utils.process_allgather(value, tiled=True)
+            host = np.asarray(jax.device_get(value)).astype(np.float32, copy=False)
+            yield name, host
+
     def _iter_publication_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
         import torch
 
         from skyrl_train.utils import str_to_torch_dtype
 
         generator_dtype = str_to_torch_dtype(self.runtime.generator_dtype)
-        for name, value in self._trainer_state.model.to_state_dict().items():
-            host = np.asarray(jax.device_get(value)).astype(np.float32, copy=False)
+        for name, host in self._iter_publication_host_arrays():
             dtype = torch.float32 if name.endswith(_ROUTER_BIAS_SUFFIX) else generator_dtype
             # Grug's vLLM loader accepts the stacked HF expert tensors and
             # unbinds their expert dimension into its fused w13/w2 storage.
@@ -582,44 +644,67 @@ class LevanterSnowballLearner:
             yield name, torch.from_numpy(np.array(host, copy=True, order="C")).to(dtype=dtype).contiguous()
 
     async def _publish_all_weights(self) -> None:
+        import torch
+
+        from skyrl_train.utils import str_to_torch_dtype
+
         client = self._inference_client
         expected_names: list[str] = []
         batch: list[tuple[str, torch.Tensor]] = []
         batch_bytes = 0
-        await client.begin_weight_reload()
-        for name, tensor in self._iter_publication_tensors():
-            tensor_bytes = tensor.numel() * tensor.element_size()
-            if batch and batch_bytes + tensor_bytes > self.runtime.publication_max_chunk_bytes:
-                await self._publish_weight_batch(batch)
+        is_publisher = jax.process_index() == 0
+        generator_dtype = str_to_torch_dtype(self.runtime.generator_dtype)
+
+        async def begin_reload() -> None:
+            await client.begin_weight_reload()
+
+        await self._rank_zero_publication_call(begin_reload, "reload start")
+        for name, host in self._iter_publication_host_arrays():
+            dtype = torch.float32 if name.endswith(_ROUTER_BIAS_SUFFIX) else generator_dtype
+            tensor_bytes = host.size * torch.empty((), dtype=dtype).element_size()
+            # Every JAX process must enter the publication collectives at the
+            # same parameter boundary. Only process zero owns Torch tensors,
+            # so use the shared byte counter rather than ``batch`` here.
+            if batch_bytes and batch_bytes + tensor_bytes > self.runtime.publication_max_chunk_bytes:
+                await self._rank_zero_publication_call(
+                    lambda: self._publish_weight_batch(batch),
+                    f"chunk ending before {name}",
+                )
                 batch = []
                 batch_bytes = 0
-            batch.append((name, tensor))
+            if is_publisher:
+                tensor = torch.from_numpy(np.array(host, copy=True, order="C")).to(dtype=dtype).contiguous()
+                batch.append((name, tensor))
             expected_names.append(name)
             batch_bytes += tensor_bytes
-        if batch:
-            await self._publish_weight_batch(batch)
-        receipts = await client.finish_weight_reload()
+        if batch_bytes:
+            await self._rank_zero_publication_call(lambda: self._publish_weight_batch(batch), "final chunk")
 
-        expected_digest = weight_name_digest(expected_names)
-        expected_parameters = sorted(expected_vllm_parameter_names(expected_names))
-        expected_parameter_digest = weight_name_digest(expected_parameters)
-        install_receipts = list(flatten_install_receipts(receipts))
-        if len(install_receipts) != self.runtime.inference_world_size:
-            raise RuntimeError(
-                f"expected {self.runtime.inference_world_size} inference-worker receipts, got {len(install_receipts)}"
-            )
-        for receipt in install_receipts:
-            if receipt.get("received_weight_count") != len(expected_names):
-                raise RuntimeError(f"incomplete inference weight receipt: {receipt}")
-            if receipt.get("received_name_digest") != expected_digest:
-                raise RuntimeError(f"inference weight-name digest mismatch: {receipt}")
-            if not receipt.get("finalized"):
-                raise RuntimeError(f"inference worker did not finalize installed parameters: {receipt}")
-            if receipt.get("loaded_parameter_count") != len(expected_parameters):
-                raise RuntimeError(f"incomplete inference parameter installation: {receipt}")
-            if receipt.get("loaded_parameter_digest") != expected_parameter_digest:
-                raise RuntimeError(f"inference installed-parameter digest mismatch: {receipt}")
-        await client.reset_prefix_cache()
+        async def finish_reload() -> None:
+            receipts = await client.finish_weight_reload()
+            expected_digest = weight_name_digest(expected_names)
+            expected_parameters = sorted(expected_vllm_parameter_names(expected_names))
+            expected_parameter_digest = weight_name_digest(expected_parameters)
+            install_receipts = list(flatten_install_receipts(receipts))
+            if len(install_receipts) != self.runtime.inference_world_size:
+                raise RuntimeError(
+                    f"expected {self.runtime.inference_world_size} inference-worker receipts, "
+                    f"got {len(install_receipts)}"
+                )
+            for receipt in install_receipts:
+                if receipt.get("received_weight_count") != len(expected_names):
+                    raise RuntimeError(f"incomplete inference weight receipt: {receipt}")
+                if receipt.get("received_name_digest") != expected_digest:
+                    raise RuntimeError(f"inference weight-name digest mismatch: {receipt}")
+                if not receipt.get("finalized"):
+                    raise RuntimeError(f"inference worker did not finalize installed parameters: {receipt}")
+                if receipt.get("loaded_parameter_count") != len(expected_parameters):
+                    raise RuntimeError(f"incomplete inference parameter installation: {receipt}")
+                if receipt.get("loaded_parameter_digest") != expected_parameter_digest:
+                    raise RuntimeError(f"inference installed-parameter digest mismatch: {receipt}")
+            await client.reset_prefix_cache()
+
+        await self._rank_zero_publication_call(finish_reload, "reload finalization")
 
     async def _publish_weight_batch(self, batch: list[tuple[str, torch.Tensor]]) -> None:
         import torch
@@ -719,6 +804,9 @@ class LevanterSnowballLearner:
         if self._trainer_entered and self._trainer is not None:
             self._trainer.__exit__(None, None, None)
             self._trainer_entered = False
+        if self._jax_distributed_initialized:
+            jax.distributed.shutdown()
+            self._jax_distributed_initialized = False
         self._lifecycle = LearnerLifecycle.CLOSED
 
     def _require_ready(self) -> None:

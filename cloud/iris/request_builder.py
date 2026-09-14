@@ -90,8 +90,12 @@ def derive_strategy(config: dict[str, Any]) -> str | None:
 
 
 def derive_runtime_profile(config: dict[str, Any]) -> RuntimeProfile:
-    """Return the dependency profile required by the configured trainer strategy."""
-    return runtime_profile_for_strategy(derive_strategy(config))
+    """Return the dependency profile required by the configured trainer entrypoint."""
+    entrypoint = config.get("entrypoint")
+    return runtime_profile_for_strategy(
+        derive_strategy(config),
+        entrypoint=entrypoint if isinstance(entrypoint, str) else None,
+    )
 
 
 def derive_output_paths(run_prefix: str) -> SkyRLOutputPaths:

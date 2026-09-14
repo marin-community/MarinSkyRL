@@ -20,6 +20,7 @@ from cloud.iris.request_builder import (
     derive_num_nodes,
     derive_output_paths,
     derive_role_plan,
+    derive_runtime_profile,
     derive_strategy,
 )
 from cloud.iris.runtime_bundle import LauncherSource
@@ -353,6 +354,13 @@ def test_runtime_identity_uses_source_commit_and_strategy_profile(tmp_path, stra
     )
     assert spec.request.runtime.commit == "abc123def456"
     assert spec.request.runtime.profile is expected_profile
+
+
+def test_levanter_entrypoint_selects_its_gpu_runtime():
+    config = _make_config(strategy="fsdp2")
+    config["entrypoint"] = "levanter_snowball"
+
+    assert derive_runtime_profile(config) is RuntimeProfile.LEVANTER
 
 
 def test_runtime_identity_is_portable_across_target_clusters(tmp_path):

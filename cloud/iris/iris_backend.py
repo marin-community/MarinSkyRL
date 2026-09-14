@@ -965,6 +965,21 @@ def _rl_training_strategy(args: argparse.Namespace) -> Optional[str]:
     return strategy.strip().lower() if isinstance(strategy, str) and strategy.strip() else None
 
 
+def _rl_training_entrypoint(args: argparse.Namespace) -> Optional[str]:
+    """Return the effective packaged entrypoint used for runtime selection."""
+    override = getattr(args, "entrypoint", None)
+    if isinstance(override, str) and override:
+        return override
+    try:
+        with open(args.rl_config) as f:
+            config = yaml.safe_load(f) or {}
+        if not isinstance(config, dict):
+            return None
+        return resolve_rl_entrypoint(config.get("entrypoint"), config_path=Path(args.rl_config))
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+
+
 def _effective_gdn_backend(args: argparse.Namespace) -> str:
     """Resolve the GDN backend with the same precedence as the training command."""
     if args.gdn_flashqla is not None:
@@ -1029,13 +1044,15 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
     strategy = _rl_training_strategy(args)
     expected_profile = runtime_profile_for_strategy(
         strategy,
+        entrypoint=_rl_training_entrypoint(args),
         mode=RuntimeMode.CHECKPOINT_EXPORT if _is_checkpoint_export(args) else RuntimeMode.TRAINING,
     )
     if args.runtime_profile is None:
         args.runtime_profile = expected_profile
     elif args.runtime_profile != expected_profile:
         raise SystemExit(
-            f"Runtime profile {args.runtime_profile.value!r} does not match trainer.strategy {strategy!r}."
+            f"Runtime profile {args.runtime_profile.value!r} does not match trainer.strategy {strategy!r} "
+            "and the configured entrypoint."
         )
 
     launcher_commit = resolve_launcher_source().commit

@@ -31,6 +31,13 @@ class PerSourceRecordingVLLMModel:
 
 
 def _packed_reported_names(name: str) -> set[str]:
+    components = name.split(".")
+    if len(components) >= 4 and components[-4] == "experts" and components[-3].isdigit():
+        projection = components[-2]
+        if projection in {"gate_proj", "up_proj"}:
+            return {".".join((*components[:-3], "w13_weight"))}
+        if projection == "down_proj":
+            return {".".join((*components[:-3], "w2_weight"))}
     for source, target in (
         ("self_attn.q_proj", "self_attn.qkv_proj"),
         ("self_attn.k_proj", "self_attn.qkv_proj"),
@@ -110,7 +117,7 @@ def test_load_weights_into_vllm_expands_transformers_fused_moe_weights():
 def test_load_weights_into_vllm_rejects_silently_skipped_fused_experts():
     model = RecordingVLLMModel({"model.layers.0.mlp.experts.w13_weight"})
 
-    with pytest.raises(RuntimeError, match=r"model\.layers\.0\.mlp\.experts\.w2_weight"):
+    with pytest.raises(RuntimeError, match=r"model\.layers\.0\.mlp\.experts\.0\.down_proj\.weight"):
         load_weights_into_vllm(
             model,
             [
@@ -118,6 +125,23 @@ def test_load_weights_into_vllm_rejects_silently_skipped_fused_experts():
                 ("model.layers.0.mlp.experts.down_proj", torch.zeros(2, 4, 3)),
             ],
         )
+
+
+def test_load_weights_into_vllm_requires_every_fused_expert_slice():
+    skipped = "model.layers.0.mlp.experts.1.up_proj.weight"
+    model = PerSourceRecordingVLLMModel({skipped})
+
+    with pytest.raises(RuntimeError, match=r"model\.layers\.0\.mlp\.experts\.1\.up_proj\.weight"):
+        load_weights_into_vllm(
+            model,
+            [
+                ("model.layers.0.mlp.experts.gate_up_proj", torch.zeros(2, 6, 4)),
+                ("model.layers.0.mlp.experts.down_proj", torch.zeros(2, 4, 3)),
+            ],
+        )
+
+    assert len(model.calls) == 6
+    assert all(len(call) == 1 for call in model.calls)
 
 
 def test_load_weights_into_vllm_rejects_silently_skipped_ordinary_parameter():

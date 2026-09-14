@@ -655,6 +655,7 @@ def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeyp
     [
         (RuntimeProfile.FSDP, ["fsdp", "vllm", "telemetry"]),
         (RuntimeProfile.FSDP_EXPORT, ["cuda", "fsdp"]),
+        (RuntimeProfile.LEVANTER, ["levanter-gpu", "vllm", "telemetry"]),
     ],
 )
 def test_task_setup_executes_the_pinned_checkout_bootstrap(

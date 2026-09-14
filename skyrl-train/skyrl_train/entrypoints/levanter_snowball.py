@@ -37,19 +37,33 @@ class LevanterSnowballExp(BasePPOExp):
 
 @ray.remote(num_cpus=1, max_retries=0)
 def skyrl_entrypoint(cfg: DictConfig) -> None:
-    # Importing this module initializes JAX. This task already owns the learner
-    # GPUs, so JAX sees only its Ray-assigned devices.
-    from skyrl_train.learners.levanter_snowball import LevanterSnowballLearner
-
     runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
-    learner = LevanterSnowballLearner(runtime)
-    LevanterSnowballExp(cfg, learner=learner).run()
+    if runtime.training_nodes == 1:
+        # Importing the concrete learner initializes JAX. This task owns the
+        # single learner node, so JAX sees only its Ray-assigned devices.
+        from skyrl_train.learners.levanter_snowball import LevanterSnowballLearner
+
+        learner = LevanterSnowballLearner(runtime)
+    else:
+        # The entrypoint owns no GPUs in this path. The facade reserves whole
+        # nodes and imports JAX only inside one actor on each learner node.
+        from skyrl_train.learners.distributed_levanter import DistributedLevanterSnowballLearner
+
+        learner = DistributedLevanterSnowballLearner(
+            runtime,
+            placement_timeout_seconds=int(cfg.trainer.distributed.placement_group_timeout_seconds),
+        )
+    try:
+        LevanterSnowballExp(cfg, learner=learner).run()
+    finally:
+        learner.close()
 
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
     runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
-    learner_entrypoint = skyrl_entrypoint.options(num_gpus=runtime.training_gpus)
+    entrypoint_gpus = runtime.training_gpus_per_node if runtime.training_nodes == 1 else 0
+    learner_entrypoint = skyrl_entrypoint.options(num_gpus=entrypoint_gpus)
     run_ray_driver(cfg, learner_entrypoint, TrajectoryRunnerMode.SKYRL_GYM)
 
 

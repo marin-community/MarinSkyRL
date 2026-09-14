@@ -42,6 +42,7 @@ class RLEntrypoint(StrEnum):
 
     FULLY_ASYNC = "fully_async"
     GENERATE = "generate"
+    LEVANTER_SNOWBALL = "levanter_snowball"
     MINI_SWE = "mini_swe"
     STANDARD = "standard"
     TERMINAL_BENCH = "terminal_bench"
@@ -51,6 +52,7 @@ class RLEntrypoint(StrEnum):
 RL_ENTRYPOINT_MODULES = {
     RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
     RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
+    RLEntrypoint.LEVANTER_SNOWBALL: "skyrl_train.entrypoints.levanter_snowball",
     RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
     RLEntrypoint.STANDARD: "skyrl_train.entrypoints.main_base",
     RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",

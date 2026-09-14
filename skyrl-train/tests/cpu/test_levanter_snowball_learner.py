@@ -72,6 +72,8 @@ def _runtime(log_dir: Path) -> LevanterSnowballRuntimeConfig:
     return LevanterSnowballRuntimeConfig(
         model_path="unused-test-model",
         seed=7,
+        training_nodes=1,
+        training_gpus_per_node=1,
         training_gpus=1,
         inference_world_size=1,
         train_batch_size=2,
@@ -435,7 +437,11 @@ def test_checkpoint_resume_in_a_fresh_process_matches_the_next_update(tmp_path):
             str(tmp_path / "child-logs"),
         ],
         cwd=Path(__file__).parents[3],
-        env={**os.environ, "JAX_PLATFORMS": "cpu"},
+        env={
+            **os.environ,
+            "JAX_PLATFORMS": "cpu",
+            "PYTHONPATH": os.pathsep.join(filter(None, (str(Path(__file__).parents[2]), os.environ.get("PYTHONPATH")))),
+        },
         capture_output=True,
         text=True,
         timeout=120,

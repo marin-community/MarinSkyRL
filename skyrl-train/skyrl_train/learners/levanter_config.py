@@ -15,6 +15,8 @@ class LevanterSnowballRuntimeConfig:
 
     model_path: str
     seed: int
+    training_nodes: int
+    training_gpus_per_node: int
     training_gpus: int
     inference_world_size: int
     train_batch_size: int
@@ -54,7 +56,6 @@ class LevanterSnowballRuntimeConfig:
         unsupported: list[str] = []
         expected_values = (
             (trainer.strategy == "fsdp2", "trainer.strategy=fsdp2"),
-            (placement.policy_num_nodes == 1, "one policy node"),
             (not placement.colocate_all, "separate learner and inference GPUs"),
             (generator.run_engines_locally, "local inference engines"),
             (generator.backend == "vllm", "generator.backend=vllm"),
@@ -99,13 +100,17 @@ class LevanterSnowballRuntimeConfig:
         )
         unsupported.extend(description for accepted, description in expected_values if not accepted)
 
-        training_gpus = int(placement.policy_num_gpus_per_node)
+        training_nodes = int(placement.policy_num_nodes)
+        training_gpus_per_node = int(placement.policy_num_gpus_per_node)
+        training_gpus = training_nodes * training_gpus_per_node
         prompt_batch_size = int(trainer.train_batch_size)
         train_batch_size = prompt_batch_size * int(generator.n_samples_per_prompt)
         micro_train = int(trainer.micro_train_batch_size_per_gpu)
         micro_forward = int(trainer.micro_forward_batch_size_per_gpu)
-        if training_gpus < 1:
-            unsupported.append("at least one policy GPU")
+        if training_nodes < 1:
+            unsupported.append("at least one policy node")
+        if training_gpus_per_node < 1:
+            unsupported.append("at least one policy GPU per node")
         if prompt_batch_size != int(trainer.policy_mini_batch_size):
             unsupported.append("train_batch_size equal to policy_mini_batch_size")
         if micro_train != 1:
@@ -142,6 +147,8 @@ class LevanterSnowballRuntimeConfig:
         return cls(
             model_path=str(policy.model.path),
             seed=int(trainer.seed),
+            training_nodes=training_nodes,
+            training_gpus_per_node=training_gpus_per_node,
             training_gpus=training_gpus,
             inference_world_size=(
                 int(generator.num_inference_engines)
