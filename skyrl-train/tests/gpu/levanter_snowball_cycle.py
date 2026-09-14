@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 NovaSkyAI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Opt-in three-H100 Levanter/Snowball MSRL capstone.
+"""Opt-in four-H100 Levanter/Snowball MSRL capstone.
 
 This file deliberately lacks the ``test_`` prefix. Run it by exact path after
 reading the repository GPU testing policy.
@@ -41,13 +41,16 @@ from tests.gpu.grug_serving import (
 )
 from tests.gpu.utils import get_test_actor_config
 
-ACTIVE_GPUS = 3
+ACTIVE_GPUS = 4
 LEARNER_GPUS = 2
 GPU_REPLAY_ATOL = 1e-4
+UNCHANGED_POLICY_MAX_ABS_DIFF = 1e-5
+UNCHANGED_POLICY_MEAN_ABS_DIFF = 1e-7
 ROUTER_BIAS_NAME = "model.layers.0.mlp.router.bias"
 QUERY_NAME = "model.layers.0.self_attn.q_proj.weight"
-EXPERT_NAME = "model.layers.0.mlp.experts.0.gate_proj.weight"
-READBACK_NAMES = [QUERY_NAME, EXPERT_NAME, LM_HEAD_NAME, ROUTER_BIAS_NAME]
+EXPERT_ZERO_NAME = "model.layers.0.mlp.experts.0.gate_proj.weight"
+EXPERT_FOUR_NAME = "model.layers.0.mlp.experts.4.gate_proj.weight"
+READBACK_NAMES = [QUERY_NAME, EXPERT_ZERO_NAME, EXPERT_FOUR_NAME, LM_HEAD_NAME, ROUTER_BIAS_NAME]
 
 
 class _Dataset:
@@ -148,6 +151,7 @@ class _CapstoneTrainer(RayPPOTrainer):
             "iteration_seconds": [],
             "resume_load_seconds": [],
             "publication_probe_scores": [],
+            "publication_expert_owners": [],
             "updates": [],
         }
         self.step_one_state = None
@@ -186,6 +190,7 @@ class _CapstoneTrainer(RayPPOTrainer):
         started = time.perf_counter()
         await super()._sync_policy_for_rollouts(reason=reason)
         self.evidence["publication_seconds"].append(time.perf_counter() - started)
+        self.evidence["publication_expert_owners"].append(_readback(self.learner, self.inference_engine_client))
         score = await _score_token(
             self.inference_engine_client,
             self.cfg,
@@ -332,8 +337,8 @@ def _config(model_path: str, run_path: Path):
     cfg.generator.num_inference_engines = 1
     cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.inference_engine_pipeline_parallel_size = 1
-    cfg.generator.inference_engine_data_parallel_size = 1
-    cfg.generator.inference_engine_expert_parallel_size = 1
+    cfg.generator.inference_engine_data_parallel_size = 2
+    cfg.generator.inference_engine_expert_parallel_size = 2
     cfg.generator.n_samples_per_prompt = 2
     cfg.trainer.algorithm.resolved_group_advantage.physical_group_size = 2
     cfg.generator.gpu_memory_utilization = 0.35
@@ -380,15 +385,17 @@ async def _score_token(client, cfg, prompt: list[int], token: int) -> float:
     return float(result["prompt_logprobs"][0][-1][token])
 
 
-def _readback(learner, client) -> None:
+def _readback(learner, client) -> dict[str, int]:
     state = {name: torch.from_numpy(np.asarray(value).copy()) for name, value in learner.model.to_state_dict().items()}
-    assert_engine_weights(
+    expert_owners = assert_engine_weights(
         client,
         READBACK_NAMES,
         state,
         [ROUTER_BIAS_NAME],
-        {EXPERT_NAME: 0},
+        {EXPERT_ZERO_NAME: 0, EXPERT_FOUR_NAME: 4},
     )
+    assert expert_owners[EXPERT_ZERO_NAME] != expert_owners[EXPERT_FOUR_NAME], expert_owners
+    return expert_owners
 
 
 def _learner_state_arrays(learner) -> dict[str, np.ndarray]:
@@ -491,6 +498,8 @@ def _phase_one(
         assert trainer.shutdown_requested
         assert jax.device_count() == LEARNER_GPUS
         assert learner.state.policy_version == learner.state.update_count == 2
+        assert learner.state.installed_policy_version == 2
+        assert learner.state.publication_status.value == "installed"
         runner = trainer.trajectory_runner
         assert len(runner.rollouts) == 2
         first_rollout, second_rollout = runner.rollouts
@@ -498,7 +507,7 @@ def _phase_one(
             assert rollout["stop_reasons"] == ["length"] * 4
             assert all(math.isfinite(value) for row in rollout["rollout_logprobs"] for value in row)
         update_one, update_two = trainer.evidence["updates"]
-        _readback(learner, client)
+        expert_owners = _readback(learner, client)
         _save_expected_learner_state(learner, expected_path)
 
         checkpoint_path = Path(cfg.trainer.ckpt_path) / "global_step_1"
@@ -508,18 +517,17 @@ def _phase_one(
         np.savez(checkpoint_state_path, **trainer.step_one_state)
         publication_probe_scores = trainer.evidence["publication_probe_scores"]
         assert len(publication_probe_scores) == 3
+        assert len(trainer.evidence["publication_expert_owners"]) == 3
 
         assert update_one["parameter_probe_delta_l2"] > 0
         assert update_two["parameter_probe_delta_l2"] > 0
         assert update_one["query_delta_beyond_first_step_weight_decay_l2"] > 1e-8
         assert update_one["router_bias_max_delta"] == update_two["router_bias_max_delta"] == 0
         for update in (update_one, update_two):
-            # Replaying the unchanged BF16 model can drift across target kernels.
-            # The synchronous one-epoch PPO denominator is therefore anchored to
-            # this differentiable forward; the external replay remains diagnostic.
-            assert update["ppo_ratio_mean"] == 1.0
+            assert update["preupdate_logprob_max_abs_diff"] <= UNCHANGED_POLICY_MAX_ABS_DIFF
+            assert update["preupdate_logprob_mean_abs_diff"] <= UNCHANGED_POLICY_MEAN_ABS_DIFF
+            assert update["ppo_ratio_mean"] == pytest.approx(1.0, abs=1e-6)
             assert update["ppo_clip_ratio"] == 0.0
-            assert math.isfinite(update["preupdate_logprob_max_abs_diff"])
         assert all(math.isfinite(update[key]) for update in (update_one, update_two) for key in ("final_loss",))
         assert abs(publication_probe_scores[2] - publication_probe_scores[0]) > 1e-7
         return {
@@ -528,13 +536,14 @@ def _phase_one(
             "stop_reasons": [first_rollout["stop_reasons"], second_rollout["stop_reasons"]],
             "timings": trainer.evidence,
             "updates": [update_one, update_two],
+            "expert_owners": expert_owners,
             "first_step_uids": runner.requested_uids[0],
             "expected_resumed_uids": runner.requested_uids[1],
             "expected_resumed_response_ids": second_rollout["response_ids"],
             "sharding": _data_sharding_evidence(learner),
             "geometry": {
                 "learner_gpus": LEARNER_GPUS,
-                "inference_gpus": 1,
+                "inference_gpus": 2,
                 "prompt_batch": 2,
                 "generated_trajectory_batch": 4,
                 "microbatch_per_gpu": 1,
@@ -580,20 +589,24 @@ def _phase_two(
         assert runner.rollouts[0]["response_ids"] == expected_response_ids
         publication_probe_scores = trainer.evidence["publication_probe_scores"]
         assert len(publication_probe_scores) == 2
+        assert len(trainer.evidence["publication_expert_owners"]) == 2
+        assert learner.state.installed_policy_version == 2
+        assert learner.state.publication_status.value == "installed"
         assert publication_probe_scores[0] == pytest.approx(expected_publication_probe_scores[1], abs=1e-5)
         assert publication_probe_scores[1] == pytest.approx(expected_publication_probe_scores[2], abs=1e-4)
         update = trainer.evidence["updates"][0]
         next_update_comparison = _compare_expected_learner_state(learner, expected_path)
-        _readback(learner, client)
+        expert_owners = _readback(learner, client)
 
         prompt = runner.rollouts[0]["prompt_token_ids"][0]
         rollout = asyncio.run(_generate(client, cfg, [prompt, prompt]))
         token = rollout["response_ids"][0][0]
         score = asyncio.run(_score_token(client, cfg, prompt, token))
         assert rollout["stop_reasons"] == ["length", "length"]
-        assert update["ppo_ratio_mean"] == 1.0
+        assert update["preupdate_logprob_max_abs_diff"] <= UNCHANGED_POLICY_MAX_ABS_DIFF
+        assert update["preupdate_logprob_mean_abs_diff"] <= UNCHANGED_POLICY_MEAN_ABS_DIFF
+        assert update["ppo_ratio_mean"] == pytest.approx(1.0, abs=1e-6)
         assert update["ppo_clip_ratio"] == 0.0
-        assert math.isfinite(update["preupdate_logprob_max_abs_diff"])
         replay_differences = next_update_comparison["category_max_abs_diff"]
         # A fresh XLA process may choose a different GPU reduction order. The
         # checkpoint itself remains byte-exact; only the replayed update uses
@@ -614,12 +627,13 @@ def _phase_two(
             "publication_probe_scores": publication_probe_scores,
             "score": score,
             "update": update,
+            "expert_owners": expert_owners,
         }
     finally:
         asyncio.run(trainer.release())
 
 
-def test_three_h100_msrl_update_publication_generation_and_fresh_resume(tmp_path):
+def test_four_h100_msrl_update_publication_generation_and_fresh_resume(tmp_path):
     require_hoppers(ACTIVE_GPUS)
     # Pytest adds skyrl-train to the driver path. Ray workers import this test
     # module in fresh processes, so give them the same source root explicitly.
