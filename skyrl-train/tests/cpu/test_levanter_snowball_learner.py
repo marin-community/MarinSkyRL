@@ -236,6 +236,19 @@ def _four_device_learner_worker(log_dir: str) -> None:
         behavior_policy_versions=np.zeros(4, dtype=np.int64),
     )
     old_log_probs = learner.compute_log_probs(batch).policy_log_probs
+    prepared = prepare_snowball_batch(batch, max_sequence_length=16)
+    Batch = Axis("batch", 4)
+    Pos = Axis("position", prepared.tokens.shape[1])
+    dense_log_probs = learner._score_fn(
+        learner.model,
+        hax.named(jnp.asarray(prepared.tokens, dtype=jnp.int32), (Batch, Pos)),
+        1.0,
+    )
+    batch_spec = dense_log_probs.sharding.spec[0]
+    batch_axes = (batch_spec,) if isinstance(batch_spec, str) else batch_spec
+    assert "data" in batch_axes
+    assert len(dense_log_probs.addressable_shards) == 4
+    assert all(shard.data.shape == (1, prepared.tokens.shape[1] - 1) for shard in dense_log_probs.addressable_shards)
     result = learner.update(
         UpdateRequest(
             batch=batch,

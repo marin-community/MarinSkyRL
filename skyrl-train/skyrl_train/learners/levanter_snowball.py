@@ -272,7 +272,7 @@ class LevanterSnowballLearner:
         self._update_count = 0
         self._lifecycle = LearnerLifecycle.UNINITIALIZED
         self._publication_status = PublicationStatus.NOT_STARTED
-        self._score_fn = hax.named_jit(_all_next_token_log_probs)
+        self._score_fn = None
 
     @property
     def state(self) -> LearnerState:
@@ -443,6 +443,15 @@ class LevanterSnowballLearner:
         self._trainer_config = trainer_config
         self._trainer = trainer
         self._trainer_state = state
+        # The Trainer context installs the parameter mapping because mutable
+        # state lives under that mapping. Standalone scoring is compute, though:
+        # without an explicit mapping its batch is replicated on every device
+        # and a 67B forward tries to materialize the entire global logits tensor
+        # on each H100.
+        self._score_fn = hax.named_jit(
+            _all_next_token_log_probs,
+            axis_resources=trainer.compute_axis_mapping,
+        )
 
     def compute_log_probs(self, batch: LearnerBatch) -> LogProbResult:
         self._require_ready()
@@ -455,6 +464,7 @@ class LevanterSnowballLearner:
         )
 
     def _score_prepared(self, prepared: _PreparedBatch) -> np.ndarray:
+        assert self._score_fn is not None
         per_microbatch = self.runtime.training_gpus * self.runtime.micro_forward_batch_size_per_gpu
         batch_size, sequence_length = prepared.tokens.shape
         if batch_size % per_microbatch:

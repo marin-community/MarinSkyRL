@@ -102,6 +102,7 @@ ADDITIVE_GENERATOR_FIELDS = {
     "gdn_backend": "torch",
 }
 ADDITIVE_POLICY_MODEL_FIELDS = {
+    "revision": None,
     "source_uri": None,
     "source_identity": None,
 }
