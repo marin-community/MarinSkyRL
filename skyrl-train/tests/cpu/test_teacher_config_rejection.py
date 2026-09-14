@@ -36,7 +36,10 @@ def test_packaged_entrypoints_reject_distillation_runtime_modes_not_yet_supporte
                     "source": "openai_compatible",
                     "placement": "external",
                     "model": {"path": "Qwen/teacher", "revision": "teacher-revision"},
-                    "endpoints": [{"url": "https://teacher.example/v1"}],
+                    "endpoints": [{"url": "https://teacher.example/v1", "max_concurrency": 8}],
+                    "tokenizer_fingerprint": f"sha256:{'a' * 64}",
+                    "max_sequence_length": 32768,
+                    "request_timeout_seconds": 120,
                     "evidence": "chosen_token",
                 }
             },

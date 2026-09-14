@@ -1,4 +1,4 @@
-"""Build a production teacher runtime from a compiled local-vLLM plan."""
+"""Build one transport-neutral teacher fleet for both trainer regimes."""
 
 from __future__ import annotations
 
@@ -12,10 +12,12 @@ from transformers import PreTrainedTokenizerBase
 from marinskyrl.distillation import (
     DistillationPlan,
     LocalInferenceTeacherSpec,
+    OpenAICompatibleTeacherSpec,
     TeacherPlacement,
     compile_distillation_plan_from_config,
     validate_distillation_runtime_support,
 )
+from rigging.secrets import resolve_secret_spec
 from skyrl_train.distillation_adapters import AsyncTeacherQueueLimits
 from skyrl_train.distillation_runtime import AsyncDistillationRuntime, SyncDistillationRuntime
 from skyrl_train.inference_engines.base import InferenceEngineInterface
@@ -23,6 +25,7 @@ from skyrl_train.inference_engines.configuration import (
     InferenceEngineRoleConfig,
     inference_engine_kwargs_from_config,
 )
+from skyrl_train.inference_engines.openai_teacher_oracle import OpenAICompatibleTeacherOracle
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.vllm_teacher_oracle import (
     VLLMTeacherOracle,
@@ -49,17 +52,18 @@ class PreparedLocalTeacher:
 
 
 @dataclass(frozen=True)
-class PreparedLocalDistillationRuntime:
-    """Validated tokenizer and plan inputs prepared before Ray actor allocation."""
+class PreparedDistillationRuntime:
+    """Validated plan inputs prepared before policy or teacher allocation."""
 
     plan: DistillationPlan
-    teachers: tuple[PreparedLocalTeacher, ...]
+    local_teachers: tuple[PreparedLocalTeacher, ...]
+    external_teachers: tuple[OpenAICompatibleTeacherSpec, ...]
     student_fingerprint: str
 
 
 @dataclass(frozen=True)
-class PreparedAsyncLocalDistillationRuntime(PreparedLocalDistillationRuntime):
-    """Local teacher inputs plus validated fully-async queue limits."""
+class PreparedAsyncDistillationRuntime(PreparedDistillationRuntime):
+    """Teacher inputs plus validated fully-async queue limits."""
 
     teacher_limits: AsyncTeacherQueueLimits
 
@@ -81,14 +85,23 @@ def _validated_distillation_plan(cfg: DictConfig) -> DistillationPlan | None:
     return plan
 
 
-def _prepare_local_distillation_runtime(
+def _prepare_distillation_runtime(
     cfg: DictConfig,
     student_tokenizer: PreTrainedTokenizerBase,
     plan: DistillationPlan,
-) -> PreparedLocalDistillationRuntime:
+) -> PreparedDistillationRuntime:
     student_fingerprint = tokenizer_vocabulary_fingerprint(student_tokenizer)
     prepared_teachers: list[PreparedLocalTeacher] = []
+    external_teachers: list[OpenAICompatibleTeacherSpec] = []
     for teacher in plan.teachers:
+        if isinstance(teacher, OpenAICompatibleTeacherSpec):
+            if teacher.tokenizer_fingerprint != student_fingerprint:
+                raise ValueError(
+                    f"teacher {teacher.id!r} tokenizer fingerprint does not match the policy tokenizer; "
+                    "vocabulary-level distillation requires identical token-ID semantics"
+                )
+            external_teachers.append(teacher)
+            continue
         assert isinstance(teacher, LocalInferenceTeacherSpec)
         teacher_tokenizer = create_tokenizer(
             teacher.model.path,
@@ -103,25 +116,30 @@ def _prepare_local_distillation_runtime(
             )
         prepared_teachers.append(PreparedLocalTeacher(teacher, teacher_tokenizer))
 
-    return PreparedLocalDistillationRuntime(plan, tuple(prepared_teachers), student_fingerprint)
+    return PreparedDistillationRuntime(
+        plan,
+        tuple(prepared_teachers),
+        tuple(external_teachers),
+        student_fingerprint,
+    )
 
 
-def prepare_local_distillation_runtime(
+def prepare_distillation_runtime(
     cfg: DictConfig,
     student_tokenizer: PreTrainedTokenizerBase,
-) -> PreparedLocalDistillationRuntime | None:
-    """Validate local teachers for synchronous training before actor allocation."""
+) -> PreparedDistillationRuntime | None:
+    """Validate all teachers for synchronous training before actor allocation."""
     plan = _validated_distillation_plan(cfg)
     if plan is None:
         return None
-    return _prepare_local_distillation_runtime(cfg, student_tokenizer, plan)
+    return _prepare_distillation_runtime(cfg, student_tokenizer, plan)
 
 
-def prepare_async_local_distillation_runtime(
+def prepare_async_distillation_runtime(
     cfg: DictConfig,
     student_tokenizer: PreTrainedTokenizerBase,
-) -> PreparedAsyncLocalDistillationRuntime | None:
-    """Validate local teachers and async queue limits before actor allocation."""
+) -> PreparedAsyncDistillationRuntime | None:
+    """Validate all teachers and async queue limits before actor allocation."""
     plan = _validated_distillation_plan(cfg)
     if plan is None:
         return None
@@ -130,11 +148,12 @@ def prepare_async_local_distillation_runtime(
         max_queued=scoring.max_queued_per_teacher,
         workers=scoring.workers_per_teacher,
     )
-    prepared = _prepare_local_distillation_runtime(cfg, student_tokenizer, plan)
+    prepared = _prepare_distillation_runtime(cfg, student_tokenizer, plan)
     assert prepared is not None
-    return PreparedAsyncLocalDistillationRuntime(
+    return PreparedAsyncDistillationRuntime(
         prepared.plan,
-        prepared.teachers,
+        prepared.local_teachers,
+        prepared.external_teachers,
         prepared.student_fingerprint,
         teacher_limits,
     )
@@ -211,7 +230,7 @@ def _teacher_factory(cfg: DictConfig, prepared: PreparedLocalTeacher) -> Teacher
 
 async def start_sync_distillation_runtime(
     cfg: DictConfig,
-    prepared: PreparedLocalDistillationRuntime | None,
+    prepared: PreparedDistillationRuntime | None,
 ) -> SyncDistillationRuntime | None:
     """Allocate pinned teachers eagerly and rotating teachers on demand."""
     if prepared is None:
@@ -221,13 +240,13 @@ async def start_sync_distillation_runtime(
     return SyncDistillationRuntime(
         prepared.plan,
         fleet,
-        tokenizer_fingerprints={teacher.spec.id: prepared.student_fingerprint for teacher in prepared.teachers},
+        tokenizer_fingerprints={teacher.id: prepared.student_fingerprint for teacher in prepared.plan.teachers},
     )
 
 
 async def start_async_distillation_runtime(
     cfg: DictConfig,
-    prepared: PreparedAsyncLocalDistillationRuntime | None,
+    prepared: PreparedAsyncDistillationRuntime | None,
 ) -> AsyncDistillationRuntime | None:
     """Allocate the shared teacher fleet and bounded fully-async score queues."""
     if prepared is None:
@@ -237,27 +256,33 @@ async def start_async_distillation_runtime(
     runtime = AsyncDistillationRuntime(
         prepared.plan,
         fleet,
-        tokenizer_fingerprints={teacher.spec.id: prepared.student_fingerprint for teacher in prepared.teachers},
-        teacher_limits={teacher.spec.id: prepared.teacher_limits for teacher in prepared.teachers},
+        tokenizer_fingerprints={teacher.id: prepared.student_fingerprint for teacher in prepared.plan.teachers},
+        teacher_limits={teacher.id: prepared.teacher_limits for teacher in prepared.plan.teachers},
     )
     return runtime
 
 
 async def _start_teacher_fleet(
     cfg: DictConfig,
-    prepared: PreparedLocalDistillationRuntime,
+    prepared: PreparedDistillationRuntime,
 ) -> TeacherOracleFleet:
-    """Start one local teacher fleet shared by sync and fully-async schedulers."""
+    """Start one mixed teacher fleet shared by sync and fully-async schedulers."""
 
-    pinned = tuple(teacher for teacher in prepared.teachers if teacher.spec.placement is TeacherPlacement.PINNED)
-    rotating = tuple(teacher for teacher in prepared.teachers if teacher.spec.placement is TeacherPlacement.ROTATING)
+    pinned = tuple(
+        teacher for teacher in prepared.local_teachers if teacher.spec.placement is TeacherPlacement.PINNED
+    )
+    rotating = tuple(
+        teacher for teacher in prepared.local_teachers if teacher.spec.placement is TeacherPlacement.ROTATING
+    )
+    fixed_factories = {teacher.spec.id: _teacher_factory(cfg, teacher) for teacher in pinned}
+    fixed_factories.update(
+        {teacher.id: _external_teacher_factory(teacher) for teacher in prepared.external_teachers}
+    )
     fixed_owner: TeacherOracleOwner | None = None
     rotating_owner: RotatingTeacherOracleOwner | None = None
     try:
-        if pinned:
-            fixed_owner = await TeacherOracleOwner.create(
-                {teacher.spec.id: _teacher_factory(cfg, teacher) for teacher in pinned}
-            )
+        if fixed_factories:
+            fixed_owner = await TeacherOracleOwner.create(fixed_factories)
         if rotating:
             rotating_owner = RotatingTeacherOracleOwner(
                 {teacher.spec.id: _teacher_factory(cfg, teacher) for teacher in rotating},
@@ -271,9 +296,45 @@ async def _start_teacher_fleet(
         cleanup_errors = [result for result in results if isinstance(result, BaseException)]
         if cleanup_errors:
             raise BaseExceptionGroup(
-                "local teacher fleet startup and cleanup failed",
+                "teacher fleet startup and cleanup failed",
                 [startup_error, *cleanup_errors],
             )
         raise
 
     return fleet
+
+
+def _external_teacher_factory(teacher: OpenAICompatibleTeacherSpec) -> TeacherOracleFactory:
+    async def start() -> TeacherEndpointPool:
+        endpoints = []
+        try:
+            for index, endpoint in enumerate(teacher.endpoints):
+                api_key = None
+                if endpoint.auth is not None:
+                    resolved_auth = await asyncio.to_thread(resolve_secret_spec, endpoint.auth)
+                    api_key = resolved_auth.value
+                endpoints.append(
+                    TeacherEndpoint(
+                        endpoint_id=f"{teacher.id}-{index}",
+                        oracle=OpenAICompatibleTeacherOracle(
+                            teacher=teacher,
+                            endpoint=endpoint,
+                            api_key=api_key,
+                        ),
+                    )
+                )
+            return TeacherEndpointPool(tuple(endpoints))
+        except BaseException as startup_error:
+            results = await asyncio.gather(
+                *(endpoint.oracle.close() for endpoint in endpoints),
+                return_exceptions=True,
+            )
+            cleanup_errors = [result for result in results if isinstance(result, BaseException)]
+            if cleanup_errors:
+                raise BaseExceptionGroup(
+                    "external teacher startup and cleanup failed",
+                    [startup_error, *cleanup_errors],
+                )
+            raise
+
+    return start

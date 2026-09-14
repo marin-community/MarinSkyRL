@@ -102,6 +102,10 @@ teachers:
       revision: teacher-revision
     endpoints:
       - url: https://teacher.example/v1
+        max_concurrency: 8
+    tokenizer_fingerprint: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    max_sequence_length: 32768
+    request_timeout_seconds: 120
     evidence: chosen_token
 teacher_routing:
   opd:
