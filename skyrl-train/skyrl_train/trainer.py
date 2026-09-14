@@ -40,7 +40,7 @@ from skyrl_train.dataset.preprocess import (
     collate_response_token_channel,
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl_train.distillation import validate_distillation_attachment
+from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC, validate_distillation_attachment
 from skyrl_train.distillation_runtime import SyncDistillationRuntime
 from skyrl_train.utils import trainer_utils
 from skyrl_train.io import io
@@ -252,7 +252,7 @@ class RayPPOTrainer:
         self.all_metrics.update(
             {
                 "distillation/teacher_count": float(len({route.teacher_id for route in scored.routes})),
-                "distillation/scored_tokens": float(scored.distillation.valid_mask.sum().item()),
+                DISTILLATION_SCORED_TOKENS_METRIC: float(scored.distillation.valid_mask.sum().item()),
             }
         )
         return forwarded

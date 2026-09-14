@@ -29,6 +29,7 @@ from omegaconf import DictConfig
 import torch
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
+from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, GenerationQueuesProvider
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.json_serialization import to_jsonable
@@ -140,12 +141,12 @@ class DistillationTokenBudgetCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ) -> Optional[TrainerControl]:
-        scored = state.metrics.get("distillation/scored_tokens")
+        scored = state.metrics.get(DISTILLATION_SCORED_TOKENS_METRIC)
         if scored is None:
             raise ValueError("distillation token budget requires teacher-scored token metrics")
         scored_tokens = int(scored)
         if scored_tokens < 0 or scored_tokens != scored:
-            raise ValueError(f"distillation/scored_tokens must be a non-negative integer, got {scored!r}")
+            raise ValueError(f"{DISTILLATION_SCORED_TOKENS_METRIC} must be a non-negative integer, got {scored!r}")
         trainer = kwargs["trainer"]
         trainer.distillation_scored_tokens_total += scored_tokens
         trainer.all_metrics.update(

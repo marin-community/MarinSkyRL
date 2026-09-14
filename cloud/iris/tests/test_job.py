@@ -15,6 +15,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 
 from cloud.iris import job, runtime_environment  # noqa: E402
 from cloud.iris import runtime_bundle  # noqa: E402
+from cloud.iris.artifacts import write_json  # noqa: E402
 from cloud.iris.job import JobBackend, execute_job  # noqa: E402
 from cloud.iris.protocol import (  # noqa: E402
     AttemptState,
@@ -696,7 +697,7 @@ def test_cli_reports_launch_state_as_json(
 def test_write_json_supports_a_filename_without_a_parent(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 
-    job._write_json("result.json", {"state": "prepared"})
+    write_json("result.json", {"state": "prepared"})
 
     assert json.loads((tmp_path / "result.json").read_text()) == {"state": "prepared"}
 

@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import fsspec
 from fsspec.spec import AbstractFileSystem
@@ -47,6 +47,28 @@ def fs_and_path(uri: str) -> tuple[AbstractFileSystem, str]:
         storage_options = {"config_kwargs": {"s3": {"addressing_style": style}}}
     filesystem, _, paths = fsspec.get_fs_token_paths(uri, storage_options=storage_options)
     return filesystem, paths[0]
+
+
+def write_json(uri: str, value: dict[str, Any], *, overwrite: bool = True) -> None:
+    """Write JSON to a local or object-store URI."""
+    filesystem, path = fs_and_path(uri)
+    if not overwrite and filesystem.exists(path):
+        raise ValueError(f"JSON artifact already exists: {uri}")
+    parent = posixpath.dirname(path)
+    if parent:
+        filesystem.makedirs(parent, exist_ok=True)
+    with filesystem.open(path, "w") as destination:
+        json.dump(value, destination, indent=2, sort_keys=True)
+        destination.write("\n")
+
+
+def read_json(uri: str) -> dict[str, Any] | None:
+    """Read a JSON object, returning ``None`` when the URI does not exist."""
+    filesystem, path = fs_and_path(uri)
+    if not filesystem.exists(path):
+        return None
+    with filesystem.open(path) as source:
+        return json.load(source)
 
 
 def terminal_checkpoint_step(checkpoint_root: str) -> int:

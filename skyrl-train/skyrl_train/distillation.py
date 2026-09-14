@@ -13,6 +13,7 @@ from skyrl_train.tensor_math import masked_mean, safe_exp_delta
 
 INVALID_TOPK_INDEX = -1
 RETAINED_MASS_ATOL = 1e-6
+DISTILLATION_SCORED_TOKENS_METRIC = "distillation/scored_tokens"
 
 
 @dataclass(frozen=True)

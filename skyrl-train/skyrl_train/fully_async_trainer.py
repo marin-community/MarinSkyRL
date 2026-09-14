@@ -55,6 +55,7 @@ from skyrl_train.dynamic_sampling import (
     resolve_dynamic_sampling_criteria,
 )
 from skyrl_train.distillation_adapters import AsyncRoutedTeacherScoreTicket, RoutedScoredDistillationBatch
+from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
 from skyrl_train.distillation_runtime import AsyncDistillationRuntime
 from skyrl_train.group_admission import (
     AdmissionAction,
@@ -851,7 +852,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 "distillation/teacher_count": float(
                                     len({route.teacher_id for scored in scored_distillation for route in scored.routes})
                                 ),
-                                "distillation/scored_tokens": float(
+                                DISTILLATION_SCORED_TOKENS_METRIC: float(
                                     sum(scored.distillation.valid_mask.sum().item() for scored in scored_distillation)
                                 ),
                             }
