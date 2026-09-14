@@ -31,6 +31,7 @@ from skyrl_train.trajectory_runners.trajectory_retention_config import parse_tra
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, DEBUG_MODE_ENV, EnvVarManager, EnvVarScope
 from skyrl_train.group_admission import resolve_group_advantage_invariant
+from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
 from marinskyrl.distillation import compile_distillation_plan, reject_disabled_distillation_runtime
@@ -39,6 +40,7 @@ from marinskyrl.runtime_options import GDNBackend, R3Transport
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .algorithm_registry import (
     AdvantageEstimatorRegistry,
+    NoGroupAdvantage,
     PolicyLossRegistry,
     PolicyLossType,
     rollout_logprobs_enabled,
@@ -353,9 +355,9 @@ def validate_batch_sizes(cfg: DictConfig):
     Validate configured batch sizes.
 
     Explanation of how batching operates:
-    1. Each prompt in train_batch_size creates `n_samples_per_prompt` total samples.
-    2. During training, these samples are split across data parallel (DP) workers, making the effective per-GPU batch size: `train_batch_size * n_samples_per_prompt / dp_size`.
-    3. Mini batches are similarly normalized to per-gpu mini batches with size: `mini_batch_size * n_samples_per_prompt / dp_size`.
+    1. Each prompt creates `optimization_samples_per_prompt` learner rows after trajectory selection.
+    2. During training, these rows are split across data parallel (DP) workers.
+    3. Mini batches are normalized using that same post-selection row count.
     4. Per-gpu train batch size must be divisble by per-gpu mini batch size, otherwise the last mini batch will be incomplete.
     5. Per-gpu mini batch size must be divisible by per-gpu micro batch size, otherwise the last micro batch will be incomplete.
     """
@@ -385,13 +387,12 @@ def validate_batch_sizes(cfg: DictConfig):
     assert cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0, (
         f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
     )
-    policy_mini_batch_size_per_gpu = (
-        cfg.trainer.policy_mini_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
-    )
+    optimization_group_size = optimization_samples_per_prompt(cfg)
+    policy_mini_batch_size_per_gpu = cfg.trainer.policy_mini_batch_size * optimization_group_size // policy_dp_size
     assert policy_mini_batch_size_per_gpu > 0, (
         f"Invalid policy_mini_batch_size_per_gpu: {policy_mini_batch_size_per_gpu}. "
         f"mini_batch_size={cfg.trainer.policy_mini_batch_size}, "
-        f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
+        f"optimization_samples_per_prompt={optimization_group_size}, "
         f"dp_size={policy_dp_size}"
     )
     assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
@@ -400,13 +401,11 @@ def validate_batch_sizes(cfg: DictConfig):
     assert policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
         f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
     )
-    policy_train_batch_size_per_gpu = (
-        cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
-    )
+    policy_train_batch_size_per_gpu = cfg.trainer.train_batch_size * optimization_group_size // policy_dp_size
 
     # `train_batch_size_per_gpu` should be divisible by `policy_mini_batch_size_per_gpu`
     assert policy_train_batch_size_per_gpu % policy_mini_batch_size_per_gpu == 0, (
-        f"normalized policy_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // policy_dp_size) {policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu (policy_mini_batch_size * n_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
+        f"normalized policy_train_batch_size_per_gpu (train_batch_size * optimization_samples_per_prompt // policy_dp_size) {policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu (policy_mini_batch_size * optimization_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
     )
 
     # Validate critic mini batch size
@@ -417,13 +416,11 @@ def validate_batch_sizes(cfg: DictConfig):
         assert cfg.trainer.train_batch_size % cfg.trainer.critic_mini_batch_size == 0, (
             f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by critic_mini_batch_size {cfg.trainer.critic_mini_batch_size}"
         )
-        critic_mini_batch_size_per_gpu = (
-            cfg.trainer.critic_mini_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
-        )
+        critic_mini_batch_size_per_gpu = cfg.trainer.critic_mini_batch_size * optimization_group_size // critic_dp_size
         assert critic_mini_batch_size_per_gpu > 0, (
             f"Invalid critic_mini_batch_size_per_gpu: {critic_mini_batch_size_per_gpu}. "
             f"mini_batch_size={cfg.trainer.critic_mini_batch_size}, "
-            f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
+            f"optimization_samples_per_prompt={optimization_group_size}, "
             f"dp_size={critic_dp_size}"
         )
         assert critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
@@ -432,11 +429,9 @@ def validate_batch_sizes(cfg: DictConfig):
         assert critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
             f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
         )
-        critic_train_batch_size_per_gpu = (
-            cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
-        )
+        critic_train_batch_size_per_gpu = cfg.trainer.train_batch_size * optimization_group_size // critic_dp_size
         assert critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0, (
-            f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) {critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu (critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
+            f"normalized critic_train_batch_size_per_gpu (train_batch_size * optimization_samples_per_prompt // critic_dp_size) {critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu (critic_mini_batch_size * optimization_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
         )
 
     # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
@@ -586,6 +581,10 @@ def validate_cfg(cfg: DictConfig):
     assert isinstance(resolved_cfg, dict)
     distillation_plan = compile_distillation_plan(resolved_cfg)
     reject_disabled_distillation_runtime(distillation_plan)
+    trajectory_selector = trajectory_selector_from_config(cfg)
+    if trajectory_selector is not None:
+        if cfg.trainer.step_wise_training:
+            raise ValueError("best-of-N selection does not support step-wise training")
     resolve_dynamic_sampling_criteria(
         cfg.trainer.algorithm.dynamic_sampling.informative_on,
         float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
@@ -709,6 +708,11 @@ def validate_cfg(cfg: DictConfig):
     assert cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators, (
         f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
     )
+    if trajectory_selector is not None and not isinstance(
+        AdvantageEstimatorRegistry.group_contract(cfg.trainer.algorithm.advantage_estimator),
+        NoGroupAdvantage,
+    ):
+        raise ValueError("best-of-N selection requires a no-group advantage estimator")
 
     assert cfg.trainer.algorithm.loss_reduction in SUPPORTED_LOSS_REDUCTIONS, (
         f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
@@ -720,7 +724,7 @@ def validate_cfg(cfg: DictConfig):
     algorithm_config = OmegaConf.create(cfg.trainer.algorithm)
     group_advantage = resolve_group_advantage_invariant(
         advantage_estimator=str(algorithm_config.advantage_estimator),
-        physical_group_size=int(cfg.generator.n_samples_per_prompt),
+        physical_group_size=optimization_samples_per_prompt(cfg),
         minimum_group_size=algorithm_config.group_advantage_min_size,
     )
     algorithm_config.resolved_group_advantage = group_advantage.to_config()

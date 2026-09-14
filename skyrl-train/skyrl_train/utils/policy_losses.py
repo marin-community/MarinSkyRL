@@ -89,6 +89,29 @@ class PolicyLossFunction(Protocol):
     ) -> tuple[torch.Tensor, dict[str, float]]: ...
 
 
+@register_policy_loss(PolicyLossType.SFT)
+def sft_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    *,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor],
+    rollout_logprobs: Optional[torch.Tensor],
+    global_loss_denom: Optional[float] = None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Maximize likelihood of selected response tokens."""
+    del old_log_probs, advantages, rollout_logprobs
+    loss = reduce_loss(
+        -log_probs,
+        loss_mask,
+        config.loss_reduction,
+        config.max_seq_len,
+        global_denom=global_loss_denom,
+    )
+    return loss, {}
+
+
 def _masked_fraction(condition: torch.Tensor, loss_mask: Optional[torch.Tensor]) -> float:
     return masked_mean(condition.float(), loss_mask).mean().detach().item()
 

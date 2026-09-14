@@ -6,6 +6,7 @@ from omegaconf import OmegaConf
 
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation import (
+    ChosenTokenTeacherEvidence,
     SampledReverseKLInput,
     TeacherScoreRequest,
     TopKTeacherEvidence,
@@ -14,8 +15,11 @@ from skyrl_train.distillation import (
     validate_sampled_reverse_kl_attachment,
     validate_teacher_evidence,
 )
+from skyrl_train.distillation_adapters import build_teacher_scoring_work
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch
-from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective, ppo_policy_loss
+from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.trajectory_selection import BestOfNTrajectorySelector
+from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective, ppo_policy_loss, sft_policy_loss
 
 
 def _request() -> TeacherScoreRequest:
@@ -154,6 +158,71 @@ def test_sampled_reverse_kl_gradient_depends_on_teacher_distribution():
     torch.testing.assert_close(second_actions.grad, torch.tensor([[0.5, 0.5, 0.0]], dtype=torch.float64))
     assert first.metrics["distillation_loss"] == pytest.approx(0.25)
     assert second.metrics["distillation_loss"] == pytest.approx(1.0)
+
+
+def test_best_of_n_optional_teacher_changes_only_the_selected_update():
+    selection = BestOfNTrajectorySelector(2).select(
+        {
+            "prompt_token_ids": [[10], [10]],
+            "response_ids": [[20, 21], [30, 31]],
+            "rewards": [[0.1, 0.0], [0.0, 0.9]],
+            "loss_masks": [[1, 1], [1, 1]],
+            "trajectory_ids": [TrajectoryID("math", 0), TrajectoryID("math", 1)],
+        },
+        ["math", "math"],
+    )
+    work = build_teacher_scoring_work(
+        selection.trajectory_batch,
+        route_ids=("math",),
+        teacher_id="teacher-a",
+        tokenizer_fingerprint="sha256:student-tokenizer",
+        plan_version="opd-v1",
+        coefficient=0.5,
+        route_weights=(1.0,),
+    )
+    assert work.request.trajectory_ids == ("math_1",)
+    torch.testing.assert_close(work.request.response_token_ids, torch.tensor([[30, 31]]))
+
+    evidence = ChosenTokenTeacherEvidence(
+        trajectory_ids=work.request.trajectory_ids,
+        route_ids=work.request.route_ids,
+        teacher_id=work.request.teacher_id,
+        teacher_revision="teacher-revision",
+        plan_version=work.request.plan_version,
+        valid_mask=work.request.response_mask,
+        chosen_logprobs=torch.tensor([[-0.25, -2.0]], dtype=torch.float64),
+    )
+    distillation = prepare_sampled_reverse_kl(
+        work.request,
+        evidence,
+        coefficient=work.coefficient,
+        route_weights=work.route_weights,
+    )
+
+    def selected_update(attached_distillation):
+        action_logprobs = torch.tensor([[-1.0, -1.0]], dtype=torch.float64, requires_grad=True)
+        objective = compute_policy_objective(
+            action_log_probs=action_logprobs,
+            old_action_log_probs=torch.full_like(action_logprobs, -1.0),
+            base_action_log_probs=None,
+            advantages=torch.ones_like(action_logprobs),
+            loss_mask=torch.ones_like(action_logprobs),
+            rollout_logprobs=None,
+            response_span_tags=None,
+            token_entropy=torch.zeros_like(action_logprobs),
+            config=_policy_config(),
+            policy_loss_fn=sft_policy_loss,
+            accumulation_steps=1,
+            scaling=LossScaling.CALLER,
+            distillation=attached_distillation,
+        )
+        objective.optimization_loss.backward()
+        return action_logprobs.grad
+
+    update_without_teacher = selected_update(None)
+    update_with_teacher = selected_update(distillation)
+
+    assert not torch.equal(update_without_teacher, update_with_teacher)
 
 
 def test_distillation_absence_preserves_policy_objective_exactly():

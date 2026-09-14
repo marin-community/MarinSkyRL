@@ -1554,6 +1554,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Convert rewards to per-token form and compute reward metrics before training conversion
         trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
+        trajectory_batch, uids = self.select_trajectories(trajectory_batch, uids)
 
         # print example just for debugging
         vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
