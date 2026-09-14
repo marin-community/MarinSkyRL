@@ -21,7 +21,7 @@ entrypoint accepts this boundary:
   divisible by the learner GPU count, frozen Snowball router bias, and expert parallelism 1;
 - AdamW with learning rate `1e-5`, betas `0.9/0.999`, epsilon `1e-8`, weight decay `0.01`, maximum gradient norm `0.5`,
   zero warmup, and a constant schedule;
-- Levanter reference attention, ring MoE dispatch, Gloo weight publication, vLLM pipeline parallelism 1, and sampling
+- Levanter reference or GPU FA4 attention, ring MoE dispatch, Gloo weight publication, vLLM pipeline parallelism 1, and sampling
   temperature `1.0`.
 
 Other settings fail preflight. They do not fall back to a Torch learner or the stateful test fake.

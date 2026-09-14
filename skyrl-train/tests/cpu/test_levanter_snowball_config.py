@@ -47,6 +47,15 @@ def test_supported_config_lowers_without_importing_the_concrete_learner():
     assert runtime.inference_world_size == 4
 
 
+def test_h100_flash_attention_config_lowers():
+    cfg = _valid_config()
+    cfg.trainer.policy.levanter.attention_implementation = "gpu_fa4_cute"
+
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.attention_implementation == "gpu_fa4_cute"
+
+
 @pytest.mark.parametrize(
     ("path", "value", "match"),
     [

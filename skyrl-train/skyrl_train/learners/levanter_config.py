@@ -124,8 +124,8 @@ class LevanterSnowballRuntimeConfig:
             unsupported.append("a positive Levanter publication chunk size")
         if float(levanter.publication_timeout_seconds) <= 0:
             unsupported.append("a positive Levanter publication timeout")
-        if str(levanter.attention_implementation) != "reference":
-            unsupported.append("Levanter reference attention")
+        if str(levanter.attention_implementation) not in {"reference", "gpu_fa4_cute"}:
+            unsupported.append("Levanter reference or gpu_fa4_cute attention")
         if str(levanter.moe_implementation) != "ring":
             unsupported.append("Levanter ring MoE dispatch")
         if unsupported:

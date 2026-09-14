@@ -65,7 +65,10 @@ trainer:
       parameter_dtype: float32
       compute_dtype: bfloat16
       output_dtype: float32
-      attention_implementation: reference
+      # Reference attention materializes the global 8K score tensor during
+      # backward (more than 400 GiB). Snowball's segmented FA4 kernel preserves
+      # causal/sliding-window semantics while streaming those scores on H100.
+      attention_implementation: gpu_fa4_cute
       moe_implementation: ring
       publication_backend: gloo
       publication_max_chunk_bytes: 67108864
