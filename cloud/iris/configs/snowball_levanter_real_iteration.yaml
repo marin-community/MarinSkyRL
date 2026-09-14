@@ -42,8 +42,12 @@ trainer:
   micro_train_batch_size_per_gpu: 1
   eval_before_train: false
   eval_interval: -1
-  ckpt_interval: 1
-  max_ckpts_to_keep: 2
+  # The callback interval is deliberately beyond this two-step run. Its
+  # independent train-end hook keeps one final native checkpoint without
+  # staging a checkpoint after every update.
+  ckpt_interval: 3
+  hf_save_interval: -1
+  max_ckpts_to_keep: 1
   resume_mode: none
   restore_dataloader_state: true
   logger: console
