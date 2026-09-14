@@ -11,7 +11,7 @@ import torch
 from omegaconf import DictConfig
 
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
-from skyrl_train.utils.policy_math import masked_mean
+from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.loss_reduction import reduce_loss
 
 

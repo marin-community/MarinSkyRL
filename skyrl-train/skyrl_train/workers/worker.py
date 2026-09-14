@@ -31,7 +31,7 @@ from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_t
 from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from skyrl_train.io import io
 from skyrl_train.utils.numa import physical_gpu_id_for_worker, set_numa_affinity_for_gpu
-from skyrl_train.utils.policy_math import masked_mean
+from skyrl_train.tensor_math import masked_mean
 from skyrl_train.distributed.dispatch import ActorInfo, Dispatch, DispatchRegistry, DispatchSettings, MeshRank
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.distributed.strategy import DistributedStrategy
@@ -1239,6 +1239,7 @@ class PolicyWorkerBase(Worker):
                 accumulation_steps=accumulation_steps,
                 scaling=LossScaling.CALLER,
                 global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
+                distillation=experience.distillation,
             )
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_EXIT)
         loss = objective.optimization_loss
