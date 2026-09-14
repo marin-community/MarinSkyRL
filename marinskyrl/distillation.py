@@ -6,7 +6,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TypeVar
+from typing import Protocol, TypeVar
 from urllib.parse import urlsplit
 
 
@@ -51,15 +51,50 @@ class TeacherEndpointSpec:
     auth: str | None
 
 
+class TeacherSpec(Protocol):
+    id: str
+    source: TeacherSource
+    placement: TeacherPlacement
+    model: TeacherModelSpec
+    evidence: TeacherEvidenceKind
+
+
 @dataclass(frozen=True)
-class TeacherSpec:
+class OpenAICompatibleTeacherSpec:
     id: str
     source: TeacherSource
     placement: TeacherPlacement
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
     endpoints: tuple[TeacherEndpointSpec, ...]
-    backend: str | None
+
+
+@dataclass(frozen=True)
+class LocalInferenceTeacherSpec:
+    id: str
+    source: TeacherSource
+    placement: TeacherPlacement
+    model: TeacherModelSpec
+    evidence: TeacherEvidenceKind
+    backend: str
+
+
+@dataclass(frozen=True)
+class FrozenWorkerTeacherSpec:
+    id: str
+    source: TeacherSource
+    placement: TeacherPlacement
+    model: TeacherModelSpec
+    evidence: TeacherEvidenceKind
+
+
+@dataclass(frozen=True)
+class ResidentTeacherSpec:
+    id: str
+    source: TeacherSource
+    placement: TeacherPlacement
+    model: TeacherModelSpec
+    evidence: TeacherEvidenceKind
 
 
 @dataclass(frozen=True)
@@ -227,15 +262,21 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
     if source is TeacherSource.FROZEN_WORKER and placement is not TeacherPlacement.PINNED:
         raise ValueError(f"{path}.placement must be pinned for frozen_worker teachers")
 
-    return TeacherSpec(
-        id=teacher_id,
-        source=source,
-        placement=placement,
-        model=_teacher_model(config, path),
-        evidence=evidence,
-        endpoints=endpoints,
-        backend=backend,
-    )
+    common = {
+        "id": teacher_id,
+        "source": source,
+        "placement": placement,
+        "model": _teacher_model(config, path),
+        "evidence": evidence,
+    }
+    if source is TeacherSource.OPENAI_COMPATIBLE:
+        return OpenAICompatibleTeacherSpec(**common, endpoints=endpoints)
+    if source is TeacherSource.LOCAL_INFERENCE:
+        assert backend is not None
+        return LocalInferenceTeacherSpec(**common, backend=backend)
+    if source is TeacherSource.FROZEN_WORKER:
+        return FrozenWorkerTeacherSpec(**common)
+    return ResidentTeacherSpec(**common)
 
 
 def _routing_plan(name: str, raw: object, teacher_ids: frozenset[str]) -> TeacherRoutingPlan:
@@ -268,7 +309,7 @@ def _routing_plan(name: str, raw: object, teacher_ids: frozenset[str]) -> Teache
 
 
 def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan | None:
-    """Compile one immutable distillation plan from a complete RL configuration."""
+    """Compile an immutable plan, or return ``None`` when distillation is absent."""
     if "teacher" in config:
         raise ValueError(
             "legacy teacher configuration is not supported; use top-level teachers and teacher_routing with "
