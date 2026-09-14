@@ -960,6 +960,22 @@ class PolicyWorkerBase(Worker):
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         self._grug_query_bias_window: GrugQueryBiasWindow | None = None
 
+    async def _begin_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
+        """Open a rank-synchronized vLLM reload around a streamed weight update."""
+        if not enabled:
+            return
+        if torch.distributed.get_rank() == 0:
+            await inference_engine_client.begin_weight_reload()
+        torch.distributed.barrier()
+
+    async def _finish_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
+        """Finalize all streamed weights and apply vLLM's kernel-layout transforms once."""
+        if not enabled:
+            return
+        torch.distributed.barrier()
+        if torch.distributed.get_rank() == 0:
+            await inference_engine_client.finish_weight_reload()
+
     def _normalize_mini_batch_size(self):
         """
         Normalize mini batch sizes to per-gpu mini batch sizes..

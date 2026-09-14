@@ -21,6 +21,9 @@ ADVANTAGE_PATTERN = torch.tensor([[-1.0, -0.25, 0.5, 1.0], [1.0, 0.5, -0.25, -1.
 def grug_engine_client(cfg, model_path: str) -> InferenceEngineClient:
     """Start eager, non-sleeping vLLM engines for a tiny Grug checkpoint on their own GPUs."""
     tokenizer = AutoTokenizer.from_pretrained(model_path)
+    engine_init_kwargs = {"max_model_len": MAX_MODEL_LEN}
+    if moe_backend is not None:
+        engine_init_kwargs["kernel_config"] = {"moe_backend": moe_backend}
     engines = create_ray_wrapped_inference_engines(
         num_inference_engines=cfg.generator.num_inference_engines,
         tensor_parallel_size=1,
@@ -41,7 +44,7 @@ def grug_engine_client(cfg, model_path: str) -> InferenceEngineClient:
         max_num_seqs=cfg.trainer.train_batch_size,
         tokenizer=tokenizer,
         backend="vllm",
-        engine_init_kwargs={"max_model_len": MAX_MODEL_LEN},
+        engine_init_kwargs=engine_init_kwargs,
     )
     return InferenceEngineClient(engines, tokenizer, cfg)
 
