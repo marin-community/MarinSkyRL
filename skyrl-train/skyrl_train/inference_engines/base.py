@@ -160,7 +160,7 @@ class InferenceEngineInterface(ABC):
         """Seal the active capture into an immutable local artifact."""
         raise NotImplementedError()
 
-    async def export_online_eagle_capture(self, job: Dict[str, Any]) -> Any:
+    async def catalog_online_eagle_capture(self) -> Any:
         """Return a metadata-only catalog for a sealed capture."""
         raise NotImplementedError()
 

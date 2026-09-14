@@ -40,7 +40,7 @@ _CONFIGS = {
     "nemotron_ultra_rlvr_acceptance.yaml": (32768, 256, 2),
     "opencode_smoke_literal.yaml": (32768, 4096, 30),
     "snowball_megatron_full.yaml": (9216, 8192, 1),
-    "snowball_megatron_online_eagle.yaml": (2048, 512, 1),
+    "snowball_megatron_online_eagle.yaml": (9856, 8192, 1),
     "snowball_megatron_smoke.yaml": (2048, 512, 1),
     "snowball_ultra_rlvr1_colocated64.yaml": (65536, 6528, 999999),
     "snowball_ultra_rlvr1_split64.yaml": (65536, 6528, 999999),

@@ -102,8 +102,8 @@ class _SpeculatorCaptureClient:
     async def discard_online_eagle_capture(self):
         self.discards += 1
 
-    async def export_online_eagle_capture(self, job):
-        self.exports.append(job)
+    async def catalog_online_eagle_capture(self):
+        self.exports.append(True)
         return [
             [
                 {

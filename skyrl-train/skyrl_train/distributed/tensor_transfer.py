@@ -32,7 +32,7 @@ _DTYPES_BY_NAME = {
 }
 
 
-def _group_rank(group: Any) -> int:
+def _group_rank(group: torch.distributed.ProcessGroup) -> int:
     """Read the standalone group's rank without consulting another default world."""
     rank = group.rank()
     if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
@@ -40,7 +40,7 @@ def _group_rank(group: Any) -> int:
     return rank
 
 
-def _group_size(group: Any) -> int:
+def _group_size(group: torch.distributed.ProcessGroup) -> int:
     size = group.size()
     if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
         raise RuntimeError(f"Tensor transfer group returned an invalid size: {size!r}")
@@ -49,7 +49,7 @@ def _group_size(group: Any) -> int:
 
 def _tensor_sha256(tensor: torch.Tensor) -> str:
     value = tensor.detach().to(device="cpu").contiguous()
-    return hashlib.sha256(value.view(torch.uint8).numpy().tobytes()).hexdigest()
+    return hashlib.sha256(value.view(torch.uint8).numpy()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -88,9 +88,8 @@ class TensorTransferEntry:
         digest = value["sha256"]
         if not isinstance(name, str) or not name:
             raise ValueError("Tensor transfer names must be nonempty")
-        if (
-            not isinstance(shape, (list, tuple))
-            or any(isinstance(size, bool) or not isinstance(size, int) or size < 0 for size in shape)
+        if not isinstance(shape, (list, tuple)) or any(
+            isinstance(size, bool) or not isinstance(size, int) or size < 0 for size in shape
         ):
             raise ValueError(f"Tensor transfer shape is invalid for {name!r}")
         if dtype not in _DTYPES_BY_NAME:
@@ -257,7 +256,7 @@ def broadcast_tensor_payload(
     manifest_value: Mapping[str, Any],
     *,
     tensors: Mapping[str, torch.Tensor] | None,
-    group: Any,
+    group: torch.distributed.ProcessGroup,
     source_rank: int = 0,
     device: torch.device | None = None,
     staging_bytes: int = DEFAULT_STAGING_BYTES,
@@ -287,7 +286,9 @@ def broadcast_tensor_payload(
     received: dict[str, torch.Tensor] | None = None
     if not is_source:
         received = {
-            entry.name: torch.empty(entry.shape, dtype=entry.torch_dtype, device="cpu", pin_memory=device.type == "cuda")
+            entry.name: torch.empty(
+                entry.shape, dtype=entry.torch_dtype, device="cpu", pin_memory=device.type == "cuda"
+            )
             for entry in manifest.tensors
         }
 
@@ -323,7 +324,7 @@ def transfer_tensor_operations(
     operation_values: Sequence[Mapping[str, Any]],
     *,
     tensor_provider: Callable[[TensorTransferOperation], torch.Tensor] | None,
-    group: Any,
+    group: torch.distributed.ProcessGroup,
     receiver_rank: int = 0,
     device: torch.device | None = None,
     staging_bytes: int = DEFAULT_STAGING_BYTES,

@@ -350,9 +350,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         """Seal every engine before the target-weight synchronization boundary."""
         return await self._run_on_all_engines("seal_online_eagle_capture", output_root)
 
-    async def export_online_eagle_capture(self, job: Dict[str, Any]) -> List[Any]:
+    async def catalog_online_eagle_capture(self) -> List[Any]:
         """Collect metadata-only catalogs from every sealed serving rank."""
-        return await self._run_on_all_engines("export_online_eagle_capture", job)
+        return await self._run_on_all_engines("catalog_online_eagle_capture")
 
     async def transfer_online_eagle_capture(self, transfer_plan: Dict[str, Any]) -> List[Any]:
         """Run the same canonical direct-transfer plan on every serving rank."""
@@ -928,6 +928,21 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def sleep(self, *args: Any, **kwargs: Any):
         return await self._run_on_all_engines("sleep", *args, **kwargs)
 
+    def _live_engine_communicator_offsets(self, rank_offset: int) -> list[tuple[Any, int]]:
+        offsets = []
+        next_rank_offset = rank_offset
+        for index, engine in enumerate(self.engines):
+            if index in self._dead_engines:
+                continue
+            relative_rank_offset = engine.weight_sync_relative_rank_offset
+            engine_rank_offset = (
+                rank_offset + relative_rank_offset if relative_rank_offset is not None else next_rank_offset
+            )
+            offsets.append((engine, engine_rank_offset))
+            if relative_rank_offset is None:
+                next_rank_offset += engine.tp_size() * engine.pp_size()
+        return offsets
+
     async def init_weight_update_communicator(
         self,
         master_addr,
@@ -939,15 +954,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         override_existing: bool = False,
     ):
         tasks = []
-        rank_offset_count = rank_offset
-
-        for i, engine in enumerate(self.engines):
-            if i in self._dead_engines:
-                continue
-            relative_rank_offset = engine.weight_sync_relative_rank_offset
-            engine_rank_offset = (
-                rank_offset + relative_rank_offset if relative_rank_offset is not None else rank_offset_count
-            )
+        for engine, engine_rank_offset in self._live_engine_communicator_offsets(rank_offset):
             tasks.append(
                 engine.init_weight_update_communicator(
                     master_addr=master_addr,
@@ -959,8 +966,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                     override_existing=override_existing,
                 )
             )
-            if relative_rank_offset is None:
-                rank_offset_count += engine.tp_size() * engine.pp_size()
         await asyncio.gather(*tasks)
 
     async def init_draft_transfer_communicator(
@@ -973,14 +978,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         backend,
     ):
         tasks = []
-        rank_offset_count = rank_offset
-        for i, engine in enumerate(self.engines):
-            if i in self._dead_engines:
-                continue
-            relative_rank_offset = engine.weight_sync_relative_rank_offset
-            engine_rank_offset = (
-                rank_offset + relative_rank_offset if relative_rank_offset is not None else rank_offset_count
-            )
+        for engine, engine_rank_offset in self._live_engine_communicator_offsets(rank_offset):
             tasks.append(
                 engine.init_draft_transfer_communicator(
                     master_addr=master_addr,
@@ -991,8 +989,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                     backend=backend,
                 )
             )
-            if relative_rank_offset is None:
-                rank_offset_count += engine.tp_size() * engine.pp_size()
         await asyncio.gather(*tasks)
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):

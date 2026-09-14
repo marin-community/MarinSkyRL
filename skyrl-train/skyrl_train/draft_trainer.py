@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
-import socket
 from typing import Any
 from uuid import uuid4
 
@@ -21,8 +20,11 @@ from skyrl_train.distributed.tensor_transfer import (
     broadcast_tensor_payload,
     transfer_tensor_operations,
 )
-from skyrl_train.distributed.utils import init_custom_process_group
+from skyrl_train.distributed.utils import get_free_port, init_custom_process_group
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    ONLINE_EAGLE_CAPTURE_TRANSFER_FORMAT,
+    ONLINE_EAGLE_MANIFEST_FILENAME,
+    ONLINE_EAGLE_TARGET_CONFIG_FILENAME,
     ONLINE_EAGLE_SCRATCH_ROOT,
     OnlineEagleTrainerRuntime,
     OnlineEagleTrainingJob,
@@ -72,10 +74,7 @@ class DraftTrainer:
     def transfer_rendezvous(self) -> dict[str, Any]:
         """Return a trainer-node TCP endpoint for the persistent transfer group."""
         master_addr = ray._private.services.get_node_ip_address()
-        with socket.socket() as listener:
-            listener.bind(("", 0))
-            master_port = listener.getsockname()[1]
-        return {"master_addr": master_addr, "master_port": master_port}
+        return {"master_addr": master_addr, "master_port": get_free_port()}
 
     def init_transfer_group(
         self,
@@ -90,12 +89,9 @@ class DraftTrainer:
         if self._draft_transfer_group is not None:
             raise RuntimeError("DraftTrainer transfer group is already initialized")
         if not torch.distributed.is_initialized():
-            with socket.socket() as listener:
-                listener.bind(("127.0.0.1", 0))
-                local_port = listener.getsockname()[1]
             torch.distributed.init_process_group(
                 backend="gloo",
-                init_method=get_tcp_url("127.0.0.1", local_port),
+                init_method=get_tcp_url("127.0.0.1", get_free_port()),
                 world_size=1,
                 rank=0,
             )
@@ -115,7 +111,7 @@ class DraftTrainer:
         """Receive a selected multi-rank capture directly into trainer-local files."""
         if self._draft_transfer_group is None:
             raise RuntimeError("DraftTrainer transfer group is not initialized")
-        if transfer_plan.get("format") != "marinskyrl-online-eagle-capture-transfer":
+        if transfer_plan.get("format") != ONLINE_EAGLE_CAPTURE_TRANSFER_FORMAT:
             raise ValueError("Unsupported online EAGLE capture transfer plan")
         operations = transfer_plan.get("operations")
         files = transfer_plan.get("files")
@@ -141,7 +137,7 @@ class DraftTrainer:
                     for tensor in file_entry["tensors"]
                 }
                 save_file(tensors, str(staging / relative_path), metadata={"format": "pt"})
-            config_path = staging / "target-config.json"
+            config_path = staging / ONLINE_EAGLE_TARGET_CONFIG_FILENAME
             config_path.write_text(transfer_plan["target_config_json"])
             manifest = dict(transfer_plan["capture_manifest"])
             manifest["windows"] = [
@@ -152,7 +148,7 @@ class DraftTrainer:
                 "weights_sha256": sha256_file(staging / manifest["target"]["weights_path"]),
                 "config_sha256": sha256_file(config_path),
             }
-            (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
+            (staging / ONLINE_EAGLE_MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, sort_keys=True))
             os.replace(staging, capture_dir)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
@@ -269,10 +265,7 @@ class DraftTrainer:
         previous = self._served_draft_dir
         self._served_draft_dir = self._pending_candidate_dir
         self._served_draft_revision = draft_revision
-        self._pending_candidate_dir = None
-        self._pending_draft_revision = None
-        self._pending_transfer_manifest = None
-        self._pending_candidate_tensors = None
+        self._clear_pending_candidate()
         previous_path = Path(previous).resolve()
         process_root = self._process_root.resolve()
         if previous_path != Path(self._initial_draft_dir).resolve() and previous_path.is_relative_to(process_root):
@@ -288,10 +281,7 @@ class DraftTrainer:
         candidate = self._pending_candidate_dir
         assert self._training_runtime is not None
         self._training_runtime.rollback(draft_revision)
-        self._pending_candidate_dir = None
-        self._pending_draft_revision = None
-        self._pending_transfer_manifest = None
-        self._pending_candidate_tensors = None
+        self._clear_pending_candidate()
         remove_online_eagle_scratch(candidate)
         return {"draft_revision": draft_revision, "served_draft_dir": self._served_draft_dir}
 
@@ -321,10 +311,7 @@ class DraftTrainer:
     def cleanup(self) -> dict[str, Any]:
         """Release this actor's process-scoped capture, candidate, and failure scratch."""
         remove_online_eagle_scratch(self._process_root)
-        self._pending_candidate_dir = None
-        self._pending_draft_revision = None
-        self._pending_transfer_manifest = None
-        self._pending_candidate_tensors = None
+        self._clear_pending_candidate()
         self._training_runtime = None
         if self._draft_transfer_group is not None:
             torch.distributed.destroy_process_group(self._draft_transfer_group)
@@ -333,6 +320,12 @@ class DraftTrainer:
             torch.distributed.destroy_process_group()
             self._owns_default_process_group = False
         return {"path": str(self._process_root)}
+
+    def _clear_pending_candidate(self) -> None:
+        self._pending_candidate_dir = None
+        self._pending_draft_revision = None
+        self._pending_transfer_manifest = None
+        self._pending_candidate_tensors = None
 
     def status(self) -> dict[str, Any]:
         return {

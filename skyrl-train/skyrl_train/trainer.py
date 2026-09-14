@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import asdict
 import json
 import math
 import os
@@ -61,6 +60,7 @@ from skyrl_train.distributed.tensor_transfer import TensorTransferManifest
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    ONLINE_EAGLE_MERGED_CAPTURE_DIRECTORY,
     ONLINE_EAGLE_SCRATCH_ROOT,
     OnlineEagleCaptureConfig,
     OnlineEagleTrainingJob,
@@ -150,6 +150,18 @@ def _active_online_eagle_results(results: list[Any]) -> list[dict[str, Any]]:
     return [item for engine_results in results for item in engine_results if item.get("active", False)]
 
 
+def _validate_online_eagle_transfer_ranks(
+    active_results: list[dict[str, Any]], expected_workers: int, operation: str
+) -> set[int]:
+    transfer_ranks = {result.get("transfer_rank") for result in active_results}
+    if len(active_results) != expected_workers or transfer_ranks != set(range(1, expected_workers + 1)):
+        raise RuntimeError(
+            f"Expected one active online EAGLE {operation} per transfer rank; "
+            f"expected {expected_workers}, got ranks {sorted(transfer_ranks, key=str)}"
+        )
+    return transfer_ranks
+
+
 def _poll_object_ref(ref: ObjectRef) -> tuple[bool, Any | None]:
     ready, _ = ray.wait([ref], timeout=0)
     return (False, None) if not ready else (True, ray.get(ready[0]))
@@ -222,6 +234,7 @@ class RayPPOTrainer:
         self._speculator_update_inflight = False
         self._draft_trainer = None
         self._draft_trainer_update_ref: ObjectRef | None = None
+        self._draft_trainer_submitted_at: float | None = None
         self._draft_trainer_target_revision: str | None = None
         self._draft_trainer_target_weights_sha256: str | None = None
         self._speculator_update_failures = 0
@@ -690,13 +703,8 @@ class RayPPOTrainer:
         results = await self.inference_engine_client.begin_online_eagle_capture(capture_config)
         active_results = _active_online_eagle_results(results)
         expected_workers = len(self.inference_engine_client.engines)
-        transfer_ranks = {result.get("transfer_rank") for result in active_results}
         try:
-            if len(active_results) != expected_workers or transfer_ranks != set(range(1, expected_workers + 1)):
-                raise RuntimeError(
-                    "Expected one active online EAGLE capture per transfer rank; "
-                    f"expected {expected_workers}, got ranks {sorted(transfer_ranks, key=str)}"
-                )
+            transfer_ranks = _validate_online_eagle_transfer_ranks(active_results, expected_workers, "capture")
         except BaseException:
             try:
                 await self.inference_engine_client.discard_online_eagle_capture()
@@ -734,13 +742,11 @@ class RayPPOTrainer:
             self._speculator_capture_transfer_ranks = None
         active_manifests = _active_online_eagle_results(manifests)
         expected_workers = len(self.inference_engine_client.engines)
-        transfer_ranks = {manifest.get("transfer_rank") for manifest in active_manifests}
-        if len(active_manifests) != expected_workers or transfer_ranks != set(range(1, expected_workers + 1)):
+        try:
+            transfer_ranks = _validate_online_eagle_transfer_ranks(active_manifests, expected_workers, "manifest")
+        except RuntimeError:
             await self.inference_engine_client.cleanup_online_eagle_scratch(output_root)
-            raise RuntimeError(
-                "Expected one active online EAGLE capture per transfer rank; "
-                f"expected {expected_workers}, got ranks {sorted(transfer_ranks, key=str)}"
-            )
+            raise
         if transfer_ranks != capture_transfer_ranks:
             await self.inference_engine_client.cleanup_online_eagle_scratch(output_root)
             raise RuntimeError(
@@ -778,13 +784,8 @@ class RayPPOTrainer:
             raise RuntimeError("Online EAGLE capture sealed before DraftTrainer started")
         candidate_dir = self._speculator_scratch_path("candidates", f"step-{self.global_step}")
         target_revision = _policy_revision(self.global_step - 1)
-        catalog_request = {
-            "step": self.global_step,
-            "capture_dir": self._sealed_speculator_capture_dir,
-            "training": asdict(training),
-        }
-        exports = await self.inference_engine_client.export_online_eagle_capture(catalog_request)
-        catalogs = _active_online_eagle_results(exports)
+        planning_started = time.monotonic()
+        catalogs = _active_online_eagle_results(await self.inference_engine_client.catalog_online_eagle_capture())
         expected_workers = len(self.inference_engine_client.engines)
         transfer_plan = plan_online_eagle_capture_transfer(
             catalogs,
@@ -794,12 +795,15 @@ class RayPPOTrainer:
             max_sequences_per_prompt_group=training.max_sequences_per_prompt_group,
             max_window_tokens=training.max_window_tokens,
         )
-        capture_dir = str(Path(self._sealed_speculator_capture_dir) / "merged")
+        self.all_metrics["speculator/capture_planning_seconds"] = time.monotonic() - planning_started
+        capture_dir = str(Path(self._sealed_speculator_capture_dir) / ONLINE_EAGLE_MERGED_CAPTURE_DIRECTORY)
+        transfer_started = time.monotonic()
         receive_ref = self._draft_trainer.receive_capture.remote(transfer_plan, capture_dir)
         transfers, received = await asyncio.gather(
             self.inference_engine_client.transfer_online_eagle_capture(transfer_plan),
             receive_ref,
         )
+        capture_transfer_seconds = time.monotonic() - transfer_started
         transferred = _active_online_eagle_results(transfers)
         if len(transferred) != expected_workers:
             raise RuntimeError(
@@ -831,9 +835,14 @@ class RayPPOTrainer:
                 "speculator/oversized_windows": float(received["oversized_windows"]),
                 "speculator/unselected_windows": float(received["unselected_windows"]),
                 "speculator/capture_transfer_bytes": float(received["transfer_bytes"]),
+                "speculator/capture_transfer_seconds": capture_transfer_seconds,
+                "speculator/capture_transfer_gib_per_second": (
+                    float(received["transfer_bytes"]) / 2**30 / max(capture_transfer_seconds, 1e-9)
+                ),
             }
         )
         self._draft_trainer_update_ref = self._draft_trainer.update.remote(job)
+        self._draft_trainer_submitted_at = time.monotonic()
         self._draft_trainer_target_revision = target_revision
         self._draft_trainer_target_weights_sha256 = received["target_weights_sha256"]
         self._speculator_update_inflight = True
@@ -852,6 +861,7 @@ class RayPPOTrainer:
         if await self._finish_speculator_update_and_install():
             self._speculator_update_inflight = False
             self._draft_trainer_update_ref = None
+            self._draft_trainer_submitted_at = None
             self._draft_trainer_target_revision = None
             self._draft_trainer_target_weights_sha256 = None
 
@@ -876,6 +886,9 @@ class RayPPOTrainer:
             return False
         assert payload is not None
         result = OnlineEagleUpdateResult.from_mapping(payload["result"])
+        submitted_at = getattr(self, "_draft_trainer_submitted_at", None)
+        if submitted_at is not None:
+            self.all_metrics["speculator/update_wall_seconds"] = time.monotonic() - submitted_at
         logger.info(
             "DraftTrainer update completed: submitted_step={} observed_step={} accepted={} "
             "duration_seconds={} parent_draft_revision={} trained_against_target_revision={}",
@@ -969,6 +982,7 @@ class RayPPOTrainer:
                 raise RuntimeError("DraftTrainer candidate lineage no longer matches its submitted capture")
             try:
                 with Timer("install_speculator", self.all_timings):
+                    candidate_transfer_started = time.monotonic()
                     broadcast_ref = self._draft_trainer.broadcast_candidate.remote(transfer_manifest)
                     stages, source_ack = await asyncio.gather(
                         self.inference_engine_client.stage_online_eagle_speculator(
@@ -976,6 +990,16 @@ class RayPPOTrainer:
                             self._served_draft_revision,
                         ),
                         broadcast_ref,
+                    )
+                    candidate_transfer_seconds = time.monotonic() - candidate_transfer_started
+                    self.all_metrics.update(
+                        {
+                            "speculator/candidate_transfer_bytes": float(manifest.total_bytes),
+                            "speculator/candidate_transfer_seconds": candidate_transfer_seconds,
+                            "speculator/candidate_transfer_gib_per_second": (
+                                float(manifest.total_bytes) / 2**30 / max(candidate_transfer_seconds, 1e-9)
+                            ),
+                        }
                     )
                     staged = _active_online_eagle_results(stages)
                     expected_serving_nodes = int(self.cfg.generator.num_inference_engines)
@@ -994,9 +1018,11 @@ class RayPPOTrainer:
                         or source_ack["payload_sha256"] != manifest.payload_sha256
                     ):
                         raise RuntimeError("Online EAGLE engines staged inconsistent candidate hashes")
+                    activation_started = time.monotonic()
                     activations = await self.inference_engine_client.activate_online_eagle_speculator(
                         transfer_manifest,
                     )
+                    self.all_metrics["speculator/candidate_activation_seconds"] = time.monotonic() - activation_started
                 activated = _active_online_eagle_results(activations)
                 if len(activated) != expected_engine_actors:
                     raise RuntimeError("Online EAGLE engines returned incomplete activation acknowledgements")

@@ -1,10 +1,8 @@
 """Behavior tests for the bounded online EAGLE trainer inputs."""
 
-import asyncio
 import copy
 from contextlib import nullcontext
 import json
-import os
 from pathlib import Path
 import random
 from types import SimpleNamespace
@@ -15,6 +13,7 @@ import torch
 
 import skyrl_train.inference_engines.vllm.online_eagle_trainer as online_eagle_trainer
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    ONLINE_EAGLE_CAPTURE_TRANSFER_FORMAT,
     _candidate_state,
     _configure_exact_mask_attention,
     _convert_trainable_parameters,
@@ -28,8 +27,6 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     candidate_is_acceptable,
     catalog_online_eagle_capture,
     export_served_speculator_checkpoint,
-    materialize_online_eagle_incumbent,
-    merge_online_eagle_captures,
     OnlineEagleTrainerRuntime,
     partition_capture_windows,
     plan_online_eagle_capture_transfer,
@@ -40,7 +37,6 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
 )
 
 from marinskyrl.hf_model import sha256_file
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
 
 def _write_rank_capture(
@@ -127,12 +123,80 @@ def test_capture_transfer_plan_uses_metadata_only_and_all_source_ranks(tmp_path:
         max_window_tokens=16,
     )
 
-    assert plan["format"] == "marinskyrl-online-eagle-capture-transfer"
+    assert plan["format"] == ONLINE_EAGLE_CAPTURE_TRANSFER_FORMAT
     assert plan["capture_manifest"]["captured_rows"] == 6
     assert len(plan["capture_manifest"]["windows"]) == 2
     assert {operation["source_rank"] for operation in plan["operations"]} == {1, 2}
     assert plan["total_bytes"] == sum(operation["tensor"]["bytes"] for operation in plan["operations"])
-    assert "object_ref" not in repr(plan)
+
+
+def test_capture_transfer_plan_is_globally_bounded_and_rank_assignment_independent(tmp_path: Path) -> None:
+    assignments = (
+        ([("request-a", "group-a"), ("request-c", "group-c")], [("request-b", "group-b")]),
+        ([("request-b", "group-b")], [("request-c", "group-c"), ("request-a", "group-a")]),
+    )
+    selected_orders = []
+    for index, (rank_zero, rank_one) in enumerate(assignments):
+        root = tmp_path / str(index)
+        _write_rank_capture(root, 0, rank_zero)
+        _write_rank_capture(root, 1, rank_one)
+        plan = plan_online_eagle_capture_transfer(
+            [
+                catalog_online_eagle_capture(root, worker_rank=0, transfer_rank=1),
+                catalog_online_eagle_capture(root, worker_rank=1, transfer_rank=2),
+            ],
+            expected_workers=2,
+            expected_step=7,
+            max_tokens=6,
+            max_sequences_per_prompt_group=1,
+            max_window_tokens=100,
+        )
+        selected_orders.append([window["request_id"] for window in plan["capture_manifest"]["windows"]])
+        assert plan["capture_manifest"]["captured_rows"] == 6
+        assert plan["capture_manifest"]["unselected_windows"] == 1
+
+    assert selected_orders[0] == selected_orders[1]
+
+
+def test_capture_transfer_plan_rejects_different_target_snapshots(tmp_path: Path) -> None:
+    root = tmp_path / "target-mismatch"
+    _write_rank_capture(root, 0, [("request-a", "group-a")])
+    _write_rank_capture(root, 1, [("request-b", "group-b")], target_value=2.0)
+
+    with pytest.raises(ValueError, match="one target snapshot"):
+        plan_online_eagle_capture_transfer(
+            [
+                catalog_online_eagle_capture(root, worker_rank=0, transfer_rank=1),
+                catalog_online_eagle_capture(root, worker_rank=1, transfer_rank=2),
+            ],
+            expected_workers=2,
+            expected_step=7,
+            max_tokens=10,
+            max_sequences_per_prompt_group=1,
+            max_window_tokens=100,
+        )
+
+
+def test_capture_transfer_plan_excludes_windows_above_the_forward_bound(tmp_path: Path) -> None:
+    root = tmp_path / "forward-bound"
+    _write_rank_capture(
+        root,
+        0,
+        [("request-at-limit", "group-at-limit"), ("request-over-limit", "group-over-limit")],
+        tokens_by_request={"request-at-limit": 5, "request-over-limit": 6},
+    )
+
+    plan = plan_online_eagle_capture_transfer(
+        [catalog_online_eagle_capture(root, worker_rank=0, transfer_rank=1)],
+        expected_workers=1,
+        expected_step=7,
+        max_tokens=20,
+        max_sequences_per_prompt_group=1,
+        max_window_tokens=4,
+    )
+
+    assert [window["request_id"] for window in plan["capture_manifest"]["windows"]] == ["request-at-limit"]
+    assert plan["capture_manifest"]["oversized_windows"] == 1
 
 
 def test_rng_restore_moves_device_mapped_generator_states_back_to_cpu(monkeypatch) -> None:
@@ -196,212 +260,6 @@ def test_capture_partition_is_deterministic_disjoint_and_satisfies_minima() -> N
     assert {item["group_id"] for item in train}.isdisjoint(item["group_id"] for item in holdout)
 
 
-def test_dp_captures_merge_into_one_globally_bounded_input(tmp_path: Path) -> None:
-    root = tmp_path / "step-7"
-    _write_rank_capture(root, 0, [("request-a", "group-0"), ("request-b", "group-1")])
-    _write_rank_capture(root, 1, [("request-c", "group-0"), ("request-d", "group-2")])
-
-    merged = merge_online_eagle_captures(
-        str(root),
-        expected_workers=2,
-        expected_step=7,
-        max_tokens=9,
-        max_sequences_per_prompt_group=1,
-        max_window_tokens=100,
-    )
-
-    assert merged["worker_ranks"] == [0, 1]
-    assert merged["captured_rows"] == 9
-    assert merged["source_captured_rows"] == 12
-    assert merged["source_windows"] == 4
-    assert merged["dropped_windows"] == 0
-    assert merged["unselected_windows"] == 1
-    assert len(merged["windows"]) == 3
-    assert len({window["group_id"] for window in merged["windows"]}) == 3
-    assert (root / "merged" / "target.safetensors").is_file()
-    assert not (root / "rank-00000").exists()
-    assert not (root / "rank-00001").exists()
-
-
-def test_dp_capture_merge_rejects_different_target_snapshots(tmp_path: Path) -> None:
-    root = tmp_path / "step-7"
-    _write_rank_capture(root, 0, [("request-a", "group-0")])
-    _write_rank_capture(root, 1, [("request-b", "group-1")], target_value=2.0)
-
-    with pytest.raises(ValueError, match="one target snapshot"):
-        merge_online_eagle_captures(
-            str(root),
-            expected_workers=2,
-            expected_step=7,
-            max_tokens=9,
-            max_sequences_per_prompt_group=1,
-            max_window_tokens=100,
-        )
-
-
-def test_inference_client_seals_rank_captures_directly_under_merge_root(tmp_path: Path) -> None:
-    class CaptureEngine:
-        async def seal_online_eagle_capture(self, output_root: str):
-            root = Path(output_root)
-            _write_rank_capture(root, 0, [("request-a", "group-a")])
-            _write_rank_capture(root, 1, [("request-b", "group-b")])
-            return [
-                json.loads((root / "rank-00000" / "manifest.json").read_text()),
-                json.loads((root / "rank-00001" / "manifest.json").read_text()),
-            ]
-
-    engine = CaptureEngine()
-    client = object.__new__(InferenceEngineClient)
-    client.engines = [engine]
-    client._dead_engines = set()
-    client.enable_http_endpoint = False
-    root = tmp_path / "step-7"
-
-    asyncio.run(client.seal_online_eagle_capture(str(root)))
-    merged = merge_online_eagle_captures(
-        str(root),
-        expected_workers=2,
-        expected_step=7,
-        max_tokens=9,
-        max_sequences_per_prompt_group=1,
-        max_window_tokens=100,
-    )
-
-    assert {window["request_id"] for window in merged["windows"]} == {"request-a", "request-b"}
-
-
-@pytest.mark.parametrize(
-    ("mutation", "message"),
-    [
-        ("duplicate_request", "Duplicate online EAGLE request"),
-        ("worker_rank", "worker-rank mismatch"),
-        ("step", "target/draft identity"),
-        ("draft", "target/draft identity"),
-    ],
-)
-def test_dp_capture_merge_rejects_inconsistent_rank_manifests(tmp_path: Path, mutation: str, message: str) -> None:
-    root = tmp_path / mutation
-    _write_rank_capture(root, 0, [("request-a", "group-a")])
-    kwargs = {}
-    request_id = "request-b"
-    if mutation == "duplicate_request":
-        request_id = "request-a"
-    elif mutation == "worker_rank":
-        kwargs["worker_rank_override"] = 7
-    elif mutation == "step":
-        kwargs["step"] = 8
-    elif mutation == "draft":
-        kwargs["draft_revision"] = "different-draft"
-    _write_rank_capture(root, 1, [(request_id, "group-b")], **kwargs)
-
-    with pytest.raises(ValueError, match=message):
-        merge_online_eagle_captures(
-            str(root),
-            expected_workers=2,
-            expected_step=7,
-            max_tokens=9,
-            max_sequences_per_prompt_group=1,
-            max_window_tokens=100,
-        )
-
-
-def test_dp_capture_merge_rejects_missing_rank_and_wrong_job_step(tmp_path: Path) -> None:
-    missing_root = tmp_path / "missing"
-    _write_rank_capture(missing_root, 0, [("request-a", "group-a")])
-    with pytest.raises(FileNotFoundError):
-        merge_online_eagle_captures(
-            str(missing_root),
-            expected_workers=2,
-            expected_step=7,
-            max_tokens=9,
-            max_sequences_per_prompt_group=1,
-            max_window_tokens=100,
-        )
-
-    step_root = tmp_path / "step"
-    _write_rank_capture(step_root, 0, [("request-a", "group-a")])
-    with pytest.raises(ValueError, match="step mismatch"):
-        merge_online_eagle_captures(
-            str(step_root),
-            expected_workers=1,
-            expected_step=8,
-            max_tokens=9,
-            max_sequences_per_prompt_group=1,
-            max_window_tokens=100,
-        )
-
-
-def test_dp_capture_merge_is_deterministic_across_rank_assignment(tmp_path: Path) -> None:
-    roots = [tmp_path / "first", tmp_path / "second"]
-    assignments = [
-        ([("request-a", "group-a"), ("request-c", "group-c")], [("request-b", "group-b")]),
-        ([("request-b", "group-b")], [("request-c", "group-c"), ("request-a", "group-a")]),
-    ]
-    selected_orders = []
-    for root, (rank_zero, rank_one) in zip(roots, assignments):
-        _write_rank_capture(root, 0, rank_zero)
-        _write_rank_capture(root, 1, rank_one)
-        merged = merge_online_eagle_captures(
-            str(root),
-            expected_workers=2,
-            expected_step=7,
-            max_tokens=6,
-            max_sequences_per_prompt_group=1,
-            max_window_tokens=100,
-        )
-        selected_orders.append([window["request_id"] for window in merged["windows"]])
-
-    assert selected_orders[0] == selected_orders[1]
-
-
-def test_dp_capture_merge_skips_oversized_window_and_keeps_later_small_window(tmp_path: Path) -> None:
-    root = tmp_path / "bounded"
-    request_ids = ["request-a", "request-b", "request-c"]
-    tokens = {"request-b": 10, "request-a": 3, "request-c": 3}
-    _write_rank_capture(
-        root,
-        0,
-        [(request_id, request_id) for request_id in request_ids],
-        tokens_by_request=tokens,
-    )
-
-    merged = merge_online_eagle_captures(
-        str(root),
-        expected_workers=1,
-        expected_step=7,
-        max_tokens=6,
-        max_sequences_per_prompt_group=1,
-        max_window_tokens=100,
-    )
-
-    assert [window["request_id"] for window in merged["windows"]] == ["request-a", "request-c"]
-    assert merged["unselected_windows"] == 1
-
-
-def test_dp_capture_merge_admits_window_bound_and_excludes_next_token(tmp_path: Path) -> None:
-    root = tmp_path / "bounded-forward"
-    tokens = {"request-at-limit": 5, "request-over-limit": 6}
-    _write_rank_capture(
-        root,
-        0,
-        [("request-at-limit", "group-at-limit"), ("request-over-limit", "group-over-limit")],
-        tokens_by_request=tokens,
-    )
-
-    merged = merge_online_eagle_captures(
-        str(root),
-        expected_workers=1,
-        expected_step=7,
-        max_tokens=20,
-        max_sequences_per_prompt_group=1,
-        max_window_tokens=4,
-    )
-
-    assert [window["request_id"] for window in merged["windows"]] == ["request-at-limit"]
-    assert merged["oversized_windows"] == 1
-    assert merged["unselected_windows"] == 1
-
-
 def test_pack_windows_keeps_one_admitted_history_larger_than_the_packing_target() -> None:
     windows = [{"request_id": "request-long", "tokens": 10}]
 
@@ -428,66 +286,6 @@ def test_exact_mask_attention_uses_sdpa_and_pins_the_efficient_cuda_kernel(monke
 
     assert config.transformer_layer_config._attn_implementation == "sdpa"
     assert selected == [torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION]
-
-
-def test_dp_capture_merge_is_atomic_and_preserves_sources_on_link_failure(tmp_path: Path, monkeypatch) -> None:
-    root = tmp_path / "atomic"
-    _write_rank_capture(root, 0, [("request-a", "group-a")])
-    monkeypatch.setattr(os, "link", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk failure")))
-
-    with pytest.raises(OSError, match="disk failure"):
-        merge_online_eagle_captures(
-            str(root),
-            expected_workers=1,
-            expected_step=7,
-            max_tokens=9,
-            max_sequences_per_prompt_group=1,
-            max_window_tokens=100,
-        )
-
-    assert not (root / "merged").exists()
-    assert not list(root.glob(".merged.tmp-*"))
-    assert (root / "rank-00000" / "manifest.json").is_file()
-
-
-def test_dp_capture_merge_rejects_missing_file_without_staging(tmp_path: Path) -> None:
-    root = tmp_path / "missing-file"
-    _write_rank_capture(root, 0, [("request-a", "group-a")])
-    (root / "rank-00000" / "window-000000.safetensors").unlink()
-
-    with pytest.raises(ValueError, match="window is missing"):
-        merge_online_eagle_captures(
-            str(root),
-            expected_workers=1,
-            expected_step=7,
-            max_tokens=9,
-            max_sequences_per_prompt_group=1,
-            max_window_tokens=100,
-        )
-
-    assert not (root / "merged").exists()
-    assert not list(root.glob(".merged.tmp-*"))
-    assert (root / "rank-00000" / "manifest.json").is_file()
-
-
-def test_dp_capture_merge_hardlinks_survive_source_cleanup(tmp_path: Path) -> None:
-    root = tmp_path / "hardlinks"
-    _write_rank_capture(root, 0, [("request-a", "group-a")])
-    source_inode = (root / "rank-00000" / "target.safetensors").stat().st_ino
-
-    merge_online_eagle_captures(
-        str(root),
-        expected_workers=1,
-        expected_step=7,
-        max_tokens=9,
-        max_sequences_per_prompt_group=1,
-        max_window_tokens=100,
-    )
-
-    merged_target = root / "merged" / "target.safetensors"
-    assert merged_target.stat().st_ino == source_inode
-    assert merged_target.read_bytes()
-    assert not (root / "rank-00000").exists()
 
 
 def test_failed_update_preserves_hardlinked_capture_and_incumbent(tmp_path: Path) -> None:
@@ -781,21 +579,6 @@ def test_served_speculator_checkpoint_is_exact_idempotent_and_restorable(tmp_pat
     normalized = json.loads((tmp_path / "restored" / "manifest.json").read_text())
     assert normalized["format"] == "marinskyrl-online-eagle-candidate"
     assert normalized["complete"] is True
-
-
-def test_initial_draft_is_materialized_as_a_rollback_candidate(tmp_path: Path) -> None:
-    source = tmp_path / "initial"
-    source.mkdir()
-    save_file({"owned.weight": torch.ones(2, 2)}, str(source / "model.safetensors"))
-    destination = tmp_path / "incumbents" / "initial"
-
-    first = materialize_online_eagle_incumbent(source, destination, draft_revision="hf-revision")
-    second = materialize_online_eagle_incumbent(source, destination, draft_revision="hf-revision")
-
-    assert first == second
-    assert first["draft_revision"] == "hf-revision"
-    assert first["weights_sha256"] == sha256_file(source / "model.safetensors")
-    assert (destination / "model.safetensors").read_bytes() == (source / "model.safetensors").read_bytes()
 
 
 def test_restore_rejects_legacy_online_trainer_state(tmp_path: Path) -> None:

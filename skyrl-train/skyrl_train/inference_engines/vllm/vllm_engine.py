@@ -7,6 +7,7 @@ from dataclasses import dataclass, fields as _dataclass_fields, replace
 from loguru import logger
 from http import HTTPStatus
 import ray
+from safetensors.torch import load_file
 import torch
 import asyncio
 import hashlib
@@ -22,6 +23,7 @@ from skyrl_train.config.behavior_logprobs import (
     validate_behavior_logprob_sampling,
 )
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    ONLINE_EAGLE_CAPTURE_TRANSFER_FORMAT,
     catalog_online_eagle_capture,
     capture_rank_directory,
     publish_speculator_checkpoint,
@@ -446,7 +448,7 @@ class WorkerWrap:
         """Send only this rank's selected tensors directly to DraftTrainer."""
         if getattr(self, "_draft_transfer_group", None) is None:
             raise RuntimeError("vLLM draft transfer group is not initialized")
-        if transfer_plan.get("format") != "marinskyrl-online-eagle-capture-transfer":
+        if transfer_plan.get("format") != ONLINE_EAGLE_CAPTURE_TRANSFER_FORMAT:
             raise ValueError("Unsupported online EAGLE capture transfer plan")
         capture_dir = Path(self._online_eagle_sealed_capture_dir).resolve()
         sources = {}
@@ -465,8 +467,6 @@ class WorkerWrap:
             nonlocal cached_path, cached_tensors
             source_path, tensor_name = sources[operation.key]
             if cached_path != source_path:
-                from safetensors.torch import load_file
-
                 cached_path = source_path
                 cached_tensors = load_file(source_path)
             return cached_tensors[tensor_name]
@@ -1288,13 +1288,8 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         self._dp_size = kwargs.get("data_parallel_size", 1)
         self._dp_rank = kwargs.get("data_parallel_rank", 0)
         self._is_lora = kwargs.get("enable_lora", False)
-        speculative_config = kwargs.get("speculative_config")
-        self._online_eagle_initial_draft_dir = None if speculative_config is None else speculative_config.get("model")
-        self._online_eagle_active_draft_dir = self._online_eagle_initial_draft_dir
         self._online_eagle_active_draft_revision = None
-        self._online_eagle_previous_draft_dir = None
         self._online_eagle_previous_draft_revision = None
-        self._online_eagle_staged_draft_dir = None
         self._online_eagle_staged_manifest = None
 
         if "rope_scaling" in kwargs:
@@ -2286,7 +2281,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await engine.collective_rpc("seal_online_eagle_capture", args=(output_dir,))
 
-    async def export_online_eagle_capture(self, job: Dict[str, Any]):
+    async def catalog_online_eagle_capture(self):
         """Return metadata-only catalogs for direct multi-rank transfer planning."""
         return await self._get_engine().collective_rpc("catalog_online_eagle_capture")
 
@@ -2339,7 +2334,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
         self._online_eagle_previous_draft_revision = self._online_eagle_active_draft_revision
         self._online_eagle_active_draft_revision = manifest.revision
-        self._online_eagle_staged_draft_dir = None
         self._online_eagle_staged_manifest = None
         return [{"active": True, "draft_revision": manifest.revision, "worker_results": worker_results}]
 
@@ -2359,14 +2353,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             "rollback_online_eagle_speculator", args=(draft_revision,)
         )
         if self._online_eagle_active_draft_revision != draft_revision:
-            self._online_eagle_staged_draft_dir = None
             self._online_eagle_staged_manifest = None
             return [{"active": True, "draft_revision": draft_revision, "worker_results": worker_results}]
         if self._online_eagle_previous_draft_revision is None:
             raise RuntimeError("Online EAGLE activated candidate has no prior draft revision")
         self._online_eagle_active_draft_revision = self._online_eagle_previous_draft_revision
         self._online_eagle_previous_draft_revision = None
-        self._online_eagle_staged_draft_dir = None
         self._online_eagle_staged_manifest = None
         return [{"active": True, "draft_revision": draft_revision, "worker_results": worker_results}]
 
@@ -2384,9 +2376,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         revisions = {item["draft_revision"] for item in worker_results if item.get("active", False)}
         if len(revisions) != 1:
             raise RuntimeError(f"Restored online EAGLE candidate reported inconsistent revisions: {revisions}")
-        self._online_eagle_active_draft_dir = candidate_dir
         self._online_eagle_active_draft_revision = revisions.pop()
-        self._online_eagle_previous_draft_dir = None
         self._online_eagle_previous_draft_revision = None
         return worker_results
 

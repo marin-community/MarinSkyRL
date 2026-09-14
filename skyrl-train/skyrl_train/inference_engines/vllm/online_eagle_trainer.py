@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 import copy
 from dataclasses import asdict, dataclass, replace
 import hashlib
@@ -35,8 +35,11 @@ _FAILURE_FORMAT = "marinskyrl-online-eagle-failure"
 _SERVED_FORMAT = "marinskyrl-served-speculator"
 _TRAINER_STATE_FORMAT = "marinskyrl-online-eagle-trainer-state"
 _TRAINER_STATE_VERSION = 2
-_MANIFEST_FILENAME = "manifest.json"
-_MERGED_CAPTURE_DIRECTORY = "merged"
+ONLINE_EAGLE_MANIFEST_FILENAME = "manifest.json"
+ONLINE_EAGLE_CAPTURE_TRANSFER_FORMAT = "marinskyrl-online-eagle-capture-transfer"
+ONLINE_EAGLE_MERGED_CAPTURE_DIRECTORY = "merged"
+ONLINE_EAGLE_TARGET_CONFIG_FILENAME = "target-config.json"
+ONLINE_EAGLE_TARGET_WEIGHTS_FILENAME = "target.safetensors"
 TRAINER_STATE_FILENAME = "trainer_state.pt"
 ONLINE_EAGLE_SCRATCH_ROOT = Path("/tmp/marinskyrl-online-eagle")
 
@@ -52,7 +55,8 @@ def remove_online_eagle_scratch(path: str | Path) -> None:
     requested = Path(path).resolve()
     if requested == allowed_root or not requested.is_relative_to(allowed_root):
         raise ValueError(f"Refusing to remove online EAGLE scratch outside a process tree: {path}")
-    shutil.rmtree(requested, ignore_errors=True)
+    if requested.exists():
+        shutil.rmtree(requested)
 
 
 def preserve_online_eagle_failure(job: "OnlineEagleTrainingJob", error: BaseException) -> str:
@@ -80,7 +84,7 @@ def preserve_online_eagle_failure(job: "OnlineEagleTrainingJob", error: BaseExce
             "capture_inventory": _directory_inventory(staging / "capture"),
             "incumbent_inventory": _directory_inventory(staging / "incumbent"),
         }
-        (staging / _MANIFEST_FILENAME).write_text(json.dumps(failure, indent=2, sort_keys=True))
+        (staging / ONLINE_EAGLE_MANIFEST_FILENAME).write_text(json.dumps(failure, indent=2, sort_keys=True))
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.replace(staging, destination)
     except BaseException:
@@ -92,11 +96,11 @@ def preserve_online_eagle_failure(job: "OnlineEagleTrainingJob", error: BaseExce
 def publish_online_eagle_failure_bundle(source: str, destination: str) -> dict[str, Any]:
     """Publish one bounded forensic bundle, committing its manifest last."""
     root = Path(source)
-    manifest_path = root / _MANIFEST_FILENAME
+    manifest_path = root / ONLINE_EAGLE_MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("format") != _FAILURE_FORMAT or not manifest.get("complete", False):
         raise ValueError(f"Invalid online EAGLE failure bundle: {source}")
-    destination_manifest = join_resource_path(destination, _MANIFEST_FILENAME)
+    destination_manifest = join_resource_path(destination, ONLINE_EAGLE_MANIFEST_FILENAME)
     if io.exists(destination_manifest):
         existing = json.loads(io.read_bytes(destination_manifest))
         if existing != manifest:
@@ -285,59 +289,13 @@ def _directory_inventory(directory: Path) -> dict[str, dict[str, Any]]:
 def validate_online_eagle_serving_candidate(directory: str | Path) -> dict[str, Any]:
     """Validate the serving subset of a draft candidate before weights mutate."""
     root = Path(directory)
-    manifest_path = root / _MANIFEST_FILENAME
+    manifest_path = root / ONLINE_EAGLE_MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("format") != _CANDIDATE_FORMAT or not manifest.get("complete", False):
         raise ValueError(f"Incomplete online EAGLE candidate: {root}")
     weights_path = root / manifest["weights_path"]
     if not weights_path.is_file() or sha256_file(weights_path) != manifest.get("weights_sha256"):
         raise ValueError(f"Online EAGLE candidate weight digest mismatch: {root}")
-    return manifest
-
-
-def materialize_online_eagle_incumbent(
-    source_dir: str | Path,
-    destination: str | Path,
-    *,
-    draft_revision: str,
-) -> dict[str, Any]:
-    """Wrap the immutable initial HF draft as a rollback-compatible candidate."""
-    source = Path(source_dir)
-    weights_path = source / HF_WEIGHT_FILENAME
-    if not weights_path.is_file():
-        raise FileNotFoundError(f"Online EAGLE initial draft has no unsharded model.safetensors: {source}")
-    target = Path(destination)
-    if target.exists():
-        manifest = validate_online_eagle_serving_candidate(target)
-        if manifest.get("draft_revision") != draft_revision:
-            raise FileExistsError(f"Online EAGLE incumbent has a different revision: {target}")
-        return manifest
-
-    tensors = load_file(weights_path)
-    manifest = {
-        "format": _CANDIDATE_FORMAT,
-        "format_version": 1,
-        "complete": True,
-        "draft_revision": draft_revision,
-        "weights_path": weights_path.name,
-        "weights_sha256": sha256_file(weights_path),
-        "tensor_inventory": {
-            name: {"shape": list(value.shape), "dtype": str(value.dtype)} for name, value in tensors.items()
-        },
-    }
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staging = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
-    staging.mkdir()
-    try:
-        try:
-            os.link(weights_path, staging / weights_path.name)
-        except OSError:
-            shutil.copy2(weights_path, staging / weights_path.name)
-        (staging / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, sort_keys=True))
-        os.replace(staging, target)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
     return manifest
 
 
@@ -354,7 +312,7 @@ def publish_speculator_checkpoint(
         raise FileNotFoundError(f"Served online EAGLE checkpoint does not exist: {source}")
     inventory = _directory_inventory(source)
     lineage: dict[str, Any] = {"initial_source_identity": draft_revision}
-    candidate_manifest_path = source / _MANIFEST_FILENAME
+    candidate_manifest_path = source / ONLINE_EAGLE_MANIFEST_FILENAME
     if candidate_manifest_path.is_file():
         candidate_manifest = json.loads(candidate_manifest_path.read_text())
         if candidate_manifest.get("format") == _CANDIDATE_FORMAT and candidate_manifest.get("complete", False):
@@ -379,7 +337,7 @@ def publish_speculator_checkpoint(
         "lineage": lineage,
         "inventory": inventory,
     }
-    manifest_path = join_resource_path(destination, _MANIFEST_FILENAME)
+    manifest_path = join_resource_path(destination, ONLINE_EAGLE_MANIFEST_FILENAME)
     if io.exists(manifest_path):
         existing = json.loads(io.read_bytes(manifest_path))
         if existing != manifest:
@@ -392,14 +350,14 @@ def publish_speculator_checkpoint(
             root / "weights",
             ignore=shutil.ignore_patterns(".cache"),
         )
-        (root / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, sort_keys=True))
+        (root / ONLINE_EAGLE_MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, sort_keys=True))
 
     if is_cloud_uri(destination):
         with tempfile.TemporaryDirectory(prefix="marinskyrl-speculator-publish-") as temporary:
             layout = Path(temporary)
             build_local_layout(layout)
             io.upload_directory(str(layout / "weights"), join_resource_path(destination, "weights"))
-            io.upload_file(str(layout / _MANIFEST_FILENAME), manifest_path)
+            io.upload_file(str(layout / ONLINE_EAGLE_MANIFEST_FILENAME), manifest_path)
     else:
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -417,7 +375,7 @@ def publish_speculator_checkpoint(
 
 
 def _validate_served_speculator_root(root: Path, source: str) -> dict[str, Any]:
-    manifest_path = root / _MANIFEST_FILENAME
+    manifest_path = root / ONLINE_EAGLE_MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("format") != _SERVED_FORMAT or not manifest.get("complete", False):
         raise ValueError(f"Incomplete served speculator checkpoint: {source}")
@@ -431,7 +389,7 @@ def export_served_speculator_checkpoint(source: str, destination: str) -> dict[s
     with io.local_read_dir(source) as local_source:
         root = Path(local_source)
         manifest = _validate_served_speculator_root(root, source)
-        destination_manifest = join_resource_path(destination, _MANIFEST_FILENAME)
+        destination_manifest = join_resource_path(destination, ONLINE_EAGLE_MANIFEST_FILENAME)
         if io.exists(destination_manifest):
             with io.local_read_dir(destination) as local_destination:
                 existing = _validate_served_speculator_root(Path(local_destination), destination)
@@ -441,7 +399,7 @@ def export_served_speculator_checkpoint(source: str, destination: str) -> dict[s
 
         if is_cloud_uri(destination):
             io.upload_directory(str(root / "weights"), join_resource_path(destination, "weights"))
-            io.upload_file(str(root / _MANIFEST_FILENAME), destination_manifest)
+            io.upload_file(str(root / ONLINE_EAGLE_MANIFEST_FILENAME), destination_manifest)
         else:
             target = Path(destination)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -482,7 +440,7 @@ def restore_speculator_checkpoint(source: str, destination: str) -> dict[str, An
         staging = target.with_name(f".{target.name}.tmp-{uuid4().hex}")
         shutil.copytree(weights, staging)
         try:
-            candidate_manifest_path = staging / _MANIFEST_FILENAME
+            candidate_manifest_path = staging / ONLINE_EAGLE_MANIFEST_FILENAME
             candidate_manifest = (
                 json.loads(candidate_manifest_path.read_text()) if candidate_manifest_path.exists() else {}
             )
@@ -562,7 +520,7 @@ def partition_capture_windows(
 
 
 def _load_and_validate_capture(capture_dir: Path, *, verify_digests: bool = True) -> dict[str, Any]:
-    manifest_path = capture_dir / _MANIFEST_FILENAME
+    manifest_path = capture_dir / ONLINE_EAGLE_MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("format") != _CAPTURE_FORMAT or not manifest.get("active", False):
         raise ValueError(f"Invalid online EAGLE capture manifest: {manifest_path}")
@@ -748,7 +706,7 @@ def plan_online_eagle_capture_transfer(
         destination_path = f"window-{index:06d}.safetensors"
         add_file(by_transfer_rank[transfer_rank], window["path"], destination_path)
         windows.append({**window, "path": destination_path})
-    add_file(baseline_catalog, baseline_target["weights_path"], "target.safetensors")
+    add_file(baseline_catalog, baseline_target["weights_path"], ONLINE_EAGLE_TARGET_WEIGHTS_FILENAME)
     manifest = {
         **baseline_identity,
         "active": True,
@@ -765,12 +723,12 @@ def plan_online_eagle_capture_transfer(
         "unselected_windows": len(candidates) - len(selected),
         "target": {
             **baseline_target,
-            "weights_path": "target.safetensors",
-            "config_path": "target-config.json",
+            "weights_path": ONLINE_EAGLE_TARGET_WEIGHTS_FILENAME,
+            "config_path": ONLINE_EAGLE_TARGET_CONFIG_FILENAME,
         },
     }
     return {
-        "format": "marinskyrl-online-eagle-capture-transfer",
+        "format": ONLINE_EAGLE_CAPTURE_TRANSFER_FORMAT,
         "format_version": 1,
         "step": step,
         "capture_manifest": manifest,
@@ -779,148 +737,6 @@ def plan_online_eagle_capture_transfer(
         "operations": operations,
         "total_bytes": sum(int(operation["tensor"]["bytes"]) for operation in operations),
     }
-
-
-def _hardlink(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    os.link(source, destination)
-
-
-def merge_online_eagle_captures(
-    capture_root: str,
-    *,
-    expected_workers: int,
-    expected_step: int,
-    max_tokens: int,
-    max_sequences_per_prompt_group: int,
-    max_window_tokens: int,
-) -> dict[str, Any]:
-    """Merge colocated DP-rank captures into one bounded, immutable trainer input."""
-    root = Path(capture_root)
-    if expected_workers <= 0:
-        raise ValueError("Online EAGLE capture worker count must be positive")
-    if max_tokens <= 0 or max_sequences_per_prompt_group <= 0:
-        raise ValueError("Online EAGLE merged capture bounds must be positive")
-    destination = root / _MERGED_CAPTURE_DIRECTORY
-    if destination.exists():
-        raise FileExistsError(f"Merged online EAGLE capture already exists: {destination}")
-
-    manifests: list[tuple[Path, dict[str, Any]]] = []
-    for worker_rank in range(expected_workers):
-        directory = capture_rank_directory(root, worker_rank)
-        manifest = _load_and_validate_capture(directory, verify_digests=False)
-        if manifest.get("worker_rank") != worker_rank:
-            raise ValueError(
-                "Online EAGLE capture worker-rank mismatch: "
-                f"expected {worker_rank}, got {manifest.get('worker_rank')!r}"
-            )
-        manifests.append((directory, manifest))
-
-    identity_fields = (
-        "format",
-        "format_version",
-        "step",
-        "target_revision",
-        "draft_revision",
-        "aux_layer_ids",
-        "head_input_semantics",
-    )
-    baseline = manifests[0][1]
-    if baseline.get("step") != expected_step:
-        raise ValueError(f"Online EAGLE capture step mismatch: expected {expected_step}, got {baseline.get('step')!r}")
-    baseline_identity = {field: baseline.get(field) for field in identity_fields}
-    baseline_target = baseline["target"]
-    target_identity = {
-        "weights_sha256": baseline_target["weights_sha256"],
-        "config_sha256": baseline_target["config_sha256"],
-        "inventory": baseline_target["inventory"],
-    }
-    candidates: list[tuple[Path, dict[str, Any]]] = []
-    request_ids: set[str] = set()
-    for directory, manifest in manifests:
-        identity = {field: manifest.get(field) for field in identity_fields}
-        if identity != baseline_identity:
-            raise ValueError("Online EAGLE DP captures do not share one target/draft identity")
-        target = manifest["target"]
-        if {
-            "weights_sha256": target["weights_sha256"],
-            "config_sha256": target["config_sha256"],
-            "inventory": target["inventory"],
-        } != target_identity:
-            raise ValueError("Online EAGLE DP captures do not share one target snapshot")
-        for window in manifest["windows"]:
-            request_id = str(window["request_id"])
-            if request_id in request_ids:
-                raise ValueError(f"Duplicate online EAGLE request across DP captures: {request_id}")
-            request_ids.add(request_id)
-            candidates.append((directory, window))
-
-    step = int(baseline["step"])
-    candidates.sort(
-        key=lambda item: hashlib.sha256(
-            f"{step}:{item[1].get('group_id', item[1]['request_id'])}:{item[1]['request_id']}".encode()
-        ).digest()
-    )
-    selected: list[tuple[Path, dict[str, Any]]] = []
-    group_counts: dict[str, int] = {}
-    selected_tokens = 0
-    oversized_windows = 0
-    for directory, window in candidates:
-        group_id = str(window.get("group_id", window["request_id"]))
-        tokens = window.get("tokens")
-        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
-            raise ValueError(f"Invalid online EAGLE captured-window token count: {tokens!r}")
-        if _window_forward_tokens(window) > max_window_tokens:
-            oversized_windows += 1
-            continue
-        if group_counts.get(group_id, 0) >= max_sequences_per_prompt_group:
-            continue
-        if selected_tokens + tokens > max_tokens:
-            continue
-        selected.append((directory, window))
-        selected_tokens += tokens
-        group_counts[group_id] = group_counts.get(group_id, 0) + 1
-
-    staging = root / f".{_MERGED_CAPTURE_DIRECTORY}.tmp-{uuid4().hex}"
-    staging.mkdir(parents=True, exist_ok=False)
-    try:
-        windows: list[dict[str, Any]] = []
-        for index, (directory, source_window) in enumerate(selected):
-            filename = f"window-{index:06d}.safetensors"
-            _hardlink(directory / source_window["path"], staging / filename)
-            windows.append({**source_window, "path": filename})
-
-        baseline_directory = manifests[0][0]
-        merged_target = dict(baseline_target)
-        for kind in ("weights", "config"):
-            source_name = baseline_target[f"{kind}_path"]
-            destination_name = "target.safetensors" if kind == "weights" else "target-config.json"
-            _hardlink(baseline_directory / source_name, staging / destination_name)
-            merged_target[f"{kind}_path"] = destination_name
-
-        manifest = {
-            **baseline_identity,
-            "active": True,
-            "worker_rank": 0,
-            "worker_ranks": list(range(expected_workers)),
-            "windows": windows,
-            "captured_rows": selected_tokens,
-            "source_captured_rows": sum(int(manifest.get("captured_rows", 0)) for _, manifest in manifests),
-            "source_windows": len(candidates),
-            "dropped_requests": sum(int(manifest.get("dropped_requests", 0)) for _, manifest in manifests),
-            "dropped_windows": sum(int(manifest.get("dropped_windows", 0)) for _, manifest in manifests),
-            "oversized_windows": oversized_windows,
-            "unselected_windows": len(candidates) - len(selected),
-            "target": merged_target,
-        }
-        (staging / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, sort_keys=True))
-        os.replace(staging, destination)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
-    for directory, _ in manifests:
-        shutil.rmtree(directory, ignore_errors=True)
-    return {**manifest, "path": str(destination / _MANIFEST_FILENAME)}
 
 
 def _prepare_model(draft_model_dir: Path, capture_dir: Path, device: torch.device):
@@ -959,7 +775,7 @@ def _prepare_model(draft_model_dir: Path, capture_dir: Path, device: torch.devic
 
 def _refresh_target_owned_weights(model: nn.Module, capture_dir: Path) -> None:
     """Refresh exact target-owned tensors without reconstructing the draft."""
-    target = load_file(capture_dir / "target.safetensors")
+    target = load_file(capture_dir / ONLINE_EAGLE_TARGET_WEIGHTS_FILENAME)
     embedding = target["model.embed_tokens.weight"]
     head = target["lm_head.weight"]
     if model.t2d is None or not torch.any(model.t2d):
@@ -989,13 +805,13 @@ def _serving_dtype(device: torch.device) -> torch.dtype:
     return torch.bfloat16 if device.type == "cuda" else torch.float32
 
 
-def _forward_context(device: torch.device) -> Any:
+def _forward_context(device: torch.device) -> AbstractContextManager[Any]:
     if device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     return nullcontext()
 
 
-def _sdpa_kernel_context(device: torch.device) -> Any:
+def _sdpa_kernel_context(device: torch.device) -> AbstractContextManager[Any]:
     """Require fused exact-mask SDPA instead of permitting a quadratic fallback."""
     if device.type == "cuda":
         from torch.nn.attention import SDPBackend, sdpa_kernel  # noqa: PLC0415
@@ -1045,32 +861,35 @@ def _restore_trainable_master_state(
     *,
     serving_dtype: torch.dtype,
 ) -> None:
-    parameters = {name: parameter for name, parameter in model.named_parameters() if parameter.requires_grad}
-    if set(state) != set(parameters):
-        raise ValueError("Online EAGLE FP32 master tensor inventory does not match the draft model")
+    parameters = _validate_trainable_master_state(model, state)
     with torch.no_grad():
         for name, parameter in parameters.items():
             master = state[name]
-            if master.dtype != torch.float32 or master.shape != parameter.shape:
-                raise ValueError(f"Invalid online EAGLE FP32 master tensor: {name}")
-            _require_finite_tensor(master, label=f"FP32 master tensor {name}")
-            master = master.to(device=parameter.device)
-            if not torch.equal(master.to(dtype=serving_dtype), parameter.detach().to(dtype=serving_dtype)):
+            device_master = master.to(device=parameter.device)
+            if not torch.equal(device_master.to(dtype=serving_dtype), parameter.detach().to(dtype=serving_dtype)):
                 raise ValueError(f"Online EAGLE FP32 master does not round to the served tensor: {name}")
-    _load_trainable_master_state(model, state)
+            parameter.copy_(device_master)
+    _require_finite_trainable_state(model)
+
+
+def _validate_trainable_master_state(model: nn.Module, state: Mapping[str, torch.Tensor]) -> dict[str, nn.Parameter]:
+    parameters = {name: parameter for name, parameter in model.named_parameters() if parameter.requires_grad}
+    if set(state) != set(parameters):
+        raise ValueError("Online EAGLE FP32 master tensor inventory does not match the draft model")
+    for name, parameter in parameters.items():
+        master = state[name]
+        if master.dtype != torch.float32 or master.shape != parameter.shape:
+            raise ValueError(f"Invalid online EAGLE FP32 master tensor: {name}")
+        _require_finite_tensor(master, label=f"FP32 master tensor {name}")
+    return parameters
 
 
 def _load_trainable_master_state(model: nn.Module, state: Mapping[str, torch.Tensor]) -> None:
     """Load an internal FP32 snapshot without treating current weights as a checkpoint fence."""
-    parameters = {name: parameter for name, parameter in model.named_parameters() if parameter.requires_grad}
-    if set(state) != set(parameters):
-        raise ValueError("Online EAGLE FP32 master tensor inventory does not match the draft model")
+    parameters = _validate_trainable_master_state(model, state)
     with torch.no_grad():
         for name, parameter in parameters.items():
             master = state[name]
-            if master.dtype != torch.float32 or master.shape != parameter.shape:
-                raise ValueError(f"Invalid online EAGLE FP32 master tensor: {name}")
-            _require_finite_tensor(master, label=f"FP32 master tensor {name}")
             parameter.copy_(master.to(device=parameter.device))
     _require_finite_trainable_state(model)
 
@@ -1285,11 +1104,11 @@ def _save_candidate(
                 name: {"shape": list(value.shape), "dtype": str(value.dtype)} for name, value in state.items()
             },
         }
-        (staging / _MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, sort_keys=True))
+        (staging / ONLINE_EAGLE_MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2, sort_keys=True))
         if output_dir.exists():
             raise FileExistsError(f"Online EAGLE candidate already exists: {output_dir}")
         os.replace(staging, output_dir)
-        return {**manifest, "path": str(output_dir / _MANIFEST_FILENAME)}
+        return {**manifest, "path": str(output_dir / ONLINE_EAGLE_MANIFEST_FILENAME)}
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -1548,7 +1367,7 @@ class OnlineEagleTrainerRuntime:
                         "parent_draft_revision": manifest["draft_revision"],
                         "trained_against_target_revision": manifest["target_revision"],
                         "trained_against_target_weights_sha256": manifest["target"]["weights_sha256"],
-                        "capture_manifest_sha256": sha256_file(capture_dir / _MANIFEST_FILENAME),
+                        "capture_manifest_sha256": sha256_file(capture_dir / ONLINE_EAGLE_MANIFEST_FILENAME),
                         "training": asdict(training),
                         "metrics": result.to_mapping(),
                     },
@@ -1590,13 +1409,3 @@ class OnlineEagleTrainerRuntime:
         self._restore(self._pending_incumbent)
         self._pending_revision = None
         self._pending_incumbent = None
-
-
-def run_training_job(job: OnlineEagleTrainingJob) -> OnlineEagleUpdateResult:
-    """Run one standalone update; DraftTrainer uses the persistent runtime."""
-    runtime = OnlineEagleTrainerRuntime(job, Path(job.capture_dir))
-    result = runtime.update(job)
-    if result.accepted:
-        assert result.draft_revision is not None
-        runtime.commit(result.draft_revision)
-    return result

@@ -74,7 +74,7 @@ class OnlineEagleActor:
             "init_draft_transfer_communicator",
             "begin_online_eagle_capture",
             "seal_online_eagle_capture",
-            "export_online_eagle_capture",
+            "catalog_online_eagle_capture",
             "transfer_online_eagle_capture",
             "discard_online_eagle_capture",
             "stage_online_eagle_speculator",
@@ -150,7 +150,7 @@ async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
     await engine.init_draft_transfer_communicator("10.0.0.1", 1234, 1, 3, "draft", "nccl")
     await engine.begin_online_eagle_capture({"step": 3})
     await engine.seal_online_eagle_capture("/tmp/capture")
-    await engine.export_online_eagle_capture({"step": 3})
+    await engine.catalog_online_eagle_capture()
     await engine.transfer_online_eagle_capture({"transfer": "capture"})
     await engine.discard_online_eagle_capture()
     await engine.stage_online_eagle_speculator({"transfer": True}, "draft-2")
@@ -166,7 +166,7 @@ async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
         ("init_draft_transfer_communicator", ("10.0.0.1", 1234, 1, 3, "draft", "nccl")),
         ("begin_online_eagle_capture", ({"step": 3},)),
         ("seal_online_eagle_capture", ("/tmp/capture",)),
-        ("export_online_eagle_capture", ({"step": 3},)),
+        ("catalog_online_eagle_capture", ()),
         ("transfer_online_eagle_capture", ({"transfer": "capture"},)),
         ("discard_online_eagle_capture", ()),
         ("stage_online_eagle_speculator", ({"transfer": True}, "draft-2")),

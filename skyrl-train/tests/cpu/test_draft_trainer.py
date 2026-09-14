@@ -154,7 +154,6 @@ def test_draft_trainer_owns_served_lineage_across_commit_and_rollback(tmp_path: 
     first = trainer.update(_training_job(tmp_path, step=4, parent_draft_revision="draft-initial"))
     assert first["transfer_manifest"]["revision"] == "draft-step-4"
     assert first["transfer_manifest"]["total_bytes"] == 8
-    assert "object_ref" not in repr(first["transfer_manifest"])
     trainer.commit("draft-step-4")
     trainer.publish(str(tmp_path / "published"), "draft-step-4", "policy-step-7")
 

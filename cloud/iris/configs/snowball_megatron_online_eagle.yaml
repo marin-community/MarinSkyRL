@@ -1,19 +1,19 @@
-# Snowball 67B-A2B with an online EAGLE-3 draft on GSM8K. The policy uses four
+# Snowball 67B-A2B with an online EAGLE-3 draft on long-form RLVR-MATH. The policy uses four
 # PP2 x EP8 Megatron nodes; one DP8/EP8 vLLM node serves while a dedicated
 # DraftTrainer actor runs on the extra node derived by the Iris request builder.
 # The exact target revision is supplied to the launcher, while the immutable
-# public draft is staged from Hugging Face. Draft updates are submitted at the
-# configured interval, polled at later policy boundaries, and skipped while one
-# is pending. Candidates that pass the holdout gate replace the served draft.
+# public draft is staged from Hugging Face. Every fourth step captures up to
+# 131,072 tokens for an asynchronous update. Candidates that finish within the
+# staleness bound and pass the holdout gate replace the served draft.
 entrypoint: standard
 
 context_budget:
-  request_window_tokens: 2048
-  max_new_tokens_per_turn: 512
+  request_window_tokens: 9856
+  max_new_tokens_per_turn: 8192
   max_turns: 1
 
 environment:
-  env_class: gsm8k
+  env_class: aime
 
 trainer:
   strategy: megatron
@@ -67,6 +67,8 @@ generator:
   weight_sync_backend: nccl
   async_engine: true
   batched: false
+  engine_init_kwargs:
+    async_scheduling: false
   speculative_decoding:
     method: eagle3
     model:
@@ -75,10 +77,11 @@ generator:
       source_identity: 4bdb47c08e5b5190bea3c7a93c3e14470230e469
     num_speculative_tokens: 3
     training:
-      interval_steps: 1
-      max_tokens_per_update: 16384
+      interval_steps: 4
+      max_candidate_staleness_steps: 2
+      max_tokens_per_update: 131072
       max_window_tokens: 16384
-      max_tokens_per_micro_batch: 2048
+      max_tokens_per_micro_batch: 8192
       max_sequences_per_prompt_group: 2
       min_train_sequences: 6
       holdout_fraction: 0.25
@@ -87,7 +90,7 @@ generator:
       learning_rate: 5.0e-5
       max_validation_loss_increase: 0.05
       max_validation_agreement_decrease: 0.01
-      reserved_gpu_memory_gib: 8
+      reserved_gpu_memory_gib: 12
   sampling_params:
     temperature: 1.0
     top_p: 1.0
