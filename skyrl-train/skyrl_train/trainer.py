@@ -40,7 +40,7 @@ from skyrl_train.dataset.preprocess import (
     collate_response_token_channel,
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl_train.distillation import validate_sampled_reverse_kl_attachment
+from skyrl_train.distillation import validate_distillation_attachment
 from skyrl_train.utils import trainer_utils
 from skyrl_train.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
@@ -136,17 +136,13 @@ def _validated_distillation_tensors(
     trajectory_ids = trajectory_batch.get("trajectory_ids")
     if trajectory_ids is None:
         raise ValueError("teacher evidence requires stable trajectory_ids")
-    validate_sampled_reverse_kl_attachment(
+    validate_distillation_attachment(
         evidence,
         distillation,
         trajectory_ids=tuple(trajectory_id.to_string() for trajectory_id in trajectory_ids),
         response_mask=response_mask.to(torch.bool),
     )
-    return {
-        "teacher_action_log_probs": distillation.teacher_action_log_probs,
-        "teacher_valid_mask": distillation.valid_mask,
-        "distillation_loss_weights": distillation.loss_weights,
-    }
+    return distillation.training_tensors()
 
 
 class RayPPOTrainer:

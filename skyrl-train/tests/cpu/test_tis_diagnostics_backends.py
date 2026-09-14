@@ -25,6 +25,7 @@ from tests.cpu.util import stub_megatron_modules
 stub_megatron_modules()
 
 from skyrl_train.dataset.replay_buffer import Experience  # noqa: E402
+from skyrl_train.distillation import SparseForwardKLInput  # noqa: E402
 from skyrl_train.workers.megatron import megatron_model_wrapper as mmw  # noqa: E402
 from skyrl_train.workers.worker import PolicyWorkerBase  # noqa: E402
 
@@ -115,15 +116,19 @@ def _globally_normalized_mask_sum(
 class _FakeHFModel:
     """Callable standing in for the HF actor: returns (action_log_probs, output)."""
 
-    def __init__(self, action_log_probs: torch.Tensor):
+    def __init__(self, action_log_probs: torch.Tensor, logits: torch.Tensor | None = None):
         self._action_log_probs = action_log_probs
+        self._logits = logits
 
     def train(self):
         pass
 
     def __call__(self, sequences, num_actions, **kwargs):
         entropy = torch.zeros(sequences.shape[0], sequences.shape[1])
-        return self._action_log_probs, {"entropy": entropy}
+        output = {"entropy": entropy}
+        if self._logits is not None:
+            output["logits"] = self._logits
+        return self._action_log_probs, output
 
 
 class _FakeStrategy:
@@ -200,6 +205,69 @@ def test_fsdp_training_step_completes_clip_metric_contract(monkeypatch):
     assert {key: status[key] for key in POLICY_CLIP_METRIC_KEYS} == dict.fromkeys(POLICY_CLIP_METRIC_KEYS, 0.0)
 
 
+def test_fsdp_training_step_gathers_sparse_teacher_tokens_from_student_logits(monkeypatch):
+    teacher_probs = torch.tensor([[[0.7, 0.2]], [[0.6, 0.3]]])
+    teacher_indices = torch.tensor([[[1, 2]], [[2, 3]]])
+    retained_mass = teacher_probs.sum(dim=-1)
+    student_logits = torch.zeros(BATCH_SIZE, SEQ_LEN, 5)
+    student_logits[0, -NUM_ACTIONS - 1, 1] = 2.0
+    student_logits[0, -NUM_ACTIONS - 1, 2] = -1.0
+    student_logits[1, -NUM_ACTIONS - 1, 2] = -0.5
+    student_logits[1, -NUM_ACTIONS - 1, 3] = 1.0
+    student_logits.requires_grad_()
+    old_lp, rollout_lp, _ = _tis_tensors()
+    worker = object.__new__(PolicyWorkerBase)
+    worker.cfg = _algorithm_cfg(use_tis=False)
+    worker.cfg.trainer.policy = {"fsdp_config": {"context_parallel_size": 1}}
+    worker.model = _FakeHFModel(action_log_probs=old_lp + 0.01, logits=student_logits)
+    worker.policy_loss_fn = _fake_policy_loss_fn
+    worker.strategy = _FakeStrategy()
+    worker.optimizer = None
+    worker.scheduler = _FakeScheduler()
+    worker.record_memory = False
+    worker.sequence_parallel_size = 1
+    worker._grug_query_bias_window = None
+    valid_mask = torch.tensor([[True, False, False, False], [True, False, False, False]])
+    padded_indices = torch.full((BATCH_SIZE, NUM_ACTIONS, 2), -1, dtype=torch.long)
+    padded_indices[:, :1] = teacher_indices
+    padded_logprobs = torch.full((BATCH_SIZE, NUM_ACTIONS, 2), torch.nan)
+    padded_logprobs[:, :1] = teacher_probs.log()
+    padded_mass = torch.full((BATCH_SIZE, NUM_ACTIONS), torch.nan)
+    padded_mass[:, :1] = retained_mass
+    experience = Experience(
+        sequences=torch.randint(0, 5, (BATCH_SIZE, SEQ_LEN)),
+        action_log_probs=old_lp,
+        base_action_log_probs=None,
+        values=None,
+        returns=None,
+        advantages=torch.zeros(BATCH_SIZE, NUM_ACTIONS),
+        attention_mask=torch.ones(BATCH_SIZE, SEQ_LEN),
+        loss_mask=valid_mask,
+        action_mask=valid_mask,
+        num_actions=NUM_ACTIONS,
+        rollout_logprobs=rollout_lp,
+        info={},
+        distillation=SparseForwardKLInput(
+            teacher_topk_indices=padded_indices,
+            teacher_topk_logprobs=padded_logprobs,
+            retained_mass=padded_mass,
+            valid_mask=valid_mask,
+            loss_weights=torch.ones(BATCH_SIZE, NUM_ACTIONS),
+        ),
+    )
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
+
+    status = worker.training_step(experience, global_step=0, local_step=0, accumulation_steps=2)
+
+    selected_student = student_logits[:, -NUM_ACTIONS - 1 : -1].log_softmax(dim=-1)[:, :1].gather(-1, teacher_indices)
+    conditional_teacher = teacher_probs / retained_mass.unsqueeze(-1)
+    expected_loss = torch.sum(conditional_teacher * (conditional_teacher.log() - selected_student), dim=-1).mean()
+    assert status["distillation_loss"] == pytest.approx(expected_loss.item())
+    assert status["final_loss"] == pytest.approx(0.25 + expected_loss.item())
+    assert status["distillation_topk"] == 2
+    assert status["distillation_retained_mass_mean"] == pytest.approx(0.9)
+
+
 # ---------------------------------------------------------------------------
 # Megatron path: MegatronModelWrapper.forward_backward_mini_batch
 # ---------------------------------------------------------------------------
@@ -210,6 +278,45 @@ class _FakeMegatronModule:
 
     def __call__(self, sequences, position_ids, attention_mask, packed_seq_params=None, fp32_output=False):
         return torch.zeros(1)
+
+
+def test_megatron_tp1_gathers_sparse_teacher_tokens_from_student_logits(monkeypatch):
+    wrapper = object.__new__(mmw.MegatronModelWrapper)
+    wrapper.use_sample_packing = False
+    monkeypatch.setattr(mmw.mpu, "get_context_parallel_world_size", lambda: 1, raising=False)
+    monkeypatch.setattr(mmw.mpu, "get_tensor_model_parallel_world_size", lambda: 1, raising=False)
+    logits = torch.tensor(
+        [[[0.1, 0.2, 0.3, 0.4], [0.5, -0.2, 0.1, 0.0], [0.2, 0.7, -0.4, 0.1]]],
+        requires_grad=True,
+    )
+    indices = torch.tensor([[[0, 2], [1, 3]]])
+    teacher_probs = torch.tensor([[[0.6, 0.3], [0.7, 0.2]]])
+    distillation = SparseForwardKLInput(
+        teacher_topk_indices=indices,
+        teacher_topk_logprobs=teacher_probs.log(),
+        retained_mass=teacher_probs.sum(dim=-1),
+        valid_mask=torch.ones(1, 2, dtype=torch.bool),
+        loss_weights=torch.ones(1, 2),
+    )
+    data = mmw.MegatronPolicyMicroBatch(
+        sequences=torch.tensor([[1, 2, 3]]),
+        attention_mask=torch.ones(1, 3),
+        position_ids=torch.tensor([[0, 1, 2]]),
+        num_actions=2,
+        old_action_log_probs=torch.zeros(1, 2),
+        base_action_log_probs=None,
+        advantages=torch.zeros(1, 2),
+        loss_mask=torch.ones(1, 2),
+        rollout_action_logprobs=None,
+        response_span_tags=None,
+        global_loss_denom=None,
+        distillation=distillation,
+    )
+
+    actual = wrapper._distillation_student_logprobs(logits, data)
+    expected = logits[:, -3:-1].log_softmax(dim=-1).gather(-1, indices)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def _fake_forward_backward_func(

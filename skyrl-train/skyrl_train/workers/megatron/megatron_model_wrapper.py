@@ -16,7 +16,7 @@ from skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl_train.distillation import SampledReverseKLInput
+from skyrl_train.distillation import DistillationInput, student_topk_logprobs
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
 
@@ -52,7 +52,7 @@ class MegatronPolicyMicroBatch:
     rollout_action_logprobs: Optional[torch.Tensor]
     response_span_tags: Optional[torch.Tensor]
     global_loss_denom: Optional[float]
-    distillation: Optional[SampledReverseKLInput] = None
+    distillation: Optional[DistillationInput] = None
 
 
 class MegatronModelWrapper:
@@ -244,6 +244,23 @@ class MegatronModelWrapper:
             log_probs = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
         return log_probs
 
+    def _distillation_student_logprobs(
+        self,
+        logits: torch.Tensor,
+        data: MegatronPolicyMicroBatch,
+    ) -> Optional[torch.Tensor]:
+        if data.distillation is None:
+            return None
+        token_ids = data.distillation.student_token_ids()
+        if token_ids is None:
+            return None
+        if self.use_sample_packing or mpu.get_context_parallel_world_size() != 1:
+            raise ValueError("sparse forward KL on Megatron does not yet support sample packing or context parallelism")
+        if mpu.get_tensor_model_parallel_world_size() != 1:
+            raise ValueError("sparse forward KL on Megatron requires a tensor-parallel top-K gather")
+        response_logits = logits[:, -data.num_actions - 1 : -1]
+        return student_topk_logprobs(response_logits, token_ids)
+
     def forward_backward_mini_batch(
         self,
         micro_batches: List[MegatronPolicyMicroBatch],
@@ -288,6 +305,8 @@ class MegatronModelWrapper:
 
             action_log_probs = token_logprobs[:, -num_actions:]
 
+            sparse_student_logprobs = self._distillation_student_logprobs(logits, data)
+
             # Without an entropy loss the entropy is a metric only. Computing it under no_grad
             # avoids saving two vocab-sized copies of the logits for backward on the last stage.
             with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
@@ -307,6 +326,7 @@ class MegatronModelWrapper:
                 scaling=LossScaling.MEGATRON_PIPELINE,
                 global_loss_denom=data.global_loss_denom,
                 distillation=data.distillation,
+                student_topk_logprobs=sparse_student_logprobs,
             )
             if log_ratio_monitor is None:
                 log_ratio_monitor = LogRatioMonitor(action_log_probs.device)

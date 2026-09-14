@@ -14,7 +14,7 @@ from jaxtyping import Float, Integer
 import torch
 import torch.nn.functional as F
 
-from skyrl_train.distillation import SampledReverseKLInput
+from skyrl_train.distillation import DistillationInput
 
 
 BasicType = Union[int, float, str, bool]
@@ -77,7 +77,7 @@ class Experience:
     # Stage D (F7) per-token span tags (SPAN_THINK==1) — present only when the
     # token-reward channel is on; used to down-weight <think> tokens in the loss.
     response_span_tags: Optional[Integer[torch.Tensor, "batch response_len"]] = None
-    distillation: Optional[SampledReverseKLInput] = None
+    distillation: Optional[DistillationInput] = None
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:

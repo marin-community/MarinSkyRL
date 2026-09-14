@@ -66,6 +66,7 @@ class TeacherSpec(Protocol):
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
     resources: TeacherResourceSpec | None
+    top_k: int | None
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ class OpenAICompatibleTeacherSpec:
     evidence: TeacherEvidenceKind
     endpoints: tuple[TeacherEndpointSpec, ...]
     resources: TeacherResourceSpec | None = None
+    top_k: int | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,7 @@ class LocalInferenceTeacherSpec:
     evidence: TeacherEvidenceKind
     backend: str
     resources: TeacherResourceSpec | None = None
+    top_k: int | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,7 @@ class FrozenWorkerTeacherSpec:
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
     resources: TeacherResourceSpec | None = None
+    top_k: int | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +112,7 @@ class ResidentTeacherSpec:
     model: TeacherModelSpec
     evidence: TeacherEvidenceKind
     resources: TeacherResourceSpec | None = None
+    top_k: int | None = None
 
 
 @dataclass(frozen=True)
@@ -257,7 +262,7 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
     config = _mapping(raw, path)
     _reject_unknown(
         config,
-        frozenset({"source", "placement", "model", "evidence", "endpoints", "backend", "resources"}),
+        frozenset({"source", "placement", "model", "evidence", "top_k", "endpoints", "backend", "resources"}),
         path,
     )
     source = _enum_value(TeacherSource, config, "source", path)
@@ -274,6 +279,7 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
         else _enum_value(TeacherPlacement, config, "placement", path)
     )
     evidence = _enum_value(TeacherEvidenceKind, config, "evidence", path)
+    top_k = None if config.get("top_k") is None else _positive_integer(config, "top_k", path)
     endpoints = _teacher_endpoints(config, path)
     backend = _optional_string(config, "backend", path)
     resources = _teacher_resources(config, path)
@@ -302,6 +308,10 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
         raise ValueError(f"{path}.placement must be pinned for frozen_worker teachers")
     if placement is TeacherPlacement.EXTERNAL and resources is not None:
         raise ValueError(f"{path}.resources cannot reserve Iris capacity for an external teacher")
+    if evidence is TeacherEvidenceKind.TOPK_DISTRIBUTION and top_k is None:
+        raise ValueError(f"{path}.top_k is required for topk_distribution evidence")
+    if evidence is TeacherEvidenceKind.CHOSEN_TOKEN and top_k is not None:
+        raise ValueError(f"{path}.top_k is only valid for topk_distribution evidence")
 
     common = {
         "id": teacher_id,
@@ -310,6 +320,7 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
         "model": _teacher_model(config, path),
         "evidence": evidence,
         "resources": resources,
+        "top_k": top_k,
     }
     if source is TeacherSource.OPENAI_COMPATIBLE:
         return OpenAICompatibleTeacherSpec(**common, endpoints=endpoints)
