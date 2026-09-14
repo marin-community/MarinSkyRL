@@ -22,7 +22,7 @@ def main() -> None:
         mask = AttentionMask.causal(sliding_window=sliding_window)
 
         @jax.jit
-        @jax.value_and_grad
+        @jax.value_and_grad(argnums=(0, 1, 2))
         def objective(q, k, v):
             out = attention(q, k, v, mask, implementation="gpu_fa4_cute")
             return jnp.mean(jnp.square(out.astype(jnp.float32)))
