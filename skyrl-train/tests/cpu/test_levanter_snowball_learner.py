@@ -282,6 +282,16 @@ def _multihost_learner_worker(
         distributed_process_count=2,
     )
     learner.initialize(_learner_config())
+    assert learner._trainer_config.device_mesh.shape == {
+        "replica_dcn": 1,
+        "data": 4,
+        "expert": 1,
+        "model": 1,
+    }
+    w_q = learner.model.transformer.blocks[0].attn.w_q
+    assert w_q.sharding.spec == jax.sharding.PartitionSpec("data", "model")
+    assert len(w_q.addressable_shards) == 2
+    assert all(shard.data.shape == (3, 16) for shard in w_q.addressable_shards)
     original = _batch()
     batch = LearnerBatch(
         sequences=np.concatenate((original.sequences, original.sequences)),

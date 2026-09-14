@@ -27,6 +27,7 @@ from jax.experimental import multihost_utils
 from levanter.checkpoint import load_checkpoint, save_checkpoint
 from levanter.compat.hf_checkpoints import HFCheckpointConverter
 from levanter.distributed import DistributedConfig
+from levanter.grug.sharding import compact_grug_mesh
 from levanter.models.snowball import GrugMoeHfConfig, SnowballConfig, SnowballLMHeadModel
 from levanter.optim.config import AdamConfig
 from levanter.tracker import NoopConfig
@@ -67,6 +68,22 @@ AutoConfig.register(GrugMoeConfig.model_type, GrugMoeConfig, exist_ok=True)
 
 
 _ROUTER_BIAS_SUFFIX = ".mlp.router.bias"
+
+
+class _SnowballTrainerConfig(TrainerConfig):
+    """Use one global FSDP axis for Snowball's explicit parameter specs.
+
+    ``MeshConfig`` normally separates the eight local devices into ``data``
+    and the four hosts into ``replica_dcn``. Snowball's raw ``P("data", ...)``
+    parameter specs do not use the logical parameter mapping, so that layout
+    would replicate the model and Adam state on every host. The production
+    Grug path uses this compact mesh with ``replica_axis_size=1`` to extend the
+    data axis across hosts.
+    """
+
+    @property
+    def device_mesh(self) -> jax.sharding.Mesh:
+        return compact_grug_mesh(expert_axis_size=1, replica_axis_size=1)
 
 
 def _resolve_local_model_snapshot(model_path: str, revision: str | None) -> str:
@@ -324,7 +341,7 @@ class LevanterSnowballLearner:
             compute_mapping={"batch": ["replica_dcn", "data"]},
             param_mapping={"embed": "data"},
         )
-        trainer_config = TrainerConfig(
+        trainer_config = _SnowballTrainerConfig(
             id=(
                 f"msrl-levanter-{self._distributed_coordinator_address.replace(':', '-')}"
                 if self._distributed_coordinator_address is not None
