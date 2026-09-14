@@ -113,3 +113,7 @@ extra_env:
   # as redzone buffers; the 67B expert projections exceed one H100 before the
   # data-axis partitioner can lower them to local shards.
   XLA_FLAGS: "--xla_gpu_autotune_level=0"
+  # JAX otherwise reserves only 75% of each dedicated learner H100. The
+  # rematerialized train executable needs 59.5 GiB including donated state,
+  # leaving too little allocator headroom under that default reservation.
+  XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"
