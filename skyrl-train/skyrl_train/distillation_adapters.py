@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -17,11 +17,37 @@ from skyrl_train.distillation import (
     TeacherScoreRequest,
     prepare_sampled_reverse_kl,
 )
-from skyrl_train.teacher_oracle import TeacherOracleOwner
+from skyrl_train.teacher_oracle import TeacherOracleCollection
+from skyrl_train.teacher_routing import RoutedTrajectoryBatch, TeacherRoute
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
 
 
 _ForwardResult = TypeVar("_ForwardResult")
+_ScoreResult = TypeVar("_ScoreResult")
+
+
+async def _gather_or_cancel(tasks: list[asyncio.Future[Any]]) -> list[Any]:
+    """Gather tasks, cancelling and draining every sibling if one fails."""
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
+async def _score_while_model_forwarding(
+    scoring: Awaitable[_ScoreResult],
+    model_forward: Callable[[], _ForwardResult],
+) -> tuple[_ForwardResult, _ScoreResult]:
+    results = await _gather_or_cancel(
+        [
+            asyncio.create_task(asyncio.to_thread(model_forward)),
+            asyncio.ensure_future(scoring),
+        ]
+    )
+    return results[0], results[1]
 
 
 @dataclass(frozen=True)
@@ -38,6 +64,37 @@ class ScoredDistillationBatch:
     """Validated evidence and the minimal payload consumed by the learner."""
 
     evidence: ChosenTokenTeacherEvidence
+    distillation: SampledReverseKLInput
+
+
+@dataclass(frozen=True)
+class RoutedTeacherScoringPartition:
+    """One logical-teacher request and its original mixed-batch coordinates."""
+
+    original_indices: tuple[int, ...]
+    work: TeacherScoringWork
+
+
+@dataclass(frozen=True)
+class RoutedTeacherScoringWork:
+    """Teacher-homogeneous requests derived from one mixed learner batch."""
+
+    trajectory_ids: tuple[str, ...]
+    routes: tuple[TeacherRoute, ...]
+    response_lengths: tuple[int, ...]
+    plan_version: str
+    partitions: tuple[RoutedTeacherScoringPartition, ...]
+
+
+@dataclass(frozen=True)
+class RoutedScoredDistillationBatch:
+    """Reassembled multi-teacher evidence in original learner row order."""
+
+    trajectory_ids: tuple[str, ...]
+    routes: tuple[TeacherRoute, ...]
+    teacher_revisions: tuple[str, ...]
+    plan_version: str
+    evidence: tuple[ChosenTokenTeacherEvidence, ...]
     distillation: SampledReverseKLInput
 
 
@@ -99,10 +156,47 @@ def build_teacher_scoring_work(
     return TeacherScoringWork(request=request, coefficient=coefficient, route_weights=loss_weights)
 
 
+def build_routed_teacher_scoring_work(
+    routed_batch: RoutedTrajectoryBatch,
+    *,
+    tokenizer_fingerprints: Mapping[str, str],
+) -> RoutedTeacherScoringWork:
+    """Build one exact request per logical-teacher partition."""
+    missing_fingerprints = sorted(
+        {partition.teacher_id for partition in routed_batch.partitions} - tokenizer_fingerprints.keys()
+    )
+    if missing_fingerprints:
+        raise ValueError(f"missing tokenizer fingerprints for teachers: {', '.join(missing_fingerprints)}")
+
+    partitions = tuple(
+        RoutedTeacherScoringPartition(
+            original_indices=partition.original_indices,
+            work=build_teacher_scoring_work(
+                partition.trajectory_batch,
+                route_ids=tuple(route.route_id for route in partition.routes),
+                teacher_id=partition.teacher_id,
+                tokenizer_fingerprint=tokenizer_fingerprints[partition.teacher_id],
+                plan_version=routed_batch.plan_version,
+                coefficient=routed_batch.coefficient,
+                route_weights=tuple(route.weight for route in partition.routes),
+                evidence=routed_batch.evidence,
+            ),
+        )
+        for partition in routed_batch.partitions
+    )
+    return RoutedTeacherScoringWork(
+        trajectory_ids=routed_batch.trajectory_ids,
+        routes=routed_batch.routes,
+        response_lengths=routed_batch.response_lengths,
+        plan_version=routed_batch.plan_version,
+        partitions=partitions,
+    )
+
+
 class TeacherEvidenceCoordinator:
     """Share scoring and objective preparation across trainer regimes."""
 
-    def __init__(self, oracle_owner: TeacherOracleOwner) -> None:
+    def __init__(self, oracle_owner: TeacherOracleCollection) -> None:
         self._oracle_owner = oracle_owner
 
     async def score(self, work: TeacherScoringWork) -> ScoredDistillationBatch:
@@ -116,6 +210,62 @@ class TeacherEvidenceCoordinator:
             route_weights=work.route_weights,
         )
         return ScoredDistillationBatch(evidence=evidence, distillation=distillation)
+
+    async def score_routed(self, work: RoutedTeacherScoringWork) -> RoutedScoredDistillationBatch:
+        """Fan out logical teachers and restore evidence to original row coordinates."""
+        scored_partitions = await _gather_or_cancel(
+            [asyncio.create_task(self.score(partition.work)) for partition in work.partitions]
+        )
+
+        return self.assemble_routed(work, tuple(scored_partitions))
+
+    def assemble_routed(
+        self,
+        work: RoutedTeacherScoringWork,
+        scored_partitions: tuple[ScoredDistillationBatch, ...],
+    ) -> RoutedScoredDistillationBatch:
+        """Restore independently scored partitions to the original mixed-batch coordinates."""
+        if len(scored_partitions) != len(work.partitions):
+            raise ValueError("scored teacher partitions do not match routed work")
+
+        row_count = len(work.trajectory_ids)
+        aligned_metadata = {
+            "routes": len(work.routes),
+            "response_lengths": len(work.response_lengths),
+        }
+        if any(length != row_count for length in aligned_metadata.values()):
+            raise ValueError(f"routed scoring metadata must align with {row_count} trajectories: {aligned_metadata}")
+        original_indices = sorted(index for partition in work.partitions for index in partition.original_indices)
+        if original_indices != list(range(row_count)):
+            raise ValueError("routed scoring partitions must cover every original trajectory exactly once")
+        response_width = max(work.response_lengths)
+        teacher_logprobs = torch.full((row_count, response_width), torch.nan, dtype=torch.float32)
+        valid_mask = torch.zeros((row_count, response_width), dtype=torch.bool)
+        loss_weights = torch.zeros((row_count, response_width), dtype=torch.float32)
+        teacher_revisions = [""] * row_count
+        for partition, scored in zip(work.partitions, scored_partitions, strict=True):
+            if scored.evidence.trajectory_ids != partition.work.request.trajectory_ids:
+                raise ValueError("scored teacher partition does not match its routed trajectories")
+            partition_width = scored.distillation.valid_mask.shape[1]
+            indices = torch.tensor(partition.original_indices, dtype=torch.long)
+            teacher_logprobs[indices, :partition_width] = scored.distillation.teacher_action_log_probs
+            valid_mask[indices, :partition_width] = scored.distillation.valid_mask
+            loss_weights[indices, :partition_width] = scored.distillation.loss_weights
+            for index in partition.original_indices:
+                teacher_revisions[index] = scored.evidence.teacher_revision
+
+        return RoutedScoredDistillationBatch(
+            trajectory_ids=work.trajectory_ids,
+            routes=work.routes,
+            teacher_revisions=tuple(teacher_revisions),
+            plan_version=work.plan_version,
+            evidence=tuple(scored.evidence for scored in scored_partitions),
+            distillation=SampledReverseKLInput(
+                teacher_action_log_probs=teacher_logprobs,
+                valid_mask=valid_mask,
+                loss_weights=loss_weights,
+            ),
+        )
 
     async def close(self) -> None:
         await self._oracle_owner.close()
@@ -133,16 +283,15 @@ class RayPPOTrainerDistillationAdapter:
         model_forward: Callable[[], _ForwardResult],
     ) -> tuple[_ForwardResult, ScoredDistillationBatch]:
         """Run the blocking trainer forward and remote teacher score concurrently."""
-        forward_task = asyncio.create_task(asyncio.to_thread(model_forward))
-        score_task = asyncio.create_task(self._coordinator.score(work))
-        try:
-            forward_result, scored = await asyncio.gather(forward_task, score_task)
-        except BaseException:
-            forward_task.cancel()
-            score_task.cancel()
-            await asyncio.gather(forward_task, score_task, return_exceptions=True)
-            raise
-        return forward_result, scored
+        return await _score_while_model_forwarding(self._coordinator.score(work), model_forward)
+
+    async def score_routed_while_model_forwarding(
+        self,
+        work: RoutedTeacherScoringWork,
+        model_forward: Callable[[], _ForwardResult],
+    ) -> tuple[_ForwardResult, RoutedScoredDistillationBatch]:
+        """Fan out a mixed-domain batch while the synchronous model forward runs."""
+        return await _score_while_model_forwarding(self._coordinator.score_routed(work), model_forward)
 
     async def close(self) -> None:
         await self._coordinator.close()
@@ -156,6 +305,19 @@ class AsyncTeacherScoreTicket:
 
     async def result(self) -> ScoredDistillationBatch:
         return await self._result
+
+
+@dataclass(frozen=True)
+class AsyncRoutedTeacherScoreTicket:
+    """Per-teacher queue tickets reassembled only when a mixed group is ready."""
+
+    _work: RoutedTeacherScoringWork
+    _partitions: tuple[AsyncTeacherScoreTicket, ...]
+    _coordinator: TeacherEvidenceCoordinator
+
+    async def result(self) -> RoutedScoredDistillationBatch:
+        scored = await asyncio.gather(*(partition.result() for partition in self._partitions))
+        return self._coordinator.assemble_routed(self._work, tuple(scored))
 
 
 @dataclass(frozen=True)
@@ -227,6 +389,24 @@ class FullyAsyncRayPPOTrainerDistillationAdapter:
     async def score_before_batch_assembly(self, work: TeacherScoringWork) -> ScoredDistillationBatch:
         """Return only once evidence is ready to travel with a generated group."""
         ticket = await self.submit_before_batch_assembly(work)
+        return await ticket.result()
+
+    async def submit_routed_before_batch_assembly(
+        self,
+        work: RoutedTeacherScoringWork,
+    ) -> AsyncRoutedTeacherScoreTicket:
+        """Submit every logical teacher concurrently so one full queue cannot head-of-line block another."""
+        tickets = await _gather_or_cancel(
+            [asyncio.create_task(self.submit_before_batch_assembly(partition.work)) for partition in work.partitions]
+        )
+        return AsyncRoutedTeacherScoreTicket(work, tuple(tickets), self._coordinator)
+
+    async def score_routed_before_batch_assembly(
+        self,
+        work: RoutedTeacherScoringWork,
+    ) -> RoutedScoredDistillationBatch:
+        """Score and reassemble a mixed-domain group before learner-batch assembly."""
+        ticket = await self.submit_routed_before_batch_assembly(work)
         return await ticket.result()
 
     async def close(self) -> None:
