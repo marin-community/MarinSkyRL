@@ -868,6 +868,18 @@ class LevanterSnowballLearner:
         is_publisher = jax.process_index() == 0
         generator_dtype = str_to_torch_dtype(self.runtime.generator_dtype)
 
+        async def pause_generation() -> None:
+            await client.pause_generation()
+
+        # Layerwise reload temporarily restores parameters that have not arrived
+        # yet to the meta device. Quiesce EngineCore before opening that bracket:
+        # vLLM's data-parallel busy loop otherwise executes dummy batches against
+        # the incomplete model even when no user generation is in flight.
+        #
+        # Do not resume after any failure. A partial reload is not safe to serve,
+        # and the enclosing lifecycle moves to FAILED so cleanup can replace it.
+        await self._rank_zero_publication_call(pause_generation, "generation pause")
+
         async def begin_reload() -> None:
             await client.begin_weight_reload()
 
@@ -937,6 +949,11 @@ class LevanterSnowballLearner:
             await client.reset_prefix_cache()
 
         await self._rank_zero_publication_call(finish_reload, "reload finalization")
+
+        async def resume_generation() -> None:
+            await client.resume_generation()
+
+        await self._rank_zero_publication_call(resume_generation, "generation resume")
 
     async def _publish_weight_batch(self, batch: list[tuple[str, torch.Tensor]]) -> None:
         import torch

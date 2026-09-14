@@ -253,12 +253,18 @@ def test_publication_rejects_one_missing_expert_slice_receipt(tmp_path):
         for expert_slice in expected_expert_slice_names(name, value.shape[0])
     ]
     assert expert_slices
+    calls = []
 
     class FakeInferenceClient:
+        async def pause_generation(self):
+            calls.append("pause")
+
         async def begin_weight_reload(self):
+            calls.append("begin")
             return None
 
         async def finish_weight_reload(self):
+            calls.append("finish")
             return [
                 {
                     "kind": "weight_install_receipt",
@@ -273,7 +279,11 @@ def test_publication_rejects_one_missing_expert_slice_receipt(tmp_path):
             ]
 
         async def reset_prefix_cache(self):
+            calls.append("reset")
             return None
+
+        async def resume_generation(self):
+            calls.append("resume")
 
     async def discard_publication(_batch):
         return None
@@ -286,6 +296,7 @@ def test_publication_rejects_one_missing_expert_slice_receipt(tmp_path):
         asyncio.run(learner.publish_policy())
     assert error.value.__cause__ is not None
     assert "incomplete inference expert-slice installation" in str(error.value.__cause__)
+    assert calls == ["pause", "begin", "finish"]
     assert learner.state.lifecycle.value == "failed"
     learner._weight_group = None
     learner.close()
@@ -531,8 +542,10 @@ def _multihost_learner_worker(
     update = learner.update(UpdateRequest(batch, advantages, old_log_probs, 0, None, 0, None))
 
     published_chunks = []
+    publication_events = []
 
     async def record_publication(batch):
+        publication_events.append("chunk")
         published_chunks.append([name for name, _ in batch])
 
     learner._publish_weight_batch = record_publication
@@ -540,10 +553,15 @@ def _multihost_learner_worker(
     if int(process_id) == 0:
 
         class FakeInferenceClient:
+            async def pause_generation(self):
+                publication_events.append("pause")
+
             async def begin_weight_reload(self):
+                publication_events.append("begin")
                 return None
 
             async def finish_weight_reload(self):
+                publication_events.append("finish")
                 state_dict = learner.model.to_state_dict()
                 names = list(state_dict)
                 parameters = sorted(expected_vllm_parameter_names(names))
@@ -566,7 +584,11 @@ def _multihost_learner_worker(
                 ]
 
             async def reset_prefix_cache(self):
+                publication_events.append("reset")
                 return None
+
+            async def resume_generation(self):
+                publication_events.append("resume")
 
         learner._inference_client = FakeInferenceClient()
         learner._weight_group = object()
@@ -575,6 +597,9 @@ def _multihost_learner_worker(
     installed_publication_status = learner.state.publication_status.value
     if int(process_id) == 0:
         assert published_chunks
+        assert publication_events[:2] == ["pause", "begin"]
+        assert publication_events[-3:] == ["finish", "reset", "resume"]
+        assert set(publication_events[2:-3]) == {"chunk"}
         learner._weight_group = None
     learner.save_checkpoint(checkpoint_path)
     result = {f"checkpoint::{name}": value for name, value in _multihost_state_arrays(learner).items()}
