@@ -30,6 +30,8 @@ from skyrl_train.weight_sync.readback_diagnostics import (
     validate_replica_digests,
     network_log_readback,
     persist_readback,
+    persist_payload,
+    serialize_receipt,
     FULL_READBACK_EVERY,
 )
 from skyrl_train.weight_sync.receiver_readback_rpc import call_all_receiver_workers
@@ -440,3 +442,61 @@ def test_a_local_path_keeps_the_full_read_back(monkeypatch, tmp_path):
     receipt = persist_readback(str(tmp_path), "stage", {"rows": [7]})
     assert receipt["verify"] in ("full-readback", "full-readback-sampled")
     assert "etag" not in receipt
+
+
+def test_serialized_receipt_is_the_bytes_persist_readback_would_write(monkeypatch):
+    stored, _ = _object_store(monkeypatch)
+    receipt = {"phase": "installed-before-replay", "result": {"rows": list(range(32))}}
+    written = persist_readback("s3://bucket/prefix", "stage", receipt)
+    assert serialize_receipt(receipt) == stored[written["uri"]]
+
+
+def test_a_frozen_receipt_ignores_later_mutation_of_the_live_result(monkeypatch):
+    stored, _ = _object_store(monkeypatch)
+    result = {"phase_seconds": {"install": 0.5}}
+    frozen = serialize_receipt({"phase": "installed-before-replay", "result": result})
+    # The interval result gains finish and timing fields after the row is captured.
+    result["phase_seconds"]["finish"] = 0.013
+    result["durable_receipt"] = {"uri": "s3://bucket/prefix/later.json"}
+    written = persist_payload("s3://bucket/prefix", "stage", frozen)
+    replayed = json.loads(stored[written["uri"]])
+    assert replayed["result"] == {"phase_seconds": {"install": 0.5}}
+    assert written["bytes"] == len(frozen)
+
+
+def test_persist_payload_and_persist_readback_agree(monkeypatch):
+    stored, _ = _object_store(monkeypatch)
+    receipt = {"rows": [{"rank": i} for i in range(8)]}
+    a = persist_readback("s3://bucket/prefix", "viaReceipt", receipt)
+    b = persist_payload("s3://bucket/prefix", "viaPayload", serialize_receipt(receipt))
+    assert stored[a["uri"]] == stored[b["uri"]]
+    assert a["sha256"] == b["sha256"] and a["bytes"] == b["bytes"]
+
+
+def _publication_stub(deferred):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        deferred_rows=deferred, output_uri="s3://bucket/prefix", preparation_id="prep", receipt_index=0
+    )
+
+
+def test_deferred_rows_round_trip_as_payloads_including_the_failure_path(monkeypatch):
+    from skyrl_train.weight_sync.shard_training import ShardTrainingPublication
+
+    stored, _ = _object_store(monkeypatch)
+    monkeypatch.setattr("skyrl_train.weight_sync.shard_training.persist_payload",
+                        __import__("skyrl_train.weight_sync.readback_diagnostics", fromlist=["x"]).persist_payload)
+    stub = _publication_stub([])
+    row = {"phase": "installed-before-replay", "result": {"rows": [{"rank": i} for i in range(8)]}}
+    assert ShardTrainingPublication.capture(stub, row) is None
+    assert stub.deferred_rows == [serialize_receipt(row)]
+
+    # The failure path takes the same rows after deferred_rows is cleared. They are bytes,
+    # so they must be written as payloads; routing them back through capture() would try to
+    # serialize an already-serialized payload.
+    rows, stub.deferred_rows = stub.deferred_rows, None
+    written = ShardTrainingPublication.capture_payload(stub, rows[0])
+    assert json.loads(stored[written["uri"]]) == row
+    with pytest.raises(TypeError):
+        ShardTrainingPublication.capture(stub, rows[0])

@@ -132,9 +132,18 @@ def _verify_written_object(uri: str, payload: bytes) -> dict:
     }
 
 
-def persist_readback(output_uri: str, stage: str, receipt: dict) -> dict:
-    """Write and verify native evidence before advancing to the next phase."""
-    payload = json.dumps(receipt, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+def serialize_receipt(receipt: dict) -> bytes:
+    """The exact bytes persist_readback would write for this receipt.
+
+    Exposed so a caller that must freeze a receipt now and write it later can pay the
+    serialization once, instead of deep-copying the live structure and serializing the copy.
+    Bytes are a stronger snapshot than a deep copy: nothing downstream can mutate them.
+    """
+    return json.dumps(receipt, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+
+
+def persist_payload(output_uri: str, stage: str, payload: bytes) -> dict:
+    """Write and verify already-serialized native evidence."""
     uri = f"{output_uri.rstrip('/')}/{stage}-{socket.gethostname()}-{os.getpid()}.json"
     write_bytes_atomic(uri, payload)
     verification = _verify_written_object(uri, payload)
@@ -144,6 +153,11 @@ def persist_readback(output_uri: str, stage: str, receipt: dict) -> dict:
         "bytes": len(payload),
         **verification,
     }
+
+
+def persist_readback(output_uri: str, stage: str, receipt: dict) -> dict:
+    """Write and verify native evidence before advancing to the next phase."""
+    return persist_payload(output_uri, stage, serialize_receipt(receipt))
 
 
 def tensor_sha256(tensor: torch.Tensor) -> str:
