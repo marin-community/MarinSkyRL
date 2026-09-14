@@ -216,7 +216,8 @@ class OpenAIHTTPModelClient:
             json=payload,
             headers={"Content-Type": "application/json"},
         ) as response:
-            response.raise_for_status()
             body = await response.json()
+            if response.status >= 400:
+                raise RuntimeError(f"OpenAI chat completion returned HTTP {response.status}: {body}")
         choice = body["choices"][0]
         return choice["message"]["content"], choice["finish_reason"]
