@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
@@ -78,6 +79,32 @@ def _choice(prompt: list[int]) -> dict:
     choice["logprobs"]["token_logprobs"] = chosen_scores
     choice["logprobs"]["top_logprobs"] = top_scores
     return choice
+
+
+def test_openai_teacher_oracle_binds_http_session_to_scoring_loop(unused_tcp_port):
+    async def construct():
+        return OpenAICompatibleTeacherOracle(
+            teacher=_teacher(TeacherEvidenceKind.CHOSEN_TOKEN),
+            endpoint=TeacherEndpointSpec(
+                url=f"http://127.0.0.1:{unused_tcp_port}/v1",
+                auth=None,
+                max_concurrency=1,
+            ),
+            api_key=None,
+        )
+
+    oracle = asyncio.run(construct())
+
+    async def score_on_new_loop():
+        app = application(-0.25, choice_factory=lambda _index, sequence: _choice(sequence))
+        async with _server(app, unused_tcp_port):
+            evidence = await oracle.score(_request(TeacherEvidenceKind.CHOSEN_TOKEN))
+            await oracle.close()
+            return evidence
+
+    evidence = asyncio.run(score_on_new_loop())
+
+    assert isinstance(evidence, ChosenTokenTeacherEvidence)
 
 
 @pytest.mark.asyncio

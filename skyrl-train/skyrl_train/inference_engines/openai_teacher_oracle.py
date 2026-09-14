@@ -131,7 +131,7 @@ class OpenAICompatibleTeacherOracle:
         self._headers = {"Content-Type": "application/json"}
         if api_key is not None:
             self._headers["Authorization"] = f"Bearer {api_key}"
-        self._session = aiohttp.ClientSession(timeout=self._timeout)
+        self._session: aiohttp.ClientSession | None = None
         self._closed = False
 
     async def score(self, request: TeacherScoreRequest) -> TeacherEvidenceBatch:
@@ -153,6 +153,8 @@ class OpenAICompatibleTeacherOracle:
             "temperature": 0,
             "return_tokens_as_token_ids": True,
         }
+        if self._session is None:
+            self._session = aiohttp.ClientSession(timeout=self._timeout)
         try:
             async with self._session.post(self._url, json=body, headers=self._headers) as response:
                 response_text = await response.text()
@@ -182,4 +184,5 @@ class OpenAICompatibleTeacherOracle:
         if self._closed:
             return
         self._closed = True
-        await self._session.close()
+        if self._session is not None:
+            await self._session.close()
