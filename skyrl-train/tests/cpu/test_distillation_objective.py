@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 import torch
 from omegaconf import OmegaConf
+from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation import (
@@ -65,7 +66,7 @@ def _objective(action_log_probs, teacher_logprobs):
     old_logprobs = torch.full_like(action_log_probs, -1.0)
     distillation = SampledReverseKLInput(
         teacher_action_log_probs=teacher_logprobs,
-        valid_mask=torch.tensor([[True, True, False]]),
+        valid_mask=torch.isfinite(teacher_logprobs),
         loss_weights=torch.ones_like(action_log_probs),
     )
     return compute_policy_objective(
@@ -300,6 +301,63 @@ def test_sampled_reverse_kl_gradient_depends_on_teacher_distribution():
     torch.testing.assert_close(second_actions.grad, torch.tensor([[0.5, 0.5, 0.0]], dtype=torch.float64))
     assert first.metrics["distillation_loss"] == pytest.approx(0.25)
     assert second.metrics["distillation_loss"] == pytest.approx(1.0)
+
+
+def test_real_same_vocabulary_teacher_changes_student_gradient_and_update():
+    config = Qwen3Config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        max_position_embeddings=16,
+    )
+    token_ids = torch.tensor([[1, 2, 3, 4, 5]])
+    response_token_ids = token_ids[:, -2:]
+
+    torch.manual_seed(0)
+    initial_student = Qwen3ForCausalLM(config)
+    initial_state = {name: value.detach().clone() for name, value in initial_student.state_dict().items()}
+
+    def model(seed: int) -> Qwen3ForCausalLM:
+        torch.manual_seed(seed)
+        return Qwen3ForCausalLM(config)
+
+    def chosen_logprobs(causal_lm: Qwen3ForCausalLM) -> torch.Tensor:
+        response_logits = causal_lm(token_ids).logits[:, -3:-1]
+        return response_logits.log_softmax(dim=-1).gather(-1, response_token_ids.unsqueeze(-1)).squeeze(-1)
+
+    def optimize_once(teacher: Qwen3ForCausalLM) -> tuple[torch.Tensor, torch.Tensor]:
+        student = model(0)
+        student.load_state_dict(initial_state)
+        optimizer = torch.optim.SGD(student.parameters(), lr=0.1)
+        with torch.no_grad():
+            teacher_actions = chosen_logprobs(teacher)
+        objective = _objective(chosen_logprobs(student), teacher_actions)
+        optimizer.zero_grad()
+        objective.optimization_loss.backward()
+        gradient = torch.cat(
+            [parameter.grad.flatten() for parameter in student.parameters() if parameter.grad is not None]
+        )
+        optimizer.step()
+        updated_parameters = torch.cat([parameter.detach().flatten() for parameter in student.parameters()])
+        return gradient, updated_parameters
+
+    first_teacher = model(1)
+    second_teacher = model(2)
+    first_teacher_actions = chosen_logprobs(first_teacher)
+    second_teacher_actions = chosen_logprobs(second_teacher)
+    first_gradient, first_update = optimize_once(first_teacher)
+    second_gradient, second_update = optimize_once(second_teacher)
+    initial_parameters = torch.cat([value.flatten() for value in initial_state.values()])
+
+    assert config.vocab_size == first_teacher.config.vocab_size == second_teacher.config.vocab_size
+    assert not torch.allclose(first_teacher_actions, second_teacher_actions)
+    assert not torch.allclose(first_gradient, second_gradient)
+    assert not torch.allclose(first_update, initial_parameters)
+    assert not torch.allclose(second_update, initial_parameters)
 
 
 def test_best_of_n_optional_teacher_changes_only_the_selected_update():
