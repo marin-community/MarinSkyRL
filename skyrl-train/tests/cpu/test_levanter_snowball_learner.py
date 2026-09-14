@@ -250,6 +250,17 @@ def _four_device_learner_worker(log_dir: str) -> None:
     assert "data" in batch_axes
     assert len(dense_log_probs.addressable_shards) == 4
     assert all(shard.data.shape == (1, prepared.tokens.shape[1] - 1) for shard in dense_log_probs.addressable_shards)
+
+    train_step = learner._trainer.train_step
+
+    def train_step_with_sharding_check(state, *training_batch):
+        for value in training_batch:
+            batch_spec = value.array.sharding.spec[0]
+            batch_axes = (batch_spec,) if isinstance(batch_spec, str) else batch_spec
+            assert "data" in batch_axes
+        return train_step(state, *training_batch)
+
+    learner._trainer.train_step = train_step_with_sharding_check
     result = learner.update(
         UpdateRequest(
             batch=batch,

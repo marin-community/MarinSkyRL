@@ -550,6 +550,11 @@ class LevanterSnowballLearner:
             old_log_probs = hax.named(jnp.asarray(dense_old), (Batch, Prediction))
             advantages = hax.named(jnp.asarray(dense_advantages), (Batch, Prediction))
             loss_mask = hax.named(jnp.asarray(dense_loss_mask), (Batch, Prediction))
+            tokens, old_log_probs, advantages, loss_mask = hax.shard(
+                (tokens, old_log_probs, advantages, loss_mask),
+                self._trainer.compute_axis_mapping,
+                mesh=self._trainer_config.device_mesh,
+            )
 
             before_probe = _parameter_probe(self._trainer_state.model)
             before_biases = _router_bias_host_copy(self._trainer_state.model)
