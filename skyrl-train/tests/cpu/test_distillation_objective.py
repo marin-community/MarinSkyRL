@@ -127,7 +127,10 @@ def test_topk_teacher_evidence_validates_as_a_distinct_transport_variant():
         valid_mask=valid_mask,
         topk_indices=torch.tensor([[[1, 2], [3, 4], [-1, -1]], [[5, 6], [-1, -1], [-1, -1]]]),
         topk_logprobs=torch.tensor(
-            [[[-0.1, -2.4], [-0.3, -1.7], [torch.nan, torch.nan]], [[-0.2, -1.9], [torch.nan, torch.nan], [torch.nan, torch.nan]]]
+            [
+                [[-0.1, -2.4], [-0.3, -1.7], [torch.nan, torch.nan]],
+                [[-0.2, -1.9], [torch.nan, torch.nan], [torch.nan, torch.nan]],
+            ]
         ),
         retained_mass=torch.tensor([[0.95, 0.8, torch.nan], [0.9, torch.nan, torch.nan]]),
     )
@@ -180,14 +183,18 @@ def test_distillation_absence_preserves_policy_objective_exactly():
 
     torch.testing.assert_close(result.optimization_loss, expected_loss, rtol=0, atol=0)
     assert "distillation_loss" not in result.metrics
-    assert result.metrics == {
-        "ppo_clip_ratio": 0.0,
-        "ppo_clip_ratio_low": 0.0,
-        "ppo_clip_ratio_high": 0.0,
-        "ppo_clip_pressure_low": 0.0,
-        "ppo_clip_pressure_high": 0.0,
-        "ppo_ratio_exact_unit_fraction": 0.0,
-    } | expected_metrics
+    assert (
+        result.metrics
+        == {
+            "ppo_clip_ratio": 0.0,
+            "ppo_clip_ratio_low": 0.0,
+            "ppo_clip_ratio_high": 0.0,
+            "ppo_clip_pressure_low": 0.0,
+            "ppo_clip_pressure_high": 0.0,
+            "ppo_ratio_exact_unit_fraction": 0.0,
+        }
+        | expected_metrics
+    )
 
 
 @pytest.mark.parametrize("loss_reduction", ["token_mean", "seq_mean_token_sum_norm_global"])
