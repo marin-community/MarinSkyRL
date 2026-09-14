@@ -125,7 +125,10 @@ def test_load_weights_into_vllm_accepts_qwen_packed_parameter_names():
         ],
     )
 
-    assert loaded == model.loaded_parameters
+    assert loaded == {
+        "model.layers.0.self_attn.qkv_proj.weight",
+        "model.layers.0.mlp.gate_up_proj.weight",
+    }
 
 
 def test_expected_parameter_names_cover_grug_stacked_experts():

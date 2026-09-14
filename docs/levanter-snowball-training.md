@@ -144,9 +144,8 @@ the public second update. The resumed trajectory UIDs and response token IDs exa
 
 The tiny-model gate was Iris job `/romain/dev-gpu-levsnow-fix-01a09cd0`. It passed in 155.32 seconds of test time. The
 whole-node allocation lasted 22 minutes 45.79 seconds, or 3.035 allocated H100-hours, with three of the eight H100s
-active. The original accounting omitted an earlier incarnation because the name `/romain/dev-gpu-levsnow-01a09cd` was
-reused. The transcript bounds that missing allocation at 6:00.41-6:34.37. Charging its entire 6:49.28 allocation
-command gives a conservative corrected total of 7.188 H100-hours across eight allocation incarnations.
+active. Accounting across eight allocation incarnations, including an earlier run hidden by a reused job name, gives a
+conservative corrected total of 7.188 H100-hours.
 
 | Measurement | Seconds |
 | --- | ---: |
