@@ -19,7 +19,10 @@ class TeacherScoreRequest:
     trajectory_ids: tuple[str, ...]
     route_ids: tuple[str, ...]
     teacher_id: str
+    tokenizer_fingerprint: str
+    plan_version: str
     prompt_token_ids: torch.Tensor
+    prompt_mask: torch.Tensor
     response_token_ids: torch.Tensor
     response_mask: torch.Tensor
     evidence: TeacherEvidenceKind
@@ -145,7 +148,8 @@ def _validate_evidence_coordinates(
         raise ValueError("teacher evidence cannot mark padded response positions valid")
 
 
-def _validate_request(request: TeacherScoreRequest) -> None:
+def validate_teacher_score_request(request: TeacherScoreRequest) -> None:
+    """Reject requests with ambiguous identities or token coordinates."""
     batch_size = len(request.trajectory_ids)
     if batch_size == 0:
         raise ValueError("teacher score request must contain at least one trajectory")
@@ -158,8 +162,14 @@ def _validate_request(request: TeacherScoreRequest) -> None:
     for route_id in request.route_ids:
         _require_nonempty(route_id, "teacher score request route_id")
     _require_nonempty(request.teacher_id, "teacher score request teacher_id")
+    _require_nonempty(request.tokenizer_fingerprint, "teacher score request tokenizer_fingerprint")
+    _require_nonempty(request.plan_version, "teacher score request plan_version")
     if request.prompt_token_ids.ndim != 2:
         raise ValueError("teacher score request prompt_token_ids must have shape [batch, prompt_len]")
+    if request.prompt_mask.shape != request.prompt_token_ids.shape:
+        raise ValueError("teacher score request prompt_mask must match prompt_token_ids")
+    if request.prompt_mask.dtype is not torch.bool:
+        raise ValueError("teacher score request prompt_mask must have bool dtype")
     if request.response_token_ids.ndim != 2:
         raise ValueError("teacher score request response_token_ids must have shape [batch, response_len]")
     if request.response_mask.shape != request.response_token_ids.shape:
@@ -178,7 +188,7 @@ def _validate_request(request: TeacherScoreRequest) -> None:
 
 def validate_teacher_evidence(request: TeacherScoreRequest, evidence: TeacherEvidenceBatch) -> None:
     """Reject evidence whose identity, token coordinates, shape, or values are ambiguous."""
-    _validate_request(request)
+    validate_teacher_score_request(request)
     if not isinstance(evidence, (ChosenTokenTeacherEvidence, TopKTeacherEvidence)):
         raise TypeError(f"unsupported teacher evidence type: {type(evidence).__name__}")
     _validate_evidence_coordinates(
@@ -193,6 +203,8 @@ def validate_teacher_evidence(request: TeacherScoreRequest, evidence: TeacherEvi
         raise ValueError("teacher evidence kind does not match the score request")
     _require_nonempty(evidence.teacher_revision, "teacher evidence teacher_revision")
     _require_nonempty(evidence.plan_version, "teacher evidence plan_version")
+    if evidence.plan_version != request.plan_version:
+        raise ValueError("teacher evidence plan_version does not match the score request")
 
     if isinstance(evidence, ChosenTokenTeacherEvidence):
         if evidence.chosen_logprobs.shape != evidence.valid_mask.shape:
