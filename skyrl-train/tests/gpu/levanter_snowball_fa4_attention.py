@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 
@@ -22,7 +24,7 @@ def main() -> None:
         mask = AttentionMask.causal(sliding_window=sliding_window)
 
         @jax.jit
-        @jax.value_and_grad(argnums=(0, 1, 2))
+        @partial(jax.value_and_grad, argnums=(0, 1, 2))
         def objective(q, k, v):
             out = attention(q, k, v, mask, implementation="gpu_fa4_cute")
             return jnp.mean(jnp.square(out.astype(jnp.float32)))
