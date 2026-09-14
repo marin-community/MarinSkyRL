@@ -32,6 +32,7 @@ from skyrl_train.learners.levanter_snowball import (
 GPU_COUNT = 8
 TRAIN_BATCH_SIZE = 16
 SEQUENCE_LENGTH = int(os.environ.get("SNOWBALL_NUMERICAL_SEQUENCE_LENGTH", "4096"))
+ATTENTION_IMPLEMENTATION = os.environ.get("SNOWBALL_NUMERICAL_ATTENTION_IMPLEMENTATION", "gpu_fa4_cute")
 RESPONSE_LENGTH = 256
 MAX_ABS_DIFF_LIMIT = 1e-5
 MEAN_ABS_DIFF_LIMIT = 1e-7
@@ -40,7 +41,7 @@ MEAN_ABS_DIFF_LIMIT = 1e-7
 def _model_config() -> SnowballConfig:
     return SnowballConfig(
         num_layers=1,
-        attention_implementation="gpu_fa4_cute",
+        attention_implementation=ATTENTION_IMPLEMENTATION,
         moe_implementation="ring",
     )
 
@@ -66,7 +67,7 @@ def _runtime(output_dir: Path) -> LevanterSnowballRuntimeConfig:
         parameter_dtype="float32",
         compute_dtype="bfloat16",
         output_dtype="float32",
-        attention_implementation="gpu_fa4_cute",
+        attention_implementation=ATTENTION_IMPLEMENTATION,
         moe_implementation="ring",
         publication_backend="gloo",
         publication_max_chunk_bytes=64 << 20,
