@@ -65,6 +65,10 @@ PLAN_STAGES = {
     Stage.FULL: PlanStage.OPD_FULL,
 }
 POLICY_GPUS = 4
+# Prompt-logprob scoring materializes float32 logits for every scheduled token.
+# At Qwen3.5's 248k-token vocabulary, the shared 8,192-token rollout budget
+# requires about 7.6 GiB for this transient alone and exhausts an H100 teacher.
+TEACHER_MAX_NUM_BATCHED_TOKENS = 4_096
 
 
 def stage_shape(stage: Stage) -> StageShape:
@@ -128,6 +132,7 @@ def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, outp
         "++teachers.primary.resources.gpus_per_node=2",
         "++teachers.primary.resources.tensor_parallel_size=2",
         "++teachers.primary.resources.colocation_group=teacher",
+        f"++teachers.primary.resources.max_num_batched_tokens={TEACHER_MAX_NUM_BATCHED_TOKENS}",
         "++teacher_routing.opd.revision=tinker-qwen35-v1",
         "++teacher_routing.opd.routes.default.teacher=primary",
         "++teacher_routing.opd.routes.default.weight=1.0",

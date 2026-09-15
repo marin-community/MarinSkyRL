@@ -182,6 +182,7 @@ def test_compile_distillation_plan_preserves_local_teacher_resource_claim():
         "gpus_per_node": 8,
         "tensor_parallel_size": 8,
         "colocation_group": "teacher-rotation",
+        "max_num_batched_tokens": 4096,
     }
 
     plan = compile_distillation_plan(config)
@@ -191,6 +192,7 @@ def test_compile_distillation_plan_preserves_local_teacher_resource_claim():
     assert resources is not None
     assert (resources.num_nodes, resources.gpus_per_node, resources.tensor_parallel_size) == (2, 8, 8)
     assert resources.colocation_group == "teacher-rotation"
+    assert resources.max_num_batched_tokens == 4096
 
 
 def test_compile_distillation_plan_preserves_teacher_residency_policy():

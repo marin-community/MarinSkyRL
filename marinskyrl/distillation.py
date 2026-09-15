@@ -71,6 +71,7 @@ class TeacherResourceSpec:
     gpus_per_node: int
     tensor_parallel_size: int
     colocation_group: str
+    max_num_batched_tokens: int | None = None
 
 
 class TeacherSpec(Protocol):
@@ -304,7 +305,7 @@ def _teacher_resources(config: Mapping[str, object], path: str) -> TeacherResour
     resources = _mapping(raw, f"{path}.resources")
     _reject_unknown(
         resources,
-        frozenset({"num_nodes", "gpus_per_node", "tensor_parallel_size", "colocation_group"}),
+        frozenset({"num_nodes", "gpus_per_node", "tensor_parallel_size", "colocation_group", "max_num_batched_tokens"}),
         f"{path}.resources",
     )
     return TeacherResourceSpec(
@@ -312,6 +313,11 @@ def _teacher_resources(config: Mapping[str, object], path: str) -> TeacherResour
         gpus_per_node=_positive_integer(resources, "gpus_per_node", f"{path}.resources"),
         tensor_parallel_size=_positive_integer(resources, "tensor_parallel_size", f"{path}.resources"),
         colocation_group=_required_string(resources, "colocation_group", f"{path}.resources"),
+        max_num_batched_tokens=(
+            None
+            if resources.get("max_num_batched_tokens") is None
+            else _positive_integer(resources, "max_num_batched_tokens", f"{path}.resources")
+        ),
     )
 
 

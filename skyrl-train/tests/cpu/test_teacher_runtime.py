@@ -244,10 +244,17 @@ def test_fully_async_teacher_queue_limits_fail_before_teacher_initialization(mon
 @pytest.mark.asyncio
 async def test_local_teacher_runtime_scores_exact_rollout_tokens_and_owns_engine(monkeypatch):
     engine = _Engine()
+    engine_kwargs = {}
     tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
+
+    def create_engine(**kwargs):
+        engine_kwargs.update(kwargs)
+        return [engine]
+
     monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
-    monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", lambda **_kwargs: [engine])
+    monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engine)
     cfg = _config()
+    cfg.teachers.primary.resources.max_num_batched_tokens = 64
     prepared = prepare_distillation_runtime(cfg, tokenizer)
     runtime = await start_sync_distillation_runtime(cfg, prepared)
     assert runtime is not None
@@ -265,6 +272,7 @@ async def test_local_teacher_runtime_scores_exact_rollout_tokens_and_owns_engine
     torch.testing.assert_close(forwarded["policy"], torch.tensor([1.0]))
     torch.testing.assert_close(scored.distillation.teacher_action_log_probs, torch.tensor([[-0.25, -0.25]]))
     torch.testing.assert_close(scored.distillation.loss_weights, torch.tensor([[0.5, 0.5]]))
+    assert engine_kwargs["max_num_batched_tokens"] == 64
     assert engine.teardown_count == 1
 
 
