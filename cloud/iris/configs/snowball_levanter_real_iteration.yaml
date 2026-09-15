@@ -1,5 +1,5 @@
-# One real Snowball 67B-A2B MSRL iteration followed by a generation from the
-# installed update. The launch must pin model revision
+# Two real Snowball 67B-A2B MSRL updates. Each update is published before the
+# next generation boundary. The launch must pin model revision
 # 6808fe5c219471517bd51df35addefd38ebebf89 and use the retained RLVR-math data.
 entrypoint: levanter_snowball
 
@@ -31,8 +31,8 @@ trainer:
     grpo_norm_by_std: true
     advantage_batch_normalize: false
   epochs: 1
-  # Step one proves update/checkpoint/publication. Step two starts only after a
-  # subsequent generation from the installed policy.
+  # Step one proves update/publication. Step two starts only after a subsequent
+  # generation from the installed policy; the train-end hook checkpoints step two.
   max_steps: 2
   update_epochs_per_batch: 1
   train_batch_size: 32

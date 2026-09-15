@@ -4,9 +4,10 @@ The `skyrl_train.entrypoints.levanter_snowball` entrypoint runs one synchronous 
 orchestration and a Levanter learner. MSRL owns generation, rewards, advantages, and progress. Levanter owns the model,
 optimizer, random key, step, mesh, sharding, collectives, checkpoint, and Hugging Face export.
 
-The target integration ran two Snowball 67B-A2B steps on four eight-H100 JAX learner hosts with a separate
-eight-H100 vLLM TP1/DP8/EP8 host. The first updated policy was published before the second generation. This qualifies
-one real iteration boundary and a second update, but not a learning campaign or a throughput comparison.
+An earlier feasibility run completed two Snowball 67B-A2B steps on four eight-H100 JAX learner hosts with a separate
+eight-H100 vLLM TP1/DP8/EP8 host. It predates the corrected objective and stronger publication checks, so it does not
+qualify the current revision. The current small gate covers two real update/generation cycles and DP2/EP2 publication;
+target-size qualification is recorded separately when it completes.
 
 ## Supported workload
 
@@ -41,7 +42,7 @@ skyrl_train.entrypoints.levanter_snowball
 
 Set `trainer.policy.levanter.*` for Levanter dtypes, kernels, publication chunks, timeout, and log directory.
 The defaults are in `skyrl-train/skyrl_train/config/ppo_base_config.yaml`. The pinned Levanter revision is
-[`38d50bb33bc872f3763145945ed107173a174e0e`](https://github.com/marin-community/marin/tree/38d50bb33bc872f3763145945ed107173a174e0e).
+[`779cd403521e02d1615d8c49290cd8de63efdde0`](https://github.com/marin-community/marin/tree/779cd403521e02d1615d8c49290cd8de63efdde0).
 The GPU extra installs JAX 0.11.1 with CUDA 12, matching the Torch and vLLM runtime. The 67B run used segmented GPU
 FA4 attention and ring MoE dispatch; reference attention remains useful for the tiny numerical gate.
 
@@ -64,7 +65,7 @@ and contains the [resolved configuration](https://huggingface.co/datasets/penfev
 | Router bias | Frozen | Same |
 | Dtypes | BF16 model dtype; FP32 router bias | FP32 parameter storage, BF16 compute and serving weights, FP32 outputs and router bias |
 | Learner topology | FSDP2, EP1, 8 nodes × 8 H100 | Levanter data mesh, EP1, 1 node with 2 active H100s |
-| Inference topology | 2 engines, each TP1/DP8/EP8 | 1 engine, TP1/DP1/EP1 on one separate H100 |
+| Inference topology | 2 engines, each TP1/DP8/EP8 | 1 engine, TP1/DP2/EP2 on two separate H100s |
 | Weight transport | NCCL | Gloo, with BF16 model tensors and FP32 router biases |
 | Updates | 20 | Two public-trainer updates, then a fresh process restores the step-1 checkpoint and repeats the saved second update |
 
@@ -81,6 +82,13 @@ Levanter state to Hugging Face names and sends chunks through MSRL's existing na
 within the configured byte threshold except when one tensor alone exceeds it. Snowball
 expert matrices stay stacked because the Grug vLLM loader unbinds their expert dimension into its fused storage. Router
 bias tensors stay FP32; other tensors use the configured generator dtype.
+
+vLLM's layer-wise reload temporarily places parameters that have not arrived yet on the meta device. The learner first
+pauses every EngineCore scheduler, then opens that reload bracket. This also stops data-parallel dummy batches, which
+otherwise can execute against the incomplete model and kill the engine. Generation resumes only after every receipt
+passes and the prefix cache resets. Any ambiguous failure leaves generation paused and the learner failed. At an idle
+synchronous boundary, the client skips its five-second request-drain grace but still waits for the scheduler-level pause;
+active requests retain the grace period.
 
 The learner marks a version installed only after every active vLLM worker returns a receiver-observed receipt. The
 receipt must match the complete source weight name count and digest, the expected top-level vLLM parameter count and
@@ -114,30 +122,56 @@ checkpoint. Unit tests cover the call and reject export from an incomplete check
 that exported directory into a separate production-sized consumer, so export interoperability beyond the converter is
 not qualified here.
 
+The two-step target configuration sets the checkpoint interval beyond the run length. `CheckpointCallback` still saves
+once at train end, so no per-step TensorStore write occurs and one final native checkpoint remains. HF export is
+disabled explicitly. Publication and checkpoint timings are reported separately.
+
 ## Validation evidence
 
-Iris `/romain/levanter-snowball-real-01a09cd0-r17` used the pinned 67B model, 32 learner H100s, and a separate
+The earlier Iris feasibility run `/romain/levanter-snowball-real-01a09cd0-r17` used the pinned 67B model, 32 learner H100s, and a separate
 eight-H100 vLLM host. All five tasks exited successfully with no retries or preemptions. Step 1 generated 417,012
 response tokens, completed a finite update with a nonzero parameter probe, published policy version 1, committed its
 native checkpoint, exported BF16 weights, and then generated 714,857 tokens with the installed policy. Step 2 also
-updated, published, checkpointed, and exported.
+updated, published, checkpointed, and exported. That run predates the corrections below and is feasibility evidence,
+not current numerical qualification.
 
-The target run exposed BF16 replay drift between two forward passes of the unchanged policy: maximum absolute
+The earlier run exposed BF16 replay drift between two forward passes of the unchanged policy: maximum absolute
 log-probability differences were 6.85 and 7.47, affecting 0.198% and 0.529% of selected tokens at the PPO clip bounds.
-The retained E6 run used an exact unit ratio for its one synchronous update epoch. The Levanter objective therefore
-anchors its denominator with `stop_gradient` to the same training forward. This keeps the intended policy-gradient
-derivative and makes the objective ratio exactly one; separately replayed old-policy scores remain visible as drift
-diagnostics and cannot activate clipping before an optimizer step.
+The rejected same-forward workaround hid this discrepancy by replacing supplied old-policy scores with
+`stop_gradient(current_scores)`. The corrected objective preserves independent old scores and computes real ratios.
+
+The main cause was local MoE output combine: scatter-add collisions used GPU atomics, so repeated unchanged-policy
+scores could differ. Levanter now gathers each token's top-k expert outputs by reverse dispatch position and sums them
+in a fixed order. Repeated scoring on the representative 8-H100 shape became bit exact. A smaller deterministic drift
+remained when standalone scoring and training used different XLA executables: maximum/mean `0.0089493`/`0.00014377`,
+ratio mean `0.9999961`, and zero clipping. Backend, attention, accumulation, and standalone `value_and_grad` A/Bs did
+not remove it.
+
+Snowball therefore computes old-policy scores with the same compiled accumulated gradient and optimizer program used
+by the update. A dynamic flag makes the scoring invocation return the input model, optimizer, RNG, and step state
+unchanged while retaining the differentiated-forward score matrix. The following update invokes that same executable
+with the independent returned scores and commits its result. Qualification requires bitwise-equal repeated scores,
+zero score-versus-training difference, ratio minimum/mean/maximum all exactly `1.0`, and zero clipping. This costs one
+discarded backward and optimizer calculation per update; exactness is the chosen gate for the target-size run.
+
+Iris job `/romain/snowball-numerical-exact-mean-01a0a1be` ran the representative one-layer Snowball shape on eight
+H100s at MarinSkyRL `049d733b7b416ffd67c273b87383847787196f9b` and the pinned Levanter revision. It succeeded with
+no retries or preemptions in 72.333 seconds. Its exact assertions covered a 4096-token batch with two accumulation
+steps: repeated score maximum/mean difference `0`, score-versus-differentiated-training maximum/mean difference `0`,
+ratio minimum/mean/maximum `1.0`, and all clipping fractions `0`. The immediately preceding run exposed only a
+diagnostic artifact: directly reducing an array of unit ratios returned `0.9999999404`. The metric now reduces
+`ratio - 1` and adds one after aggregation, preserving exact unit reporting without changing the objective or relaxing
+the score gate.
 
 The independent CPU oracle builds the same tiny model in the native PyTorch Grug implementation. It compares selected
 response log probabilities, the masked loss, every gradient, and the first AdamW update:
 
 | Quantity | Mean absolute difference | Maximum absolute difference |
 | --- | ---: | ---: |
-| Token log probability | `9.5367433e-8` | `2.3841858e-7` |
-| Masked GRPO loss | `0` | `0` |
-| Gradient | `5.0648888e-11` | `8.9406967e-8` |
-| First AdamW update | `4.0966097e-10` | `1.1920929e-7` |
+| Token log probability | `1.4305115e-7` | `2.3841858e-7` |
+| Masked GRPO loss | — | `4.4703484e-8` |
+| Gradient | `5.0938549e-11` | `8.9406967e-8` |
+| First AdamW update | `4.0987352e-10` | `1.1920929e-7` |
 
 `skyrl-train/tests/cpu/test_levanter_snowball_learner.py` also covers different left-padding widths, right-padded
 responses, response predictor positions, per-sequence masked token means averaged across devices and accumulation,
@@ -153,7 +187,7 @@ uv run --frozen --extra cuda --extra vllm --extra levanter-gpu --group dev \
 The opt-in real-GPU gate is:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2 uv run --frozen \
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --frozen \
   --extra cuda --extra vllm --extra levanter-gpu --group dev \
   pytest -s skyrl-train/tests/gpu/levanter_snowball_cycle.py
 ```
@@ -164,23 +198,23 @@ steps 1 and 2. Phase two starts a fresh Ray process, restores step 1 through the
 checkpoint arrays and dataloader position, republishes before generation, replays the saved second batch, and completes
 the public second update. The resumed trajectory UIDs and response token IDs exactly match the saved batch.
 
-The tiny-model gate was Iris job `/romain/dev-gpu-levsnow-fix-01a09cd0`. It passed in 155.32 seconds of test time. The
-whole-node allocation lasted 22 minutes 45.79 seconds, or 3.035 allocated H100-hours, with three of the eight H100s
-active. Accounting across eight allocation incarnations, including an earlier run hidden by a reused job name, gives a
-conservative corrected total of 7.188 H100-hours.
+The current tiny-model gate was Iris job `/romain/snowball-ep2-capstone-idle-fast-01a0a1be`. It passed in 198.96
+seconds of test time. The four-H100 pod existed for 227 seconds, or 0.252 allocated H100-hours. Five publications each
+verified selected dense values plus expert 0 and expert 4 on opposite EP owners. Ratio minimum, mean, and maximum were
+all `1.0` in this exact tiny case, with zero clipping.
 
 | Measurement | Seconds |
 | --- | ---: |
-| Learner initialization | `3.353`–`3.370` |
-| First forward compilation | `1.603` in phase one; `2.010` after restart |
-| First complete update | `9.892` in phase one; `10.046` for fresh-process replay |
-| Warm complete update | `0.0423` |
-| Warm forward | `0.0113` |
-| Warm full iteration | `0.577` |
-| Compiled full iteration | `12.708` in phase one; `12.634` after restart |
-| Checkpoint commit and MSRL marker | `0.192`–`0.243` |
-| Fresh-process checkpoint load | `0.369` |
-| Weight publication | `0.156`–`0.242` |
+| Learner initialization | `4.300` in phase one; `5.064` after restart |
+| First forward compilation | `2.298` in phase one; `2.224` after restart |
+| First complete update | `9.117` in phase one; `9.421` for fresh-process replay |
+| Warm complete update | `0.0343` |
+| Warm forward | `0.0227` |
+| Warm full iteration | `0.804` |
+| Compiled full iteration | `14.410` in phase one; `13.099` after restart |
+| Checkpoint commit and MSRL marker | `0.179`–`0.249` |
+| Fresh-process checkpoint load | `0.373` |
+| Weight publication | `0.309`–`0.634` |
 
 Each iteration consumed 24 prompt tokens and generated 16 response tokens from two prompts and four trajectories. The
 learner batch was four rows, one example per GPU microbatch. The data mesh had size two; the measured batch had two
