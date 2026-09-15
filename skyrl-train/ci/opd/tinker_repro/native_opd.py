@@ -9,13 +9,13 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 
 from deepmath_dataset import PROMPT_ONLY_ENV, materialize_dataset
+from native_artifact_run import run_artifact_command
 from reproduction_artifacts import validate_output_uri
-from skyrl_train.io.io import local_read_dir, upload_directory
+from skyrl_train.io.io import local_read_dir
 from training_plan import (
     OPD_DATASET,
     OPD_DATASET_REVISION,
@@ -277,28 +277,25 @@ def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
                 runtime_patches=runtime_patches,
                 command=command,
             )
-            manifest_path = output_root / "native-opd-manifest.json"
-            try:
-                rows = materialize_dataset(data_path, shape.dataset_rows)
-                if rows != shape.dataset_rows and shape.dataset_rows is not None:
-                    raise RuntimeError(f"DeepMath yielded {rows} rows; expected {shape.dataset_rows}")
-                manifest = replace(manifest, status="running")
-                manifest_path.write_text(json.dumps(asdict(manifest), indent=2, sort_keys=True) + "\n")
-                upload_directory(str(output_root), output_uri)
-                environment = os.environ | {"VLLM_USE_DEEP_GEMM": "0"}
-                result = subprocess.run(command, check=False, env=environment)
-                manifest = replace(
-                    manifest,
-                    status="complete" if result.returncode == 0 else "failed",
-                    returncode=result.returncode,
-                )
-                return result.returncode
-            except Exception as error:
-                manifest = replace(manifest, status="failed", failure=str(error))
-                raise
-            finally:
-                manifest_path.write_text(json.dumps(asdict(manifest), indent=2, sort_keys=True) + "\n")
-                upload_directory(str(output_root), output_uri)
+            rows = materialize_dataset(data_path, shape.dataset_rows)
+            if rows != shape.dataset_rows and shape.dataset_rows is not None:
+                raise RuntimeError(f"DeepMath yielded {rows} rows; expected {shape.dataset_rows}")
+            manifest = replace(manifest, status="running")
+            environment = os.environ | {"VLLM_USE_DEEP_GEMM": "0"}
+            return run_artifact_command(
+                command=command,
+                initial_manifest=manifest,
+                manifest_path=output_root / "native-opd-manifest.json",
+                output_root=output_root,
+                output_uri=output_uri,
+                environment=environment,
+                complete_manifest=lambda current, returncode: replace(
+                    current,
+                    status="complete" if returncode == 0 else "failed",
+                    returncode=returncode,
+                ),
+                failed_manifest=lambda current, failure: replace(current, status="failed", failure=failure),
+            )
 
 
 def main(argv: list[str] | None = None) -> int:
