@@ -453,7 +453,7 @@ def test_microbatching_does_not_split_batch_sized_model_arrays(tmp_path):
     learner.close()
 
 
-def test_scoring_uses_the_training_step_without_mutating_state(tmp_path):
+def test_independent_forward_scoring_does_not_mutate_training_state(tmp_path):
     runtime = replace(_runtime(tmp_path / "compute-dtype-logs"), compute_dtype="bfloat16")
     model_config = _snowball_config()
     learner = LevanterSnowballLearner(
@@ -489,11 +489,11 @@ def test_scoring_uses_the_training_step_without_mutating_state(tmp_path):
             None,
         )
     )
-    assert update.metrics["preupdate_logprob_max_abs_diff"] == 0.0
-    assert update.metrics["preupdate_logprob_mean_abs_diff"] == 0.0
-    assert update.metrics["ppo_ratio_min"] == 1.0
-    assert update.metrics["ppo_ratio_mean"] == 1.0
-    assert update.metrics["ppo_ratio_max"] == 1.0
+    assert update.metrics["preupdate_logprob_max_abs_diff"] < 1.0e-6
+    assert update.metrics["preupdate_logprob_mean_abs_diff"] < 1.0e-6
+    assert update.metrics["ppo_ratio_min"] == pytest.approx(1.0, abs=1.0e-6)
+    assert update.metrics["ppo_ratio_mean"] == pytest.approx(1.0, abs=1.0e-6)
+    assert update.metrics["ppo_ratio_max"] == pytest.approx(1.0, abs=1.0e-6)
     assert update.metrics["ppo_clip_ratio"] == 0.0
     learner.close()
 
@@ -515,7 +515,7 @@ def test_scoring_and_update_reenter_mesh_in_async_worker_thread(tmp_path):
 
     assert update.status.value == "succeeded"
     assert np.isfinite(update.metrics["final_loss"])
-    assert update.metrics["preupdate_logprob_max_abs_diff"] == 0.0
+    assert update.metrics["preupdate_logprob_max_abs_diff"] < 1.0e-6
     learner.close()
 
 
@@ -566,13 +566,13 @@ def test_regular_mask_update_requires_and_consumes_rollout_probabilities(tmp_pat
     learner.close()
 
 
-def test_scoring_failure_invalidates_the_donated_learner_state(tmp_path):
+def test_scoring_failure_invalidates_the_learner_state(tmp_path):
     learner = _make_learner(tmp_path / "score-failure-logs")
 
     def fail_score(*_args, **_kwargs):
         raise RuntimeError("injected scoring failure")
 
-    learner._trainer.train_step_with_metrics = fail_score
+    learner._score_fn = fail_score
     with pytest.raises(RuntimeError, match="injected scoring failure"):
         learner.compute_log_probs(_batch())
 
@@ -614,15 +614,15 @@ def _four_device_learner_worker(log_dir: str) -> None:
         behavior_policy_versions=np.zeros(4, dtype=np.int64),
     )
     train_step = learner._trainer.train_step_with_metrics
-    apply_update_calls = []
+    train_step_calls = []
 
-    def train_step_with_sharding_check(state, *training_batch, apply_update):
+    def train_step_with_sharding_check(state, *training_batch):
         for value in training_batch:
             batch_spec = value.array.sharding.spec[0]
             batch_axes = (batch_spec,) if isinstance(batch_spec, str) else batch_spec
             assert "data" in batch_axes
-        apply_update_calls.append(apply_update)
-        return train_step(state, *training_batch, apply_update=apply_update)
+        train_step_calls.append(True)
+        return train_step(state, *training_batch)
 
     learner._trainer.train_step_with_metrics = train_step_with_sharding_check
     old_log_probs = learner.compute_log_probs(batch).policy_log_probs
@@ -640,9 +640,9 @@ def _four_device_learner_worker(log_dir: str) -> None:
             global_loss_denominator=None,
         )
     )
-    assert apply_update_calls == [False, True]
+    assert train_step_calls == [True]
     assert result.status.value == "succeeded"
-    assert result.metrics["preupdate_logprob_max_abs_diff"] == 0.0
+    assert result.metrics["preupdate_logprob_max_abs_diff"] < 1.0e-6
     assert np.isfinite(result.metrics["final_loss"])
     learner.close()
 
@@ -1047,12 +1047,10 @@ def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
             hax.named(jnp.zeros_like(jnp.asarray(dense_old)), (Batch, Prediction)),
             hax.named(jnp.asarray(dense_advantages), (Batch, Prediction)),
             hax.named(jnp.asarray(dense_mask), (Batch, Prediction)),
-            hax.named(jnp.arange(Batch.size, dtype=jnp.int32), (Batch,)),
             key=jax.random.key(0),
             temperature=1.0,
             clip_low=0.2,
             clip_high=0.2,
-            full_batch_size=Batch.size,
             offpolicy_mask_enabled=False,
             offpolicy_mask_low=0.5,
             offpolicy_mask_high=5.0,

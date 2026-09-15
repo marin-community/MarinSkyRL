@@ -246,21 +246,10 @@ class _SnowballTrainer(Trainer):
             (loss, metrics), gradients = grad_fn(model, *batch, **batch_kwargs)
         return loss, gradients, metrics
 
-    def _train_step(self, state, batch, batch_kwargs, _no_hooks=False):
-        batch_kwargs = dict(batch_kwargs)
-        apply_update = batch_kwargs.pop("_snowball_apply_update")
-        result = super()._train_step(state, batch, batch_kwargs, _no_hooks=_no_hooks)
-        new_state = jax.lax.cond(apply_update, lambda: result.new_state, lambda: state)
-        return dataclasses.replace(result, new_state=new_state)
+    def train_step_with_metrics(self, state, *batch):
+        """Run one normal donated optimizer step and retain its loss metrics."""
 
-    def train_step_with_metrics(self, state, *batch, apply_update: bool):
-        """Run the shared compiled step and retain its differentiated-forward outputs."""
-
-        return self._jit_train_step_fn_no_hook(
-            state,
-            batch,
-            {"_snowball_apply_update": jnp.asarray(apply_update)},
-        )
+        return self._jit_train_step_fn_no_hook(state, batch, {})
 
 
 def _resolve_local_model_snapshot(model_path: str, revision: str | None) -> str:
@@ -377,13 +366,11 @@ def _regular_grpo_loss(
     rollout_log_probs: hax.NamedArray,
     advantages: hax.NamedArray,
     loss_mask: hax.NamedArray,
-    row_indices: hax.NamedArray,
     *,
     key,
     temperature: float,
     clip_low: float,
     clip_high: float,
-    full_batch_size: int,
     offpolicy_mask_enabled: bool,
     offpolicy_mask_low: float,
     offpolicy_mask_high: float,
@@ -423,23 +410,8 @@ def _regular_grpo_loss(
             reduction=ReductionType.MEAN,
         )
 
-    FullBatch = Axis("batch", full_batch_size)
-    Prediction = Axis("prediction", log_probs.shape[1])
-    full_batch_log_probs = jnp.zeros((full_batch_size, log_probs.shape[1]), dtype=log_probs.dtype)
-    full_batch_log_probs = full_batch_log_probs.at[row_indices.array].set(
-        log_probs,
-        indices_are_sorted=True,
-        unique_indices=True,
-        out_sharding=jax.sharding.PartitionSpec(None, None),
-    )
     return policy_loss, {
         "policy_loss": policy_loss,
-        # Each microbatch writes disjoint global rows. SUM reconstructs the
-        # complete differentiated-forward score matrix across accumulation.
-        "current_log_probs": Metric.from_value(
-            hax.named(full_batch_log_probs, (FullBatch, Prediction)),
-            ReductionType.SUM,
-        ),
         "preupdate_logprob_mean_abs_diff": selected_mean(objective["preupdate_deviation"]),
         "preupdate_logprob_max_abs_diff": Metric.from_value(
             jnp.max(jnp.where(selected, objective["preupdate_deviation"], 0.0)),
@@ -616,6 +588,7 @@ class LevanterSnowballLearner:
         self._trainer: Trainer | None = None
         self._trainer_state = None
         self._trainer_config: TrainerConfig | None = None
+        self._score_fn = None
         self._trainer_entered = False
         self._converter: HFCheckpointConverter | None = None
         self._inference_client: InferenceEngineClient | None = None
@@ -790,7 +763,6 @@ class LevanterSnowballLearner:
             temperature=config.logprob_temperature,
             clip_low=config.clip_low,
             clip_high=config.clip_high,
-            full_batch_size=self.runtime.train_batch_size,
             offpolicy_mask_enabled=config.offpolicy_mask_enabled,
             offpolicy_mask_low=config.offpolicy_mask_low,
             offpolicy_mask_high=config.offpolicy_mask_high,
@@ -813,6 +785,13 @@ class LevanterSnowballLearner:
         self._trainer_config = trainer_config
         self._trainer = trainer
         self._trainer_state = state
+        # Old-policy scores are an independent pre-update snapshot. Stream one
+        # forward microbatch per data-parallel rank instead of differentiating
+        # and constructing a provisional Adam result merely to obtain logits.
+        self._score_fn = hax.named_jit(
+            _all_next_token_log_probs,
+            axis_resources=trainer.compute_axis_mapping,
+        )
 
     def compute_log_probs(self, batch: LearnerBatch) -> LogProbResult:
         self._require_ready()
@@ -825,36 +804,35 @@ class LevanterSnowballLearner:
         )
 
     def _score_prepared(self, prepared: _PreparedBatch) -> np.ndarray:
-        batch_size, prediction_length = prepared.tokens.shape[0], prepared.tokens.shape[1] - 1
+        assert self._score_fn is not None
+        batch_size, sequence_length = prepared.tokens.shape
         if batch_size != self.runtime.train_batch_size:
             raise ValueError(
                 f"scoring batch size {batch_size} must equal the configured train batch size "
                 f"{self.runtime.train_batch_size}"
             )
-        zeros = np.zeros((batch_size, prediction_length), dtype=np.float32)
-        training_batch = self._prepare_training_arrays(prepared, zeros, zeros, zeros, zeros)
+        per_microbatch = self.runtime.training_gpus * self.runtime.micro_forward_batch_size_per_gpu
+        if batch_size % per_microbatch:
+            raise ValueError(f"batch size {batch_size} is not divisible by forward microbatch {per_microbatch}")
         try:
-            # Scoring and updating intentionally call the same donated JIT with
-            # the same input and output structure. The dynamic flag discards the
-            # provisional optimizer result while preserving the exact
-            # differentiated-forward scores used by the following real update.
             # FullyAsyncRayPPOTrainer runs learner scoring in ``asyncio.to_thread``.
             # JAX's mesh context is thread-local, so the context entered while
             # constructing the learner is not inherited by that worker thread.
             with self._trainer_config.use_device_mesh():
-                info = self._trainer.train_step_with_metrics(
-                    self._trainer_state,
-                    *training_batch,
-                    apply_update=False,
-                )
-            self._trainer_state = info.new_state
-            jax.block_until_ready(info)
-            result = info.loss_metrics["train/current_log_probs"]
-            if not result.is_fully_addressable:
-                result = multihost_utils.process_allgather(result, tiled=True)
-            return np.asarray(jax.device_get(result), dtype=np.float32)
+                compute_model = self._trainer.mp.cast_to_compute(self._trainer_state.model)
+                outputs = []
+                for start in range(0, batch_size, per_microbatch):
+                    values = prepared.tokens[start : start + per_microbatch]
+                    Batch = Axis("batch", per_microbatch)
+                    Pos = Axis("position", sequence_length)
+                    tokens = hax.named(jnp.asarray(values, dtype=jnp.int32), (Batch, Pos))
+                    result = self._score_fn(compute_model, tokens, self._learner_config.logprob_temperature)
+                    jax.block_until_ready(result)
+                    if not result.is_fully_addressable:
+                        result = multihost_utils.process_allgather(result, tiled=True)
+                    outputs.append(np.asarray(jax.device_get(result), dtype=np.float32))
+            return np.concatenate(outputs, axis=0)
         except Exception:
-            # The donated state may no longer be reusable if execution failed.
             self._lifecycle = LearnerLifecycle.FAILED
             raise
 
@@ -874,9 +852,8 @@ class LevanterSnowballLearner:
         rollout_log_probs = hax.named(jnp.asarray(dense_rollout), (Batch, Prediction))
         advantages = hax.named(jnp.asarray(dense_advantages), (Batch, Prediction))
         loss_mask = hax.named(jnp.asarray(dense_loss_mask), (Batch, Prediction))
-        row_indices = hax.named(jnp.arange(Batch.size, dtype=jnp.int32), (Batch,))
         return hax.shard(
-            (tokens, old_log_probs, rollout_log_probs, advantages, loss_mask, row_indices),
+            (tokens, old_log_probs, rollout_log_probs, advantages, loss_mask),
             self._trainer.compute_axis_mapping,
             mesh=self._trainer_config.device_mesh,
         )
@@ -931,7 +908,6 @@ class LevanterSnowballLearner:
                 info = self._trainer.train_step_with_metrics(
                     self._trainer_state,
                     *training_batch,
-                    apply_update=True,
                 )
             self._trainer_state = info.new_state
             jax.block_until_ready(info)
