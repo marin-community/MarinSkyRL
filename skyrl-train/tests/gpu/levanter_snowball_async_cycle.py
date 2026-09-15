@@ -76,8 +76,7 @@ class _AsyncTrajectoryRunner(TrajectoryRunner):
                     "temperature": 1.0,
                     "ignore_eos": True,
                     "logprobs": 1,
-                    "seed": 1000 + 10 * int(trajectory_id.instance_id.rpartition("-")[2])
-                    + trajectory_id.repetition_id,
+                    "seed": 1000 + 10 * int(trajectory_id.instance_id.rpartition("-")[2]) + trajectory_id.repetition_id,
                 }
             )
             result = await self.client.generate(
@@ -200,9 +199,7 @@ async def _final_generation(client, cfg):
         "max_tokens": 4,
         "logprobs": 1,
     }
-    return await client.generate(
-        InferenceEngineInput(prompt_token_ids=[[3, 17, 29, 5]], sampling_params=sampling)
-    )
+    return await client.generate(InferenceEngineInput(prompt_token_ids=[[3, 17, 29, 5]], sampling_params=sampling))
 
 
 @ray.remote(num_gpus=LEARNER_GPUS, num_cpus=4, max_calls=1, max_retries=0)
@@ -235,10 +232,7 @@ def _run_async_gate(model_path: str, run_path: str) -> dict[str, object]:
         assert len(trainer.publication_intervals) == 6
         assert len(runner.rollouts) == PROMPT_GROUPS
         assert all(
-            math.isfinite(value)
-            for rollout in runner.rollouts
-            for row in rollout["rollout_logprobs"]
-            for value in row
+            math.isfinite(value) for rollout in runner.rollouts for row in rollout["rollout_logprobs"] for value in row
         )
         assert all(math.isfinite(update["final_loss"]) for update in trainer.updates)
         stale_updates = [

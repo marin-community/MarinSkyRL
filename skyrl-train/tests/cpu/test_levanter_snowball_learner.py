@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
 import os
@@ -425,6 +426,27 @@ def test_scoring_uses_the_training_step_without_mutating_state(tmp_path):
     assert update.metrics["ppo_ratio_mean"] == 1.0
     assert update.metrics["ppo_ratio_max"] == 1.0
     assert update.metrics["ppo_clip_ratio"] == 0.0
+    learner.close()
+
+
+def test_scoring_and_update_reenter_mesh_in_async_worker_thread(tmp_path):
+    learner = _make_learner(tmp_path / "async-thread-logs")
+    batch = _batch()
+    advantages = np.asarray([[1.0, -0.5, 0.0], [0.25, -1.0, 0.5]], dtype=np.float32)
+
+    # FullyAsyncRayPPOTrainer calls both methods through asyncio.to_thread.
+    # The explicit Levanter/JAX mesh must therefore be entered by the method,
+    # rather than inherited from the thread that initialized the learner.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        old_log_probs = executor.submit(learner.compute_log_probs, batch).result().policy_log_probs
+        update = executor.submit(
+            learner.update,
+            UpdateRequest(batch, advantages, old_log_probs, 0, None, 0, None),
+        ).result()
+
+    assert update.status.value == "succeeded"
+    assert np.isfinite(update.metrics["final_loss"])
+    assert update.metrics["preupdate_logprob_max_abs_diff"] == 0.0
     learner.close()
 
 

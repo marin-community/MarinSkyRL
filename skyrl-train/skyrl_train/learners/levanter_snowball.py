@@ -838,11 +838,15 @@ class LevanterSnowballLearner:
             # the same input and output structure. The dynamic flag discards the
             # provisional optimizer result while preserving the exact
             # differentiated-forward scores used by the following real update.
-            info = self._trainer.train_step_with_metrics(
-                self._trainer_state,
-                *training_batch,
-                apply_update=False,
-            )
+            # FullyAsyncRayPPOTrainer runs learner scoring in ``asyncio.to_thread``.
+            # JAX's mesh context is thread-local, so the context entered while
+            # constructing the learner is not inherited by that worker thread.
+            with self._trainer_config.use_device_mesh():
+                info = self._trainer.train_step_with_metrics(
+                    self._trainer_state,
+                    *training_batch,
+                    apply_update=False,
+                )
             self._trainer_state = info.new_state
             jax.block_until_ready(info)
             result = info.loss_metrics["train/current_log_probs"]
@@ -920,11 +924,15 @@ class LevanterSnowballLearner:
             before_probe = _parameter_probe(self._trainer_state.model)
             before_biases = _router_bias_host_copy(self._trainer_state.model)
             update_start = time.perf_counter()
-            info = self._trainer.train_step_with_metrics(
-                self._trainer_state,
-                *training_batch,
-                apply_update=True,
-            )
+            # Updates also run through ``asyncio.to_thread`` in the fully async
+            # trainer. Re-enter the explicit mesh on the calling thread before
+            # tracing or executing any PartitionSpec-based model operation.
+            with self._trainer_config.use_device_mesh():
+                info = self._trainer.train_step_with_metrics(
+                    self._trainer_state,
+                    *training_batch,
+                    apply_update=True,
+                )
             self._trainer_state = info.new_state
             jax.block_until_ready(info)
             update_seconds = time.perf_counter() - update_start
