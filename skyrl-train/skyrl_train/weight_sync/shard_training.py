@@ -29,7 +29,7 @@ class ShardTrainingPublication:
             raise ValueError("generator.shard_sync.inline_diagnostic_updates must be a nonnegative integer")
         self.before_observation = None
         self.pending_result = None
-        self.deferred_rows = None
+        self.deferred_payloads = None
         self.geometry = ShardGeometry(
             config.policy_ranks,
             config.receiver_replicas,
@@ -59,20 +59,22 @@ class ShardTrainingPublication:
         self.measurement_marker = None
 
     def capture(self, row):
-        if self.deferred_rows is not None:
-            # The interval result gains finish/timing fields later, so what is kept here must
-            # not alias the live structure. Serializing now freezes it to bytes -- a stronger
-            # snapshot than a deep copy, and a far cheaper one inside the pause: the rank rows
-            # make this receipt megabytes, where deepcopy allocates every object again and
-            # json.dumps writes a buffer. The write after resume then reuses these exact bytes
-            # instead of serializing a second time.
-            self.deferred_rows.append(serialize_receipt(row))
+        if self.deferred_payloads is not None:
+            # The interval result gains finish and timing fields after this call, so what is
+            # kept must not alias it. Serializing now freezes it to bytes -- a stronger
+            # snapshot than a deep copy, and a cheaper one inside the pause; the write after
+            # resume reuses these exact bytes instead of serializing a second time.
+            self.deferred_payloads.append(serialize_receipt(row))
             return None
         self.receipt_index += 1
         return persist_readback(self.output_uri, f"shard-driver-{self.preparation_id}-{self.receipt_index}", row)
 
     def capture_payload(self, payload):
-        """Write a receipt frozen earlier by capture()."""
+        """Write a receipt that capture() froze to bytes earlier.
+
+        Every writer of a deferred payload belongs here: capture() would serialize an
+        already-serialized payload.
+        """
         self.receipt_index += 1
         return persist_payload(self.output_uri, f"shard-driver-{self.preparation_id}-{self.receipt_index}", payload)
 
@@ -104,15 +106,15 @@ class ShardTrainingPublication:
             raise ValueError("Shard durable completion requires resumed inference")
         if self.pending_result is None or self.pending_result[0] != publication_id:
             raise ValueError("Shard diagnostics lack a completed matching install")
-        _, result, rows = self.pending_result
+        _, result, payloads = self.pending_result
         started = time.perf_counter()
         result["physical_after"] = await self.observe(publication_id, "after-resume")
         result["outside_pause_seconds"]["observation_after"] = time.perf_counter() - started
         started = time.perf_counter()
         # Await I/O, so failure is visible and shutdown cannot lose writes. The
         # thread lets the driver's generation coroutines progress after resume.
-        for row in rows:
-            await settled(asyncio.to_thread(self.capture_payload, row))
+        for payload in payloads:
+            await settled(asyncio.to_thread(self.capture_payload, payload))
         result["outside_pause_seconds"]["interval_capture"] = time.perf_counter() - started
         started = time.perf_counter()
         result["durable_receipt"] = (
@@ -182,7 +184,7 @@ class ShardTrainingPublication:
         if outside_pause:
             if self.before_observation is None or self.before_observation[0] != publication_id:
                 raise ValueError("Shard before diagnostics are missing for this install")
-            self.deferred_rows = []
+            self.deferred_payloads = []
         try:
             if self.context is None:
                 await self.prepare()
@@ -212,9 +214,9 @@ class ShardTrainingPublication:
             if outside_pause:
                 _, result["physical_before"], seconds = self.before_observation
                 result["outside_pause_seconds"] = {"observation_before": seconds}
-                self.pending_result = (publication_id, result, self.deferred_rows)
+                self.pending_result = (publication_id, result, self.deferred_payloads)
                 self.before_observation = None
-                self.deferred_rows = None
+                self.deferred_payloads = None
                 return result
             capture_started = time.perf_counter()
             result["durable_receipt"] = self.capture(
@@ -225,12 +227,10 @@ class ShardTrainingPublication:
         except BaseException as primary:
             # A failed installation stays paused. Retain the immutable partial
             # evidence before closing; success-path latency rules do not apply.
-            rows, self.deferred_rows = self.deferred_rows, None
-            # These were frozen to bytes by capture(); write them as bytes. Routing them
-            # back through capture() would serialize an already-serialized payload.
-            for row in rows or ():
+            payloads, self.deferred_payloads = self.deferred_payloads, None
+            for payload in payloads or ():
                 try:
-                    self.capture_payload(row)
+                    self.capture_payload(payload)
                 except BaseException as error:
                     primary.add_note(f"Shard partial receipt: {type(error).__name__}: {error}")
             try:
@@ -254,11 +254,10 @@ class ShardTrainingPublication:
     async def close(self):
         try:
             if self.pending_result is not None:
-                publication_id, result, rows = self.pending_result
+                publication_id, result, payloads = self.pending_result
                 self.pending_result = None
-                # Frozen to bytes by capture(); write them as bytes, as after_resume does.
-                for row in rows:
-                    await settled(asyncio.to_thread(self.capture_payload, row))
+                for payload in payloads:
+                    await settled(asyncio.to_thread(self.capture_payload, payload))
                 await settled(
                     asyncio.to_thread(
                         self.capture,

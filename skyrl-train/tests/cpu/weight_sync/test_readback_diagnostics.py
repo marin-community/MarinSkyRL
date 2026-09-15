@@ -478,29 +478,26 @@ def _publication_stub(deferred):
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        deferred_rows=deferred, output_uri="s3://bucket/prefix", preparation_id="prep", receipt_index=0
+        deferred_payloads=deferred, output_uri="s3://bucket/prefix", preparation_id="prep", receipt_index=0
     )
 
 
-def test_deferred_rows_round_trip_as_payloads_including_the_failure_path(monkeypatch):
+def test_a_deferred_payload_round_trips_including_on_the_failure_path(monkeypatch):
     from skyrl_train.weight_sync.shard_training import ShardTrainingPublication
 
     stored, _ = _object_store(monkeypatch)
-    monkeypatch.setattr("skyrl_train.weight_sync.shard_training.persist_payload",
-                        __import__("skyrl_train.weight_sync.readback_diagnostics", fromlist=["x"]).persist_payload)
     stub = _publication_stub([])
     row = {"phase": "installed-before-replay", "result": {"rows": [{"rank": i} for i in range(8)]}}
     assert ShardTrainingPublication.capture(stub, row) is None
-    assert stub.deferred_rows == [serialize_receipt(row)]
+    assert stub.deferred_payloads == [serialize_receipt(row)]
 
-    # The failure path takes the same rows after deferred_rows is cleared. They are bytes,
-    # so they must be written as payloads; routing them back through capture() would try to
-    # serialize an already-serialized payload.
-    rows, stub.deferred_rows = stub.deferred_rows, None
-    written = ShardTrainingPublication.capture_payload(stub, rows[0])
+    # The failure path writes the same payloads after deferred_payloads is cleared, and must
+    # write them as payloads: capture() would serialize an already-serialized payload.
+    payloads, stub.deferred_payloads = stub.deferred_payloads, None
+    written = ShardTrainingPublication.capture_payload(stub, payloads[0])
     assert json.loads(stored[written["uri"]]) == row
     with pytest.raises(TypeError):
-        ShardTrainingPublication.capture(stub, rows[0])
+        ShardTrainingPublication.capture(stub, payloads[0])
 
 
 @pytest.mark.parametrize(

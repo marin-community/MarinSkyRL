@@ -99,7 +99,7 @@ def stat_object(path: str) -> dict:
     filesystem = _get_filesystem(path)
     normalized = filesystem._strip_protocol(path) if is_cloud_path(path) else path
     if path.startswith("s3://"):
-        # refresh: a cached entry from the write would defeat the point of asking.
+        # Refresh: the write cached an entry for this key, and a cached answer proves nothing.
         return dict(call_with_s3_retry(filesystem, filesystem.info, normalized, refresh=True))
     return dict(filesystem.info(normalized))
 

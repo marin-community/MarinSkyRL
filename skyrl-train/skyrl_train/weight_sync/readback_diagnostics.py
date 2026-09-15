@@ -85,80 +85,92 @@ def network_log_readback() -> dict:
     }
 
 
+def _report_verify_fallback(
+    reason: str, uri: str, etag: str, stored_bytes: int | None, payload_bytes: int, digest: str
+) -> None:
+    """Report a fallback at the level its cause deserves.
+
+    A structural cause costs speed: the object carries no payload-MD5 ETag, or its metadata
+    could not be read, so every receipt now pays a full transfer. A content cause is louder --
+    the store reports something other than what was written, and if the full re-read that
+    follows passes anyway, then the ETag is not a payload digest on this store and the cheap
+    path should be disabled rather than retried per object.
+    """
+    if reason in ("etag-absent", "etag-multipart") or reason.startswith("metadata-unavailable"):
+        logger.warning(
+            "Receipt verify fell back to a full read-back (%s) for %s: the cheap digest check is "
+            "unavailable on this object, so every receipt now costs a full transfer. Objects above "
+            "the client's multipart threshold have no payload-MD5 ETag.",
+            reason,
+            uri,
+        )
+    else:
+        logger.error(
+            "Receipt verify fell back to a full read-back (%s) for %s: the store reports %s bytes "
+            "and ETag %r against a written %s bytes and MD5 %s. The full re-read below is "
+            "authoritative; if it passes, this store's ETag is not a payload digest and the cheap "
+            "path should be disabled rather than retried per object.",
+            reason,
+            uri,
+            stored_bytes,
+            etag or None,
+            payload_bytes,
+            digest,
+        )
+
+
 def _verify_written_object(uri: str, payload: bytes) -> dict:
     """Establish that the stored object is exactly the payload, preferring not to move it.
 
     A single-part S3 object's ETag is the MD5 of exactly the bytes stored, so comparing it
-    against a locally computed MD5 proves what re-reading the object proves, for the cost of
-    a HEAD. These receipts are megabytes -- 6.13 MB median at P32/I8 -- and at that size the
+    against a locally computed MD5 proves what re-reading the object proves, for the cost of a
+    HEAD. These receipts are megabytes -- 6.13 MB median at P32/I8 -- and at that size the
     re-read costs about three times the write, on the trainer's critical path after resume.
 
-    The cheap path can only accelerate, never weaken, the claim: every condition that makes
-    the ETag unusable falls through to the full re-read, which remains the authority, and a
-    sampled fraction is re-read in full regardless.
-
-    Each fallback is classified and reported, because they do not mean the same thing. A
-    non-S3 store and the sampling schedule are by design and say nothing. A multipart or
-    absent ETag means the optimisation is off for a structural reason worth knowing about at
-    this scale. A size or digest disagreement means the store holds something other than what
-    was written, which the full re-read then adjudicates -- and if the re-read passes, the
-    ETag itself is untrustworthy on this store, which is a louder signal than a slow write.
+    Every condition that makes the ETag unusable falls through to the full re-read, which
+    remains the authority, and a sampled fraction is re-read in full regardless. The cheap path
+    can therefore only accelerate the claim, never weaken it. Each fallback records a
+    machine-readable reason and, where it is not by design, is reported by level.
     """
-    sampled = next(_RECEIPTS_WRITTEN) % FULL_READBACK_EVERY == 0
     detail: dict = {}
     reason = None
-    digest = None
 
-    if sampled:
-        verify = "full-readback-sampled"          # by design, audits the cheap path
+    if next(_RECEIPTS_WRITTEN) % FULL_READBACK_EVERY == 0:
+        # By design: the sample audits the cheap verify against the read-back it replaces.
+        verify = "full-readback-sampled"
     elif not uri.startswith("s3://"):
-        verify, reason = "full-readback", "non-s3-store"   # by design, no ETag contract
+        # By design: no store outside S3 offers an ETag that is a payload digest.
+        verify, reason = "full-readback", "non-s3-store"
+        detail = {"fallback_reason": reason}
     else:
         digest = hashlib.md5(payload, usedforsecurity=False).hexdigest()
         try:
-            detail = stat_object(uri)
+            metadata = stat_object(uri)
         except Exception as error:  # metadata is an optimisation; never fail the write on it
-            detail = {}
+            metadata = {}
             reason = f"metadata-unavailable:{type(error).__name__}"
-        etag = str(detail.get("ETag", "")).strip('"')
-        stored = detail.get("size")
-        if reason is not None:
-            pass
-        elif not etag:
-            reason = "etag-absent"
-        elif "-" in etag:
-            reason = "etag-multipart"
-        elif stored != len(payload):
-            reason = "stored-size-differs"
-        elif etag != digest:
-            reason = "etag-digest-differs"
+        etag = str(metadata.get("ETag", "")).strip('"')
+        stored_bytes = metadata.get("size")
         if reason is None:
-            return {
-                "verify": "etag-md5",
-                "etag": etag,
-                "md5": digest,
-                "full_readback_every": FULL_READBACK_EVERY,
-                "verify_scope": "stored-object digest equals written payload; bytes not transferred",
-            }
+            if not etag:
+                reason = "etag-absent"
+            elif "-" in etag:
+                reason = "etag-multipart"
+            elif stored_bytes != len(payload):
+                reason = "stored-size-differs"
+            elif etag != digest:
+                reason = "etag-digest-differs"
+            else:
+                return {
+                    "verify": "etag-md5",
+                    "etag": etag,
+                    "md5": digest,
+                    "full_readback_every": FULL_READBACK_EVERY,
+                    "verify_scope": "stored-object digest equals written payload; bytes not transferred",
+                }
         verify = "full-readback-after-etag-unusable"
-        detail = {"etag": etag or None, "stored_bytes": stored, "md5": digest, "fallback_reason": reason}
-        # Structural reasons cost speed and are worth surfacing once they appear at scale;
-        # content reasons say the store disagrees about the bytes and are louder.
-        if reason in ("etag-absent", "etag-multipart") or reason.startswith("metadata-unavailable"):
-            logger.warning(
-                "Receipt verify fell back to a full read-back (%s) for %s: the cheap digest check is "
-                "unavailable on this object, so every receipt now costs a full transfer. "
-                "Objects above the client's multipart threshold have no payload-MD5 ETag.",
-                reason, uri,
-            )
-        else:
-            logger.error(
-                "Receipt verify fell back to a full read-back (%s) for %s: the store reports "
-                "%s bytes and ETag %r against a written %s bytes and MD5 %s. The full re-read "
-                "below is authoritative; if it passes, this store's ETag is not a payload digest "
-                "and the cheap path should be disabled rather than retried per object.",
-                reason, uri, stored, etag or None, len(payload), digest,
-            )
+        detail = {"etag": etag or None, "stored_bytes": stored_bytes, "md5": digest, "fallback_reason": reason}
+        _report_verify_fallback(reason, uri, etag, stored_bytes, len(payload), digest)
 
     if read_bytes(uri) != payload:
         raise ValueError("Durable native readback differs from the original receipt")
@@ -166,7 +178,6 @@ def _verify_written_object(uri: str, payload: bytes) -> dict:
         "verify": verify,
         "full_readback_every": FULL_READBACK_EVERY,
         "verify_scope": "stored object re-read in full and compared byte for byte",
-        **({"fallback_reason": reason} if reason and not detail else {}),
         **detail,
     }
 
