@@ -705,6 +705,7 @@ class RayPPOTrainer:
         logger.warning("Skipping the initial policy-to-vLLM sync for the Snowball corruption ablation")
         self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
         await self.inference_engine_client.wake_up(tags=["weights"])
+        self._validate_grug_weight_sync_if_requested()
         self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
         await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
