@@ -1,6 +1,6 @@
 from peft import LoraConfig, TaskType
 
-from skyrl_train.workers.fsdp.fsdp_worker import peft_config_payload
+from skyrl_train.distributed.fsdp_strategy import peft_config_payload
 
 
 def test_peft_sync_serializes_loaded_string_task_type() -> None:

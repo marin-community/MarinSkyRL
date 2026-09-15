@@ -2,6 +2,7 @@ import os
 import copy
 import random
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
@@ -53,6 +54,16 @@ from skyrl_train import hf_model_io
 
 _DEFAULT_OPTIMIZER_NAME = "AdamW"
 _MUONH_OPTIMIZER_NAME = "MuonH"
+
+
+def peft_config_payload(peft_config) -> dict[str, object]:
+    """Return PEFT adapter metadata in its JSON representation."""
+    payload = asdict(peft_config)
+    for key in ("task_type", "peft_type"):
+        value = payload[key]
+        payload[key] = value.value if hasattr(value, "value") else value
+    payload["target_modules"] = sorted(payload["target_modules"])
+    return payload
 
 
 def snapshot_shared_state_dict_tensors(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -707,7 +718,6 @@ class FSDPStrategy(DistributedStrategy):
 
     def _save_lora_adapters(self, model, ckpt_dir):
         """Save LoRA adapters in HuggingFace PEFT format"""
-        from dataclasses import asdict
         from safetensors.torch import save_file
         from skyrl_train.distributed.fsdp_utils import layered_summon_lora_params
 
@@ -716,11 +726,9 @@ class FSDPStrategy(DistributedStrategy):
 
         if self.is_rank_0():
             io.makedirs(lora_save_path, exist_ok=True)
-            peft_config = asdict(model.peft_config.get("default", {}))
-            if peft_config:
-                peft_config["task_type"] = peft_config["task_type"].value
-                peft_config["peft_type"] = peft_config["peft_type"].value
-                peft_config["target_modules"] = list(peft_config["target_modules"])
+            config = model.peft_config.get("default")
+            if config is not None:
+                peft_config = peft_config_payload(config)
 
         lora_params = layered_summon_lora_params(model)
 
