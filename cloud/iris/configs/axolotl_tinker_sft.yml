@@ -49,13 +49,10 @@ lora_target_modules:
   - linear_attn.out_proj
   - lm_head
 
-sequence_len: 16384
 sample_packing: false
 pad_to_sequence_len: false
 micro_batch_size: 1
-gradient_accumulation_steps: 16
 num_epochs: 1
-max_steps: 3000
 
 optimizer: adamw_torch_fused
 learning_rate: 0.001

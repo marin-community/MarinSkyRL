@@ -46,7 +46,6 @@ def test_full_plan_preserves_published_training_shape_and_immutable_inputs(launc
     assert plan.model_revision == "68c46c4b3498877f3ef123c856ecfde50c39f404"
     assert plan.dataset_revision == "61bcf9d4eb38b30295efc2021227a63cc5bb34c8"
     assert plan.axolotl_version == "0.19.0"
-    assert plan.base_config_sha256 == launcher.BASE_CONFIG_SHA256
     assert plan.required_cost_acknowledgement_usd == "10000"
     assert plan.iris_command[-2:] == ("--acknowledge-cost-usd", "10000")
 
@@ -172,13 +171,29 @@ def test_peft_completion_contract_records_content_digests(tmp_path: Path) -> Non
     ]
 
 
-def test_checked_in_yaml_has_no_unresolved_training_dimensions() -> None:
+def test_checked_in_yaml_leaves_stage_dimensions_to_the_resolver() -> None:
     config = yaml.safe_load(launcher.DEFAULT_CONFIG.read_text())
 
     assert config["base_model"] == launcher.MODEL_REPOSITORY
     assert config["revision_of_model"] == launcher.MODEL_REVISION
-    assert config["max_steps"] == 3_000
-    assert config["sequence_len"] == 16_384
+    assert "max_steps" not in config
+    assert "sequence_len" not in config
+    assert "gradient_accumulation_steps" not in config
+
+
+def test_plan_rejects_a_modified_base_recipe(launcher_source: Path, tmp_path: Path) -> None:
+    modified = tmp_path / "recipe.yml"
+    modified.write_text(launcher.DEFAULT_CONFIG.read_text() + "\n# mutation\n")
+
+    with pytest.raises(ValueError, match="does not match the reviewed recipe"):
+        launcher.build_plan(
+            launcher.Stage.PLUMBING,
+            run_id="repro-20260915",
+            cluster_config=Path("/tmp/iris.yaml"),
+            output_uri=OUTPUT_URI,
+            task_image=TASK_IMAGE,
+            config_path=modified,
+        )
 
 
 def test_control_image_pins_the_reviewed_axolotl_amd64_manifest() -> None:

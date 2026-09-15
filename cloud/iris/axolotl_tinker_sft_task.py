@@ -38,8 +38,8 @@ DATASET_NAME = "openthoughts3-tinker-order.jsonl"
 SYNC_INTERVAL = 300
 
 
-def validate_runtime() -> dict[str, object]:
-    """Validate the reviewed runtime and eight-GPU topology before downloading data."""
+def validate_and_inventory_runtime() -> dict[str, object]:
+    """Validate the reviewed runtime and return its provenance inventory."""
     try:
         version = importlib.metadata.version("axolotl")
     except importlib.metadata.PackageNotFoundError as error:
@@ -154,28 +154,21 @@ def peft_artifacts(output_dir: Path) -> dict[str, object]:
     }
 
 
-def run_stage(
-    plan: LaunchPlan,
-    *,
-    base_config: Path,
-    work_root: Path,
-    acknowledgement: Decimal | None,
-    task_image: str,
-    launcher_commit: str,
-    sync_interval: int = SYNC_INTERVAL,
-) -> int:
-    """Execute a bounded stage, preserving a deterministic provenance manifest."""
-    validate_cost_acknowledgement(plan, acknowledgement)
-    if task_image != plan.task_image or launcher_commit != plan.launcher_commit:
-        raise ValueError("Worker provenance does not match the reviewed launch plan")
-    reject_existing_output(plan.output_uri, MANIFEST_NAME)
+def write_manifest(path: Path, manifest: dict[str, object]) -> None:
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def prepare_stage(
+    plan: LaunchPlan, *, base_config: Path, work_root: Path
+) -> tuple[Path, dict[str, Any], tuple[str, ...], dict[str, object]]:
+    """Materialize immutable inputs and return the initial training manifest."""
     if work_root.exists():
         raise ValueError(f"Work root already exists: {work_root}")
     work_root.mkdir(parents=True)
     output_root = work_root / "output"
     output_root.mkdir()
 
-    runtime = validate_runtime()
+    runtime = validate_and_inventory_runtime()
     revisions = validate_huggingface_revisions()
     definition = STAGES[plan.stage]
     dataset_path = work_root / DATASET_NAME
@@ -202,12 +195,33 @@ def run_stage(
         },
         "resolved_config_sha256": file_sha256(resolved_path),
         "command": command,
-        "task_image": task_image,
-        "launcher_commit": launcher_commit,
-        "cost_acknowledgement_usd": str(acknowledgement) if acknowledgement is not None else None,
     }
+    return output_root, resolved, command, manifest
+
+
+def run_stage(
+    plan: LaunchPlan,
+    *,
+    base_config: Path,
+    work_root: Path,
+    acknowledgement: Decimal | None,
+    task_image: str,
+    launcher_commit: str,
+    sync_interval: int = SYNC_INTERVAL,
+) -> int:
+    """Execute a bounded stage, preserving a deterministic provenance manifest."""
+    validate_cost_acknowledgement(plan, acknowledgement)
+    if task_image != plan.task_image or launcher_commit != plan.launcher_commit:
+        raise ValueError("Worker provenance does not match the reviewed launch plan")
+    reject_existing_output(plan.output_uri, MANIFEST_NAME)
+    output_root, resolved, command, manifest = prepare_stage(plan, base_config=base_config, work_root=work_root)
+    manifest.update(
+        task_image=task_image,
+        launcher_commit=launcher_commit,
+        cost_acknowledgement_usd=str(acknowledgement) if acknowledgement is not None else None,
+    )
     manifest_path = output_root / MANIFEST_NAME
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_manifest(manifest_path, manifest)
     sync_tree(output_root, plan.output_uri)
 
     stop = threading.Event()
@@ -226,11 +240,11 @@ def run_stage(
             manifest["status"] = "complete"
         else:
             manifest["status"] = "failed"
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_manifest(manifest_path, manifest)
     except Exception as error:
         manifest["status"] = "failed"
         manifest["failure"] = str(error)
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_manifest(manifest_path, manifest)
         raise
     finally:
         stop.set()
@@ -248,7 +262,6 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-image", required=True)
     parser.add_argument("--launcher-commit", required=True)
     parser.add_argument("--acknowledge-cost-usd", type=Decimal)
-    parser.add_argument("--cluster-config", type=Path, default=Path("/dev/null"))
     parser.add_argument("--work-root", type=Path, default=Path("/tmp/axolotl-tinker-sft"))
     parser.add_argument("--sync-interval", type=int, default=SYNC_INTERVAL)
     return parser
@@ -260,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     plan = build_plan(
         Stage(args.stage),
         run_id=args.run_id,
-        cluster_config=args.cluster_config,
+        cluster_config=None,
         output_uri=args.output_uri,
         task_image=args.task_image,
         config_path=args.config,

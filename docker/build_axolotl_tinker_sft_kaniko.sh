@@ -4,8 +4,6 @@ set +x
 set -euo pipefail
 
 : "${GITSHA:?}"
-REGISTRY_USER="${REGISTRY_USER:-${DOCKER_USER_ID:-}}"
-REGISTRY_TOKEN="${REGISTRY_TOKEN:-${GHCR_TOKEN:-}}"
 : "${REGISTRY_USER:?}"
 : "${REGISTRY_TOKEN:?}"
 

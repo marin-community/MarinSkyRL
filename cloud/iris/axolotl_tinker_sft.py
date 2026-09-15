@@ -19,7 +19,7 @@ from cloud.iris.runtime_bundle import resolve_launcher_source
 
 DEFAULT_CONFIG = Path(__file__).with_name("configs") / "axolotl_tinker_sft.yml"
 CONFIG_RELATIVE_PATH = Path("cloud/iris/configs/axolotl_tinker_sft.yml")
-BASE_CONFIG_SHA256 = "bdb6d038cbdc37947c32cceb9855f6828f97a8dec237cf348222c794e9af8290"
+BASE_CONFIG_SHA256 = "4f7987b7dfe287eb5d972540274ca9bd61001d77f1a9eefe4ff8384a91f2df39"
 TASK_MODULE = "cloud.iris.axolotl_tinker_sft_task"
 AXOLOTL_VERSION = "0.19.0"
 MODEL_REPOSITORY = "Qwen/Qwen3.5-9B-Base"
@@ -135,7 +135,7 @@ def build_plan(
     stage: Stage,
     *,
     run_id: str,
-    cluster_config: Path,
+    cluster_config: Path | None,
     output_uri: str,
     task_image: str,
     config_path: Path = DEFAULT_CONFIG,
@@ -162,54 +162,56 @@ def build_plan(
     if definition.global_batch_size % WORLD_SIZE:
         raise ValueError("global batch size must be divisible by the eight-GPU world size")
     acknowledgement = definition.cost_acknowledgement
-    command = (
-        "uv",
-        "run",
-        "--frozen",
-        "iris",
-        "--config",
-        str(cluster_config.resolve()),
-        "job",
-        "run",
-        "--enable-extra-resources",
-        "--gpu",
-        GPU_SLICE,
-        "--cpu",
-        "64",
-        "--memory",
-        "512GB",
-        "--disk",
-        "750GB",
-        "--priority",
-        "batch" if acknowledgement is not None else "interactive",
-        "--no-preemptible",
-        "--max-retries",
-        "0",
-        "--task-image",
-        task_image,
-        "--no-sync",
-        "--no-wait",
-        "--job-name",
-        f"axolotl-tinker-sft-{stage.value.replace('_', '-')}-{run_id}",
-        "--",
-        "python",
-        "-m",
-        TASK_MODULE,
-        "--config",
-        relative_config.as_posix(),
-        "--stage",
-        stage.value,
-        "--run-id",
-        run_id,
-        "--output-uri",
-        output_uri.rstrip("/"),
-        "--task-image",
-        task_image,
-        "--launcher-commit",
-        source.commit,
-    )
-    if acknowledgement is not None:
-        command += ("--acknowledge-cost-usd", str(acknowledgement))
+    command: tuple[str, ...] = ()
+    if cluster_config is not None:
+        command = (
+            "uv",
+            "run",
+            "--frozen",
+            "iris",
+            "--config",
+            str(cluster_config.resolve()),
+            "job",
+            "run",
+            "--enable-extra-resources",
+            "--gpu",
+            GPU_SLICE,
+            "--cpu",
+            "64",
+            "--memory",
+            "512GB",
+            "--disk",
+            "750GB",
+            "--priority",
+            "batch" if acknowledgement is not None else "interactive",
+            "--no-preemptible",
+            "--max-retries",
+            "0",
+            "--task-image",
+            task_image,
+            "--no-sync",
+            "--no-wait",
+            "--job-name",
+            f"axolotl-tinker-sft-{stage.value.replace('_', '-')}-{run_id}",
+            "--",
+            "python",
+            "-m",
+            TASK_MODULE,
+            "--config",
+            relative_config.as_posix(),
+            "--stage",
+            stage.value,
+            "--run-id",
+            run_id,
+            "--output-uri",
+            output_uri.rstrip("/"),
+            "--task-image",
+            task_image,
+            "--launcher-commit",
+            source.commit,
+        )
+        if acknowledgement is not None:
+            command += ("--acknowledge-cost-usd", str(acknowledgement))
     return LaunchPlan(
         stage=stage,
         steps=definition.steps,
