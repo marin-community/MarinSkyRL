@@ -27,6 +27,7 @@ from open_mopd_versions import versions_match
 
 CONTROL_MANIFEST_NAME = "control-manifest.json"
 HYDRA_REWARD_MODE_PATCH = "scripts/local/mt_opd.sh: declare the release-only rollout.reward_mode key"
+RAW_PROMPT_RETENTION_PATCH = "verl/trainer/ppo/ray_trainer.py: retain raw_prompt for teacher retokenization"
 
 
 @dataclass(frozen=True)
@@ -87,16 +88,29 @@ def checkout_source(config: FidelityConfig, destination: Path) -> Path:
     return source
 
 
+def replace_source_contract(path: Path, old: str, new: str, description: str) -> None:
+    text = path.read_text()
+    if text.count(old) != 1 or new in text:
+        raise ValueError(f"Pinned Open-MOPD source no longer matches the expected {description}")
+    path.write_text(text.replace(old, new))
+
+
 def patch_source_compatibility(source: Path) -> tuple[str, ...]:
     """Apply narrow, fail-closed compatibility fixes to the pinned authors' checkout."""
-    launcher = source / "scripts" / "local" / "mt_opd.sh"
-    text = launcher.read_text()
-    old = '"actor_rollout_ref.rollout.reward_mode=mt_opd"'
-    new = '"+actor_rollout_ref.rollout.reward_mode=mt_opd"'
-    if text.count(old) != 1 or new in text:
-        raise ValueError("Pinned Open-MOPD launcher no longer matches the expected reward_mode assignment")
-    launcher.write_text(text.replace(old, new))
-    return (HYDRA_REWARD_MODE_PATCH,)
+    replace_source_contract(
+        source / "scripts" / "local" / "mt_opd.sh",
+        '"actor_rollout_ref.rollout.reward_mode=mt_opd"',
+        '"+actor_rollout_ref.rollout.reward_mode=mt_opd"',
+        "reward_mode assignment",
+    )
+    replace_source_contract(
+        source / "training" / "verl" / "verl" / "trainer" / "ppo" / "ray_trainer.py",
+        '{"data_source", "reward_model", "extra_info", "uid", "domain"} & batch.non_tensor_batch.keys()',
+        '{"data_source", "reward_model", "extra_info", "uid", "domain", "raw_prompt"}\n'
+        "            & batch.non_tensor_batch.keys()",
+        "reward-model metadata retention set",
+    )
+    return HYDRA_REWARD_MODE_PATCH, RAW_PROMPT_RETENTION_PATCH
 
 
 def verify_lfs_files(destination: Path, expected_files: tuple[LfsFile, ...]) -> tuple[FileVerification, ...]:
