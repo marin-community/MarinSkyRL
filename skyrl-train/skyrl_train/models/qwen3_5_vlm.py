@@ -41,6 +41,9 @@ This unwrap is the supported policy representation for these checkpoints.
 from loguru import logger
 
 
+QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING = {r"^model\.language_model\.": "model."}
+
+
 def is_qwen3_5_vlm_shell(config) -> bool:
     """True iff ``config`` is a Qwen3.5/3.6 multimodal shell wrapping a text MoE
     tower that we should unwrap for RL.

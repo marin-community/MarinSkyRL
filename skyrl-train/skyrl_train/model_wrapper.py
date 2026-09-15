@@ -132,12 +132,19 @@ def _load_trainable_lora_adapter(
             for name, (configured, stored) in mismatches.items()
         )
         raise ValueError(f"Configured LoRA parameters do not match adapter {adapter_path!r}: {details}")
+    from skyrl_train.models.qwen3_5_vlm import (
+        QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING,
+        is_qwen3_5_text_tower,
+    )
+
+    key_mapping = QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING if is_qwen3_5_text_tower(model.config) else None
     return PeftModel.from_pretrained(
         model,
         adapter_path,
         is_trainable=True,
         revision=adapter_revision,
         low_cpu_mem_usage=model.device.type == "meta",
+        key_mapping=key_mapping,
     )
 
 
