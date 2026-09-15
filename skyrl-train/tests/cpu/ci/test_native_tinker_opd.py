@@ -4,6 +4,7 @@ import sys
 
 from hydra import compose, initialize_config_dir
 import pyarrow as pa
+import pytest
 from skyrl_train.utils.utils import validate_cfg
 
 
@@ -79,3 +80,46 @@ def test_native_opd_plumbing_batch_covers_every_policy_rank():
     validate_cfg(config)
 
     assert config.trainer.train_batch_size == config.trainer.placement.policy_num_gpus_per_node == 4
+
+
+def test_qwen35_runtime_patch_enables_embedding_and_lm_head_lora(tmp_path: Path):
+    source_path = tmp_path / "qwen3_5.py"
+    source_path.write_text(
+        """class Qwen3_5ForCausalLMBase(
+    nn.Module,
+    HasInnerState,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+):
+    packed_modules_mapping = {
+        \"qkv_proj\": [
+            \"q_proj\",
+            \"k_proj\",
+            \"v_proj\",
+        ],
+        \"gate_up_proj\": [\"gate_proj\", \"up_proj\"],
+        # GDN fused projections.
+        \"in_proj_qkvz\": [\"in_proj_qkv\", \"in_proj_z\"],
+        \"in_proj_ba\": [\"in_proj_b\", \"in_proj_a\"],
+    }
+"""
+    )
+
+    OPD.patch_qwen35_embedding_lora(source_path)
+
+    patched_source = source_path.read_text()
+    assert '"embed_tokens": "input_embeddings"' in patched_source
+    assert '"lm_head": "output_embeddings"' in patched_source
+
+
+def test_qwen35_runtime_patch_rejects_shared_symlink_source(tmp_path: Path):
+    shared_source = tmp_path / "shared_qwen3_5.py"
+    shared_source.write_text("shared wheel cache")
+    installed_source = tmp_path / "installed_qwen3_5.py"
+    installed_source.symlink_to(shared_source)
+
+    with pytest.raises(RuntimeError, match="UV_LINK_MODE=copy"):
+        OPD.patch_qwen35_embedding_lora(installed_source)
+
+    assert shared_source.read_text() == "shared wheel cache"

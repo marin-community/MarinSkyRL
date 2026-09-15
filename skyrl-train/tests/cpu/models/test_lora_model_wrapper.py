@@ -3,10 +3,12 @@ from pathlib import Path
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
-from peft.utils.save_and_load import get_peft_model_state_dict
+from peft.utils.save_and_load import get_peft_model_state_dict, load_peft_weights
+from safetensors.torch import save_file
 from transformers import GPT2Config, GPT2LMHeadModel
 
 from skyrl_train.model_wrapper import HFModelWrapper
+from skyrl_train.models.qwen3_5_vlm import QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING
 
 
 LORA_RANK = 2
@@ -58,6 +60,20 @@ def test_model_wrapper_loads_trainable_lora_adapter_weights(tmp_path: Path) -> N
     assert actual.keys() == expected.keys()
     assert all(torch.equal(actual[name], expected[name]) for name in expected)
     assert all(parameter.requires_grad for name, parameter in wrapped.model.named_parameters() if "lora_" in name)
+
+
+def test_qwen35_shell_adapter_keys_map_to_the_unwrapped_text_tower(tmp_path: Path) -> None:
+    adapter_path = tmp_path / "adapter"
+    adapter_path.mkdir()
+    shell_key = "base_model.model.model.language_model.layers.0.self_attn.q_proj.lora_A.weight"
+    save_file({shell_key: torch.ones(2, 2)}, adapter_path / "adapter_model.safetensors")
+
+    mapped = load_peft_weights(
+        str(adapter_path),
+        key_mapping=QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING,
+    )
+
+    assert set(mapped) == {"base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"}
 
 
 @pytest.mark.parametrize(

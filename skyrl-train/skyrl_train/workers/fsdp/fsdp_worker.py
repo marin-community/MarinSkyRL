@@ -2,7 +2,7 @@ import asyncio
 import os
 import socket
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 from loguru import logger
 from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
@@ -25,7 +25,7 @@ from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
     validate_grug_expert_parallel_options,
 )
-from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
+from skyrl_train.distributed.fsdp_strategy import FSDPStrategy, peft_config_payload
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
 from skyrl_train.numa_policy import MemoryPolicy, cpu_numa_topology, current_memory_policy
 from skyrl_train.utils.numa import memory_nodes_for_range
@@ -46,16 +46,6 @@ from skyrl_train.weight_sync.weight_extractor import (
 )
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
 from skyrl_train.utils.fd_monitor import start_fd_monitor
-
-
-def peft_config_payload(peft_config) -> dict[str, object]:
-    """Return PEFT adapter metadata in its JSON representation."""
-    payload = asdict(peft_config)
-    for key in ("task_type", "peft_type"):
-        value = payload[key]
-        payload[key] = value.value if hasattr(value, "value") else value
-    payload["target_modules"] = sorted(payload["target_modules"])
-    return payload
 
 
 def _fsdp_moe_model_kwargs(fsdp_config) -> dict[str, bool]:

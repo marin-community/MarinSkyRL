@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,7 @@ from training_plan import (
 STUDENT_REVISION = "68c46c4b3498877f3ef123c856ecfde50c39f404"
 TEACHER_REVISION = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
 TOKENIZER_FINGERPRINT = "sha256:9040bcdb3add0466884acccc0be5029887530f65cbe9fa7354c1447eda51b9f8"
+VLLM_QWEN35_LORA_PATCH = "vLLM Qwen3.5 embedding/lm_head LoRA support (upstream #48850)"
 LORA_TARGETS = (
     "q_proj",
     "k_proj",
@@ -94,6 +96,7 @@ class RunManifest:
     dataset: str
     dataset_revision: str
     adapter_uri: str
+    runtime_patches: tuple[str, ...]
     command: tuple[str, ...]
     returncode: int | None = None
     failure: str | None = None
@@ -182,8 +185,62 @@ def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, outp
     )
 
 
+def patch_qwen35_embedding_lora(source_path: Path) -> str:
+    """Backport the Qwen3.5 LoRA declaration from vLLM upstream PR #48850.
+
+    Returns:
+        The compatibility-patch label recorded in the run manifest.
+    """
+    if source_path.resolve() != source_path.absolute():
+        raise RuntimeError(
+            "Refusing to patch a symlinked vLLM installation; install with UV_LINK_MODE=copy and a task-private "
+            "UV_CACHE_DIR"
+        )
+    old = """class Qwen3_5ForCausalLMBase(
+    nn.Module,
+    HasInnerState,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        # GDN fused projections.
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+    }
+"""
+    new = (
+        old
+        + """    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
+"""
+    )
+    source = source_path.read_text()
+    if source.count(old) != 1 or new in source:
+        raise RuntimeError("Pinned vLLM Qwen3.5 source no longer matches the expected LoRA compatibility contract")
+    source_path.write_text(source.replace(old, new))
+    return VLLM_QWEN35_LORA_PATCH
+
+
+def installed_qwen35_source() -> Path:
+    spec = importlib.util.find_spec("vllm")
+    if spec is None or spec.submodule_search_locations is None:
+        raise RuntimeError("The pinned training environment does not contain vLLM")
+    package_root = Path(next(iter(spec.submodule_search_locations)))
+    return package_root / "model_executor" / "models" / "qwen3_5.py"
+
+
 def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
     validate_output_uri(output_uri)
+    runtime_patches = (patch_qwen35_embedding_lora(installed_qwen35_source()),)
     shape = stage_shape(stage)
     with tempfile.TemporaryDirectory(prefix="tinker-native-opd-") as temporary:
         root = Path(temporary)
@@ -210,6 +267,7 @@ def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
                 dataset=OPD_DATASET,
                 dataset_revision=OPD_DATASET_REVISION,
                 adapter_uri=adapter_uri,
+                runtime_patches=runtime_patches,
                 command=command,
             )
             manifest_path = output_root / "native-opd-manifest.json"
