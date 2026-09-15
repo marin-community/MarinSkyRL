@@ -79,6 +79,9 @@ def test_native_opd_fidelity_step_matches_the_published_batch_and_objective():
     validate_cfg(config)
     assert config.trainer.policy.model.lora.target_modules == list(OPD.LORA_TARGETS)
     assert config.teachers.primary.resources.max_num_batched_tokens == 4096
+    assert config.teachers.primary.resources.gpu_memory_utilization == OPD.TEACHER_GPU_MEMORY_UTILIZATION == 0.7
+    assert config.generator.gpu_memory_utilization == OPD.ROLLOUT_GPU_MEMORY_UTILIZATION == 0.9
+    assert config.generator.max_num_seqs == OPD.ROLLOUT_MAX_NUM_SEQS == 512
 
 
 def test_native_opd_plumbing_batch_covers_every_policy_rank():

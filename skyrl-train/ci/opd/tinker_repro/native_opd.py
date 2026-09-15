@@ -65,6 +65,9 @@ PLAN_STAGES = {
     Stage.FULL: PlanStage.OPD_FULL,
 }
 POLICY_GPUS = 4
+ROLLOUT_GPU_MEMORY_UTILIZATION = 0.9
+ROLLOUT_MAX_NUM_SEQS = 512
+TEACHER_GPU_MEMORY_UTILIZATION = 0.7
 # Prompt-logprob scoring materializes float32 logits for every scheduled token.
 # At Qwen3.5's 248k-token vocabulary, the shared 8,192-token rollout budget
 # requires about 7.6 GiB for this transient alone and exhausts an H100 teacher.
@@ -133,6 +136,7 @@ def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, outp
         "++teachers.primary.resources.tensor_parallel_size=2",
         "++teachers.primary.resources.colocation_group=teacher",
         f"++teachers.primary.resources.max_num_batched_tokens={TEACHER_MAX_NUM_BATCHED_TOKENS}",
+        f"++teachers.primary.resources.gpu_memory_utilization={TEACHER_GPU_MEMORY_UTILIZATION}",
         "++teacher_routing.opd.revision=tinker-qwen35-v1",
         "++teacher_routing.opd.routes.default.teacher=primary",
         "++teacher_routing.opd.routes.default.weight=1.0",
@@ -181,7 +185,8 @@ def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, outp
         "generator.sampling_params.temperature=1.0",
         "generator.sampling_params.top_p=1.0",
         "generator.sampling_params.top_k=-1",
-        "generator.gpu_memory_utilization=0.7",
+        f"generator.gpu_memory_utilization={ROLLOUT_GPU_MEMORY_UTILIZATION}",
+        f"generator.max_num_seqs={ROLLOUT_MAX_NUM_SEQS}",
         "generator.run_engines_locally=true",
         "generator.weight_sync_backend=nccl",
         "generator.async_engine=true",

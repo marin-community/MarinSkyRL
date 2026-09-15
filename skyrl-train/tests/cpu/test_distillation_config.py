@@ -183,6 +183,7 @@ def test_compile_distillation_plan_preserves_local_teacher_resource_claim():
         "tensor_parallel_size": 8,
         "colocation_group": "teacher-rotation",
         "max_num_batched_tokens": 4096,
+        "gpu_memory_utilization": 0.65,
     }
 
     plan = compile_distillation_plan(config)
@@ -193,6 +194,7 @@ def test_compile_distillation_plan_preserves_local_teacher_resource_claim():
     assert (resources.num_nodes, resources.gpus_per_node, resources.tensor_parallel_size) == (2, 8, 8)
     assert resources.colocation_group == "teacher-rotation"
     assert resources.max_num_batched_tokens == 4096
+    assert resources.gpu_memory_utilization == 0.65
 
 
 def test_compile_distillation_plan_preserves_teacher_residency_policy():
@@ -219,6 +221,21 @@ def test_compile_distillation_plan_rejects_resource_claim_for_external_teacher()
     }
 
     with pytest.raises(ValueError, match="external teacher"):
+        compile_distillation_plan(config)
+
+
+@pytest.mark.parametrize("gpu_memory_utilization", [0, 1.01])
+def test_compile_distillation_plan_rejects_invalid_teacher_gpu_memory_utilization(gpu_memory_utilization):
+    config = _mopd_config()
+    config["teachers"]["swe"]["resources"] = {
+        "num_nodes": 1,
+        "gpus_per_node": 2,
+        "tensor_parallel_size": 2,
+        "colocation_group": "teacher",
+        "gpu_memory_utilization": gpu_memory_utilization,
+    }
+
+    with pytest.raises(ValueError, match="gpu_memory_utilization"):
         compile_distillation_plan(config)
 
 
