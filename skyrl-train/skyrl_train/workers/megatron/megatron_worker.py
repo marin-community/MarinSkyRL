@@ -647,12 +647,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 weights_update_request["extras"].append({"ipc_handles": ipc_handles})
                 weights_update_request["packed"] = True
 
+                await self._complete_cuda_ipc_weight_update(inference_engine_client, weights_update_request)
                 if torch.distributed.get_rank() == 0:
-                    await inference_engine_client.update_named_weights(weights_update_request)
                     weights_update_request = {"names": [], "dtypes": [], "shapes": [], "sizes": [], "extras": []}
-
-                # force collect any sent tensors if possible to be memory efficient
-                torch.cuda.ipc_collect()
 
         # Finalize after every transport chunk so vLLM materializes and processes each layer
         # exactly once. In particular, this restores FlashInfer-CUTLASS's w13 kernel layout.

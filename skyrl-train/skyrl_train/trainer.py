@@ -627,10 +627,11 @@ class RayPPOTrainer:
         missing = [name for name, count in found.items() if count == 0]
         if missing:
             raise AssertionError(f"engine weights absent from every serving rank after sync: {missing}")
-        logger.info(
-            "Grug weight-sync fingerprints matched: {}",
-            json.dumps({"expected": expected, "serving_copies": found}, sort_keys=True),
-        )
+        for name in names:
+            logger.info(
+                "Grug weight-sync fingerprint matched: {}",
+                json.dumps({"name": name, "expected": expected[name], "serving_copies": found[name]}, sort_keys=True),
+            )
 
     async def _sync_policy_for_rollouts(self, *, reason: str) -> None:
         with Timer("publish_policy_weights", log_events=False) as update_timer:

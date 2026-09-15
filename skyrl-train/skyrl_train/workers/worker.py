@@ -978,6 +978,14 @@ class PolicyWorkerBase(Worker):
         if torch.distributed.get_rank() == 0:
             await inference_engine_client.finish_weight_reload()
 
+    async def _complete_cuda_ipc_weight_update(self, inference_engine_client, request) -> None:
+        """Keep every sender's IPC allocation alive until all receivers finish loading it."""
+        if torch.distributed.get_rank() == 0:
+            await inference_engine_client.update_named_weights(request)
+        torch.distributed.barrier()
+        torch.cuda.synchronize()
+        torch.cuda.ipc_collect()
+
     def _normalize_mini_batch_size(self):
         """
         Normalize mini batch sizes to per-gpu mini batch sizes..
