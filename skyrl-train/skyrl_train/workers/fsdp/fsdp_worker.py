@@ -2,7 +2,7 @@ import asyncio
 import os
 import socket
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from loguru import logger
 from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
@@ -46,6 +46,16 @@ from skyrl_train.weight_sync.weight_extractor import (
 )
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
 from skyrl_train.utils.fd_monitor import start_fd_monitor
+
+
+def peft_config_payload(peft_config) -> dict[str, object]:
+    """Return PEFT adapter metadata in its JSON representation."""
+    payload = asdict(peft_config)
+    for key in ("task_type", "peft_type"):
+        value = payload[key]
+        payload[key] = value.value if hasattr(value, "value") else value
+    payload["target_modules"] = sorted(payload["target_modules"])
+    return payload
 
 
 def _fsdp_moe_model_kwargs(fsdp_config) -> dict[str, bool]:
@@ -910,7 +920,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         """Collect LoRA parameters, save and call inference engine to load."""
         import os
         import json
-        from dataclasses import asdict
         from safetensors.torch import save_file
         from skyrl_train.distributed.fsdp_utils import collect_lora_params
 
@@ -919,10 +928,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
 
-            peft_config = asdict(peft_model.peft_config.get("default", {}))
-            peft_config["task_type"] = peft_config["task_type"].value
-            peft_config["peft_type"] = peft_config["peft_type"].value
-            peft_config["target_modules"] = list(peft_config["target_modules"])
+            peft_config = peft_config_payload(peft_model.peft_config["default"])
 
             # Save LoRA parameters and config
             save_file(lora_params, os.path.join(lora_sync_path, "adapter_model.safetensors"))
