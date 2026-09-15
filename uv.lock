@@ -3044,8 +3044,8 @@ vllm = [
     { name = "torchcodec", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "torchdata", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "torchvision", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "vllm", version = "0.0.0.dev20260915+marin.9f24c61ce835.cu132", source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-9f24c61ce835/vllm-0.0.0.dev20260915+marin.9f24c61ce835.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-fsdp') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
-    { name = "vllm", version = "0.0.0.dev20260915+marin.9f24c61ce835.cu132", source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-9f24c61ce835/vllm-0.0.0.dev20260915+marin.9f24c61ce835.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-fsdp') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "vllm", version = "0.0.0.dev20260915+marin.97c6286e87f7.cu132", source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-97c6286e87f7/vllm-0.0.0.dev20260915+marin.97c6286e87f7.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-fsdp') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "vllm", version = "0.0.0.dev20260915+marin.97c6286e87f7.cu132", source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-97c6286e87f7/vllm-0.0.0.dev20260915+marin.97c6286e87f7.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-fsdp') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 
 [package.dev-dependencies]
@@ -3186,9 +3186,9 @@ requires-dist = [
     { name = "transformers", specifier = "==5.16.1" },
     { name = "uvicorn" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
-    { name = "vllm", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-9f24c61ce835/vllm-0.0.0.dev20260915+marin.9f24c61ce835.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" },
-    { name = "vllm", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.0.0.dev20260915+marin.9f24c61ce835.cu132" },
-    { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-9f24c61ce835/vllm-0.0.0.dev20260915+marin.9f24c61ce835.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" },
+    { name = "vllm", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-97c6286e87f7/vllm-0.0.0.dev20260915+marin.97c6286e87f7.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" },
+    { name = "vllm", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.0.0.dev20260915+marin.97c6286e87f7.cu132" },
+    { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-97c6286e87f7/vllm-0.0.0.dev20260915+marin.97c6286e87f7.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" },
     { name = "wandb" },
     { name = "xmltodict" },
 ]
@@ -7182,8 +7182,8 @@ wheels = [
 
 [[package]]
 name = "vllm"
-version = "0.0.0.dev20260915+marin.9f24c61ce835.cu132"
-source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-9f24c61ce835/vllm-0.0.0.dev20260915+marin.9f24c61ce835.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" }
+version = "0.0.0.dev20260915+marin.97c6286e87f7.cu132"
+source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-97c6286e87f7/vllm-0.0.0.dev20260915+marin.97c6286e87f7.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" }
 resolution-markers = [
     "platform_machine == 'aarch64' and sys_platform == 'linux'",
 ]
@@ -7265,7 +7265,7 @@ dependencies = [
     { name = "xgrammar", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-9f24c61ce835/vllm-0.0.0.dev20260915+marin.9f24c61ce835.cu132-cp38-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:009a59c06048d22166755bad82a9e6ffcfae1b4a918fbb338b545387c415b371" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-97c6286e87f7/vllm-0.0.0.dev20260915+marin.97c6286e87f7.cu132-cp38-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:2add5195ee0562f7a25a5f94c8c1b08bd1df03ded3e11de8a38f1de5403357a2" },
 ]
 
 [package.metadata]
@@ -7375,8 +7375,8 @@ provides-extras = ["zen", "bench", "tensorizer", "fastsafetensors", "instanttens
 
 [[package]]
 name = "vllm"
-version = "0.0.0.dev20260915+marin.9f24c61ce835.cu132"
-source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-9f24c61ce835/vllm-0.0.0.dev20260915+marin.9f24c61ce835.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" }
+version = "0.0.0.dev20260915+marin.97c6286e87f7.cu132"
+source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-97c6286e87f7/vllm-0.0.0.dev20260915+marin.97c6286e87f7.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" }
 resolution-markers = [
     "platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
@@ -7458,7 +7458,7 @@ dependencies = [
     { name = "xgrammar", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-9f24c61ce835/vllm-0.0.0.dev20260915+marin.9f24c61ce835.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:cff255613305e89a620ef13a0f61aea5baed61a92669f308dc0cb417cea447b4" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-97c6286e87f7/vllm-0.0.0.dev20260915+marin.97c6286e87f7.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:d8696c42905a48e4f3ca82eeae5ab6509b4704478e97d816aa8d6053dc9e1dee" },
 ]
 
 [package.metadata]

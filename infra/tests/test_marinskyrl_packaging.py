@@ -17,16 +17,16 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 PYPROJECT = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
-VLLM_CANDIDATE = "marin-vllm-gpu-candidate-77c1868fdb61"
-VLLM_VERSION = "0.0.0.dev20260914+marin.77c1868fdb61.cu132"
+VLLM_CANDIDATE = "marin-vllm-gpu-candidate-97c6286e87f7"
+VLLM_VERSION = "0.0.0.dev20260915+marin.97c6286e87f7.cu132"
 VLLM_WHEELS = {
     "x86_64": (
-        "vllm-0.0.0.dev20260914+marin.77c1868fdb61.cu132-cp38-abi3-manylinux_2_28_x86_64.whl",
-        "sha256:e2531e9ee641a4d14ef6ec4a4922fdcd859684f1c5eb53d8cf3fee9dbd98be97",
+        "vllm-0.0.0.dev20260915+marin.97c6286e87f7.cu132-cp38-abi3-manylinux_2_28_x86_64.whl",
+        "sha256:d8696c42905a48e4f3ca82eeae5ab6509b4704478e97d816aa8d6053dc9e1dee",
     ),
     "aarch64": (
-        "vllm-0.0.0.dev20260914+marin.77c1868fdb61.cu132-cp38-abi3-manylinux_2_28_aarch64.whl",
-        "sha256:3f667d924daec0344012f237bacb83b9878d8fd4cd6026748711dc5f39a14b5e",
+        "vllm-0.0.0.dev20260915+marin.97c6286e87f7.cu132-cp38-abi3-manylinux_2_28_aarch64.whl",
+        "sha256:2add5195ee0562f7a25a5f94c8c1b08bd1df03ded3e11de8a38f1de5403357a2",
     ),
 }
 
@@ -124,14 +124,15 @@ def test_megatron_extra_has_native_wheels_for_linux_x86_64() -> None:
         assert any("linux_x86_64.whl" in source["url"] for source in urls)
 
 
-@pytest.mark.parametrize("policy_extra", ["fsdp", "megatron"])
-def test_policy_extra_provides_flash_attention_for_linux_x86_64(policy_extra: str) -> None:
+def test_policy_attention_dependencies_match_the_linux_x86_64_runtimes() -> None:
     extras = PYPROJECT["project"]["optional-dependencies"]
     sources = PYPROJECT["tool"]["uv"]["sources"]
 
-    requirements = [Requirement(value) for value in extras[policy_extra]]
+    fsdp_requirements = [Requirement(value) for value in extras["fsdp"]]
+    megatron_requirements = [Requirement(value) for value in extras["megatron"]]
     linux_x86 = {"sys_platform": "linux", "platform_machine": "x86_64"}
-    assert any(req.name == "flash-attn" and req.marker.evaluate(linux_x86) for req in requirements)
+    assert any(req.name == "flash-attn" and req.marker.evaluate(linux_x86) for req in fsdp_requirements)
+    assert all(req.name != "flash-attn" or not req.marker.evaluate(linux_x86) for req in megatron_requirements)
     urls = sources["flash-attn"]
     assert any("linux_x86_64.whl" in source["url"] for source in urls)
 
