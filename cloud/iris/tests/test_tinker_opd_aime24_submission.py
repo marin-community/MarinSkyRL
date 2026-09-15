@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 SUBMITTER_PATH = Path(__file__).parents[3] / "skyrl-train" / "ci" / "opd" / "tinker_repro" / "submit_iris.py"
+sys.path.insert(0, str(SUBMITTER_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("tinker_opd_aime24_submitter", SUBMITTER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 submitter = importlib.util.module_from_spec(SPEC)

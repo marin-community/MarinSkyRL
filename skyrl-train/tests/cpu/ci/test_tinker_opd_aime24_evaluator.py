@@ -7,6 +7,7 @@ import pytest
 from datasets import Dataset
 
 EVALUATOR_PATH = Path(__file__).parents[3] / "ci" / "opd" / "tinker_repro" / "evaluate_aime24.py"
+sys.path.insert(0, str(EVALUATOR_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("tinker_opd_aime24_evaluator", EVALUATOR_PATH)
 assert SPEC is not None and SPEC.loader is not None
 evaluator = importlib.util.module_from_spec(SPEC)
