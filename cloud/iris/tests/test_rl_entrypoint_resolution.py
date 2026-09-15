@@ -258,6 +258,7 @@ def test_snowball_levanter_async_m10_config_composes_and_lowers():
     assert runtime.publication_scatter_experts
     assert runtime.initial_weights_already_loaded
     assert runtime.model_revision == revision
+    assert parsed.raw["extra_env"]["XLA_PYTHON_CLIENT_ALLOCATOR"] == "cuda_async"
     assert cfg.trainer.fully_async.max_staleness_steps == 4
     assert cfg.trainer.fully_async.num_parallel_generation_workers == 160
     assert cfg.trainer.fully_async.max_buffered_groups == 32

@@ -159,4 +159,5 @@ extra_env:
   HF_HUB_OFFLINE: "1"
   NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
   XLA_FLAGS: "--xla_gpu_autotune_level=0"
+  XLA_PYTHON_CLIENT_ALLOCATOR: "cuda_async"
   XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"
