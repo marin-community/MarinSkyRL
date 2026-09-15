@@ -143,7 +143,12 @@ def _benchmark(value: Any, index: int) -> EvaluationBenchmark:
     item = _object(value, name, set(EvaluationBenchmark.__dataclass_fields__))
     path = _string(item["path"], f"{name}.path")
     parsed_path = PurePosixPath(path)
-    if parsed_path.is_absolute() or not parsed_path.parts or path != parsed_path.as_posix() or ".." in parsed_path.parts:
+    if (
+        parsed_path.is_absolute()
+        or not parsed_path.parts
+        or path != parsed_path.as_posix()
+        or ".." in parsed_path.parts
+    ):
         raise ValueError(f"{name}.path must be a normalized safe relative path")
     size = _integer(item["size"], f"{name}.size")
     rows = _integer(item["rows"], f"{name}.rows")
@@ -227,7 +232,11 @@ def load_evaluation_config(path: Path) -> EvaluationConfig:
         if len(settings) != 1:
             raise ValueError(f"{domain} benchmarks must share sampling settings")
     omissions = root["known_omissions"]
-    if not isinstance(omissions, list) or not omissions or not all(isinstance(item, str) and item for item in omissions):
+    if (
+        not isinstance(omissions, list)
+        or not omissions
+        or not all(isinstance(item, str) and item for item in omissions)
+    ):
         raise ValueError("known_omissions must be a non-empty list of strings")
     return EvaluationConfig(
         schema_version=1,
@@ -285,9 +294,7 @@ def evaluation_scale(config: EvaluationConfig, gate: str) -> tuple[int, int]:
     if gate != "full":
         raise ValueError(f"Unknown gate {gate!r}; choose one of {GATES}")
     completions = sum(benchmark.rows * benchmark.samples for benchmark in config.benchmarks)
-    maximum_tokens = sum(
-        benchmark.rows * benchmark.samples * benchmark.max_tokens for benchmark in config.benchmarks
-    )
+    maximum_tokens = sum(benchmark.rows * benchmark.samples * benchmark.max_tokens for benchmark in config.benchmarks)
     return completions, maximum_tokens
 
 

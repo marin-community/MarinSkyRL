@@ -33,6 +33,7 @@ from cloud.iris.open_mopd_fidelity_task import (
     validate_runtime,
 )
 
+
 @dataclass(frozen=True)
 class StagedBenchmark:
     benchmark: EvaluationBenchmark
@@ -78,9 +79,7 @@ def verify_benchmark_file(benchmark: EvaluationBenchmark, path: Path) -> FileVer
     )
 
 
-def _download_benchmark(
-    config: EvaluationConfig, benchmark: EvaluationBenchmark, destination: Path
-) -> StagedBenchmark:
+def _download_benchmark(config: EvaluationConfig, benchmark: EvaluationBenchmark, destination: Path) -> StagedBenchmark:
     artifact = DatasetArtifact(
         repository=config.data.repository,
         revision=config.data.revision,
@@ -104,9 +103,7 @@ def _download_benchmark(
     return StagedBenchmark(benchmark=benchmark, path=path, verification=verification)
 
 
-def stage_evaluation_inputs(
-    evaluation: EvaluationConfig, fidelity: FidelityConfig, root: Path
-) -> EvaluationInputs:
+def stage_evaluation_inputs(evaluation: EvaluationConfig, fidelity: FidelityConfig, root: Path) -> EvaluationInputs:
     source = checkout_source(fidelity, root / "source")
     model, model_verification = snapshot_model(
         fidelity.evaluation_reference.repository,
@@ -114,9 +111,7 @@ def stage_evaluation_inputs(
         fidelity.evaluation_reference.lfs_files,
         root / "model",
     )
-    benchmarks = tuple(
-        _download_benchmark(evaluation, benchmark, root / "data") for benchmark in evaluation.benchmarks
-    )
+    benchmarks = tuple(_download_benchmark(evaluation, benchmark, root / "data") for benchmark in evaluation.benchmarks)
     return EvaluationInputs(
         source=source,
         model=model,
