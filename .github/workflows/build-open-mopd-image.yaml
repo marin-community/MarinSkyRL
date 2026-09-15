@@ -34,7 +34,7 @@ jobs:
             -e HF_TOKEN "$HF_TOKEN" \
             -e REGISTRY_USER "$GITHUB_ACTOR" \
             -e REGISTRY_TOKEN "$REGISTRY_TOKEN" \
-            -e OPEN_MOPD_IMAGE_REPOSITORY ghcr.io/marin-community/marinskyrl \
+            -e OPEN_MOPD_IMAGE_REPOSITORY ghcr.io/marin-community/marinskyrl-opd-repro \
             -- bash docker/build_open_mopd_kaniko.sh
 
       - name: Cancel any Iris job left behind
