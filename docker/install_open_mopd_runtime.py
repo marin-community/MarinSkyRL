@@ -12,7 +12,7 @@ import sys
 from open_mopd_versions import versions_match
 
 
-PURE_PYTHON_OVERRIDES = ("fsspec", "protobuf", "ray", "s3fs", "transformers")
+PURE_PYTHON_OVERRIDES = ("fsspec", "langdetect", "protobuf", "ray", "s3fs", "transformers")
 
 def expected_packages(config_path: Path) -> dict[str, str]:
     config = json.loads(config_path.read_text())
