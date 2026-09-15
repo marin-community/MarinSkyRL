@@ -58,6 +58,11 @@ register(
 )
 
 register(
+    id="prompt_only",
+    entry_point="skyrl_gym.envs.prompt_only.env:PromptOnlyEnv",
+)
+
+register(
     id="reasoning_gym",
     entry_point="skyrl_gym.envs.reasoning_gym.env:ReasoningGymEnv",
 )

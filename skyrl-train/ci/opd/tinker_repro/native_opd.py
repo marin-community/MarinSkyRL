@@ -1,0 +1,245 @@
+"""Run the published Tinker math-distillation recipe on MarinSkyRL."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict, dataclass, replace
+from enum import StrEnum
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+import datasets
+
+from deepmath_dataset import DATASET, DATASET_REVISION, convert_rows
+from skyrl_train.io.io import local_read_dir, upload_directory
+
+STUDENT_MODEL = "Qwen/Qwen3.5-9B-Base"
+STUDENT_REVISION = "68c46c4b3498877f3ef123c856ecfde50c39f404"
+TEACHER_MODEL = "Qwen/Qwen3.5-9B"
+TEACHER_REVISION = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+TOKENIZER_FINGERPRINT = "sha256:9040bcdb3add0466884acccc0be5029887530f65cbe9fa7354c1447eda51b9f8"
+LORA_TARGETS = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+    "linear_attn.in_proj_qkv",
+    "linear_attn.in_proj_z",
+    "linear_attn.out_proj",
+    "lm_head",
+)
+
+
+class Stage(StrEnum):
+    PLUMBING = "plumbing"
+    FIDELITY_STEP = "fidelity_step"
+    FULL = "full"
+
+
+@dataclass(frozen=True)
+class StageShape:
+    steps: int
+    groups_per_batch: int
+    group_size: int
+    max_generate_length: int
+    dataset_rows: int | None
+
+
+STAGES = {
+    Stage.PLUMBING: StageShape(1, 4, 1, 256, 4),
+    Stage.FIDELITY_STEP: StageShape(1, 512, 4, 16_384, 512),
+    Stage.FULL: StageShape(200, 512, 4, 16_384, None),
+}
+
+
+@dataclass(frozen=True)
+class RunManifest:
+    schema_version: int
+    status: str
+    stage: str
+    shape: dict[str, int | None]
+    student: str
+    student_revision: str
+    teacher: str
+    teacher_revision: str
+    tokenizer_fingerprint: str
+    dataset: str
+    dataset_revision: str
+    adapter_uri: str
+    command: tuple[str, ...]
+    returncode: int | None = None
+    failure: str | None = None
+
+
+def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, output_root: Path) -> tuple[str, ...]:
+    batch_size = shape.groups_per_batch * shape.group_size
+    mini_batch_size = min(batch_size, 256)
+    targets = ",".join(LORA_TARGETS)
+    return (
+        f"data.train_data=['{data_path}']",
+        "data.val_data=[]",
+        "data.shuffle=true",
+        "trainer.algorithm.advantage_estimator=uniform",
+        "trainer.algorithm.use_kl_loss=false",
+        "++trainer.algorithm.distillation.objective=sampled_reverse_kl",
+        "++trainer.algorithm.distillation.routing_plan=opd",
+        "++trainer.algorithm.distillation.coefficient=1.0",
+        "++trainer.algorithm.distillation.reward_mode=replace",
+        "++teachers.primary.source=local_inference",
+        "++teachers.primary.placement=pinned",
+        f"++teachers.primary.model.path={TEACHER_MODEL}",
+        f"++teachers.primary.model.revision={TEACHER_REVISION}",
+        "++teachers.primary.backend=vllm",
+        "++teachers.primary.evidence=chosen_token",
+        "++teachers.primary.resources.num_nodes=1",
+        "++teachers.primary.resources.gpus_per_node=2",
+        "++teachers.primary.resources.tensor_parallel_size=2",
+        "++teachers.primary.resources.colocation_group=teacher",
+        "++teacher_routing.opd.revision=tinker-qwen35-v1",
+        "++teacher_routing.opd.routes.default.teacher=primary",
+        "++teacher_routing.opd.routes.default.weight=1.0",
+        f"trainer.policy.model.path={STUDENT_MODEL}",
+        f"trainer.policy.model.revision={STUDENT_REVISION}",
+        "trainer.policy.model.lora.rank=128",
+        "trainer.policy.model.lora.alpha=1",
+        "trainer.policy.model.lora.dropout=0.0",
+        f"trainer.policy.model.lora.adapter_path={adapter_path}",
+        f"trainer.policy.model.lora.target_modules=[{targets}]",
+        "trainer.policy.model.lora.exclude_modules=null",
+        "trainer.policy.optimizer_config.lr=1.0e-4",
+        "trainer.policy.optimizer_config.weight_decay=0.0",
+        "trainer.policy.optimizer_config.scheduler=constant",
+        "trainer.strategy=fsdp2",
+        "trainer.flash_attn=true",
+        "trainer.use_sample_packing=false",
+        "trainer.placement.colocate_all=false",
+        "trainer.placement.policy_num_gpus_per_node=4",
+        "trainer.epochs=1",
+        f"trainer.max_steps={shape.steps}",
+        f"trainer.train_batch_size={batch_size}",
+        f"trainer.policy_mini_batch_size={mini_batch_size}",
+        "trainer.micro_train_batch_size_per_gpu=1",
+        "trainer.micro_forward_batch_size_per_gpu=1",
+        "trainer.update_epochs_per_batch=1",
+        "trainer.max_prompt_length=1024",
+        "trainer.eval_before_train=false",
+        "trainer.eval_interval=-1",
+        "trainer.ckpt_interval=1",
+        "trainer.hf_save_interval=1",
+        "trainer.resume_mode=null",
+        "trainer.dump_eval_results=false",
+        "trainer.logger=console",
+        "trainer.project_name=tinker_native_repro",
+        f"trainer.run_name=tinker_native_{shape.steps}_{batch_size}",
+        f"trainer.ckpt_path={output_root / 'checkpoints'}",
+        f"trainer.export_path={output_root / 'exports'}",
+        "generator.backend=vllm",
+        "generator.num_inference_engines=1",
+        "generator.inference_engine_tensor_parallel_size=2",
+        f"generator.n_samples_per_prompt={shape.group_size}",
+        f"generator.sampling_params.max_generate_length={shape.max_generate_length}",
+        "generator.sampling_params.temperature=1.0",
+        "generator.sampling_params.top_p=1.0",
+        "generator.sampling_params.top_k=-1",
+        "generator.gpu_memory_utilization=0.7",
+        "generator.run_engines_locally=true",
+        "generator.weight_sync_backend=nccl",
+        "generator.async_engine=true",
+        "generator.batched=true",
+        "environment.env_class=prompt_only",
+        "trajectory_runner.process_pool.num_coordinators=1",
+        "trajectory_runner.process_pool.cpus_per_coordinator=4",
+    )
+
+
+def materialize_dataset(path: Path, row_limit: int | None) -> int:
+    source = datasets.load_dataset(DATASET, split="train", revision=DATASET_REVISION)
+    if row_limit is not None:
+        source = source.select(range(min(row_limit, len(source))))
+    rows = (source[index] for index in range(len(source)))
+    table = convert_rows(rows)
+    datasets.Dataset(table).to_parquet(path)
+    return table.num_rows
+
+
+def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
+    if not output_uri.startswith("s3://") or not output_uri.removeprefix("s3://").strip("/"):
+        raise ValueError("--output-uri must be a non-root s3:// prefix")
+    shape = STAGES[stage]
+    with tempfile.TemporaryDirectory(prefix="tinker-native-opd-") as temporary:
+        root = Path(temporary)
+        output_root = root / "output"
+        output_root.mkdir()
+        data_path = root / "deepmath.parquet"
+        with local_read_dir(adapter_uri) as adapter_path:
+            command = (
+                sys.executable,
+                "-m",
+                "skyrl_train.entrypoints.main_base",
+                *hydra_arguments(shape, data_path, Path(adapter_path), output_root),
+            )
+            manifest = RunManifest(
+                schema_version=1,
+                status="preparing",
+                stage=stage,
+                shape=asdict(shape),
+                student=STUDENT_MODEL,
+                student_revision=STUDENT_REVISION,
+                teacher=TEACHER_MODEL,
+                teacher_revision=TEACHER_REVISION,
+                tokenizer_fingerprint=TOKENIZER_FINGERPRINT,
+                dataset=DATASET,
+                dataset_revision=DATASET_REVISION,
+                adapter_uri=adapter_uri,
+                command=command,
+            )
+            manifest_path = output_root / "native-opd-manifest.json"
+            try:
+                rows = materialize_dataset(data_path, shape.dataset_rows)
+                if rows != shape.dataset_rows and shape.dataset_rows is not None:
+                    raise RuntimeError(f"DeepMath yielded {rows} rows; expected {shape.dataset_rows}")
+                manifest = replace(manifest, status="running")
+                manifest_path.write_text(json.dumps(asdict(manifest), indent=2, sort_keys=True) + "\n")
+                upload_directory(str(output_root), output_uri)
+                environment = os.environ | {"VLLM_USE_DEEP_GEMM": "0"}
+                result = subprocess.run(command, check=False, env=environment)
+                manifest = replace(
+                    manifest,
+                    status="complete" if result.returncode == 0 else "failed",
+                    returncode=result.returncode,
+                )
+                return result.returncode
+            except Exception as error:
+                manifest = replace(manifest, status="failed", failure=str(error))
+                raise
+            finally:
+                manifest_path.write_text(json.dumps(asdict(manifest), indent=2, sort_keys=True) + "\n")
+                upload_directory(str(output_root), output_uri)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--stage", choices=tuple(Stage), required=True)
+    parser.add_argument("--adapter-uri", required=True)
+    parser.add_argument("--output-uri", required=True)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+    stage = Stage(args.stage)
+    if args.dry_run:
+        command = hydra_arguments(
+            STAGES[stage], Path("/data/deepmath.parquet"), Path("/model/adapter"), Path("/output")
+        )
+        print(json.dumps({"stage": stage, "shape": asdict(STAGES[stage]), "hydra_arguments": command}, indent=2))
+        return 0
+    return run(stage, args.adapter_uri, args.output_uri)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
