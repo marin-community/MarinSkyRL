@@ -14,7 +14,31 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from cloud.iris.artifacts import fs_and_path
-from cloud.iris.open_mopd_fidelity import DOMAINS, GATES, FidelityConfig, gpu_count, load_config, validate_output_uri
+from cloud.iris.open_mopd_fidelity import (
+    DOMAINS,
+    GATES,
+    FidelityConfig,
+    LfsFile,
+    gpu_count,
+    load_config,
+    validate_output_uri,
+)
+
+
+@dataclass(frozen=True)
+class FileVerification:
+    path: str
+    expected_size: int
+    observed_size: int
+    expected_sha256: str
+    observed_sha256: str
+
+
+@dataclass(frozen=True)
+class ArtifactVerification:
+    repository: str
+    revision: str
+    files: tuple[FileVerification, ...]
 
 
 @dataclass(frozen=True)
@@ -23,6 +47,7 @@ class StagedInputs:
     student: Path
     teachers: tuple[Path, ...]
     dataset: Path
+    artifact_verifications: tuple[ArtifactVerification, ...] = ()
 
 
 def _run(
@@ -58,19 +83,57 @@ def _checkout_source(config: FidelityConfig, destination: Path) -> Path:
     return source
 
 
-def _snapshot(repository: str, revision: str, destination: Path) -> Path:
+def verify_lfs_files(destination: Path, expected_files: tuple[LfsFile, ...]) -> tuple[FileVerification, ...]:
+    """Verify downloaded model files against the pinned Hugging Face LFS manifest."""
+    root = destination.resolve()
+    failures = []
+    verified = []
+    for expected in expected_files:
+        candidate = root / expected.path
+        path = candidate.resolve()
+        if not path.is_relative_to(root):
+            failures.append(f"{expected.path}: resolves outside the model directory")
+            continue
+        if candidate.is_symlink() or not path.is_file():
+            failures.append(f"{expected.path}: missing or not a regular file")
+            continue
+        observed_size = path.stat().st_size
+        if observed_size != expected.size:
+            failures.append(f"{expected.path}: expected {expected.size} bytes, found {observed_size}")
+            continue
+        with path.open("rb") as source:
+            observed_sha256 = hashlib.file_digest(source, "sha256").hexdigest()
+        if observed_sha256 != expected.sha256:
+            failures.append(f"{expected.path}: expected SHA-256 {expected.sha256}, found {observed_sha256}")
+            continue
+        verified.append(
+            FileVerification(
+                path=expected.path,
+                expected_size=expected.size,
+                observed_size=observed_size,
+                expected_sha256=expected.sha256,
+                observed_sha256=observed_sha256,
+            )
+        )
+    if failures:
+        raise ValueError("Model artifact integrity verification failed: " + "; ".join(failures))
+    return tuple(verified)
+
+
+def _snapshot(
+    repository: str, revision: str, expected_files: tuple[LfsFile, ...], destination: Path
+) -> tuple[Path, ArtifactVerification]:
     code = (
         "from huggingface_hub import snapshot_download; import sys; "
         "print(snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3]))"
     )
     _run([sys.executable, "-c", code, repository, revision, str(destination)])
-    return destination
+    files = verify_lfs_files(destination, expected_files)
+    return destination, ArtifactVerification(repository=repository, revision=revision, files=files)
 
 
-def _dataset(config: FidelityConfig, destination: Path) -> Path:
+def _dataset(config: FidelityConfig, destination: Path) -> tuple[Path, ArtifactVerification]:
     artifact = config.dataset
-    if artifact.path is None or artifact.sha256 is None:
-        raise ValueError("Dataset path and SHA-256 are required")
     code = (
         "from huggingface_hub import hf_hub_download; import sys; "
         "print(hf_hub_download(sys.argv[1], sys.argv[3], repo_type='dataset', revision=sys.argv[2], "
@@ -88,21 +151,56 @@ def _dataset(config: FidelityConfig, destination: Path) -> Path:
         ]
     )
     path = destination / artifact.path
+    observed_size = path.stat().st_size
+    if observed_size != artifact.size:
+        raise ValueError(f"Dataset size mismatch: expected {artifact.size} bytes, found {observed_size}")
     with path.open("rb") as source:
         actual = hashlib.file_digest(source, "sha256").hexdigest()
     if actual != artifact.sha256:
         raise ValueError(f"Dataset digest mismatch: expected {artifact.sha256}, found {actual}")
-    return path
+    verification = FileVerification(
+        path=artifact.path,
+        expected_size=artifact.size,
+        observed_size=observed_size,
+        expected_sha256=artifact.sha256,
+        observed_sha256=actual,
+    )
+    return path, ArtifactVerification(
+        repository=artifact.repository,
+        revision=artifact.revision,
+        files=(verification,),
+    )
 
 
 def stage_inputs(config: FidelityConfig, root: Path) -> StagedInputs:
     source = _checkout_source(config, root / "source")
-    student = _snapshot(config.student.repository, config.student.revision, root / "models" / "student")
-    teachers = tuple(
-        _snapshot(teacher.repository, teacher.revision, root / "models" / teacher.domain) for teacher in config.teachers
+    student, student_verification = _snapshot(
+        config.student.repository,
+        config.student.revision,
+        config.student.lfs_files,
+        root / "models" / "student",
     )
-    dataset = _dataset(config, root / "data")
-    return StagedInputs(source=source, student=student, teachers=teachers, dataset=dataset)
+    teacher_snapshots = tuple(
+        _snapshot(
+            teacher.repository,
+            teacher.revision,
+            teacher.lfs_files,
+            root / "models" / teacher.domain,
+        )
+        for teacher in config.teachers
+    )
+    dataset, dataset_verification = _dataset(config, root / "data")
+    return StagedInputs(
+        source=source,
+        student=student,
+        teachers=tuple(snapshot for snapshot, _ in teacher_snapshots),
+        dataset=dataset,
+        artifact_verifications=(
+            student_verification,
+            *(verification for _, verification in teacher_snapshots),
+            dataset_verification,
+        ),
+    )
 
 
 def training_command(
@@ -258,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         "steps": GATES[args.gate],
         "command": command,
         "runtime": _runtime_inventory(inputs.source),
+        "artifact_verifications": [asdict(verification) for verification in inputs.artifact_verifications],
         "task_image": args.task_image,
         "launcher_commit": args.launcher_commit,
         "gpu_slice": args.gpu_slice,
