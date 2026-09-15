@@ -1,5 +1,8 @@
 # Levanter Snowball training
 
+For the newer asynchronous interface, exact M10 configuration, and its qualified limits, see
+[Asynchronous Snowball viability](async-snowball-viability.md).
+
 The `skyrl_train.entrypoints.levanter_snowball` entrypoint runs one synchronous Snowball GRPO workload with MSRL
 orchestration and a Levanter learner. MSRL owns generation, rewards, advantages, and progress. Levanter owns the model,
 optimizer, random key, step, mesh, sharding, collectives, checkpoint, and Hugging Face export.

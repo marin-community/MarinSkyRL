@@ -26,7 +26,16 @@ if TYPE_CHECKING:
     from skyrl_train.learner import LearnerBatch, LearnerConfig, LogProbResult, UpdateRequest, UpdateResult
 
 
-_PROCESS_LOCAL_TIMING_METRICS = frozenset({"forward_validation_seconds", "training_update_seconds"})
+_PROCESS_LOCAL_TIMING_METRICS = frozenset(
+    {
+        "forward_validation_seconds",
+        "gradient_compute_seconds",
+        "optimizer_apply_seconds",
+        "optimizer_input_transfer_seconds",
+        "optimizer_output_transfer_seconds",
+        "training_update_seconds",
+    }
+)
 
 
 def _merge_update_results(results: list[UpdateResult]) -> UpdateResult:
