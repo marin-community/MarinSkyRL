@@ -88,12 +88,17 @@ trainer:
     grug_query_bias_update_rate: null
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
+      revision: null
       source_uri: null
       source_identity: null
       lora:
           rank: 0
           alpha: 16
           dropout: 0
+          # Load an existing adapter instead of creating fresh LoRA weights. Its
+          # stored PEFT config is authoritative; rank must match for vLLM sync.
+          adapter_path: null
+          adapter_revision: null
           lora_sync_path: "/tmp/skyrl_lora_sync"
           target_modules: "all-linear"
           exclude_modules: null
@@ -132,6 +137,7 @@ trainer:
   ref:
     model:
       path: ${trainer.policy.model.path}
+      revision: ${trainer.policy.model.revision}
     sequence_parallel_size: 1
     deepspeed_config: ${deepspeed_config.eval}
     fsdp_config:
@@ -282,12 +288,24 @@ trainer:
 
     num_parallel_generation_workers: 768
 
+    # Bound teacher-scoring work independently for each logical teacher. Queue
+    # backpressure is applied when a rollout group is admitted, before learner
+    # batch assembly.
+    teacher_scoring:
+      max_queued_per_teacher: 8
+      workers_per_teacher: 1
+
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   seed: 42
   resume_mode: latest
   resume_path: null
   restore_dataloader_state: true
+  # Optional OPD stage boundary. Stops after the first optimizer batch whose
+  # cumulative teacher-scored tokens reach the budget.
+  distillation_token_budget: null
+  reset_distillation_token_count_on_resume: false
+  reset_global_step_on_resume: false
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
   ckpt_interval: 5
@@ -457,8 +475,9 @@ generator:
     accepted_stop_reasons: ${generator.trajectory_reward_shaping.non_termination.accepted_stop_reasons}
     reward_below: null
     reward_above: null
-    max_bytes_per_step: 8388608
-    max_bytes_per_run: 268435456
+    # Set either bound to null to make that dimension unlimited.
+    max_bytes_per_step: 838860800
+    max_bytes_per_run: 26843545600
     required: false
     publish_timeout_seconds: 120
     shutdown_timeout_seconds: 30

@@ -189,7 +189,11 @@ RUN echo "VLLM_FORK_COMMIT=${VLLM_FORK_COMMIT}" >  /wheels/MANIFEST && \
     echo "TORCH_VERSION=${TORCH_VERSION}" >> /wheels/MANIFEST && \
     echo "TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}" >> /wheels/MANIFEST && \
     echo "CUDA=12.9 PY=cp312 PLATFORM=linux_aarch64" >> /wheels/MANIFEST && \
+    cd /wheels && sha256sum ./*.whl > SHA256SUMS && \
     ls -la /wheels
+
+FROM scratch AS wheel-artifact
+COPY --from=wheel-builder /wheels /wheels
 
 # =============================================================================
 # STAGE 2: wheels — always the wheel-builder stage

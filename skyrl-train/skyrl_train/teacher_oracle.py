@@ -380,14 +380,6 @@ class TeacherOracleOwner:
         return frozenset(self._oracles)
 
     @classmethod
-    def from_oracles(cls, oracles: Mapping[str, TeacherOracle]) -> Self:
-        """Take ownership of already-created logical teacher oracles."""
-        _require_teacher_oracle_entries(oracles)
-        for teacher_id, oracle in oracles.items():
-            _validate_teacher_oracle_identity(teacher_id, oracle)
-        return cls({teacher_id: ValidatedTeacherOracle(oracle) for teacher_id, oracle in oracles.items()})
-
-    @classmethod
     async def create(cls, factories: Mapping[str, TeacherOracleFactory]) -> Self:
         _require_teacher_oracle_entries(factories)
 

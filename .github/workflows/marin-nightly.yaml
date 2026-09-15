@@ -23,11 +23,6 @@ concurrency:
   group: marin-nightly
   cancel-in-progress: false
 
-env:
-  GCP_PROJECT: hai-gcp-models
-  IRIS_CLIENT_REQUIREMENT: marin-core>=0.2.46.dev202607131620
-  WIF_PROVIDER: projects/748532799086/locations/global/workloadIdentityPools/github-pool/providers/github-oidc
-
 jobs:
   gpu-gate:
     name: ${{ matrix.lane }}
@@ -83,24 +78,7 @@ jobs:
       - name: Trim the Iris bundle
         run: git rm -r --quiet skyrl-train/docs skyrl-agent
 
-      - uses: astral-sh/setup-uv@v7
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v3
-        with:
-          project_id: ${{ env.GCP_PROJECT }}
-          workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: github-iris@hai-gcp-models.iam.gserviceaccount.com
-
-      - name: Set up Google Cloud SDK
-        uses: google-github-actions/setup-gcloud@v3
-        with:
-          project_id: ${{ env.GCP_PROJECT }}
-
-      - name: Install the iris client
-        run: |
-          uv tool install --prerelease allow "$IRIS_CLIENT_REQUIREMENT"
-          echo "$(uv tool dir)/marin-core/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-iris
 
       - name: Run ${{ matrix.lane }}
         run: |

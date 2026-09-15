@@ -99,6 +99,24 @@ def test_model_source_locator_reaches_trainer_config():
     assert "trainer.policy.model.source_identity='policy@abc123'" in args
 
 
+def test_policy_revision_override_reaches_trainer_config():
+    parsed = parse_rl_config(_CONFIG)
+    revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
+
+    args = build_skyrl_hydra_args(
+        parsed,
+        {
+            "job_name": "revision-pinned-run",
+            "model_path": "Qwen/Qwen3.5-9B-Base",
+            "model_revision": revision,
+            "num_nodes": 4,
+        },
+        _HPCStub(),
+    )
+
+    assert f"trainer.policy.model.revision={revision}" in args
+
+
 def test_partial_model_source_is_rejected_during_config_translation():
     parsed = parse_rl_config(_CONFIG)
     exp_args = {

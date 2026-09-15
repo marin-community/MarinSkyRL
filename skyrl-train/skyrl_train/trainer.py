@@ -5,7 +5,7 @@ import os
 import shutil
 import threading
 import time
-from typing import Any, List, Optional, Dict, Tuple, Union
+from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -40,7 +40,7 @@ from skyrl_train.dataset.preprocess import (
     collate_response_token_channel,
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl_train.distillation import validate_distillation_attachment
+from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC, validate_distillation_attachment
 from skyrl_train.distillation_runtime import SyncDistillationRuntime
 from skyrl_train.utils import trainer_utils
 from skyrl_train.io import io
@@ -151,6 +151,10 @@ def _policy_revision(step: int) -> str:
     return f"policy-step-{step}"
 
 
+class _ClosableDistillationRuntime(Protocol):
+    async def close(self) -> None: ...
+
+
 def _validated_distillation_tensors(
     trajectory_batch: TrajectoryBatch,
     response_mask: torch.Tensor,
@@ -255,6 +259,7 @@ class RayPPOTrainer:
         self._group_admission_watchdog: AdmissionProgressWatchdog | None = None
         self._step_time_history: deque[float] = deque(maxlen=5)
         self._sync_distillation_runtime: Optional[SyncDistillationRuntime] = None
+        self.distillation_scored_tokens_total = 0
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         configure_ray_worker_logging()
@@ -275,6 +280,13 @@ class RayPPOTrainer:
             raise RuntimeError("synchronous distillation runtime is already configured")
         self._sync_distillation_runtime = runtime
 
+    async def _close_distillation_runtime(self, runtime: _ClosableDistillationRuntime) -> None:
+        await self._guarded_async(
+            runtime.close(),
+            timeout=30,
+            label="Teacher oracle shutdown",
+        )
+
     async def _forward_with_optional_distillation(
         self,
         trajectory_batch: TrajectoryBatch,
@@ -290,7 +302,7 @@ class RayPPOTrainer:
         self.all_metrics.update(
             {
                 "distillation/teacher_count": float(len({route.teacher_id for route in scored.routes})),
-                "distillation/scored_tokens": float(scored.distillation.valid_mask.sum().item()),
+                DISTILLATION_SCORED_TOKENS_METRIC: float(scored.distillation.valid_mask.sum().item()),
             }
         )
         return forwarded
@@ -459,11 +471,7 @@ class RayPPOTrainer:
         4. Ray actor cleanup – force-kills remaining actors.
         """
         if self._sync_distillation_runtime is not None:
-            await self._guarded_async(
-                self._sync_distillation_runtime.close(),
-                timeout=30,
-                label="Teacher oracle shutdown",
-            )
+            await self._close_distillation_runtime(self._sync_distillation_runtime)
         if self.inference_engine_client is not None:
             self._guarded_sync(
                 self.inference_engine_client.shutdown_http_endpoint,
@@ -1589,7 +1597,11 @@ class RayPPOTrainer:
             from transformers import AutoConfig
 
             model_path = self.cfg.trainer.policy.model.path
-            hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            hf_config = AutoConfig.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                revision=self.cfg.trainer.policy.model.get("revision"),
+            )
             # Some families nest the expert count under a text/decoder sub-config.
             candidates = [hf_config, getattr(hf_config, "text_config", None)]
             for cfg_obj in candidates:
@@ -2623,6 +2635,7 @@ class RayPPOTrainer:
             "global_step": self.global_step,
             "config": self.cfg,
             "pending_sync_prompts": self._pending_sync_prompts,
+            "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
         }
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
         with io.open_file(trainer_state_path, "wb") as f:
@@ -2750,6 +2763,10 @@ class RayPPOTrainer:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
         self._pending_sync_prompts = []
+        if self.cfg.trainer.get("reset_distillation_token_count_on_resume", False):
+            self.distillation_scored_tokens_total = 0
+        else:
+            self.distillation_scored_tokens_total = int(trainer_state.get("distillation_scored_tokens_total", 0))
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
@@ -2805,6 +2822,9 @@ class RayPPOTrainer:
             logger.info("Successfully loaded critic checkpoint")
 
         logger.info(f"Successfully loaded complete checkpoint state from global_step_{global_step}")
+        if self.cfg.trainer.get("reset_global_step_on_resume", False):
+            logger.info("Resetting the trainer step to 0 at the explicit stage boundary")
+            global_step = 0
         return global_step, str(checkpoint_path)
 
     def handle_hf_export(self) -> None:

@@ -77,7 +77,7 @@ teacher:
         parse_rl_config(str(config))
 
 
-def test_rl_config_rejects_unsupported_distillation_before_hydra_translation(tmp_path):
+def test_rl_config_translates_distillation_only_replace_mode(tmp_path):
     config = tmp_path / "rl.yaml"
     config.write_text(
         """\
@@ -102,6 +102,10 @@ teachers:
       revision: teacher-revision
     endpoints:
       - url: https://teacher.example/v1
+        max_concurrency: 8
+    tokenizer_fingerprint: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    max_sequence_length: 32768
+    request_timeout_seconds: 120
     evidence: chosen_token
 teacher_routing:
   opd:
@@ -117,8 +121,12 @@ teacher_routing:
 
     assert parsed.distillation_plan is not None
     assert parsed.distillation_plan.teachers[0].source is TeacherSource.OPENAI_COMPATIBLE
-    with pytest.raises(ValueError, match="supports only reward_mode=add"):
-        build_skyrl_hydra_args(parsed, {"num_nodes": 1}, SimpleNamespace(gpus_per_node=8))
+    hydra_args = build_skyrl_hydra_args(parsed, {"num_nodes": 1}, SimpleNamespace(gpus_per_node=8))
+
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=hydra_args)
+
+    assert cfg.trainer.algorithm.distillation.reward_mode == "replace"
 
 
 def test_supported_local_teacher_plan_crosses_cli_and_hydra_boundaries(tmp_path):

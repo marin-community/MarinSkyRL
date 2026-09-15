@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 import torch
 from omegaconf import OmegaConf
+from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation import (
@@ -41,7 +42,7 @@ def _request() -> TeacherScoreRequest:
     )
 
 
-def _policy_config(loss_reduction: str = "token_mean"):
+def _policy_config(loss_reduction: str = "token_mean", reward_mode: str = "add"):
     return OmegaConf.create(
         {
             "policy_loss_type": "regular",
@@ -57,6 +58,7 @@ def _policy_config(loss_reduction: str = "token_mean"):
             "kl_estimator_type": "k1",
             "use_tis": False,
             "tis_imp_ratio_cap": 2.0,
+            "distillation": {"reward_mode": reward_mode},
         }
     )
 
@@ -65,7 +67,7 @@ def _objective(action_log_probs, teacher_logprobs):
     old_logprobs = torch.full_like(action_log_probs, -1.0)
     distillation = SampledReverseKLInput(
         teacher_action_log_probs=teacher_logprobs,
-        valid_mask=torch.tensor([[True, True, False]]),
+        valid_mask=torch.isfinite(teacher_logprobs),
         loss_weights=torch.ones_like(action_log_probs),
     )
     return compute_policy_objective(
@@ -300,6 +302,124 @@ def test_sampled_reverse_kl_gradient_depends_on_teacher_distribution():
     torch.testing.assert_close(second_actions.grad, torch.tensor([[0.5, 0.5, 0.0]], dtype=torch.float64))
     assert first.metrics["distillation_loss"] == pytest.approx(0.25)
     assert second.metrics["distillation_loss"] == pytest.approx(1.0)
+
+
+def test_replace_mode_optimizes_only_sampled_reverse_kl():
+    actions = torch.tensor([[-0.8, -1.2]], dtype=torch.float64, requires_grad=True)
+    old_actions = torch.tensor([[-1.0, -1.0]], dtype=torch.float64)
+    teacher_actions = torch.tensor([[-0.5, -2.0]], dtype=torch.float64)
+    distillation = SampledReverseKLInput(
+        teacher_action_log_probs=teacher_actions,
+        valid_mask=torch.ones_like(actions, dtype=torch.bool),
+        loss_weights=torch.ones_like(actions),
+    )
+    config = _policy_config(reward_mode="replace")
+    config.use_entropy_loss = True
+    config.entropy_loss_coef = 0.7
+    config.use_kl_loss = True
+    config.kl_loss_coef = 0.4
+
+    objective = compute_policy_objective(
+        action_log_probs=actions,
+        old_action_log_probs=old_actions,
+        base_action_log_probs=torch.tensor([[-1.4, -0.6]], dtype=torch.float64),
+        advantages=torch.tensor([[3.0, -2.0]], dtype=torch.float64),
+        loss_mask=torch.ones_like(actions),
+        rollout_logprobs=None,
+        response_span_tags=None,
+        token_entropy=torch.tensor([[0.6, 0.8]], dtype=torch.float64),
+        config=config,
+        policy_loss_fn=ppo_policy_loss,
+        accumulation_steps=1,
+        scaling=LossScaling.CALLER,
+        distillation=distillation,
+    )
+    expected = (torch.exp(actions - old_actions) * (old_actions - teacher_actions)).mean()
+
+    torch.testing.assert_close(objective.optimization_loss, expected)
+    torch.testing.assert_close(objective.unscaled_loss, expected)
+    assert objective.policy_loss.item() == 0.0
+    assert objective.entropy.item() == 0.0
+    assert objective.kl_loss.item() == 0.0
+    objective.optimization_loss.backward()
+    expected_gradient = torch.exp(actions.detach() - old_actions) * (old_actions - teacher_actions) / actions.numel()
+    torch.testing.assert_close(actions.grad, expected_gradient)
+
+
+def test_replace_mode_rejects_batch_without_teacher_evidence():
+    actions = torch.tensor([[-1.0]], dtype=torch.float64)
+
+    with pytest.raises(ValueError, match="replace requires distillation evidence"):
+        compute_policy_objective(
+            action_log_probs=actions,
+            old_action_log_probs=actions,
+            base_action_log_probs=None,
+            advantages=torch.ones_like(actions),
+            loss_mask=torch.ones_like(actions),
+            rollout_logprobs=None,
+            response_span_tags=None,
+            token_entropy=torch.zeros_like(actions),
+            config=_policy_config(reward_mode="replace"),
+            policy_loss_fn=ppo_policy_loss,
+            accumulation_steps=1,
+            scaling=LossScaling.CALLER,
+        )
+
+
+def test_real_same_vocabulary_teacher_changes_student_gradient_and_update():
+    config = Qwen3Config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        max_position_embeddings=16,
+    )
+    token_ids = torch.tensor([[1, 2, 3, 4, 5]])
+    response_token_ids = token_ids[:, -2:]
+
+    torch.manual_seed(0)
+    initial_student = Qwen3ForCausalLM(config)
+    initial_state = {name: value.detach().clone() for name, value in initial_student.state_dict().items()}
+
+    def model(seed: int) -> Qwen3ForCausalLM:
+        torch.manual_seed(seed)
+        return Qwen3ForCausalLM(config)
+
+    def chosen_logprobs(causal_lm: Qwen3ForCausalLM) -> torch.Tensor:
+        response_logits = causal_lm(token_ids).logits[:, -3:-1]
+        return response_logits.log_softmax(dim=-1).gather(-1, response_token_ids.unsqueeze(-1)).squeeze(-1)
+
+    def optimize_once(teacher: Qwen3ForCausalLM) -> tuple[torch.Tensor, torch.Tensor]:
+        student = model(0)
+        student.load_state_dict(initial_state)
+        optimizer = torch.optim.SGD(student.parameters(), lr=0.1)
+        with torch.no_grad():
+            teacher_actions = chosen_logprobs(teacher)
+        objective = _objective(chosen_logprobs(student), teacher_actions)
+        optimizer.zero_grad()
+        objective.optimization_loss.backward()
+        gradient = torch.cat(
+            [parameter.grad.flatten() for parameter in student.parameters() if parameter.grad is not None]
+        )
+        optimizer.step()
+        updated_parameters = torch.cat([parameter.detach().flatten() for parameter in student.parameters()])
+        return gradient, updated_parameters
+
+    first_teacher = model(1)
+    second_teacher = model(2)
+    first_teacher_actions = chosen_logprobs(first_teacher)
+    second_teacher_actions = chosen_logprobs(second_teacher)
+    first_gradient, first_update = optimize_once(first_teacher)
+    second_gradient, second_update = optimize_once(second_teacher)
+    initial_parameters = torch.cat([value.flatten() for value in initial_state.values()])
+
+    assert not torch.allclose(first_teacher_actions, second_teacher_actions)
+    assert not torch.allclose(first_gradient, second_gradient)
+    assert not torch.allclose(first_update, initial_parameters)
+    assert not torch.allclose(second_update, initial_parameters)
 
 
 def test_best_of_n_optional_teacher_changes_only_the_selected_update():

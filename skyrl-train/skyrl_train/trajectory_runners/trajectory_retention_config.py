@@ -19,8 +19,8 @@ class TrajectoryRetentionConfig:
     accepted_stop_reasons: tuple[str, ...] = DEFAULT_ACCEPTED_STOP_REASONS
     reward_below: float | None = None
     reward_above: float | None = None
-    max_bytes_per_step: int = 8 * 1024 * 1024
-    max_bytes_per_run: int = 256 * 1024 * 1024
+    max_bytes_per_step: int | None = 800 * 1024 * 1024
+    max_bytes_per_run: int | None = 25 * 1024 * 1024 * 1024
     required: bool = False
     publish_timeout_seconds: float = 120.0
     shutdown_timeout_seconds: float = 30.0
@@ -64,8 +64,8 @@ def parse_trajectory_retention_config(config: Mapping[str, Any] | None) -> Traje
         accepted_stop_reasons=tuple(str(reason).strip().lower() for reason in accepted_stops_value),
         reward_below=_optional_float(config.get("reward_below", defaults.reward_below)),
         reward_above=_optional_float(config.get("reward_above", defaults.reward_above)),
-        max_bytes_per_step=int(config.get("max_bytes_per_step", defaults.max_bytes_per_step)),
-        max_bytes_per_run=int(config.get("max_bytes_per_run", defaults.max_bytes_per_run)),
+        max_bytes_per_step=_optional_int(config.get("max_bytes_per_step", defaults.max_bytes_per_step)),
+        max_bytes_per_run=_optional_int(config.get("max_bytes_per_run", defaults.max_bytes_per_run)),
         required=bool(config.get("required", defaults.required)),
         publish_timeout_seconds=float(config.get("publish_timeout_seconds", defaults.publish_timeout_seconds)),
         shutdown_timeout_seconds=float(config.get("shutdown_timeout_seconds", defaults.shutdown_timeout_seconds)),
@@ -83,6 +83,10 @@ def _optional_float(value: Any) -> float | None:
     return None if value is None else float(value)
 
 
+def _optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
 def _optional_string(value: Any) -> str | None:
     return None if value in (None, "") else str(value)
 
@@ -96,9 +100,14 @@ def _validate_config(config: TrajectoryRetentionConfig) -> None:
         raise ValueError("trajectory_retention.sample_count_per_step must be non-negative")
     if not 0.0 <= config.sample_fraction <= 1.0:
         raise ValueError("trajectory_retention.sample_fraction must be between 0 and 1")
-    if config.max_bytes_per_step < 0 or config.max_bytes_per_run < 0:
+    byte_bounds = (config.max_bytes_per_step, config.max_bytes_per_run)
+    if any(bound is not None and bound < 0 for bound in byte_bounds):
         raise ValueError("trajectory retention byte bounds must be non-negative")
-    if config.max_bytes_per_step > config.max_bytes_per_run:
+    if (
+        config.max_bytes_per_step is not None
+        and config.max_bytes_per_run is not None
+        and config.max_bytes_per_step > config.max_bytes_per_run
+    ):
         raise ValueError("trajectory retention per-step bound cannot exceed its run bound")
     if config.publish_timeout_seconds <= 0 or config.shutdown_timeout_seconds <= 0:
         raise ValueError("trajectory retention publication timeouts must be positive")

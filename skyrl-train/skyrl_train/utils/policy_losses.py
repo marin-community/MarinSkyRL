@@ -14,6 +14,7 @@ import loguru
 import torch
 from omegaconf import DictConfig
 
+from marinskyrl.distillation import DistillationRewardMode
 from skyrl_train.distillation import (
     DistillationInput,
 )
@@ -261,28 +262,49 @@ def compute_policy_objective(
             f"global_loss_denom is required for {GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION}"
         )
 
-    policy_loss_mask = build_think_weighted_loss_mask(
-        loss_mask,
-        response_span_tags,
-        float(config.think_token_weight),
-    )
-    policy_loss, policy_loss_metrics = policy_loss_fn(
-        action_log_probs,
-        old_action_log_probs,
-        advantages,
-        config=config,
-        loss_mask=policy_loss_mask,
-        rollout_logprobs=rollout_logprobs,
-        global_loss_denom=global_loss_denom,
-    )
+    distillation_config = config.get("distillation")
+    if distillation_config is None:
+        if distillation is not None:
+            raise ValueError("distillation evidence requires trainer.algorithm.distillation configuration")
+        reward_mode = DistillationRewardMode.ADD
+    else:
+        reward_mode = DistillationRewardMode(distillation_config.reward_mode)
+    if reward_mode is DistillationRewardMode.REPLACE and distillation is None:
+        raise ValueError("reward_mode=replace requires distillation evidence on every learner batch")
 
-    auxiliary = _compute_policy_auxiliary_terms(
-        action_log_probs=action_log_probs,
-        base_action_log_probs=base_action_log_probs,
-        token_entropy=token_entropy,
-        loss_mask=loss_mask,
-        config=config,
-    )
+    if reward_mode is DistillationRewardMode.REPLACE:
+        policy_loss = action_log_probs.new_zeros(())
+        policy_loss_metrics = {}
+    else:
+        policy_loss_mask = build_think_weighted_loss_mask(
+            loss_mask,
+            response_span_tags,
+            float(config.think_token_weight),
+        )
+        policy_loss, policy_loss_metrics = policy_loss_fn(
+            action_log_probs,
+            old_action_log_probs,
+            advantages,
+            config=config,
+            loss_mask=policy_loss_mask,
+            rollout_logprobs=rollout_logprobs,
+            global_loss_denom=global_loss_denom,
+        )
+
+    if reward_mode is DistillationRewardMode.REPLACE:
+        auxiliary = PolicyAuxiliaryTerms(
+            entropy=action_log_probs.new_zeros(()),
+            kl_loss=action_log_probs.new_zeros(()),
+            loss=action_log_probs.new_zeros(()),
+        )
+    else:
+        auxiliary = _compute_policy_auxiliary_terms(
+            action_log_probs=action_log_probs,
+            base_action_log_probs=base_action_log_probs,
+            token_entropy=token_entropy,
+            loss_mask=loss_mask,
+            config=config,
+        )
     distillation_loss = None
     distillation_metrics: dict[str, float] = {}
     combined_auxiliary_loss = auxiliary.loss

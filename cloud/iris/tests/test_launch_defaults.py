@@ -793,6 +793,47 @@ teacher_routing:
     assert staged == [{"path": "Qwen/teacher", "revision": "abc123"}]
 
 
+def test_policy_revision_is_staged_and_forwarded_to_training(tmp_path):
+    revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
+    args = _args(tmp_path, "opencode", ["--model-revision", revision])
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert set(options["--prestage-model"]) == {"Qwen/Model-30B"}
+    assert set(options["--model-revision"]) == {revision}
+
+
+def test_policy_revision_from_config_is_staged_before_ray(tmp_path):
+    revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
+    args = _args(tmp_path, "opencode")
+    Path(args.rl_config).write_text(f"trainer:\n  policy:\n    model:\n      revision: {revision}\n")
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert set(options["--prestage-model"]) == {"Qwen/Model-30B"}
+    assert set(options["--model-revision"]) == {revision}
+
+
+def test_policy_revision_from_config_rejects_task_local_model(tmp_path):
+    args = _args(tmp_path, "opencode", ["--model_path", "/models/preloaded-policy"])
+    Path(args.rl_config).write_text("trainer:\n  policy:\n    model:\n      revision: immutable-revision\n")
+
+    with pytest.raises(SystemExit, match="model-revision requires a Hugging Face repo ID"):
+        normalize(args)
+
+
+def test_policy_revision_from_config_must_be_a_non_empty_string(tmp_path):
+    args = _args(tmp_path, "opencode")
+    Path(args.rl_config).write_text("trainer:\n  policy:\n    model:\n      revision: 123\n")
+
+    with pytest.raises(SystemExit, match="model.revision must be a non-empty string"):
+        normalize(args)
+
+
 def test_task_local_model_without_source_supports_chat_template_override(tmp_path):
     args = _args(tmp_path, "opencode", ["--model_path", "/models/preloaded-policy"])
     Path(args.rl_config).write_text("policy_chat_template: chat_templates/test.jinja2\n")

@@ -25,7 +25,8 @@ from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
     validate_grug_expert_parallel_options,
 )
-from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
+from skyrl_train.inference_engines.base import lora_disk_load_request
+from skyrl_train.distributed.fsdp_strategy import FSDPStrategy, peft_config_payload
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
 from skyrl_train.numa_policy import MemoryPolicy, cpu_numa_topology, current_memory_policy
 from skyrl_train.utils.numa import memory_nodes_for_range
@@ -766,7 +767,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # Update per-gpu mini batch size based on device mesh
         self._normalize_mini_batch_size()
 
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        model_revision = self.cfg.trainer.policy.model.get("revision")
+        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
         validate_grug_expert_parallel_options(
             getattr(model_config, "model_type", None),
             expert_model_parallel_size=strategy.ep_size,
@@ -786,6 +788,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 lora_dropout=self.cfg.trainer.policy.model.lora.dropout,
                 target_modules=self.cfg.trainer.policy.model.lora.target_modules,
                 exclude_modules=self.cfg.trainer.policy.model.lora.exclude_modules,
+                lora_adapter_path=self.cfg.trainer.policy.model.lora.adapter_path,
+                lora_adapter_revision=self.cfg.trainer.policy.model.lora.adapter_revision,
                 sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
@@ -801,6 +805,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 training_strategy=self.cfg.trainer.strategy,
                 model_load_retry=self.cfg.trainer.model_load_retry,
                 gdn_backend=str(self.cfg.generator.gdn_backend),
+                model_revision=model_revision,
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -906,7 +911,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         """Collect LoRA parameters, save and call inference engine to load."""
         import os
         import json
-        from dataclasses import asdict
         from safetensors.torch import save_file
         from skyrl_train.distributed.fsdp_utils import collect_lora_params
 
@@ -915,23 +919,15 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         if torch.distributed.get_rank() == 0:
             os.makedirs(lora_sync_path, exist_ok=True)
 
-            peft_config = asdict(peft_model.peft_config.get("default", {}))
-            peft_config["task_type"] = peft_config["task_type"].value
-            peft_config["peft_type"] = peft_config["peft_type"].value
-            peft_config["target_modules"] = list(peft_config["target_modules"])
+            peft_config = peft_config_payload(peft_model.peft_config["default"])
 
             # Save LoRA parameters and config
             save_file(lora_params, os.path.join(lora_sync_path, "adapter_model.safetensors"))
             with io.open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
                 json.dump(peft_config, f, ensure_ascii=False, indent=4)
 
-            # Send LoRA disk loading request to inference engine. `lora_disk_load` is a specific identifier
-            # to tell the inference engine to extract the `lora_disk_path`.
-            lora_request = {
-                "names": ["lora_disk_load"],
-                "extras": [{"lora_disk_path": lora_sync_path}],
-            }
-            await inference_engine_client.update_named_weights(lora_request)
+            # Load the saved adapter through the inference engine's named-weight protocol.
+            await inference_engine_client.update_named_weights(lora_disk_load_request(lora_sync_path))
 
         torch.distributed.barrier()
 
@@ -960,24 +956,21 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         _fuse_weights = bool(self.cfg.generator.fuse_weights)
 
         # #1685 fix (FlashInfer-CUTLASS w13 swap skipped on RL update -> MoE token-salad):
-        # bracket the WHOLE multi-chunk sync with vLLM's layerwise reload so per-chunk
-        # model.load_weights DEFER processing and a single finalize re-runs
+        # bracket the WHOLE multi-chunk sync with vLLM's layerwise reload so model.load_weights
+        # defers processing and a single finalize re-runs
         # process_weights_after_loading (re-applying swap_w13_to_w31) EXACTLY once. PROVEN
         # by the disagg kernel-format diag: without this the engine holds checkpoint
         # [gate;up] while the FlashInfer CUTLASS kernel reads [up;gate]. Inert (swap-wise)
-        # on triton/dense backends, so byte-identical there.
-        _w13_bracket = not self.use_cuda_ipc and not _fuse_weights
+        # on triton/dense backends, so byte-identical there. CUDA IPC requires this too:
+        # transport changes how tensors arrive, not vLLM's kernel-layout contract.
+        _w13_bracket = not _fuse_weights
+
+        await self._begin_vllm_layerwise_weight_reload(inference_engine_client, enabled=_w13_bracket)
 
         if not self.use_cuda_ipc:
             # Signal engines to start accumulating weights (for FP8 batched quantization)
             if _fuse_weights and torch.distributed.get_rank() == 0:
                 await inference_engine_client.begin_weight_update()
-
-            # Open the layerwise-reload bracket (rank 0 drives the engine RPC).
-            if _w13_bracket and torch.distributed.get_rank() == 0:
-                await inference_engine_client.begin_weight_reload()
-            if _w13_bracket:
-                torch.distributed.barrier()
 
             # Broadcast path: one chunk per parameter
             for chunk in self.weight_extractor.extract_weights(generator_dtype):
@@ -1012,13 +1005,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             if _fuse_weights and torch.distributed.get_rank() == 0:
                 await inference_engine_client.end_weight_update()
 
-            # Close the layerwise-reload bracket: finalize_layerwise_reload re-runs
-            # process_weights_after_loading over every layer ONCE -> re-applies the
-            # FlashInfer-CUTLASS w13 [gate;up]->[up;gate] swap the per-chunk loads skipped.
-            if _w13_bracket:
-                torch.distributed.barrier()
-                if torch.distributed.get_rank() == 0:
-                    await inference_engine_client.finish_weight_reload()
         else:
             # CUDA IPC path: batched chunks (batching handled by extractor)
             from torch.multiprocessing.reductions import reduce_tensor
@@ -1058,6 +1044,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     torch.cuda.ipc_collect()
                 torch.distributed.barrier()
                 torch.cuda.synchronize()
+
+        # Finalize after every transport chunk so vLLM materializes and processes each layer
+        # exactly once. In particular, this restores FlashInfer-CUTLASS's w13 kernel layout.
+        await self._finish_vllm_layerwise_weight_reload(inference_engine_client, enabled=_w13_bracket)
 
         if cache_reset_task is not None:
             await cache_reset_task
@@ -1285,7 +1275,8 @@ class FSDPRefWorkerBase(RefWorkerBase):
         self.cp_mesh = getattr(strategy, "cp_mesh", None)
         self.cp_group = getattr(strategy, "cp_group", None)
 
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        model_revision = self.cfg.trainer.ref.model.get("revision")
+        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
         validate_grug_expert_parallel_options(
             getattr(model_config, "model_type", None),
             expert_model_parallel_size=strategy.ep_size,
@@ -1315,6 +1306,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 training_strategy=self.cfg.trainer.strategy,
                 model_load_retry=self.cfg.trainer.model_load_retry,
                 gdn_backend=str(self.cfg.generator.gdn_backend),
+                model_revision=model_revision,
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

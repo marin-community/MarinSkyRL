@@ -37,8 +37,9 @@ uv run --frozen marinskyrl --help
 
 Python extras cannot replace a base CPU Torch wheel with a CUDA wheel, so `cpu` and `cuda` are mutually
 exclusive wheel profiles. GPU-only component extras imply `cuda`: ordinary training commands select only
-`vllm`, while the standard image adds `fsdp` for its TorchTitan expert-parallel path and the Megatron image
-adds `megatron`. Native CUDA wheels are validated and installed by the GPU Docker builds.
+`vllm`, while the standard image adds `fsdp` for its TorchTitan expert-parallel path and optimized attention
+kernels used by hybrid architectures such as Qwen3.5. The Megatron image adds `megatron`. Native CUDA wheels
+are validated and installed by the GPU Docker builds.
 
 The walkthrough below reproduces the original OpenThoughts-Agent v1 release (kept here for reference), i.e.:
 - Using [open-thoughts/OpenThinker-Agent-v1-SFT](https://huggingface.co/open-thoughts/OpenThinker-Agent-v1-SFT) as base

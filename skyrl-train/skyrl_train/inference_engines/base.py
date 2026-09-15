@@ -47,6 +47,20 @@ class NamedWeightsUpdateRequest(TypedDict):
     packed: NotRequired[bool]
 
 
+LORA_DISK_LOAD_NAME = "lora_disk_load"
+LORA_DISK_PATH_KEY = "lora_disk_path"
+
+
+def lora_disk_load_request(path: str) -> NamedWeightsUpdateRequest:
+    """Return the named-weight request used to load a vLLM LoRA directory."""
+    return {
+        "names": [LORA_DISK_LOAD_NAME],
+        "dtypes": [],
+        "shapes": [],
+        "extras": [{LORA_DISK_PATH_KEY: path}],
+    }
+
+
 class InferenceEngineInterface(ABC):
     weight_sync_relative_rank_offset: int | None = None
     max_model_len: int | None = None

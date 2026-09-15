@@ -5,13 +5,14 @@
 
 import contextlib
 import threading
+from collections.abc import Iterable
 from typing import Any, Dict, Optional, Tuple, Union
 from copy import deepcopy
 
 import torch
 import torch.nn as nn
 from loguru import logger
-from peft import LoraConfig, TaskType, get_peft_model
+from peft import LoraConfig, PeftConfig, PeftModel, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
 import transformers
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
@@ -90,6 +91,67 @@ def resolve_attn_implementation(
             "supported under context parallel (G2)."
         )
     return impl
+
+
+def _load_trainable_lora_adapter(
+    model: nn.Module,
+    *,
+    adapter_path: str,
+    adapter_revision: str | None,
+    lora_rank: int,
+    lora_alpha: int,
+    lora_dropout: float,
+    target_modules: str | Iterable[str] | None,
+    exclude_modules: str | Iterable[str] | None,
+) -> PeftModel:
+    adapter_config = PeftConfig.from_pretrained(adapter_path, revision=adapter_revision)
+    if not isinstance(adapter_config, LoraConfig):
+        raise ValueError(f"Adapter {adapter_path!r} is {adapter_config.peft_type}, not LoRA")
+    configured_values = {
+        "rank": lora_rank,
+        "alpha": lora_alpha,
+        "dropout": lora_dropout,
+        "target_modules": _normalized_module_names(target_modules),
+        "exclude_modules": _normalized_module_names(exclude_modules),
+    }
+    adapter_values = {
+        "rank": adapter_config.r,
+        "alpha": adapter_config.lora_alpha,
+        "dropout": adapter_config.lora_dropout,
+        "target_modules": _normalized_module_names(adapter_config.target_modules),
+        "exclude_modules": _normalized_module_names(adapter_config.exclude_modules),
+    }
+    mismatches = {
+        name: (configured_values[name], adapter_values[name])
+        for name in configured_values
+        if configured_values[name] != adapter_values[name]
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{name}: configured={configured!r}, adapter={stored!r}"
+            for name, (configured, stored) in mismatches.items()
+        )
+        raise ValueError(f"Configured LoRA parameters do not match adapter {adapter_path!r}: {details}")
+    from skyrl_train.models.qwen3_5_vlm import (
+        QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING,
+        is_qwen3_5_text_tower,
+    )
+
+    key_mapping = QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING if is_qwen3_5_text_tower(model.config) else None
+    return PeftModel.from_pretrained(
+        model,
+        adapter_path,
+        is_trainable=True,
+        revision=adapter_revision,
+        low_cpu_mem_usage=model.device.type == "meta",
+        key_mapping=key_mapping,
+    )
+
+
+def _normalized_module_names(value: str | Iterable[str] | None) -> str | frozenset[str] | None:
+    if isinstance(value, str) or value is None:
+        return value
+    return frozenset(value)
 
 
 def validate_grug_training_options(
@@ -309,13 +371,13 @@ def _cp_moe_no_mask():
         _cp_moe_force_no_mask.active = prev
 
 
-def _model_is_gdn_arch(pretrain_or_model) -> bool:
+def _model_is_gdn_arch(pretrain_or_model, *, revision: str | None = None) -> bool:
     """Best-effort: does this HF model use GatedDeltaNet / linear-attention layers
     (the Qwen3-Next / Qwen3.6 family) that REQUIRE the pure-torch GDN path because
     the fla wheel is broken? Reads only the HF config (no weights). Returns False
     on any error or for a plain dense/full-attention model."""
     try:
-        cfg = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
+        cfg = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, revision=revision)
     except Exception:
         return False
     model_type = str(getattr(cfg, "model_type", "") or "").lower()
@@ -346,6 +408,8 @@ class HFModelWrapper(nn.Module):
         lora_dropout (float, optional): Dropout rate for LoRA layers. Defaults to 0.
         target_modules (list, optional): List of target modules for applying LoRA. Defaults to None.
         exclude_modules (list, optional): List of modules to exclude from applying LoRA. Defaults to None.
+        lora_adapter_path (str, optional): Local path or Hub model ID for initial LoRA weights. Defaults to None.
+        lora_adapter_revision (str, optional): Hub revision for the initial LoRA adapter. Defaults to None.
         ds_config (dict, optional): Configuration for DeepSpeed, enabling model partitioning across multiple GPUs. Defaults to None.
         device_map (dict, optional): Device mapping for loading the model onto specific devices. Defaults to None.
         packing_samples (bool, optional): Whether to pack samples during training. Defaults to False.
@@ -365,6 +429,8 @@ class HFModelWrapper(nn.Module):
         lora_dropout=0,
         target_modules=None,
         exclude_modules=None,
+        lora_adapter_path: str | None = None,
+        lora_adapter_revision: str | None = None,
         ds_config=None,
         device_map=None,
         temperature=1.0,
@@ -384,9 +450,14 @@ class HFModelWrapper(nn.Module):
         training_strategy: str | None = None,
         model_load_retry=None,
         gdn_backend: str = "torch",
+        model_revision: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
+        if lora_adapter_path is not None and lora_rank <= 0:
+            raise ValueError("lora_rank must be positive when lora_adapter_path is configured")
+        if lora_adapter_revision is not None and lora_adapter_path is None:
+            raise ValueError("lora_adapter_revision requires lora_adapter_path")
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
         self.context_parallel_size = context_parallel_size
@@ -415,7 +486,11 @@ class HFModelWrapper(nn.Module):
             )
 
         if isinstance(pretrain_or_model, str):
-            local_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
+            local_config = AutoConfig.from_pretrained(
+                pretrain_or_model,
+                trust_remote_code=True,
+                revision=model_revision,
+            )
             model_type = getattr(local_config, "model_type", None)
             validate_grug_training_strategy(model_type, training_strategy)
             validate_grug_training_options(
@@ -436,7 +511,7 @@ class HFModelWrapper(nn.Module):
             # qwen3_next modeling import — mask fla off BEFORE from_pretrained so
             # transformers uses its pure-torch (or, opt-in, FlashQLA) GDN path.
             # The architecture determines whether the broken FLA surface is masked.
-            _gdn_mask = _model_is_gdn_arch(pretrain_or_model)
+            _gdn_mask = _model_is_gdn_arch(pretrain_or_model, revision=model_revision)
             if _gdn_mask:
                 from skyrl_train.models.qwen3_next_gdn import mask_fla
 
@@ -493,6 +568,7 @@ class HFModelWrapper(nn.Module):
                     quantization_config=nf4_config,
                     torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                     device_map=device_map,
+                    revision=model_revision,
                     **rope_scaling_kwargs,
                 ),
                 model_id=pretrain_or_model,
@@ -551,16 +627,28 @@ class HFModelWrapper(nn.Module):
             if lora_rank > 0:
                 # https://github.com/huggingface/peft/issues/137
                 self.model.enable_input_require_grads()
-                lora_config = LoraConfig(
-                    task_type=TaskType.CAUSAL_LM,
-                    r=lora_rank,
-                    lora_alpha=lora_alpha,
-                    target_modules=target_modules,
-                    exclude_modules=exclude_modules,
-                    lora_dropout=lora_dropout,
-                    bias="none",
-                )
-                self.model = get_peft_model(self.model, lora_config)
+                if lora_adapter_path is not None:
+                    self.model = _load_trainable_lora_adapter(
+                        self.model,
+                        adapter_path=lora_adapter_path,
+                        adapter_revision=lora_adapter_revision,
+                        lora_rank=lora_rank,
+                        lora_alpha=lora_alpha,
+                        lora_dropout=lora_dropout,
+                        target_modules=target_modules,
+                        exclude_modules=exclude_modules,
+                    )
+                else:
+                    lora_config = LoraConfig(
+                        task_type=TaskType.CAUSAL_LM,
+                        r=lora_rank,
+                        lora_alpha=lora_alpha,
+                        target_modules=target_modules,
+                        exclude_modules=exclude_modules,
+                        lora_dropout=lora_dropout,
+                        bias="none",
+                    )
+                    self.model = get_peft_model(self.model, lora_config)
 
                 if load_in_4bit:
                     for name, module in self.model.named_modules():

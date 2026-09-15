@@ -4,6 +4,7 @@ import pytest
 
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
+    DistillationRewardMode,
     TeacherEvidenceKind,
     TeacherPlacement,
     TeacherSource,
@@ -28,7 +29,10 @@ def _mopd_config() -> dict:
                 "source": "openai_compatible",
                 "placement": "external",
                 "model": {"path": "Qwen/math-teacher", "revision": "math-revision"},
-                "endpoints": [{"url": "https://math.example/v1", "auth": "secret://math-api"}],
+                "endpoints": [{"url": "https://math.example/v1", "auth": "env:MATH_API_KEY", "max_concurrency": 8}],
+                "tokenizer_fingerprint": f"sha256:{'a' * 64}",
+                "max_sequence_length": 32768,
+                "request_timeout_seconds": 120,
                 "evidence": "chosen_token",
             },
             "swe": {
@@ -56,6 +60,7 @@ def test_compile_distillation_plan_preserves_multi_teacher_routes():
 
     assert plan is not None
     assert plan.objective is DistillationObjectiveKind.SAMPLED_REVERSE_KL
+    assert plan.reward_mode is DistillationRewardMode.REPLACE
     assert plan.routing.name == "mopd_v1"
     assert plan.routing.revision == "routing-revision"
     assert [(route.key, route.teacher_id, route.weight) for route in plan.routing.routes] == [
@@ -146,6 +151,30 @@ def test_compile_distillation_plan_defaults_hosted_teacher_to_external():
     assert plan.teachers[0].placement is TeacherPlacement.EXTERNAL
 
 
+def test_compile_distillation_plan_rejects_plaintext_teacher_auth():
+    config = _mopd_config()
+    config["teachers"]["math"]["endpoints"][0]["auth"] = "plaintext-key"
+
+    with pytest.raises(ValueError, match="auth must be an env:, file:, or versioned gcp-secret:// reference"):
+        compile_distillation_plan(config)
+
+
+def test_compile_distillation_plan_rejects_non_base_completion_url():
+    config = _mopd_config()
+    config["teachers"]["math"]["endpoints"][0]["url"] = "https://math.example/v1/completions"
+
+    with pytest.raises(ValueError, match=r"must be an HTTP\(S\) /v1 base endpoint"):
+        compile_distillation_plan(config)
+
+
+def test_compile_distillation_plan_rejects_invalid_external_tokenizer_fingerprint():
+    config = _mopd_config()
+    config["teachers"]["math"]["tokenizer_fingerprint"] = "Qwen/math-tokenizer"
+
+    with pytest.raises(ValueError, match="tokenizer_fingerprint must be a sha256: fingerprint"):
+        compile_distillation_plan(config)
+
+
 def test_compile_distillation_plan_preserves_local_teacher_resource_claim():
     config = _mopd_config()
     config["teachers"]["swe"]["resources"] = {
@@ -153,6 +182,7 @@ def test_compile_distillation_plan_preserves_local_teacher_resource_claim():
         "gpus_per_node": 8,
         "tensor_parallel_size": 8,
         "colocation_group": "teacher-rotation",
+        "max_num_batched_tokens": 4096,
     }
 
     plan = compile_distillation_plan(config)
@@ -162,6 +192,21 @@ def test_compile_distillation_plan_preserves_local_teacher_resource_claim():
     assert resources is not None
     assert (resources.num_nodes, resources.gpus_per_node, resources.tensor_parallel_size) == (2, 8, 8)
     assert resources.colocation_group == "teacher-rotation"
+    assert resources.max_num_batched_tokens == 4096
+
+
+def test_compile_distillation_plan_preserves_teacher_residency_policy():
+    config = _mopd_config()
+    config["trainer"]["algorithm"]["distillation"]["residency"] = {
+        "max_resident": 1,
+        "minimum_residency_seconds": 300,
+    }
+
+    plan = compile_distillation_plan(config)
+
+    assert plan is not None
+    assert plan.residency.max_resident == 1
+    assert plan.residency.minimum_residency_seconds == 300
 
 
 def test_compile_distillation_plan_rejects_resource_claim_for_external_teacher():

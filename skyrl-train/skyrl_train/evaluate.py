@@ -54,6 +54,12 @@ class _EvaluationAccumulator(Protocol):
     def record(self, request: TrajectoryRequestBatch, batch: TrajectoryBatch, uids: List[str]) -> None: ...
 
 
+def evaluation_dump_dir(export_path: Path, global_step: int | None) -> Path:
+    """Return the directory containing one evaluation session's persisted results."""
+    session = "eval_only" if global_step is None else f"global_step_{global_step}_evals"
+    return export_path / "dumped_evals" / session
+
+
 @dataclass
 class _WholeTrajectoryAccumulator:
     env_classes: List[str]
@@ -178,11 +184,7 @@ def _dump_eval_results(
         return
     with Timer("dump_eval_results"):
         # TODO(Ben): route eval dumps through skyrl_train.io when evaluation exports support cloud paths.
-        data_save_dir = (
-            Path(cfg.trainer.export_path)
-            / "dumped_evals"
-            / ("eval_only" if global_step is None else f"global_step_{global_step}_evals")
-        )
+        data_save_dir = evaluation_dump_dir(Path(cfg.trainer.export_path), global_step)
         data_save_dir.mkdir(parents=True, exist_ok=True)
         dump_per_dataset_eval_results(
             data_save_dir,

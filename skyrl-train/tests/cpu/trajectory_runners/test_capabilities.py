@@ -2,6 +2,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.config.trajectory_runner_capabilities import (
+    EntrypointOperation,
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
@@ -21,7 +22,8 @@ def _harbor_config(agent_name, **harbor_overrides):
                     "use_tis": True,
                     "policy_loss_type": "regular",
                     "tito_full": None,
-                }
+                },
+                "placement": {"colocate_all": True},
             },
             "terminal_bench_config": {"harbor": harbor},
             "generator": {"backend": "vllm"},
@@ -136,39 +138,53 @@ def test_behavior_logprobs_reject_multiturn_custom_template_retokenization():
         validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM)
 
 
-def test_distillation_rejects_fully_async_trainer_until_scored_buffer_wiring_exists():
-    cfg = _skyrl_config(use_tis=False)
-    OmegaConf.set_struct(cfg, False)
-    cfg.trainer.algorithm.distillation = {
-        "objective": "sampled_reverse_kl",
-        "routing_plan": "opd",
-        "coefficient": 0.5,
-        "reward_mode": "add",
-    }
-    cfg.teachers = {
-        "primary": {
-            "source": "local_inference",
-            "placement": "pinned",
-            "model": {"path": "Qwen/teacher", "revision": "teacher-revision"},
-            "backend": "vllm",
-            "evidence": "chosen_token",
-            "resources": {
-                "num_nodes": 1,
-                "gpus_per_node": 1,
-                "tensor_parallel_size": 1,
-                "colocation_group": "teacher",
-            },
-        }
-    }
-    cfg.teacher_routing = {
-        "opd": {
-            "revision": "route-revision",
-            "routes": {"default": {"teacher": "primary", "weight": 1.0}},
-        }
-    }
+def test_distillation_accepts_reconstructed_fully_async_learner_tokens(local_distillation_config):
+    cfg = local_distillation_config(_skyrl_config(use_tis=False))
 
-    with pytest.raises(ValueError, match="only the synchronous SkyRL Gym trainer"):
-        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
+    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM)
+
+
+@pytest.mark.parametrize(("agent_name", "version"), [("terminus-2", None), ("opencode", "1.18.2"), ("pi", None)])
+def test_distillation_accepts_exact_synchronous_harbor_paths(agent_name, version, local_distillation_config):
+    cfg = local_distillation_config(_harbor_config(agent_name, version=version))
+    cfg.trainer.algorithm.use_tis = False
+
+    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
+
+
+def test_distillation_rejects_harbor_without_exact_token_evidence(local_distillation_config):
+    cfg = local_distillation_config(_harbor_config("codex"))
+    cfg.trainer.algorithm.use_tis = False
+
+    with pytest.raises(ValueError, match="Harbor codex cannot supply tokenized learner actions"):
+        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
+
+
+def test_distillation_accepts_fully_async_harbor_with_exact_token_evidence(local_distillation_config):
+    cfg = local_distillation_config(_harbor_config("terminus-2"))
+    cfg.trainer.algorithm.use_tis = False
+    cfg.trainer.placement.colocate_all = False
+
+    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.HARBOR)
+
+
+def test_distillation_rejects_mini_swe_before_allocation(local_distillation_config):
+    cfg = local_distillation_config(_skyrl_config(use_tis=False))
+
+    with pytest.raises(ValueError, match="mini-swe"):
+        validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.MINI_SWE)
+
+
+def test_distillation_rejects_generate_only_entrypoint_before_allocation(local_distillation_config):
+    cfg = local_distillation_config(_harbor_config("terminus-2"))
+    cfg.trainer.algorithm.use_tis = False
+
+    with pytest.raises(ValueError, match="training-only"):
+        validate_trajectory_runner_capabilities(
+            cfg,
+            TrajectoryRunnerMode.HARBOR,
+            EntrypointOperation.GENERATE,
+        )
 
 
 @pytest.mark.parametrize(

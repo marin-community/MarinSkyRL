@@ -97,7 +97,7 @@ def resolve_engine_max_model_len(engine_init_kwargs: Dict[str, Any], rope_scalin
     return int(rope_factor * rope_max_pos)
 
 
-def _qwen3_5_vlm_engine_kwargs(pretrain: str) -> Dict[str, Any]:
+def _qwen3_5_vlm_engine_kwargs(pretrain: str, *, revision: str | None = None) -> Dict[str, Any]:
     """vLLM EngineArgs overrides for the Qwen3.5/3.6 VLM-shell rollout (tmax Stage 2).
 
     The Qwen3.6-35B-A3B (``qwen3_5_moe``) checkpoint's ``architectures`` names the
@@ -123,7 +123,7 @@ def _qwen3_5_vlm_engine_kwargs(pretrain: str) -> Dict[str, Any]:
     try:
         from skyrl_train.models.qwen3_5_vlm import is_qwen3_5_vlm_shell
 
-        cfg = AutoConfig.from_pretrained(pretrain, trust_remote_code=True)
+        cfg = AutoConfig.from_pretrained(pretrain, trust_remote_code=True, revision=revision)
         if is_qwen3_5_vlm_shell(cfg):
             logger.info(
                 f"[qwen3_5_vlm] {pretrain} is a Qwen3.5/3.6 VLM shell; setting vLLM "
@@ -354,7 +354,7 @@ def create_ray_wrapped_inference_engines(
     # Empty {} for every non-VLM-shell model -> byte-identical engine construction.
     # Do NOT clobber an explicit ++generator.engine_init_kwargs.language_model_only.
     vlm_engine_kwargs = (
-        _qwen3_5_vlm_engine_kwargs(pretrain)
+        _qwen3_5_vlm_engine_kwargs(pretrain, revision=engine_init_kwargs.get("revision"))
         if backend == "vllm" and "language_model_only" not in engine_init_kwargs
         else {}
     )

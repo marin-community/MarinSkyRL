@@ -25,6 +25,11 @@ class TrajectoryRunnerMode(StrEnum):
     HARBOR = "harbor"
 
 
+class EntrypointOperation(StrEnum):
+    TRAIN = "train"
+    GENERATE = "generate"
+
+
 class EvidenceFidelity(StrEnum):
     EXACT = "exact"
     RETOKENIZED = "retokenized"
@@ -203,17 +208,55 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
     )
 
 
-def validate_trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) -> None:
-    """Reject objectives whose selected runner cannot support their evidence contract."""
+def _validate_exact_sampled_completion(capabilities: TrajectoryRunnerCapabilities, *, consumer: str) -> None:
+    action_evidence_unusable = capabilities.action_tokens in {
+        ActionTokenHandling.RETOKENIZED,
+        ActionTokenHandling.UNAVAILABLE,
+    }
+    if capabilities.sampled_completion is not EvidenceFidelity.EXACT or action_evidence_unusable:
+        raise ValueError(
+            f"{capabilities.runner} cannot supply exact sampled completion token IDs required by {consumer}; "
+            f"resolved evidence fidelity is {capabilities.sampled_completion.value} and action-token handling is "
+            f"{capabilities.action_tokens.value}"
+        )
+
+    _validate_capability_requirements(capabilities, consumer=consumer)
+
+
+def _validate_capability_requirements(capabilities: TrajectoryRunnerCapabilities, *, consumer: str) -> None:
+    unmet = [requirement for requirement in capabilities.requirements if not requirement.satisfied]
+    if unmet:
+        settings = ", ".join(f"{requirement.config_path}={requirement.expected_value}" for requirement in unmet)
+        raise ValueError(f"{consumer} with {capabilities.runner} requires {settings}")
+
+
+def _validate_teacher_scoreable_tokens(capabilities: TrajectoryRunnerCapabilities) -> None:
+    """Accept exact or reconstructed learner tokens and reject missing token sequences."""
+    if capabilities.sampled_completion is EvidenceFidelity.UNAVAILABLE or (
+        capabilities.action_tokens is ActionTokenHandling.UNAVAILABLE
+    ):
+        raise ValueError(
+            f"{capabilities.runner} cannot supply tokenized learner actions required by teacher-scored distillation"
+        )
+    _validate_capability_requirements(capabilities, consumer="teacher-scored distillation")
+
+
+def validate_trajectory_runner_capabilities(
+    cfg: DictConfig,
+    mode: TrajectoryRunnerMode,
+    operation: EntrypointOperation = EntrypointOperation.TRAIN,
+) -> None:
+    """Reject operation and runner combinations that cannot supply required training evidence."""
     # Keep launcher imports Torch-free. Importing a skyrl_train.utils submodule
     # executes that package's eager registration imports, including Torch.
     from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
 
     distillation_plan = compile_distillation_plan_from_config(cfg)
-    if distillation_plan is not None and mode is not TrajectoryRunnerMode.SKYRL_GYM:
-        raise ValueError(
-            f"configured distillation currently supports only the synchronous SkyRL Gym trainer; got {mode.value}"
-        )
+    capabilities = trajectory_runner_capabilities(cfg, mode)
+    if distillation_plan is not None:
+        if operation is not EntrypointOperation.TRAIN:
+            raise ValueError("teacher-scored distillation is training-only and cannot be configured for generation")
+        _validate_teacher_scoreable_tokens(capabilities)
 
     algorithm = cfg.trainer.algorithm
     behavior_logprobs_required = rollout_logprobs_enabled(algorithm)
@@ -221,24 +264,9 @@ def validate_trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRun
     if not behavior_logprobs_required and not full_tito_required:
         return
 
-    capabilities = trajectory_runner_capabilities(cfg, mode)
-    action_evidence_unusable = capabilities.action_tokens in {
-        ActionTokenHandling.RETOKENIZED,
-        ActionTokenHandling.UNAVAILABLE,
-    }
-    if capabilities.sampled_completion is not EvidenceFidelity.EXACT or action_evidence_unusable:
-        raise ValueError(
-            f"{capabilities.runner} cannot supply exact sampled completion token IDs and logprobs; "
-            f"resolved evidence fidelity is {capabilities.sampled_completion.value} and action-token handling is "
-            f"{capabilities.action_tokens.value}"
-        )
+    _validate_exact_sampled_completion(capabilities, consumer="behavior-policy evidence")
     if full_tito_required and capabilities.full_context_continuation is not EvidenceFidelity.EXACT:
         raise ValueError(
             f"{capabilities.runner} does not support exact full-context continuation required by "
             "trainer.algorithm.tito_full=true"
         )
-
-    unmet = [requirement for requirement in capabilities.requirements if not requirement.satisfied]
-    if unmet:
-        settings = ", ".join(f"{requirement.config_path}={requirement.expected_value}" for requirement in unmet)
-        raise ValueError(f"Behavior-policy evidence with {capabilities.runner} requires {settings}")

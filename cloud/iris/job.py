@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import posixpath
 import subprocess
 import sys
 import tempfile
@@ -19,7 +18,9 @@ from cloud.iris.artifacts import (
     fs_and_path,
     relative_object_key,
     terminal_checkpoint_step,
+    write_json,
 )
+from cloud.iris.opd_curriculum import load_curriculum_manifest, run_curriculum
 from marinskyrl.checkpoint_paths import policy_export_path
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from marinskyrl.packed_tasks import select_task_references
@@ -52,15 +53,6 @@ class JobBackend(Protocol):
     ) -> IrisLaunchOutcome: ...
 
     def export_terminal_policy(self, spec: SkyRLJobSpec, config_path: str) -> None: ...
-
-
-def _write_json(uri: str, value: dict[str, Any]) -> None:
-    filesystem, path = fs_and_path(uri)
-    parent = posixpath.dirname(path)
-    if parent:
-        filesystem.makedirs(parent, exist_ok=True)
-    with filesystem.open(path, "w") as destination:
-        json.dump(value, destination, sort_keys=True)
 
 
 def _path_exists(uri: str) -> bool:
@@ -124,7 +116,7 @@ def _record_failed_attempt(
 ) -> SkyRLLaunchResponse:
     request = spec.request
     response = _launch_response(spec, AttemptState.FAILED, outcome=outcome, failure=failure)
-    _write_json(_attempt_uri(request), _manifest_payload(spec, response))
+    write_json(_attempt_uri(request), _manifest_payload(spec, response))
     return response
 
 
@@ -200,8 +192,8 @@ def execute_job(
         )
     response = _launch_response(spec, AttemptState.SUCCEEDED, outcome=outcome, model=model)
     payload = _manifest_payload(spec, response)
-    _write_json(_attempt_uri(request), payload)
-    _write_json(request.output.terminal_manifest_uri, payload)
+    write_json(_attempt_uri(request), payload)
+    write_json(request.output.terminal_manifest_uri, payload)
     return response
 
 
@@ -248,11 +240,25 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--attempt-id", default=None)
     build_parser.add_argument("--out", default=None, help="Write JSON to this path; stdout if omitted.")
 
+    curriculum_parser = iris_commands.add_parser(
+        "run-opd-curriculum",
+        help="Run or resume a sequential OPD curriculum manifest.",
+    )
+    curriculum_parser.add_argument("--manifest", required=True, help="Path to the curriculum YAML manifest.")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = create_parser().parse_args(argv)
+
+    if args.action == "run-opd-curriculum":
+        manifest = load_curriculum_manifest(Path(args.manifest))
+        with contextlib.redirect_stdout(sys.stderr):
+            result = run_curriculum(manifest, execute_job)
+        json.dump(asdict(result), sys.stdout, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
 
     if args.action == "build-request":
         optional_fields = (

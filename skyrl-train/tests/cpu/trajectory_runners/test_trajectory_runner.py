@@ -1,5 +1,6 @@
 import pytest
 
+from skyrl_train.batch_sampling import filter_trajectory_batch
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryRunner, TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.types import TrajectoryID
@@ -37,6 +38,16 @@ class _ReconstructedRunner(TrajectoryRunner):
                 "generate/tis/alignment_alert": 1.0,
             },
             "rollout_logprobs": [[-0.1, -0.2]],
+        }
+
+
+class _TwoRowRunner(TrajectoryRunner):
+    async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+        return {
+            "prompt_token_ids": [[1], [2]],
+            "response_ids": [[3], [4]],
+            "rewards": [1.0, 1.0],
+            "loss_masks": [[1], [1]],
         }
 
 
@@ -109,3 +120,62 @@ async def test_run_propagates_request_identity_when_runner_output_omits_it():
     output = await _AlignedRunner().run({"trajectory_ids": trajectory_ids})
 
     assert output["trajectory_ids"] == trajectory_ids
+
+
+@pytest.mark.asyncio
+async def test_run_propagates_explicit_teacher_routes_from_environment_metadata():
+    output = await _TwoRowRunner().run(
+        {
+            "env_extras": [
+                {"teacher_route": "math"},
+                {"teacher_route": "code"},
+            ]
+        }
+    )
+
+    assert output["teacher_route_keys"] == ["math", "code"]
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_partially_routed_teacher_batch():
+    with pytest.raises(ValueError, match="teacher_route.*every request row"):
+        await _TwoRowRunner().run(
+            {
+                "env_extras": [
+                    {"teacher_route": "math"},
+                    {},
+                ]
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_empty_teacher_route():
+    with pytest.raises(ValueError, match="teacher_route must be a non-empty string"):
+        await _TwoRowRunner().run(
+            {
+                "env_extras": [
+                    {"teacher_route": "math"},
+                    {"teacher_route": ""},
+                ]
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_omits_teacher_routes_when_request_does_not_supply_them():
+    output = await _TwoRowRunner().run({"env_extras": [{}, {}]})
+
+    assert "teacher_route_keys" not in output
+
+
+@pytest.mark.asyncio
+async def test_teacher_routes_survive_batch_concatenation_and_filtering():
+    math = await _AlignedRunner().run({"env_extras": [{"teacher_route": "math"}]})
+    code = await _AlignedRunner().run({"env_extras": [{"teacher_route": "code"}]})
+
+    combined = concatenate_trajectory_batches([math, code], tis_lcs_alert_threshold=0.005)
+    filtered = filter_trajectory_batch(combined, [1])
+
+    assert combined["teacher_route_keys"] == ["math", "code"]
+    assert filtered["teacher_route_keys"] == ["code"]

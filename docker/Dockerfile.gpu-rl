@@ -60,7 +60,7 @@ ARG TORCHVISION_VERSION=0.26.0
 ARG FLASH_ATTN_VERSION=2.8.3
 ARG VLLM_FORK_REPO=https://github.com/marin-community/vllm.git
 ARG VLLM_FORK_COMMIT=8672c71e311cb76a81154589cb60498b41dd59f7
-ARG VLLM_NATIVE_DONOR_COMMIT=4b55591306c934cdc21461f091c9ea22ad008007
+ARG VLLM_NATIVE_DONOR_COMMIT=8672c71e311cb76a81154589cb60498b41dd59f7
 ARG VLLM_NATIVE_DONOR_ARCHIVE_SHA256=not-applicable
 # A100 (8.0) + Hopper (9.0) + Blackwell (10.0): the GPUs that run this image.
 # 10.0 is GB200/B200 (cw-us-east-08a, 4 GPUs per node). Adding it REQUIRES
@@ -157,7 +157,14 @@ RUN echo "VLLM_FORK_COMMIT=${VLLM_FORK_COMMIT}" >  /wheels/MANIFEST && \
     echo "TORCH_VERSION=${TORCH_VERSION}" >> /wheels/MANIFEST && \
     echo "TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}" >> /wheels/MANIFEST && \
     echo "CUDA=12.9 PY=cp312 PLATFORM=linux_x86_64" >> /wheels/MANIFEST && \
+    cd /wheels && sha256sum ./*.whl > SHA256SUMS && \
     ls -la /wheels
+
+# Keep the exported wheel image small enough to transfer and archive after the
+# compile. The wheel-builder filesystem also contains the CUDA toolkit and build
+# tree, neither of which belongs in the reusable artifact.
+FROM scratch AS wheel-artifact
+COPY --from=wheel-builder /wheels /wheels
 
 # =============================================================================
 # STAGE 2: wheel source alias — prebuilt-wheelhouse (default) | wheel-builder

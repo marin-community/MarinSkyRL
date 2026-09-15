@@ -59,7 +59,10 @@ DEBUG_MODE_TRAINER_FIELDS = {
 }
 RUNTIME_CONFIG_TRAINER_FIELDS = {
     "collective_phase_diagnostics": None,
+    "distillation_token_budget": None,
     "offload_optimizer_during_rollouts": False,
+    "reset_distillation_token_count_on_resume": False,
+    "reset_global_step_on_resume": False,
     "restore_dataloader_state": True,
     "trajectory_selector": {"type": None},
     "distributed": {
@@ -89,6 +92,12 @@ ADDITIVE_DYNAMIC_SAMPLING_FIELDS = {
 ADDITIVE_GROUP_ADMISSION_FIELDS = {
     "stall_timeout": None,
 }
+ADDITIVE_FULLY_ASYNC_FIELDS = {
+    "teacher_scoring": {
+        "max_queued_per_teacher": 8,
+        "workers_per_teacher": 1,
+    },
+}
 ADDITIVE_OVERLONG_FIELDS = {
     "penalty_scale": 1.0,
 }
@@ -103,9 +112,14 @@ ADDITIVE_GENERATOR_FIELDS = {
     "r3_dispatch_put_timeout_seconds": 600,
     "gdn_backend": "torch",
 }
-ADDITIVE_POLICY_MODEL_FIELDS = {
+ADDITIVE_MODEL_FIELDS = {
     "source_uri": None,
     "source_identity": None,
+    "revision": None,
+}
+ADDITIVE_POLICY_LORA_FIELDS = {
+    "adapter_path": None,
+    "adapter_revision": None,
 }
 ADDITIVE_POLICY_FIELDS = {
     "grug_query_bias_interpolation_weight": None,
@@ -180,12 +194,17 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         container["trainer"]["algorithm"]["dynamic_sampling"].pop(k, None)
     for k in ADDITIVE_GROUP_ADMISSION_FIELDS:
         container["trainer"]["algorithm"]["group_admission"].pop(k, None)
+    for k in ADDITIVE_FULLY_ASYNC_FIELDS:
+        container["trainer"]["fully_async"].pop(k, None)
     if not container["trainer"]["algorithm"]["group_admission"]:
         container["trainer"]["algorithm"].pop("group_admission")
     for k in ADDITIVE_GENERATOR_FIELDS:
         container["generator"].pop(k, None)
-    for k in ADDITIVE_POLICY_MODEL_FIELDS:
-        container["trainer"]["policy"]["model"].pop(k, None)
+    for role in TRAINER_MODEL_ROLES:
+        for k in ADDITIVE_MODEL_FIELDS:
+            container["trainer"][role]["model"].pop(k, None)
+    for k in ADDITIVE_POLICY_LORA_FIELDS:
+        container["trainer"]["policy"]["model"]["lora"].pop(k, None)
     for k in ADDITIVE_POLICY_FIELDS:
         container["trainer"]["policy"].pop(k, None)
     for k in ADDITIVE_OVERLONG_FIELDS:

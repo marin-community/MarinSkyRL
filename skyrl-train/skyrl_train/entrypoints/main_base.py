@@ -24,6 +24,7 @@ import asyncio
 import multiprocessing as mp
 
 from skyrl_train.config.trajectory_runner_capabilities import (
+    EntrypointOperation,
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
@@ -160,6 +161,13 @@ def create_ray_wrapped_inference_engines_from_config(
         shared_pg=colocate_pg,
         inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
     )
+    engine_init_kwargs = {
+        **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
+        "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
+    }
+    model_revision = cfg.trainer.policy.model.get("revision")
+    if model_revision is not None:
+        engine_init_kwargs["revision"] = model_revision
     engine_kwargs = inference_engine_kwargs_from_config(
         cfg,
         tokenizer,
@@ -247,6 +255,10 @@ class BasePPOExp:
         logger.info("Inference engines ready: mode={} count={}", engine_mode, len(inference_engines))
         return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
 
+    def uses_fully_async_trainer(self) -> bool:
+        """Return whether this entrypoint schedules learner batches fully asynchronously."""
+        return False
+
     def _configure_log_level(self):
         """Configure loguru log level from trainer config."""
         import sys
@@ -277,6 +289,7 @@ class BasePPOExp:
             model_path=self.cfg.trainer.policy.model.path,
             disable_fast_tokenizer=self.cfg.trainer.disable_fast_tokenizer,
             padding_side=padding_side,
+            revision=self.cfg.trainer.policy.model.get("revision"),
         )
 
     def get_train_dataset(self):
@@ -526,12 +539,17 @@ class BasePPOExp:
         tracker = self.get_tracker()
 
         tokenizer = self.tokenizer
-        from skyrl_train.local_teacher_runtime import (  # noqa: PLC0415
-            prepare_sync_distillation_runtime,
+        from skyrl_train.teacher_runtime import (  # noqa: PLC0415
+            prepare_async_distillation_runtime,
+            prepare_distillation_runtime,
+            start_async_distillation_runtime,
             start_sync_distillation_runtime,
         )
 
-        prepared_distillation = prepare_sync_distillation_runtime(self.cfg, tokenizer)
+        prepare_distillation_runtime = (
+            prepare_async_distillation_runtime if self.uses_fully_async_trainer() else prepare_distillation_runtime
+        )
+        prepared_distillation = prepare_distillation_runtime(self.cfg, tokenizer)
         inference_engine_client = self.create_inference_engine_client()
 
         trajectory_runner: TrajectoryRunner = self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client)
@@ -558,9 +576,15 @@ class BasePPOExp:
                 self.cfg.trainer.strategy,
                 len(trainer.policy_model.actor_infos),
             )
-            distillation_runtime = asyncio.run(start_sync_distillation_runtime(self.cfg, prepared_distillation))
+            start_distillation_runtime = (
+                start_async_distillation_runtime if self.uses_fully_async_trainer() else start_sync_distillation_runtime
+            )
+            distillation_runtime = asyncio.run(start_distillation_runtime(self.cfg, prepared_distillation))
             if distillation_runtime is not None:
-                trainer.configure_sync_distillation(distillation_runtime)
+                if self.uses_fully_async_trainer():
+                    trainer.configure_async_distillation(distillation_runtime)
+                else:
+                    trainer.configure_sync_distillation(distillation_runtime)
         except BaseException:
             asyncio.run(trainer.shutdown())
             raise
@@ -637,6 +661,7 @@ def run_ray_driver(
     entrypoint: RemoteFunction,
     runner_mode: TrajectoryRunnerMode,
     *,
+    operation: EntrypointOperation = EntrypointOperation.TRAIN,
     failure_message: str = "Training failed",
 ) -> None:
     """Run one packaged experiment entrypoint with the shared Ray driver lifecycle."""
@@ -648,7 +673,7 @@ def run_ray_driver(
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
 
     validate_cfg(cfg)
-    validate_trajectory_runner_capabilities(cfg, runner_mode)
+    validate_trajectory_runner_capabilities(cfg, runner_mode, operation)
     configure_progress(cfg.trainer.progress)
 
     initialize_ray(cfg)

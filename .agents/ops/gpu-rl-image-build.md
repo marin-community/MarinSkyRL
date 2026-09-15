@@ -47,9 +47,11 @@ because its post-lock install can alter the resolved environment.
 | variable | condition |
 |---|---|
 | `GITSHA` | always; full committed MarinSkyRL revision |
-| `DOCKER_USER_ID` | always |
-| `GHCR_TOKEN` | always; token must push packages |
-| `PREBUILT_WHEEL_ARTIFACT_URI` and `PREBUILT_WHEEL_ARTIFACT_SHA256` | only for `prebuilt-wheelhouse` |
+| `REGISTRY_USER` | always |
+| `REGISTRY_TOKEN` | always; short-lived token that can push the selected repository |
+| `IMAGE_REPOSITORY` | optional; defaults to `ghcr.io/marin-community/marinskyrl` |
+| `PREBUILT_WHEEL_ARTIFACT_URI` and `PREBUILT_WHEEL_ARTIFACT_SHA256` | only for an explicitly selected `prebuilt-wheelhouse`; the URI may be S3, HTTPS, or a local staged file |
+| `HF_TOKEN` and `HF_WHEEL_REPOSITORY` | when a source build must publish a reusable wheelhouse |
 
 Architecture is derived from the build host. It selects the Dockerfile, crane/kaniko platform,
 wheel platform, cache repository, and arm64 tag suffix. Do not override those as an architecture
@@ -60,9 +62,11 @@ task. Keep the Iris task retry policy focused on whole-task failures; do not dis
 to recover from a transport reset.
 
 Use `WHEEL_SOURCE=wheel-builder` for arm64. On amd64, use `prebuilt-wheelhouse` only when the operator
-supplies an artifact URI and digest whose manifest matches the Dockerfile; otherwise use
-`wheel-builder`. That mode preserves the compiled wheel stage under `wheels-<full-sha><arch-suffix>` and
-reuses the registry cache on retries.
+supplies an artifact URI and digest whose manifest matches the Dockerfile. `WHEEL_SOURCE=auto` checks the public,
+content-addressed Hugging Face wheelhouse first and compiles on a cache miss. A source build preserves a minimal
+wheel-only image under `wheels-<full-sha><arch-suffix>` and reuses the registry cache on retries. Set
+`HF_WHEEL_REPOSITORY` only when an authorized Hugging Face token is available; the upload completes before the runtime
+image layers begin.
 
 ## Submit
 
@@ -70,8 +74,8 @@ Run from the clean committed build worktree:
 
 ```bash
 GITSHA=$(git rev-parse HEAD)
-DOCKER_USER_ID=$(gh api user --jq .login)
-GHCR_TOKEN=$(gh auth token)
+REGISTRY_USER=$(gh api user --jq .login)
+REGISTRY_TOKEN=$(gh auth token)
 BUILD_B64=$(base64 < docker/build_gpu_rl_kaniko.sh | tr -d '\n')
 ```
 
@@ -81,8 +85,8 @@ Every job uses `docker.io/library/ubuntu:22.04`, `--no-sync`, `--enable-extra-re
 ```bash
 -e BUILD_B64 "$BUILD_B64" \
 -e GITSHA "$GITSHA" \
--e DOCKER_USER_ID "$DOCKER_USER_ID" \
--e GHCR_TOKEN "$GHCR_TOKEN" \
+-e REGISTRY_USER "$REGISTRY_USER" \
+-e REGISTRY_TOKEN "$REGISTRY_TOKEN" \
 -e WHEEL_SOURCE wheel-builder \
 -- bash -lc 'echo "$BUILD_B64" | base64 -d > /tmp/build.sh && exec bash /tmp/build.sh'
 ```

@@ -146,7 +146,7 @@ async def test_http_model_client_normalizes_chat_completion():
             {
                 "prompts": [[{"role": "user", "content": "question"}]],
                 "session_ids": ["trajectory-1"],
-                "sampling_params": {"temperature": 0.7},
+                "sampling_params": {"temperature": 0.7, "max_generate_length": 256},
             }
         )
     finally:
@@ -158,6 +158,7 @@ async def test_http_model_client_normalizes_chat_completion():
             "messages": [{"role": "user", "content": "question"}],
             "session_id": "trajectory-1",
             "temperature": 0.7,
+            "max_completion_tokens": 256,
         }
     ]
     assert output == {
@@ -168,3 +169,24 @@ async def test_http_model_client_normalizes_chat_completion():
         "prompt_logprobs": None,
         "token_provenance": "reconstructed",
     }
+
+
+@pytest.mark.asyncio
+async def test_http_model_client_preserves_server_error_details():
+    async def reject(_request):
+        return web.json_response({"error": {"message": "unsupported field"}}, status=400)
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", reject)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+
+    try:
+        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=MagicMock())
+        with pytest.raises(RuntimeError, match="HTTP 400.*unsupported field"):
+            await client.generate({"prompts": [[{"role": "user", "content": "question"}]]})
+    finally:
+        await runner.cleanup()
