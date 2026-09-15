@@ -120,6 +120,7 @@ async def _collect_evaluation_rollouts(
     trajectory_batches: List[TrajectoryBatch] = []
     last_request = None
     last_batch = None
+    pbar = None
     try:
         pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
         for prompts in eval_dataloader:
@@ -138,7 +139,11 @@ async def _collect_evaluation_rollouts(
 
             accumulator.record(request, batch, uids)
     finally:
-        await trajectory_runner.stop_eval_session()
+        try:
+            if pbar is not None:
+                pbar.close()
+        finally:
+            await trajectory_runner.stop_eval_session()
 
     if last_request is None or last_batch is None:
         raise ValueError("evaluation dataloader produced no batches")

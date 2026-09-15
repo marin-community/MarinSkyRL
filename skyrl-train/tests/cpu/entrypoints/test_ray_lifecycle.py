@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import signal
 from unittest.mock import Mock
 
@@ -10,6 +11,8 @@ from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperatio
 from skyrl_train.entrypoints import ray_lifecycle
 from skyrl_train.entrypoints.main_base import EntrypointSupervisor, resolve_entrypoint_node_id, run_ray_driver
 from skyrl_train.config.utils import get_default_config
+from skyrl_train import telemetry
+from skyrl_train.entrypoints import main_base
 from skyrl_train.utils import utils as trainer_utils
 
 
@@ -68,6 +71,22 @@ def test_external_ray_owner_preserves_termination_exit_code(monkeypatch):
     exit_process.assert_called_once_with(128 + signal.SIGTERM)
 
 
+def test_external_ray_owner_flushes_logs_before_immediate_exit(monkeypatch):
+    exit_process = Mock()
+    stdout = Mock()
+    stderr = Mock()
+    monkeypatch.setenv("SKYRL_RAY_CLUSTER_OWNER", "iris-task-runtime")
+    monkeypatch.setattr(ray_lifecycle.os, "_exit", exit_process)
+    monkeypatch.setattr(ray_lifecycle.sys, "stdout", stdout)
+    monkeypatch.setattr(ray_lifecycle.sys, "stderr", stderr)
+
+    ray_lifecycle.exit_without_ray_destructors(1)
+
+    stdout.flush.assert_called_once_with()
+    stderr.flush.assert_called_once_with()
+    exit_process.assert_called_once_with(1)
+
+
 def test_local_ray_owner_returns_through_normal_process_exit(monkeypatch):
     exit_process = Mock()
     monkeypatch.delenv("SKYRL_RAY_CLUSTER_OWNER", raising=False)
@@ -90,6 +109,30 @@ def test_runner_evidence_rejection_happens_before_ray_initialization(monkeypatch
         run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.MINI_SWE)
 
     initialize_ray.assert_not_called()
+
+
+def test_driver_preserves_remote_exception_before_external_owner_exit(tmp_path, monkeypatch):
+    cfg = get_default_config()
+    cfg.trainer.logger = "console"
+    remote_failure = RuntimeError("original remote failure")
+    shutdown = Mock()
+    immediate_exit = Mock()
+    monkeypatch.setenv("SKYRL_DEBUG_ARTIFACT_DIR", str(tmp_path))
+    monkeypatch.setattr(trainer_utils, "initialize_ray", Mock())
+    monkeypatch.setattr(main_base, "validate_trajectory_runner_capabilities", Mock())
+    monkeypatch.setattr(main_base.EntrypointSupervisor, "wait", Mock(side_effect=remote_failure))
+    monkeypatch.setattr(ray_lifecycle, "shutdown_ray", shutdown)
+    monkeypatch.setattr(ray_lifecycle, "exit_without_ray_destructors", immediate_exit)
+    monkeypatch.setattr(telemetry, "process_telemetry", lambda _role: contextlib.nullcontext())
+
+    with pytest.raises(RuntimeError, match="original remote failure"):
+        run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.SKYRL_GYM)
+
+    shutdown.assert_called_once_with()
+    immediate_exit.assert_called_once_with(1)
+    receipts = list((tmp_path / "outcomes").glob("*.exception.json"))
+    assert len(receipts) == 1
+    assert "original remote failure" in receipts[0].read_text()
 
 
 def test_generate_only_distillation_rejection_happens_before_ray_initialization(monkeypatch, local_distillation_config):

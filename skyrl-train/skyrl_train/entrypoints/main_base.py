@@ -630,6 +630,7 @@ def run_ray_driver(
 ) -> None:
     """Run one packaged experiment entrypoint with the shared Ray driver lifecycle."""
     from skyrl_train.entrypoints.ray_lifecycle import exit_without_ray_destructors, shutdown_ray  # noqa: PLC0415
+    from marinskyrl.process_diagnostics import write_exception_receipt  # noqa: PLC0415
     from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry  # noqa: PLC0415
     from skyrl_train.utils import validate_cfg  # noqa: PLC0415
     from skyrl_train.utils.logging_utils import log_exception_as_text  # noqa: PLC0415
@@ -657,14 +658,27 @@ def run_ray_driver(
             )
 
         exit_code = None
+        failure: Exception | None = None
         try:
             exit_code = supervisor.wait(entrypoint.remote(cfg))
         except Exception as e:
             log_exception_as_text(failure_message, e)
-            raise
+            receipt = write_exception_receipt(
+                "skyrl-entrypoint-driver",
+                e,
+                metadata={"failure_message": failure_message},
+            )
+            logger.error("Preserved original training-driver exception at {}", receipt)
+            failure = e
         finally:
             logger.info("Shutting down Ray on head node...")
             shutdown_ray()
+
+        if failure is not None:
+            # An externally owned Ray cluster must bypass native destructors, which have
+            # previously replaced the useful RayTaskError with a late SIGABRT.
+            exit_without_ray_destructors(1)
+            raise failure.with_traceback(failure.__traceback__)
 
         if exit_code is not None:
             exit_without_ray_destructors(exit_code)

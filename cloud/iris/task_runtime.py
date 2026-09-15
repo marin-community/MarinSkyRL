@@ -1282,6 +1282,10 @@ RAY_LOG_SYNC_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # skip a single >2 GiB log
 # teardown budget while staying far below object-store request-rate limits.
 RAY_LOG_SYNC_MAX_WORKERS = 16
 RAY_LOG_SYNC_MAX_FAILURE_LOGS = 3
+# A periodic pass must not consume the entire teardown window on a long-lived Ray
+# session. Deferred files remain eligible for the next pass; diagnostic logs sort first.
+RAY_LOG_SYNC_MAX_FILES_PER_PASS = 1024
+RAY_LOG_SYNC_MAX_BYTES_PER_PASS = 1024 * 1024 * 1024
 DEBUG_SYNC_MAX_FILE_BYTES = 512 * 1024 * 1024
 DEBUG_SYNC_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 
@@ -1292,6 +1296,7 @@ class RayLogSyncResult:
     uploaded_bytes: int = 0
     unchanged_files: int = 0
     failed_files: int = 0
+    deferred_files: int = 0
 
 
 class RayLogSyncWaitStatus(StrEnum):
@@ -1337,6 +1342,7 @@ class _RayLogUploadPlan:
     active_remote_paths: frozenset[str]
     unchanged_files: int
     scan_failures: tuple[_RayLogScanFailure, ...]
+    deferred_files: int
 
 
 @dataclass(frozen=True)
@@ -1426,11 +1432,31 @@ def _plan_ray_log_uploads(
                     unchanged_files += 1
                     continue
                 uploads.append(_RayLogUpload(local_path=local_path, remote_path=remote_path, version=version))
+
+    def priority(upload: _RayLogUpload) -> tuple[bool, int, str]:
+        filename = os.path.basename(upload.local_path)
+        diagnostic = (
+            filename.endswith(".err")
+            or filename in {"raylet.out", "gcs_server.out"}
+            or filename.startswith("python-core-driver")
+        )
+        return diagnostic, upload.version.modified_ns, upload.local_path
+
+    selected: list[_RayLogUpload] = []
+    selected_bytes = 0
+    for upload in sorted(uploads, key=priority, reverse=True):
+        if len(selected) >= RAY_LOG_SYNC_MAX_FILES_PER_PASS:
+            break
+        if selected_bytes + upload.version.size_bytes > RAY_LOG_SYNC_MAX_BYTES_PER_PASS:
+            continue
+        selected.append(upload)
+        selected_bytes += upload.version.size_bytes
     return _RayLogUploadPlan(
-        uploads=tuple(uploads),
+        uploads=tuple(selected),
         active_remote_paths=frozenset(active_remote_paths),
         unchanged_files=unchanged_files,
         scan_failures=tuple(scan_failures),
+        deferred_files=len(uploads) - len(selected),
     )
 
 
@@ -1460,6 +1486,7 @@ def _apply_ray_log_upload_results(
             uploaded_bytes=uploaded_bytes,
             unchanged_files=plan.unchanged_files,
             failed_files=len(plan.scan_failures) + len(failures),
+            deferred_files=plan.deferred_files,
         ),
         tuple(failures),
     )
@@ -1529,8 +1556,11 @@ class RayLogSyncSession:
             return None
         return join_resource_path(self.ray_log_dir, self.node_id)
 
-    def sync(self, reason: str) -> RayLogSyncResult:
-        """Upload new or changed files and return per-pass file and byte counts."""
+    def _sync_pass(
+        self,
+        reason: str,
+        uploaded_versions: dict[str, _RayLogVersion],
+    ) -> RayLogSyncResult:
         if not self.destination or not self._settings.enabled:
             return RayLogSyncResult()
 
@@ -1543,10 +1573,9 @@ class RayLogSyncSession:
             _log(f"[ray-log-sync] cannot resolve dest {self.destination} ({error}) [{reason}]")
             return RayLogSyncResult()
 
-        with self._lock:
-            plan = _plan_ray_log_uploads(log_dirs, destination_path, self._uploaded_versions)
-            upload_results = _upload_ray_logs(filesystem, plan.uploads)
-            result, upload_failures = _apply_ray_log_upload_results(self._uploaded_versions, plan, upload_results)
+        plan = _plan_ray_log_uploads(log_dirs, destination_path, uploaded_versions)
+        upload_results = _upload_ray_logs(filesystem, plan.uploads)
+        result, upload_failures = _apply_ray_log_upload_results(uploaded_versions, plan, upload_results)
 
         failure_messages = [
             f"stat failed for {failure.local_path}: {type(failure.error).__name__}: {failure.error}"
@@ -1564,9 +1593,27 @@ class RayLogSyncSession:
         _log(
             f"[ray-log-sync] uploaded {result.uploaded_files} file(s) / "
             f"{result.uploaded_bytes / 1073741824.0:.2f} GiB "
-            f"(unchanged={result.unchanged_files}, failed={result.failed_files}) -> {self.destination} [{reason}]"
+            f"(unchanged={result.unchanged_files}, failed={result.failed_files}, deferred={result.deferred_files}) "
+            f"-> {self.destination} [{reason}]"
         )
         return result
+
+    def sync(self, reason: str) -> RayLogSyncResult:
+        """Upload new or changed files and return per-pass file and byte counts."""
+        with self._lock:
+            return self._sync_pass(reason, self._uploaded_versions)
+
+    def _sync_final(self, reason: str) -> RayLogSyncResult:
+        """Run a final pass even when a periodic pass is stuck in remote I/O."""
+        if self._lock.acquire(blocking=False):
+            try:
+                return self._sync_pass(reason, self._uploaded_versions)
+            finally:
+                self._lock.release()
+        _log(f"[ray-log-sync] periodic upload still active; starting independent final pass [{reason}]")
+        # Do not mutate shared version state concurrently. Re-uploading bounded diagnostic
+        # files is preferable to losing the exception that caused process teardown.
+        return self._sync_pass(reason, {})
 
     def sync_bounded(self, reason: str) -> RayLogSyncWaitStatus:
         """Wait at most the configured teardown budget and report the terminal wait status."""
@@ -1578,7 +1625,7 @@ class RayLogSyncSession:
             return RayLogSyncWaitStatus.SKIPPED
 
         sync_thread = threading.Thread(
-            target=self.sync,
+            target=self._sync_final,
             args=(reason,),
             daemon=True,
             name="ray-log-final-sync",

@@ -1,5 +1,6 @@
 import atexit
 import os
+import sys
 
 import ray
 from loguru import logger
@@ -21,4 +22,8 @@ def exit_without_ray_destructors(exit_code: int = 0) -> None:
         return
 
     logger.info(f"Exiting after handing Ray cluster teardown to {owner}")
+    # os._exit intentionally skips interpreter teardown, including normal stream flushing.
+    # Flush explicitly so the exception immediately preceding this call survives in task logs.
+    sys.stdout.flush()
+    sys.stderr.flush()
     os._exit(exit_code)
