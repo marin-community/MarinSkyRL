@@ -12,6 +12,7 @@ MARINSKYRL_ACTIVATION_FILE = f"{MARINSKYRL_TASK_ROOT}/.iris-runtime-env"
 MARINSKYRL_BOOTSTRAP_SCRIPT = "cloud/iris/bootstrap_runtime.sh"
 CHECKPOINT_EXPORT_ENTRYPOINT = "skyrl_train.entrypoints.checkpoint_export"
 LEVANTER_SNOWBALL_ENTRYPOINT = "skyrl_train.entrypoints.levanter_snowball"
+FULLY_ASYNC_LEVANTER_SNOWBALL_ENTRYPOINT = "skyrl_train.entrypoints.fully_async_levanter_snowball"
 
 
 class RuntimeProfile(StrEnum):
@@ -39,7 +40,12 @@ def runtime_profile_for_strategy(
 ) -> RuntimeProfile:
     """Return the locked dependency profile for a trainer strategy."""
     checkpoint_export = mode is RuntimeMode.CHECKPOINT_EXPORT
-    if not checkpoint_export and entrypoint in {"levanter_snowball", LEVANTER_SNOWBALL_ENTRYPOINT}:
+    if not checkpoint_export and entrypoint in {
+        "levanter_snowball",
+        "fully_async_levanter_snowball",
+        LEVANTER_SNOWBALL_ENTRYPOINT,
+        FULLY_ASYNC_LEVANTER_SNOWBALL_ENTRYPOINT,
+    }:
         return RuntimeProfile.LEVANTER
     if strategy == "megatron":
         return RuntimeProfile.MEGATRON_EXPORT if checkpoint_export else RuntimeProfile.MEGATRON

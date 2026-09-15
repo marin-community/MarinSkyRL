@@ -937,9 +937,10 @@ def test_fsdp_config_selects_the_fsdp_profile(tmp_path):
     assert args.runtime_profile is RuntimeProfile.FSDP
 
 
-def test_levanter_entrypoint_selects_the_levanter_profile(tmp_path):
+@pytest.mark.parametrize("entrypoint", ["levanter_snowball", "fully_async_levanter_snowball"])
+def test_levanter_entrypoint_selects_the_levanter_profile(tmp_path, entrypoint):
     config = tmp_path / "levanter.yaml"
-    config.write_text("entrypoint: levanter_snowball\ntrainer:\n  strategy: fsdp2\n")
+    config.write_text(f"entrypoint: {entrypoint}\ntrainer:\n  strategy: fsdp2\n")
     args = create_parser().parse_args(
         [
             "--rl_config",

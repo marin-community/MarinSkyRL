@@ -10,6 +10,25 @@ from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_dr
 from skyrl_train.learners.levanter_config import LevanterSnowballRuntimeConfig
 
 
+def create_levanter_snowball_learner(cfg: DictConfig, runtime: LevanterSnowballRuntimeConfig):
+    """Create the local or distributed learner without importing JAX on the driver."""
+    if runtime.training_nodes == 1:
+        # Importing the concrete learner initializes JAX. This task owns the
+        # single learner node, so JAX sees only its Ray-assigned devices.
+        from skyrl_train.learners.levanter_snowball import LevanterSnowballLearner  # noqa: PLC0415
+
+        return LevanterSnowballLearner(runtime)
+
+    # The entrypoint owns no GPUs in this path. The facade reserves whole
+    # nodes and imports JAX only inside one actor on each learner node.
+    from skyrl_train.learners.distributed_levanter import DistributedLevanterSnowballLearner  # noqa: PLC0415
+
+    return DistributedLevanterSnowballLearner(
+        runtime,
+        placement_timeout_seconds=int(cfg.trainer.distributed.placement_group_timeout_seconds),
+    )
+
+
 class LevanterSnowballExp(BasePPOExp):
     def get_trainer(
         self,
@@ -38,21 +57,7 @@ class LevanterSnowballExp(BasePPOExp):
 @ray.remote(num_cpus=1, max_retries=0)
 def skyrl_entrypoint(cfg: DictConfig) -> None:
     runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
-    if runtime.training_nodes == 1:
-        # Importing the concrete learner initializes JAX. This task owns the
-        # single learner node, so JAX sees only its Ray-assigned devices.
-        from skyrl_train.learners.levanter_snowball import LevanterSnowballLearner
-
-        learner = LevanterSnowballLearner(runtime)
-    else:
-        # The entrypoint owns no GPUs in this path. The facade reserves whole
-        # nodes and imports JAX only inside one actor on each learner node.
-        from skyrl_train.learners.distributed_levanter import DistributedLevanterSnowballLearner
-
-        learner = DistributedLevanterSnowballLearner(
-            runtime,
-            placement_timeout_seconds=int(cfg.trainer.distributed.placement_group_timeout_seconds),
-        )
+    learner = create_levanter_snowball_learner(cfg, runtime)
     try:
         LevanterSnowballExp(cfg, learner=learner).run()
     finally:
