@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "https://github.com/BytedTsinghua-SIA/Open-MOPD.git",
+    "commit": "4809a96cf85a869106ff0ff3f37d0a51e12010ae"
+  },
+  "artifacts": {
+    "student": {
+      "repository": "BytedTsinghua-SIA/Open-MOPD-SmolLM3-3B-MixSFT",
+      "revision": "c9e7bad031667828656ead188d7e8ea162c048a4"
+    },
+    "teachers": [
+      {
+        "domain": "math",
+        "repository": "BytedTsinghua-SIA/Open-MOPD-SmolLM3-3B-RL-Math",
+        "revision": "5e901bb626b69d711074d2832c41ce1aa4232da8"
+      },
+      {
+        "domain": "code",
+        "repository": "BytedTsinghua-SIA/Open-MOPD-SmolLM3-3B-RL-Code",
+        "revision": "e2ce9beec52381350edcdaefebfd08ea67c21b42"
+      },
+      {
+        "domain": "if",
+        "repository": "BytedTsinghua-SIA/Open-MOPD-SmolLM3-3B-RL-IF",
+        "revision": "8948051a805883e2db988cae4522de3c29d1d112"
+      }
+    ],
+    "dataset": {
+      "repository": "BytedTsinghua-SIA/Open-MOPD-Data",
+      "revision": "9e897efe3257599d4300e2d5ee865a1cc714af87",
+      "path": "rl_prompt_mix/train.parquet",
+      "sha256": "5243f3e61e7c0841a102389e509bd0822405c27f949e4d04cb7dd1615d4e5b2e"
+    }
+  },
+  "hardware": {
+    "gpu": "A100x8",
+    "cpu": 120,
+    "memory": "900GB",
+    "disk": "1TB"
+  },
+  "environment": {
+    "python": "3.12",
+    "packages": {
+      "torch": "2.8.0",
+      "vllm": "0.11.0",
+      "ray": "2.55.1",
+      "transformers": "4.57.6",
+      "protobuf": "3.20.3",
+      "flash-attn": "2.8.1",
+      "flashinfer-python": "0.3.1"
+    }
+  },
+  "training": {
+    "train_batch_size": 1024,
+    "mini_batch_size": 256,
+    "ppo_epochs": 1,
+    "micro_batch_size_per_gpu": 1,
+    "learning_rate": 1.5e-6,
+    "gradient_clip": 1.0,
+    "entropy_coefficient": 0.0,
+    "loss_aggregation": "token-mean",
+    "prompt_limit": 2048,
+    "response_limit": 16384,
+    "top_k": 16,
+    "nucleus_p": 0.99,
+    "temperature": 1.0,
+    "teacher_temperature": 1.0,
+    "clip_low": 0.2,
+    "clip_high": 0.28,
+    "domain_weights": [2, 2, 1],
+    "target_gradient_shares": [0.3333333333333333, 0.3333333333333333, 0.3333333333333333],
+    "gap_following_alpha": 1.0,
+    "save_every": 50
+  },
+  "gates": {
+    "one_step": 1,
+    "paper_checkpoint": 200,
+    "paper_schedule": 600
+  },
+  "known_deviations": [
+    "The released patched verl tree exposes one global response length. The paper uses 16K for math/code and 2K for IF.",
+    "The release does not pin a digest-addressed CUDA task image or a complete Python lockfile.",
+    "The model card identifies the released final model as step 200 while paper Table 8 specifies 600 total steps."
+  ]
+}
