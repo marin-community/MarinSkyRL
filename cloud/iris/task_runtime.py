@@ -399,9 +399,9 @@ def stage_model(model_path: str, warm_source: str | None = None, revision: str |
                 f"stage_model: warm sync from {warm_source} FAILED ({exc!r}) -> HF snapshot_download prestage fallback"
             )
 
-    # Weights + config + tokenizer + any trust_remote_code modeling files. Mirrors
-    # mirror_hf_to_gcs.INCLUDE_PATTERNS so from_pretrained resolves fully offline.
-    allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.model", "*.py"]
+    # Weights + config + tokenizer + repository-provided chat templates and any
+    # trust_remote_code modeling files needed by from_pretrained in offline ranks.
+    allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.model", "*.py", "*.jinja"]
 
     # Download in a SUBPROCESS with the offline flags stripped from ITS env. An
     # in-process os.environ.pop does NOT work here: huggingface_hub snapshots
