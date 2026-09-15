@@ -19,6 +19,7 @@ from cloud.iris.open_mopd_evaluation_task import (
 )
 from cloud.iris.open_mopd_fidelity import load_config
 from cloud.iris.open_mopd_fidelity_task import ArtifactVerification
+from cloud.iris.open_mopd_vllm_rollout import evaluation_port_seed, worker_port
 
 TASK_IMAGE = "registry.example/open-mopd-eval@sha256:" + "1" * 64
 OUTPUT_URI = "s3://bucket/open-mopd/final-eval"
@@ -66,8 +67,16 @@ def test_full_gate_reports_scored_and_rollout_only_coverage() -> None:
 
 def test_rollout_commands_preserve_released_domain_protocols() -> None:
     config = evaluation.load_evaluation_config(evaluation.DEFAULT_CONFIG)
+    port_seed = evaluation_port_seed(OUTPUT_URI)
 
-    commands = rollout_commands(config, _inputs(config), "full", Path("/work/output"), world_size=8)
+    commands = rollout_commands(
+        config,
+        _inputs(config),
+        "full",
+        Path("/work/output"),
+        world_size=8,
+        vllm_port_seed=port_seed,
+    )
     math, code, instruction = (_options(command.argv) for command in commands)
 
     assert math["--temperature"] == "0.6"
@@ -91,13 +100,32 @@ def test_rollout_commands_preserve_released_domain_protocols() -> None:
         assert options["--top-p"] == "0.95"
         assert options["--top-k"] == "-1"
         assert options["--stop-token-ids"] == "128012"
+        assert options["--vllm-port-seed"] == str(port_seed)
         assert options["--trust-remote-code"] is True
+    assert all(command.argv[2] == "cloud.iris.open_mopd_vllm_rollout" for command in commands)
+
+
+def test_rollout_workers_get_distinct_vllm_port_ranges() -> None:
+    port_seed = evaluation_port_seed(OUTPUT_URI)
+
+    ports = [worker_port(port_seed, rank) for rank in range(8)]
+
+    assert len(set(ports)) == 8
+    assert all(20_000 <= port <= 59_999 for port in ports)
+    assert min(abs(left - right) for index, left in enumerate(ports) for right in ports[index + 1 :]) > 1
 
 
 def test_smoke_gate_bounds_every_domain_without_claiming_comparability() -> None:
     config = evaluation.load_evaluation_config(evaluation.DEFAULT_CONFIG)
 
-    commands = rollout_commands(config, _inputs(config), "smoke", Path("/work/output"), world_size=8)
+    commands = rollout_commands(
+        config,
+        _inputs(config),
+        "smoke",
+        Path("/work/output"),
+        world_size=8,
+        vllm_port_seed=evaluation_port_seed(OUTPUT_URI),
+    )
     coverage = evaluation.benchmark_coverage(config, "smoke")
 
     assert all(item.rollout_rows == 1 and not item.comparable_to_paper for item in coverage)

@@ -32,6 +32,7 @@ from cloud.iris.open_mopd_fidelity_task import (
     sync_tree,
     validate_runtime,
 )
+from cloud.iris.open_mopd_vllm_rollout import evaluation_port_seed
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,7 @@ def rollout_commands(
     output: Path,
     *,
     world_size: int,
+    vllm_port_seed: int,
 ) -> tuple[RolloutCommand, ...]:
     if gate not in GATES:
         raise ValueError(f"Unknown evaluation gate: {gate}")
@@ -179,13 +181,15 @@ def rollout_commands(
         command = [
             sys.executable,
             "-m",
-            "evals.rollout_engine.vllm_rollout",
+            "cloud.iris.open_mopd_vllm_rollout",
             "--model",
             str(inputs.model),
             "--input",
             *(str(item.path) for item in selected),
             "--output-dir",
             str(output / "rollouts"),
+            "--vllm-port-seed",
+            str(vllm_port_seed),
             "--tensor-parallel-size",
             "1",
             "--data-parallel-size",
@@ -285,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     output.mkdir(parents=True)
     manifest_path = output / "evaluation-manifest.json"
     planned_completions, maximum_output_tokens = evaluation_scale(evaluation, args.gate)
+    vllm_port_seed = evaluation_port_seed(args.output_uri)
     manifest: dict[str, object] = {
         "status": "staging",
         "gate": args.gate,
@@ -296,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         "task_image": args.task_image,
         "launcher_commit": args.launcher_commit,
         "gpu_slice": args.gpu_slice,
+        "vllm_port_seed": vllm_port_seed,
     }
     _write_manifest(manifest_path, manifest)
     sync_tree(output, args.output_uri)
@@ -309,7 +315,14 @@ def main(argv: list[str] | None = None) -> int:
     uploader.start()
     try:
         inputs = stage_evaluation_inputs(evaluation, fidelity, args.work_root)
-        commands = rollout_commands(evaluation, inputs, args.gate, output, world_size=world_size)
+        commands = rollout_commands(
+            evaluation,
+            inputs,
+            args.gate,
+            output,
+            world_size=world_size,
+            vllm_port_seed=vllm_port_seed,
+        )
         manifest.update(
             {
                 "status": "running",
