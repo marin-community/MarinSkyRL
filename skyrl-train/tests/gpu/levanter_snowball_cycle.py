@@ -323,6 +323,7 @@ def _config(model_path: str, run_path: Path):
     cfg.trainer.policy.levanter.moe_implementation = "ring"
     cfg.trainer.policy.levanter.publication_backend = "gloo"
     cfg.trainer.policy.levanter.publication_max_chunk_bytes = 1 << 20
+    cfg.trainer.policy.levanter.publication_scatter_experts = True
     cfg.trainer.policy.levanter.publication_timeout_seconds = 120
     cfg.trainer.policy.levanter.require_accelerator = True
     cfg.trainer.policy.levanter.log_dir = str(run_path / "levanter-logs")

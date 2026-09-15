@@ -374,6 +374,7 @@ class WorkerWrap:
         # Create receiver now that we have all the state
         self._weight_receiver = VLLMWeightTransferReceiver(
             model_update_group=self._model_update_group,
+            model_update_rank=rank,
             model_config=self.model_config,
             device=self.device,
         )
@@ -2301,15 +2302,23 @@ class VLLMWeightTransferReceiver:
     Created locally in WorkerWrap with worker-specific state.
     """
 
-    def __init__(self, model_update_group: Any, model_config: Any, device: torch.device) -> None:
+    def __init__(
+        self,
+        model_update_group: Any,
+        model_update_rank: int,
+        model_config: Any,
+        device: torch.device,
+    ) -> None:
         """Initialize the receiver with worker-local state.
 
         Args:
             model_update_group: Torch process group for weight updates.
+            model_update_rank: This worker's explicit rank in the cross-world update group.
             model_config: vLLM model configuration.
             device: CUDA device for this worker.
         """
         self.model_update_group = model_update_group
+        self.model_update_rank = model_update_rank
         self.model_config = model_config
         self.device = device
 
@@ -2366,14 +2375,15 @@ class VLLMWeightTransferReceiver:
                     raise ValueError(
                         f"cannot scatter expert weight {name!r} with shape {shape} across {scatter_world_size} ranks"
                     )
-                group_rank = torch.distributed.get_rank(self.model_update_group)
-                if not 1 <= group_rank <= scatter_world_size:
-                    raise RuntimeError(f"expert receiver rank {group_rank} is outside 1..{scatter_world_size}")
+                if not 1 <= self.model_update_rank <= scatter_world_size:
+                    raise RuntimeError(
+                        f"expert receiver rank {self.model_update_rank} is outside 1..{scatter_world_size}"
+                    )
                 local_expert_count = shape[0] // scatter_world_size
                 local_shape = [local_expert_count, *shape[1:]]
                 weight = torch.empty(local_shape, dtype=dtype, device=receive_device)
                 torch.distributed.scatter(weight, scatter_list=None, src=0, group=self.model_update_group)
-                self.expert_id_offsets[name] = (group_rank - 1) * local_expert_count
+                self.expert_id_offsets[name] = (self.model_update_rank - 1) * local_expert_count
             else:
                 weight = torch.empty(shape, dtype=dtype, device=receive_device)
                 torch.distributed.broadcast(weight, 0, group=self.model_update_group)
