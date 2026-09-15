@@ -356,9 +356,10 @@ def test_runtime_identity_uses_source_commit_and_strategy_profile(tmp_path, stra
     assert spec.request.runtime.profile is expected_profile
 
 
-def test_levanter_entrypoint_selects_its_gpu_runtime():
+@pytest.mark.parametrize("entrypoint", ["levanter_snowball", "fully_async_levanter_snowball"])
+def test_levanter_entrypoint_selects_its_gpu_runtime(entrypoint):
     config = _make_config(strategy="fsdp2")
-    config["entrypoint"] = "levanter_snowball"
+    config["entrypoint"] = entrypoint
 
     assert derive_runtime_profile(config) is RuntimeProfile.LEVANTER
 

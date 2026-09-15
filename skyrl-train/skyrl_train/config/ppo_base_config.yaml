@@ -116,6 +116,16 @@ trainer:
       publication_backend: "gloo"
       publication_max_chunk_bytes: 67108864
       publication_timeout_seconds: 300
+      # Keep Adam moments in pinned host memory between compiled steps when a
+      # full FP32 checkpoint would otherwise exceed accelerator memory.
+      offload_opt_state: false
+      # With full expert parallelism, send each inference rank only its owned
+      # slice of stacked expert tensors. Ordinary parameters remain broadcast.
+      publication_scatter_experts: false
+      # Version zero may skip its redundant transfer only when both sides just
+      # loaded the same immutable model source. Pause/resume still establishes
+      # serving-policy provenance; every trained version is transferred.
+      initial_weights_already_loaded: false
       require_accelerator: true
       log_dir: "/tmp/marinskyrl-levanter"
     fsdp_config:
@@ -298,7 +308,11 @@ trainer:
     max_staleness_steps: 4
 
     num_parallel_generation_workers: 768
+    max_buffered_groups: null
     admission_stall_timeout: 21600
+    # null publishes after every optimizer update. An explicit list is for
+    # bounded experiments that intentionally train on older serving weights.
+    policy_publication_steps: null
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
@@ -432,6 +446,9 @@ generator:
     stop: null
 
   eval_n_samples_per_prompt: 1
+
+  # Explicit opt-in; existing non-agentic reward parsing is unchanged when null.
+  non_agentic_parser_protocol: null
 
   trajectory_reward_shaping:
     schema_version: 2

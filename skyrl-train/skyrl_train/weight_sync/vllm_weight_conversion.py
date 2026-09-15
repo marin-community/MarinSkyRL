@@ -72,6 +72,8 @@ def _load_grug_stacked_experts(
     model: VLLMWeightModel,
     name: str,
     tensor: torch.Tensor,
+    *,
+    expert_id_offset: int = 0,
 ) -> tuple[str, set[str]] | None:
     """Load Grug experts directly and retain every locally written slice."""
 
@@ -90,7 +92,8 @@ def _load_grug_stacked_experts(
         raise RuntimeError(f"Grug expert parameter {mapped_name!r} has no FusedMoE weight loader")
 
     local_slices = set()
-    for expert_id, expert_tensor in enumerate(tensor.unbind(0)):
+    for local_expert_id, expert_tensor in enumerate(tensor.unbind(0)):
+        expert_id = expert_id_offset + local_expert_id
         loaded = weight_loader(
             parameter,
             expert_tensor,
@@ -142,6 +145,7 @@ def load_weights_into_vllm(
     weights: Iterable[tuple[str, torch.Tensor]],
     *,
     loaded_expert_slices: set[str] | None = None,
+    expert_id_offsets: dict[str, int] | None = None,
 ) -> set[str]:
     """Load one weight-sync batch and return its logical parameter receipt.
 
@@ -155,7 +159,12 @@ def load_weights_into_vllm(
     missing_parameters: set[str] = set()
 
     for name, tensor in conversion.weights:
-        grug_experts = _load_grug_stacked_experts(model, name, tensor)
+        grug_experts = _load_grug_stacked_experts(
+            model,
+            name,
+            tensor,
+            expert_id_offset=0 if expert_id_offsets is None else expert_id_offsets.get(name, 0),
+        )
         if grug_experts is not None:
             mapped_name, local_slices = grug_experts
             acknowledged_parameters.add(mapped_name)

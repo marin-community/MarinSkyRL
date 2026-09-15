@@ -91,6 +91,11 @@ class WholeTrajectoryProjection:
             actual_global_step=minimum_captured_global_step(outputs),
         )
         _attach_behavior_policy_versions(batch, outputs)
+        contracts = [output.evidence.metadata.get("non_agentic_contract") for output in outputs]
+        if any(contract is not None for contract in contracts):
+            if any(contract is None for contract in contracts):
+                raise ValueError("Mixed parser protocols in one trajectory batch")
+            batch["non_agentic_contract"] = contracts
         attach_terminal_classifications(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
         return batch

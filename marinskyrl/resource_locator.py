@@ -3,12 +3,14 @@
 from dataclasses import dataclass
 import os
 import posixpath
+import re
 from urllib.parse import quote, urlsplit, urlunsplit
 
 CLOUD_URI_SCHEMES = frozenset({"s3", "gs", "gcs"})
 CLOUD_URI_PREFIXES = tuple(f"{scheme}://" for scheme in sorted(CLOUD_URI_SCHEMES))
 HF_SELECTOR_REVISION_SEPARATOR = "@"
 HF_SELECTOR_SUBDIR_SEPARATOR = "::"
+_IMMUTABLE_GIT_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 class ModelLocatorError(ValueError):
@@ -36,6 +38,12 @@ def is_hugging_face_repo_id(repo_id: str) -> bool:
     if repo_id.startswith(("./", "../", "/", "~")) or "\\" in repo_id:
         return False
     return all(part.strip() not in ("", ".", "..") for part in repo_id.split("/"))
+
+
+def is_immutable_git_commit(value: str | None) -> bool:
+    """Return whether a revision is one complete lowercase Git commit."""
+
+    return value is not None and _IMMUTABLE_GIT_COMMIT.fullmatch(value) is not None
 
 
 @dataclass(frozen=True)

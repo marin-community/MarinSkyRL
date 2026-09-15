@@ -199,6 +199,23 @@ def test_load_weights_into_vllm_records_each_locally_owned_grug_expert_slice():
     assert model.w2.calls == [(0, "w2"), (1, "w2")]
 
 
+def test_load_weights_into_vllm_applies_scattered_expert_offset():
+    name = "model.layers.0.mlp.experts.gate_proj.weight"
+    model = GrugExpertRecordingModel({5})
+    loaded_expert_slices: set[str] = set()
+
+    loaded = load_weights_into_vllm(
+        model,
+        [(name, torch.zeros(2, 3, 4))],
+        loaded_expert_slices=loaded_expert_slices,
+        expert_id_offsets={name: 4},
+    )
+
+    assert loaded == {"model.layers.0.mlp.experts.routed_experts.w13_weight"}
+    assert model.w13.calls == [(4, "w1"), (5, "w1")]
+    assert loaded_expert_slices == {f"{name}#expert=5"}
+
+
 def test_load_weights_into_vllm_does_not_acknowledge_a_skipped_local_expert_slice():
     model = GrugExpertRecordingModel({1}, ignored={(1, "w3")})
     loaded_expert_slices: set[str] = set()

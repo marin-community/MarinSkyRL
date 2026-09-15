@@ -374,6 +374,7 @@ class WorkerWrap:
         # Create receiver now that we have all the state
         self._weight_receiver = VLLMWeightTransferReceiver(
             model_update_group=self._model_update_group,
+            model_update_rank=rank,
             model_config=self.model_config,
             device=self.device,
         )
@@ -758,6 +759,7 @@ class WorkerWrap:
                 self.model_runner.model,
                 weight_list,
                 loaded_expert_slices=self._skyrl_loaded_expert_slices,
+                expert_id_offsets=self._weight_receiver.expert_id_offsets,
             )
             installed = getattr(self, "_skyrl_loaded_parameters", set())
             installed.update(loaded_parameters)
@@ -2300,15 +2302,23 @@ class VLLMWeightTransferReceiver:
     Created locally in WorkerWrap with worker-specific state.
     """
 
-    def __init__(self, model_update_group: Any, model_config: Any, device: torch.device) -> None:
+    def __init__(
+        self,
+        model_update_group: Any,
+        model_update_rank: int,
+        model_config: Any,
+        device: torch.device,
+    ) -> None:
         """Initialize the receiver with worker-local state.
 
         Args:
             model_update_group: Torch process group for weight updates.
+            model_update_rank: This worker's explicit rank in the cross-world update group.
             model_config: vLLM model configuration.
             device: CUDA device for this worker.
         """
         self.model_update_group = model_update_group
+        self.model_update_rank = model_update_rank
         self.model_config = model_config
         self.device = device
 
@@ -2329,6 +2339,7 @@ class VLLMWeightTransferReceiver:
         Args:
             request: Weight update request with names, dtypes, shapes, and optionally IPC handles.
         """
+        self.expert_id_offsets: dict[str, int] = {}
         extras = request.get("extras")
         is_ipc = extras and len(extras) > 0 and "ipc_handles" in extras[0]
 
@@ -2342,15 +2353,40 @@ class VLLMWeightTransferReceiver:
         _fuse = bool(request.get("packed", False))
         backend = str(torch.distributed.get_backend(self.model_update_group)).lower()
         receive_device = "cpu" if "gloo" in backend else self.device
-        for name, dtype_str, shape in zip(request["names"], request["dtypes"], request["shapes"]):
+        expert_scatter = request.get("expert_scatter", [False] * len(request["names"]))
+        if len(expert_scatter) != len(request["names"]):
+            raise ValueError("expert_scatter must have one entry per transferred weight")
+        scatter_world_size = int(request.get("expert_scatter_world_size", 0))
+        for name, dtype_str, shape, scatter_expert in zip(
+            request["names"],
+            request["dtypes"],
+            request["shapes"],
+            expert_scatter,
+            strict=True,
+        ):
             dtype = str_to_torch_dtype(dtype_str)
             if not _fuse:
                 assert self._is_compatible_weight_dtype(name, dtype), (
                     f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
                 )
             # Always receive in sender's dtype, load_weights handles conversion
-            weight = torch.empty(shape, dtype=dtype, device=receive_device)
-            torch.distributed.broadcast(weight, 0, group=self.model_update_group)
+            if scatter_expert:
+                if scatter_world_size < 1 or shape[0] % scatter_world_size:
+                    raise ValueError(
+                        f"cannot scatter expert weight {name!r} with shape {shape} across {scatter_world_size} ranks"
+                    )
+                if not 1 <= self.model_update_rank <= scatter_world_size:
+                    raise RuntimeError(
+                        f"expert receiver rank {self.model_update_rank} is outside 1..{scatter_world_size}"
+                    )
+                local_expert_count = shape[0] // scatter_world_size
+                local_shape = [local_expert_count, *shape[1:]]
+                weight = torch.empty(local_shape, dtype=dtype, device=receive_device)
+                torch.distributed.scatter(weight, scatter_list=None, src=0, group=self.model_update_group)
+                self.expert_id_offsets[name] = (self.model_update_rank - 1) * local_expert_count
+            else:
+                weight = torch.empty(shape, dtype=dtype, device=receive_device)
+                torch.distributed.broadcast(weight, 0, group=self.model_update_group)
             if receive_device == "cpu":
                 weight = weight.to(device=self.device)
             yield name, weight

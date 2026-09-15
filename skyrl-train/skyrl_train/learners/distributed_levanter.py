@@ -9,24 +9,32 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import socket
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import ray
 from ray.util.placement_group import placement_group, remove_placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from skyrl_train.learner import LearnerLifecycle, LearnerState, PublicationStatus
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.learner import (
+    LearnerBatch,
+    LearnerConfig,
+    LearnerLifecycle,
+    LearnerState,
+    LogProbResult,
+    PublicationStatus,
+    UpdateRequest,
+    UpdateResult,
+)
 from skyrl_train.learners.levanter_config import LevanterSnowballRuntimeConfig
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 
-if TYPE_CHECKING:
-    from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-    from skyrl_train.learner import LearnerBatch, LearnerConfig, LogProbResult, UpdateRequest, UpdateResult
 
-
-_PROCESS_LOCAL_TIMING_METRICS = frozenset({"forward_validation_seconds", "training_update_seconds"})
+logger = logging.getLogger(__name__)
+_PROCESS_LOCAL_TIMING_SUFFIX = "_seconds"
 
 
 def _merge_update_results(results: list[UpdateResult]) -> UpdateResult:
@@ -37,14 +45,15 @@ def _merge_update_results(results: list[UpdateResult]) -> UpdateResult:
         if result.status != first.status or result.metrics.keys() != first.metrics.keys():
             raise RuntimeError(f"JAX process {process_id} returned a different update result")
         for name, value in result.metrics.items():
-            if name in _PROCESS_LOCAL_TIMING_METRICS:
+            if name.endswith(_PROCESS_LOCAL_TIMING_SUFFIX):
                 continue
             if not np.isclose(value, first.metrics[name], rtol=1e-6, atol=1e-8):
                 raise RuntimeError(f"JAX process {process_id} returned a different {name} metric")
 
     metrics = dict(first.metrics)
-    for name in _PROCESS_LOCAL_TIMING_METRICS.intersection(metrics):
-        metrics[name] = max(float(result.metrics[name]) for result in results)
+    for name in metrics:
+        if name.endswith(_PROCESS_LOCAL_TIMING_SUFFIX):
+            metrics[name] = max(float(result.metrics[name]) for result in results)
     return dataclasses.replace(first, metrics=metrics)
 
 
@@ -290,7 +299,7 @@ class DistributedLevanterSnowballLearner:
             try:
                 ray.kill(actor, no_restart=True)
             except Exception:
-                pass
+                logger.warning("Failed to terminate a distributed Levanter actor during cleanup", exc_info=True)
         self._actors.clear()
         if self._placement_group is not None:
             remove_placement_group(self._placement_group)

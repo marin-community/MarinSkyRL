@@ -10,6 +10,7 @@ from omegaconf import OmegaConf
 from cloud.iris.iris_backend import create_parser, normalize
 from cloud.iris.rl_config_translation import build_skyrl_hydra_args, parse_rl_config
 from cloud.iris.training_driver import parse_list_arg
+from skyrl_train.entrypoints.fully_async_levanter_snowball import validate_fully_async_levanter_config
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.learners.levanter_config import LevanterSnowballRuntimeConfig
 
@@ -26,11 +27,19 @@ def test_external_rl_config_rejects_deleted_module_path_before_dry_run(tmp_path)
         normalize(args)
 
 
-def test_rl_config_resolves_named_terminal_bench_entrypoint(tmp_path):
+@pytest.mark.parametrize(
+    ("entrypoint", "module"),
+    [
+        ("terminal_bench", "skyrl_train.entrypoints.terminal_bench"),
+        ("levanter_snowball", "skyrl_train.entrypoints.levanter_snowball"),
+        ("fully_async_levanter_snowball", "skyrl_train.entrypoints.fully_async_levanter_snowball"),
+    ],
+)
+def test_rl_config_resolves_named_entrypoint(tmp_path, entrypoint, module):
     config = tmp_path / "rl.yaml"
     config.write_text(
-        """\
-entrypoint: terminal_bench
+        f"""\
+entrypoint: {entrypoint}
 context_budget:
   request_window_tokens: 2
   max_new_tokens_per_turn: 1
@@ -40,24 +49,7 @@ context_budget:
 
     parsed = parse_rl_config(str(config))
 
-    assert parsed.entrypoint == "skyrl_train.entrypoints.terminal_bench"
-
-
-def test_rl_config_resolves_named_levanter_snowball_entrypoint(tmp_path):
-    config = tmp_path / "rl.yaml"
-    config.write_text(
-        """\
-entrypoint: levanter_snowball
-context_budget:
-  request_window_tokens: 2
-  max_new_tokens_per_turn: 1
-  max_turns: 1
-"""
-    )
-
-    parsed = parse_rl_config(str(config))
-
-    assert parsed.entrypoint == "skyrl_train.entrypoints.levanter_snowball"
+    assert parsed.entrypoint == module
 
 
 def test_rl_config_rejects_removed_opd_entrypoint(tmp_path):
@@ -231,3 +223,46 @@ def test_snowball_levanter_real_iteration_config_composes_and_lowers():
     assert runtime.train_batch_size == 128
     assert runtime.model_revision == revision
     assert cfg.generator.engine_init_kwargs.revision == revision
+
+
+def test_snowball_levanter_async_m10_config_composes_and_lowers():
+    revision = "6808fe5c219471517bd51df35addefd38ebebf89"
+    parsed = parse_rl_config(
+        str(_REPO_ROOT / "cloud/iris/configs/snowball_levanter_async_m10.yaml"),
+        model_override="marin-community/grug-67b-a2b-sft-s2-thinking-step630",
+    )
+    hydra_args = build_skyrl_hydra_args(
+        parsed,
+        {
+            "num_nodes": 5,
+            "model_path": "marin-community/grug-67b-a2b-sft-s2-thinking-step630",
+            "model_revision": revision,
+        },
+        SimpleNamespace(gpus_per_node=8),
+    )
+
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=hydra_args)
+
+    validate_fully_async_levanter_config(cfg)
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+    assert parsed.entrypoint == "skyrl_train.entrypoints.fully_async_levanter_snowball"
+    assert runtime.training_gpus == 32
+    assert runtime.inference_world_size == 8
+    assert runtime.train_batch_size == 128
+    assert runtime.learning_rate == 1.0e-6
+    assert runtime.max_grad_norm == 1.0
+    assert runtime.parameter_dtype == "float32"
+    assert runtime.publication_max_chunk_bytes == 2 << 30
+    assert not runtime.offload_opt_state
+    assert runtime.publication_scatter_experts
+    assert runtime.initial_weights_already_loaded
+    assert runtime.model_revision == revision
+    assert cfg.trainer.fully_async.max_staleness_steps == 4
+    assert cfg.trainer.fully_async.num_parallel_generation_workers == 160
+    assert cfg.trainer.fully_async.max_buffered_groups == 32
+    assert cfg.generator.sampling_params.logprobs == 0
+    assert cfg.generator.non_agentic_parser_protocol == "post-thinking-native-v1"
+    assert cfg.trainer.fully_async.policy_publication_steps == [1, 2, 3, 4, 5]
+    assert cfg.trainer.eval_before_train
+    assert cfg.trainer.eval_interval == 6

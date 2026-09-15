@@ -1,0 +1,162 @@
+# Five-update viability gate for Ahmad's measured M10 Snowball/GSM8K recipe.
+# The launcher supplies the immutable model, tokenizer, data, output paths, and
+# seed. Generation is direct token-in/token-out so selected-token vLLM
+# probabilities and policy-version spans reach regular_mask unchanged.
+entrypoint: fully_async_levanter_snowball
+
+context_budget:
+  request_window_tokens: 4096
+  max_new_tokens_per_turn: 2048
+  max_turns: 1
+
+environment:
+  env_class: gsm8k
+
+trainer:
+  strategy: fsdp2
+  seed: 17
+  flash_attn: false
+  use_sample_packing: false
+  step_wise_training: false
+  gradient_checkpointing: true
+  algorithm:
+    advantage_estimator: grpo
+    policy_loss_type: regular
+    loss_reduction: token_mean
+    use_kl_loss: false
+    use_kl_in_reward: false
+    use_entropy_loss: false
+    use_tis: false
+    require_rollout_logprobs: true
+    offpolicy_mask:
+      enabled: true
+      ratio: mismatch
+      low: 0.5
+      high: 5.0
+      veto_ratio: 1.0e-5
+      renormalize: false
+    eps_clip_low: 0.2
+    eps_clip_high: 0.2
+    grpo_norm_by_std: true
+    advantage_batch_normalize: false
+    dynamic_sampling:
+      type: null
+  fully_async:
+    max_staleness_steps: 4
+    num_parallel_generation_workers: 160
+    max_buffered_groups: 32
+    admission_stall_timeout: 1800
+    # Ahmad's measured M10 recipe copies the learner after every update.
+    policy_publication_steps: [1, 2, 3, 4, 5]
+  epochs: 1
+  max_steps: 5
+  update_epochs_per_batch: 1
+  train_batch_size: 32
+  policy_mini_batch_size: 32
+  eval_batch_size: 128
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  eval_before_train: true
+  eval_interval: 6
+  ckpt_interval: 6
+  hf_save_interval: -1
+  max_ckpts_to_keep: 1
+  resume_mode: none
+  restore_dataloader_state: true
+  logger: console
+  policy:
+    grug_query_bias_update_mode: frozen
+    optimizer_config:
+      optimizer: AdamW
+      scheduler: constant_with_warmup
+      lr: 1.0e-6
+      adam_betas: [0.9, 0.999]
+      weight_decay: 0.01
+      max_grad_norm: 1.0
+      num_warmup_steps: 0
+      optimizer_kwargs:
+        eps: 1.0e-8
+    fsdp_config:
+      expert_model_parallel_size: 1
+    levanter:
+      # Four learner nodes fit the reference FP32 parameter storage and the
+      # ordinary device-resident AdamW step used by the corrected 67B run.
+      parameter_dtype: float32
+      compute_dtype: bfloat16
+      output_dtype: float32
+      attention_implementation: gpu_fa4_cute
+      moe_implementation: ring
+      publication_backend: gloo
+      # The largest BF16 expert projection is 1.68 GB. A 2 GiB cap therefore
+      # keeps the existing peak-tensor envelope while avoiding tiny per-chunk
+      # synchronization around the 125 GB publication.
+      publication_max_chunk_bytes: 2147483648
+      publication_timeout_seconds: 1800
+      offload_opt_state: false
+      # EP8 workers install disjoint contiguous expert ranges. Scatter those
+      # ranges instead of broadcasting the full 1.68 GB tensors eight times.
+      publication_scatter_experts: true
+      # The launcher stages this one immutable source for both vLLM and
+      # Levanter. Trained versions 1 and 5 still use full verified publication.
+      initial_weights_already_loaded: true
+      require_accelerator: true
+      log_dir: /tmp/marinskyrl-levanter
+  placement:
+    colocate_all: false
+    policy_num_nodes: 4
+    policy_num_gpus_per_node: 8
+
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_pipeline_parallel_size: 1
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  num_inference_engines: 1
+  n_samples_per_prompt: 4
+  gpu_memory_utilization: 0.75
+  enforce_eager: false
+  max_num_batched_tokens: 16384
+  run_engines_locally: true
+  weight_sync_backend: gloo
+  fuse_weights: false
+  async_engine: true
+  batched: false
+  enable_http_endpoint: false
+  use_conversation_multi_turn: false
+  non_agentic_parser_protocol: post-thinking-native-v1
+  sampling_params:
+    temperature: 1.0
+    top_p: 1.0
+    min_p: 0.0
+    top_k: -1
+    logprobs: 0
+    stop: null
+  eval_sampling_params:
+    temperature: 0.0
+    top_p: 1.0
+    min_p: 0.0
+    top_k: -1
+    logprobs: null
+    stop: null
+  trajectory_retention:
+    enabled: true
+    phases: [train, eval]
+    sample_count_per_step: 4
+    always_retain_failures: true
+    always_retain_non_terminating: true
+    always_retain_loops: false
+    max_bytes_per_step: 8388608
+    max_bytes_per_run: 67108864
+
+data:
+  kind: parquet
+  train_data: []
+  val_data: []
+
+extra_env:
+  HF_HUB_OFFLINE: "1"
+  NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
+  XLA_FLAGS: "--xla_gpu_autotune_level=0"
+  XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"

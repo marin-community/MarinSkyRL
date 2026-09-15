@@ -46,6 +46,55 @@ def test_supported_config_lowers_without_importing_the_concrete_learner():
     assert runtime.train_batch_size == 2
     assert runtime.publication_backend == "gloo"
     assert runtime.inference_world_size == 1
+    assert not runtime.offload_opt_state
+    assert not runtime.publication_scatter_experts
+
+
+def test_optimizer_state_offload_lowers_before_allocation():
+    cfg = _valid_config()
+    cfg.trainer.policy.levanter.offload_opt_state = True
+
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.offload_opt_state
+
+
+def test_bfloat16_parameter_storage_lowers_before_allocation():
+    cfg = _valid_config()
+    cfg.trainer.policy.levanter.parameter_dtype = "bfloat16"
+
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.parameter_dtype == "bfloat16"
+
+
+def test_expert_scatter_requires_one_full_expert_parallel_group():
+    cfg = _valid_config()
+    cfg.trainer.policy.levanter.publication_scatter_experts = True
+    cfg.generator.inference_engine_data_parallel_size = 2
+    cfg.generator.inference_engine_expert_parallel_size = 1
+
+    with pytest.raises(UnsupportedLearnerConfiguration, match="one full inference data-parallel group"):
+        LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    cfg.generator.inference_engine_expert_parallel_size = 2
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.publication_scatter_experts
+
+
+def test_initial_weight_adoption_requires_an_immutable_shared_source():
+    cfg = _valid_config()
+    cfg.trainer.policy.levanter.initial_weights_already_loaded = True
+
+    with pytest.raises(UnsupportedLearnerConfiguration, match="immutable model source identity"):
+        LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    cfg.trainer.policy.model.source_identity = "model@0123456789abcdef"
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.initial_weights_already_loaded
+    assert runtime.model_source_identity == "model@0123456789abcdef"
 
 
 def test_h100_flash_attention_config_lowers():
@@ -55,6 +104,47 @@ def test_h100_flash_attention_config_lowers():
     runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
 
     assert runtime.attention_implementation == "gpu_fa4_cute"
+
+
+def test_measured_m10_regular_mask_config_lowers():
+    cfg = _valid_config()
+    cfg.trainer.algorithm.offpolicy_mask.enabled = True
+    cfg.trainer.algorithm.offpolicy_mask.ratio = "mismatch"
+    cfg.trainer.algorithm.offpolicy_mask.low = 0.5
+    cfg.trainer.algorithm.offpolicy_mask.high = 5.0
+    cfg.trainer.algorithm.offpolicy_mask.veto_ratio = 1.0e-5
+    cfg.trainer.algorithm.offpolicy_mask.renormalize = False
+    cfg.trainer.algorithm.require_rollout_logprobs = True
+    cfg.trainer.policy.optimizer_config.lr = 1.0e-6
+    cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0
+
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.learning_rate == 1.0e-6
+    assert runtime.max_grad_norm == 1.0
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "match"),
+    [
+        ("trainer.algorithm.require_rollout_logprobs", False, "strict rollout log probabilities"),
+        ("trainer.algorithm.offpolicy_mask.ratio", "full", "ratio=mismatch"),
+        ("trainer.algorithm.offpolicy_mask.low", 0.4, "regular_mask bounds"),
+        ("trainer.algorithm.offpolicy_mask.renormalize", True, "original loss denominator"),
+        ("trainer.policy.optimizer_config.lr", 1.0e-5, "optimizer_config.lr=1e-6"),
+        ("trainer.policy.optimizer_config.max_grad_norm", 0.5, "optimizer_config.max_grad_norm=1"),
+    ],
+)
+def test_measured_m10_semantics_fail_before_allocation(path, value, match):
+    cfg = _valid_config()
+    cfg.trainer.algorithm.offpolicy_mask.enabled = True
+    cfg.trainer.algorithm.require_rollout_logprobs = True
+    cfg.trainer.policy.optimizer_config.lr = 1.0e-6
+    cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0
+    OmegaConf.update(cfg, path, value)
+
+    with pytest.raises(UnsupportedLearnerConfiguration, match=match):
+        LevanterSnowballRuntimeConfig.from_msrl(cfg)
 
 
 @pytest.mark.parametrize(
