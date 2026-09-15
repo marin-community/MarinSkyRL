@@ -26,6 +26,31 @@ class MemoryStorage:
         self.files[path] = data
 
 
+def reproduction_manifest(
+    status: object = evaluator.ManifestStatus.STARTED, score_completed: float | None = None
+) -> object:
+    return evaluator.ReproductionManifest(
+        checkpoint="tinker://released",
+        dataset="HuggingFaceH4/aime_2024",
+        dataset_revision="revision",
+        model_name="Qwen/Qwen3.5-9B-Base",
+        renderer_name="qwen3_5",
+        runtime_versions={"tinker": "0.29.0"},
+        sampling=evaluator.SamplingContract(
+            concurrency=8,
+            context_window=65_536,
+            max_examples=1,
+            max_tokens=64_000,
+            num_samples=1,
+            temperature=1.0,
+            top_k=-1,
+            top_p=1.0,
+        ),
+        status=status,
+        score_completed=score_completed,
+    )
+
+
 def test_load_aime24_examples_pins_dataset_and_normalizes_rows() -> None:
     requested: dict[str, object] = {}
 
@@ -121,16 +146,18 @@ def test_claim_output_rejects_reused_prefix() -> None:
     storage = MemoryStorage({"aime_2024": b"existing"})
 
     with pytest.raises(RuntimeError, match="must be empty"):
-        evaluator.claim_output(storage, {"status": "started"})
+        evaluator.claim_output(storage, reproduction_manifest())
 
 
 def test_claim_and_complete_output_persist_reproduction_manifest() -> None:
     storage = MemoryStorage()
-    started = {"status": "started", "checkpoint": "tinker://released"}
-    complete = {"status": "complete", "checkpoint": "tinker://released", "score": 0.75}
+    started = reproduction_manifest()
+    complete = reproduction_manifest(evaluator.ManifestStatus.COMPLETE, score_completed=0.75)
 
     evaluator.claim_output(storage, started)
-    assert json.loads(storage.files["reproduction-manifest.json"]) == started
+    assert json.loads(storage.files["reproduction-manifest.json"])["status"] == "started"
 
     evaluator.write_manifest(storage, complete)
-    assert json.loads(storage.files["reproduction-manifest.json"]) == complete
+    persisted = json.loads(storage.files["reproduction-manifest.json"])
+    assert persisted["status"] == "complete"
+    assert persisted["score_completed"] == 0.75

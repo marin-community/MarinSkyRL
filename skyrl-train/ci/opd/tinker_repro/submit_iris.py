@@ -7,8 +7,8 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
 
+from cloud.iris.open_mopd_fidelity import validate_output_uri
 from iris.cli.connect import open_iris_client
 from iris.cluster.constraints import Constraint, preemptible_constraint
 from iris.cluster.types import Entrypoint, EnvironmentSpec, ResourceSpec
@@ -19,6 +19,11 @@ JOB_NAME = "tinker-opd-aime24"
 CPU = 2.0
 MEMORY = "8GB"
 DISK = "20GB"
+REPLICAS = 1
+MAX_RETRIES = 0
+PREEMPTIBLE = False
+PRIORITY_BAND = job_pb2.PRIORITY_BAND_INTERACTIVE
+PRIORITY_NAME = job_pb2.PriorityBand.Name(PRIORITY_BAND).removeprefix("PRIORITY_BAND_").lower()
 TINKER_API_KEY_ENV = "TINKER_API_KEY"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 EVALUATOR_PATH = "skyrl-train/ci/opd/tinker_repro/evaluate_aime24.py"
@@ -68,9 +73,7 @@ class SubmissionPlan:
 
 def evaluator_command(config: SubmissionConfig) -> tuple[str, ...]:
     """Return the secret-free evaluator command sent to Iris."""
-    parsed_save_dir = urlparse(config.save_dir)
-    if parsed_save_dir.scheme not in {"gs", "s3"} or not parsed_save_dir.netloc or not parsed_save_dir.path.strip("/"):
-        raise ValueError("--save-dir must be a non-root gs:// or s3:// durable prefix")
+    validate_output_uri(config.save_dir, option_name="--save-dir")
     command = [
         "uv",
         "run",
@@ -97,11 +100,11 @@ def public_plan(config: SubmissionConfig) -> SubmissionPlan:
         disk=DISK,
         job_name=JOB_NAME,
         max_examples=config.max_examples,
-        max_retries=0,
+        max_retries=MAX_RETRIES,
         memory=MEMORY,
-        non_preemptible=True,
-        priority="interactive",
-        replicas=1,
+        non_preemptible=not PREEMPTIBLE,
+        priority=PRIORITY_NAME,
+        replicas=REPLICAS,
         save_dir=config.save_dir,
     )
 
@@ -115,8 +118,8 @@ def build_submission(config: SubmissionConfig, *, tinker_api_key: str) -> IrisSu
         entrypoint=Entrypoint.from_command(*evaluator_command(config)),
         resources=ResourceSpec(cpu=CPU, memory=MEMORY, disk=DISK),
         environment=EnvironmentSpec(env_vars={TINKER_API_KEY_ENV: tinker_api_key}, setup_scripts=[]),
-        constraints=(preemptible_constraint(False),),
-        priority_band=job_pb2.PRIORITY_BAND_INTERACTIVE,
+        constraints=(preemptible_constraint(PREEMPTIBLE),),
+        priority_band=PRIORITY_BAND,
     )
 
 
@@ -130,9 +133,9 @@ def submit(config: SubmissionConfig, *, tinker_api_key: str) -> str:
             resources=request.resources,
             environment=request.environment,
             constraints=list(request.constraints),
-            replicas=1,
-            max_retries_failure=0,
-            max_task_failures=0,
+            replicas=REPLICAS,
+            max_retries_failure=MAX_RETRIES,
+            max_task_failures=MAX_RETRIES,
             priority_band=request.priority_band,
         )
     return str(job.job_id)

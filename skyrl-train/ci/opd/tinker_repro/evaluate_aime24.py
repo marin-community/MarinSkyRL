@@ -12,7 +12,8 @@ import argparse
 import asyncio
 import json
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from enum import StrEnum
 from importlib.metadata import version
 from typing import Any, Protocol
 
@@ -79,12 +80,43 @@ class ArtifactStorage(Protocol):
 MANIFEST_PATH = "reproduction-manifest.json"
 
 
-def write_manifest(storage: ArtifactStorage, manifest: dict[str, Any]) -> None:
+class ManifestStatus(StrEnum):
+    STARTED = "started"
+    COMPLETE = "complete"
+
+
+@dataclass(frozen=True)
+class SamplingContract:
+    concurrency: int
+    context_window: int
+    max_examples: int | None
+    max_tokens: int
+    num_samples: int
+    temperature: float
+    top_k: int
+    top_p: float
+
+
+@dataclass(frozen=True)
+class ReproductionManifest:
+    checkpoint: str
+    dataset: str
+    dataset_revision: str
+    model_name: str
+    renderer_name: str
+    runtime_versions: dict[str, str]
+    sampling: SamplingContract
+    status: ManifestStatus
+    result: dict[str, Any] | None = None
+    score_completed: float | None = None
+
+
+def write_manifest(storage: ArtifactStorage, manifest: ReproductionManifest) -> None:
     """Persist a deterministic top-level reproduction manifest."""
-    storage.write(MANIFEST_PATH, (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode())
+    storage.write(MANIFEST_PATH, (json.dumps(asdict(manifest), indent=2, sort_keys=True) + "\n").encode())
 
 
-def claim_output(storage: ArtifactStorage, manifest: dict[str, Any]) -> None:
+def claim_output(storage: ArtifactStorage, manifest: ReproductionManifest) -> None:
     """Claim an empty output prefix before any paid sampling request."""
     existing = storage.list_dir("")
     if existing:
@@ -98,26 +130,26 @@ def _runtime_versions() -> dict[str, str]:
     return {package: version(package) for package in ("datasets", "tinker", "tinker-cookbook", "transformers")}
 
 
-def _manifest(config: EvaluationConfig, *, status: str) -> dict[str, Any]:
-    return {
-        "checkpoint": config.checkpoint,
-        "dataset": AIME24_DATASET,
-        "dataset_revision": AIME24_REVISION,
-        "model_name": MODEL_NAME,
-        "renderer_name": RENDERER_NAME,
-        "runtime_versions": _runtime_versions(),
-        "sampling": {
-            "concurrency": config.concurrency,
-            "context_window": CONTEXT_WINDOW,
-            "max_examples": config.max_examples,
-            "max_tokens": MAX_TOKENS,
-            "num_samples": config.num_samples,
-            "temperature": TEMPERATURE,
-            "top_k": TOP_K,
-            "top_p": TOP_P,
-        },
-        "status": status,
-    }
+def _manifest(config: EvaluationConfig) -> ReproductionManifest:
+    return ReproductionManifest(
+        checkpoint=config.checkpoint,
+        dataset=AIME24_DATASET,
+        dataset_revision=AIME24_REVISION,
+        model_name=MODEL_NAME,
+        renderer_name=RENDERER_NAME,
+        runtime_versions=_runtime_versions(),
+        sampling=SamplingContract(
+            concurrency=config.concurrency,
+            context_window=CONTEXT_WINDOW,
+            max_examples=config.max_examples,
+            max_tokens=MAX_TOKENS,
+            num_samples=config.num_samples,
+            temperature=TEMPERATURE,
+            top_k=TOP_K,
+            top_p=TOP_P,
+        ),
+        status=ManifestStatus.STARTED,
+    )
 
 
 def load_aime24_examples(dataset_loader: DatasetLoader = load_dataset) -> list[AIME24Example]:
@@ -217,7 +249,8 @@ async def evaluate(config: EvaluationConfig) -> dict[str, Any]:
     validate_sampling_defaults(tinker.SamplingParams)
     examples = load_aime24_examples()
     storage = storage_from_uri(config.save_dir)
-    claim_output(storage, _manifest(config, status="started"))
+    manifest = _manifest(config)
+    claim_output(storage, manifest)
     service_client = tinker.ServiceClient()
     sampling_client = await service_client.create_sampling_client_async(model_path=config.checkpoint)
     tokenizer = get_tokenizer(MODEL_NAME)
@@ -244,13 +277,14 @@ async def evaluate(config: EvaluationConfig) -> dict[str, Any]:
         num_errors=result.num_errors,
         num_truncated=result.num_truncated,
     )
-    manifest = {
-        **_manifest(config, status="complete"),
-        "result": asdict(result),
-        "score_completed": result.score_completed,
-    }
-    write_manifest(storage, manifest)
-    return manifest
+    complete_manifest = replace(
+        manifest,
+        status=ManifestStatus.COMPLETE,
+        result=asdict(result),
+        score_completed=result.score_completed,
+    )
+    write_manifest(storage, complete_manifest)
+    return asdict(complete_manifest)
 
 
 def _parse_args() -> EvaluationConfig:

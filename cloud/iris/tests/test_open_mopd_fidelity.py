@@ -120,13 +120,28 @@ def test_gpu_override_records_deviation_and_enforces_authors_world_size() -> Non
 
     assert plan.gpu_slice == "H100x8"
     assert any("H100x8" in deviation for deviation in plan.known_deviations)
-    assert any("prompt length" in deviation and "1,024" in deviation for deviation in plan.known_deviations)
     assert "--no-sync" in plan.iris_command
     assert plan.iris_command[plan.iris_command.index("--gpu-slice") + 1] == "H100x8"
     with pytest.raises(ValueError, match="8-GPU"):
         fidelity.gpu_count("H100x4")
     with pytest.raises(ValueError, match="Malformed"):
         fidelity.gpu_count("H100")
+
+
+def test_plan_exposes_control_and_paper_prompt_limits() -> None:
+    config = fidelity.load_config(fidelity.DEFAULT_CONFIG)
+    plan = fidelity.build_plan(
+        config,
+        config_path=fidelity.DEFAULT_CONFIG,
+        gate="one_step",
+        cluster_config=Path("/tmp/iris.yaml"),
+        output_uri=OUTPUT_URI,
+        task_image=TASK_IMAGE,
+    )
+
+    assert plan.prompt_limit == 2048
+    assert plan.paper_prompt_limits == (1024, 2048, 2048)
+    assert plan.prompt_limit != plan.paper_prompt_limits[0]
 
 
 @pytest.mark.parametrize("output_uri", ["/tmp/output", "file:///tmp/output", "s3://bucket"])
