@@ -265,12 +265,15 @@ install -m 0755 crane /usr/local/bin/crane
 # The kaniko executor tag is a multi-arch manifest, and crane defaults to
 # linux/amd64 regardless of the host, so the platform has to be explicit or an
 # aarch64 builder unpacks amd64 binaries it cannot run.
-crane export --platform "$KANIKO_PLATFORM" gcr.io/kaniko-project/executor:latest - | tar -xf - -C / || true
+crane export --platform "$KANIKO_PLATFORM" gcr.io/kaniko-project/executor:latest kaniko-rootfs.tar
+# Extract only Kaniko. Expanding the complete image over the Iris task root
+# touches read-only pseudo-filesystems such as /sys and masks real tar errors.
+tar -xf kaniko-rootfs.tar -C / kaniko
 test -x /kaniko/executor
 
 export DOCKER_CONFIG=/kaniko/.docker
 REGISTRY_USER="$REGISTRY_USER" REGISTRY_TOKEN="$REGISTRY_TOKEN" \
-  "${SCRIPT_DIR}/write_registry_auth.sh" "$REGISTRY_HOST" "$DOCKER_CONFIG"
+  bash "${SCRIPT_DIR}/write_registry_auth.sh" "$REGISTRY_HOST" "$DOCKER_CONFIG"
 unset REGISTRY_TOKEN
 
 # When we pay the nvcc compile, keep a minimal wheel-only image before building
