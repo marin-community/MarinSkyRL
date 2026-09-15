@@ -401,7 +401,7 @@ def stage_model(model_path: str, warm_source: str | None = None, revision: str |
 
     # Weights + config + tokenizer + any trust_remote_code modeling files. Mirrors
     # mirror_hf_to_gcs.INCLUDE_PATTERNS so from_pretrained resolves fully offline.
-    allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.model", "*.py"]
+    allow_patterns = ["*.safetensors", "*.json", "*.txt", "*.model", "*.py", "*.jinja"]
 
     # Download in a SUBPROCESS with the offline flags stripped from ITS env. An
     # in-process os.environ.pop does NOT work here: huggingface_hub snapshots
