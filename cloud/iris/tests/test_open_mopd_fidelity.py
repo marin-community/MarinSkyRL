@@ -29,15 +29,22 @@ def test_runtime_accepts_cuda_local_version_for_public_release(monkeypatch: pyte
     validate_runtime(config)
 
 
-def test_release_launcher_uses_hydra_addition_for_undeclared_reward_mode(tmp_path: Path) -> None:
+def test_release_source_compatibility_patches_preserve_training_contracts(tmp_path: Path) -> None:
     launcher = tmp_path / "scripts" / "local" / "mt_opd.sh"
     launcher.parent.mkdir(parents=True)
     launcher.write_text('cmd+=("actor_rollout_ref.rollout.reward_mode=mt_opd")\n')
+    trainer = tmp_path / "training" / "verl" / "verl" / "trainer" / "ppo" / "ray_trainer.py"
+    trainer.parent.mkdir(parents=True)
+    trainer.write_text(
+        'reward_model_keys = ({"data_source", "reward_model", "extra_info", "uid", "domain"} '
+        "& batch.non_tensor_batch.keys())\n"
+    )
 
     patches = patch_source_compatibility(tmp_path)
 
-    assert patches == (fidelity_task.HYDRA_REWARD_MODE_PATCH,)
+    assert patches == (fidelity_task.HYDRA_REWARD_MODE_PATCH, fidelity_task.RAW_PROMPT_RETENTION_PATCH)
     assert launcher.read_text() == 'cmd+=("+actor_rollout_ref.rollout.reward_mode=mt_opd")\n'
+    assert '"domain", "raw_prompt"' in trainer.read_text()
 
 
 def test_config_parser_rejects_unknown_nested_fields(tmp_path: Path) -> None:
