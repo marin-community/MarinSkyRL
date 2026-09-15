@@ -21,9 +21,8 @@ limits.
 
 The Tinker Cookbook dependency is deliberately absent from the MarinSkyRL root
 environment. Its Transformers constraint conflicts with the root training
-environment, so run the evaluator in an isolated uv environment pinned to the
-reviewed cookbook revision. This pins the cookbook source but does not fully lock
-its transitive dependencies. The evaluator records the resolved versions of
+environment, so the evaluator carries PEP 723 script metadata and a dedicated
+uv lockfile pinned to the reviewed cookbook revision. The evaluator records the resolved versions of
 Tinker, Transformers, Datasets, and Tinker Cookbook in its JSON summary, and
 fails before sampling if Tinker's top-p or top-k defaults differ from the
 published evaluation settings.
@@ -32,9 +31,7 @@ published evaluation settings.
 CHECKPOINT='tinker://de58946a-6bfd-5ab2-821f-03b61d237b5b:train:0/sampler_weights/final'
 OUTPUT_DIR="$PWD/artifacts/tinker-opd-aime24"
 
-uv run --no-project \
-  --with 'tinker-cookbook[cloud] @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git@485726f55d3b2b5abe5fcb4a0d2f3e18e4599dfe' \
-  python skyrl-train/ci/opd/tinker_repro/evaluate_aime24.py \
+uv run --locked --script skyrl-train/ci/opd/tinker_repro/evaluate_aime24.py \
   --checkpoint "$CHECKPOINT" \
   --save-dir "$OUTPUT_DIR"
 ```
@@ -69,11 +66,18 @@ uv run --frozen python skyrl-train/ci/opd/tinker_repro/submit_iris.py \
   --max-examples 1
 ```
 
+The submitter prints a secret-free JSON plan and does not submit by default. Review it, then repeat the command with
+`--submit`. The submitter reads `TINKER_API_KEY` only after the dry-run gate.
+
 The submission goes directly to `cw-rno2a` at interactive priority. It requests
 2 CPU cores, 8 GB of memory, and 20 GB of disk on a non-preemptible worker, with
 zero task retries. The API key is never included in the evaluator command or job
 entrypoint. Do not print the `EnvironmentSpec`, which necessarily contains the
 key sent to the worker.
+
+Every run requires a new, empty `--save-dir`. The evaluator claims it with `reproduction-manifest.json` before the
+first sampling request and replaces that file with the complete result after validation. This prevents the cookbook's
+resume behavior from mixing samples from different reproduction attempts.
 
 Remove `--max-examples 1` only after the smoke test confirms checkpoint access,
 object-store writes, renderer behavior, and expected billing.

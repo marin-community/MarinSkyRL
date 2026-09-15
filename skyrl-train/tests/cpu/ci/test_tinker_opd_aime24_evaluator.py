@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -11,6 +12,18 @@ assert SPEC is not None and SPEC.loader is not None
 evaluator = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = evaluator
 SPEC.loader.exec_module(evaluator)
+
+
+class MemoryStorage:
+    def __init__(self, files: dict[str, bytes] | None = None) -> None:
+        self.files = files or {}
+
+    def list_dir(self, prefix: str) -> list[str]:
+        assert prefix == ""
+        return sorted(self.files)
+
+    def write(self, path: str, data: bytes) -> None:
+        self.files[path] = data
 
 
 def test_load_aime24_examples_pins_dataset_and_normalizes_rows() -> None:
@@ -102,3 +115,22 @@ def test_validate_comparable_result_accounts_for_smoke_limit_and_sample_count() 
         num_errors=0,
         num_truncated=0,
     )
+
+
+def test_claim_output_rejects_reused_prefix() -> None:
+    storage = MemoryStorage({"aime_2024": b"existing"})
+
+    with pytest.raises(RuntimeError, match="must be empty"):
+        evaluator.claim_output(storage, {"status": "started"})
+
+
+def test_claim_and_complete_output_persist_reproduction_manifest() -> None:
+    storage = MemoryStorage()
+    started = {"status": "started", "checkpoint": "tinker://released"}
+    complete = {"status": "complete", "checkpoint": "tinker://released", "score": 0.75}
+
+    evaluator.claim_output(storage, started)
+    assert json.loads(storage.files["reproduction-manifest.json"]) == started
+
+    evaluator.write_manifest(storage, complete)
+    assert json.loads(storage.files["reproduction-manifest.json"]) == complete

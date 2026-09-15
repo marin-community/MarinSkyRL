@@ -1,3 +1,9 @@
+# /// script
+# requires-python = ">=3.12,<3.13"
+# dependencies = [
+#   "tinker-cookbook[cloud] @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git@485726f55d3b2b5abe5fcb4a0d2f3e18e4599dfe",
+# ]
+# ///
 """Evaluate a Tinker sampler checkpoint on the pinned AIME 2024 corpus."""
 
 from __future__ import annotations
@@ -60,6 +66,58 @@ class SamplingParamsFactory(Protocol):
     """Construct sampling parameters using the installed SDK defaults."""
 
     def __call__(self) -> SamplingParams: ...
+
+
+class ArtifactStorage(Protocol):
+    """Storage operations used to claim and finalize one result prefix."""
+
+    def list_dir(self, prefix: str) -> list[str]: ...
+
+    def write(self, path: str, data: bytes) -> None: ...
+
+
+MANIFEST_PATH = "reproduction-manifest.json"
+
+
+def write_manifest(storage: ArtifactStorage, manifest: dict[str, Any]) -> None:
+    """Persist a deterministic top-level reproduction manifest."""
+    storage.write(MANIFEST_PATH, (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode())
+
+
+def claim_output(storage: ArtifactStorage, manifest: dict[str, Any]) -> None:
+    """Claim an empty output prefix before any paid sampling request."""
+    existing = storage.list_dir("")
+    if existing:
+        raise RuntimeError(
+            f"Evaluation save_dir must be empty; found {existing}. Use a new output prefix for every run."
+        )
+    write_manifest(storage, manifest)
+
+
+def _runtime_versions() -> dict[str, str]:
+    return {package: version(package) for package in ("datasets", "tinker", "tinker-cookbook", "transformers")}
+
+
+def _manifest(config: EvaluationConfig, *, status: str) -> dict[str, Any]:
+    return {
+        "checkpoint": config.checkpoint,
+        "dataset": AIME24_DATASET,
+        "dataset_revision": AIME24_REVISION,
+        "model_name": MODEL_NAME,
+        "renderer_name": RENDERER_NAME,
+        "runtime_versions": _runtime_versions(),
+        "sampling": {
+            "concurrency": config.concurrency,
+            "context_window": CONTEXT_WINDOW,
+            "max_examples": config.max_examples,
+            "max_tokens": MAX_TOKENS,
+            "num_samples": config.num_samples,
+            "temperature": TEMPERATURE,
+            "top_k": TOP_K,
+            "top_p": TOP_P,
+        },
+        "status": status,
+    }
 
 
 def load_aime24_examples(dataset_loader: DatasetLoader = load_dataset) -> list[AIME24Example]:
@@ -153,10 +211,13 @@ async def evaluate(config: EvaluationConfig) -> dict[str, Any]:
     import tinker
     from tinker_cookbook.eval.benchmarks import BenchmarkConfig, run_benchmark
     from tinker_cookbook.renderers import get_renderer
+    from tinker_cookbook.stores.storage import storage_from_uri
     from tinker_cookbook.tokenizer_utils import get_tokenizer
 
     validate_sampling_defaults(tinker.SamplingParams)
     examples = load_aime24_examples()
+    storage = storage_from_uri(config.save_dir)
+    claim_output(storage, _manifest(config, status="started"))
     service_client = tinker.ServiceClient()
     sampling_client = await service_client.create_sampling_client_async(model_path=config.checkpoint)
     tokenizer = get_tokenizer(MODEL_NAME)
@@ -183,26 +244,13 @@ async def evaluate(config: EvaluationConfig) -> dict[str, Any]:
         num_errors=result.num_errors,
         num_truncated=result.num_truncated,
     )
-    return {
-        "checkpoint": config.checkpoint,
-        "dataset": AIME24_DATASET,
-        "dataset_revision": AIME24_REVISION,
-        "model_name": MODEL_NAME,
-        "renderer_name": RENDERER_NAME,
-        "runtime_versions": {
-            package: version(package) for package in ("datasets", "tinker", "tinker-cookbook", "transformers")
-        },
-        "sampling": {
-            "temperature": TEMPERATURE,
-            "top_p": TOP_P,
-            "top_k": TOP_K,
-            "max_tokens": MAX_TOKENS,
-            "context_window": CONTEXT_WINDOW,
-            "num_samples": config.num_samples,
-        },
+    manifest = {
+        **_manifest(config, status="complete"),
         "result": asdict(result),
         "score_completed": result.score_completed,
     }
+    write_manifest(storage, manifest)
+    return manifest
 
 
 def _parse_args() -> EvaluationConfig:

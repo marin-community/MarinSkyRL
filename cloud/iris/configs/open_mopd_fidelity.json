@@ -79,6 +79,7 @@
     "paper_schedule": 600
   },
   "known_deviations": [
+    "The released launcher exposes one global prompt length. The paper uses 1,024 tokens for math and 2,048 for code/IF; this control uses 2,048 for every domain.",
     "The released patched verl tree exposes one global response length. The paper uses 16K for math/code and 2K for IF.",
     "The release does not pin a digest-addressed CUDA task image or a complete Python lockfile.",
     "The model card identifies the released final model as step 200 while paper Table 8 specifies 600 total steps."

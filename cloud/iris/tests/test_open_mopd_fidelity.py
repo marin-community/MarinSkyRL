@@ -120,6 +120,7 @@ def test_gpu_override_records_deviation_and_enforces_authors_world_size() -> Non
 
     assert plan.gpu_slice == "H100x8"
     assert any("H100x8" in deviation for deviation in plan.known_deviations)
+    assert any("prompt length" in deviation and "1,024" in deviation for deviation in plan.known_deviations)
     assert "--no-sync" in plan.iris_command
     assert plan.iris_command[plan.iris_command.index("--gpu-slice") + 1] == "H100x8"
     with pytest.raises(ValueError, match="8-GPU"):
