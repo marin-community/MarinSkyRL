@@ -64,10 +64,16 @@ UV_PROJECT_ENVIRONMENT="$environment" uv sync --quiet \
 
 python="$environment/bin/python"
 "$python" "$project_root/marinskyrl/environment_contract.py" write-frozen-cuda-runtime "$runtime_file"
+# Native JITs invoke tools such as ninja by name after bootstrap completes.
+printf 'export PATH=%q${PATH:+:$PATH}\n' "$environment/bin" >> "$runtime_file"
 source "$runtime_file"
 # Keep the development linker name in this environment, outside uv's package cache.
 ln -sf "$CUDA_HOME/lib/libcudart.so.13" "$environment/lib/libcudart.so"
-if [[ "$profile" == fsdp || "$profile" == fsdp-export || "$profile" == megatron || "$profile" == megatron-export ]]; then
+runtime_architecture="$("$python" -c 'import platform; print(platform.machine())')"
+# The GB200 FSDP lane uses eager Grug attention and has no ARM FlashAttention wheel.
+# Megatron and every x86 policy runtime still validate their compiled extension here.
+if [[ "$profile" == megatron || "$profile" == megatron-export || \
+  ( "$runtime_architecture" != aarch64 && ( "$profile" == fsdp || "$profile" == fsdp-export ) ) ]]; then
   "$python" -c "import flash_attn, flash_attn_2_cuda"
 fi
 if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then

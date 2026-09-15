@@ -90,21 +90,21 @@ fsdp = [
 ]
 vllm = [
     # The CPU audio wheel uses Torch for GPU resampling without loading a cu132 extension.
-    "torchaudio==2.11.0+cpu ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torchcodec==0.16.0+cu132 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "accelerate>=1.14,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "harbor[analysis,datasets,daytona] ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "harbor-config ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "peft>=0.19 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "quack-kernels==0.6.4 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "tensordict ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torch==2.13.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torchdata ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torchvision==0.28.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "vllm==0.0.0.dev20260913+marin.4c1c798a7b60.cu132 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchaudio==2.11.0+cpu ; sys_platform == 'linux'",
+    "torchcodec==0.16.0+cu132 ; sys_platform == 'linux'",
+    "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux'",
+    "accelerate>=1.14,<2 ; sys_platform == 'linux'",
+    "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux'",
+    "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
+    "harbor[analysis,datasets,daytona] ; sys_platform == 'linux'",
+    "harbor-config ; sys_platform == 'linux'",
+    "peft>=0.19 ; sys_platform == 'linux'",
+    "quack-kernels==0.6.4 ; sys_platform == 'linux'",
+    "tensordict ; sys_platform == 'linux'",
+    "torch==2.13.0 ; sys_platform == 'linux'",
+    "torchdata ; sys_platform == 'linux'",
+    "torchvision==0.28.0 ; sys_platform == 'linux'",
+    "vllm==0.0.0.dev20260914+marin.77c1868fdb61.cu132 ; sys_platform == 'linux'",
 ]
 megatron = [
     "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -212,8 +212,8 @@ transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_to
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
 
 [tool.uv.sources]
-torchaudio = { index = "pytorch-cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
-torchcodec = { index = "pytorch-cu132", extra = "vllm", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
+torchaudio = { index = "pytorch-cpu", marker = "sys_platform == 'linux'" }
+torchcodec = { index = "pytorch-cu132", extra = "vllm", marker = "sys_platform == 'linux'" }
 flash-attn = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
@@ -234,7 +234,8 @@ torchvision = [
 ]
 flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 vllm = [
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260913-4c1c798a7b60/vllm-0.0.0.dev20260913+marin.4c1c798a7b60.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-77c1868fdb61/vllm-0.0.0.dev20260914+marin.77c1868fdb61.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-77c1868fdb61/vllm-0.0.0.dev20260914+marin.77c1868fdb61.cu132-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 torchtitan = { git = "https://github.com/pytorch/torchtitan", rev = "a1fdd7e" }
 transformer-engine-torch = [

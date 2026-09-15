@@ -38,9 +38,10 @@ uv run --frozen marinskyrl --help
 Python extras cannot replace a base CPU Torch wheel with a CUDA wheel, so `cpu` and `cuda` are mutually
 exclusive wheel profiles. GPU-only component extras imply `cuda`: ordinary training commands select only
 `vllm`, while the standard image adds `fsdp` for its TorchTitan expert-parallel path and the Megatron image
-adds `megatron`. The GPU profiles use Torch 2.13.0+cu132. The `fsdp`, `vllm`, and
-`megatron` native wheel profiles target Linux x86_64 H100; this release supplies
-no aarch64 native wheels. Iris installs the frozen root profile before launch.
+adds `megatron`. The GPU profiles use Torch 2.13.0+cu132. The `vllm` profile selects
+immutable Linux x86_64 H100 and aarch64 GB200 wheels. The optional `fsdp` native
+FlashAttention and TorchTitan dependencies, and all `megatron` native wheels, remain
+x86_64-only; the aarch64 Grug policy path uses eager attention. Iris installs the frozen root profile before launch.
 See [the native wheel build recipe](scripts/wheels/README.md) for source and
 toolchain pins. The `cpu` profile remains on Torch 2.11.0.
 

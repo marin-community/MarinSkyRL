@@ -257,10 +257,6 @@ class Logprob:
 def setup_envvars_for_vllm(kwargs, bundle_indices):
     noset_visible_devices = kwargs.pop("noset_visible_devices")
     os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"  # TODO(Charlie): may not be needed.
-    # The frozen CUDA wheel has nvcc but no unversioned libcudart.so, so
-    # FlashInfer's TP all-reduce JIT cannot link with -lcudart. Keep vLLM's
-    # packaged custom/NCCL paths as the default while allowing explicit opt-in.
-    os.environ.setdefault("VLLM_ALLREDUCE_USE_FLASHINFER", "0")
 
     # When custom all-reduce is disabled (e.g. for TP=2 on H100 where
     # SymmMemCommunicator rendezvous fails), also disable symmetric memory

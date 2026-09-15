@@ -67,8 +67,9 @@ source ../.venv/bin/activate
 
 Select `cpu` for CPU training. GPU-only component extras imply the `cuda` profile, so ordinary FSDP/vLLM
 training selects `vllm`; add `fsdp` only for its TorchTitan expert-parallel dependencies. Native CUDA artifacts
-are selected by architecture from the frozen root lock. Iris installs and validates that profile in its standard
-task image before training.
+are selected by architecture from the frozen root lock. FSDP plus vLLM supports x86_64 H100 and aarch64 GB200;
+the aarch64 Grug path uses eager attention without the x86_64-only FlashAttention and TorchTitan artifacts. Iris
+installs and validates that profile in its standard task image before training.
 
 Then, prepare the dataset:
 

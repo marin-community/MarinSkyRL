@@ -202,12 +202,42 @@ def test_export_bootstrap_does_not_require_rollout_or_telemetry_packages(tmp_pat
     assert result.returncode == 0, result.stderr
 
 
+def test_arm_fsdp_bootstrap_does_not_require_flash_attention_extension(tmp_path: Path) -> None:
+    environment, process_environment = _fake_frozen_runtime(tmp_path)
+    site_packages = next((environment / "lib").glob("python*/site-packages"))
+    (site_packages / "flash_attn_2_cuda.py").unlink()
+    _write_module(site_packages, "sitecustomize.py", "import platform\nplatform.machine = lambda: 'aarch64'\n")
+
+    result = _run_bootstrap(environment, process_environment, "fsdp")
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_bootstrap_uses_system_python_when_managed_pin_is_unresolvable(tmp_path: Path) -> None:
     environment, process_environment = _fake_frozen_runtime(tmp_path, managed_python_pin_is_unresolvable=True)
 
     result = _run_bootstrap(environment, process_environment, "megatron")
 
     assert result.returncode == 0, result.stderr
+
+
+def test_bootstrap_activation_exposes_runtime_commands(tmp_path: Path) -> None:
+    environment, process_environment = _fake_frozen_runtime(tmp_path)
+    ninja = environment / "bin" / "ninja"
+    ninja.write_text("#!/bin/sh\nexit 0\n")
+    ninja.chmod(0o755)
+
+    result = _run_bootstrap(environment, process_environment, "fsdp")
+    activation = subprocess.run(
+        ["bash", "-c", 'source "$1"; command -v ninja', "bash", environment / "runtime.sh"],
+        env=process_environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert activation.stdout.strip() == str(ninja)
 
 
 @pytest.mark.parametrize(

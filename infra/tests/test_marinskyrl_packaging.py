@@ -17,6 +17,18 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 PYPROJECT = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
+VLLM_CANDIDATE = "marin-vllm-gpu-candidate-77c1868fdb61"
+VLLM_VERSION = "0.0.0.dev20260914+marin.77c1868fdb61.cu132"
+VLLM_WHEELS = {
+    "x86_64": (
+        "vllm-0.0.0.dev20260914+marin.77c1868fdb61.cu132-cp38-abi3-manylinux_2_28_x86_64.whl",
+        "sha256:e2531e9ee641a4d14ef6ec4a4922fdcd859684f1c5eb53d8cf3fee9dbd98be97",
+    ),
+    "aarch64": (
+        "vllm-0.0.0.dev20260914+marin.77c1868fdb61.cu132-cp38-abi3-manylinux_2_28_aarch64.whl",
+        "sha256:3f667d924daec0344012f237bacb83b9878d8fd4cd6026748711dc5f39a14b5e",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -189,7 +201,9 @@ def test_every_valid_extra_closure_uses_one_pinned_cuda132_runtime() -> None:
             }
             if len(runtimes) > 1:
                 failures.append((extras, platform["platform_machine"], sorted(runtimes)))
-            supported_gpu_extras = gpu_extras if platform["platform_machine"] == "x86_64" else {"cuda", "deepspeed"}
+            supported_gpu_extras = (
+                gpu_extras if platform["platform_machine"] == "x86_64" else {"cuda", "deepspeed", "vllm"}
+            )
             if "cpu" not in extras and supported_gpu_extras.intersection(extras):
                 assert runtimes == {("nvidia-cuda-runtime", "==13.2.75")}, (
                     extras,
@@ -200,12 +214,54 @@ def test_every_valid_extra_closure_uses_one_pinned_cuda132_runtime() -> None:
     assert not failures
 
 
-@pytest.mark.parametrize("policy_extra", ["fsdp", "megatron"])
-def test_rollout_closure_keeps_vllm_and_flashinfer(policy_extra: str) -> None:
-    exported = _exported_requirements((policy_extra, "vllm"))
+@pytest.mark.parametrize("architecture", ["x86_64", "aarch64"])
+def test_fsdp_vllm_closure_selects_the_exact_architecture_wheel(architecture: str) -> None:
+    platform = {"sys_platform": "linux", "platform_machine": architecture}
+    exported = [
+        requirement
+        for requirement in _exported_requirements(("fsdp", "vllm"))
+        if requirement.marker is None or requirement.marker.evaluate(platform)
+    ]
     names = {requirement.name for requirement in exported}
 
-    assert {"vllm", "flashinfer-python", "flashinfer-cubin"}.issubset(names)
-    assert {"humming-kernels", "cuda-tile"}.issubset(names)
-    assert "nvidia-cuda-nvcc" in names
+    assert {
+        "vllm",
+        "torch",
+        "torchaudio",
+        "torchcodec",
+        "flashinfer-python",
+        "flashinfer-cubin",
+        "quack-kernels",
+        "humming-kernels",
+        "cuda-tile",
+        "nvidia-cuda-nvcc",
+    }.issubset(names)
     assert "nvidia-cuda-tileiras" not in names
+
+    wheel_name, _ = VLLM_WHEELS[architecture]
+    declared_vllm = next(
+        Requirement(value)
+        for value in PYPROJECT["project"]["optional-dependencies"]["vllm"]
+        if Requirement(value).name == "vllm"
+    )
+    assert declared_vllm.specifier == Requirement(f"vllm=={VLLM_VERSION}").specifier
+    vllm = next(requirement for requirement in exported if requirement.name == "vllm")
+    assert vllm.url == f"https://github.com/marin-community/vllm/releases/download/{VLLM_CANDIDATE}/{wheel_name}"
+
+    if architecture == "aarch64":
+        assert {"flash-attn", "torchtitan"}.isdisjoint(names)
+    else:
+        assert {"flash-attn", "torchtitan"}.issubset(names)
+
+
+def test_lock_records_the_published_vllm_wheel_hashes() -> None:
+    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
+    locked_vllm = [package for package in lock["package"] if package["name"] == "vllm"]
+
+    assert {package["version"] for package in locked_vllm} == {VLLM_VERSION}
+    locked_wheels = {
+        wheel["url"].rsplit("/", 1)[-1]: wheel["hash"]
+        for package in locked_vllm
+        for wheel in package["wheels"]
+    }
+    assert locked_wheels == {wheel_name: digest for wheel_name, digest in VLLM_WHEELS.values()}
