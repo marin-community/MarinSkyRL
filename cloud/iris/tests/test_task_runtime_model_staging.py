@@ -1,6 +1,13 @@
 import pytest
 
-from cloud.iris.task_runtime import policy_chat_template_model
+from cloud.iris.task_runtime import _warm_sync_model_from_s3, policy_chat_template_model
+
+
+def test_revision_rejects_unbound_flat_warm_mirror(capsys) -> None:
+    revision = "6" * 40
+
+    assert not _warm_sync_model_from_s3("org/model", "s3://models/org--model", revision)
+    assert "no revision-bound content manifest" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

@@ -221,17 +221,18 @@ def stage_task_data(data_json: str, *, role: str) -> None:
     _log(f"{role.capitalize()} data staged to node-local paths: {resolved}")
 
 
-def _warm_model_snapshot_hash(model_path: str, revision: str | None = None) -> str:
-    """Select the pinned commit or a deterministic synthetic warm snapshot name.
+def _warm_model_snapshot_hash(model_path: str) -> str:
+    """Return a deterministic synthetic warm snapshot name.
 
     Offline ``from_pretrained`` / ``snapshot_download(local_files_only=True)`` resolve a
     repo via ``<cache>/models--<org>--<name>/refs/main`` -> a ``snapshots/<hash>/`` dir.
-    A pinned launch uses the real 40-hex commit as the snapshot directory. Legacy
-    unpinned launches use a stable synthetic hash keyed on the repo ID.
+    The flat warm mirror has no revision-bound manifest, so it must never be named
+    after a real Hugging Face commit. Unpinned launches use a stable synthetic hash
+    keyed on the repo ID.
     """
     import hashlib
 
-    return revision or hashlib.sha1(("otwarm:" + model_path).encode()).hexdigest()
+    return hashlib.sha1(("otwarm:" + model_path).encode()).hexdigest()
 
 
 def _warm_sync_model_from_s3(model_path: str, warm_source: str, revision: str | None = None) -> bool:
@@ -253,6 +254,12 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str, revision: str | 
     explicit botocore ``Config`` here so this call is correct even if invoked out of
     order.
     """
+    if revision:
+        _log(
+            "warm sync: the flat source has no revision-bound content manifest; "
+            f"refusing to label it as {model_path}@{revision}"
+        )
+        return False
     if not warm_source or not warm_source.startswith("s3://"):
         _log(f"warm sync: warm_source {warm_source!r} is not an s3:// URI; skipping warm path")
         return False
@@ -298,7 +305,7 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str, revision: str | 
 
     cache = _hf_constants.HF_HUB_CACHE
     folder = "models--" + model_path.replace("/", "--")
-    snap_hash = _warm_model_snapshot_hash(model_path, revision)
+    snap_hash = _warm_model_snapshot_hash(model_path)
     snap_dir = os.path.join(cache, folder, "snapshots", snap_hash)
     refs_dir = os.path.join(cache, folder, "refs")
     os.makedirs(snap_dir, exist_ok=True)
@@ -387,7 +394,7 @@ def stage_model(model_path: str, warm_source: str | None = None, revision: str |
             if _warm_sync_model_from_s3(model_path, warm_source, revision):
                 return
             _log(
-                f"stage_model: warm source {warm_source} missing/empty/incomplete "
+                f"stage_model: warm source {warm_source} missing/empty/incomplete/unqualified "
                 f"-> HF snapshot_download prestage fallback"
             )
         except Exception as exc:  # noqa: BLE001 - never let the warm path block bring-up

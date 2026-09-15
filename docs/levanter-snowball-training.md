@@ -75,6 +75,10 @@ full-checkpoint diagnostic read and hashed all 39 cached weight shards, totaling
 matched the Git LFS object in public revision `6808...`. The cache directory name was stale; the weight identity is now
 resolved to the public revision above.
 
+The flat regional S3 warm mirror has no revision-bound content manifest. Iris therefore uses it only for unpinned
+launches. When `--model-revision` is set, staging bypasses that mirror and asks Hugging Face for the named commit; it
+never creates a commit-named cache directory from bytes authenticated only by filename and size.
+
 ## Weight publication and resume
 
 Every successful learner update invalidates the installed inference version. Publication converts the complete

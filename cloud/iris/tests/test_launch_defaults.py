@@ -711,6 +711,7 @@ def test_model_revision_is_immutable_and_forwarded_to_staging_and_training(tmp_p
     options = _shell_options(build_task_command(args)[-1])
 
     assert options["--model-revision"] == [revision, revision]
+    assert "--model-warm-source" not in options
 
 
 def test_model_revision_rejects_a_mutable_ref(tmp_path):

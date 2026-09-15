@@ -1403,8 +1403,9 @@ def create_parser() -> argparse.ArgumentParser:
         "node from HF Hub (the flaky path behind the 80B r4a/r4b bring-up failures). "
         "Default: AUTO-DERIVE s3://marin-us-east-02a/models/<org>--<name> from the "
         "repo id (a missing/empty source is a clean no-op -> HF prestage fallback, "
-        "byte-identical to today). Pass 'none'/'off' to DISABLE the warm path (pure "
-        "HF prestage). Only used when the config runs HF_HUB_OFFLINE=1 with a "
+        "byte-identical to today). Pinned revisions bypass this unversioned mirror "
+        "and use the Hub commit directly. Pass 'none'/'off' to DISABLE the warm path "
+        "(pure HF prestage). Only used when the config runs HF_HUB_OFFLINE=1 with a "
         "repo-id model_path (same gate as --prestage-model).",
     )
 
@@ -2129,7 +2130,10 @@ def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
             warm_source = f"s3://marin-us-east-02a/models/{args.model_path.replace('/', '--')}"
         elif warm_source.strip().lower() in ("none", "off", ""):
             warm_source = None
-        if warm_source:
+        # The flat regional mirror has no revision-bound content manifest. Using it
+        # for a pinned launch would authenticate only the cache-directory label, not
+        # the bytes. Let task_runtime fetch the requested Hub commit instead.
+        if warm_source and not args.model_revision:
             model_args.extend(["--model-warm-source", warm_source])
     if policy_chat_template:
         model_args.extend(["--policy-chat-template", policy_chat_template])
