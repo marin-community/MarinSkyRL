@@ -58,6 +58,8 @@ def test_native_opd_fidelity_step_matches_the_published_batch_and_objective():
     assert values["trainer.algorithm.distillation.objective"] == "sampled_reverse_kl"
     assert values["trainer.algorithm.distillation.reward_mode"] == "replace"
     assert values["trainer.algorithm.distillation.coefficient"] == "1.0"
+    assert values["trainer.policy.optimizer_config.fsdp_parameter_storage_dtype"] == "float32"
+    assert values["trainer.policy.optimizer_config.bf16_update_mode"] == "fp32_master"
     assert values["trainer.policy.model.revision"] == OPD.STUDENT_REVISION
     assert values["teachers.primary.model.revision"] == OPD.TEACHER_REVISION
     assert values["trainer.policy.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap"] == ("[Qwen3_5DecoderLayer]")

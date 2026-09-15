@@ -137,6 +137,8 @@ def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, outp
         "trainer.policy.optimizer_config.lr=1.0e-4",
         "trainer.policy.optimizer_config.weight_decay=0.0",
         "trainer.policy.optimizer_config.scheduler=constant",
+        "trainer.policy.optimizer_config.fsdp_parameter_storage_dtype=float32",
+        "++trainer.policy.optimizer_config.bf16_update_mode=fp32_master",
         "trainer.strategy=fsdp2",
         "++trainer.policy.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[Qwen3_5DecoderLayer]",
         "trainer.flash_attn=true",
