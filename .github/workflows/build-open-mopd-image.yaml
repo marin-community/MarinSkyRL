@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 120
     env:
       JOB_NAME: open-mopd-image-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -20,21 +20,18 @@ jobs:
 
       - name: Build on an amd64 Iris node
         env:
-          HF_TOKEN: ${{ secrets.OPEN_ATHENA_HF_TOKEN }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           "$(uv tool dir)/marin-core/bin/iris" --cluster marin job run \
             --target-cluster cw-rno2a \
             --job-name "$JOB_NAME" \
             --task-image docker.io/library/ubuntu:22.04 \
-            --cpu 48 --memory 512GB --disk 400GB \
+            --cpu 8 --memory 32GB --disk 100GB \
             --priority interactive --no-preemptible --max-retries 0 \
-            --timeout 18000 --no-sync --enable-extra-resources \
+            --timeout 5400 --no-sync --enable-extra-resources \
             -e GITSHA "$GITHUB_SHA" \
-            -e HF_TOKEN "$HF_TOKEN" \
             -e REGISTRY_USER "$GITHUB_ACTOR" \
             -e REGISTRY_TOKEN "$REGISTRY_TOKEN" \
-            -e OPEN_MOPD_IMAGE_REPOSITORY ghcr.io/marin-community/marinskyrl \
             -- bash docker/build_open_mopd_kaniko.sh
 
       - name: Cancel any Iris job left behind

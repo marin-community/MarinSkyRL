@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a Marin-native Open-MOPD experiment image under an isolated tag.
+# Build a thin, pinned mutation of the authors' Open-MOPD runtime.
 # SHELLOPTS can propagate xtrace, so disable it before reading credentials.
 set +x
 set -euo pipefail
@@ -17,19 +17,30 @@ if [[ ! "$GITSHA" =~ ^[0-9a-f]{40}$ ]]; then
   exit 2
 fi
 
-# Reuse the maintained source and frozen root environment. The isolated tag is
-# an experiment-selection boundary, not a second dependency closure.
-IMAGE_REPOSITORY="${OPEN_MOPD_IMAGE_REPOSITORY:-us-east1-docker.pkg.dev/hai-gcp-models/marin/marinskyrl}"
-WHEEL_SOURCE="${WHEEL_SOURCE:-auto}"
-
+DOCKER_CONTEXT=/app
+DOCKERFILE="${DOCKER_CONTEXT}/docker/Dockerfile.open-mopd"
+IMAGE_REPOSITORY="${OPEN_MOPD_IMAGE_REPOSITORY:-ghcr.io/marin-community/marinskyrl-opd-repro}"
+REGISTRY_HOST="${IMAGE_REPOSITORY%%/*}"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-exec env \
-  REGISTRY_USER="$REGISTRY_USER" \
-  REGISTRY_TOKEN="$REGISTRY_TOKEN" \
-  IMAGE_REPOSITORY="$IMAGE_REPOSITORY" \
-  TAG_PREFIX=opd-repro \
-  DOCKERFILE=docker/Dockerfile.gpu-rl \
-  INSTALL_MEGATRON=0 \
-  HF_WHEEL_REPOSITORY=open-athena/marinskyrl-gpu-wheelhouse \
-  WHEEL_SOURCE="$WHEEL_SOURCE" \
-  bash "${SCRIPT_DIR}/build_gpu_rl_kaniko.sh"
+source "${SCRIPT_DIR}/kaniko_executor_setup.sh"
+
+if [ -z "${IRIS_TASK_ID:-}" ] || [ ! -f "$DOCKERFILE" ]; then
+  echo "build_open_mopd_kaniko.sh must run inside a disposable Iris task" >&2
+  exit 2
+fi
+if [ "$REGISTRY_HOST" = "$IMAGE_REPOSITORY" ]; then
+  echo "OPEN_MOPD_IMAGE_REPOSITORY must include a registry hostname and repository path" >&2
+  exit 2
+fi
+
+install_kaniko_build_packages ca-certificates curl tar
+prepare_kaniko_executor_and_registry x86_64 linux/amd64 "$REGISTRY_HOST"
+
+exec /kaniko/executor \
+  --context "dir://${DOCKER_CONTEXT}" \
+  --dockerfile "$DOCKERFILE" \
+  --build-arg GITSHA="$GITSHA" \
+  --cache=true \
+  --cache-repo="${IMAGE_REPOSITORY}/cache" \
+  "${KANIKO_REGISTRY_RETRY_FLAGS[@]}" \
+  --destination "${IMAGE_REPOSITORY}:opd-repro-${GITSHA}"
