@@ -278,6 +278,7 @@ def test_snowball_levanter_async_m10_config_composes_and_lowers():
     assert runtime.train_batch_size == 128
     assert runtime.learning_rate == 1.0e-6
     assert runtime.max_grad_norm == 1.0
+    assert runtime.publication_max_chunk_bytes == 2 << 30
     assert runtime.model_revision == revision
     assert cfg.trainer.fully_async.max_staleness_steps == 4
     assert cfg.trainer.fully_async.num_parallel_generation_workers == 160

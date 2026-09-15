@@ -84,7 +84,10 @@ trainer:
       attention_implementation: gpu_fa4_cute
       moe_implementation: ring
       publication_backend: gloo
-      publication_max_chunk_bytes: 67108864
+      # The largest BF16 expert projection is 1.68 GB. A 2 GiB cap therefore
+      # keeps the existing peak-tensor envelope while avoiding tiny per-chunk
+      # synchronization around the 125 GB publication.
+      publication_max_chunk_bytes: 2147483648
       publication_timeout_seconds: 1800
       require_accelerator: true
       log_dir: /tmp/marinskyrl-levanter
