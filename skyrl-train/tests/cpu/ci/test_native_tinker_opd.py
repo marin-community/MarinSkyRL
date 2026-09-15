@@ -79,3 +79,34 @@ def test_native_opd_plumbing_batch_covers_every_policy_rank():
     validate_cfg(config)
 
     assert config.trainer.train_batch_size == config.trainer.placement.policy_num_gpus_per_node == 4
+
+
+def test_qwen35_runtime_patch_enables_embedding_and_lm_head_lora(tmp_path: Path):
+    source_path = tmp_path / "qwen3_5.py"
+    source_path.write_text(
+        """class Qwen3_5ForCausalLMBase(
+    nn.Module,
+    HasInnerState,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+):
+    packed_modules_mapping = {
+        \"qkv_proj\": [
+            \"q_proj\",
+            \"k_proj\",
+            \"v_proj\",
+        ],
+        \"gate_up_proj\": [\"gate_proj\", \"up_proj\"],
+        # GDN fused projections.
+        \"in_proj_qkvz\": [\"in_proj_qkv\", \"in_proj_z\"],
+        \"in_proj_ba\": [\"in_proj_b\", \"in_proj_a\"],
+    }
+"""
+    )
+
+    OPD.patch_qwen35_embedding_lora(source_path)
+
+    patched_source = source_path.read_text()
+    assert '"embed_tokens": "input_embeddings"' in patched_source
+    assert '"lm_head": "output_embeddings"' in patched_source
