@@ -37,9 +37,13 @@ uv run --frozen marinskyrl --help
 
 Python extras cannot replace a base CPU Torch wheel with a CUDA wheel, so `cpu` and `cuda` are mutually
 exclusive wheel profiles. GPU-only component extras imply `cuda`: ordinary training commands select only
-`vllm`, while the standard image adds `fsdp` for its TorchTitan expert-parallel path and optimized attention
-kernels used by hybrid architectures such as Qwen3.5. The Megatron image adds `megatron`. Native CUDA wheels
-are validated and installed by the GPU Docker builds.
+`vllm`, while the standard image adds `fsdp` for its TorchTitan expert-parallel path and the Megatron image
+adds `megatron`. The GPU profiles use Torch 2.13.0+cu132. The `vllm` profile selects
+immutable Linux x86_64 H100 and aarch64 GB200 wheels. The optional `fsdp` native
+FlashAttention and TorchTitan dependencies, and all `megatron` native wheels, remain
+x86_64-only; the aarch64 Grug policy path uses eager attention. Iris installs the frozen root profile before launch.
+See [the native wheel build recipe](scripts/wheels/README.md) for source and
+toolchain pins. The `cpu` profile remains on Torch 2.11.0.
 
 The walkthrough below reproduces the original OpenThoughts-Agent v1 release (kept here for reference), i.e.:
 - Using [open-thoughts/OpenThinker-Agent-v1-SFT](https://huggingface.co/open-thoughts/OpenThinker-Agent-v1-SFT) as base
