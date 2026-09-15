@@ -60,6 +60,7 @@ def test_native_opd_fidelity_step_matches_the_published_batch_and_objective():
     assert values["trainer.algorithm.distillation.coefficient"] == "1.0"
     assert values["trainer.policy.model.revision"] == OPD.STUDENT_REVISION
     assert values["teachers.primary.model.revision"] == OPD.TEACHER_REVISION
+    assert values["trainer.policy.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap"] == ("[Qwen3_5DecoderLayer]")
 
     with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
         config = compose(config_name="ppo_base_config", overrides=list(arguments))
