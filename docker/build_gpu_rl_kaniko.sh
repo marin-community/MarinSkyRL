@@ -15,8 +15,6 @@ set +x
 set -euo pipefail
 
 : "${GITSHA:?}"
-REGISTRY_USER="${REGISTRY_USER:-${DOCKER_USER_ID:-}}"
-REGISTRY_TOKEN="${REGISTRY_TOKEN:-${GHCR_TOKEN:-}}"
 : "${REGISTRY_USER:?}"
 : "${REGISTRY_TOKEN:?}"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -48,7 +46,7 @@ echo "[arch] build host=$BUILD_ARCH kaniko=$KANIKO_PLATFORM wheels=$WHEEL_PLATFO
 
 # Registry home is this repo's org, marin-community/MarinSkyRL. Declared here so a
 # build pushes where it says it pushes without an ad-hoc env var at every call site.
-IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-${GHCR_IMAGE_REPOSITORY:-ghcr.io/marin-community/marinskyrl}}"
+IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-ghcr.io/marin-community/marinskyrl}"
 REGISTRY_HOST="${IMAGE_REPOSITORY%%/*}"
 if [ "$REGISTRY_HOST" = "$IMAGE_REPOSITORY" ]; then
   echo "IMAGE_REPOSITORY must include a registry hostname and repository path" >&2

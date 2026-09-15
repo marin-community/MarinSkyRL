@@ -25,6 +25,7 @@ from skyrl_train.trajectory_runners.base import (
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
+from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.utils.fd_monitor import start_fd_monitor
 from skyrl_train.worker_setup import configure_worker_process
@@ -141,8 +142,6 @@ class RolloutCoordinator:
         executor_workers: int,
     ):
         configure_worker_process()
-        from skyrl_train.tokenizer import create_tokenizer
-
         # Each actor process gets its own FD monitor (per-process daemon thread),
         # mirroring the entrypoint behavior.
         try:

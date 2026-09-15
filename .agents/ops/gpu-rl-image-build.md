@@ -47,8 +47,9 @@ because its post-lock install can alter the resolved environment.
 | variable | condition |
 |---|---|
 | `GITSHA` | always; full committed MarinSkyRL revision |
-| `DOCKER_USER_ID` | always |
-| `GHCR_TOKEN` | always; token must push packages |
+| `REGISTRY_USER` | always |
+| `REGISTRY_TOKEN` | always; short-lived token that can push the selected repository |
+| `IMAGE_REPOSITORY` | optional; defaults to `ghcr.io/marin-community/marinskyrl` |
 | `PREBUILT_WHEEL_ARTIFACT_URI` and `PREBUILT_WHEEL_ARTIFACT_SHA256` | only for `prebuilt-wheelhouse` |
 
 Architecture is derived from the build host. It selects the Dockerfile, crane/kaniko platform,
@@ -70,8 +71,8 @@ Run from the clean committed build worktree:
 
 ```bash
 GITSHA=$(git rev-parse HEAD)
-DOCKER_USER_ID=$(gh api user --jq .login)
-GHCR_TOKEN=$(gh auth token)
+REGISTRY_USER=$(gh api user --jq .login)
+REGISTRY_TOKEN=$(gh auth token)
 BUILD_B64=$(base64 < docker/build_gpu_rl_kaniko.sh | tr -d '\n')
 ```
 
@@ -81,8 +82,8 @@ Every job uses `docker.io/library/ubuntu:22.04`, `--no-sync`, `--enable-extra-re
 ```bash
 -e BUILD_B64 "$BUILD_B64" \
 -e GITSHA "$GITSHA" \
--e DOCKER_USER_ID "$DOCKER_USER_ID" \
--e GHCR_TOKEN "$GHCR_TOKEN" \
+-e REGISTRY_USER "$REGISTRY_USER" \
+-e REGISTRY_TOKEN "$REGISTRY_TOKEN" \
 -e WHEEL_SOURCE wheel-builder \
 -- bash -lc 'echo "$BUILD_B64" | base64 -d > /tmp/build.sh && exec bash /tmp/build.sh'
 ```

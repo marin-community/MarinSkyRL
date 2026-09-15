@@ -7,15 +7,13 @@ import subprocess
 
 ROOT = Path(__file__).parents[2]
 BUILD_SCRIPT = ROOT / "docker" / "build_open_mopd_kaniko.sh"
-GPU_RL_DOCKERFILE = ROOT / "docker" / "Dockerfile.gpu-rl"
-
-
 def test_open_mopd_wrapper_delegates_with_an_isolated_tag_and_maintained_environment(tmp_path: Path) -> None:
     wrapper = tmp_path / BUILD_SCRIPT.name
     wrapper.write_bytes(BUILD_SCRIPT.read_bytes())
     delegated_environment = tmp_path / "environment"
     (tmp_path / "build_gpu_rl_kaniko.sh").write_text(
-        '#!/usr/bin/env bash\nenv | grep -E "^(TAG_PREFIX|DOCKERFILE|INSTALL_MEGATRON|WHEEL_SOURCE|IMAGE_REPOSITORY)="'
+        '#!/usr/bin/env bash\n[ "$REGISTRY_USER" = test-user ]\n[ "$REGISTRY_TOKEN" = test-token ]\n'
+        'env | grep -E "^(TAG_PREFIX|DOCKERFILE|INSTALL_MEGATRON|WHEEL_SOURCE|IMAGE_REPOSITORY)="'
         ' | sort > "$DELEGATED_ENVIRONMENT"\n'
     )
     fake_bin = tmp_path / "bin"
@@ -43,15 +41,21 @@ def test_open_mopd_wrapper_delegates_with_an_isolated_tag_and_maintained_environ
         "TAG_PREFIX=opd-repro",
         "WHEEL_SOURCE=wheel-builder",
     ]
-    assert GPU_RL_DOCKERFILE.is_file()
-
-
-def test_open_mopd_wrapper_disables_inherited_xtrace_before_credentials() -> None:
+def test_open_mopd_wrapper_disables_inherited_xtrace_before_credentials(tmp_path: Path) -> None:
     credential = "registry-secret-sentinel"
+    wrapper = tmp_path / BUILD_SCRIPT.name
+    wrapper.write_bytes(BUILD_SCRIPT.read_bytes())
+    (tmp_path / "build_gpu_rl_kaniko.sh").write_text(
+        '#!/usr/bin/env bash\n[ "$REGISTRY_TOKEN" = registry-secret-sentinel ]\n'
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "uname").write_text("#!/usr/bin/env bash\necho x86_64\n")
+    (fake_bin / "uname").chmod(0o755)
     result = subprocess.run(
-        ["bash", str(BUILD_SCRIPT)],
+        ["bash", str(wrapper)],
         env={
-            "PATH": os.environ["PATH"],
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "SHELLOPTS": "braceexpand:hashall:interactive-comments:xtrace",
             "GITSHA": "a" * 40,
             "REGISTRY_USER": "test-user",
@@ -62,5 +66,5 @@ def test_open_mopd_wrapper_disables_inherited_xtrace_before_credentials() -> Non
         text=True,
     )
 
-    assert result.returncode != 0
+    assert result.returncode == 0
     assert credential not in result.stderr
