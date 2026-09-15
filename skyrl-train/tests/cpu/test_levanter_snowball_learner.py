@@ -618,8 +618,13 @@ def test_scoring_and_update_reenter_mesh_in_async_worker_thread(tmp_path):
     learner.close()
 
 
-def test_optimizer_state_offload_survives_a_donated_update(tmp_path):
-    runtime = replace(_runtime(tmp_path / "optimizer-offload-logs"), offload_opt_state=True)
+@pytest.mark.parametrize("parameter_dtype", ["float32", "bfloat16"])
+def test_optimizer_state_offload_survives_a_donated_update(tmp_path, parameter_dtype):
+    runtime = replace(
+        _runtime(tmp_path / "optimizer-offload-logs"),
+        offload_opt_state=True,
+        parameter_dtype=parameter_dtype,
+    )
     model_config = _snowball_config()
     learner = LevanterSnowballLearner(
         runtime,

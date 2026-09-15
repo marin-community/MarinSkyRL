@@ -20,6 +20,7 @@ def validate_fully_async_levanter_config(cfg: DictConfig) -> None:
     fully_async = cfg.trainer.fully_async
     workers = int(fully_async.num_parallel_generation_workers)
     buffered = fully_async.max_buffered_groups
+    configured_publication_steps = fully_async.get("policy_publication_steps")
     unsupported = []
     if cfg.environment.env_class != "gsm8k":
         unsupported.append("environment.env_class=gsm8k")
@@ -37,6 +38,16 @@ def validate_fully_async_levanter_config(cfg: DictConfig) -> None:
         unsupported.append("an explicit positive max_buffered_groups no greater than the worker count")
     if cfg.trainer.train_batch_size != cfg.trainer.policy_mini_batch_size:
         unsupported.append("train_batch_size equal to policy_mini_batch_size")
+    if configured_publication_steps is not None:
+        publication_steps = [int(step) for step in configured_publication_steps]
+        final_step = int(cfg.trainer.max_steps) if cfg.trainer.max_steps is not None else -1
+        if (
+            publication_steps != sorted(set(publication_steps))
+            or not publication_steps
+            or publication_steps[0] != 1
+            or publication_steps[-1] != final_step
+        ):
+            unsupported.append("policy_publication_steps containing sorted unique first and final steps")
     if unsupported:
         raise ValueError("the fully async Levanter Snowball entrypoint requires " + ", ".join(unsupported))
 

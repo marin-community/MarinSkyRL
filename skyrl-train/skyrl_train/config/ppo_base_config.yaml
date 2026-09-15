@@ -310,6 +310,9 @@ trainer:
     num_parallel_generation_workers: 768
     max_buffered_groups: null
     admission_stall_timeout: 21600
+    # null publishes after every optimizer update. An explicit list is for
+    # bounded experiments that intentionally train on older serving weights.
+    policy_publication_steps: null
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false

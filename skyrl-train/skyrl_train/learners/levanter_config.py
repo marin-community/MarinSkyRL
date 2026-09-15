@@ -143,7 +143,10 @@ class LevanterSnowballRuntimeConfig:
             (int(generator.inference_engine_tensor_parallel_size) == 1, "inference tensor parallel size 1"),
             (int(generator.inference_engine_pipeline_parallel_size) == 1, "inference pipeline parallel size 1"),
             (float(generator.sampling_params.temperature) == 1.0, "generator.sampling_params.temperature=1.0"),
-            (levanter.parameter_dtype == "float32", "Levanter FP32 parameter storage"),
+            (
+                levanter.parameter_dtype in {"float32", "bfloat16"},
+                "Levanter FP32 or BF16 parameter storage",
+            ),
             (levanter.compute_dtype == "bfloat16", "Levanter BF16 compute"),
             (levanter.output_dtype == "float32", "Levanter FP32 outputs"),
             (generator.model_dtype == "bfloat16", "generator.model_dtype=bfloat16"),

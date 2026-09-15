@@ -33,6 +33,14 @@ def test_direct_async_levanter_config_passes_before_allocation():
     validate_fully_async_levanter_config(_valid_config())
 
 
+def test_explicit_first_and_final_publication_steps_pass_before_allocation():
+    cfg = _valid_config()
+    cfg.trainer.max_steps = 5
+    cfg.trainer.fully_async.policy_publication_steps = [1, 5]
+
+    validate_fully_async_levanter_config(cfg)
+
+
 @pytest.mark.parametrize(
     ("path", "value", "match"),
     [
@@ -44,6 +52,7 @@ def test_direct_async_levanter_config_passes_before_allocation():
         ("trainer.fully_async.num_parallel_generation_workers", 3, "generation workers"),
         ("trainer.fully_async.max_buffered_groups", None, "explicit positive max_buffered_groups"),
         ("trainer.fully_async.max_buffered_groups", 21, "no greater than the worker count"),
+        ("trainer.fully_async.policy_publication_steps", [2, 4], "first and final steps"),
         ("trainer.train_batch_size", 8, "train_batch_size equal"),
     ],
 )

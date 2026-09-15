@@ -131,6 +131,7 @@ from skyrl_train.learner_bridge import (
     learner_batch_from_training_input,
     update_request_from_training_input,
 )
+from skyrl_train.policy_version import BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 _PAD_SIZE_METADATA_KEY = "pad_size"
@@ -1467,7 +1468,7 @@ class RayPPOTrainer:
         logger.info(f"Number of sequences before padding: {len(training_input['sequences'])}")
         training_input = self.pad_batch(training_input)
         logger.info(f"Number of sequences after padding: {len(training_input['sequences'])}")
-        if self.learner is not None:
+        if self.learner is not None and trajectory_batch.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY) is None:
             installed_version = self.learner.state.installed_policy_version
             if installed_version is None or not self.learner.state.ready_for_rollouts:
                 raise LearnerPublicationIncomplete("cannot label rollout rows before learner policy installation")

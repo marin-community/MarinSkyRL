@@ -46,6 +46,9 @@ trainer:
     num_parallel_generation_workers: 160
     max_buffered_groups: 32
     admission_stall_timeout: 1800
+    # Publish once after update 1 and once after the final update. Policy-1
+    # rollouts remain admissible through update 5 under the age-4 bound.
+    policy_publication_steps: [1, 5]
   epochs: 1
   max_steps: 5
   update_epochs_per_batch: 1
@@ -54,8 +57,9 @@ trainer:
   eval_batch_size: 128
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
-  eval_before_train: true
-  # Keep the initial and train-end evaluations without duplicating step 5.
+  # The identical policy-0/dev-set baseline was measured by the preceding
+  # bounded allocation. Keep only the train-end evaluation in this final gate.
+  eval_before_train: false
   eval_interval: 6
   ckpt_interval: 6
   hf_save_interval: -1
@@ -78,7 +82,9 @@ trainer:
     fsdp_config:
       expert_model_parallel_size: 1
     levanter:
-      parameter_dtype: float32
+      # The staged checkpoint and vLLM weights are BF16. FP32 parameter and
+      # gradient storage exceeded H100 memory before Adam entered the device.
+      parameter_dtype: bfloat16
       compute_dtype: bfloat16
       output_dtype: float32
       attention_implementation: gpu_fa4_cute
@@ -94,7 +100,7 @@ trainer:
       # ranges instead of broadcasting the full 1.68 GB tensors eight times.
       publication_scatter_experts: true
       # The launcher stages this one immutable source for both vLLM and
-      # Levanter. Trained versions 1-5 still use full verified publication.
+      # Levanter. Trained versions 1 and 5 still use full verified publication.
       initial_weights_already_loaded: true
       require_accelerator: true
       log_dir: /tmp/marinskyrl-levanter

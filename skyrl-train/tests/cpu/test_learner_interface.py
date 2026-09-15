@@ -458,7 +458,9 @@ def test_async_serving_identity_is_per_row_and_independent_of_global_step(tmp_pa
         producer = asyncio.create_task(trainer._run_generate_for_a_group_loop(queues))
         await runner.started.wait()
         _run_update(trainer)
-        await trainer.async_sync_policy_weights_to_inference_engines()
+        # Exact serving-observed segments remain sufficient while the learner
+        # has a newer, deliberately unpublished policy.
+        assert not trainer.learner.state.ready_for_rollouts
         runner.release.set()
         group = await asyncio.wait_for(queues.completed.get(), timeout=1)
         producer.cancel()

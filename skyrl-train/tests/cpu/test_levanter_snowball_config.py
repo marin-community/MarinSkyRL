@@ -59,6 +59,15 @@ def test_optimizer_state_offload_lowers_before_allocation():
     assert runtime.offload_opt_state
 
 
+def test_bfloat16_parameter_storage_lowers_before_allocation():
+    cfg = _valid_config()
+    cfg.trainer.policy.levanter.parameter_dtype = "bfloat16"
+
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.parameter_dtype == "bfloat16"
+
+
 def test_expert_scatter_requires_one_full_expert_parallel_group():
     cfg = _valid_config()
     cfg.trainer.policy.levanter.publication_scatter_experts = True
