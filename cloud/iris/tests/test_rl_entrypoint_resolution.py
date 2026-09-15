@@ -266,3 +266,47 @@ def test_snowball_levanter_async_m10_config_composes_and_lowers():
     assert cfg.trainer.fully_async.policy_publication_steps == [1, 2, 3, 4, 5]
     assert cfg.trainer.eval_before_train
     assert cfg.trainer.eval_interval == 6
+
+
+def test_snowball_megatron_async_m10_config_composes_and_matches_gate():
+    revision = "6808fe5c219471517bd51df35addefd38ebebf89"
+    parsed = parse_rl_config(
+        str(_REPO_ROOT / "cloud/iris/configs/snowball_megatron_async_m10.yaml"),
+        model_override="marin-community/grug-67b-a2b-sft-s2-thinking-step630",
+    )
+    hydra_args = build_skyrl_hydra_args(
+        parsed,
+        {
+            "num_nodes": 5,
+            "model_path": "marin-community/grug-67b-a2b-sft-s2-thinking-step630",
+            "model_revision": revision,
+        },
+        SimpleNamespace(gpus_per_node=8),
+    )
+
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config", overrides=hydra_args)
+
+    assert parsed.entrypoint == "skyrl_train.entrypoints.fully_async"
+    assert cfg.trainer.strategy == "megatron"
+    assert cfg.trainer.placement.policy_num_nodes == 4
+    assert cfg.trainer.placement.policy_num_gpus_per_node == 8
+    assert cfg.trainer.train_batch_size == 32
+    assert cfg.trainer.policy_mini_batch_size == 32
+    assert cfg.trainer.micro_train_batch_size_per_gpu == 1
+    assert cfg.trainer.algorithm.policy_loss_type == "regular"
+    assert cfg.trainer.algorithm.require_rollout_logprobs
+    assert cfg.trainer.algorithm.offpolicy_mask.enabled
+    assert not cfg.trainer.algorithm.use_kl_loss
+    assert not cfg.trainer.algorithm.use_tis
+    assert cfg.trainer.fully_async.max_staleness_steps == 4
+    assert cfg.trainer.fully_async.num_parallel_generation_workers == 160
+    assert cfg.trainer.fully_async.max_buffered_groups == 32
+    assert cfg.trainer.fully_async.policy_publication_steps == [1, 2, 3, 4, 5]
+    assert cfg.generator.inference_engine_data_parallel_size == 8
+    assert cfg.generator.inference_engine_expert_parallel_size == 8
+    assert cfg.generator.n_samples_per_prompt == 4
+    assert cfg.generator.sampling_params.logprobs == 0
+    assert cfg.generator.non_agentic_parser_protocol == "post-thinking-native-v1"
+    assert cfg.trainer.eval_before_train
+    assert cfg.trainer.eval_interval == 6
