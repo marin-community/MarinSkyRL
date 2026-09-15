@@ -111,9 +111,10 @@ ADDITIVE_GENERATOR_FIELDS = {
     "r3_dispatch_put_timeout_seconds": 600,
     "gdn_backend": "torch",
 }
-ADDITIVE_POLICY_MODEL_FIELDS = {
+ADDITIVE_MODEL_FIELDS = {
     "source_uri": None,
     "source_identity": None,
+    "revision": None,
 }
 ADDITIVE_POLICY_FIELDS = {
     "grug_query_bias_interpolation_weight": None,
@@ -194,8 +195,9 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         container["trainer"]["algorithm"].pop("group_admission")
     for k in ADDITIVE_GENERATOR_FIELDS:
         container["generator"].pop(k, None)
-    for k in ADDITIVE_POLICY_MODEL_FIELDS:
-        container["trainer"]["policy"]["model"].pop(k, None)
+    for role in TRAINER_MODEL_ROLES:
+        for k in ADDITIVE_MODEL_FIELDS:
+            container["trainer"][role]["model"].pop(k, None)
     for k in ADDITIVE_POLICY_FIELDS:
         container["trainer"]["policy"].pop(k, None)
     for k in ADDITIVE_OVERLONG_FIELDS:

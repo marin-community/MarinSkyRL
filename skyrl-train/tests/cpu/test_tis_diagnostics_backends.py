@@ -218,6 +218,7 @@ def test_fsdp_training_step_gathers_sparse_teacher_tokens_from_student_logits(mo
     old_lp, rollout_lp, _ = _tis_tensors()
     worker = object.__new__(PolicyWorkerBase)
     worker.cfg = _algorithm_cfg(use_tis=False)
+    worker.cfg.trainer.algorithm.distillation = {"reward_mode": "add"}
     worker.cfg.trainer.policy = {"fsdp_config": {"context_parallel_size": 1}}
     worker.model = _FakeHFModel(action_log_probs=old_lp + 0.01, logits=student_logits)
     worker.policy_loss_fn = _fake_policy_loss_fn
