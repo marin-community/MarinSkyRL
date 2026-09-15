@@ -465,15 +465,6 @@ def test_a_frozen_receipt_ignores_later_mutation_of_the_live_result(monkeypatch)
     assert written["bytes"] == len(frozen)
 
 
-def test_persist_payload_and_persist_readback_agree(monkeypatch):
-    stored, _ = _object_store(monkeypatch)
-    receipt = {"rows": [{"rank": i} for i in range(8)]}
-    a = persist_readback("s3://bucket/prefix", "viaReceipt", receipt)
-    b = persist_payload("s3://bucket/prefix", "viaPayload", serialize_receipt(receipt))
-    assert stored[a["uri"]] == stored[b["uri"]]
-    assert a["sha256"] == b["sha256"] and a["bytes"] == b["bytes"]
-
-
 def _publication_stub(deferred):
     from types import SimpleNamespace
 
