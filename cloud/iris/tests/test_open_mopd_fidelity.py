@@ -8,10 +8,24 @@ import pytest
 
 import cloud.iris.open_mopd_fidelity as fidelity
 import cloud.iris.open_mopd_fidelity_task as fidelity_task
-from cloud.iris.open_mopd_fidelity_task import FileVerification, StagedInputs, training_command, verify_lfs_files
+from cloud.iris.open_mopd_fidelity_task import (
+    FileVerification,
+    StagedInputs,
+    training_command,
+    validate_runtime,
+    verify_lfs_files,
+)
 
 TASK_IMAGE = "registry.example/open-mopd@sha256:" + "1" * 64
 OUTPUT_URI = "s3://bucket/open-mopd/one-step"
+
+
+def test_runtime_accepts_cuda_local_version_for_public_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = fidelity.load_config(fidelity.DEFAULT_CONFIG)
+    versions = config.environment.packages | {"torch": "2.8.0+cu128"}
+    monkeypatch.setattr(fidelity_task.importlib.metadata, "version", versions.__getitem__)
+
+    validate_runtime(config)
 
 
 def test_config_parser_rejects_unknown_nested_fields(tmp_path: Path) -> None:
