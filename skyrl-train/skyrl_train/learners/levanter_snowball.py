@@ -1137,6 +1137,42 @@ class LevanterSnowballLearner:
         transfer_seconds = 0.0
         transferred_bytes = 0
         chunk_count = 0
+        pending_transfer: asyncio.Task[None] | None = None
+        has_pending_transfer = False
+
+        async def wait_for_pending_transfer(stage: str) -> None:
+            nonlocal pending_transfer, has_pending_transfer
+            if not has_pending_transfer:
+                return
+
+            async def wait_on_publisher() -> None:
+                assert pending_transfer is not None
+                await pending_transfer
+
+            await self._rank_zero_publication_call(wait_on_publisher, stage)
+            pending_transfer = None
+            has_pending_transfer = False
+
+        async def schedule_transfer(weight_batch: list[tuple[str, torch.Tensor]], stage: str) -> None:
+            nonlocal pending_transfer, has_pending_transfer, transfer_seconds, chunk_count
+            await wait_for_pending_transfer(f"transfer before {stage}")
+
+            async def transfer() -> None:
+                nonlocal transfer_seconds
+                transfer_start = time.perf_counter()
+                try:
+                    await self._publish_weight_batch(weight_batch)
+                finally:
+                    transfer_seconds += time.perf_counter() - transfer_start
+
+            if is_publisher:
+                pending_transfer = asyncio.create_task(transfer())
+            has_pending_transfer = True
+            chunk_count += 1
+            # Let rank zero start the receiver RPC and its background Gloo
+            # broadcast before every rank materializes the next chunk. At most
+            # two bounded chunks are resident on the publishing host.
+            await asyncio.sleep(0)
 
         # Layerwise reload temporarily restores parameters that have not arrived
         # yet to the meta device. publish_policy has already quiesced EngineCore
@@ -1168,13 +1204,7 @@ class LevanterSnowballLearner:
             # so use the shared byte counter rather than ``batch`` here.
             if batch_bytes and batch_bytes + tensor_bytes > self.runtime.publication_max_chunk_bytes:
                 host_materialization_seconds += time.perf_counter() - stage_start
-                transfer_start = time.perf_counter()
-                await self._rank_zero_publication_call(
-                    lambda: self._publish_weight_batch(batch),
-                    f"chunk ending before {name}",
-                )
-                transfer_seconds += time.perf_counter() - transfer_start
-                chunk_count += 1
+                await schedule_transfer(batch, f"chunk ending before {name}")
                 batch = []
                 batch_bytes = 0
                 stage_start = time.perf_counter()
@@ -1188,10 +1218,8 @@ class LevanterSnowballLearner:
             transferred_bytes += tensor_bytes
             host_materialization_seconds += time.perf_counter() - stage_start
         if batch_bytes:
-            transfer_start = time.perf_counter()
-            await self._rank_zero_publication_call(lambda: self._publish_weight_batch(batch), "final chunk")
-            transfer_seconds += time.perf_counter() - transfer_start
-            chunk_count += 1
+            await schedule_transfer(batch, "final chunk")
+        await wait_for_pending_transfer("final chunk")
 
         async def finish_reload() -> None:
             receipts = await client.finish_weight_reload()

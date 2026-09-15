@@ -569,6 +569,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 if env_step_output["reward"] != verdict.legacy_full_text_reward:
                     raise ValueError("Native reward differs from the declared unshaped verifier")
                 non_agentic_contract = asdict(verdict)
+                native_metadata = env_step_output["metadata"]
                 env_step_output = {
                     **env_step_output,
                     "reward": verdict.verifier_reward,
@@ -582,8 +583,15 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         optimization_reward=verdict.verifier_reward,
                     ),
                     "metadata": {
-                        **{f"legacy_full_text/{key}": value for key, value in env_step_output["metadata"].items()},
+                        # Budget and termination diagnostics still describe the
+                        # same generated token sequence, so keep them available
+                        # to the environment's normal aggregator. Preserve a
+                        # namespaced copy of every native field for comparison,
+                        # then make correctness follow the selected parser.
+                        **native_metadata,
+                        **{f"legacy_full_text/{key}": value for key, value in native_metadata.items()},
                         **non_agentic_contract,
+                        "acc": bool(verdict.contract_correct),
                     },
                 }
             new_obs = env_step_output["observations"]

@@ -85,3 +85,53 @@ async def test_post_thinking_runner_preserves_tokens_and_dumped_parser_identity(
         assert dumped["non_agentic_contract"]["legacy_full_text_reward"] == 0
     else:
         assert "parser_protocol" not in dumped and "non_agentic_contract" not in batch
+
+
+@pytest.mark.asyncio
+async def test_post_thinking_runner_preserves_aime_aggregation_contract():
+    vocabulary = [
+        "[UNK]",
+        "<|start_think|>",
+        "<|end_think|>",
+        "<|eot_id|>",
+        r"\boxed{42}",
+        "nope",
+        "question",
+    ]
+    decoder = Tokenizer(WordLevel(dict(zip(vocabulary, range(len(vocabulary)))), unk_token="[UNK]"))
+    decoder.pre_tokenizer = WhitespaceSplit()
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=decoder,
+        unk_token="[UNK]",
+        eos_token="<|eot_id|>",
+        additional_special_tokens=["<|start_think|>", "<|end_think|>"],
+    )
+    tokenizer.chat_template = "{% for m in messages %}{{ m['content'] }} <|eot_id|> {% endfor %}{% if add_generation_prompt %}<|start_think|>{% endif %}"
+    cfg = get_default_config()
+    cfg.generator.non_agentic_parser_protocol = "post-thinking-native-v1"
+    cfg.generator.max_turns = 1
+    cfg.generator.batched = False
+    cfg.generator.use_conversation_multi_turn = False
+    cfg.generator.sampling_params.logprobs = 0
+    cfg.generator.trajectory_retention.enabled = False
+    cfg.environment.skyrl_gym.max_env_workers = 0
+    client = RecordedModelClient(tokenizer, r"\boxed{42} <|end_think|> nope <|eot_id|>", "stop")
+    runner = SkyRLGymTrajectoryRunner(cfg.generator, cfg.environment.skyrl_gym, None, tokenizer, model_client=client)
+    batch = await runner.run(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "env_classes": ["aime"],
+            "env_extras": [{"reward_model": {"ground_truth": "42"}}],
+            "sampling_params": None,
+            "trajectory_ids": None,
+            "batch_metadata": None,
+        },
+        disable_tqdm=True,
+    )
+
+    metrics = batch["rollout_metrics"]
+    assert sum(batch["rewards"][0]) == -1
+    assert metrics["environment/acc"] == 0
+    assert "environment/legacy_full_text/acc" in metrics
+    assert metrics["environment/contract_correct"] == 0
+    assert metrics["environment/over_evaluation_budget_fraction"] == 0

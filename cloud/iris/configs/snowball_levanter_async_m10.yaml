@@ -93,7 +93,9 @@ trainer:
       log_dir: /tmp/marinskyrl-levanter
   placement:
     colocate_all: false
-    policy_num_nodes: 4
+    # Two learner hosts keep the 128-trajectory M10 batch unchanged while
+    # reducing both allocation cost and redundant cross-host publication work.
+    policy_num_nodes: 2
     policy_num_gpus_per_node: 8
 
 generator:

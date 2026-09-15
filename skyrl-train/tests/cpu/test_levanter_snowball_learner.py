@@ -244,6 +244,75 @@ def test_publication_keeps_grug_experts_stacked_for_vllm(tmp_path):
     learner.close()
 
 
+def test_publication_overlaps_next_host_chunk_with_previous_transfer(tmp_path):
+    learner = _make_learner(tmp_path / "pipelined-publication")
+    learner.runtime = replace(learner.runtime, publication_max_chunk_bytes=8)
+    names = [
+        "model.embed_tokens.weight",
+        "model.layers.0.input_layernorm.weight",
+        "model.norm.weight",
+    ]
+    parameters = sorted(expected_vllm_parameter_names(names))
+    events: list[str] = []
+
+    class FakeInferenceClient:
+        async def begin_weight_reload(self):
+            events.append("begin")
+
+        async def finish_weight_reload(self):
+            events.append("finish")
+            return [
+                {
+                    "kind": "weight_install_receipt",
+                    "finalized": True,
+                    "received_weight_count": len(names),
+                    "received_name_digest": weight_name_digest(names),
+                    "loaded_parameter_count": len(parameters),
+                    "loaded_parameter_digest": weight_name_digest(parameters),
+                    "loaded_expert_slices": [],
+                    "host": "fake-worker",
+                }
+            ]
+
+        async def reset_prefix_cache(self):
+            events.append("reset")
+
+        async def resume_generation(self, policy_version=None):
+            events.append(f"resume:{policy_version}")
+
+    async def exercise() -> None:
+        first_transfer_started = asyncio.Event()
+        release_first_transfer = asyncio.Event()
+
+        def host_arrays():
+            yield names[0], np.ones(2, dtype=np.float32)
+            yield names[1], np.ones(2, dtype=np.float32)
+            assert first_transfer_started.is_set()
+            events.append("materialize-third")
+            release_first_transfer.set()
+            yield names[2], np.ones(2, dtype=np.float32)
+
+        async def transfer(batch):
+            name = batch[0][0]
+            events.append(f"transfer-start:{name}")
+            if name == names[0]:
+                first_transfer_started.set()
+                await release_first_transfer.wait()
+            events.append(f"transfer-end:{name}")
+
+        learner._iter_publication_host_arrays = host_arrays
+        learner._publish_weight_batch = transfer
+        await learner._publish_all_weights()
+
+    learner._inference_client = FakeInferenceClient()
+    asyncio.run(exercise())
+
+    assert events.index("transfer-start:model.embed_tokens.weight") < events.index("materialize-third")
+    assert events.index("materialize-third") < events.index("transfer-end:model.embed_tokens.weight")
+    assert events[-3:] == ["finish", "reset", "resume:0"]
+    learner.close()
+
+
 def test_publication_rejects_one_missing_expert_slice_receipt(tmp_path):
     learner = _make_learner(tmp_path / "missing-expert-receipt")
     state_dict = learner.model.to_state_dict()

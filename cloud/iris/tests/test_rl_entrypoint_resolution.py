@@ -260,7 +260,7 @@ def test_snowball_levanter_async_m10_config_composes_and_lowers():
     hydra_args = build_skyrl_hydra_args(
         parsed,
         {
-            "num_nodes": 5,
+            "num_nodes": 3,
             "model_path": "marin-community/grug-67b-a2b-sft-s2-thinking-step630",
             "model_revision": revision,
         },
@@ -273,7 +273,7 @@ def test_snowball_levanter_async_m10_config_composes_and_lowers():
     validate_fully_async_levanter_config(cfg)
     runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
     assert parsed.entrypoint == "skyrl_train.entrypoints.fully_async_levanter_snowball"
-    assert runtime.training_gpus == 32
+    assert runtime.training_gpus == 16
     assert runtime.inference_world_size == 8
     assert runtime.train_batch_size == 128
     assert runtime.learning_rate == 1.0e-6
