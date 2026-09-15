@@ -102,7 +102,8 @@ def test_rollout_commands_preserve_released_domain_protocols() -> None:
         assert options["--stop-token-ids"] == "128012"
         assert options["--vllm-port-seed"] == str(port_seed)
         assert options["--trust-remote-code"] is True
-    assert all(command.argv[2] == "cloud.iris.open_mopd_vllm_rollout" for command in commands)
+    assert all(Path(command.argv[1]).name == "open_mopd_vllm_rollout.py" for command in commands)
+    assert all(Path(command.argv[1]).is_file() for command in commands)
 
 
 def test_rollout_workers_get_distinct_vllm_port_ranges() -> None:

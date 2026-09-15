@@ -34,6 +34,8 @@ from cloud.iris.open_mopd_fidelity_task import (
 )
 from cloud.iris.open_mopd_vllm_rollout import evaluation_port_seed
 
+ROLLOUT_WRAPPER = Path(__file__).with_name("open_mopd_vllm_rollout.py")
+
 
 @dataclass(frozen=True)
 class StagedBenchmark:
@@ -180,8 +182,7 @@ def rollout_commands(
         max_tokens = min(protocol.max_tokens, SMOKE_MAX_TOKENS) if gate == "smoke" else protocol.max_tokens
         command = [
             sys.executable,
-            "-m",
-            "cloud.iris.open_mopd_vllm_rollout",
+            str(ROLLOUT_WRAPPER),
             "--model",
             str(inputs.model),
             "--input",
