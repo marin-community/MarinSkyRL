@@ -68,7 +68,7 @@ def test_rollout_commands_preserve_released_domain_protocols() -> None:
     config = evaluation.load_evaluation_config(evaluation.DEFAULT_CONFIG)
 
     commands = rollout_commands(config, _inputs(config), "full", Path("/work/output"), world_size=8)
-    math, code, instruction = (_options(command) for command in commands)
+    math, code, instruction = (_options(command.argv) for command in commands)
 
     assert math["--temperature"] == "0.6"
     assert math["--n"] == "64"
@@ -102,7 +102,7 @@ def test_smoke_gate_bounds_every_domain_without_claiming_comparability() -> None
 
     assert all(item.rollout_rows == 1 and not item.comparable_to_paper for item in coverage)
     for command in commands:
-        options = _options(command)
+        options = _options(command.argv)
         assert options["--n"] == "1"
         assert options["--max-tokens"] == "512"
         assert options["--offset"] == "1"

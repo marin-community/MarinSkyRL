@@ -49,6 +49,13 @@ class EvaluationInputs:
     model_verification: ArtifactVerification
 
 
+@dataclass(frozen=True)
+class RolloutCommand:
+    domain: str
+    argv: tuple[str, ...]
+    log_path: Path
+
+
 class EvaluationCommandError(RuntimeError):
     """A child evaluation command failed after writing its durable log."""
 
@@ -160,7 +167,7 @@ def rollout_commands(
     output: Path,
     *,
     world_size: int,
-) -> tuple[tuple[str, ...], ...]:
+) -> tuple[RolloutCommand, ...]:
     if gate not in GATES:
         raise ValueError(f"Unknown evaluation gate: {gate}")
     commands = []
@@ -209,7 +216,13 @@ def rollout_commands(
             command.extend(["--enable-thinking", str(protocol.enable_thinking).lower()])
         if gate == "smoke":
             command.extend(["--base", "0", "--offset", "1"])
-        commands.append(tuple(command))
+        commands.append(
+            RolloutCommand(
+                domain=domain,
+                argv=tuple(command),
+                log_path=output / "logs" / f"rollout-{domain}.log",
+            )
+        )
     return tuple(commands)
 
 
@@ -233,7 +246,11 @@ def score_released_benchmarks(config: EvaluationConfig, inputs: EvaluationInputs
             "--data-dir",
             str(data_dir),
         ]
-        run_logged_command(command, cwd=inputs.source, log_path=output / "logs" / f"score-{benchmark.name}.log")
+        run_logged_command(command, cwd=inputs.source, log_path=scorer_log_path(output, benchmark.name))
+
+
+def scorer_log_path(output: Path, benchmark_name: str) -> Path:
+    return output / "logs" / f"score-{benchmark_name}.log"
 
 
 def argument_parser() -> argparse.ArgumentParser:
@@ -299,11 +316,11 @@ def main(argv: list[str] | None = None) -> int:
                 "runtime": runtime_inventory(inputs.source),
                 "model_verification": asdict(inputs.model_verification),
                 "data_verifications": [asdict(item.verification) for item in inputs.benchmarks],
-                "rollout_commands": commands,
+                "rollout_commands": [command.argv for command in commands],
                 "command_logs": {
-                    "rollouts": {domain: f"logs/rollout-{domain}.log" for domain in ("math", "code", "if")},
+                    "rollouts": {command.domain: str(command.log_path.relative_to(output)) for command in commands},
                     "scorers": {
-                        benchmark.name: f"logs/score-{benchmark.name}.log"
+                        benchmark.name: str(scorer_log_path(output, benchmark.name).relative_to(output))
                         for benchmark in evaluation.benchmarks
                         if benchmark.score_mode == "released"
                     },
@@ -312,11 +329,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         _write_manifest(manifest_path, manifest)
         sync_tree(output, args.output_uri)
-        for domain, command in zip(("math", "code", "if"), commands, strict=True):
+        for command in commands:
             run_logged_command(
-                list(command),
+                list(command.argv),
                 cwd=inputs.source,
-                log_path=output / "logs" / f"rollout-{domain}.log",
+                log_path=command.log_path,
             )
         score_released_benchmarks(evaluation, inputs, output)
         manifest["status"] = "complete"
