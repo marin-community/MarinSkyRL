@@ -57,6 +57,47 @@ def test_h100_flash_attention_config_lowers():
     assert runtime.attention_implementation == "gpu_fa4_cute"
 
 
+def test_measured_m10_regular_mask_config_lowers():
+    cfg = _valid_config()
+    cfg.trainer.algorithm.offpolicy_mask.enabled = True
+    cfg.trainer.algorithm.offpolicy_mask.ratio = "mismatch"
+    cfg.trainer.algorithm.offpolicy_mask.low = 0.5
+    cfg.trainer.algorithm.offpolicy_mask.high = 5.0
+    cfg.trainer.algorithm.offpolicy_mask.veto_ratio = 1.0e-5
+    cfg.trainer.algorithm.offpolicy_mask.renormalize = False
+    cfg.trainer.algorithm.require_rollout_logprobs = True
+    cfg.trainer.policy.optimizer_config.lr = 1.0e-6
+    cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0
+
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.learning_rate == 1.0e-6
+    assert runtime.max_grad_norm == 1.0
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "match"),
+    [
+        ("trainer.algorithm.require_rollout_logprobs", False, "strict rollout log probabilities"),
+        ("trainer.algorithm.offpolicy_mask.ratio", "full", "ratio=mismatch"),
+        ("trainer.algorithm.offpolicy_mask.low", 0.4, "regular_mask bounds"),
+        ("trainer.algorithm.offpolicy_mask.renormalize", True, "original loss denominator"),
+        ("trainer.policy.optimizer_config.lr", 1.0e-5, "optimizer_config.lr=1e-6"),
+        ("trainer.policy.optimizer_config.max_grad_norm", 0.5, "optimizer_config.max_grad_norm=1"),
+    ],
+)
+def test_measured_m10_semantics_fail_before_allocation(path, value, match):
+    cfg = _valid_config()
+    cfg.trainer.algorithm.offpolicy_mask.enabled = True
+    cfg.trainer.algorithm.require_rollout_logprobs = True
+    cfg.trainer.policy.optimizer_config.lr = 1.0e-6
+    cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0
+    OmegaConf.update(cfg, path, value)
+
+    with pytest.raises(UnsupportedLearnerConfiguration, match=match):
+        LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+
 @pytest.mark.parametrize(
     ("path", "value", "match"),
     [

@@ -41,6 +41,7 @@ from skyrl_train.learners.levanter_snowball import (
     _parameter_probe,
     _replicated_host_copy,
     _regular_grpo_loss,
+    _regular_grpo_objective,
     _resolve_local_model_snapshot,
     prepare_snowball_batch,
 )
@@ -282,8 +283,8 @@ def test_publication_rejects_one_missing_expert_slice_receipt(tmp_path):
             calls.append("reset")
             return None
 
-        async def resume_generation(self):
-            calls.append("resume")
+        async def resume_generation(self, policy_version=None):
+            calls.append(("resume", policy_version))
 
     async def discard_publication(_batch):
         return None
@@ -424,6 +425,53 @@ def test_scoring_uses_the_training_step_without_mutating_state(tmp_path):
     assert update.metrics["ppo_ratio_mean"] == 1.0
     assert update.metrics["ppo_ratio_max"] == 1.0
     assert update.metrics["ppo_clip_ratio"] == 0.0
+    learner.close()
+
+
+def test_regular_mask_update_requires_and_consumes_rollout_probabilities(tmp_path):
+    runtime = replace(
+        _runtime(tmp_path / "regular-mask-update"),
+        learning_rate=1.0e-6,
+        max_grad_norm=1.0,
+    )
+    model_config = _snowball_config()
+    learner = LevanterSnowballLearner(
+        runtime,
+        model_factory=lambda: SnowballLMHeadModel.init(
+            Axis("vocab", model_config.vocab_size),
+            model_config,
+            key=jax.random.key(7),
+        ),
+    )
+    learner.initialize(
+        replace(
+            _learner_config(),
+            require_rollout_logprobs=True,
+            offpolicy_mask_enabled=True,
+            offpolicy_mask_ratio="mismatch",
+            offpolicy_mask_low=0.5,
+            offpolicy_mask_high=5.0,
+            offpolicy_mask_veto_ratio=1.0e-5,
+            offpolicy_mask_renormalize=False,
+        )
+    )
+    batch = _batch()
+    old_log_probs = learner.compute_log_probs(batch).policy_log_probs
+    advantages = np.asarray([[1.0, -0.5, 0.0], [0.25, -1.0, 0.5]], dtype=np.float32)
+    request = UpdateRequest(batch, advantages, old_log_probs, 0, None, 0, None)
+
+    with pytest.raises(ValueError, match="requires rollout log probabilities"):
+        learner.update(request)
+
+    mismatch_ratios = np.asarray([[1.0, 0.4, 1.0], [1.0e-6, 1.0, 6.0]], dtype=np.float32)
+    rollout_log_probs = old_log_probs - np.log(mismatch_ratios)
+    result = learner.update(replace(request, batch=replace(batch, rollout_log_probs=rollout_log_probs)))
+
+    assert result.metrics["policy_loss"] == pytest.approx(-0.25, abs=1e-6)
+    assert result.metrics["offpolicy_mask/masked_fraction"] == pytest.approx(0.8)
+    assert result.metrics["offpolicy_mask/masked_fraction_low"] == pytest.approx(0.4)
+    assert result.metrics["offpolicy_mask/masked_fraction_high"] == pytest.approx(0.2)
+    assert result.metrics["offpolicy_mask/vetoed_sequence_fraction"] == pytest.approx(0.5)
     learner.close()
 
 
@@ -636,8 +684,8 @@ def _multihost_learner_worker(
                 publication_events.append("reset")
                 return None
 
-            async def resume_generation(self):
-                publication_events.append("resume")
+            async def resume_generation(self, policy_version=None):
+                publication_events.append(("resume", policy_version))
 
         learner._inference_client = FakeInferenceClient()
         learner._weight_group = object()
@@ -647,7 +695,7 @@ def _multihost_learner_worker(
     if int(process_id) == 0:
         assert published_chunks
         assert publication_events[:2] == ["pause", "begin"]
-        assert publication_events[-3:] == ["finish", "reset", "resume"]
+        assert publication_events[-3:] == ["finish", "reset", ("resume", 1)]
         assert set(publication_events[2:-3]) == {"chunk"}
         learner._weight_group = None
     learner.save_checkpoint(checkpoint_path)
@@ -812,6 +860,52 @@ def _torch_loss(torch_model, tokens, old_log_probs, advantages, loss_mask):
     return loss, log_probs
 
 
+def test_regular_mask_value_and_gradient_match_independent_unequal_length_reference():
+    old = torch.full((2, 4), -1.0, dtype=torch.float32)
+    ppo_ratios = torch.tensor([[1.1, 0.9, 1.3, 1.0], [0.8, 1.1, 1.0, 1.0]], dtype=torch.float32)
+    current = (old + ppo_ratios.log()).requires_grad_(True)
+    mismatch_ratios = torch.tensor([[1.0, 0.4, 6.0, 1.0], [1.0e-6, 1.0, 1.0, 1.0]], dtype=torch.float32)
+    rollout = old - mismatch_ratios.log()
+    advantages = torch.tensor([[2.0, 3.0, 4.0, 50.0], [5.0, 6.0, 70.0, 80.0]], dtype=torch.float32)
+    mask = torch.tensor([[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
+
+    def reference(current_log_probs):
+        selected = mask > 0
+        mismatch = torch.exp(torch.clamp(old - rollout, -20.0, 20.0))
+        vetoed_rows = (selected & (mismatch < 1.0e-5)).any(dim=-1, keepdim=True)
+        removed = selected & ((mismatch < 0.5) | (mismatch > 5.0) | vetoed_rows)
+        effective_advantages = torch.where(removed, 0.0, advantages)
+        ratio = torch.exp(torch.clamp(current_log_probs - old, -20.0, 20.0))
+        surrogate = ratio * effective_advantages
+        clipped = torch.clamp(ratio, 0.8, 1.2) * effective_advantages
+        token_loss = -torch.minimum(surrogate, clipped) * mask
+        return (token_loss.sum(dim=-1) / mask.sum(dim=-1).clamp_min(1.0)).mean()
+
+    torch_loss = reference(current)
+    torch_loss.backward()
+    jax_loss, jax_gradient = jax.value_and_grad(
+        lambda values: _regular_grpo_objective(
+            values,
+            jnp.asarray(old.numpy()),
+            jnp.asarray(rollout.numpy()),
+            jnp.asarray(advantages.numpy()),
+            jnp.asarray(mask.numpy()),
+            clip_low=0.2,
+            clip_high=0.2,
+            offpolicy_mask_enabled=True,
+            offpolicy_mask_low=0.5,
+            offpolicy_mask_high=5.0,
+            offpolicy_mask_veto_ratio=1.0e-5,
+        )[0]
+    )(jnp.asarray(current.detach().numpy()))
+
+    np.testing.assert_allclose(np.asarray(jax_loss), torch_loss.detach().numpy(), rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(np.asarray(jax_gradient), current.grad.numpy(), rtol=1e-6, atol=1e-7)
+    expected_gradient = np.zeros((2, 4), dtype=np.float32)
+    expected_gradient[0, 0] = -2.2 / 6.0
+    np.testing.assert_allclose(np.asarray(jax_gradient), expected_gradient, rtol=1e-6, atol=1e-7)
+
+
 def test_padding_compaction_preserves_each_response_predictor_position():
     prepared = prepare_snowball_batch(_batch(), max_sequence_length=16)
 
@@ -859,6 +953,7 @@ def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
             model,
             hax.named(jnp.asarray(prepared.tokens), (Batch, Pos)),
             hax.named(jnp.asarray(dense_old), (Batch, Prediction)),
+            hax.named(jnp.zeros_like(jnp.asarray(dense_old)), (Batch, Prediction)),
             hax.named(jnp.asarray(dense_advantages), (Batch, Prediction)),
             hax.named(jnp.asarray(dense_mask), (Batch, Prediction)),
             hax.named(jnp.arange(Batch.size, dtype=jnp.int32), (Batch,)),
@@ -867,6 +962,10 @@ def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
             clip_low=0.2,
             clip_high=0.2,
             full_batch_size=Batch.size,
+            offpolicy_mask_enabled=False,
+            offpolicy_mask_low=0.5,
+            offpolicy_mask_high=5.0,
+            offpolicy_mask_veto_ratio=1.0e-5,
         )
 
     with learner._trainer_config.use_device_mesh():

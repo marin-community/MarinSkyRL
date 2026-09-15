@@ -53,6 +53,11 @@ class LevanterSnowballRuntimeConfig:
         generator = cfg.generator
         levanter = policy.levanter
         optimizer = policy.optimizer_config
+        offpolicy_mask = algorithm.offpolicy_mask
+        regular_mask_enabled = bool(offpolicy_mask.enabled)
+        expected_learning_rate = 1e-6 if regular_mask_enabled else 1e-5
+        expected_learning_rate_text = "1e-6" if regular_mask_enabled else "1e-5"
+        expected_max_grad_norm = 1.0 if regular_mask_enabled else 0.5
 
         unsupported: list[str] = []
         expected_values = (
@@ -74,6 +79,27 @@ class LevanterSnowballRuntimeConfig:
             ),
             (algorithm.policy_loss_type == "regular", "trainer.algorithm.policy_loss_type=regular"),
             (algorithm.loss_reduction == "token_mean", "trainer.algorithm.loss_reduction=token_mean"),
+            (
+                not regular_mask_enabled or bool(algorithm.require_rollout_logprobs),
+                "strict rollout log probabilities for regular_mask",
+            ),
+            (
+                not regular_mask_enabled or offpolicy_mask.ratio == "mismatch",
+                "trainer.algorithm.offpolicy_mask.ratio=mismatch",
+            ),
+            (
+                not regular_mask_enabled
+                or (
+                    float(offpolicy_mask.low) == 0.5
+                    and float(offpolicy_mask.high) == 5.0
+                    and float(offpolicy_mask.veto_ratio) == 1.0e-5
+                ),
+                "regular_mask bounds low=0.5, high=5.0, veto_ratio=1e-5",
+            ),
+            (
+                not regular_mask_enabled or not bool(offpolicy_mask.renormalize),
+                "regular_mask with its original loss denominator",
+            ),
             (float(algorithm.eps_clip_low) == 0.2, "trainer.algorithm.eps_clip_low=0.2"),
             (float(algorithm.eps_clip_high) == 0.2, "trainer.algorithm.eps_clip_high=0.2"),
             (bool(algorithm.grpo_norm_by_std), "trainer.algorithm.grpo_norm_by_std=true"),
@@ -86,10 +112,16 @@ class LevanterSnowballRuntimeConfig:
             (optimizer.optimizer == "AdamW", "trainer.policy.optimizer_config.optimizer=AdamW"),
             (optimizer.scheduler == "constant_with_warmup", "a constant-with-warmup optimizer schedule"),
             (optimizer.num_warmup_steps == 0, "zero optimizer warmup steps"),
-            (float(optimizer.lr) == 1e-5, "trainer.policy.optimizer_config.lr=1e-5"),
+            (
+                float(optimizer.lr) == expected_learning_rate,
+                f"trainer.policy.optimizer_config.lr={expected_learning_rate_text}",
+            ),
             (list(optimizer.adam_betas) == [0.9, 0.999], "trainer.policy.optimizer_config.adam_betas=[0.9,0.999]"),
             (float(optimizer.weight_decay) == 0.01, "trainer.policy.optimizer_config.weight_decay=0.01"),
-            (float(optimizer.max_grad_norm) == 0.5, "trainer.policy.optimizer_config.max_grad_norm=0.5"),
+            (
+                float(optimizer.max_grad_norm) == expected_max_grad_norm,
+                f"trainer.policy.optimizer_config.max_grad_norm={expected_max_grad_norm:g}",
+            ),
             (levanter.publication_backend == "gloo", "trainer.policy.levanter.publication_backend=gloo"),
             (generator.weight_sync_backend == "gloo", "generator.weight_sync_backend=gloo"),
             (int(generator.inference_engine_tensor_parallel_size) == 1, "inference tensor parallel size 1"),
