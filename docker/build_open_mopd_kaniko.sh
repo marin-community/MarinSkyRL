@@ -21,10 +21,11 @@ fi
 # an experiment-selection boundary, not a second dependency closure.
 IMAGE_REPOSITORY="${OPEN_MOPD_IMAGE_REPOSITORY:-us-east1-docker.pkg.dev/hai-gcp-models/marin/marinskyrl}"
 WHEEL_SOURCE="${WHEEL_SOURCE:-wheel-builder}"
-unset REGISTRY_TOKEN
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 exec env \
+  REGISTRY_USER="$REGISTRY_USER" \
+  REGISTRY_TOKEN="$REGISTRY_TOKEN" \
   IMAGE_REPOSITORY="$IMAGE_REPOSITORY" \
   TAG_PREFIX=opd-repro \
   DOCKERFILE=docker/Dockerfile.gpu-rl \
