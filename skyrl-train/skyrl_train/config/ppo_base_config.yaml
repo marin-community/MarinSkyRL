@@ -369,6 +369,9 @@ generator:
   n_samples_per_prompt: 5
   async_engine: true
   batched: false
+  # Zero preserves the normal unbounded fan-out. A positive value is primarily
+  # useful for isolating request-concurrency failures in an inference backend.
+  max_concurrent_agent_loops: 0
   max_input_length: ${trainer.max_prompt_length}
   vllm_v1_disable_multiproc: true
   enable_prefix_caching: true
