@@ -1375,6 +1375,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Hugging Face repo ID (e.g., Qwen/Qwen3-8B) or a directory available inside every task.",
     )
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--model-revision",
+        default=None,
+        help="Immutable Hugging Face commit or tag for the policy model and tokenizer.",
+    )
 
     parser.add_argument(
         "--model-source-uri",
@@ -1959,6 +1964,20 @@ def load_config_policy_chat_template(rl_config_path: str) -> Optional[str]:
     return str(value) if value else None
 
 
+def load_config_policy_model_revision(rl_config_path: str) -> str | None:
+    """Return the immutable policy Hugging Face revision declared by an RL config."""
+    raw = _load_rl_config_yaml(rl_config_path)
+    trainer = raw.get("trainer") or {}
+    policy = trainer.get("policy") or {}
+    model = policy.get("model") or {}
+    revision = model.get("revision")
+    if revision is None:
+        return None
+    if not isinstance(revision, str) or not revision.strip():
+        raise ValueError("trainer.policy.model.revision must be a non-empty string or null")
+    return revision
+
+
 def load_config_terminal_bench_data(rl_config_path: str) -> list[str]:
     """Return task datasets used by the mixed Gym/Harbor sidechannel.
 
@@ -2032,6 +2051,12 @@ def normalize(args: argparse.Namespace) -> None:
         task_path=f"{RL_CONFIG_TASK_DIR}/{digest}{suffix}",
         payload=base64.b64encode(contents).decode("ascii"),
     )
+    try:
+        policy_model_revision = args.model_revision or load_config_policy_model_revision(args.rl_config)
+    except (ValueError, yaml.YAMLError) as error:
+        raise SystemExit(str(error)) from error
+    if policy_model_revision and not is_hugging_face_repo_id(args.model_path):
+        raise SystemExit("--model-revision requires a Hugging Face repo ID model_path")
 
     if args.num_nodes < 1:
         raise SystemExit("--num-nodes must be >= 1.")
@@ -2117,8 +2142,9 @@ def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
 
     config_env = load_config_extra_env(args.rl_config)
     policy_chat_template = load_config_policy_chat_template(args.rl_config)
+    policy_model_revision = args.model_revision or load_config_policy_model_revision(args.rl_config)
     offline = str(config_env.get("HF_HUB_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on")
-    if (offline or policy_chat_template) and is_hub_model:
+    if (offline or policy_chat_template or policy_model_revision) and is_hub_model:
         model_args.extend(["--prestage-model", args.model_path])
         warm_source = args.model_warm_source
         if warm_source is None:
@@ -2127,6 +2153,8 @@ def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
             warm_source = None
         if warm_source:
             model_args.extend(["--model-warm-source", warm_source])
+        if policy_model_revision:
+            model_args.extend(["--model-revision", policy_model_revision])
     if policy_chat_template:
         model_args.extend(["--policy-chat-template", policy_chat_template])
     if offline:
@@ -2177,6 +2205,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         "--ray_port",
         str(args.ray_port),
     ]
+    if args.model_revision:
+        train_cmd.extend(["--model-revision", args.model_revision])
     if args.entrypoint:
         train_cmd.extend(["--entrypoint", args.entrypoint])
     train_cmd.extend(model_source_cli_args(args.model_source_uri, args.model_source_identity))

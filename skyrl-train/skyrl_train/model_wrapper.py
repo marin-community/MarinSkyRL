@@ -309,13 +309,13 @@ def _cp_moe_no_mask():
         _cp_moe_force_no_mask.active = prev
 
 
-def _model_is_gdn_arch(pretrain_or_model) -> bool:
+def _model_is_gdn_arch(pretrain_or_model, *, revision: str | None = None) -> bool:
     """Best-effort: does this HF model use GatedDeltaNet / linear-attention layers
     (the Qwen3-Next / Qwen3.6 family) that REQUIRE the pure-torch GDN path because
     the fla wheel is broken? Reads only the HF config (no weights). Returns False
     on any error or for a plain dense/full-attention model."""
     try:
-        cfg = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
+        cfg = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, revision=revision)
     except Exception:
         return False
     model_type = str(getattr(cfg, "model_type", "") or "").lower()
@@ -384,6 +384,7 @@ class HFModelWrapper(nn.Module):
         training_strategy: str | None = None,
         model_load_retry=None,
         gdn_backend: str = "torch",
+        model_revision: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -415,7 +416,11 @@ class HFModelWrapper(nn.Module):
             )
 
         if isinstance(pretrain_or_model, str):
-            local_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
+            local_config = AutoConfig.from_pretrained(
+                pretrain_or_model,
+                trust_remote_code=True,
+                revision=model_revision,
+            )
             model_type = getattr(local_config, "model_type", None)
             validate_grug_training_strategy(model_type, training_strategy)
             validate_grug_training_options(
@@ -436,7 +441,7 @@ class HFModelWrapper(nn.Module):
             # qwen3_next modeling import — mask fla off BEFORE from_pretrained so
             # transformers uses its pure-torch (or, opt-in, FlashQLA) GDN path.
             # The architecture determines whether the broken FLA surface is masked.
-            _gdn_mask = _model_is_gdn_arch(pretrain_or_model)
+            _gdn_mask = _model_is_gdn_arch(pretrain_or_model, revision=model_revision)
             if _gdn_mask:
                 from skyrl_train.models.qwen3_next_gdn import mask_fla
 
@@ -493,6 +498,7 @@ class HFModelWrapper(nn.Module):
                     quantization_config=nf4_config,
                     torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                     device_map=device_map,
+                    revision=model_revision,
                     **rope_scaling_kwargs,
                 ),
                 model_id=pretrain_or_model,

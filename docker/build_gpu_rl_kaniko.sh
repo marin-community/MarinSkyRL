@@ -15,8 +15,11 @@ set +x
 set -euo pipefail
 
 : "${GITSHA:?}"
-: "${DOCKER_USER_ID:?}"
-: "${GHCR_TOKEN:?}"
+REGISTRY_USER="${REGISTRY_USER:-${DOCKER_USER_ID:-}}"
+REGISTRY_TOKEN="${REGISTRY_TOKEN:-${GHCR_TOKEN:-}}"
+: "${REGISTRY_USER:?}"
+: "${REGISTRY_TOKEN:?}"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 # ARCH_TAG_SUFFIX keeps the two architectures apart in the registry. Every tag is
 # derived from the git sha and the same commit builds both images, so without a
@@ -45,7 +48,12 @@ echo "[arch] build host=$BUILD_ARCH kaniko=$KANIKO_PLATFORM wheels=$WHEEL_PLATFO
 
 # Registry home is this repo's org, marin-community/MarinSkyRL. Declared here so a
 # build pushes where it says it pushes without an ad-hoc env var at every call site.
-GHCR_IMAGE_REPOSITORY="${GHCR_IMAGE_REPOSITORY:-ghcr.io/marin-community/marinskyrl}"
+IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-${GHCR_IMAGE_REPOSITORY:-ghcr.io/marin-community/marinskyrl}}"
+REGISTRY_HOST="${IMAGE_REPOSITORY%%/*}"
+if [ "$REGISTRY_HOST" = "$IMAGE_REPOSITORY" ]; then
+  echo "IMAGE_REPOSITORY must include a registry hostname and repository path" >&2
+  exit 2
+fi
 
 WHEEL_SOURCE="${WHEEL_SOURCE:-$DEFAULT_WHEEL_SOURCE}"
 INSTALL_MEGATRON="${INSTALL_MEGATRON:-0}"
@@ -106,7 +114,7 @@ fi
 if [ "${KANIKO_CACHE:-1}" = "0" ]; then
   CACHE_FLAGS=(--cache=false)
 else
-  KANIKO_CACHE_REPOSITORY="${KANIKO_CACHE_REPOSITORY:-${GHCR_IMAGE_REPOSITORY}/cache${ARCH_TAG_SUFFIX}}"
+  KANIKO_CACHE_REPOSITORY="${KANIKO_CACHE_REPOSITORY:-${IMAGE_REPOSITORY}/cache${ARCH_TAG_SUFFIX}}"
   CACHE_FLAGS=(--cache=true "--cache-repo=${KANIKO_CACHE_REPOSITORY}")
 fi
 
@@ -121,9 +129,9 @@ REGISTRY_RETRY_FLAGS=(
 )
 
 IMAGE_TAG="${TAG_PREFIX}-${GITSHA}${ARCH_TAG_SUFFIX}"
-DESTINATIONS=(--destination "${GHCR_IMAGE_REPOSITORY}:${IMAGE_TAG}")
+DESTINATIONS=(--destination "${IMAGE_REPOSITORY}:${IMAGE_TAG}")
 if [ "${PUSH_FLOATING:-0}" = "1" ]; then
-  DESTINATIONS+=(--destination "${GHCR_IMAGE_REPOSITORY}:${TAG_PREFIX}${ARCH_TAG_SUFFIX}")
+  DESTINATIONS+=(--destination "${IMAGE_REPOSITORY}:${TAG_PREFIX}${ARCH_TAG_SUFFIX}")
 fi
 
 APT_PACKAGES=(ca-certificates curl tar)
@@ -205,12 +213,9 @@ crane export --platform "$KANIKO_PLATFORM" gcr.io/kaniko-project/executor:latest
 test -x /kaniko/executor
 
 export DOCKER_CONFIG=/kaniko/.docker
-install -d -m 0700 "$DOCKER_CONFIG"
-AUTH=$(printf '%s:%s' "$DOCKER_USER_ID" "$GHCR_TOKEN" | base64 | tr -d '\n')
-printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH" \
-  > "$DOCKER_CONFIG/config.json"
-chmod 0600 "$DOCKER_CONFIG/config.json"
-unset AUTH GHCR_TOKEN
+REGISTRY_USER="$REGISTRY_USER" REGISTRY_TOKEN="$REGISTRY_TOKEN" \
+  "${SCRIPT_DIR}/write_registry_auth.sh" "$REGISTRY_HOST" "$DOCKER_CONFIG"
+unset REGISTRY_TOKEN
 set -x
 
 # When we pay the nvcc compile, keep the wheels. The wheel-builder stage is pushed as
@@ -232,8 +237,8 @@ if [ "$WHEEL_SOURCE" = "wheel-builder" ] && [ "${PRESERVE_WHEELS:-1}" = "1" ]; t
     --compressed-caching=false \
     "${REGISTRY_RETRY_FLAGS[@]}" \
     "${CACHE_FLAGS[@]}" \
-    --destination "${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}${ARCH_TAG_SUFFIX}"
-  echo "preserved wheel-builder stage as ${GHCR_IMAGE_REPOSITORY}:wheels-${GITSHA}${ARCH_TAG_SUFFIX}"
+    --destination "${IMAGE_REPOSITORY}:wheels-${GITSHA}${ARCH_TAG_SUFFIX}"
+  echo "preserved wheel-builder stage as ${IMAGE_REPOSITORY}:wheels-${GITSHA}${ARCH_TAG_SUFFIX}"
 fi
 
 exec /kaniko/executor \

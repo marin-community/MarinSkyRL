@@ -126,6 +126,7 @@ class DeepSpeedPolicyWorkerBase(PolicyWorkerBase):
             training_strategy=self.cfg.trainer.strategy,
             model_load_retry=self.cfg.trainer.model_load_retry,
             gdn_backend=str(self.cfg.generator.gdn_backend),
+            model_revision=self.cfg.trainer.policy.model.get("revision"),
         )
 
     def init_model(self, model_id_or_path, num_training_steps: int = None):
@@ -418,6 +419,7 @@ class DeepSpeedRefWorkerBase(RefWorkerBase):
             training_strategy=self.cfg.trainer.strategy,
             model_load_retry=self.cfg.trainer.model_load_retry,
             gdn_backend=str(self.cfg.generator.gdn_backend),
+            model_revision=self.cfg.trainer.ref.model.get("revision"),
         )
         self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

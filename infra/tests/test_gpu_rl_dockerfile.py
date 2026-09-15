@@ -1,6 +1,7 @@
 """Contracts for the GPU-RL image build."""
 
 import ast
+import json
 import os
 from pathlib import Path
 import re
@@ -57,13 +58,13 @@ def test_gpu_rl_build_disables_inherited_xtrace_before_reading_credentials() -> 
         "PATH": os.environ["PATH"],
         "SHELLOPTS": "braceexpand:hashall:interactive-comments:xtrace",
         "GITSHA": "test",
-        "GHCR_IMAGE_REPOSITORY": "example.invalid/scratch",
-        "DOCKER_USER_ID": "test-user",
-        "GHCR_TOKEN": credential,
+        "IMAGE_REPOSITORY": "example.invalid/scratch",
+        "REGISTRY_USER": "test-user",
+        "REGISTRY_TOKEN": credential,
     }
 
     trace_probe = subprocess.run(
-        ["bash", "-c", ': "$GHCR_TOKEN"'],
+        ["bash", "-c", ': "$REGISTRY_TOKEN"'],
         env=environment,
         capture_output=True,
         check=True,
@@ -80,6 +81,19 @@ def test_gpu_rl_build_disables_inherited_xtrace_before_reading_credentials() -> 
     )
     assert result.returncode == 2
     assert credential not in result.stderr
+
+
+def test_registry_auth_writer_targets_the_selected_host(tmp_path: Path) -> None:
+    docker_config = tmp_path / "docker-config"
+    subprocess.run(
+        [str(REPOSITORY_ROOT / "docker" / "write_registry_auth.sh"), "registry.example", str(docker_config)],
+        env=os.environ | {"REGISTRY_USER": "test-user", "REGISTRY_TOKEN": "test-token"},
+        check=True,
+    )
+
+    assert json.loads((docker_config / "config.json").read_text()) == {
+        "auths": {"registry.example": {"auth": "dGVzdC11c2VyOnRlc3QtdG9rZW4="}}
+    }
 
 
 @pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)

@@ -2062,6 +2062,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "launcher (auto-derived from the repo id).",
     )
     parser.add_argument(
+        "--model-revision",
+        default="",
+        help="Immutable Hugging Face revision used to pre-stage the policy model.",
+    )
+    parser.add_argument(
         "--prestage-teacher-models-json",
         default="[]",
         help="JSON list of local teacher model paths and immutable revisions to stage before Ray starts.",
@@ -2173,7 +2178,11 @@ def main() -> None:
     # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
     # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:
-        stage_model(args.prestage_model, warm_source=(args.model_warm_source or None))
+        stage_model(
+            args.prestage_model,
+            warm_source=(args.model_warm_source or None),
+            revision=(args.model_revision or None),
+        )
     for teacher_model in teacher_model_specs_from_json(args.prestage_teacher_models_json):
         stage_model(teacher_model.path, revision=teacher_model.revision)
     # Force the policy chat template onto the staged Hub snapshot or materialized local

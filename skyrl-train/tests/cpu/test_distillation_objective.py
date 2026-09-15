@@ -42,7 +42,7 @@ def _request() -> TeacherScoreRequest:
     )
 
 
-def _policy_config(loss_reduction: str = "token_mean"):
+def _policy_config(loss_reduction: str = "token_mean", reward_mode: str = "add"):
     return OmegaConf.create(
         {
             "policy_loss_type": "regular",
@@ -58,6 +58,7 @@ def _policy_config(loss_reduction: str = "token_mean"):
             "kl_estimator_type": "k1",
             "use_tis": False,
             "tis_imp_ratio_cap": 2.0,
+            "distillation": {"reward_mode": reward_mode},
         }
     )
 
@@ -301,6 +302,68 @@ def test_sampled_reverse_kl_gradient_depends_on_teacher_distribution():
     torch.testing.assert_close(second_actions.grad, torch.tensor([[0.5, 0.5, 0.0]], dtype=torch.float64))
     assert first.metrics["distillation_loss"] == pytest.approx(0.25)
     assert second.metrics["distillation_loss"] == pytest.approx(1.0)
+
+
+def test_replace_mode_optimizes_only_sampled_reverse_kl():
+    actions = torch.tensor([[-0.8, -1.2]], dtype=torch.float64, requires_grad=True)
+    old_actions = torch.tensor([[-1.0, -1.0]], dtype=torch.float64)
+    teacher_actions = torch.tensor([[-0.5, -2.0]], dtype=torch.float64)
+    distillation = SampledReverseKLInput(
+        teacher_action_log_probs=teacher_actions,
+        valid_mask=torch.ones_like(actions, dtype=torch.bool),
+        loss_weights=torch.ones_like(actions),
+    )
+    config = _policy_config(reward_mode="replace")
+    config.use_entropy_loss = True
+    config.entropy_loss_coef = 0.7
+    config.use_kl_loss = True
+    config.kl_loss_coef = 0.4
+
+    objective = compute_policy_objective(
+        action_log_probs=actions,
+        old_action_log_probs=old_actions,
+        base_action_log_probs=torch.tensor([[-1.4, -0.6]], dtype=torch.float64),
+        advantages=torch.tensor([[3.0, -2.0]], dtype=torch.float64),
+        loss_mask=torch.ones_like(actions),
+        rollout_logprobs=None,
+        response_span_tags=None,
+        token_entropy=torch.tensor([[0.6, 0.8]], dtype=torch.float64),
+        config=config,
+        policy_loss_fn=ppo_policy_loss,
+        accumulation_steps=1,
+        scaling=LossScaling.CALLER,
+        distillation=distillation,
+    )
+    expected = (torch.exp(actions - old_actions) * (old_actions - teacher_actions)).mean()
+
+    torch.testing.assert_close(objective.optimization_loss, expected)
+    torch.testing.assert_close(objective.unscaled_loss, expected)
+    assert objective.policy_loss.item() == 0.0
+    assert objective.entropy.item() == 0.0
+    assert objective.kl_loss.item() == 0.0
+    objective.optimization_loss.backward()
+    expected_gradient = torch.exp(actions.detach() - old_actions) * (old_actions - teacher_actions) / actions.numel()
+    torch.testing.assert_close(actions.grad, expected_gradient)
+
+
+def test_replace_mode_rejects_batch_without_teacher_evidence():
+    actions = torch.tensor([[-1.0]], dtype=torch.float64)
+
+    with pytest.raises(ValueError, match="replace requires distillation evidence"):
+        compute_policy_objective(
+            action_log_probs=actions,
+            old_action_log_probs=actions,
+            base_action_log_probs=None,
+            advantages=torch.ones_like(actions),
+            loss_mask=torch.ones_like(actions),
+            rollout_logprobs=None,
+            response_span_tags=None,
+            token_entropy=torch.zeros_like(actions),
+            config=_policy_config(reward_mode="replace"),
+            policy_loss_fn=ppo_policy_loss,
+            accumulation_steps=1,
+            scaling=LossScaling.CALLER,
+        )
 
 
 def test_real_same_vocabulary_teacher_changes_student_gradient_and_update():

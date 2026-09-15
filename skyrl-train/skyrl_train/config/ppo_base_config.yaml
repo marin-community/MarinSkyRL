@@ -88,6 +88,7 @@ trainer:
     grug_query_bias_update_rate: null
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
+      revision: null
       source_uri: null
       source_identity: null
       lora:
@@ -132,6 +133,7 @@ trainer:
   ref:
     model:
       path: ${trainer.policy.model.path}
+      revision: ${trainer.policy.model.revision}
     sequence_parallel_size: 1
     deepspeed_config: ${deepspeed_config.eval}
     fsdp_config:

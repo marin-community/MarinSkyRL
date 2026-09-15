@@ -766,7 +766,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # Update per-gpu mini batch size based on device mesh
         self._normalize_mini_batch_size()
 
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        model_revision = self.cfg.trainer.policy.model.get("revision")
+        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
         validate_grug_expert_parallel_options(
             getattr(model_config, "model_type", None),
             expert_model_parallel_size=strategy.ep_size,
@@ -801,6 +802,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 training_strategy=self.cfg.trainer.strategy,
                 model_load_retry=self.cfg.trainer.model_load_retry,
                 gdn_backend=str(self.cfg.generator.gdn_backend),
+                model_revision=model_revision,
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -1279,7 +1281,8 @@ class FSDPRefWorkerBase(RefWorkerBase):
         self.cp_mesh = getattr(strategy, "cp_mesh", None)
         self.cp_group = getattr(strategy, "cp_group", None)
 
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        model_revision = self.cfg.trainer.ref.model.get("revision")
+        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
         validate_grug_expert_parallel_options(
             getattr(model_config, "model_type", None),
             expert_model_parallel_size=strategy.ep_size,
@@ -1309,6 +1312,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 training_strategy=self.cfg.trainer.strategy,
                 model_load_retry=self.cfg.trainer.model_load_retry,
                 gdn_backend=str(self.cfg.generator.gdn_backend),
+                model_revision=model_revision,
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
