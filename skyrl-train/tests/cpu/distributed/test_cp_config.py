@@ -80,6 +80,15 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
 }
 ADDITIVE_ALGORITHM_FIELDS = {
     "batch_invariant": False,
+    "offpolicy_mask": {
+        "enabled": False,
+        "ratio": "mismatch",
+        "low": 0.5,
+        "high": 5.0,
+        "veto_ratio": 1.0e-5,
+        "renormalize": False,
+    },
+    "require_rollout_logprobs": False,
 }
 ADDITIVE_DYNAMIC_SAMPLING_FIELDS = {
     "informative_on": "shaped",
