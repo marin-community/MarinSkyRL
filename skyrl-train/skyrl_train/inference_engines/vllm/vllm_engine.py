@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import threading
@@ -853,6 +854,16 @@ class WorkerWrap:
                 out[name] = entry
             except Exception as e:  # never crash the collective_rpc
                 out[name] = {"found": False, "error": repr(e)}
+        return out
+
+    def fingerprint_named_weights(self, hf_names):
+        """TEST-ONLY: fingerprint reconstructed HF weights without shipping tensors to the driver."""
+        out = self.read_named_weights(hf_names)
+        for entry in out.values():
+            tensor = entry.pop("tensor", None) if isinstance(entry, dict) else None
+            if tensor is not None:
+                entry["shape"] = list(tensor.shape)
+                entry["sha256"] = hashlib.sha256(tensor.numpy().tobytes()).hexdigest()
         return out
 
     def read_expert_slots_raw(self, layer_idx: int):
@@ -1968,6 +1979,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         engine = self._get_engine()
         return await engine.collective_rpc("read_named_weights", args=(list(hf_names), dump_inventory))
+
+    async def read_engine_weight_fingerprints(self, hf_names):
+        """TEST-ONLY: compact engine-side fingerprints from every TP/EP worker."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("fingerprint_named_weights", args=(list(hf_names),))
 
     async def read_engine_expert_slots_raw(self, layer_idx: int):
         """TEST-ONLY (D1/D2 diag): per-engine-worker RAW FusedMoE local-slot weights +

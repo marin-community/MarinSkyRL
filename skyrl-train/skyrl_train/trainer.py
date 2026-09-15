@@ -592,9 +592,45 @@ class RayPPOTrainer:
         await self.inference_engine_client.wake_up(tags=["weights"])
         with Timer("sync_weights", self.all_timings):
             ray.get(self.sync_policy_weights_to_inference_engines())
+        self._validate_grug_weight_sync_if_requested()
         with Timer("offload_policy_model_to_cpu", self.all_timings):
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
         await self.inference_engine_client.wake_up(tags=["kv_cache"])
+
+    def _validate_grug_weight_sync_if_requested(self) -> None:
+        names = list(getattr(self.cfg.trainer, "debug_grug_weight_sync_names", ()))
+        if not names:
+            return
+        snapshots = ray.get(
+            self.policy_model.async_run_ray_method("pass_through", "grug_validation_fingerprints", names)
+        )
+        expected = next(snapshot.fingerprints for snapshot in snapshots if snapshot.rank == 0)
+        found = {name: 0 for name in names}
+        for engine in self.inference_engine_client.engines:
+            per_rank = ray.get(engine.inference_engine_actor.read_engine_weight_fingerprints.remote(names))
+            if isinstance(per_rank, dict):
+                per_rank = [per_rank]
+            for rank_values in per_rank:
+                for name in names:
+                    entry = rank_values[name]
+                    if entry.get("skip"):
+                        continue
+                    if not entry.get("found"):
+                        raise AssertionError(f"engine weight missing after sync: {name}: {entry}")
+                    actual = {key: entry[key] for key in ("shape", "sha256")}
+                    if actual != expected[name]:
+                        raise AssertionError(
+                            f"engine weight mismatch after sync: {name}: expected={expected[name]} actual={actual} "
+                            f"ranks={rank_values['__ranks__']}"
+                        )
+                    found[name] += 1
+        missing = [name for name, count in found.items() if count == 0]
+        if missing:
+            raise AssertionError(f"engine weights absent from every serving rank after sync: {missing}")
+        logger.info(
+            "Grug weight-sync fingerprints matched: {}",
+            json.dumps({"expected": expected, "serving_copies": found}, sort_keys=True),
+        )
 
     async def _sync_policy_for_rollouts(self, *, reason: str) -> None:
         with Timer("publish_policy_weights", log_events=False) as update_timer:

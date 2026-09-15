@@ -6,8 +6,10 @@ from transformers import AutoTokenizer, AutoConfig
 from huggingface_hub import snapshot_download
 
 import asyncio
+import hashlib
 import importlib.util
 import os
+import re
 from enum import StrEnum
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
@@ -49,7 +51,7 @@ from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWra
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
 from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, MegatronWeightExtractor
-from skyrl_train.workers.grug_validation import GrugValidationSnapshot
+from skyrl_train.workers.grug_validation import GrugValidationFingerprintSnapshot, GrugValidationSnapshot
 
 
 class _MegatronInitMode(StrEnum):
@@ -686,6 +688,43 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             attention_backend=str(self.provider.attention_backend),
             weights=weights,
         )
+
+    def grug_validation_fingerprints(self, names=()):
+        """Fingerprint selected HF-layout weights without returning full expert stacks."""
+        if self.strategy.hf_config.model_type != GRUG_MOE_MODEL_TYPE:
+            raise ValueError("grug_validation_fingerprints is only valid for Grug models")
+        expert_re = re.compile(r"^(model\.layers\.\d+\.mlp)\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
+        wanted_direct = set()
+        wanted_experts = defaultdict(list)
+        for name in names:
+            if match := expert_re.match(name):
+                prefix, expert_index, projection = match.groups()
+                wanted_experts[f"{prefix}.experts.{projection}.weight"].append((name, int(expert_index)))
+            else:
+                wanted_direct.add(name)
+
+        is_rank0 = torch.distributed.get_rank() == 0
+        fingerprints = {}
+        for name, tensor in self.bridge.export_hf_weights(self.actor_module, show_progress=False):
+            if not is_rank0:
+                continue
+            selected = []
+            if name in wanted_direct:
+                selected.append((name, tensor))
+            selected.extend(
+                (requested_name, tensor[expert_index]) for requested_name, expert_index in wanted_experts[name]
+            )
+            for requested_name, selected_tensor in selected:
+                selected_tensor = selected_tensor.detach().to(torch.bfloat16).float().cpu().contiguous()
+                fingerprints[requested_name] = {
+                    "shape": list(selected_tensor.shape),
+                    "sha256": hashlib.sha256(selected_tensor.numpy().tobytes()).hexdigest(),
+                }
+
+        missing = set(names).difference(fingerprints) if is_rank0 else set()
+        if missing:
+            raise KeyError(f"missing Grug state entries: {sorted(missing)}")
+        return GrugValidationFingerprintSnapshot(rank=torch.distributed.get_rank(), fingerprints=fingerprints)
 
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""

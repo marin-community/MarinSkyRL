@@ -1,4 +1,4 @@
-"""Test-only snapshot type shared by the FSDP2 and Megatron Grug policy workers."""
+"""Test-only snapshot types shared by the FSDP2 and Megatron Grug policy workers."""
 
 from dataclasses import dataclass
 
@@ -12,3 +12,11 @@ class GrugValidationSnapshot:
     rank: int
     attention_backend: str
     weights: dict[str, torch.Tensor]
+
+
+@dataclass(frozen=True)
+class GrugValidationFingerprintSnapshot:
+    """One policy rank's selected Grug tensors represented by compact fingerprints."""
+
+    rank: int
+    fingerprints: dict[str, dict[str, object]]
