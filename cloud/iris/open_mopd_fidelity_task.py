@@ -26,6 +26,7 @@ from cloud.iris.open_mopd_fidelity import (
 from open_mopd_versions import versions_match
 
 CONTROL_MANIFEST_NAME = "control-manifest.json"
+HYDRA_REWARD_MODE_PATCH = "scripts/local/mt_opd.sh: declare the release-only rollout.reward_mode key"
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,18 @@ def checkout_source(config: FidelityConfig, destination: Path) -> Path:
     if actual != config.source.commit:
         raise ValueError(f"Open-MOPD checkout mismatch: expected {config.source.commit}, found {actual}")
     return source
+
+
+def patch_source_compatibility(source: Path) -> tuple[str, ...]:
+    """Apply narrow, fail-closed compatibility fixes to the pinned authors' checkout."""
+    launcher = source / "scripts" / "local" / "mt_opd.sh"
+    text = launcher.read_text()
+    old = '"actor_rollout_ref.rollout.reward_mode=mt_opd"'
+    new = '"+actor_rollout_ref.rollout.reward_mode=mt_opd"'
+    if text.count(old) != 1 or new in text:
+        raise ValueError("Pinned Open-MOPD launcher no longer matches the expected reward_mode assignment")
+    launcher.write_text(text.replace(old, new))
+    return (HYDRA_REWARD_MODE_PATCH,)
 
 
 def verify_lfs_files(destination: Path, expected_files: tuple[LfsFile, ...]) -> tuple[FileVerification, ...]:
@@ -352,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
     output = args.work_root / "output"
     output.mkdir()
     inputs = stage_inputs(config, args.work_root)
+    source_compatibility_patches = patch_source_compatibility(inputs.source)
     command = training_command(config, inputs, args.gate, output, world_size=world_size)
     manifest = {
         "config": asdict(config),
@@ -359,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
         "steps": GATES[args.gate],
         "command": command,
         "runtime": runtime_inventory(inputs.source),
+        "source_compatibility_patches": source_compatibility_patches,
         "artifact_verifications": [asdict(verification) for verification in inputs.artifact_verifications],
         "task_image": args.task_image,
         "launcher_commit": args.launcher_commit,
