@@ -162,9 +162,7 @@ def test_distributed_adapter_publishes_changed_weights_before_generation():
             assert update["ppo_ratio_min"] == update["ppo_ratio_mean"] == update["ppo_ratio_max"] == 1
             assert update["ppo_clip_ratio"] == 0
 
-        final_generation = asyncio.run(
-            _generate(client, cfg, [list(_Dataset._PROMPTS[0]), list(_Dataset._PROMPTS[1])])
-        )
+        final_generation = asyncio.run(_generate(client, cfg, [list(_Dataset._PROMPTS[0]), list(_Dataset._PROMPTS[1])]))
         assert final_generation["stop_reasons"] == ["length", "length"]
         evidence = {
             "learner_state": {
