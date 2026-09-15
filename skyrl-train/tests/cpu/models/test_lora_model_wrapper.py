@@ -60,17 +60,34 @@ def test_model_wrapper_loads_trainable_lora_adapter_weights(tmp_path: Path) -> N
     assert all(parameter.requires_grad for name, parameter in wrapped.model.named_parameters() if "lora_" in name)
 
 
-def test_model_wrapper_rejects_adapter_with_different_rank(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"lora_rank": 4}, "rank: configured=4, adapter=2"),
+        ({"lora_alpha": 8}, "alpha: configured=8, adapter=4"),
+        ({"lora_dropout": 0.1}, "dropout: configured=0.1, adapter=0.0"),
+        ({"target_modules": ["c_proj"]}, "target_modules"),
+        ({"exclude_modules": ["lm_head"]}, "exclude_modules"),
+    ],
+)
+def test_model_wrapper_rejects_adapter_configuration_drift(
+    tmp_path: Path, override: dict[str, object], message: str
+) -> None:
     base_path, adapter_path, _ = _save_base_and_adapter(tmp_path)
+    lora_config = {
+        "lora_rank": LORA_RANK,
+        "lora_alpha": LORA_ALPHA,
+        "lora_dropout": LORA_DROPOUT,
+        "target_modules": TARGET_MODULES,
+        "exclude_modules": None,
+    }
+    lora_config.update(override)
 
-    with pytest.raises(ValueError, match="Configured LoRA rank 4.*rank 2"):
+    with pytest.raises(ValueError, match=message):
         HFModelWrapper(
             str(base_path),
             bf16=False,
             training_strategy="fsdp2",
-            lora_rank=4,
-            lora_alpha=LORA_ALPHA,
-            lora_dropout=LORA_DROPOUT,
-            target_modules=TARGET_MODULES,
             lora_adapter_path=str(adapter_path),
+            **lora_config,
         )

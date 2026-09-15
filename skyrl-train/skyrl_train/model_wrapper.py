@@ -5,6 +5,7 @@
 
 import contextlib
 import threading
+from collections.abc import Iterable
 from typing import Any, Dict, Optional, Tuple, Union
 from copy import deepcopy
 
@@ -98,14 +99,39 @@ def _load_trainable_lora_adapter(
     adapter_path: str,
     adapter_revision: str | None,
     lora_rank: int,
+    lora_alpha: int,
+    lora_dropout: float,
+    target_modules: str | Iterable[str] | None,
+    exclude_modules: str | Iterable[str] | None,
 ) -> PeftModel:
     adapter_config = PeftConfig.from_pretrained(adapter_path, revision=adapter_revision)
     if not isinstance(adapter_config, LoraConfig):
         raise ValueError(f"Adapter {adapter_path!r} is {adapter_config.peft_type}, not LoRA")
-    if adapter_config.r != lora_rank:
-        raise ValueError(
-            f"Configured LoRA rank {lora_rank} does not match adapter {adapter_path!r} rank {adapter_config.r}"
+    configured_values = {
+        "rank": lora_rank,
+        "alpha": lora_alpha,
+        "dropout": lora_dropout,
+        "target_modules": _normalized_module_names(target_modules),
+        "exclude_modules": _normalized_module_names(exclude_modules),
+    }
+    adapter_values = {
+        "rank": adapter_config.r,
+        "alpha": adapter_config.lora_alpha,
+        "dropout": adapter_config.lora_dropout,
+        "target_modules": _normalized_module_names(adapter_config.target_modules),
+        "exclude_modules": _normalized_module_names(adapter_config.exclude_modules),
+    }
+    mismatches = {
+        name: (configured_values[name], adapter_values[name])
+        for name in configured_values
+        if configured_values[name] != adapter_values[name]
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{name}: configured={configured!r}, adapter={stored!r}"
+            for name, (configured, stored) in mismatches.items()
         )
+        raise ValueError(f"Configured LoRA parameters do not match adapter {adapter_path!r}: {details}")
     return PeftModel.from_pretrained(
         model,
         adapter_path,
@@ -113,6 +139,12 @@ def _load_trainable_lora_adapter(
         revision=adapter_revision,
         low_cpu_mem_usage=model.device.type == "meta",
     )
+
+
+def _normalized_module_names(value: str | Iterable[str] | None) -> str | frozenset[str] | None:
+    if isinstance(value, str) or value is None:
+        return value
+    return frozenset(value)
 
 
 def validate_grug_training_options(
@@ -594,6 +626,10 @@ class HFModelWrapper(nn.Module):
                         adapter_path=lora_adapter_path,
                         adapter_revision=lora_adapter_revision,
                         lora_rank=lora_rank,
+                        lora_alpha=lora_alpha,
+                        lora_dropout=lora_dropout,
+                        target_modules=target_modules,
+                        exclude_modules=exclude_modules,
                     )
                 else:
                     lora_config = LoraConfig(
