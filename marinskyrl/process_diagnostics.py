@@ -58,6 +58,33 @@ class ProcessOutcome:
         )
 
 
+def _receipt_path_and_identity(
+    role: str,
+    suffix: str,
+    *,
+    pid: int,
+    environment: Mapping[str, str],
+) -> tuple[Path, dict[str, object]] | None:
+    artifact_root = environment.get(DEBUG_ARTIFACT_DIR_ENV)
+    if not artifact_root:
+        return None
+    ensure_debug_artifact_directories(artifact_root)
+    timestamp_ns = time.time_ns()
+    hostname = socket.gethostname()
+    path = (
+        Path(artifact_root)
+        / "outcomes"
+        / (f"{safe_artifact_component(role)}.{hostname}.{pid}.{timestamp_ns}{suffix}.json")
+    )
+    return path, {
+        "schema_version": 1,
+        "role": role,
+        "hostname": hostname,
+        "pid": pid,
+        "observed_at_ns": timestamp_ns,
+    }
+
+
 def write_process_outcome(
     role: str,
     returncode: int,
@@ -70,24 +97,13 @@ def write_process_outcome(
     outcome = ProcessOutcome.from_returncode(returncode)
     # Read the manager-projected process contract; this module never defines environment values.
     values = os.environ if environment is None else environment
-    artifact_root = values.get(DEBUG_ARTIFACT_DIR_ENV)
-    if not artifact_root:
-        return outcome, None
-    ensure_debug_artifact_directories(artifact_root)
     process_id = os.getpid() if pid is None else pid
-    timestamp_ns = time.time_ns()
-    hostname = socket.gethostname()
-    path = (
-        Path(artifact_root)
-        / "outcomes"
-        / f"{safe_artifact_component(role)}.{hostname}.{process_id}.{timestamp_ns}.json"
-    )
+    receipt = _receipt_path_and_identity(role, "", pid=process_id, environment=values)
+    if receipt is None:
+        return outcome, None
+    path, identity = receipt
     payload = {
-        "schema_version": 1,
-        "role": role,
-        "hostname": hostname,
-        "pid": process_id,
-        "observed_at_ns": timestamp_ns,
+        **identity,
         **asdict(outcome),
         "metadata": dict(metadata or {}),
     }
@@ -105,24 +121,12 @@ def write_exception_receipt(
     """Persist the original Python exception before native runtime teardown can mask it."""
     # Read the manager-projected process contract; this module never defines environment values.
     values = os.environ if environment is None else environment
-    artifact_root = values.get(DEBUG_ARTIFACT_DIR_ENV)
-    if not artifact_root:
+    receipt = _receipt_path_and_identity(role, ".exception", pid=os.getpid(), environment=values)
+    if receipt is None:
         return None
-    ensure_debug_artifact_directories(artifact_root)
-    timestamp_ns = time.time_ns()
-    hostname = socket.gethostname()
-    process_id = os.getpid()
-    path = (
-        Path(artifact_root)
-        / "outcomes"
-        / f"{safe_artifact_component(role)}.{hostname}.{process_id}.{timestamp_ns}.exception.json"
-    )
+    path, identity = receipt
     payload = {
-        "schema_version": 1,
-        "role": role,
-        "hostname": hostname,
-        "pid": process_id,
-        "observed_at_ns": timestamp_ns,
+        **identity,
         "kind": "exception",
         "exception_type": f"{type(error).__module__}.{type(error).__qualname__}",
         "message": str(error),

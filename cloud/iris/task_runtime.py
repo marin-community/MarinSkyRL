@@ -1542,7 +1542,7 @@ def sync_debug_artifacts(rendezvous_dir: str | None, node_id: str, reason: str) 
 
 @dataclass
 class RayLogSyncSession:
-    """Incrementally upload one node's Ray logs without overlapping sync passes."""
+    """Incrementally upload one node's Ray logs, with a preemptive final evidence pass."""
 
     ray_log_dir: str | None
     node_id: str
@@ -1599,7 +1599,7 @@ class RayLogSyncSession:
         return result
 
     def sync(self, reason: str) -> RayLogSyncResult:
-        """Upload new or changed files and return per-pass file and byte counts."""
+        """Upload a bounded selection of changed files and return per-pass counts."""
         with self._lock:
             return self._sync_pass(reason, self._uploaded_versions)
 

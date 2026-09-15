@@ -2,13 +2,13 @@
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_eval.py
 """
 
-import importlib
 from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.evaluate import evaluate
+import skyrl_train.evaluate as evaluate_module
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
 from tests.cpu.util import example_dummy_config
 
@@ -16,6 +16,26 @@ from tests.cpu.util import example_dummy_config
 @pytest.fixture
 def dummy_config():
     return example_dummy_config()
+
+
+def configure_eval(cfg, tmp_path):
+    cfg.generator.backend = "vllm"
+    cfg.generator.eval_sampling_params = OmegaConf.create(
+        {
+            "max_generate_length": 20,
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": -1,
+            "min_p": 0.0,
+            "logprobs": None,
+            "stop": None,
+        }
+    )
+    cfg.generator.eval_n_samples_per_prompt = 1
+    cfg.environment = OmegaConf.create({"env_class": "gsm8k"})
+    cfg.trainer.dump_eval_results = False
+    cfg.trainer.export_path = str(tmp_path)
+    return cfg
 
 
 class DummyStatefulDataLoader:
@@ -46,23 +66,7 @@ class FailingRunner(TrajectoryRunner):
 
 @pytest.mark.asyncio
 async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
-    cfg = dummy_config
-    cfg.generator.backend = "vllm"
-    cfg.generator.eval_sampling_params = OmegaConf.create(
-        {
-            "max_generate_length": 20,
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "top_k": -1,
-            "min_p": 0.0,
-            "logprobs": None,
-            "stop": None,
-        }
-    )
-    cfg.generator.eval_n_samples_per_prompt = 1
-    cfg.environment = OmegaConf.create({"env_class": "gsm8k"})
-    cfg.trainer.dump_eval_results = False
-    cfg.trainer.export_path = str(tmp_path)
+    cfg = configure_eval(dummy_config, tmp_path)
 
     prompts_batch = [
         {
@@ -123,28 +127,11 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
 
 @pytest.mark.asyncio
 async def test_evaluate_closes_progress_reporter_when_rollout_fails(dummy_config, tmp_path, monkeypatch):
-    cfg = dummy_config
-    cfg.generator.backend = "vllm"
-    cfg.generator.eval_sampling_params = OmegaConf.create(
-        {
-            "max_generate_length": 20,
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "top_k": -1,
-            "min_p": 0.0,
-            "logprobs": None,
-            "stop": None,
-        }
-    )
-    cfg.generator.eval_n_samples_per_prompt = 1
-    cfg.environment = OmegaConf.create({"env_class": "gsm8k"})
-    cfg.trainer.dump_eval_results = False
-    cfg.trainer.export_path = str(tmp_path)
+    cfg = configure_eval(dummy_config, tmp_path)
     eval_dataloader = DummyStatefulDataLoader(
         [[{"prompt": [{"role": "user", "content": "question"}], "env_class": None, "env_extras": {}, "uid": "1"}]]
     )
     progress = MagicMock()
-    evaluate_module = importlib.import_module("skyrl_train.evaluate")
     monkeypatch.setattr(evaluate_module, "tqdm", lambda **_kwargs: progress)
 
     with pytest.raises(RuntimeError, match="evaluation actor failed"):
