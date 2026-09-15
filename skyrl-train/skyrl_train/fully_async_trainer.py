@@ -55,20 +55,30 @@ from skyrl_train.dynamic_sampling import (
     resolve_dynamic_sampling_criteria,
 )
 from skyrl_train.group_admission import AdmissionDecision, AdmissionRejection, GroupAdmissionPolicy
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
-from skyrl_train.learner_bridge import BEHAVIOR_POLICY_VERSIONS_METADATA_KEY
+from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
+from skyrl_train.learner_bridge import (
+    BEHAVIOR_POLICY_VERSIONS_METADATA_KEY,
+    BEHAVIOR_POLICY_VERSION_SEGMENTS_METADATA_KEY,
+)
+from skyrl_train.policy_version import (
+    BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
+    PolicyVersionSegment,
+    policy_version_bounds,
+    validate_policy_version_segments,
+)
 
 
 _QueueItem = TypeVar("_QueueItem")
-BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY = "behavior_policy_version_segments"
 
 
 class GenerationStalledError(RuntimeError):
     """Raised when generation cannot make progress (no active producers, or dataset exhausted)."""
 
 
-def _receiver_observed_behavior_policy_versions(trajectory_batch: TrajectoryBatch) -> List[int]:
-    """Collapse serving-observed segment versions into one stable version per response row."""
+def _validated_behavior_policy_version_segments(
+    trajectory_batch: TrajectoryBatch,
+) -> List[List[PolicyVersionSegment]]:
+    """Validate serving-observed token spans without collapsing cross-policy rows."""
     segments_by_row = trajectory_batch.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY)
     response_count = len(trajectory_batch["response_ids"])
     if not isinstance(segments_by_row, list) or len(segments_by_row) != response_count:
@@ -76,20 +86,20 @@ def _receiver_observed_behavior_policy_versions(trajectory_batch: TrajectoryBatc
             "async learner rollouts require serving-observed policy-version segments aligned with response rows"
         )
 
-    versions = []
-    for row_index, segment_versions in enumerate(segments_by_row):
-        if (
-            not isinstance(segment_versions, list)
-            or not segment_versions
-            or any(type(version) is not int or version < 0 for version in segment_versions)
+    loss_masks = trajectory_batch["loss_masks"]
+    try:
+        for response_ids, loss_mask, segments in zip(
+            trajectory_batch["response_ids"], loss_masks, segments_by_row, strict=True
         ):
-            raise RuntimeError(f"async learner rollout row {row_index} has an invalid policy version")
-        if len(set(segment_versions)) != 1:
-            raise RuntimeError(
-                f"async learner rollout row {row_index} spans multiple installed policy versions: {segment_versions}"
+            validate_policy_version_segments(
+                segments,
+                response_length=len(response_ids),
+                require_known=True,
+                required_mask=[bool(value) for value in loss_mask],
             )
-        versions.append(segment_versions[0])
-    return versions
+    except ValueError as error:
+        raise RuntimeError(f"async learner rollout has invalid serving policy provenance: {error}") from error
+    return segments_by_row
 
 
 def _drain_queue(queue: asyncio.Queue[_QueueItem]) -> List[_QueueItem]:
@@ -528,9 +538,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self._group_admission_policy = GroupAdmissionPolicy(
             self.group_advantage_invariant,
             max_staleness_steps=self.max_staleness_steps,
-            rollout_logprobs_required=policy_loss_requires_rollout_logprobs(
-                self.cfg.trainer.algorithm.policy_loss_type
-            ),
+            rollout_logprobs_required=rollout_logprobs_enabled(self.cfg.trainer.algorithm),
         )
         # Some async-specific validations
         assert self.cfg.trainer.train_batch_size == self.cfg.trainer.policy_mini_batch_size, (
@@ -901,14 +909,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     #    fully_async, which never drains trial orchestration. This
                     #    block is now byte-identical for fan-out ON and OFF.
                     with Timer("sync_weights", self.all_timings) as weight_update_timer:
-                        await self.inference_engine_client.pause_generation()
-                        await self.async_sync_policy_weights_to_inference_engines()
-                        # Drain the policy workers' event loops to a hard sync point so
-                        # every FSDP shard rank is free before the NEXT step's forward is
-                        # dispatched (the MoE-RL async-dispatch wedge fix). See
-                        # _drain_policy_event_loops.
-                        await self._drain_policy_event_loops()
-                        await self.inference_engine_client.resume_generation()
+                        if self.learner is not None:
+                            # The learner owns its atomic publication and receiver
+                            # acknowledgement. A second outer pause would deadlock/fail.
+                            await self.async_sync_policy_weights_to_inference_engines()
+                        else:
+                            await self.inference_engine_client.pause_generation()
+                            await self.async_sync_policy_weights_to_inference_engines()
+                            # Drain the policy workers' event loops to a hard sync point so
+                            # every FSDP shard rank is free before the NEXT step's forward is
+                            # dispatched (the MoE-RL async-dispatch wedge fix). See
+                            # _drain_policy_event_loops.
+                            await self._drain_policy_event_loops()
+                            await self.inference_engine_client.resume_generation()
                     self._log_weight_update_completed(
                         reason="training_step",
                         duration_seconds=weight_update_timer.duration,
@@ -1115,9 +1128,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 )
                 actual_step = cur_trajectory_batch.get("actual_global_step")
                 staleness_step = actual_step if actual_step is not None else global_step_at_start
-                behavior_policy_versions = None
+                behavior_policy_version_segments = None
                 if self.learner is not None:
-                    behavior_policy_versions = _receiver_observed_behavior_policy_versions(cur_trajectory_batch)
+                    behavior_policy_version_segments = _validated_behavior_policy_version_segments(cur_trajectory_batch)
+                    bounds = policy_version_bounds(behavior_policy_version_segments)
+                    if bounds is not None:
+                        # Trainer global_step is one-based during generation while
+                        # learner policy versions count completed updates from zero.
+                        staleness_step = bounds[0] + 1
 
                 record_generated_work(
                     cur_trajectory_batch["response_ids"],
@@ -1129,7 +1147,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     uid=uids[0],
                     earliest_model_step=staleness_step,
                     source_prompts=rand_prompts,
-                    behavior_policy_versions=behavior_policy_versions,
+                    behavior_policy_version_segments=behavior_policy_version_segments,
                 )
                 freshness = await self._enqueue_if_fresh(queues, completed_group)
                 if freshness is _GroupFreshness.STALE:
@@ -1554,7 +1572,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         trajectory_batch = concatenate_trajectory_batches(
             trajectory_batches,
-            require_rollout_logprobs=policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type),
+            require_rollout_logprobs=rollout_logprobs_enabled(self.cfg.trainer.algorithm),
             tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
         assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
@@ -1579,21 +1597,27 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         training_input = self.convert_to_training_input(trajectory_batch, uids)
         if self.learner is not None:
+            # The synchronous conversion labels each row with the currently
+            # installed policy. That shortcut is invalid when an async response
+            # can cross a publication boundary.
+            training_input.metadata.pop(BEHAVIOR_POLICY_VERSIONS_METADATA_KEY, None)
             if any(
-                group.behavior_policy_versions is None
-                or len(group.behavior_policy_versions) != len(group.trajectory_batch["response_ids"])
+                group.behavior_policy_version_segments is None
+                or len(group.behavior_policy_version_segments) != len(group.trajectory_batch["response_ids"])
                 for group in cur_generation_group_mini_batch
             ):
                 raise RuntimeError("async learner group lost behavior-policy version alignment")
-            behavior_policy_versions = [
-                version for group in cur_generation_group_mini_batch for version in group.behavior_policy_versions or []
+            behavior_policy_version_segments = [
+                segments
+                for group in cur_generation_group_mini_batch
+                for segments in group.behavior_policy_version_segments or []
             ]
-            if len(behavior_policy_versions) != training_input.batch_size:
+            if len(behavior_policy_version_segments) != training_input.batch_size:
                 raise RuntimeError(
-                    "async behavior-policy versions lost batch alignment: "
-                    f"{len(behavior_policy_versions)} versions for {training_input.batch_size} rows"
+                    "async behavior-policy segments lost batch alignment: "
+                    f"{len(behavior_policy_version_segments)} rows for {training_input.batch_size} responses"
                 )
-            training_input.metadata[BEHAVIOR_POLICY_VERSIONS_METADATA_KEY] = behavior_policy_versions
+            training_input.metadata[BEHAVIOR_POLICY_VERSION_SEGMENTS_METADATA_KEY] = behavior_policy_version_segments
         return training_input
 
     def save_checkpoints(self):

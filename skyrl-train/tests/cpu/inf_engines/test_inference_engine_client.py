@@ -970,6 +970,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
                     response_ids=[[21, 22]],
                     stop_reasons=["abort"],
                     response_logprobs=[[-0.1, -0.2]],
+                    response_policy_version_segments=[[{"start": 0, "token_count": 2, "policy_version": 0}]],
                 ),
                 # 2) abort with 0 tokens (should be ignored)
                 InferenceEngineOutput(
@@ -984,6 +985,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
                     response_ids=[[23, 24]],
                     stop_reasons=["stop"],
                     response_logprobs=[[-0.3, -0.4]],
+                    response_policy_version_segments=[[{"start": 0, "token_count": 2, "policy_version": 1}]],
                 ),
             ]
 
@@ -1037,6 +1039,12 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
     assert out["response_ids"] == [expected_final_response_ids]
     assert out["stop_reasons"] == ["stop"]
     assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
+    assert out["response_policy_version_segments"] == [
+        [
+            {"start": 0, "token_count": 2, "policy_version": 0},
+            {"start": 2, "token_count": 2, "policy_version": 1},
+        ]
+    ]
 
 
 @pytest.mark.asyncio
@@ -1166,6 +1174,7 @@ class _MockWeightSyncEngine:
         self.scheduler_paused = False
         self.outstanding_requests = 388
         self.reloads = 0
+        self.resumed_policy_version = None
 
     async def pause_generation(self):
         self.scheduler_paused = True
@@ -1176,7 +1185,8 @@ class _MockWeightSyncEngine:
             raise RuntimeError("reshape_and_cache_flash attempted to run with Meta tensors")
         self.reloads += 1
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_version=None):
+        self.resumed_policy_version = policy_version
         self.scheduler_paused = False
 
 
@@ -1195,8 +1205,9 @@ async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes(monkeyp
     assert engine.outstanding_requests == 0
     assert engine.reloads == 1
 
-    await client.resume_generation()
+    await client.resume_generation(policy_version=7)
     assert not engine.scheduler_paused
+    assert engine.resumed_policy_version == 7
 
 
 @pytest.mark.asyncio

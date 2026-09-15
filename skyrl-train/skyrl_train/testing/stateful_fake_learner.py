@@ -116,9 +116,11 @@ class StatefulFakeLearner:
             ):
                 raise ValueError("reference log probabilities do not match the fake reference policy")
 
-        uses_behavior_probs = config.use_rollout_importance_sampling or config.policy_loss is PolicyLoss.BEHAVIOR_CLIP
-        if uses_behavior_probs and request.batch.rollout_log_probs is None:
+        if config.requires_behavior_log_probs and request.batch.rollout_log_probs is None:
             raise ValueError("the configured update requires rollout log probabilities")
+        applies_behavior_ratio = (
+            config.use_rollout_importance_sampling or config.policy_loss is PolicyLoss.BEHAVIOR_CLIP
+        )
 
         weights = request.batch.loss_mask.astype(np.float64, copy=False)
         denominator = float(weights.sum())
@@ -126,8 +128,40 @@ class StatefulFakeLearner:
             return UpdateResult(status=UpdateStatus.SKIPPED, metrics=self._metrics(request, denominator, 0.0))
 
         response_tokens = request.batch.sequences[:, -request.batch.response_length :]
-        terms = request.advantages * (1.0 + np.remainder(response_tokens, 7) / 10.0)
-        if uses_behavior_probs:
+        effective_advantages = request.advantages
+        mask_metrics: dict[str, float] = {}
+        if config.offpolicy_mask_enabled:
+            assert request.batch.rollout_log_probs is not None
+            numerator = request.old_policy_log_probs
+            mismatch_ratio = np.exp(np.clip(numerator - request.batch.rollout_log_probs, -20.0, 20.0))
+            selected = weights > 0
+            low = selected & (mismatch_ratio < config.offpolicy_mask_low)
+            high = selected & (mismatch_ratio > config.offpolicy_mask_high)
+            veto = np.any(selected & (mismatch_ratio < config.offpolicy_mask_veto_ratio), axis=-1, keepdims=True)
+            removed = selected & (low | high | veto)
+            selected_count = int(np.count_nonzero(selected))
+            selected_rows = np.any(selected, axis=-1)
+            mask_metrics = {
+                "offpolicy_mask/masked_fraction": float(np.count_nonzero(removed) / selected_count),
+                "offpolicy_mask/masked_fraction_low": float(np.count_nonzero(low) / selected_count),
+                "offpolicy_mask/masked_fraction_high": float(np.count_nonzero(high) / selected_count),
+                "offpolicy_mask/vetoed_sequence_fraction": float(
+                    np.count_nonzero(veto.squeeze(-1) & selected_rows) / np.count_nonzero(selected_rows)
+                ),
+            }
+            if config.offpolicy_mask_renormalize:
+                weights = np.where(removed, 0.0, weights)
+                denominator = float(weights.sum())
+            else:
+                effective_advantages = np.where(removed, 0.0, effective_advantages)
+            if denominator == 0:
+                return UpdateResult(
+                    status=UpdateStatus.SKIPPED,
+                    metrics=self._metrics(request, denominator, 0.0) | mask_metrics,
+                )
+
+        terms = effective_advantages * (1.0 + np.remainder(response_tokens, 7) / 10.0)
+        if applies_behavior_ratio:
             assert request.batch.rollout_log_probs is not None
             ratios = np.exp(np.clip(request.old_policy_log_probs - request.batch.rollout_log_probs, -8.0, 8.0))
             if config.use_rollout_importance_sampling:
@@ -141,7 +175,7 @@ class StatefulFakeLearner:
         self._publication_status = PublicationStatus.OUTDATED
         return UpdateResult(
             status=UpdateStatus.SUCCEEDED,
-            metrics=self._metrics(request, denominator, update_signal),
+            metrics=self._metrics(request, denominator, update_signal) | mask_metrics,
         )
 
     async def publish_policy(self) -> None:
@@ -197,12 +231,13 @@ class StatefulFakeLearner:
         return np.where(batch.response_mask > 0, values, 0.0).astype(np.float32)
 
     def _metrics(self, request: UpdateRequest, masked_tokens: float, update_signal: float) -> dict[str, float]:
+        versions = request.batch.selected_behavior_policy_versions
         return {
             "fake/masked_tokens": masked_tokens,
             "fake/update_signal": update_signal,
             "fake/global_loss_denominator": float(request.global_loss_denominator or -1.0),
-            "fake/oldest_behavior_version": float(request.batch.behavior_policy_versions.min()),
-            "fake/newest_behavior_version": float(request.batch.behavior_policy_versions.max()),
+            "fake/oldest_behavior_version": float(versions.min()) if versions.size else -1.0,
+            "fake/newest_behavior_version": float(versions.max()) if versions.size else -1.0,
         }
 
     def _require_ready(self) -> LearnerConfig:

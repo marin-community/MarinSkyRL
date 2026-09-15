@@ -33,6 +33,11 @@ import ray.exceptions
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from skyrl_train.config.trajectory_runner_capabilities import opencode_exact_continuation_enabled
+from skyrl_train.policy_version import (
+    PolicyVersionSegment,
+    append_policy_version_segment,
+    validate_policy_version_segments,
+)
 
 ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
 ABORT_FINISH_REASON = "abort"
@@ -312,6 +317,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         stop_reasons: list[str] = [""] * n
         response_logprobs: List[Optional[List[float]]] = [None for _ in range(n)]
         response_ids: List[List[int]] = [[] for _ in range(n)]
+        response_policy_version_segments: List[List[PolicyVersionSegment] | None] = [None for _ in range(n)]
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
@@ -322,6 +328,15 @@ class InferenceEngineClient(InferenceEngineInterface):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
                 response_ids[original_idx] = result["response_ids"][local_idx]
+                version_segments = result.get("response_policy_version_segments")
+                if version_segments is not None:
+                    row = version_segments[local_idx]
+                    validate_policy_version_segments(
+                        row,
+                        response_length=len(response_ids[original_idx]),
+                        require_known=False,
+                    )
+                    response_policy_version_segments[original_idx] = row
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
@@ -329,13 +344,21 @@ class InferenceEngineClient(InferenceEngineInterface):
                     add_prompt_logprobs = True
                     prompt_logprobs[original_idx] = result["prompt_logprobs"][local_idx]
 
-        return InferenceEngineOutput(
+        output = InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
         )
+        if any(segments is not None for segments in response_policy_version_segments):
+            output["response_policy_version_segments"] = [
+                segments
+                if segments is not None
+                else ([{"start": 0, "token_count": len(ids), "policy_version": None}] if ids else [])
+                for ids, segments in zip(response_ids, response_policy_version_segments, strict=True)
+            ]
+        return output
 
     async def _generate_single_with_retry(
         self, engine_idx: int, original_prompt_ids: List[int], sampling_params: Optional[Dict[str, Any]]
@@ -378,6 +401,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 2. Initialize fields we want to accumulate or update in each loop iteration
         accum_response_ids: List[int] = []
         accum_response_logprobs: List[float] = []
+        accum_policy_version_segments: List[PolicyVersionSegment] = []
+        saw_policy_version_segments = False
         stop_reason: str = ABORT_FINISH_REASON
 
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
@@ -413,6 +438,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 # Reset accumulation — new engine has no prior context
                 accum_response_ids = []
                 accum_response_logprobs = []
+                accum_policy_version_segments = []
+                saw_policy_version_segments = False
                 num_turns = 0
                 stop_reason = ABORT_FINISH_REASON
                 continue
@@ -432,6 +459,34 @@ class InferenceEngineClient(InferenceEngineInterface):
                 continue
 
             # 3.5 Accumulate outputs
+            partial_segments = partial_response.get("response_policy_version_segments")
+            if partial_segments is not None:
+                if len(partial_segments) != 1:
+                    raise ValueError("single-response generation requires one policy-version segment row")
+                validate_policy_version_segments(
+                    partial_segments[0],
+                    response_length=len(new_response_ids),
+                    require_known=False,
+                )
+                if accum_response_ids and not saw_policy_version_segments:
+                    append_policy_version_segment(
+                        accum_policy_version_segments,
+                        token_count=len(accum_response_ids),
+                        policy_version=None,
+                    )
+                for segment in partial_segments[0]:
+                    append_policy_version_segment(
+                        accum_policy_version_segments,
+                        token_count=segment["token_count"],
+                        policy_version=segment["policy_version"],
+                    )
+                saw_policy_version_segments = True
+            elif new_response_ids and saw_policy_version_segments:
+                append_policy_version_segment(
+                    accum_policy_version_segments,
+                    token_count=len(new_response_ids),
+                    policy_version=None,
+                )
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
                 accum_response_logprobs.extend(new_response_logprobs)
@@ -447,13 +502,16 @@ class InferenceEngineClient(InferenceEngineInterface):
         # for teacher scoring where max_tokens=1 and num_turns=1).
         final_prompt_logprobs = partial_response.get("prompt_logprobs") if partial_response else None
 
-        return InferenceEngineOutput(
+        result = InferenceEngineOutput(
             responses=[final_text_response],
             stop_reasons=[stop_reason],
             response_ids=[accum_response_ids],
             response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
             prompt_logprobs=final_prompt_logprobs,
         )
+        if saw_policy_version_segments:
+            result["response_policy_version_segments"] = [accum_policy_version_segments]
+        return result
 
     async def _chat_completion_with_retry(
         self, engine_idx: int, original_request_payload: Dict[str, Any]
@@ -934,7 +992,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
         await self._run_on_all_engines("pause_generation")
 
-    async def resume_generation(self) -> None:
+    async def resume_generation(self, policy_version: int | None = None) -> None:
         """
         Resumes generation for all engines, intended for in-flight weight updates and partial rollouts.
 
@@ -943,7 +1001,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Generation is not paused, cannot resume.")
-        await self._run_on_all_engines("resume_generation")
+        if policy_version is None:
+            await self._run_on_all_engines("resume_generation")
+        else:
+            await self._run_on_all_engines("resume_generation", policy_version=policy_version)
         self.generation_paused_event.clear()
 
     # ----------------------------

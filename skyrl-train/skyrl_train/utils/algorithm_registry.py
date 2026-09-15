@@ -100,7 +100,13 @@ def policy_loss_requires_rollout_logprobs(policy_loss_type: str) -> bool:
 
 def rollout_logprobs_enabled(algorithm_config: DictConfig) -> bool:
     """Return whether training consumes rollout logprobs for loss or diagnostics."""
-    return bool(algorithm_config.use_tis) or policy_loss_requires_rollout_logprobs(algorithm_config.policy_loss_type)
+    offpolicy_mask = algorithm_config.get("offpolicy_mask", {})
+    return (
+        bool(algorithm_config.get("use_tis", False))
+        or bool(algorithm_config.get("require_rollout_logprobs", False))
+        or bool(offpolicy_mask.get("enabled", False))
+        or policy_loss_requires_rollout_logprobs(algorithm_config.policy_loss_type)
+    )
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):

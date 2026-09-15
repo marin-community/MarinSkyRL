@@ -87,7 +87,7 @@ from skyrl_train.utils.utils import (
     policy_per_gpu_bundles_enabled,
     policy_force_cvd_mask_enabled,
 )
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks import (
@@ -168,6 +168,7 @@ def learner_config_from_msrl(cfg: DictConfig) -> LearnerConfig:
             "the JAX-first learner boundary does not support " + ", ".join(unsupported)
         )
     reference_required = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    offpolicy_mask = cfg.trainer.algorithm.get("offpolicy_mask", {})
     return LearnerConfig(
         policy_loss=policy_loss,
         loss_normalization=loss_normalization,
@@ -185,6 +186,13 @@ def learner_config_from_msrl(cfg: DictConfig) -> LearnerConfig:
         update_epochs=int(cfg.trainer.update_epochs_per_batch),
         logprob_temperature=float(cfg.generator.sampling_params.temperature),
         max_sequence_length=int(cfg.trainer.algorithm.max_seq_len),
+        require_rollout_logprobs=bool(cfg.trainer.algorithm.get("require_rollout_logprobs", False)),
+        offpolicy_mask_enabled=bool(offpolicy_mask.get("enabled", False)),
+        offpolicy_mask_ratio=str(offpolicy_mask.get("ratio", "mismatch")),
+        offpolicy_mask_low=float(offpolicy_mask.get("low", 0.5)),
+        offpolicy_mask_high=float(offpolicy_mask.get("high", 5.0)),
+        offpolicy_mask_veto_ratio=float(offpolicy_mask.get("veto_ratio", 1.0e-5)),
+        offpolicy_mask_renormalize=bool(offpolicy_mask.get("renormalize", False)),
     )
 
 
@@ -1357,9 +1365,9 @@ class RayPPOTrainer:
             response_span_tags,
             num_experts,
         )
-        behavior_logprobs_required = policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type)
+        behavior_logprobs_required = rollout_logprobs_enabled(self.cfg.trainer.algorithm)
         if behavior_logprobs_required and rollout_logprobs_tensor is None:
-            raise ValueError("rollout_logprobs are required for behavior_clip policy loss")
+            raise ValueError("the selected objective requires rollout_logprobs")
 
         # sanity check for tis
         #
@@ -2249,9 +2257,7 @@ class RayPPOTrainer:
             trajectory_batch,
             uids,
             invariant=self.group_advantage_invariant,
-            rollout_logprobs_required=policy_loss_requires_rollout_logprobs(
-                self.cfg.trainer.algorithm.policy_loss_type
-            ),
+            rollout_logprobs_required=rollout_logprobs_enabled(self.cfg.trainer.algorithm),
             target_batch_size=int(self.cfg.trainer.train_batch_size),
             tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
             state=self.group_admission_state,

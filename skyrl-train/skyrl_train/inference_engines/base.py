@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
 
+from skyrl_train.policy_version import PolicyVersionSegment
+
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 
@@ -28,6 +30,9 @@ class InferenceEngineOutput(TypedDict):
     response_ids: List[List[int]]
     stop_reasons: List[str]
     response_logprobs: Optional[List[List[float]]]
+    # Compact spans aligned with response_ids. A None version is explicit missing
+    # receiver evidence and must be rejected by learner-backed async training.
+    response_policy_version_segments: NotRequired[List[List[PolicyVersionSegment]]]
     # prompt_logprobs: per-prompt-token top-K logprobs from vLLM (for teacher scoring).
     # Format: List[List[Optional[Dict[int, float]]]] — outer list is batch,
     # inner list is prompt positions, dict maps token_id → logprob.
@@ -142,6 +147,6 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def resume_generation(self) -> None:
-        """Resume the scheduler after a weight update."""
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        """Resume after a weight update, optionally naming the installed policy."""
         raise NotImplementedError()

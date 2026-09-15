@@ -1076,7 +1076,7 @@ class BufferCheckpointCallback(TrainerCallback):
                 "uid": item.uid,
                 "earliest_model_step": item.earliest_model_step,
                 "source_prompts": item.source_prompts,
-                "behavior_policy_versions": item.behavior_policy_versions,
+                "behavior_policy_version_segments": item.behavior_policy_version_segments,
             }
             for item in groups
         ]
@@ -1157,13 +1157,23 @@ class BufferCheckpointCallback(TrainerCallback):
             groups = []
             for entry in entries:
                 trajectory_batch: TrajectoryBatch = entry["trajectory_batch"]
+                version_segments = entry.get("behavior_policy_version_segments")
+                legacy_versions = entry.get("behavior_policy_versions")
+                if version_segments is None and legacy_versions is not None:
+                    response_ids = trajectory_batch["response_ids"]
+                    if len(legacy_versions) != len(response_ids):
+                        raise ValueError("legacy behavior-policy versions do not align with response rows")
+                    version_segments = [
+                        ([{"start": 0, "token_count": len(ids), "policy_version": version}] if ids else [])
+                        for ids, version in zip(response_ids, legacy_versions, strict=True)
+                    ]
                 groups.append(
                     GeneratedOutputGroup(
                         trajectory_batch=trajectory_batch,
                         uid=entry["uid"],
                         earliest_model_step=entry["earliest_model_step"],
                         source_prompts=entry["source_prompts"],
-                        behavior_policy_versions=entry.get("behavior_policy_versions"),
+                        behavior_policy_version_segments=version_segments,
                     )
                 )
             return groups

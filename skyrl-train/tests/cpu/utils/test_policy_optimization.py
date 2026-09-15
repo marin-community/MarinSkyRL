@@ -117,6 +117,70 @@ def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
     torch.testing.assert_close(objective.kl_loss.detach(), metric[0, :2].sum() / 4)
 
 
+def test_regular_mask_matches_independent_unequal_length_value_and_gradient_reference():
+    action_log_probs = torch.tensor(
+        [[-1.0, -1.1, -1.2, -1.3], [-0.7, -0.8, -0.9, -1.0]],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    old_log_probs = torch.full_like(action_log_probs, -1.0)
+    mismatch_ratios = torch.tensor([[1.0, 0.4, 6.0, 1.0], [1.0e-6, 1.0, 1.0, 1.0]], dtype=torch.float32)
+    rollout_logprobs = old_log_probs - mismatch_ratios.log()
+    advantages = torch.tensor([[2.0, 3.0, 4.0, 50.0], [5.0, 6.0, 70.0, 80.0]], dtype=torch.float32)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
+    config = OmegaConf.create(
+        {
+            "policy_loss_type": "regular",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "eps_clip_low": 0.2,
+            "eps_clip_high": 0.2,
+            "think_token_weight": 1.0,
+            "use_entropy_loss": False,
+            "entropy_loss_coef": 0.0,
+            "use_kl_loss": False,
+            "kl_loss_coef": 0.0,
+            "kl_estimator_type": "k1",
+            "use_tis": False,
+            "offpolicy_mask": {
+                "enabled": True,
+                "ratio": "mismatch",
+                "low": 0.5,
+                "high": 5.0,
+                "veto_ratio": 1.0e-5,
+                "renormalize": False,
+            },
+        }
+    )
+
+    objective = compute_policy_objective(
+        action_log_probs=action_log_probs,
+        old_action_log_probs=old_log_probs,
+        base_action_log_probs=None,
+        advantages=advantages,
+        loss_mask=loss_mask,
+        rollout_logprobs=rollout_logprobs,
+        response_span_tags=None,
+        token_entropy=torch.zeros_like(action_log_probs),
+        config=config,
+        policy_loss_fn=ppo_policy_loss,
+        accumulation_steps=1,
+        scaling=LossScaling.CALLER,
+    )
+    objective.optimization_loss.backward()
+
+    # Only row 0 token 0 survives. The denominator remains all five originally
+    # selected tokens: loss=-2/5 and d(loss)/d(log p)=-2/5.
+    assert objective.policy_loss.item() == pytest.approx(-0.4)
+    expected_gradient = torch.zeros_like(action_log_probs)
+    expected_gradient[0, 0] = -0.4
+    torch.testing.assert_close(action_log_probs.grad, expected_gradient, rtol=0, atol=0)
+    assert objective.metrics["offpolicy_mask/masked_fraction"] == pytest.approx(0.8)
+    assert objective.metrics["offpolicy_mask/masked_fraction_low"] == pytest.approx(0.4)
+    assert objective.metrics["offpolicy_mask/masked_fraction_high"] == pytest.approx(0.2)
+    assert objective.metrics["offpolicy_mask/vetoed_sequence_fraction"] == pytest.approx(0.5)
+
+
 def test_compute_reinforce_plus_plus_outcome_advantage_returns_and_masking():
     """REINFORCE++ returns should be discounted sums with reset after EOS; advantages masked."""
     token_level_rewards = torch.tensor([[1.0, 2.0, 3.0]])
