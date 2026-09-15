@@ -271,6 +271,7 @@ def training_command(
         "+data.sampler.class_path=pkg://verl.utils.dataset.domain_weighted_sampler",
         "+data.sampler.class_name=DomainWeightedSampler",
         *(f"+data.domain_weights.{domain}={weight}" for domain, weight in zip(DOMAINS, training.domain_weights)),
+        "data.return_raw_chat=True",
         "data.dataloader_num_workers=0",
         "+mt_opd.domain_weighting=domain_routing",
         "+mt_opd.target_share_domains=[math,code,if]",
