@@ -1,60 +1,64 @@
-"""Contracts for the Marin-native Open-MOPD experiment image wrapper."""
+"""Contracts for the Open-MOPD authors-runtime image builder."""
 
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
 
+import pytest
+
 
 ROOT = Path(__file__).parents[2]
 BUILD_SCRIPT = ROOT / "docker" / "build_open_mopd_kaniko.sh"
-def test_open_mopd_wrapper_delegates_with_an_isolated_tag_and_maintained_environment(tmp_path: Path) -> None:
-    wrapper = tmp_path / BUILD_SCRIPT.name
-    wrapper.write_bytes(BUILD_SCRIPT.read_bytes())
-    delegated_environment = tmp_path / "environment"
-    (tmp_path / "build_gpu_rl_kaniko.sh").write_text(
-        '#!/usr/bin/env bash\n[ "$REGISTRY_USER" = test-user ]\n[ "$REGISTRY_TOKEN" = test-token ]\n'
-        'env | grep -E "^(TAG_PREFIX|DOCKERFILE|INSTALL_MEGATRON|HF_WHEEL_REPOSITORY|WHEEL_SOURCE|IMAGE_REPOSITORY)="'
-        ' | sort > "$DELEGATED_ENVIRONMENT"\n'
-    )
+INSTALLER_PATH = ROOT / "docker" / "install_open_mopd_runtime.py"
+SPEC = importlib.util.spec_from_file_location("install_open_mopd_runtime", INSTALLER_PATH)
+assert SPEC is not None and SPEC.loader is not None
+INSTALLER = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(INSTALLER)
+
+
+def test_open_mopd_runtime_manifest_rejects_a_missing_image_override(tmp_path: Path) -> None:
+    config = tmp_path / "fidelity.json"
+    config.write_text('{"environment":{"packages":{"s3fs":"2025.9.0"}}}')
+
+    with pytest.raises(ValueError, match="runtime manifest is missing packages"):
+        INSTALLER.expected_packages(config)
+
+
+def test_open_mopd_builder_rejects_non_iris_execution(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    apt_marker = tmp_path / "apt-ran"
+    (fake_bin / "apt-get").write_text(f"#!/usr/bin/env bash\ntouch {apt_marker}\n")
+    (fake_bin / "apt-get").chmod(0o755)
     (fake_bin / "uname").write_text("#!/usr/bin/env bash\necho x86_64\n")
     (fake_bin / "uname").chmod(0o755)
 
-    subprocess.run(
-        ["bash", str(wrapper)],
-        env=os.environ
-        | {
-            "DELEGATED_ENVIRONMENT": str(delegated_environment),
+    result = subprocess.run(
+        ["bash", str(BUILD_SCRIPT)],
+        env={
             "GITSHA": "a" * 40,
             "REGISTRY_USER": "test-user",
             "REGISTRY_TOKEN": "test-token",
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
         },
-        check=True,
+        capture_output=True,
+        check=False,
+        text=True,
     )
 
-    assert delegated_environment.read_text().splitlines() == [
-        "DOCKERFILE=docker/Dockerfile.gpu-rl",
-        "HF_WHEEL_REPOSITORY=open-athena/marinskyrl-gpu-wheelhouse",
-        "IMAGE_REPOSITORY=us-east1-docker.pkg.dev/hai-gcp-models/marin/marinskyrl",
-        "INSTALL_MEGATRON=0",
-        "TAG_PREFIX=opd-repro",
-        "WHEEL_SOURCE=auto",
-    ]
-def test_open_mopd_wrapper_disables_inherited_xtrace_before_credentials(tmp_path: Path) -> None:
+    assert result.returncode == 2
+    assert not apt_marker.exists()
+
+
+def test_open_mopd_builder_does_not_trace_credentials_on_guard_failure(tmp_path: Path) -> None:
     credential = "registry-secret-sentinel"
-    wrapper = tmp_path / BUILD_SCRIPT.name
-    wrapper.write_bytes(BUILD_SCRIPT.read_bytes())
-    (tmp_path / "build_gpu_rl_kaniko.sh").write_text(
-        '#!/usr/bin/env bash\n[ "$REGISTRY_TOKEN" = registry-secret-sentinel ]\n'
-    )
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     (fake_bin / "uname").write_text("#!/usr/bin/env bash\necho x86_64\n")
     (fake_bin / "uname").chmod(0o755)
     result = subprocess.run(
-        ["bash", str(wrapper)],
+        ["bash", str(BUILD_SCRIPT)],
         env={
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "SHELLOPTS": "braceexpand:hashall:interactive-comments:xtrace",
@@ -67,5 +71,5 @@ def test_open_mopd_wrapper_disables_inherited_xtrace_before_credentials(tmp_path
         text=True,
     )
 
-    assert result.returncode == 0
+    assert result.returncode == 2
     assert credential not in result.stderr

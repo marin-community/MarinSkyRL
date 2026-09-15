@@ -133,7 +133,9 @@
       "transformers": "4.57.6",
       "protobuf": "3.20.3",
       "flash-attn": "2.8.1",
-      "flashinfer-python": "0.3.1"
+      "flashinfer-python": "0.3.1",
+      "fsspec": "2025.9.0",
+      "s3fs": "2025.9.0"
     }
   },
   "training": {

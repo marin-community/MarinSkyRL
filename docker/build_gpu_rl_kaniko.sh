@@ -18,6 +18,7 @@ set -euo pipefail
 : "${REGISTRY_USER:?}"
 : "${REGISTRY_TOKEN:?}"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/kaniko_executor_setup.sh"
 
 # ARCH_TAG_SUFFIX keeps the two architectures apart in the registry. Every tag is
 # derived from the git sha and the same commit builds both images, so without a
@@ -138,16 +139,6 @@ else
   CACHE_FLAGS=(--cache=true "--cache-repo=${KANIKO_CACHE_REPOSITORY}")
 fi
 
-# Large cached layers traverse the CoreWeave-to-GHCR path for several minutes.
-# Kaniko otherwise defaults every registry operation to zero retries, so one
-# reset discards an otherwise healthy multi-hour build. Retry extraction,
-# download, and push failures inside the same task while preserving its cache.
-REGISTRY_RETRY_FLAGS=(
-  --image-fs-extract-retry=3
-  --image-download-retry=3
-  --push-retry=3
-)
-
 IMAGE_TAG="${TAG_PREFIX}-${GITSHA}${ARCH_TAG_SUFFIX}"
 DESTINATIONS=(--destination "${IMAGE_REPOSITORY}:${IMAGE_TAG}")
 if [ "${PUSH_FLOATING:-0}" = "1" ]; then
@@ -167,8 +158,7 @@ if [ "$WHEEL_SOURCE" = "wheel-builder" ] && [ -n "$HF_WHEEL_REPOSITORY" ]; then
   : "${HF_TOKEN:?HF_WHEEL_REPOSITORY requires HF_TOKEN for source builds}"
 fi
 
-apt-get update -y
-apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
+install_kaniko_build_packages "${APT_PACKAGES[@]}"
 
 if [ "$WHEEL_SOURCE" = "auto" ]; then
   [ "$BUILD_ARCH" = x86_64 ] || { echo "automatic Hugging Face wheel reuse is currently amd64-only" >&2; exit 2; }
@@ -255,26 +245,10 @@ PY
 fi
 unset PREBUILT_WHEEL_ARTIFACT_URI PREBUILT_WHEEL_ARTIFACT_SHA256
 
-cd /tmp
-CRANE_VERSION=v0.20.2
-curl -fsSL \
-  "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${CRANE_ASSET_ARCH}.tar.gz" \
-  -o crane.tgz
-tar -xzf crane.tgz crane
-install -m 0755 crane /usr/local/bin/crane
 # The kaniko executor tag is a multi-arch manifest, and crane defaults to
 # linux/amd64 regardless of the host, so the platform has to be explicit or an
 # aarch64 builder unpacks amd64 binaries it cannot run.
-crane export --platform "$KANIKO_PLATFORM" gcr.io/kaniko-project/executor:latest kaniko-rootfs.tar
-# Extract only Kaniko. Expanding the complete image over the Iris task root
-# touches read-only pseudo-filesystems such as /sys and masks real tar errors.
-tar -xf kaniko-rootfs.tar -C / kaniko
-test -x /kaniko/executor
-
-export DOCKER_CONFIG=/kaniko/.docker
-REGISTRY_USER="$REGISTRY_USER" REGISTRY_TOKEN="$REGISTRY_TOKEN" \
-  bash "${SCRIPT_DIR}/write_registry_auth.sh" "$REGISTRY_HOST" "$DOCKER_CONFIG"
-unset REGISTRY_TOKEN
+prepare_kaniko_executor_and_registry "$CRANE_ASSET_ARCH" "$KANIKO_PLATFORM" "$REGISTRY_HOST"
 
 # When we pay the nvcc compile, keep a minimal wheel-only image before building
 # the runtime layers. The same files are archived by manifest digest on Hugging
@@ -293,7 +267,7 @@ if [ "$WHEEL_SOURCE" = "wheel-builder" ]; then
     --build-arg VLLM_NATIVE_DONOR_ARCHIVE_SHA256="$NATIVE_ARCHIVE_SHA256" \
     --skip-unused-stages \
     --compressed-caching=false \
-    "${REGISTRY_RETRY_FLAGS[@]}" \
+    "${KANIKO_REGISTRY_RETRY_FLAGS[@]}" \
     "${CACHE_FLAGS[@]}" \
     --destination "${IMAGE_REPOSITORY}:wheels-${GITSHA}${ARCH_TAG_SUFFIX}"
   set +x
@@ -343,6 +317,6 @@ exec /kaniko/executor \
   --skip-unused-stages \
   "${SNAPSHOT_FLAGS[@]}" \
   --compressed-caching=false \
-  "${REGISTRY_RETRY_FLAGS[@]}" \
+  "${KANIKO_REGISTRY_RETRY_FLAGS[@]}" \
   "${CACHE_FLAGS[@]}" \
   "${DESTINATIONS[@]}"
