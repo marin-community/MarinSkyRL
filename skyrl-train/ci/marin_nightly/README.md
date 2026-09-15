@@ -59,7 +59,7 @@ environment (`MODEL`, `MAX_STEPS`, `DATA_DIR`). Inside an Iris GPU task:
 MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
 ```
 
-The GB200 lane additionally imports `vllm._C` and the cuMem allocator, verifies the
+The GB200 lane additionally imports `vllm._C_stable_libtorch` and the cuMem allocator, verifies the
 Grug model registry entry, then runs a real rollout, eager FSDP2 policy update,
 mixed-dtype weight broadcast, and second rollout. The eager policy path keeps this
 gate independent of the optional compiled FlashAttention package.

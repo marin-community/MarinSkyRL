@@ -65,12 +65,12 @@ def test_frozen_cuda_activation_preserves_task_shell_library_path(tmp_path):
     assert result.stdout.splitlines() == ["/frozen/lib:/task/lib", "/frozen/nvrtc"]
 
 
-def test_frozen_cuda_runtime_rejects_multiple_nvrtc_homes(tmp_path):
+def test_frozen_cuda_runtime_rejects_multiple_cuda_roots(tmp_path):
     site_packages = []
     for name in ("first", "second"):
         root = tmp_path / name
         (root / "nvidia" / "cu13" / "lib").mkdir(parents=True)
         site_packages.append(str(root))
 
-    with pytest.raises(RuntimeError, match="exactly one NVRTC home"):
+    with pytest.raises(RuntimeError, match="exactly one CUDA root"):
         EnvVarManager.for_frozen_cuda_runtime(site_packages)
