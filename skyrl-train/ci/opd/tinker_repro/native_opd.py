@@ -103,8 +103,10 @@ class RunManifest:
 
 
 def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, output_root: Path) -> tuple[str, ...]:
-    batch_size = shape.groups_per_batch * shape.group_size
-    mini_batch_size = min(batch_size, 256)
+    # MarinSkyRL sizes trainer batches in prompt groups. The generator expands each
+    # group into ``n_samples_per_prompt`` trajectories before the learner update.
+    prompt_batch_size = shape.groups_per_batch
+    mini_batch_size = min(prompt_batch_size, 256)
     targets = ",".join(LORA_TARGETS)
     return (
         f"data.train_data=['{data_path}']",
@@ -149,7 +151,7 @@ def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, outp
         f"trainer.placement.policy_num_gpus_per_node={POLICY_GPUS}",
         "trainer.epochs=1",
         f"trainer.max_steps={shape.steps}",
-        f"trainer.train_batch_size={batch_size}",
+        f"trainer.train_batch_size={prompt_batch_size}",
         f"trainer.policy_mini_batch_size={mini_batch_size}",
         "trainer.micro_train_batch_size_per_gpu=1",
         "trainer.micro_forward_batch_size_per_gpu=1",
@@ -163,7 +165,7 @@ def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, outp
         "trainer.dump_eval_results=false",
         "trainer.logger=console",
         "trainer.project_name=tinker_native_repro",
-        f"trainer.run_name=tinker_native_{shape.steps}_{batch_size}",
+        f"trainer.run_name=tinker_native_{shape.steps}_{prompt_batch_size}x{shape.group_size}",
         f"trainer.ckpt_path={output_root / 'checkpoints'}",
         f"trainer.export_path={output_root / 'exports'}",
         "generator.backend=vllm",

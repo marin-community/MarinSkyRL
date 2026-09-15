@@ -54,8 +54,10 @@ def test_native_opd_fidelity_step_matches_the_published_batch_and_objective():
     arguments = OPD.hydra_arguments(shape, Path("/data.parquet"), Path("/adapter"), Path("/output"))
     values = {argument.split("=", 1)[0].lstrip("+"): argument.split("=", 1)[1] for argument in arguments}
 
-    assert values["trainer.train_batch_size"] == "2048"
+    assert values["trainer.train_batch_size"] == "512"
     assert values["generator.n_samples_per_prompt"] == "4"
+    assert shape.dataset_rows == int(values["trainer.train_batch_size"])
+    assert int(values["trainer.train_batch_size"]) * int(values["generator.n_samples_per_prompt"]) == 2048
     assert values["trainer.algorithm.distillation.objective"] == "sampled_reverse_kl"
     assert values["trainer.algorithm.distillation.reward_mode"] == "replace"
     assert values["trainer.algorithm.distillation.coefficient"] == "1.0"
