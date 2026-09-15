@@ -95,6 +95,10 @@ trainer:
           rank: 0
           alpha: 16
           dropout: 0
+          # Load an existing adapter instead of creating fresh LoRA weights. Its
+          # stored PEFT config is authoritative; rank must match for vLLM sync.
+          adapter_path: null
+          adapter_revision: null
           lora_sync_path: "/tmp/skyrl_lora_sync"
           target_modules: "all-linear"
           exclude_modules: null

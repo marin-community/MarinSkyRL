@@ -5,13 +5,14 @@
 
 import contextlib
 import threading
+from collections.abc import Iterable
 from typing import Any, Dict, Optional, Tuple, Union
 from copy import deepcopy
 
 import torch
 import torch.nn as nn
 from loguru import logger
-from peft import LoraConfig, TaskType, get_peft_model
+from peft import LoraConfig, PeftConfig, PeftModel, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
 import transformers
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
@@ -90,6 +91,60 @@ def resolve_attn_implementation(
             "supported under context parallel (G2)."
         )
     return impl
+
+
+def _load_trainable_lora_adapter(
+    model: nn.Module,
+    *,
+    adapter_path: str,
+    adapter_revision: str | None,
+    lora_rank: int,
+    lora_alpha: int,
+    lora_dropout: float,
+    target_modules: str | Iterable[str] | None,
+    exclude_modules: str | Iterable[str] | None,
+) -> PeftModel:
+    adapter_config = PeftConfig.from_pretrained(adapter_path, revision=adapter_revision)
+    if not isinstance(adapter_config, LoraConfig):
+        raise ValueError(f"Adapter {adapter_path!r} is {adapter_config.peft_type}, not LoRA")
+    configured_values = {
+        "rank": lora_rank,
+        "alpha": lora_alpha,
+        "dropout": lora_dropout,
+        "target_modules": _normalized_module_names(target_modules),
+        "exclude_modules": _normalized_module_names(exclude_modules),
+    }
+    adapter_values = {
+        "rank": adapter_config.r,
+        "alpha": adapter_config.lora_alpha,
+        "dropout": adapter_config.lora_dropout,
+        "target_modules": _normalized_module_names(adapter_config.target_modules),
+        "exclude_modules": _normalized_module_names(adapter_config.exclude_modules),
+    }
+    mismatches = {
+        name: (configured_values[name], adapter_values[name])
+        for name in configured_values
+        if configured_values[name] != adapter_values[name]
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{name}: configured={configured!r}, adapter={stored!r}"
+            for name, (configured, stored) in mismatches.items()
+        )
+        raise ValueError(f"Configured LoRA parameters do not match adapter {adapter_path!r}: {details}")
+    return PeftModel.from_pretrained(
+        model,
+        adapter_path,
+        is_trainable=True,
+        revision=adapter_revision,
+        low_cpu_mem_usage=model.device.type == "meta",
+    )
+
+
+def _normalized_module_names(value: str | Iterable[str] | None) -> str | frozenset[str] | None:
+    if isinstance(value, str) or value is None:
+        return value
+    return frozenset(value)
 
 
 def validate_grug_training_options(
@@ -346,6 +401,8 @@ class HFModelWrapper(nn.Module):
         lora_dropout (float, optional): Dropout rate for LoRA layers. Defaults to 0.
         target_modules (list, optional): List of target modules for applying LoRA. Defaults to None.
         exclude_modules (list, optional): List of modules to exclude from applying LoRA. Defaults to None.
+        lora_adapter_path (str, optional): Local path or Hub model ID for initial LoRA weights. Defaults to None.
+        lora_adapter_revision (str, optional): Hub revision for the initial LoRA adapter. Defaults to None.
         ds_config (dict, optional): Configuration for DeepSpeed, enabling model partitioning across multiple GPUs. Defaults to None.
         device_map (dict, optional): Device mapping for loading the model onto specific devices. Defaults to None.
         packing_samples (bool, optional): Whether to pack samples during training. Defaults to False.
@@ -365,6 +422,8 @@ class HFModelWrapper(nn.Module):
         lora_dropout=0,
         target_modules=None,
         exclude_modules=None,
+        lora_adapter_path: str | None = None,
+        lora_adapter_revision: str | None = None,
         ds_config=None,
         device_map=None,
         temperature=1.0,
@@ -388,6 +447,10 @@ class HFModelWrapper(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__()
+        if lora_adapter_path is not None and lora_rank <= 0:
+            raise ValueError("lora_rank must be positive when lora_adapter_path is configured")
+        if lora_adapter_revision is not None and lora_adapter_path is None:
+            raise ValueError("lora_adapter_revision requires lora_adapter_path")
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
         self.context_parallel_size = context_parallel_size
@@ -557,16 +620,28 @@ class HFModelWrapper(nn.Module):
             if lora_rank > 0:
                 # https://github.com/huggingface/peft/issues/137
                 self.model.enable_input_require_grads()
-                lora_config = LoraConfig(
-                    task_type=TaskType.CAUSAL_LM,
-                    r=lora_rank,
-                    lora_alpha=lora_alpha,
-                    target_modules=target_modules,
-                    exclude_modules=exclude_modules,
-                    lora_dropout=lora_dropout,
-                    bias="none",
-                )
-                self.model = get_peft_model(self.model, lora_config)
+                if lora_adapter_path is not None:
+                    self.model = _load_trainable_lora_adapter(
+                        self.model,
+                        adapter_path=lora_adapter_path,
+                        adapter_revision=lora_adapter_revision,
+                        lora_rank=lora_rank,
+                        lora_alpha=lora_alpha,
+                        lora_dropout=lora_dropout,
+                        target_modules=target_modules,
+                        exclude_modules=exclude_modules,
+                    )
+                else:
+                    lora_config = LoraConfig(
+                        task_type=TaskType.CAUSAL_LM,
+                        r=lora_rank,
+                        lora_alpha=lora_alpha,
+                        target_modules=target_modules,
+                        exclude_modules=exclude_modules,
+                        lora_dropout=lora_dropout,
+                        bias="none",
+                    )
+                    self.model = get_peft_model(self.model, lora_config)
 
                 if load_in_4bit:
                     for name, module in self.model.named_modules():

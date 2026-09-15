@@ -116,6 +116,10 @@ ADDITIVE_MODEL_FIELDS = {
     "source_identity": None,
     "revision": None,
 }
+ADDITIVE_POLICY_LORA_FIELDS = {
+    "adapter_path": None,
+    "adapter_revision": None,
+}
 ADDITIVE_POLICY_FIELDS = {
     "grug_query_bias_interpolation_weight": None,
     "grug_query_bias_update_rate": None,
@@ -198,6 +202,8 @@ def test_all_defaults_is_structurally_identical_to_baseline():
     for role in TRAINER_MODEL_ROLES:
         for k in ADDITIVE_MODEL_FIELDS:
             container["trainer"][role]["model"].pop(k, None)
+    for k in ADDITIVE_POLICY_LORA_FIELDS:
+        container["trainer"]["policy"]["model"]["lora"].pop(k, None)
     for k in ADDITIVE_POLICY_FIELDS:
         container["trainer"]["policy"].pop(k, None)
     for k in ADDITIVE_OVERLONG_FIELDS:

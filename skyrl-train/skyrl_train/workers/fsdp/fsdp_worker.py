@@ -787,6 +787,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 lora_dropout=self.cfg.trainer.policy.model.lora.dropout,
                 target_modules=self.cfg.trainer.policy.model.lora.target_modules,
                 exclude_modules=self.cfg.trainer.policy.model.lora.exclude_modules,
+                lora_adapter_path=self.cfg.trainer.policy.model.lora.adapter_path,
+                lora_adapter_revision=self.cfg.trainer.policy.model.lora.adapter_revision,
                 sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
