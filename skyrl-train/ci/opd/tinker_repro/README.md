@@ -103,6 +103,13 @@ and reverse-KL objective on eight local GPUs. Its exact vLLM compatibility
 backport edits the installed Python source, so Iris jobs must use a task-private
 uv cache and copy-mode installation:
 
+The rollout engine reserves 90% of each assigned GPU for weights and KV cache
+and admits at most 512 concurrent sequences. The bound reduces repeated
+preemption of 16,384-token responses while preserving the published batch and
+sampling contract. Teacher prompt-logprob scoring retains a separate 70% GPU
+memory reservation and token budget so its float32 log-softmax has transient
+memory headroom.
+
 ```bash
 uv run iris --cluster cw-rno2a job run \
   --enable-extra-resources --gpu H100x8 --no-sync \

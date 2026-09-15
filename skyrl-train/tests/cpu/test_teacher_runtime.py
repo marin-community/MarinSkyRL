@@ -255,6 +255,7 @@ async def test_local_teacher_runtime_scores_exact_rollout_tokens_and_owns_engine
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engine)
     cfg = _config()
     cfg.teachers.primary.resources.max_num_batched_tokens = 64
+    cfg.teachers.primary.resources.gpu_memory_utilization = 0.6
     prepared = prepare_distillation_runtime(cfg, tokenizer)
     runtime = await start_sync_distillation_runtime(cfg, prepared)
     assert runtime is not None
@@ -273,6 +274,7 @@ async def test_local_teacher_runtime_scores_exact_rollout_tokens_and_owns_engine
     torch.testing.assert_close(scored.distillation.teacher_action_log_probs, torch.tensor([[-0.25, -0.25]]))
     torch.testing.assert_close(scored.distillation.loss_weights, torch.tensor([[0.5, 0.5]]))
     assert engine_kwargs["max_num_batched_tokens"] == 64
+    assert engine_kwargs["gpu_memory_utilization"] == 0.6
     assert engine.teardown_count == 1
 
 

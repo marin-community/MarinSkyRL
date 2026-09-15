@@ -72,6 +72,7 @@ class TeacherResourceSpec:
     tensor_parallel_size: int
     colocation_group: str
     max_num_batched_tokens: int | None = None
+    gpu_memory_utilization: float | None = None
 
 
 class TeacherSpec(Protocol):
@@ -285,6 +286,13 @@ def _nonnegative_float(config: Mapping[str, object], key: str, path: str) -> flo
     return result
 
 
+def _gpu_memory_utilization(config: Mapping[str, object], path: str) -> float:
+    result = _positive_float(config, "gpu_memory_utilization", path)
+    if result > 1:
+        raise ValueError(f"{path}.gpu_memory_utilization must be at most 1; got {result!r}")
+    return result
+
+
 def _teacher_residency(config: Mapping[str, object]) -> TeacherResidencySpec:
     raw = config.get("residency")
     if raw is None:
@@ -305,7 +313,16 @@ def _teacher_resources(config: Mapping[str, object], path: str) -> TeacherResour
     resources = _mapping(raw, f"{path}.resources")
     _reject_unknown(
         resources,
-        frozenset({"num_nodes", "gpus_per_node", "tensor_parallel_size", "colocation_group", "max_num_batched_tokens"}),
+        frozenset(
+            {
+                "num_nodes",
+                "gpus_per_node",
+                "tensor_parallel_size",
+                "colocation_group",
+                "max_num_batched_tokens",
+                "gpu_memory_utilization",
+            }
+        ),
         f"{path}.resources",
     )
     return TeacherResourceSpec(
@@ -317,6 +334,11 @@ def _teacher_resources(config: Mapping[str, object], path: str) -> TeacherResour
             None
             if resources.get("max_num_batched_tokens") is None
             else _positive_integer(resources, "max_num_batched_tokens", f"{path}.resources")
+        ),
+        gpu_memory_utilization=(
+            None
+            if resources.get("gpu_memory_utilization") is None
+            else _gpu_memory_utilization(resources, f"{path}.resources")
         ),
     )
 
