@@ -46,9 +46,8 @@ trainer:
     num_parallel_generation_workers: 160
     max_buffered_groups: 32
     admission_stall_timeout: 1800
-    # Publish once after update 1 and once after the final update. Policy-1
-    # rollouts remain admissible through update 5 under the age-4 bound.
-    policy_publication_steps: [1, 5]
+    # Ahmad's measured M10 recipe copies the learner after every update.
+    policy_publication_steps: [1, 2, 3, 4, 5]
   epochs: 1
   max_steps: 5
   update_epochs_per_batch: 1
@@ -57,9 +56,7 @@ trainer:
   eval_batch_size: 128
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
-  # The identical policy-0/dev-set baseline was measured by the preceding
-  # bounded allocation. Keep only the train-end evaluation in this final gate.
-  eval_before_train: false
+  eval_before_train: true
   eval_interval: 6
   ckpt_interval: 6
   hf_save_interval: -1
@@ -82,9 +79,9 @@ trainer:
     fsdp_config:
       expert_model_parallel_size: 1
     levanter:
-      # The staged checkpoint and vLLM weights are BF16. FP32 parameter and
-      # gradient storage exceeded H100 memory before Adam entered the device.
-      parameter_dtype: bfloat16
+      # Four learner nodes fit the reference FP32 parameter storage and the
+      # ordinary device-resident AdamW step used by the corrected 67B run.
+      parameter_dtype: float32
       compute_dtype: bfloat16
       output_dtype: float32
       attention_implementation: gpu_fa4_cute
@@ -95,7 +92,7 @@ trainer:
       # synchronization around the 125 GB publication.
       publication_max_chunk_bytes: 2147483648
       publication_timeout_seconds: 1800
-      offload_opt_state: true
+      offload_opt_state: false
       # EP8 workers install disjoint contiguous expert ranges. Scatter those
       # ranges instead of broadcasting the full 1.68 GB tensors eight times.
       publication_scatter_experts: true
@@ -106,9 +103,7 @@ trainer:
       log_dir: /tmp/marinskyrl-levanter
   placement:
     colocate_all: false
-    # Two learner hosts keep the 128-trajectory M10 batch unchanged while
-    # reducing both allocation cost and redundant cross-host publication work.
-    policy_num_nodes: 2
+    policy_num_nodes: 4
     policy_num_gpus_per_node: 8
 
 generator:

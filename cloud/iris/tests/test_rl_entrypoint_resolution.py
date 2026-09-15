@@ -234,7 +234,7 @@ def test_snowball_levanter_async_m10_config_composes_and_lowers():
     hydra_args = build_skyrl_hydra_args(
         parsed,
         {
-            "num_nodes": 3,
+            "num_nodes": 5,
             "model_path": "marin-community/grug-67b-a2b-sft-s2-thinking-step630",
             "model_revision": revision,
         },
@@ -247,13 +247,14 @@ def test_snowball_levanter_async_m10_config_composes_and_lowers():
     validate_fully_async_levanter_config(cfg)
     runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
     assert parsed.entrypoint == "skyrl_train.entrypoints.fully_async_levanter_snowball"
-    assert runtime.training_gpus == 16
+    assert runtime.training_gpus == 32
     assert runtime.inference_world_size == 8
     assert runtime.train_batch_size == 128
     assert runtime.learning_rate == 1.0e-6
     assert runtime.max_grad_norm == 1.0
+    assert runtime.parameter_dtype == "float32"
     assert runtime.publication_max_chunk_bytes == 2 << 30
-    assert runtime.offload_opt_state
+    assert not runtime.offload_opt_state
     assert runtime.publication_scatter_experts
     assert runtime.initial_weights_already_loaded
     assert runtime.model_revision == revision
@@ -262,4 +263,6 @@ def test_snowball_levanter_async_m10_config_composes_and_lowers():
     assert cfg.trainer.fully_async.max_buffered_groups == 32
     assert cfg.generator.sampling_params.logprobs == 0
     assert cfg.generator.non_agentic_parser_protocol == "post-thinking-native-v1"
+    assert cfg.trainer.fully_async.policy_publication_steps == [1, 2, 3, 4, 5]
+    assert cfg.trainer.eval_before_train
     assert cfg.trainer.eval_interval == 6
