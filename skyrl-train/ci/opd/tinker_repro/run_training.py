@@ -26,6 +26,7 @@ from training_plan import COOKBOOK_REVISION, Stage, TrainingPlan, build_training
 
 MANIFEST_NAME = "training-reproduction-manifest.json"
 SYNC_INTERVAL_SECONDS = 60
+RECIPE_RUNNER = Path(__file__).with_name("recipe_fidelity.py")
 
 
 class RecipeProcess(Protocol):
@@ -161,7 +162,15 @@ def run_stage(
         cost_acknowledgement_usd=str(acknowledgement) if acknowledgement is not None else None,
     )
     claim_output(storage, manifest)
-    command = (sys.executable, "-m", plan.recipe_module, *plan.recipe_arguments)
+    command = (
+        sys.executable,
+        str(RECIPE_RUNNER),
+        plan.recipe.value,
+        plan.recipe_module,
+        plan.dataset.repository,
+        plan.dataset.revision,
+        *plan.recipe_arguments,
+    )
     try:
         process = process_factory(command)
         while True:

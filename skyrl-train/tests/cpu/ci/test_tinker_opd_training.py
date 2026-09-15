@@ -24,6 +24,7 @@ def load_module(name: str, filename: str) -> Any:
 
 training_plan = load_module("tinker_training_plan", "training_plan.py")
 runner = load_module("tinker_training_runner", "run_training.py")
+recipe_fidelity = load_module("tinker_recipe_fidelity", "recipe_fidelity.py")
 
 
 class MemoryStorage:
@@ -137,6 +138,57 @@ def test_dataset_revision_drift_fails_before_training() -> None:
         runner.validate_dataset_head(plan, lambda repository: "new-revision")
 
 
+def test_pinned_dataset_loader_forwards_reviewed_revision() -> None:
+    requests: list[tuple[str, str, str]] = []
+
+    def load_dataset(repository: str, *, split: str, revision: str) -> object:
+        requests.append((repository, split, revision))
+        return object()
+
+    loader = recipe_fidelity.pinned_dataset_loader(
+        load_dataset,
+        repository="zwhe99/DeepMath-103K",
+        revision="reviewed-revision",
+    )
+
+    loader("zwhe99/DeepMath-103K", split="train")
+
+    assert requests == [("zwhe99/DeepMath-103K", "train", "reviewed-revision")]
+
+
+def test_pinned_dataset_loader_rejects_recipe_dataset_substitution() -> None:
+    loader = recipe_fidelity.pinned_dataset_loader(
+        lambda *args, **kwargs: pytest.fail("unexpected dataset reached Hugging Face"),
+        repository="zwhe99/DeepMath-103K",
+        revision="reviewed-revision",
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected dataset"):
+        loader("substituted/dataset", split="train")
+
+
+def test_opd_config_factory_forwards_cli_temperature() -> None:
+    received: dict[str, object] = {}
+
+    def build_config(**kwargs: object) -> object:
+        received.update(kwargs)
+        return object()
+
+    config_factory = recipe_fidelity.opd_config_factory(build_config, temperature=1.0)
+
+    config_factory(max_tokens=16_384)
+
+    assert received == {"max_tokens": 16_384, "temperature": 1.0}
+
+
+def test_recipe_adapter_rejects_module_not_recorded_for_recipe() -> None:
+    with pytest.raises(RuntimeError, match="unexpected sft recipe module"):
+        recipe_fidelity.validated_recipe_module(
+            training_plan.Recipe.SFT,
+            "tinker_cookbook.recipes.distillation.on_policy_distillation",
+        )
+
+
 def test_run_stage_periodically_preserves_artifacts_and_records_final_checkpoint(tmp_path: Path) -> None:
     plan = replace(sft_plan(training_plan.Stage.SFT_PLUMBING), local_log_path=str(tmp_path / "run"))
     storage = MemoryStorage()
@@ -183,6 +235,14 @@ def test_run_stage_periodically_preserves_artifacts_and_records_final_checkpoint
     )
 
     assert command_seen is not None
+    assert command_seen[:6] == (
+        sys.executable,
+        str(runner.RECIPE_RUNNER),
+        "sft",
+        plan.recipe_module,
+        plan.dataset.repository,
+        plan.dataset.revision,
+    )
     assert any(path == "metrics.jsonl" for path, _ in storage.history[:-2])
     assert storage.files["checkpoints.jsonl"]
     persisted = json.loads(storage.files[runner.MANIFEST_NAME])
