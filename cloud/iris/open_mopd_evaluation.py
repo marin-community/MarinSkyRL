@@ -5,13 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import shlex
-import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from cloud.iris.experiment_launch import iris_task_command, submit_or_print, validate_digest_addressed_image
 from cloud.iris.open_mopd_fidelity import Hardware, gpu_count, load_config, validate_output_uri
 from cloud.iris.runtime_bundle import resolve_launcher_source
 
@@ -24,7 +23,7 @@ GATES = ("smoke", "full")
 SCORE_MODES = ("released", "unavailable")
 SMOKE_MAX_TOKENS = 512
 _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
-_DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -162,7 +161,7 @@ def _benchmark(value: Any, index: int) -> EvaluationBenchmark:
         raise ValueError(f"{name} size, rows, samples, and max_tokens must be positive")
     if not 0 < gpu_memory_utilization < 1:
         raise ValueError(f"{name}.gpu_memory_utilization must be in (0, 1)")
-    if not _DIGEST_PATTERN.fullmatch(sha256):
+    if not _SHA256_PATTERN.fullmatch(sha256):
         raise ValueError(f"{name}.sha256 must be a lowercase 64-character SHA-256")
     if score_mode not in SCORE_MODES:
         raise ValueError(f"{name}.score_mode must be one of {SCORE_MODES}")
@@ -310,8 +309,7 @@ def build_plan(
 ) -> EvaluationLaunchPlan:
     validate_output_uri(output_uri)
     source = resolve_launcher_source()
-    if not re.fullmatch(r"[^@]+@sha256:[0-9a-f]{64}", task_image):
-        raise ValueError("--task-image must be a digest-addressed image reference")
+    validate_digest_addressed_image(task_image)
     selected_slice = gpu_slice or config.hardware.gpu
     gpu_count(selected_slice)
     try:
@@ -324,53 +322,32 @@ def build_plan(
     omissions = list(config.known_omissions)
     if selected_slice != config.hardware.gpu:
         omissions.append(f"Hardware override uses {selected_slice}; the authors report {config.hardware.gpu}.")
-    command = (
-        "uv",
-        "run",
-        "--frozen",
-        "iris",
-        "--config",
-        str(cluster_config),
-        "job",
-        "run",
-        "--enable-extra-resources",
-        "--gpu",
-        selected_slice,
-        "--cpu",
-        str(config.hardware.cpu),
-        "--memory",
-        config.hardware.memory,
-        "--disk",
-        config.hardware.disk,
-        "--priority",
-        "batch",
-        "--no-preemptible",
-        "--max-retries",
-        "0",
-        "--task-image",
-        task_image,
-        "--no-sync",
-        "--no-wait",
-        "--job-name",
-        f"open-mopd-final-eval-{gate}",
-        "--",
-        "python",
-        "-m",
-        TASK_MODULE,
-        "--config",
-        task_config.as_posix(),
-        "--fidelity-config",
-        fidelity_path.as_posix(),
-        "--gate",
-        gate,
-        "--output-uri",
-        output_uri,
-        "--gpu-slice",
-        selected_slice,
-        "--task-image",
-        task_image,
-        "--launcher-commit",
-        source.commit,
+    command = iris_task_command(
+        cluster_config=cluster_config,
+        gpu=selected_slice,
+        cpu=config.hardware.cpu,
+        memory=config.hardware.memory,
+        disk=config.hardware.disk,
+        priority="batch",
+        task_image=task_image,
+        job_name=f"open-mopd-final-eval-{gate}",
+        task_module=TASK_MODULE,
+        task_args=(
+            "--config",
+            task_config.as_posix(),
+            "--fidelity-config",
+            fidelity_path.as_posix(),
+            "--gate",
+            gate,
+            "--output-uri",
+            output_uri,
+            "--gpu-slice",
+            selected_slice,
+            "--task-image",
+            task_image,
+            "--launcher-commit",
+            source.commit,
+        ),
     )
     return EvaluationLaunchPlan(
         gate=gate,
@@ -418,13 +395,12 @@ def main(argv: list[str] | None = None) -> int:
         gpu_slice=args.gpu_slice,
     )
     print(plan.json())
-    print(shlex.join(plan.iris_command))
-    if not args.submit:
-        print("Dry run only. Add --submit --allow-known-omissions after reviewing the plan.")
-        return 0
-    if not args.allow_known_omissions:
-        raise SystemExit("--submit requires --allow-known-omissions")
-    return subprocess.run(plan.iris_command, check=False).returncode
+    return submit_or_print(
+        plan.iris_command,
+        submit=args.submit,
+        reviewed=args.allow_known_omissions,
+        review_option="--allow-known-omissions",
+    )
 
 
 if __name__ == "__main__":

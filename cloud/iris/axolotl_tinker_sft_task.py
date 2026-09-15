@@ -9,7 +9,7 @@ import json
 import subprocess
 import sys
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -158,10 +158,16 @@ def write_manifest(path: Path, manifest: dict[str, object]) -> None:
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def prepare_stage(
-    plan: LaunchPlan, *, base_config: Path, work_root: Path
-) -> tuple[Path, dict[str, Any], tuple[str, ...], dict[str, object]]:
-    """Materialize immutable inputs and return the initial training manifest."""
+@dataclass(frozen=True)
+class PreparedStage:
+    output_root: Path
+    resolved_config: dict[str, Any]
+    command: tuple[str, ...]
+    manifest: dict[str, object]
+
+
+def prepare_stage(plan: LaunchPlan, *, base_config: Path, work_root: Path) -> PreparedStage:
+    """Materialize immutable inputs and return their named execution bundle."""
     if work_root.exists():
         raise ValueError(f"Work root already exists: {work_root}")
     work_root.mkdir(parents=True)
@@ -196,7 +202,7 @@ def prepare_stage(
         "resolved_config_sha256": file_sha256(resolved_path),
         "command": command,
     }
-    return output_root, resolved, command, manifest
+    return PreparedStage(output_root, resolved, command, manifest)
 
 
 def run_stage(
@@ -214,29 +220,30 @@ def run_stage(
     if task_image != plan.task_image or launcher_commit != plan.launcher_commit:
         raise ValueError("Worker provenance does not match the reviewed launch plan")
     reject_existing_output(plan.output_uri, MANIFEST_NAME)
-    output_root, resolved, command, manifest = prepare_stage(plan, base_config=base_config, work_root=work_root)
+    prepared = prepare_stage(plan, base_config=base_config, work_root=work_root)
+    manifest = prepared.manifest
     manifest.update(
         task_image=task_image,
         launcher_commit=launcher_commit,
         cost_acknowledgement_usd=str(acknowledgement) if acknowledgement is not None else None,
     )
-    manifest_path = output_root / MANIFEST_NAME
+    manifest_path = prepared.output_root / MANIFEST_NAME
     write_manifest(manifest_path, manifest)
-    sync_tree(output_root, plan.output_uri)
+    sync_tree(prepared.output_root, plan.output_uri)
 
     stop = threading.Event()
     uploader = threading.Thread(
         target=periodic_sync,
-        args=(output_root, plan.output_uri, stop, sync_interval),
+        args=(prepared.output_root, plan.output_uri, stop, sync_interval),
         daemon=True,
         name="axolotl-sft-output-sync",
     )
     uploader.start()
     try:
-        result = subprocess.run(command, check=False)
+        result = subprocess.run(prepared.command, check=False)
         manifest["returncode"] = result.returncode
         if result.returncode == 0:
-            manifest["peft"] = peft_artifacts(Path(resolved["output_dir"]))
+            manifest["peft"] = peft_artifacts(Path(prepared.resolved_config["output_dir"]))
             manifest["status"] = "complete"
         else:
             manifest["status"] = "failed"
@@ -249,7 +256,7 @@ def run_stage(
     finally:
         stop.set()
         uploader.join(timeout=10)
-        sync_tree(output_root, plan.output_uri)
+        sync_tree(prepared.output_root, plan.output_uri)
     return result.returncode
 
 

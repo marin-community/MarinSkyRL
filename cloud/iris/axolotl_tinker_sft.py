@@ -6,14 +6,13 @@ import argparse
 import hashlib
 import json
 import re
-import shlex
-import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 
+from cloud.iris.experiment_launch import iris_task_command, submit_or_print, validate_digest_addressed_image
 from cloud.iris.open_mopd_fidelity import validate_output_uri
 from cloud.iris.runtime_bundle import resolve_launcher_source
 
@@ -34,7 +33,6 @@ FULL_SEQUENCE_LENGTH = 16_384
 FULL_SHUFFLE_BUFFER = FULL_STEPS * FULL_BATCH_SIZE
 FULL_COST_ACKNOWLEDGEMENT = Decimal("10000")
 FIDELITY_COST_ACKNOWLEDGEMENT = Decimal("150")
-_IMAGE_DIGEST = re.compile(r"[^@]+@sha256:[0-9a-f]{64}")
 _RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{7,62}")
 
 
@@ -143,8 +141,7 @@ def build_plan(
     """Resolve one immutable, secret-free native SFT launch plan."""
     _validate_run_id(run_id)
     validate_output_uri(output_uri)
-    if not _IMAGE_DIGEST.fullmatch(task_image):
-        raise ValueError("--task-image must be a digest-addressed Axolotl v0.19.0 image")
+    validate_digest_addressed_image(task_image)
     source = resolve_launcher_source()
     if config_path == DEFAULT_CONFIG:
         config_path = source.root / CONFIG_RELATIVE_PATH
@@ -164,39 +161,7 @@ def build_plan(
     acknowledgement = definition.cost_acknowledgement
     command: tuple[str, ...] = ()
     if cluster_config is not None:
-        command = (
-            "uv",
-            "run",
-            "--frozen",
-            "iris",
-            "--config",
-            str(cluster_config.resolve()),
-            "job",
-            "run",
-            "--enable-extra-resources",
-            "--gpu",
-            GPU_SLICE,
-            "--cpu",
-            "64",
-            "--memory",
-            "512GB",
-            "--disk",
-            "750GB",
-            "--priority",
-            "batch" if acknowledgement is not None else "interactive",
-            "--no-preemptible",
-            "--max-retries",
-            "0",
-            "--task-image",
-            task_image,
-            "--no-sync",
-            "--no-wait",
-            "--job-name",
-            f"axolotl-tinker-sft-{stage.value.replace('_', '-')}-{run_id}",
-            "--",
-            "python",
-            "-m",
-            TASK_MODULE,
+        task_args = (
             "--config",
             relative_config.as_posix(),
             "--stage",
@@ -211,7 +176,19 @@ def build_plan(
             source.commit,
         )
         if acknowledgement is not None:
-            command += ("--acknowledge-cost-usd", str(acknowledgement))
+            task_args += ("--acknowledge-cost-usd", str(acknowledgement))
+        command = iris_task_command(
+            cluster_config=cluster_config,
+            gpu=GPU_SLICE,
+            cpu=64,
+            memory="512GB",
+            disk="750GB",
+            priority="batch" if acknowledgement is not None else "interactive",
+            task_image=task_image,
+            job_name=f"axolotl-tinker-sft-{stage.value.replace('_', '-')}-{run_id}",
+            task_module=TASK_MODULE,
+            task_args=task_args,
+        )
     return LaunchPlan(
         stage=stage,
         steps=definition.steps,
@@ -266,13 +243,12 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:
         argument_parser().error(str(error))
     print(plan.json())
-    print(shlex.join(plan.iris_command))
-    if not args.submit:
-        print("Dry run only. Add --submit --allow-known-deviations after reviewing the plan.")
-        return 0
-    if not args.allow_known_deviations:
-        raise SystemExit("--submit requires --allow-known-deviations")
-    return subprocess.run(plan.iris_command, check=False).returncode
+    return submit_or_print(
+        plan.iris_command,
+        submit=args.submit,
+        reviewed=args.allow_known_deviations,
+        review_option="--allow-known-deviations",
+    )
 
 
 if __name__ == "__main__":

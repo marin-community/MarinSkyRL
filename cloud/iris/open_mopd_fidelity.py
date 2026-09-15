@@ -5,14 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import shlex
-import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+from cloud.iris.experiment_launch import iris_task_command, submit_or_print, validate_digest_addressed_image
 from cloud.iris.runtime_bundle import LauncherSource, resolve_launcher_source
 
 DEFAULT_CONFIG = Path(__file__).with_name("configs") / "open_mopd_fidelity.json"
@@ -336,8 +335,7 @@ def validate_output_uri(output_uri: str, *, option_name: str = "--output-uri") -
 
 
 def _provenance(task_image: str, source: LauncherSource) -> tuple[str, str]:
-    if not re.fullmatch(r"[^@]+@sha256:[0-9a-f]{64}", task_image):
-        raise ValueError("--task-image must be a digest-addressed image reference")
+    validate_digest_addressed_image(task_image)
     return source.commit, task_image
 
 
@@ -372,51 +370,30 @@ def _iris_command(
         task_config_path = config_path.resolve().relative_to(launcher_root)
     except ValueError as error:
         raise ValueError("--config must be inside the checkout bundled by Iris") from error
-    return (
-        "uv",
-        "run",
-        "--frozen",
-        "iris",
-        "--config",
-        str(cluster_config),
-        "job",
-        "run",
-        "--enable-extra-resources",
-        "--gpu",
-        gpu_slice,
-        "--cpu",
-        str(config.hardware.cpu),
-        "--memory",
-        config.hardware.memory,
-        "--disk",
-        config.hardware.disk,
-        "--priority",
-        "batch",
-        "--no-preemptible",
-        "--max-retries",
-        "0",
-        "--task-image",
-        task_image,
-        "--no-sync",
-        "--no-wait",
-        "--job-name",
-        f"open-mopd-fidelity-{gate.replace('_', '-')}",
-        "--",
-        "python",
-        "-m",
-        TASK_MODULE,
-        "--config",
-        task_config_path.as_posix(),
-        "--gate",
-        gate,
-        "--output-uri",
-        output_uri,
-        "--gpu-slice",
-        gpu_slice,
-        "--task-image",
-        task_image,
-        "--launcher-commit",
-        launcher_commit,
+    return iris_task_command(
+        cluster_config=cluster_config,
+        gpu=gpu_slice,
+        cpu=config.hardware.cpu,
+        memory=config.hardware.memory,
+        disk=config.hardware.disk,
+        priority="batch",
+        task_image=task_image,
+        job_name=f"open-mopd-fidelity-{gate.replace('_', '-')}",
+        task_module=TASK_MODULE,
+        task_args=(
+            "--config",
+            task_config_path.as_posix(),
+            "--gate",
+            gate,
+            "--output-uri",
+            output_uri,
+            "--gpu-slice",
+            gpu_slice,
+            "--task-image",
+            task_image,
+            "--launcher-commit",
+            launcher_commit,
+        ),
     )
 
 
@@ -492,13 +469,12 @@ def main(argv: list[str] | None = None) -> int:
         gpu_slice=args.gpu_slice,
     )
     print(plan.json())
-    print(shlex.join(plan.iris_command))
-    if not args.submit:
-        print("Dry run only. Add --submit --allow-known-deviations after reviewing the plan.")
-        return 0
-    if not args.allow_known_deviations:
-        raise SystemExit("--submit requires --allow-known-deviations")
-    return subprocess.run(plan.iris_command, check=False).returncode
+    return submit_or_print(
+        plan.iris_command,
+        submit=args.submit,
+        reviewed=args.allow_known_deviations,
+        review_option="--allow-known-deviations",
+    )
 
 
 if __name__ == "__main__":

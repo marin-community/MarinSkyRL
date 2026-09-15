@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 import cloud.iris.axolotl_tinker_sft as launcher
+import cloud.iris.experiment_launch as experiment_launch
 from cloud.iris.axolotl_tinker_sft_task import peft_artifacts, resolved_axolotl_config, training_command
 
 TASK_IMAGE = f"registry.example/axolotl@sha256:{'a' * 64}"
@@ -99,7 +100,7 @@ def test_plumbing_stage_reduces_cost_without_mutating_full_recipe(launcher_sourc
 def test_cli_defaults_to_non_submitting_structured_dry_run(
     launcher_source: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(launcher.subprocess, "run", lambda *args, **kwargs: pytest.fail("submitted"))
+    monkeypatch.setattr(experiment_launch.subprocess, "run", lambda *args, **kwargs: pytest.fail("submitted"))
 
     assert (
         launcher.main(
@@ -128,7 +129,7 @@ def test_cli_defaults_to_non_submitting_structured_dry_run(
 def test_full_stage_rejects_missing_cost_acknowledgement_before_submission(
     launcher_source: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(launcher.subprocess, "run", lambda *args, **kwargs: pytest.fail("submitted"))
+    monkeypatch.setattr(experiment_launch.subprocess, "run", lambda *args, **kwargs: pytest.fail("submitted"))
 
     with pytest.raises(SystemExit):
         launcher.main(

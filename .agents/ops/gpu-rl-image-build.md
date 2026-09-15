@@ -73,19 +73,17 @@ Run from the clean committed build worktree:
 GITSHA=$(git rev-parse HEAD)
 REGISTRY_USER=$(gh api user --jq .login)
 REGISTRY_TOKEN=$(gh auth token)
-BUILD_B64=$(base64 < docker/build_gpu_rl_kaniko.sh | tr -d '\n')
 ```
 
 Every job uses `docker.io/library/ubuntu:22.04`, `--no-sync`, `--enable-extra-resources`,
 `--no-wait`, the architecture's resource line above, and:
 
 ```bash
--e BUILD_B64 "$BUILD_B64" \
 -e GITSHA "$GITSHA" \
 -e REGISTRY_USER "$REGISTRY_USER" \
 -e REGISTRY_TOKEN "$REGISTRY_TOKEN" \
 -e WHEEL_SOURCE wheel-builder \
--- bash -lc 'echo "$BUILD_B64" | base64 -d > /tmp/build.sh && exec bash /tmp/build.sh'
+-- bash /app/docker/build_gpu_rl_kaniko.sh
 ```
 
 For Megatron add:
