@@ -21,6 +21,7 @@ from .builtin import (
     LoggingCallback,
     DefaultCallbackHandler,
     DataTrackingCallback,
+    DistillationTokenBudgetCallback,
     # YAML configuration support
     CALLBACK_REGISTRY,
     register_callback,
@@ -45,6 +46,7 @@ __all__ = [
     "LoggingCallback",
     "DefaultCallbackHandler",
     "DataTrackingCallback",
+    "DistillationTokenBudgetCallback",
     # YAML configuration support
     "CALLBACK_REGISTRY",
     "register_callback",
