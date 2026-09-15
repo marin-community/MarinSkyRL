@@ -51,6 +51,18 @@ from tests.grug_training_parity import ORACLE_FIXTURE_DIR
 _DRAFT_REVISION = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
 
 
+def _draft_checkpoint(uri: str) -> DraftCheckpoint:
+    return DraftCheckpoint(
+        step=2,
+        revision="draft-step-2",
+        uri=uri,
+        weights_uri=f"{uri}/model.safetensors",
+        weights_size=5,
+        completion_uri=f"{uri}/complete.json",
+        source_identity=_DRAFT_REVISION,
+    )
+
+
 class _SpeculatorCaptureClient:
     def __init__(self):
         self.begins = []
@@ -60,7 +72,6 @@ class _SpeculatorCaptureClient:
             {
                 "active": True,
                 "draft_revision": "draft-step-2",
-                "worker_results": [{"active": True}, {"active": True}],
             }
         ]
         self.engines = [object()]
@@ -97,8 +108,8 @@ class _SpeculatorCaptureClient:
             ]
         ]
 
-    async def refresh_online_eagle_speculator(self, candidate_uri, draft_revision):
-        self.refreshes.append((candidate_uri, draft_revision))
+    async def update_draft_weights(self, weights_path, draft_revision):
+        self.refreshes.append((weights_path, draft_revision))
         return self.refresh_result
 
 
@@ -191,7 +202,6 @@ def test_online_speculator_capture_seals_target_snapshot_before_training_boundar
             "step": 2,
             "max_tokens": 16_384,
             "max_window_tokens": 16_384,
-            "max_sequences_per_prompt_group": 2,
             "target_revision": "policy-step-1",
             "draft_revision": "draft-step-1",
             "reserved_gpu_memory_gib": 8,
@@ -226,12 +236,7 @@ def test_online_speculator_update_overlaps_then_refreshes_at_boundary(monkeypatc
     monkeypatch.setattr(
         trainer_module,
         "read_latest_draft_checkpoint",
-        lambda _root, **_kwargs: DraftCheckpoint(
-            step=2,
-            revision="draft-step-2",
-            uri="s3://bucket/checkpoints/drafts/draft-step-2",
-            source_identity=_DRAFT_REVISION,
-        ),
+        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
     )
 
     async def scenario():
@@ -249,30 +254,24 @@ def test_online_speculator_update_overlaps_then_refreshes_at_boundary(monkeypatc
     asyncio.run(scenario())
 
     assert trainer.inference_engine_client.refreshes == [
-        ("s3://bucket/checkpoints/drafts/draft-step-2", "draft-step-2")
+        ("s3://bucket/checkpoints/drafts/draft-step-2/model.safetensors", "draft-step-2")
     ]
     assert trainer._speculator_revision == "draft-step-2"
     assert trainer.all_metrics["speculator/install_count"] == 1.0
     assert trainer.all_metrics["speculator/candidate_accepted"] == 1.0
 
 
-def test_online_speculator_failed_rank_is_recorded_without_rejecting_accepted_revision(monkeypatch):
+def test_online_speculator_failed_engine_is_recorded_without_rejecting_accepted_revision(monkeypatch):
     trainer = _online_speculator_trainer()
     monkeypatch.setattr(
         trainer_module,
         "read_latest_draft_checkpoint",
-        lambda _root, **_kwargs: DraftCheckpoint(
-            step=2,
-            revision="draft-step-2",
-            uri="s3://bucket/checkpoints/drafts/draft-step-2",
-            source_identity=_DRAFT_REVISION,
-        ),
+        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
     )
     trainer.inference_engine_client.refresh_result = [
         {
             "active": False,
             "error": "RuntimeError: draft load failed",
-            "worker_results": [{"active": True}, {"active": False}],
         }
     ]
 
@@ -280,8 +279,8 @@ def test_online_speculator_failed_rank_is_recorded_without_rejecting_accepted_re
 
     assert trainer._speculator_revision == "draft-step-1"
     assert trainer._speculator_requested_revision is None
-    assert trainer.all_metrics["speculator/install_successful_workers"] == 1.0
-    assert trainer.all_metrics["speculator/install_failed_workers"] == 1.0
+    assert trainer.all_metrics["speculator/install_successful_engines"] == 0.0
+    assert trainer.all_metrics["speculator/install_failed_engines"] == 1.0
     assert trainer.all_metrics["speculator/install_failures"] == 1.0
 
 
@@ -290,12 +289,7 @@ def test_online_speculator_stale_accepted_revision_still_refreshes_serving(monke
     monkeypatch.setattr(
         trainer_module,
         "read_latest_draft_checkpoint",
-        lambda _root, **_kwargs: DraftCheckpoint(
-            step=2,
-            revision="draft-step-2",
-            uri="s3://bucket/checkpoints/drafts/draft-step-2",
-            source_identity=_DRAFT_REVISION,
-        ),
+        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
     )
     trainer.global_step = 5
 
@@ -389,18 +383,13 @@ def test_online_speculator_normalizes_gcs_checkpoint_for_vllm(monkeypatch) -> No
     monkeypatch.setattr(
         trainer_module,
         "read_latest_draft_checkpoint",
-        lambda _root, **_kwargs: DraftCheckpoint(
-            step=2,
-            revision="draft-step-2",
-            uri="gcs://bucket/checkpoints/drafts/draft-step-2",
-            source_identity=_DRAFT_REVISION,
-        ),
+        lambda _root, **_kwargs: _draft_checkpoint("gcs://bucket/checkpoints/drafts/draft-step-2"),
     )
 
     asyncio.run(trainer._refresh_latest_speculator(wait=True))
 
     assert trainer.inference_engine_client.refreshes == [
-        ("gs://bucket/checkpoints/drafts/draft-step-2", "draft-step-2")
+        ("gs://bucket/checkpoints/drafts/draft-step-2/model.safetensors", "draft-step-2")
     ]
 
 
@@ -409,18 +398,13 @@ def test_online_speculator_refresh_failure_is_retryable(monkeypatch) -> None:
     monkeypatch.setattr(
         trainer_module,
         "read_latest_draft_checkpoint",
-        lambda _root, **_kwargs: DraftCheckpoint(
-            step=2,
-            revision="draft-step-2",
-            uri="s3://bucket/checkpoints/drafts/draft-step-2",
-            source_identity=_DRAFT_REVISION,
-        ),
+        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
     )
     trainer.inference_engine_client.refresh_result = [{"active": False, "error": "load failed"}]
 
     asyncio.run(trainer._refresh_latest_speculator(wait=True))
     assert trainer._speculator_requested_revision is None
-    trainer.inference_engine_client.refresh_result = [{"active": True, "worker_results": [{"active": True}]}]
+    trainer.inference_engine_client.refresh_result = [{"active": True}]
     asyncio.run(trainer._refresh_latest_speculator(wait=True))
 
     assert trainer._speculator_revision == "draft-step-2"
@@ -1135,6 +1119,7 @@ def test_load_checkpoints_can_start_a_new_stage_with_continued_model_training_st
     trainer.policy_model = MagicMock()
     trainer.policy_model.async_run_ray_method.return_value = []
     trainer.critic_model = None
+    trainer.colocate_all = True
 
     with patch("skyrl_train.trainer.ray.get", return_value=None):
         global_step, _ = trainer.load_checkpoints()

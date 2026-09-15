@@ -509,13 +509,13 @@ def _make_min_cfg():
     )
 
 
-class _DraftRefreshEngine:
+class _DraftUpdateEngine:
     def __init__(self, result):
         self.result = result
         self.calls = []
 
-    async def refresh_online_eagle_speculator(self, candidate_uri, draft_revision):
-        self.calls.append((candidate_uri, draft_revision))
+    async def update_draft_weights(self, weights_path, draft_revision):
+        self.calls.append((weights_path, draft_revision))
         if isinstance(self.result, BaseException):
             raise self.result
         return self.result
@@ -524,31 +524,31 @@ class _DraftRefreshEngine:
 @pytest.mark.asyncio
 async def test_draft_refresh_retains_per_engine_exceptions() -> None:
     engines = [
-        _DraftRefreshEngine({"active": True, "draft_revision": "draft-step-4"}),
-        _DraftRefreshEngine(RuntimeError("load failed")),
+        _DraftUpdateEngine({"active": True, "draft_revision": "draft-step-4"}),
+        _DraftUpdateEngine(RuntimeError("load failed")),
     ]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
-    coverage = await client.refresh_online_eagle_speculator("s3://bucket/drafts/draft-step-4", "draft-step-4")
+    coverage = await client.update_draft_weights("s3://bucket/drafts/draft-step-4/model.safetensors", "draft-step-4")
 
     assert coverage == [
         {"active": True, "draft_revision": "draft-step-4"},
         {"active": False, "error": "RuntimeError: load failed"},
     ]
-    expected_call = [("s3://bucket/drafts/draft-step-4", "draft-step-4")]
+    expected_call = [("s3://bucket/drafts/draft-step-4/model.safetensors", "draft-step-4")]
     assert [engine.calls for engine in engines] == [expected_call, expected_call]
 
 
 @pytest.mark.asyncio
 async def test_draft_refresh_skips_dead_engines() -> None:
-    engines = [_DraftRefreshEngine({"active": True}), _DraftRefreshEngine({"active": True})]
+    engines = [_DraftUpdateEngine({"active": True}), _DraftUpdateEngine({"active": True})]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
     client._dead_engines.add(1)
 
-    coverage = await client.refresh_online_eagle_speculator("s3://bucket/drafts/draft-step-4", "draft-step-4")
+    coverage = await client.update_draft_weights("s3://bucket/drafts/draft-step-4/model.safetensors", "draft-step-4")
 
     assert coverage == [{"active": True}]
-    assert engines[0].calls == [("s3://bucket/drafts/draft-step-4", "draft-step-4")]
+    assert engines[0].calls == [("s3://bucket/drafts/draft-step-4/model.safetensors", "draft-step-4")]
     assert engines[1].calls == []
 
 

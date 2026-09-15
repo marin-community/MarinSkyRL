@@ -23,6 +23,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     merge_online_eagle_captures,
     partition_capture_windows,
     per_worker_capture_token_credit,
+    request_group_from_id,
 )
 
 
@@ -256,6 +257,22 @@ def test_capture_partition_is_deterministic_and_group_disjoint() -> None:
     assert len(train) == 16
     assert len(holdout) == 4
     assert {item["group_id"] for item in train}.isdisjoint(item["group_id"] for item in holdout)
+
+
+def test_capture_partition_derives_prompt_groups_from_skyrl_request_ids() -> None:
+    windows = [{"request_id": f"skyrl-group-{index // 2:08x}-attempt{index}"} for index in range(20)]
+
+    train, holdout = partition_capture_windows(
+        windows,
+        step=7,
+        holdout_fraction=0.2,
+        min_train_sequences=10,
+        min_holdout_sequences=4,
+    )
+
+    train_groups = {request_group_from_id(item["request_id"]) for item in train}
+    holdout_groups = {request_group_from_id(item["request_id"]) for item in holdout}
+    assert train_groups.isdisjoint(holdout_groups)
 
 
 def test_capture_partition_rejects_a_vacuous_holdout() -> None:

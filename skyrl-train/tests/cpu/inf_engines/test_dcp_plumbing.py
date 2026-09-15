@@ -143,6 +143,7 @@ def test_online_eagle_training_uses_vllm_synchronous_scheduling(monkeypatch):
 
     assert captured["async_engine"] is True
     assert captured["engine_init_kwargs"]["async_scheduling"] is False
+    assert captured["engine_init_kwargs"]["weight_transfer_config"] == {"backend": "runai_streamer"}
 
 
 def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):

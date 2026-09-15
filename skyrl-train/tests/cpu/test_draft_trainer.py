@@ -36,6 +36,9 @@ class _CloudFixture:
     def read_bytes(self, uri: str) -> bytes:
         return self.path(uri).read_bytes()
 
+    def file_size(self, uri: str) -> int:
+        return self.path(uri).stat().st_size
+
     def write_bytes_atomic(self, uri: str, value: bytes) -> None:
         path = self.path(uri)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,7 +63,15 @@ class _CloudFixture:
 @pytest.fixture
 def cloud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _CloudFixture:
     fixture = _CloudFixture(tmp_path / "cloud")
-    for name in ("exists", "read_bytes", "write_bytes_atomic", "upload_directory", "download_directory", "remove"):
+    for name in (
+        "exists",
+        "read_bytes",
+        "file_size",
+        "write_bytes_atomic",
+        "upload_directory",
+        "download_directory",
+        "remove",
+    ):
         monkeypatch.setattr(draft_trainer_module.io, name, getattr(fixture, name))
     return fixture
 
@@ -155,8 +166,11 @@ def test_draft_trainer_publishes_checkpoint_before_latest_pointer(
     candidate_uri = "s3://bucket/run/drafts/checkpoints/draft-step-4"
     assert result.accepted is True
     assert result.candidate_uri == candidate_uri
-    assert cloud.events[-3:] == [
+    completion_uri = f"{candidate_uri}/complete.json"
+    weights_uri = f"{candidate_uri}/model.safetensors"
+    assert cloud.events[-4:] == [
         ("upload", candidate_uri),
+        ("write", completion_uri),
         ("write", latest_draft_checkpoint_uri(checkpoint_root)),
         ("remove", request.capture_uri),
     ]
@@ -165,6 +179,9 @@ def test_draft_trainer_publishes_checkpoint_before_latest_pointer(
         step=4,
         revision="draft-step-4",
         uri=candidate_uri,
+        weights_uri=weights_uri,
+        weights_size=5,
+        completion_uri=completion_uri,
         source_identity=_DRAFT_REVISION,
     )
     assert _Runtime.instances[0].initial_job.draft_model_source == _initial_model().source_uri
@@ -180,13 +197,28 @@ def test_draft_trainer_restores_latest_checkpoint_once(
     checkpoint_dir = cloud.path(checkpoint_uri)
     checkpoint_dir.mkdir(parents=True)
     (checkpoint_dir / "trainer_state.pt").write_bytes(b"state")
+    (checkpoint_dir / "model.safetensors").write_bytes(b"draft")
+    completion_uri = f"{checkpoint_uri}/complete.json"
     cloud.write_bytes_atomic(
-        latest_draft_checkpoint_uri(checkpoint_root),
+        completion_uri,
         json.dumps(
             {
                 "step": 4,
                 "revision": "draft-step-4",
                 "uri": checkpoint_uri,
+                "weights_uri": f"{checkpoint_uri}/model.safetensors",
+                "weights_size": 5,
+                "completion_uri": completion_uri,
+                "source_identity": _DRAFT_REVISION,
+            }
+        ).encode(),
+    )
+    cloud.write_bytes_atomic(
+        latest_draft_checkpoint_uri(checkpoint_root),
+        json.dumps(
+            {
+                "revision": "draft-step-4",
+                "completion_uri": completion_uri,
                 "source_identity": _DRAFT_REVISION,
             }
         ).encode(),
@@ -210,14 +242,12 @@ def test_latest_checkpoint_from_another_initial_draft_is_ignored(
         latest_draft_checkpoint_uri(checkpoint_root),
         json.dumps(
             {
-                "step": 4,
                 "revision": "draft-step-4",
-                "uri": f"{checkpoint_root}/draft-step-4",
+                "completion_uri": f"{checkpoint_root}/draft-step-4/complete.json",
                 "source_identity": "different-draft",
             }
         ).encode(),
     )
-
     assert (
         read_latest_draft_checkpoint(
             checkpoint_root,
@@ -225,6 +255,58 @@ def test_latest_checkpoint_from_another_initial_draft_is_ignored(
         )
         is None
     )
+
+
+def test_latest_pointer_to_partial_checkpoint_is_rejected(cloud: _CloudFixture) -> None:
+    checkpoint_root = "s3://bucket/run/drafts/checkpoints"
+    checkpoint_uri = f"{checkpoint_root}/draft-step-4"
+    completion_uri = f"{checkpoint_uri}/complete.json"
+    cloud.write_bytes_atomic(
+        completion_uri,
+        json.dumps(
+            {
+                "step": 4,
+                "revision": "draft-step-4",
+                "uri": checkpoint_uri,
+                "weights_uri": f"{checkpoint_uri}/model.safetensors",
+                "weights_size": 5,
+                "completion_uri": completion_uri,
+                "source_identity": _DRAFT_REVISION,
+            }
+        ).encode(),
+    )
+    cloud.write_bytes_atomic(
+        latest_draft_checkpoint_uri(checkpoint_root),
+        json.dumps(
+            {
+                "revision": "draft-step-4",
+                "completion_uri": completion_uri,
+                "source_identity": _DRAFT_REVISION,
+            }
+        ).encode(),
+    )
+
+    with pytest.raises(FileNotFoundError):
+        read_latest_draft_checkpoint(checkpoint_root)
+
+
+def test_incomplete_upload_never_advances_latest(
+    cloud: _CloudFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_training(monkeypatch)
+    request = _request()
+    _publish_capture(cloud, request)
+    checkpoint_root = "s3://bucket/run/drafts/checkpoints"
+    trainer = DraftTrainer(initial_model=_initial_model(), checkpoint_root=checkpoint_root)
+    monkeypatch.setattr(draft_trainer_module.io, "file_size", lambda _uri: 1)
+
+    result = trainer.update(request)
+
+    assert result.accepted is False
+    assert result.error is not None and "upload is incomplete" in result.error
+    assert not cloud.exists(latest_draft_checkpoint_uri(checkpoint_root))
+    assert not cloud.exists(f"{checkpoint_root}/draft-step-4/complete.json")
 
 
 def test_draft_trainer_failure_is_nonfatal_and_consumes_capture(

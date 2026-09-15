@@ -24,6 +24,8 @@ from skyrl_train.io import io
 
 
 LATEST_DRAFT_FILENAME = "latest.json"
+COMPLETE_DRAFT_FILENAME = "complete.json"
+_DRAFT_WEIGHTS_FILENAME = "model.safetensors"
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,9 @@ class DraftCheckpoint:
     step: int
     revision: str
     uri: str
+    weights_uri: str
+    weights_size: int
+    completion_uri: str
     source_identity: str
 
     @classmethod
@@ -40,6 +45,9 @@ class DraftCheckpoint:
         step = value.get("step")
         revision = value.get("revision")
         uri = value.get("uri")
+        weights_uri = value.get("weights_uri")
+        weights_size = value.get("weights_size")
+        completion_uri = value.get("completion_uri")
         source_identity = value.get("source_identity")
         if isinstance(step, bool) or not isinstance(step, int) or step <= 0:
             raise ValueError("Draft checkpoint step must be a positive integer")
@@ -47,9 +55,51 @@ class DraftCheckpoint:
             raise ValueError("Draft checkpoint revision must be nonempty")
         if not isinstance(uri, str) or not is_cloud_uri(uri):
             raise ValueError("Draft checkpoint URI must be cloud-backed")
+        if not isinstance(weights_uri, str) or not is_cloud_uri(weights_uri):
+            raise ValueError("Draft checkpoint weights URI must be cloud-backed")
+        if isinstance(weights_size, bool) or not isinstance(weights_size, int) or weights_size <= 0:
+            raise ValueError("Draft checkpoint weights size must be a positive integer")
+        if not isinstance(completion_uri, str) or not is_cloud_uri(completion_uri):
+            raise ValueError("Draft checkpoint completion URI must be cloud-backed")
         if not isinstance(source_identity, str) or not source_identity:
             raise ValueError("Draft checkpoint source identity must be nonempty")
-        return cls(step=step, revision=revision, uri=uri, source_identity=source_identity)
+        expected_weights_uri = join_resource_path(uri, _DRAFT_WEIGHTS_FILENAME)
+        expected_completion_uri = join_resource_path(uri, COMPLETE_DRAFT_FILENAME)
+        if weights_uri != expected_weights_uri or completion_uri != expected_completion_uri:
+            raise ValueError("Draft checkpoint object URIs do not match its immutable directory")
+        return cls(
+            step=step,
+            revision=revision,
+            uri=uri,
+            weights_uri=weights_uri,
+            weights_size=weights_size,
+            completion_uri=completion_uri,
+            source_identity=source_identity,
+        )
+
+
+@dataclass(frozen=True)
+class _DraftCheckpointPointer:
+    revision: str
+    completion_uri: str
+    source_identity: str
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "_DraftCheckpointPointer":
+        revision = value.get("revision")
+        completion_uri = value.get("completion_uri")
+        source_identity = value.get("source_identity")
+        if not isinstance(revision, str) or not revision:
+            raise ValueError("Latest draft revision must be nonempty")
+        if not isinstance(completion_uri, str) or not is_cloud_uri(completion_uri):
+            raise ValueError("Latest draft completion URI must be cloud-backed")
+        if not isinstance(source_identity, str) or not source_identity:
+            raise ValueError("Latest draft source identity must be nonempty")
+        return cls(
+            revision=revision,
+            completion_uri=completion_uri,
+            source_identity=source_identity,
+        )
 
 
 @dataclass(frozen=True)
@@ -77,8 +127,22 @@ def read_latest_draft_checkpoint(
     latest_uri = latest_draft_checkpoint_uri(checkpoint_root)
     if not io.exists(latest_uri):
         return None
-    checkpoint = DraftCheckpoint.from_mapping(json.loads(io.read_bytes(latest_uri)))
-    return checkpoint if source_identity is None or checkpoint.source_identity == source_identity else None
+    pointer = _DraftCheckpointPointer.from_mapping(json.loads(io.read_bytes(latest_uri)))
+    if source_identity is not None and pointer.source_identity != source_identity:
+        return None
+    checkpoint = DraftCheckpoint.from_mapping(json.loads(io.read_bytes(pointer.completion_uri)))
+    if (
+        checkpoint.revision != pointer.revision
+        or checkpoint.source_identity != pointer.source_identity
+        or checkpoint.completion_uri != pointer.completion_uri
+    ):
+        raise ValueError("Latest draft pointer does not match its completion manifest")
+    remote_size = io.file_size(checkpoint.weights_uri)
+    if remote_size != checkpoint.weights_size:
+        raise ValueError(
+            f"Draft checkpoint weights are incomplete: expected {checkpoint.weights_size} bytes, got {remote_size}"
+        )
+    return checkpoint
 
 
 class DraftTrainer:
@@ -89,10 +153,14 @@ class DraftTrainer:
             raise ValueError(f"DraftTrainer checkpoint root must be cloud-backed: {checkpoint_root}")
         self._initial_model = initial_model
         self._checkpoint_root = checkpoint_root
-        self._latest = read_latest_draft_checkpoint(
-            checkpoint_root,
-            source_identity=initial_model.source_identity,
-        )
+        try:
+            self._latest = read_latest_draft_checkpoint(
+                checkpoint_root,
+                source_identity=initial_model.source_identity,
+            )
+        except Exception as error:
+            logger.warning("Ignoring invalid latest draft checkpoint at {}: {}", checkpoint_root, error)
+            self._latest = None
         self._accepted_revision = self._latest.revision if self._latest is not None else initial_model.source_identity
         self._runtime: OnlineEagleTrainerRuntime | None = None
         self._node_id = str(ray.get_runtime_context().get_node_id()) if ray.is_initialized() else None
@@ -140,15 +208,36 @@ class DraftTrainer:
                     assert result.draft_revision is not None
                     candidate_uri = join_resource_path(self._checkpoint_root, result.draft_revision)
                     io.upload_directory(str(candidate_dir), candidate_uri)
+                    weights_uri = join_resource_path(candidate_uri, _DRAFT_WEIGHTS_FILENAME)
+                    weights_size = (candidate_dir / _DRAFT_WEIGHTS_FILENAME).stat().st_size
+                    remote_weights_size = io.file_size(weights_uri)
+                    if remote_weights_size != weights_size:
+                        raise IOError(
+                            f"Draft checkpoint upload is incomplete: expected {weights_size} bytes, "
+                            f"got {remote_weights_size}"
+                        )
+                    completion_uri = join_resource_path(candidate_uri, COMPLETE_DRAFT_FILENAME)
                     checkpoint = DraftCheckpoint(
                         step=request.step,
                         revision=result.draft_revision,
                         uri=candidate_uri,
+                        weights_uri=weights_uri,
+                        weights_size=weights_size,
+                        completion_uri=completion_uri,
                         source_identity=self._initial_model.source_identity,
                     )
                     io.write_bytes_atomic(
-                        latest_draft_checkpoint_uri(self._checkpoint_root),
+                        completion_uri,
                         json.dumps(asdict(checkpoint), sort_keys=True).encode(),
+                    )
+                    pointer = _DraftCheckpointPointer(
+                        revision=checkpoint.revision,
+                        completion_uri=checkpoint.completion_uri,
+                        source_identity=checkpoint.source_identity,
+                    )
+                    io.write_bytes_atomic(
+                        latest_draft_checkpoint_uri(self._checkpoint_root),
+                        json.dumps(asdict(pointer), sort_keys=True).encode(),
                     )
                     self._latest = checkpoint
                     self._accepted_revision = checkpoint.revision

@@ -15,6 +15,7 @@ import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
@@ -395,23 +396,6 @@ class WorkerWrap:
                 "error": f"{type(error).__name__}: {error}",
             }
         return {**result, "active": True, "path": rank_destination}
-
-    def refresh_online_eagle_speculator(self, candidate_uri, draft_revision):
-        """Best-effort refresh this rank's draft directly from cloud storage."""
-        try:
-            return self.model_runner.refresh_online_eagle_speculator(candidate_uri, draft_revision)
-        except Exception as error:
-            logger.exception(
-                "Online EAGLE refresh failed for worker rank {} revision {}",
-                self.model_runner.parallel_config.data_parallel_rank,
-                draft_revision,
-            )
-            return {
-                "active": False,
-                "worker_rank": self.model_runner.parallel_config.data_parallel_rank,
-                "draft_revision": draft_revision,
-                "error": f"{type(error).__name__}: {error}",
-            }
 
     def init_weight_update_communicator(
         self,
@@ -2036,18 +2020,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await engine.collective_rpc("seal_online_eagle_capture", args=(destination,))
 
-    async def refresh_online_eagle_speculator(self, candidate_uri: str, draft_revision: str):
-        """Best-effort refresh every worker directly from cloud storage."""
+    async def update_draft_weights(self, weights_path: str, draft_revision: str):
+        """Stream one completed checkpoint through vLLM's draft-update API."""
         engine = self._get_engine()
-        worker_results = await engine.collective_rpc(
-            "refresh_online_eagle_speculator",
-            args=(candidate_uri, draft_revision),
-        )
-        active = [result for result in worker_results if result.get("active", False)]
+        await engine.start_draft_weight_update()
+        await engine.update_weights(WeightTransferUpdateRequest(update_info={"weights_path": weights_path}))
+        await engine.finish_weight_update()
         return {
-            "active": len(active) == len(worker_results),
+            "active": True,
             "draft_revision": draft_revision,
-            "worker_results": worker_results,
         }
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):

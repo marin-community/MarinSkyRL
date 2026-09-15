@@ -706,7 +706,6 @@ class RayPPOTrainer:
             step=self.global_step,
             max_tokens=training.max_tokens_per_update,
             max_window_tokens=training.max_window_tokens,
-            max_sequences_per_prompt_group=training.max_sequences_per_prompt_group,
             target_revision=_policy_revision(self.global_step - 1),
             draft_revision=self._speculator_revision,
             reserved_gpu_memory_gib=training.reserved_gpu_memory_gib,
@@ -816,8 +815,8 @@ class RayPPOTrainer:
             return
         self._speculator_requested_revision = checkpoint.revision
         self._speculator_refresh_task = asyncio.create_task(
-            self.inference_engine_client.refresh_online_eagle_speculator(
-                runai_model_uri(checkpoint.uri),
+            self.inference_engine_client.update_draft_weights(
+                runai_model_uri(checkpoint.weights_uri),
                 checkpoint.revision,
             )
         )
@@ -838,24 +837,14 @@ class RayPPOTrainer:
             return
         successful = [entry for entry in coverage if entry.get("active", False)]
         failed = [entry for entry in coverage if not entry.get("active", False)]
-        worker_successes = sum(
-            len([worker for worker in entry.get("worker_results", ()) if worker.get("active", False)])
-            for entry in coverage
-        )
-        worker_failures = sum(
-            len([worker for worker in entry.get("worker_results", ()) if not worker.get("active", False)])
-            if entry.get("worker_results")
-            else int(not entry.get("active", False))
-            for entry in coverage
-        )
-        self._speculator_install_failures += worker_failures
+        self._speculator_install_failures += len(failed)
         if len(successful) == len(coverage) and coverage:
             self._speculator_revision = requested_revision
             self._speculator_install_count += 1
             logger.info(
-                "Draft revision refreshed: revision={} workers={}",
+                "Draft revision refreshed: revision={} engines={}",
                 requested_revision,
-                worker_successes,
+                len(successful),
             )
         else:
             self._speculator_requested_revision = None
@@ -869,8 +858,8 @@ class RayPPOTrainer:
             {
                 "speculator/install_count": float(self._speculator_install_count),
                 "speculator/install_failures": float(self._speculator_install_failures),
-                "speculator/install_successful_workers": float(worker_successes),
-                "speculator/install_failed_workers": float(worker_failures),
+                "speculator/install_successful_engines": float(len(successful)),
+                "speculator/install_failed_engines": float(len(failed)),
             }
         )
 

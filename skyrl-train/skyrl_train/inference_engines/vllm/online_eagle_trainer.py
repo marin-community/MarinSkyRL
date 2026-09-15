@@ -36,6 +36,7 @@ _TRAINER_STATE_FORMAT = "marinskyrl-online-eagle-trainer-state"
 _TRAINER_STATE_VERSION = 2
 ONLINE_EAGLE_MANIFEST_FILENAME = "manifest.json"
 ONLINE_EAGLE_MERGED_CAPTURE_DIRECTORY = "merged"
+_SKYRL_REQUEST_PREFIX = "skyrl-group-"
 ONLINE_EAGLE_TARGET_CONFIG_FILENAME = "target-config.json"
 ONLINE_EAGLE_TARGET_WEIGHTS_FILENAME = "target.safetensors"
 TRAINER_STATE_FILENAME = "trainer_state.pt"
@@ -74,13 +75,27 @@ class OnlineEagleCaptureConfig:
     step: int
     max_tokens: int
     max_window_tokens: int
-    max_sequences_per_prompt_group: int
     target_revision: str
     draft_revision: str
     reserved_gpu_memory_gib: float
 
     def to_mapping(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def request_group_from_id(request_id: str) -> str:
+    """Return SkyRL's prompt-group digest, or the ungrouped request ID."""
+    if request_id.startswith(_SKYRL_REQUEST_PREFIX):
+        remainder = request_id[len(_SKYRL_REQUEST_PREFIX) :]
+        group, separator, _attempt = remainder.partition("-")
+        if separator and group:
+            return group
+    return request_id
+
+
+def _window_group_id(window: Mapping[str, Any]) -> str:
+    group_id = window.get("group_id")
+    return str(group_id) if group_id is not None else request_group_from_id(str(window["request_id"]))
 
 
 def per_worker_capture_token_credit(
@@ -163,7 +178,7 @@ def partition_capture_windows(
     ordered_windows = sorted(windows, key=lambda window: str(window["request_id"]))
     groups: dict[str, list[dict[str, Any]]] = {}
     for window in ordered_windows:
-        group_id = str(window.get("group_id", window["request_id"]))
+        group_id = _window_group_id(window)
         groups.setdefault(group_id, []).append(window)
     ordered_groups = sorted(
         groups.items(),
@@ -184,12 +199,8 @@ def partition_capture_windows(
             "Online EAGLE capture cannot form group-disjoint train and holdout splits with "
             f"at least {min_train_sequences} and {min_holdout_sequences} sequences"
         )
-    holdout = [
-        window for window in ordered_windows if str(window.get("group_id", window["request_id"])) in holdout_groups
-    ]
-    train = [
-        window for window in ordered_windows if str(window.get("group_id", window["request_id"])) not in holdout_groups
-    ]
+    holdout = [window for window in ordered_windows if _window_group_id(window) in holdout_groups]
+    train = [window for window in ordered_windows if _window_group_id(window) not in holdout_groups]
     return train, holdout
 
 
@@ -263,16 +274,14 @@ def merge_online_eagle_captures(
 
     step = int(baseline["step"])
     candidates.sort(
-        key=lambda item: hashlib.sha256(
-            f"{step}:{item[1].get('group_id', item[1]['request_id'])}:{item[1]['request_id']}".encode()
-        ).digest()
+        key=lambda item: hashlib.sha256(f"{step}:{_window_group_id(item[1])}:{item[1]['request_id']}".encode()).digest()
     )
     selected = []
     group_counts: dict[str, int] = {}
     selected_tokens = 0
     oversized_windows = 0
     for directory, window in candidates:
-        group_id = str(window.get("group_id", window["request_id"]))
+        group_id = _window_group_id(window)
         tokens = window.get("tokens")
         if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
             raise ValueError(f"Invalid online EAGLE captured-window token count: {tokens!r}")

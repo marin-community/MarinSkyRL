@@ -142,6 +142,7 @@ def create_ray_wrapped_inference_engines_from_config(
             # enables its asynchronous scheduler by default, but online EAGLE
             # capture must reconcile each target forward before the next schedule.
             engine_init_kwargs["async_scheduling"] = False
+            engine_init_kwargs["weight_transfer_config"] = {"backend": "runai_streamer"}
 
     role = InferenceEngineRoleConfig(
         pretrain=cfg.trainer.policy.model.path,
@@ -161,10 +162,6 @@ def create_ray_wrapped_inference_engines_from_config(
         shared_pg=colocate_pg,
         inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
     )
-    engine_init_kwargs = {
-        **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
-        "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
-    }
     model_revision = cfg.trainer.policy.model.get("revision")
     if model_revision is not None:
         engine_init_kwargs["revision"] = model_revision
