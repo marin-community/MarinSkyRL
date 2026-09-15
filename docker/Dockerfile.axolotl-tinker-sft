@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+# Axolotl v0.19.0, Python 3.12, CUDA 13.0, and PyTorch 2.11.0.
+FROM docker.io/axolotlai/axolotl-uv@sha256:ee66d1b20b1f308996857e3a08b8b20903f9c8df827bc8b50e37ccb7b9215fbd
+
+ARG GITSHA
+LABEL org.opencontainers.image.source="https://github.com/marin-community/MarinSkyRL" \
+      org.opencontainers.image.revision="${GITSHA}" \
+      org.marin.experiment="tinker-axolotl-sft-control" \
+      org.marin.axolotl-version="0.19.0"
+
+COPY cloud /app/cloud
+COPY marinskyrl /app/marinskyrl
+
+WORKDIR /app
+ENV PYTHONPATH=/app
+ENTRYPOINT []
+
+RUN python - <<'PY'
+import importlib.metadata
+
+assert importlib.metadata.version("axolotl") == "0.19.0"
+for package in ("datasets", "fsspec", "huggingface-hub", "s3fs", "torch", "transformers"):
+    print(package, importlib.metadata.version(package))
+PY

@@ -1,0 +1,85 @@
+# Axolotl v0.19.0 native control for the public Tinker OpenThoughts3 SFT recipe.
+# Stage-specific paths, step counts, sequence lengths, and gradient accumulation
+# are resolved by cloud.iris.axolotl_tinker_sft_task before training.
+base_model: Qwen/Qwen3.5-9B-Base
+revision_of_model: 68c46c4b3498877f3ef123c856ecfde50c39f404
+trust_remote_code: false
+strict: false
+
+chat_template: qwen3_5
+datasets:
+  - path: __MATERIALIZED_DATASET__
+    ds_type: json
+    split: train
+    type: chat_template
+    field_messages: conversations
+    message_property_mappings:
+      role: from
+      content: value
+    roles:
+      user: [human]
+      assistant: [gpt]
+    roles_to_train: [assistant]
+    train_on_eos: turn
+train_on_inputs: false
+val_set_size: 0.0
+shuffle_merged_datasets: false
+curriculum_sampling: true
+dataset_num_proc: 8
+dataset_prepared_path: __PREPARED_DATASET__
+
+output_dir: __OUTPUT_DIR__
+adapter: lora
+lora_r: 128
+# Tinker exports adapters with alpha=1. This preserves its PEFT scaling
+# convention, although the unpublished service-side parameterization remains a
+# cross-runtime fidelity uncertainty.
+lora_alpha: 1
+lora_dropout: 0.0
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  - linear_attn.in_proj_qkv
+  - linear_attn.in_proj_z
+  - linear_attn.out_proj
+  - lm_head
+
+sequence_len: 16384
+sample_packing: false
+pad_to_sequence_len: false
+micro_batch_size: 1
+gradient_accumulation_steps: 16
+num_epochs: 1
+max_steps: 3000
+
+optimizer: adamw_torch_fused
+learning_rate: 0.001
+lr_scheduler: linear
+warmup_steps: 0
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_epsilon: 1.0e-8
+weight_decay: 0.0
+max_grad_norm: 1.0
+
+seed: 0
+bf16: true
+tf32: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+attn_implementation: flash_attention_2
+dataloader_num_workers: 0
+dataloader_drop_last: true
+
+logging_steps: 1
+save_strategy: steps
+save_steps: 50
+eval_strategy: "no"
+special_tokens:
+  eos_token: <|im_end|>
