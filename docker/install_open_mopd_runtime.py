@@ -5,14 +5,30 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 from open_mopd_versions import versions_match
 
+PURE_PYTHON_OVERRIDES = (
+    "absl-py",
+    "appdirs",
+    "emoji",
+    "fsspec",
+    "immutabledict",
+    "jsonlines",
+    "langdetect",
+    "nltk",
+    "protobuf",
+    "ray",
+    "s3fs",
+    "syllapy",
+    "tempdir",
+    "transformers",
+    "wget",
+)
 
-PURE_PYTHON_OVERRIDES = ("fsspec", "langdetect", "protobuf", "ray", "s3fs", "transformers")
 
 def expected_packages(config_path: Path) -> dict[str, str]:
     config = json.loads(config_path.read_text())
@@ -31,7 +47,7 @@ def install_and_verify(config_path: Path) -> None:
         actual = importlib.metadata.version(distribution)
         if not versions_match(expected, actual):
             raise RuntimeError(f"{distribution}: expected {expected}, found {actual}")
-    import s3fs  # noqa: F401, PLC0415
+    import s3fs  # noqa: F401
 
 
 if __name__ == "__main__":
