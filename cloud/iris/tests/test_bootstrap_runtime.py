@@ -206,7 +206,14 @@ def test_arm_fsdp_bootstrap_does_not_require_flash_attention_extension(tmp_path:
     environment, process_environment = _fake_frozen_runtime(tmp_path)
     site_packages = next((environment / "lib").glob("python*/site-packages"))
     (site_packages / "flash_attn_2_cuda.py").unlink()
-    _write_module(site_packages, "sitecustomize.py", "import platform\nplatform.machine = lambda: 'aarch64'\n")
+    architecture_override = tmp_path / "architecture-override"
+    architecture_override.mkdir()
+    _write_module(
+        architecture_override,
+        "sitecustomize.py",
+        "import platform\nplatform.machine = lambda: 'aarch64'\n",
+    )
+    process_environment["PYTHONPATH"] = str(architecture_override)
 
     result = _run_bootstrap(environment, process_environment, "fsdp")
 
