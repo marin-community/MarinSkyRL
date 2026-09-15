@@ -9,8 +9,10 @@ the maintained `gpu-rl-<full-sha>` image contract.
 
 Work from a clean, committed revision and complete the standard GPU-RL image preflight. The x86_64 wrapper
 `docker/build_open_mopd_kaniko.sh` fixes the Dockerfile, FSDP variant, and tag prefix, then delegates to the
-maintained kaniko driver. It defaults to a source wheel build; a prebuilt wheelhouse is allowed only under the
-standard manifest and digest checks.
+maintained kaniko driver. It reuses a content-addressed wheelhouse from
+`open-athena/marinskyrl-gpu-wheelhouse` when the exact native-build manifest exists. Otherwise it builds the wheels,
+publishes a minimal wheel image, uploads a deterministic archive to that Hugging Face repository, and only then
+continues through the runtime layers.
 
 The default destination is
 `us-east1-docker.pkg.dev/hai-gcp-models/marin/marinskyrl:opd-repro-<full-sha>`. The shared driver derives the
@@ -27,6 +29,7 @@ and the standard amd64 build resources. Iris still bundles the committed workspa
 GITSHA=<full committed MarinSkyRL revision>
 REGISTRY_USER=<registry username; oauth2accesstoken for a GAR access token>
 REGISTRY_TOKEN=<runtime-only registry credential>
+HF_TOKEN=<runtime-only token with write access to open-athena>
 ```
 
 Do not print or persist the credential. After the build, resolve the tag to an immutable digest and apply every

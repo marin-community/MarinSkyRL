@@ -20,7 +20,7 @@ fi
 # Reuse the maintained source and frozen root environment. The isolated tag is
 # an experiment-selection boundary, not a second dependency closure.
 IMAGE_REPOSITORY="${OPEN_MOPD_IMAGE_REPOSITORY:-us-east1-docker.pkg.dev/hai-gcp-models/marin/marinskyrl}"
-WHEEL_SOURCE="${WHEEL_SOURCE:-wheel-builder}"
+WHEEL_SOURCE="${WHEEL_SOURCE:-auto}"
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 exec env \
@@ -30,5 +30,6 @@ exec env \
   TAG_PREFIX=opd-repro \
   DOCKERFILE=docker/Dockerfile.gpu-rl \
   INSTALL_MEGATRON=0 \
+  HF_WHEEL_REPOSITORY=open-athena/marinskyrl-gpu-wheelhouse \
   WHEEL_SOURCE="$WHEEL_SOURCE" \
   bash "${SCRIPT_DIR}/build_gpu_rl_kaniko.sh"
