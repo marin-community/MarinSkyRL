@@ -569,7 +569,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # swap_w13_to_w31) EXACTLY once. This is required for both NCCL broadcast and colocated
         # CUDA IPC: transport changes how tensors arrive, not vLLM's kernel-layout contract.
         # Rank 0 drives the engine RPC (same global-rank-0 semantics as the update loop below).
-        _w13_bracket = not bool(self.cfg.generator.fuse_weights)
+        # Diagnostic ablation for the Snowball reload investigation: Triton's
+        # unquantized MoE backend does not require the CUTLASS w13 layout swap.
+        # Keep this experiment isolated from production until the live canary
+        # establishes whether layerwise reload itself causes the corruption.
+        _w13_bracket = False
 
         await self._begin_vllm_layerwise_weight_reload(inference_engine_client, enabled=_w13_bracket)
 
