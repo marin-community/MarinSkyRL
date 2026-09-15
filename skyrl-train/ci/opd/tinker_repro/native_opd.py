@@ -191,6 +191,11 @@ def patch_qwen35_embedding_lora(source_path: Path) -> str:
     Returns:
         The compatibility-patch label recorded in the run manifest.
     """
+    if source_path.resolve() != source_path.absolute():
+        raise RuntimeError(
+            "Refusing to patch a symlinked vLLM installation; install with UV_LINK_MODE=copy and a task-private "
+            "UV_CACHE_DIR"
+        )
     old = """class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,

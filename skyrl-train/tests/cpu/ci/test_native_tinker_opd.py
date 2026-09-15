@@ -4,6 +4,7 @@ import sys
 
 from hydra import compose, initialize_config_dir
 import pyarrow as pa
+import pytest
 from skyrl_train.utils.utils import validate_cfg
 
 
@@ -110,3 +111,15 @@ def test_qwen35_runtime_patch_enables_embedding_and_lm_head_lora(tmp_path: Path)
     patched_source = source_path.read_text()
     assert '"embed_tokens": "input_embeddings"' in patched_source
     assert '"lm_head": "output_embeddings"' in patched_source
+
+
+def test_qwen35_runtime_patch_rejects_shared_symlink_source(tmp_path: Path):
+    shared_source = tmp_path / "shared_qwen3_5.py"
+    shared_source.write_text("shared wheel cache")
+    installed_source = tmp_path / "installed_qwen3_5.py"
+    installed_source.symlink_to(shared_source)
+
+    with pytest.raises(RuntimeError, match="UV_LINK_MODE=copy"):
+        OPD.patch_qwen35_embedding_lora(installed_source)
+
+    assert shared_source.read_text() == "shared wheel cache"

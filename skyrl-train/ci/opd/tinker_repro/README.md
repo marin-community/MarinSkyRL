@@ -96,6 +96,24 @@ value explicitly instead of relying on the underlying config default; the
 current reproduction plan configures 1.0. Treat a change to either pin or
 temperature as a fidelity review, not an automatic dependency update.
 
+## Native MarinSkyRL OPD
+
+`native_opd.py` runs the same published Qwen3.5 student, teacher, LoRA shape,
+and reverse-KL objective on eight local GPUs. Its exact vLLM compatibility
+backport edits the installed Python source, so Iris jobs must use a task-private
+uv cache and copy-mode installation:
+
+```bash
+uv run iris --cluster cw-rno2a job run \
+  --enable-extra-resources --gpu H100x8 --extra fsdp --extra vllm \
+  -e UV_CACHE_DIR /tmp/tinker-native-uv-cache -e UV_LINK_MODE copy \
+  -- python skyrl-train/ci/opd/tinker_repro/native_opd.py \
+  --stage plumbing --adapter-uri "$ADAPTER_URI" --output-uri "$OUTPUT_URI"
+```
+
+The runner refuses a symlinked vLLM source tree rather than modifying Iris's
+shared uv cache. Use a unique output URI for every attempt.
+
 ## AIME 2024 evaluation
 
 This evaluator measures a Tinker sampler checkpoint on the 30-problem
