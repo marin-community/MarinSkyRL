@@ -13,8 +13,6 @@ import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from packaging.version import Version
-
 from cloud.iris.artifacts import fs_and_path
 from cloud.iris.open_mopd_fidelity import (
     DOMAINS,
@@ -25,6 +23,7 @@ from cloud.iris.open_mopd_fidelity import (
     load_config,
     validate_output_uri,
 )
+from open_mopd_versions import versions_match
 
 CONTROL_MANIFEST_NAME = "control-manifest.json"
 
@@ -70,11 +69,7 @@ def validate_runtime(config: FidelityConfig) -> None:
             actual = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError as error:
             raise ValueError(f"Required distribution is missing from the task image: {distribution}") from error
-        expected_version = Version(expected)
-        actual_version = Version(actual)
-        if actual_version.public != expected_version.public or (
-            expected_version.local is not None and actual_version != expected_version
-        ):
+        if not versions_match(expected, actual):
             raise ValueError(f"{distribution} version mismatch: expected {expected}, found {actual}")
 
 

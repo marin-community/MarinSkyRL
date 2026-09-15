@@ -9,5 +9,6 @@ LABEL org.opencontainers.image.source="https://github.com/marin-community/MarinS
 # Preserve the authors' native CUDA closure while resolving and validating the
 # pure-Python corrections from the same manifest used by the runtime preflight.
 COPY cloud/iris/configs/open_mopd_fidelity.json /opt/open-mopd/fidelity.json
+COPY open_mopd_versions.py /opt/open-mopd/open_mopd_versions.py
 COPY docker/install_open_mopd_runtime.py /opt/open-mopd/install_runtime.py
 RUN python3 /opt/open-mopd/install_runtime.py /opt/open-mopd/fidelity.json
