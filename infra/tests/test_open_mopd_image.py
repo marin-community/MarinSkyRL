@@ -17,6 +17,19 @@ INSTALLER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(INSTALLER)
 
 
+@pytest.mark.parametrize(
+    ("expected", "actual", "matches"),
+    [
+        ("2.8.0", "2.8.0+cu128", True),
+        ("2.8.0+cu128", "2.8.0+cu128", True),
+        ("2.8.0+cu128", "2.8.0+cu126", False),
+        ("2.8.0", "2.8.1+cu128", False),
+    ],
+)
+def test_versions_match_local_build_contract(expected: str, actual: str, matches: bool) -> None:
+    assert INSTALLER.versions_match(expected, actual) is matches
+
+
 def test_open_mopd_runtime_manifest_rejects_a_missing_image_override(tmp_path: Path) -> None:
     config = tmp_path / "fidelity.json"
     config.write_text('{"environment":{"packages":{"s3fs":"2025.9.0"}}}')
