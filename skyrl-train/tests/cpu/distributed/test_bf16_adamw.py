@@ -165,6 +165,17 @@ def test_fp32_parameters_use_torch_adamw_for_every_low_precision_mode() -> None:
         assert type(optimizer) is torch.optim.AdamW
 
 
+def test_nearest_mode_uses_torch_adamw_for_mixed_precision_parameters() -> None:
+    parameters = [
+        torch.nn.Parameter(torch.ones(2, dtype=torch.bfloat16)),
+        torch.nn.Parameter(torch.ones(2, dtype=torch.float32)),
+    ]
+
+    optimizer = build_adamw(parameters, update_mode=BFloat16UpdateMode.NEAREST, seed=17, lr=1e-5)
+
+    assert type(optimizer) is torch.optim.AdamW
+
+
 def test_fp32_master_mode_controls_fsdp_parameter_storage() -> None:
     mode = BFloat16UpdateMode.FP32_MASTER
     assert resolve_fsdp_parameter_storage_dtype("AdamW", None, mode) is torch.float32
