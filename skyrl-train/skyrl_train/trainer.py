@@ -12,7 +12,7 @@ import ray
 from ray import ObjectRef
 import torch
 from loguru import logger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import PlacementGroup, placement_group
 from skyrl_train.utils.progress import tqdm
 from transformers import AutoTokenizer
@@ -61,6 +61,15 @@ from skyrl_train.distributed.dispatch import (
 )
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    OnlineEagleCaptureConfig,
+    OnlineEagleUpdateResult,
+)
+from skyrl_train.draft_trainer import (
+    DraftUpdateRequest,
+    create_draft_trainer,
+    read_latest_draft_checkpoint,
+)
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import (
     AdmissionProgressWatchdog,
@@ -75,7 +84,12 @@ from skyrl_train.sync_group_admission import (
     admit_or_collect_replacements,
 )
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
+from marinskyrl.checkpoint_paths import (
+    GLOBAL_STEP_PREFIX,
+    LATEST_CHECKPOINT_FILE,
+)
+from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
+from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, runai_model_uri
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import (
     cleanup_old_checkpoints,
@@ -92,6 +106,7 @@ from skyrl_train.utils.utils import (
     policy_per_gpu_bundles_enabled,
     policy_force_cvd_mask_enabled,
 )
+
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.utils.logging_utils import log_example
@@ -121,6 +136,19 @@ from skyrl_train.hf_export_schema import (
 )
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
+
+
+def _active_online_eagle_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    return [item for engine_results in results for item in engine_results if item.get("active", False)]
+
+
+def _poll_object_ref(ref: ObjectRef) -> tuple[bool, Any | None]:
+    ready, _ = ray.wait([ref], timeout=0)
+    return (False, None) if not ready else (True, ray.get(ready[0]))
+
+
+def _policy_revision(step: int) -> str:
+    return f"policy-step-{step}"
 
 
 class _ClosableDistillationRuntime(Protocol):
@@ -195,6 +223,29 @@ class RayPPOTrainer:
         self._shutdown_complete = False
         self.global_step = 0
         self._last_saved_step: int | None = None
+        raw_speculative_decoding = cfg.generator.get("speculative_decoding")
+        if raw_speculative_decoding is not None:
+            raw_speculative_decoding = OmegaConf.to_container(raw_speculative_decoding, resolve=True)
+        self.speculative_decoding = (
+            None
+            if raw_speculative_decoding is None
+            else SpeculativeDecodingConfig.from_mapping(raw_speculative_decoding)
+        )
+        self._speculator_capture_active = False
+        self._speculator_revision = (
+            None if self.speculative_decoding is None else self.speculative_decoding.model.source_identity
+        )
+        self._sealed_speculator_capture_uri: str | None = None
+        self._speculator_checkpoint_root = join_resource_path(self.cfg.trainer.ckpt_path, "drafts")
+        self._draft_trainer = None
+        self._draft_trainer_update_ref: ObjectRef | None = None
+        self._draft_trainer_submitted_at: float | None = None
+        self._speculator_refresh_task: asyncio.Task | None = None
+        self._speculator_requested_revision: str | None = None
+        self._speculator_update_failures = 0
+        self._speculator_install_count = 0
+        self._speculator_install_failures = 0
+        self._speculator_checkpoint_poll_failures = 0
 
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
@@ -380,6 +431,14 @@ class RayPPOTrainer:
                 except Exception as e:
                     logger.warning(f"Error killing {model_name} actors: {e}")
 
+        if getattr(self, "_draft_trainer", None) is not None:
+            try:
+                ray.kill(self._draft_trainer, no_restart=True)
+                logger.info("Killed DraftTrainer actor")
+            except Exception as error:
+                logger.warning("Error killing DraftTrainer actor: {}", error)
+            self._draft_trainer = None
+
         # Kill inference engine actors.  These are not covered by the model
         # actor groups above.
         if self.inference_engine_client is not None:
@@ -425,6 +484,14 @@ class RayPPOTrainer:
             label="Trajectory runner shutdown",
         )
         self._guarded_sync(self.trajectory_sink.close, label="Trajectory retention shutdown")
+        self._draft_trainer_update_ref = None
+        if self._speculator_refresh_task is not None:
+            await self._guarded_async(
+                self._speculator_refresh_task,
+                timeout=30,
+                label="Draft refresh completion",
+            )
+            self._speculator_refresh_task = None
         await self._guarded_async(
             self.inference_engine_client.teardown(),
             timeout=30,
@@ -597,6 +664,289 @@ class RayPPOTrainer:
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
         await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
+    async def _start_draft_trainer(self) -> None:
+        """Start the independent one-GPU draft trainer when online updates are enabled."""
+        config = self.speculative_decoding
+        if config is None or config.training is None or self._draft_trainer is not None:
+            return
+        if not is_cloud_uri(self._speculator_checkpoint_root):
+            raise ValueError("Online EAGLE training requires trainer.ckpt_path to use s3://, gs://, or gcs://")
+        self._draft_trainer = create_draft_trainer(
+            initial_model=config.model,
+            checkpoint_root=self._speculator_checkpoint_root,
+        )
+        logger.info("DraftTrainer ready: {}", await self._draft_trainer.status.remote())
+        await self._refresh_latest_speculator(wait=True)
+
+    def _should_update_speculator(self) -> bool:
+        config = self.speculative_decoding
+        return (
+            config is not None
+            and config.training is not None
+            and self._draft_trainer_update_ref is None
+            and self.global_step % config.training.interval_steps == 0
+        )
+
+    def _speculator_capture_uri(self) -> str:
+        return join_resource_path(
+            self._speculator_checkpoint_root,
+            "captures",
+            f"step-{self.global_step}",
+        )
+
+    async def _begin_speculator_capture(self) -> None:
+        """Start a bounded capture without making draft failures fatal to rollouts."""
+        await self._poll_speculator_lifecycle()
+        if self._speculator_capture_active or not self._should_update_speculator():
+            return
+        assert self.speculative_decoding is not None
+        training = self.speculative_decoding.training
+        assert training is not None
+        assert self._speculator_revision is not None
+        capture_config = OnlineEagleCaptureConfig(
+            step=self.global_step,
+            max_tokens=training.max_tokens_per_update,
+            max_window_tokens=training.max_window_tokens,
+            target_revision=_policy_revision(self.global_step - 1),
+            draft_revision=self._speculator_revision,
+            reserved_gpu_memory_gib=training.reserved_gpu_memory_gib,
+        )
+        capture_uri = self._speculator_capture_uri()
+        try:
+            if await asyncio.to_thread(io.exists, capture_uri):
+                await asyncio.to_thread(io.remove, capture_uri)
+            results = await self.inference_engine_client.begin_online_eagle_capture(capture_config.to_mapping())
+        except Exception as error:
+            logger.warning("Online EAGLE capture skipped at step {}: {}", self.global_step, error)
+            self.all_metrics["speculator/capture_failures"] = 1.0
+            return
+        active = _active_online_eagle_results(results)
+        if not active:
+            logger.warning("Online EAGLE capture had no active ranks at step {}", self.global_step)
+            return
+        self._speculator_capture_active = True
+        logger.info(
+            "Online EAGLE capture started: step={} ranks={} target_revision={} draft_revision={}",
+            self.global_step,
+            len(active),
+            capture_config.target_revision,
+            capture_config.draft_revision,
+        )
+
+    async def _seal_speculator_capture(self) -> None:
+        """Publish the active capture and retain only its cloud URI."""
+        if not self._speculator_capture_active:
+            return
+        capture_uri = self._speculator_capture_uri()
+        self._speculator_capture_active = False
+        try:
+            manifests = await self.inference_engine_client.seal_online_eagle_capture(capture_uri)
+        except Exception as error:
+            logger.warning("Online EAGLE capture publication failed at step {}: {}", self.global_step, error)
+            self.all_metrics["speculator/capture_failures"] = 1.0
+            return
+        active = _active_online_eagle_results(manifests)
+        if not active:
+            logger.warning("Online EAGLE capture published no rank manifests at step {}", self.global_step)
+            self.all_metrics["speculator/capture_failures"] = 1.0
+            return
+        self._sealed_speculator_capture_uri = capture_uri
+        self.all_metrics.update(
+            {
+                "speculator/sealed_rows": float(sum(item.get("captured_rows", 0) for item in active)),
+                "speculator/sealed_windows": float(sum(len(item.get("windows", ())) for item in active)),
+                "speculator/capture_dropped_windows": float(sum(item.get("dropped_windows", 0) for item in active)),
+            }
+        )
+        logger.info(
+            "Online EAGLE capture published: step={} ranks={} uri={}",
+            self.global_step,
+            len(active),
+            capture_uri,
+        )
+
+    async def _start_speculator_update(self) -> None:
+        """Hand the published capture URI to the independent DraftTrainer actor."""
+        capture_uri = self._sealed_speculator_capture_uri
+        if capture_uri is None or self._draft_trainer_update_ref is not None:
+            return
+        if self._draft_trainer is None or self.speculative_decoding is None:
+            raise RuntimeError("Online EAGLE capture published before DraftTrainer started")
+        training = self.speculative_decoding.training
+        assert training is not None
+        request = DraftUpdateRequest(
+            step=self.global_step,
+            capture_uri=capture_uri,
+            target_revision=_policy_revision(self.global_step - 1),
+            num_speculative_tokens=self.speculative_decoding.num_speculative_tokens,
+            seed=int(self.cfg.trainer.seed),
+            training=training,
+        )
+        self._draft_trainer_update_ref = self._draft_trainer.update.remote(request)
+        self._draft_trainer_submitted_at = time.monotonic()
+        self._sealed_speculator_capture_uri = None
+        self.all_metrics["speculator/update_pending"] = 1.0
+        logger.info(
+            "DraftTrainer update submitted: step={} capture_uri={}",
+            self.global_step,
+            capture_uri,
+        )
+
+    async def _start_latest_speculator_refresh(self) -> None:
+        if (
+            self.speculative_decoding is None
+            or self.speculative_decoding.training is None
+            or self._speculator_refresh_task is not None
+        ):
+            return
+        try:
+            checkpoint = await asyncio.to_thread(
+                read_latest_draft_checkpoint,
+                self._speculator_checkpoint_root,
+                source_identity=self.speculative_decoding.model.source_identity,
+            )
+        except Exception as error:
+            self._speculator_checkpoint_poll_failures += 1
+            self.all_metrics["speculator/checkpoint_poll_failures"] = float(self._speculator_checkpoint_poll_failures)
+            logger.warning("Draft checkpoint poll failed: {}", error)
+            return
+        if (
+            checkpoint is None
+            or checkpoint.revision == self._speculator_revision
+            or checkpoint.revision == self._speculator_requested_revision
+        ):
+            return
+        self._speculator_requested_revision = checkpoint.revision
+        self._speculator_refresh_task = asyncio.create_task(
+            self.inference_engine_client.update_draft_weights(
+                runai_model_uri(checkpoint.weights_uri),
+            )
+        )
+        await asyncio.sleep(0)
+
+    async def _finish_speculator_refresh(self) -> None:
+        task = self._speculator_refresh_task
+        if task is None or not task.done():
+            return
+        requested_revision = self._speculator_requested_revision
+        self._speculator_refresh_task = None
+        try:
+            coverage = task.result()
+        except Exception as error:
+            logger.warning("Draft refresh failed for revision {}: {}", requested_revision, error)
+            self._speculator_requested_revision = None
+            self._speculator_install_failures += 1
+            return
+        successful = [entry for entry in coverage if entry.get("active", False)]
+        failed = [entry for entry in coverage if not entry.get("active", False)]
+        self._speculator_install_failures += len(failed)
+        if len(successful) == len(coverage) and coverage:
+            self._speculator_revision = requested_revision
+            self._speculator_install_count += 1
+            logger.info(
+                "Draft revision refreshed: revision={} engines={}",
+                requested_revision,
+                len(successful),
+            )
+        else:
+            self._speculator_requested_revision = None
+            logger.warning(
+                "Draft revision refresh was partial: revision={} successful_engines={} failed_engines={}",
+                requested_revision,
+                len(successful),
+                len(failed),
+            )
+        self.all_metrics.update(
+            {
+                "speculator/install_count": float(self._speculator_install_count),
+                "speculator/install_failures": float(self._speculator_install_failures),
+                "speculator/install_successful_engines": float(len(successful)),
+                "speculator/install_failed_engines": float(len(failed)),
+            }
+        )
+
+    async def _refresh_latest_speculator(self, *, wait: bool = False) -> None:
+        await self._finish_speculator_refresh()
+        await self._start_latest_speculator_refresh()
+        if wait and self._speculator_refresh_task is not None:
+            await self._speculator_refresh_task
+            await self._finish_speculator_refresh()
+
+    async def _poll_speculator_lifecycle(self) -> None:
+        """Poll independent draft work and start any newly published refresh."""
+        if self.speculative_decoding is None or self.speculative_decoding.training is None:
+            return
+        ref = self._draft_trainer_update_ref
+        if ref is not None:
+            try:
+                ready, payload = _poll_object_ref(ref)
+            except Exception as error:
+                self._draft_trainer_update_ref = None
+                self._draft_trainer_submitted_at = None
+                self._speculator_update_failures += 1
+                self.all_metrics["speculator/update_pending"] = 0.0
+                self.all_metrics["speculator/update_failures"] = float(self._speculator_update_failures)
+                logger.warning("DraftTrainer actor update failed: {}", error)
+                await self._refresh_latest_speculator()
+                return
+            if ready:
+                self._draft_trainer_update_ref = None
+                if not isinstance(payload, OnlineEagleUpdateResult):
+                    self._draft_trainer_submitted_at = None
+                    self._speculator_update_failures += 1
+                    self.all_metrics["speculator/update_pending"] = 0.0
+                    self.all_metrics["speculator/update_failures"] = float(self._speculator_update_failures)
+                    logger.warning(
+                        "DraftTrainer returned {}, expected OnlineEagleUpdateResult",
+                        type(payload).__name__,
+                    )
+                    await self._refresh_latest_speculator()
+                    return
+                result = payload
+                submitted_at = self._draft_trainer_submitted_at
+                self._draft_trainer_submitted_at = None
+                if submitted_at is not None:
+                    self.all_metrics["speculator/update_wall_seconds"] = time.monotonic() - submitted_at
+                self.all_metrics.update(
+                    {
+                        "speculator/update_pending": 0.0,
+                        "speculator/candidate_accepted": float(result.accepted),
+                        "speculator/train_loss": float(
+                            result.train_loss if result.train_loss is not None else float("nan")
+                        ),
+                        "speculator/candidate_holdout_loss": float(
+                            result.candidate_holdout_loss if result.candidate_holdout_loss is not None else float("nan")
+                        ),
+                        "speculator/candidate_holdout_agreement": float(
+                            result.candidate_holdout_agreement
+                            if result.candidate_holdout_agreement is not None
+                            else float("nan")
+                        ),
+                        "speculator/train_duration_seconds": float(
+                            result.duration_seconds if result.duration_seconds is not None else float("nan")
+                        ),
+                    }
+                )
+                if result.error is not None:
+                    self._speculator_update_failures += 1
+                    logger.warning(
+                        "DraftTrainer update failed: step={} error={}",
+                        result.step,
+                        result.error,
+                    )
+                else:
+                    logger.info(
+                        "DraftTrainer update completed: step={} accepted={} revision={} uri={}",
+                        result.step,
+                        result.accepted,
+                        result.draft_revision,
+                        result.candidate_uri,
+                    )
+            else:
+                self.all_metrics["speculator/update_pending"] = 1.0
+        self.all_metrics["speculator/update_failures"] = float(self._speculator_update_failures)
+        await self._refresh_latest_speculator()
+
     async def _sync_policy_for_rollouts(self, *, reason: str) -> None:
         with Timer("publish_policy_weights", log_events=False) as update_timer:
             if self.colocate_all:
@@ -665,6 +1015,8 @@ class RayPPOTrainer:
             with Timer("load_checkpoints", self.all_startup_timings):
                 self.global_step, _ = self.load_checkpoints()
 
+        await self._start_draft_trainer()
+
         await self._sync_policy_for_rollouts(reason="initial")
 
         # Synchronize before checking completion so a requested final evaluation uses
@@ -722,6 +1074,7 @@ class RayPPOTrainer:
                     )
 
                     # 1.1 generation phase
+                    await self._begin_speculator_capture()
                     with (
                         Timer("generate", self.all_timings),
                         critical_phase("rollout_or_inference_wait", self.global_step),
@@ -751,6 +1104,9 @@ class RayPPOTrainer:
                             # update progress bar for current batch (but not global step)
                             pbar.update(1)
                             continue
+
+                    await self._seal_speculator_capture()
+                    await self._start_speculator_update()
 
                     if self.colocate_all:
                         # if we are not continuing sampling, we sleep the inference engine
@@ -824,6 +1180,7 @@ class RayPPOTrainer:
                     )
 
                     # 5. sync weights to inference engines (must happen before callbacks)
+                    await self._poll_speculator_lifecycle()
                     await self._sync_policy_for_rollouts(reason="training_step")
 
                     # 6. Run callback-requested work before closing the inclusive step timer.
@@ -2428,6 +2785,14 @@ class RayPPOTrainer:
             logger.warning(
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
             )
+
+        # Match the optimizer residency used when disaggregated checkpoints are
+        # saved. Megatron initializes restore buffers before reading checkpoint
+        # tensors; leaving the optimizer and gradient buffers on GPU can double
+        # their peak allocation and OOM before the first rollout.
+        if not self.colocate_all and self.cfg.trainer.offload_optimizer_during_rollouts:
+            with Timer("offload_policy_optimizer_before_checkpoint_load", self.all_startup_timings):
+                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
 
         # 3. Load policy checkpoint
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")

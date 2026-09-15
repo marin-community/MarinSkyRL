@@ -3,6 +3,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
+    OnlineEagleResult,
 )
 from skyrl_train.inference_engines.vllm.stats import (
     HTTPBridgeStatsAccumulator,
@@ -16,7 +17,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 )
 from transformers import PreTrainedTokenizerBase
 import asyncio
-from typing import List, Any, Optional, Dict, Union
+from typing import List, Any, Optional, Dict, Union, Hashable
 from skyrl_train.inference_engines.utils import (
     route_prompts_to_engines,
     hash_with_sha256,
@@ -240,6 +241,8 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         num_prompts = len(prompt_token_ids)
         num_inference_engines = len(self.engines)
+        if session_ids is not None and len(session_ids) != num_prompts:
+            raise ValueError("session_ids must align one-for-one with prompts")
 
         # 1. Route prompts to engines
         engine_idx_to_prompt_ids: dict[int, list[int]] = route_prompts_to_engines(
@@ -261,6 +264,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 engine_idx=engine_idx,
                 original_prompt_ids=original_prompt_ids,
                 sampling_params=sampling_params,
+                session_id=session_ids[0] if session_ids is not None else None,
             )
 
         # For batched generate(), pause/continue cannot be supported.
@@ -283,6 +287,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             engine_input = InferenceEngineInput(
                 prompt_token_ids=cur_prompt_token_ids,
                 sampling_params=sampling_params,
+                session_ids=[session_ids[i] for i in prompt_ids] if session_ids is not None else None,
             )
             tasks.append(asyncio.create_task(self.engines[engine_idx].generate(engine_input)))
             indices_list.append(prompt_ids)
@@ -301,6 +306,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=cur_prompt_token_ids,
                     sampling_params=sampling_params,
+                    session_ids=[session_ids[j] for j in indices_list[i]] if session_ids is not None else None,
                 )
                 results[i] = await self.engines[fallback].generate(engine_input)
             elif isinstance(result, BaseException):
@@ -337,8 +343,35 @@ class InferenceEngineClient(InferenceEngineInterface):
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
         )
 
+    async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
+        """Begin the same capture interval on every live inference engine."""
+        return await self._run_on_all_engines("begin_online_eagle_capture", config)
+
+    async def seal_online_eagle_capture(self, destination: str) -> List[OnlineEagleResult]:
+        """Publish every engine's capture before target-weight synchronization."""
+        return await self._run_on_all_engines("seal_online_eagle_capture", destination)
+
+    async def update_draft_weights(self, weights_path: str) -> List[OnlineEagleResult]:
+        """Ask every live engine to best-effort update its resident draft."""
+        awaitables = [
+            engine.update_draft_weights(weights_path)
+            for index, engine in enumerate(self.engines)
+            if index not in self._dead_engines
+        ]
+        results = await asyncio.gather(*awaitables, return_exceptions=True)
+        return [
+            {"active": False, "error": f"{type(result).__name__}: {result}"}
+            if isinstance(result, BaseException)
+            else result
+            for result in results
+        ]
+
     async def _generate_single_with_retry(
-        self, engine_idx: int, original_prompt_ids: List[int], sampling_params: Optional[Dict[str, Any]]
+        self,
+        engine_idx: int,
+        original_prompt_ids: List[int],
+        sampling_params: Optional[Dict[str, Any]],
+        session_id: Hashable | None = None,
     ) -> InferenceEngineOutput:
         """
         Generate a single response with retry mechanism.
@@ -398,6 +431,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             engine_input = InferenceEngineInput(
                 prompt_token_ids=[new_prompt_ids],
                 sampling_params=cur_sampling_params,
+                session_ids=[session_id] if session_id is not None else None,
             )
 
             # 3.2. Send the request.
@@ -840,6 +874,21 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def sleep(self, *args: Any, **kwargs: Any):
         return await self._run_on_all_engines("sleep", *args, **kwargs)
 
+    def _live_engine_communicator_offsets(self, rank_offset: int) -> list[tuple[InferenceEngineInterface, int]]:
+        offsets = []
+        next_rank_offset = rank_offset
+        for index, engine in enumerate(self.engines):
+            if index in self._dead_engines:
+                continue
+            relative_rank_offset = engine.weight_sync_relative_rank_offset
+            engine_rank_offset = (
+                rank_offset + relative_rank_offset if relative_rank_offset is not None else next_rank_offset
+            )
+            offsets.append((engine, engine_rank_offset))
+            if relative_rank_offset is None:
+                next_rank_offset += engine.tp_size() * engine.pp_size()
+        return offsets
+
     async def init_weight_update_communicator(
         self,
         master_addr,
@@ -851,15 +900,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         override_existing: bool = False,
     ):
         tasks = []
-        rank_offset_count = rank_offset
-
-        for i, engine in enumerate(self.engines):
-            if i in self._dead_engines:
-                continue
-            relative_rank_offset = engine.weight_sync_relative_rank_offset
-            engine_rank_offset = (
-                rank_offset + relative_rank_offset if relative_rank_offset is not None else rank_offset_count
-            )
+        for engine, engine_rank_offset in self._live_engine_communicator_offsets(rank_offset):
             tasks.append(
                 engine.init_weight_update_communicator(
                     master_addr=master_addr,
@@ -871,8 +912,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                     override_existing=override_existing,
                 )
             )
-            if relative_rank_offset is None:
-                rank_offset_count += engine.tp_size() * engine.pp_size()
         await asyncio.gather(*tasks)
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):

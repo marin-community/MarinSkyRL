@@ -337,7 +337,11 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
     """
 
     class MockEngine:
+        def __init__(self):
+            self.inputs = []
+
         async def generate(self, input_batch):
+            self.inputs.append(deepcopy(input_batch))
             # input_batch["prompt_token_ids"] is a local sub-batch list of token id lists
             prompt_token_ids = input_batch["prompt_token_ids"]
             responses = []
@@ -399,6 +403,9 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
         assert out["responses"][i] == expected_texts[i]
         assert out["response_ids"][i] == [i, i]
         assert out["stop_reasons"][i] == "stop"
+    if session_ids is not None:
+        observed = [session_id for engine in engines for batch in engine.inputs for session_id in batch["session_ids"]]
+        assert sorted(observed) == sorted(session_ids)
 
 
 # -----------------------------
@@ -500,6 +507,50 @@ def _make_min_cfg():
             },
         }
     )
+
+
+class _DraftUpdateEngine:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    async def update_draft_weights(self, weights_path):
+        self.calls.append(weights_path)
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return self.result
+
+
+@pytest.mark.asyncio
+async def test_draft_refresh_retains_per_engine_exceptions() -> None:
+    engines = [
+        _DraftUpdateEngine({"active": True}),
+        _DraftUpdateEngine(RuntimeError("load failed")),
+    ]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    weights_path = "s3://bucket/drafts/draft-step-4/model.safetensors"
+    coverage = await client.update_draft_weights(weights_path)
+
+    assert coverage == [
+        {"active": True},
+        {"active": False, "error": "RuntimeError: load failed"},
+    ]
+    assert [engine.calls for engine in engines] == [[weights_path], [weights_path]]
+
+
+@pytest.mark.asyncio
+async def test_draft_refresh_skips_dead_engines() -> None:
+    engines = [_DraftUpdateEngine({"active": True}), _DraftUpdateEngine({"active": True})]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+    client._dead_engines.add(1)
+
+    weights_path = "s3://bucket/drafts/draft-step-4/model.safetensors"
+    coverage = await client.update_draft_weights(weights_path)
+
+    assert coverage == [{"active": True}]
+    assert engines[0].calls == [weights_path]
+    assert engines[1].calls == []
 
 
 @pytest.mark.parametrize(
@@ -953,6 +1004,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
     input_batch = InferenceEngineInput(
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
+        session_ids=["stable-session"],
     )
 
     out = await client.generate(input_batch)
@@ -977,6 +1029,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
     assert third_call["prompt_token_ids"] == [[1, 2, 3, 4, 5, 21, 22]]
     assert third_call["sampling_params"][max_tokens_key] == 8  # 10 - 2 already generated
     assert third_call["sampling_params"]["temperature"] == 0.7
+    assert [call["session_ids"] for call in engines[0].calls] == [["stable-session"]] * 3
 
     # Final response should accumulate all tokens
     expected_final_response_ids = [21, 22, 23, 24]

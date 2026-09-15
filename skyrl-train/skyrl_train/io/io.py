@@ -97,6 +97,19 @@ def find_files(path: str) -> dict[str, int]:
     return {str(file_path): int(detail["size"]) for file_path, detail in details.items()}
 
 
+def file_size(path: str) -> int:
+    """Return the size of one exact local or cloud object."""
+    filesystem = _get_filesystem(path)
+    normalized = filesystem._strip_protocol(path) if is_cloud_path(path) else path
+    if path.startswith("s3://"):
+        detail = call_with_s3_retry(filesystem, filesystem.info, normalized)
+    else:
+        detail = filesystem.info(normalized)
+    if detail.get("type") == "directory":
+        raise IsADirectoryError(path)
+    return int(detail["size"])
+
+
 def makedirs(path: str, exist_ok: bool = True) -> None:
     """Create directories. Only applies to local filesystem paths."""
     if not is_cloud_path(path):
