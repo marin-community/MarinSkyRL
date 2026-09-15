@@ -197,6 +197,8 @@ async def _start_local_teacher_pool(
         role=role,
         engine_init_kwargs=engine_init_kwargs,
     )
+    if resources.max_num_batched_tokens is not None:
+        engine_kwargs["max_num_batched_tokens"] = resources.max_num_batched_tokens
     engines = create_ray_wrapped_inference_engines(**engine_kwargs)
     try:
         endpoints = tuple(

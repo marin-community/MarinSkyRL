@@ -70,6 +70,7 @@ def test_native_opd_fidelity_step_matches_the_published_batch_and_objective():
         config = compose(config_name="ppo_base_config", overrides=list(arguments))
     validate_cfg(config)
     assert config.trainer.policy.model.lora.target_modules == list(OPD.LORA_TARGETS)
+    assert config.teachers.primary.resources.max_num_batched_tokens == 4096
 
 
 def test_native_opd_plumbing_batch_covers_every_policy_rank():
