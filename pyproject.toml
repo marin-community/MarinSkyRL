@@ -81,7 +81,9 @@ deepspeed = [
     "torchvision==0.26.0 ; sys_platform == 'linux'",
 ]
 fsdp = [
+    "causal-conv1d>=1.5,<2 ; sys_platform == 'linux'",
     "flash-attn==2.8.3 ; sys_platform == 'linux'",
+    "flash-linear-attention==0.4.2 ; sys_platform == 'linux'",
     "torchtitan ; sys_platform == 'linux'",
 ]
 vllm = [
