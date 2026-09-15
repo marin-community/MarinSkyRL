@@ -31,6 +31,7 @@ from omegaconf import OmegaConf
 import asyncio
 import pytest
 import random
+import ray
 import ray.exceptions
 from copy import deepcopy
 
@@ -57,6 +58,7 @@ class _CommunicatorEngine:
         self._tp_size = tp_size
         self._pp_size = pp_size
         self.received_rank_offset = None
+        self.events = []
 
     def tp_size(self):
         return self._tp_size
@@ -65,7 +67,14 @@ class _CommunicatorEngine:
         return self._pp_size
 
     async def init_weight_update_communicator(self, **kwargs):
+        self.events.append("group")
         self.received_rank_offset = kwargs["rank_offset"]
+
+    async def pause_generation(self):
+        self.events.append("pause")
+
+    async def resume_generation(self):
+        self.events.append("resume")
 
 
 @pytest.mark.parametrize(
@@ -94,6 +103,46 @@ def test_weight_sync_communicator_rank_offsets(engines, expected_offsets):
     )
 
     assert [engine.received_rank_offset for engine in engines] == expected_offsets
+
+
+@pytest.mark.parametrize(
+    "pause_before_group",
+    [pytest.param(False, id="old-group-then-pause"), pytest.param(True, id="new-pause-then-group")],
+)
+def test_pickled_client_can_pause_before_first_generation_for_either_publication_order(pause_before_group):
+    client = InferenceEngineClient(
+        engines=[_CommunicatorEngine(relative_rank_offset=0)],
+        tokenizer=object(),
+        full_config=_make_min_cfg(),
+    )
+    restored = ray.cloudpickle.loads(ray.cloudpickle.dumps(client))
+
+    async def run_publication_boundary():
+        async def create_group():
+            await restored.init_weight_update_communicator(
+                master_addr="127.0.0.1",
+                master_port=1234,
+                rank_offset=1,
+                world_size=2,
+                group_name="test",
+                backend="gloo",
+            )
+
+        if pause_before_group:
+            await restored.pause_generation()
+            await create_group()
+        else:
+            await create_group()
+            await restored.pause_generation()
+        await restored.resume_generation()
+
+    asyncio.run(run_publication_boundary())
+
+    expected = ["pause", "group", "resume"] if pause_before_group else ["group", "pause", "resume"]
+    assert restored.engines[0].events == expected
+    assert not restored.generation_paused_event.is_set()
+    assert restored._routing_lock is not None
+    assert restored._http_bridge_stats is not None
 
 
 # -------------------------------------------
