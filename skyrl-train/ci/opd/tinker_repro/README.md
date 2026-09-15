@@ -105,14 +105,17 @@ uv cache and copy-mode installation:
 
 ```bash
 uv run iris --cluster cw-rno2a job run \
-  --enable-extra-resources --gpu H100x8 --extra fsdp --extra vllm \
-  -e UV_CACHE_DIR /tmp/tinker-native-uv-cache -e UV_LINK_MODE copy \
-  -- python skyrl-train/ci/opd/tinker_repro/native_opd.py \
+  --enable-extra-resources --gpu H100x8 --no-sync \
+  -- env UV_CACHE_DIR=/tmp/tinker-native-uv-cache UV_LINK_MODE=copy \
+  uv run --frozen --extra fsdp --extra vllm python \
+  skyrl-train/ci/opd/tinker_repro/native_opd.py \
   --stage plumbing --adapter-uri "$ADAPTER_URI" --output-uri "$OUTPUT_URI"
 ```
 
 The runner refuses a symlinked vLLM source tree rather than modifying Iris's
-shared uv cache. Use a unique output URI for every attempt.
+shared uv cache. `--no-sync` is required because Iris's managed setup currently
+hardcodes symlink mode before applying job environment overrides. Use a unique
+output URI for every attempt.
 
 ## AIME 2024 evaluation
 
