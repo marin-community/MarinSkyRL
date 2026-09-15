@@ -59,14 +59,21 @@ class _MegatronInitMode(StrEnum):
 
 class MegatronWorker:
     def init_configs(
-        self, model_path, megatron_config, model_config_kwargs, transformer_config_kwargs, bf16=True, flash_attn=False
+        self,
+        model_path,
+        megatron_config,
+        model_config_kwargs,
+        transformer_config_kwargs,
+        bf16=True,
+        flash_attn=False,
+        model_revision: str | None = None,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
         """
-        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
         validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
@@ -84,7 +91,7 @@ class MegatronWorker:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
                 transformer_config_kwargs[key] = None
 
-        bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
+        bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True, revision=model_revision)
         provider = bridge.to_megatron_provider()
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
@@ -334,6 +341,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.cfg.trainer.policy.megatron_config.transformer_config_kwargs,
             bf16=self.cfg.trainer.bf16,
             flash_attn=self.cfg.trainer.flash_attn,
+            model_revision=self.cfg.trainer.policy.model.get("revision"),
         )
 
         self.actor_module = self.make_megatron_module(
@@ -351,7 +359,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # failures still surface. no-op if already downloaded.
             retry = self.cfg.trainer.model_load_retry
             load_pretrained_with_retry(
-                lambda: snapshot_download(model_path),
+                lambda: snapshot_download(model_path, revision=self.cfg.trainer.policy.model.get("revision")),
                 model_id=model_path,
                 max_retries=int(retry.max_retries),
                 backoff_base=float(retry.backoff_base_seconds),
@@ -747,6 +755,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             self.cfg.trainer.ref.megatron_config.transformer_config_kwargs,
             bf16=self.cfg.trainer.bf16,
             flash_attn=self.cfg.trainer.flash_attn,
+            model_revision=self.cfg.trainer.ref.model.get("revision"),
         )
 
         self.actor_module = self.make_megatron_module(
@@ -765,7 +774,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             # failures still surface. no-op if already downloaded.
             retry = self.cfg.trainer.model_load_retry
             load_pretrained_with_retry(
-                lambda: snapshot_download(model_path),
+                lambda: snapshot_download(model_path, revision=self.cfg.trainer.ref.model.get("revision")),
                 model_id=model_path,
                 max_retries=int(retry.max_retries),
                 backoff_base=float(retry.backoff_base_seconds),

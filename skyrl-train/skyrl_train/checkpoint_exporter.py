@@ -215,6 +215,7 @@ def export_tokenizer(cfg: DictConfig) -> PreTrainedTokenizerBase:
         model_path=cfg.trainer.policy.model.path,
         disable_fast_tokenizer=cfg.trainer.disable_fast_tokenizer,
         padding_side="left",
+        revision=cfg.trainer.policy.model.get("revision"),
     )
 
 

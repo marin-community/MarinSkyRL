@@ -14,7 +14,7 @@ def test_packaged_entrypoints_reject_ad_hoc_teacher_configuration():
         validate_cfg(cfg)
 
 
-def test_packaged_entrypoints_reject_distillation_runtime_modes_not_yet_supported():
+def test_packaged_entrypoints_accept_distillation_only_replace_mode():
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="ppo_base_config")
     OmegaConf.set_struct(cfg, False)
@@ -51,6 +51,6 @@ def test_packaged_entrypoints_reject_distillation_runtime_modes_not_yet_supporte
             },
         },
     )
+    cfg.trainer.logger = "console"
 
-    with pytest.raises(ValueError, match="supports only reward_mode=add"):
-        validate_cfg(cfg)
+    validate_cfg(cfg)

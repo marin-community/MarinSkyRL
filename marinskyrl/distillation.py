@@ -166,8 +166,6 @@ def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None
     """Fail before allocation unless every teacher has a production scoring adapter."""
     if plan is None:
         return
-    if plan.reward_mode is not DistillationRewardMode.ADD:
-        raise ValueError("the distillation runtime currently supports only reward_mode=add auxiliary losses")
     rotating_teachers = tuple(teacher for teacher in plan.teachers if teacher.placement is TeacherPlacement.ROTATING)
     if rotating_teachers and plan.residency.max_resident != 1:
         raise ValueError("the local teacher resource plan currently supports exactly one rotating residency slot")

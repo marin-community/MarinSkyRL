@@ -1238,7 +1238,11 @@ class RayPPOTrainer:
             from transformers import AutoConfig
 
             model_path = self.cfg.trainer.policy.model.path
-            hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            hf_config = AutoConfig.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                revision=self.cfg.trainer.policy.model.get("revision"),
+            )
             # Some families nest the expert count under a text/decoder sub-config.
             candidates = [hf_config, getattr(hf_config, "text_config", None)]
             for cfg_obj in candidates:

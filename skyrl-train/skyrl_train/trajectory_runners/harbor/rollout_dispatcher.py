@@ -25,6 +25,7 @@ from skyrl_train.trajectory_runners.base import (
 from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec, ProcessPoolResources
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import TrajectorySink, retain_trajectories
+from skyrl_train.tokenizer import create_tokenizer
 from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
 from skyrl_train.utils.fd_monitor import start_fd_monitor
 from skyrl_train.worker_setup import configure_worker_process
@@ -141,8 +142,6 @@ class RolloutCoordinator:
         executor_workers: int,
     ):
         configure_worker_process()
-        from transformers import AutoTokenizer
-
         # Each actor process gets its own FD monitor (per-process daemon thread),
         # mirroring the entrypoint behavior.
         try:
@@ -160,15 +159,11 @@ class RolloutCoordinator:
         # Build the tokenizer in-process (same construction as
         # BasePPOExp.get_tokenizer) — the runner uses it during
         # post-gather token/logprob extraction (apply_chat_template).
-        tokenizer = AutoTokenizer.from_pretrained(
-            spec.config.trainer.policy.model.path,
-            trust_remote_code=True,
-            use_fast=not spec.config.trainer.disable_fast_tokenizer,
+        tokenizer = create_tokenizer(
+            model_path=spec.config.trainer.policy.model.path,
+            disable_fast_tokenizer=spec.config.trainer.disable_fast_tokenizer,
+            revision=spec.config.trainer.policy.model.get("revision"),
         )
-        tokenizer.padding_side = "left"
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-            tokenizer.pad_token_id = tokenizer.eos_token_id
 
         self._runner = spec.build(tokenizer)
 

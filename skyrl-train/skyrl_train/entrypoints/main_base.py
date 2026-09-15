@@ -129,14 +129,18 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         shared_pg=colocate_pg,
         inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
     )
+    engine_init_kwargs = {
+        **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
+        "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
+    }
+    model_revision = cfg.trainer.policy.model.get("revision")
+    if model_revision is not None:
+        engine_init_kwargs["revision"] = model_revision
     engine_kwargs = inference_engine_kwargs_from_config(
         cfg,
         tokenizer,
         role,
-        engine_init_kwargs={
-            **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
-            "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
-        },
+        engine_init_kwargs=engine_init_kwargs,
     )
 
     # Conditionally add LoRA parameters if LoRA is enabled
@@ -249,6 +253,7 @@ class BasePPOExp:
             model_path=self.cfg.trainer.policy.model.path,
             disable_fast_tokenizer=self.cfg.trainer.disable_fast_tokenizer,
             padding_side=padding_side,
+            revision=self.cfg.trainer.policy.model.get("revision"),
         )
 
     def get_train_dataset(self):

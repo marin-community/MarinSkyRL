@@ -4,6 +4,7 @@ import pytest
 
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
+    DistillationRewardMode,
     TeacherEvidenceKind,
     TeacherPlacement,
     TeacherSource,
@@ -59,6 +60,7 @@ def test_compile_distillation_plan_preserves_multi_teacher_routes():
 
     assert plan is not None
     assert plan.objective is DistillationObjectiveKind.SAMPLED_REVERSE_KL
+    assert plan.reward_mode is DistillationRewardMode.REPLACE
     assert plan.routing.name == "mopd_v1"
     assert plan.routing.revision == "routing-revision"
     assert [(route.key, route.teacher_id, route.weight) for route in plan.routing.routes] == [

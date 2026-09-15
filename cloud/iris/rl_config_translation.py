@@ -788,6 +788,9 @@ def _apply_policy_model_source(trainer: Dict[str, Any], exp_args: Dict[str, Any]
         return None
     policy_model = trainer.setdefault("policy", {}).setdefault("model", {})
     policy_model["path"] = model_path
+    model_revision = exp_args.get("model_revision")
+    if model_revision is not None:
+        policy_model["revision"] = model_revision
     model_source = model_source_for_path(
         model_path,
         exp_args.get("model_source_uri"),

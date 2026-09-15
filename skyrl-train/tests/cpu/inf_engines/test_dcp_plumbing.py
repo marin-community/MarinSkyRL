@@ -74,6 +74,41 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
     assert captured["vllm_attention_backend"] == "FLASH_ATTN"
 
 
+def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):
+    pytest.importorskip("hydra")
+    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
+    from skyrl_train.entrypoints import main_base
+    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
+
+    captured = {}
+    monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
+    cfg = get_default_config()
+    revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
+    cfg.trainer.policy.model.revision = revision
+
+    main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
+
+    assert captured["engine_init_kwargs"]["revision"] == revision
+
+
+def test_policy_tokenizer_uses_configured_revision(monkeypatch):
+    pytest.importorskip("hydra")
+    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
+    from skyrl_train.entrypoints import main_base
+    import skyrl_train.tokenizer as tokenizer_module
+
+    captured = {}
+    monkeypatch.setattr(tokenizer_module, "create_tokenizer", lambda **kwargs: captured.update(kwargs) or object())
+    experiment = main_base.BasePPOExp.__new__(main_base.BasePPOExp)
+    experiment.cfg = get_default_config()
+    revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
+    experiment.cfg.trainer.policy.model.revision = revision
+
+    experiment.get_tokenizer()
+
+    assert captured["revision"] == revision
+
+
 # ===================================================== remote forwarding G1 + G4
 class _RemoteCapture:
     """Captures the kwargs passed to the (mocked) vLLM actor .options(...).remote(...)."""
