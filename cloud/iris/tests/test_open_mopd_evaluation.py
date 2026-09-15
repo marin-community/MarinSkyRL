@@ -1,6 +1,7 @@
 import hashlib
 import json
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,8 +10,10 @@ import pytest
 
 import cloud.iris.open_mopd_evaluation as evaluation
 from cloud.iris.open_mopd_evaluation_task import (
+    EvaluationCommandError,
     EvaluationInputs,
     StagedBenchmark,
+    run_logged_command,
     rollout_commands,
     verify_benchmark_file,
 )
@@ -143,6 +146,23 @@ def test_benchmark_verification_returns_auditable_observation(tmp_path: Path) ->
 
     assert observed.expected_size == observed.observed_size == len(content)
     assert observed.expected_sha256 == observed.observed_sha256 == benchmark.sha256
+
+
+def test_failed_evaluation_command_persists_combined_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    log_path = tmp_path / "logs" / "rollout-code.log"
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; print('rank stdout'); print('rank stderr', file=sys.stderr); raise SystemExit(7)",
+    ]
+
+    with pytest.raises(EvaluationCommandError) as caught:
+        run_logged_command(command, cwd=tmp_path, log_path=log_path)
+
+    assert caught.value.returncode == 7
+    assert caught.value.log_path == log_path
+    assert set(log_path.read_text().splitlines()) == {"rank stdout", "rank stderr"}
+    assert set(capsys.readouterr().out.splitlines()) == {"rank stdout", "rank stderr"}
 
 
 def test_dry_run_exposes_immutable_inputs_without_submitting(

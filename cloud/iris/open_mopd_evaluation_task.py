@@ -49,8 +49,41 @@ class EvaluationInputs:
     model_verification: ArtifactVerification
 
 
+class EvaluationCommandError(RuntimeError):
+    """A child evaluation command failed after writing its durable log."""
+
+    def __init__(self, command: list[str], returncode: int, log_path: Path):
+        self.command = tuple(command)
+        self.returncode = returncode
+        self.log_path = log_path
+        super().__init__(f"Evaluation command exited with code {returncode}; see {log_path}")
+
+
 def _run(command: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(command, cwd=cwd, check=True)
+
+
+def run_logged_command(command: list[str], *, cwd: Path, log_path: Path) -> None:
+    """Run a child process while preserving its merged stdout and stderr."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w") as log:
+        with subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        ) as process:
+            if process.stdout is None:
+                raise RuntimeError("Failed to capture evaluation command output")
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                print(line, end="", flush=True)
+            returncode = process.wait()
+    if returncode:
+        raise EvaluationCommandError(command, returncode, log_path)
 
 
 def verify_benchmark_file(benchmark: EvaluationBenchmark, path: Path) -> FileVerification:
@@ -200,7 +233,7 @@ def score_released_benchmarks(config: EvaluationConfig, inputs: EvaluationInputs
             "--data-dir",
             str(data_dir),
         ]
-        _run(command, cwd=inputs.source)
+        run_logged_command(command, cwd=inputs.source, log_path=output / "logs" / f"score-{benchmark.name}.log")
 
 
 def argument_parser() -> argparse.ArgumentParser:
@@ -267,12 +300,24 @@ def main(argv: list[str] | None = None) -> int:
                 "model_verification": asdict(inputs.model_verification),
                 "data_verifications": [asdict(item.verification) for item in inputs.benchmarks],
                 "rollout_commands": commands,
+                "command_logs": {
+                    "rollouts": {domain: f"logs/rollout-{domain}.log" for domain in ("math", "code", "if")},
+                    "scorers": {
+                        benchmark.name: f"logs/score-{benchmark.name}.log"
+                        for benchmark in evaluation.benchmarks
+                        if benchmark.score_mode == "released"
+                    },
+                },
             }
         )
         _write_manifest(manifest_path, manifest)
         sync_tree(output, args.output_uri)
-        for command in commands:
-            _run(list(command), cwd=inputs.source)
+        for domain, command in zip(("math", "code", "if"), commands, strict=True):
+            run_logged_command(
+                list(command),
+                cwd=inputs.source,
+                log_path=output / "logs" / f"rollout-{domain}.log",
+            )
         score_released_benchmarks(evaluation, inputs, output)
         manifest["status"] = "complete"
         _write_manifest(manifest_path, manifest)
