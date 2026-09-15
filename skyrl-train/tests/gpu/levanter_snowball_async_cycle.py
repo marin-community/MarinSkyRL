@@ -212,6 +212,55 @@ async def _final_generation(client, cfg):
     return await client.generate(InferenceEngineInput(prompt_token_ids=[[3, 17, 29, 5]], sampling_params=sampling))
 
 
+def _collect_gate_evidence(trainer, runner, learner, client, cfg) -> dict[str, object]:
+    assert trainer.shutdown_requested
+    assert learner.state.policy_version == learner.state.update_count == 5
+    assert learner.state.installed_policy_version == 5
+    assert learner.state.publication_status.value == "installed"
+    assert len(trainer.updates) == 5
+    assert len(trainer.publication_intervals) == 6
+    assert len(runner.rollouts) == PROMPT_GROUPS
+    assert all(
+        math.isfinite(value) for rollout in runner.rollouts for row in rollout["rollout_logprobs"] for value in row
+    )
+    assert all(math.isfinite(update["final_loss"]) for update in trainer.updates)
+    stale_updates = [
+        update for update in trainer.updates if update["behavior_version_bounds"][0] < update["policy_before_update"]
+    ]
+    assert stale_updates, trainer.updates
+    overlap_pairs = [
+        (generation_index, training_index)
+        for generation_index, generation in enumerate(runner.intervals)
+        for training_index, training in enumerate(trainer.training_intervals)
+        if generation["start"] < training["end"] and generation["end"] > training["start"]
+    ]
+    assert overlap_pairs, (runner.intervals, trainer.training_intervals)
+
+    final_generation = asyncio.run(_final_generation(client, cfg))
+    final_segments = final_generation["response_policy_version_segments"][0]
+    assert policy_version_bounds([final_segments]) == (5, 5)
+    assert final_generation["stop_reasons"] == ["length"]
+    return {
+        "learner_state": {
+            "policy_version": learner.state.policy_version,
+            "installed_policy_version": learner.state.installed_policy_version,
+            "update_count": learner.state.update_count,
+        },
+        "updates": trainer.updates,
+        "publication_intervals": trainer.publication_intervals,
+        "generation_intervals": runner.intervals,
+        "training_intervals": trainer.training_intervals,
+        "optimizer_intervals": trainer.update_intervals,
+        "generation_training_overlap_pairs": overlap_pairs,
+        "stale_update_count": len(stale_updates),
+        "final_generation": {
+            "response_ids": final_generation["response_ids"],
+            "response_policy_version_segments": final_generation["response_policy_version_segments"],
+            "stop_reasons": final_generation["stop_reasons"],
+        },
+    }
+
+
 @ray.remote(num_gpus=LEARNER_GPUS, num_cpus=4, max_calls=1, max_retries=0)
 def _run_async_gate(model_path: str, run_path: str) -> dict[str, object]:
     cfg = _async_config(model_path, Path(run_path))
@@ -234,54 +283,7 @@ def _run_async_gate(model_path: str, run_path: str) -> dict[str, object]:
     trainer.build_models(None, None, None)
     try:
         asyncio.run(trainer.train())
-        assert trainer.shutdown_requested
-        assert learner.state.policy_version == learner.state.update_count == 5
-        assert learner.state.installed_policy_version == 5
-        assert learner.state.publication_status.value == "installed"
-        assert len(trainer.updates) == 5
-        assert len(trainer.publication_intervals) == 6
-        assert len(runner.rollouts) == PROMPT_GROUPS
-        assert all(
-            math.isfinite(value) for rollout in runner.rollouts for row in rollout["rollout_logprobs"] for value in row
-        )
-        assert all(math.isfinite(update["final_loss"]) for update in trainer.updates)
-        stale_updates = [
-            update
-            for update in trainer.updates
-            if update["behavior_version_bounds"][0] < update["policy_before_update"]
-        ]
-        assert stale_updates, trainer.updates
-        overlap_pairs = [
-            (generation_index, training_index)
-            for generation_index, generation in enumerate(runner.intervals)
-            for training_index, training in enumerate(trainer.training_intervals)
-            if generation["start"] < training["end"] and generation["end"] > training["start"]
-        ]
-        assert overlap_pairs, (runner.intervals, trainer.training_intervals)
-
-        final_generation = asyncio.run(_final_generation(client, cfg))
-        final_segments = final_generation["response_policy_version_segments"][0]
-        assert policy_version_bounds([final_segments]) == (5, 5)
-        assert final_generation["stop_reasons"] == ["length"]
-        return {
-            "learner_state": {
-                "policy_version": learner.state.policy_version,
-                "installed_policy_version": learner.state.installed_policy_version,
-                "update_count": learner.state.update_count,
-            },
-            "updates": trainer.updates,
-            "publication_intervals": trainer.publication_intervals,
-            "generation_intervals": runner.intervals,
-            "training_intervals": trainer.training_intervals,
-            "optimizer_intervals": trainer.update_intervals,
-            "generation_training_overlap_pairs": overlap_pairs,
-            "stale_update_count": len(stale_updates),
-            "final_generation": {
-                "response_ids": final_generation["response_ids"],
-                "response_policy_version_segments": final_generation["response_policy_version_segments"],
-                "stop_reasons": final_generation["stop_reasons"],
-            },
-        }
+        return _collect_gate_evidence(trainer, runner, learner, client, cfg)
     finally:
         asyncio.run(trainer.release())
 
