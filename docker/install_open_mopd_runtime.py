@@ -9,8 +9,19 @@ from pathlib import Path
 import subprocess
 import sys
 
+from packaging.version import Version
+
 
 PURE_PYTHON_OVERRIDES = ("fsspec", "protobuf", "ray", "s3fs", "transformers")
+
+
+def versions_match(expected: str, actual: str) -> bool:
+    """Accept a matching local build when the manifest names a public release."""
+    expected_version = Version(expected)
+    actual_version = Version(actual)
+    if expected_version.local is not None:
+        return actual_version == expected_version
+    return actual_version.public == expected_version.public
 
 
 def expected_packages(config_path: Path) -> dict[str, str]:
@@ -28,7 +39,7 @@ def install_and_verify(config_path: Path) -> None:
     subprocess.run([sys.executable, "-m", "pip", "install", "--no-cache-dir", *requirements], check=True)
     for distribution, expected in packages.items():
         actual = importlib.metadata.version(distribution)
-        if actual != expected:
+        if not versions_match(expected, actual):
             raise RuntimeError(f"{distribution}: expected {expected}, found {actual}")
     import s3fs  # noqa: F401, PLC0415
 
