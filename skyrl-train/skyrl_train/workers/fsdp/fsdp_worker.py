@@ -9,7 +9,7 @@ from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_th
 import ray
 import torch
 import torch.distributed
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 import io
@@ -137,7 +137,9 @@ def _build_cpu_offload_numa_diagnostics(rank: int, page_sample: _ParameterPageSa
     )
 
 
-def _omit_tied_lm_head_weight(params, config):
+def _omit_tied_lm_head_weight(
+    params: dict[str, torch.Tensor], config: PretrainedConfig | None
+) -> dict[str, torch.Tensor]:
     """Keep only the canonical input embedding when the output head is tied to it.
 
     vLLM rejects an alias such as ``lm_head.weight`` when a weight-sync chunk does

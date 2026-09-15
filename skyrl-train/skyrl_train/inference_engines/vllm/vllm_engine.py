@@ -20,49 +20,15 @@ from skyrl_train.config.behavior_logprobs import (
     validate_behavior_logprob_sampling,
 )
 
-# vLLM 0.16+ reorganized entrypoints into sub-packages.
-# Try new paths first, fall back to old paths for backwards compatibility.
-try:
-    # vLLM >= 0.16
-    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-    from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-    from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-    from vllm.entrypoints.openai.models.protocol import BaseModelPath
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-        ChatCompletionResponse,
-    )
-    from vllm.entrypoints.openai.completion.protocol import (
-        CompletionRequest,
-        CompletionResponse,
-    )
-
-    try:
-        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-    except ImportError:
-        from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-except ImportError:
-    # vLLM < 0.16 (old flat layout)
-    from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-    from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-    from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-    from vllm.entrypoints.openai.protocol import (
-        ChatCompletionRequest,
-        ChatCompletionResponse,
-        ErrorResponse,
-        CompletionRequest,
-        CompletionResponse,
-    )
-
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest, ChatCompletionResponse
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest, CompletionResponse
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest, TokenizeResponse
-
-try:
-    from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
-except ImportError:
-    try:
-        from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization as ServingTokenization
-    except ImportError:
-        ServingTokenization = None
+from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 
 try:
     from vllm.v1.metrics.loggers import LoggingStatLogger
@@ -144,35 +110,10 @@ def _parse_vllm_version() -> version.Version:
 
 
 def _build_error_response(message: str, type_phrase: str, code: int) -> Dict[str, Any]:
-    """Build an OpenAI-style ErrorResponse dict, robust to vLLM's ErrorInfo move.
-
-    vLLM >= 0.10 wraps the error fields in a nested ``ErrorInfo``; older vLLM put
-    them flat on ``ErrorResponse``. vLLM 0.16 ALSO relocated ``ErrorInfo`` out of
-    the flat ``vllm.entrypoints.openai.protocol`` module (which no longer exists)
-    into ``vllm.entrypoints.openai.engine.protocol`` — importing the old path
-    raised ``ModuleNotFoundError`` inside the engine's request-error handler
-    (vllm_engine.py:1591), turning every recoverable per-request error into an
-    unhandled crash. Try the new sub-package path first, then the old flat path,
-    then fall back to the flat-field ErrorResponse for pre-0.10 vLLM.
-    """
-    ErrorInfo = None
-    try:  # Current vLLM serve layout.
-        from vllm.entrypoints.serve.engine.protocol import ErrorInfo  # type: ignore
-    except ImportError:
-        try:  # vLLM 0.16–0.20 layout.
-            from vllm.entrypoints.openai.engine.protocol import ErrorInfo  # type: ignore
-        except ImportError:
-            try:  # vLLM 0.10–0.15 flat layout.
-                from vllm.entrypoints.openai.protocol import ErrorInfo  # type: ignore
-            except ImportError:
-                ErrorInfo = None
-
-    if ErrorInfo is not None:
-        return ErrorResponse(
-            error=ErrorInfo(message=message, type=type_phrase, code=code),
-        ).model_dump()
-    # pre-0.10 vLLM: flat fields directly on ErrorResponse.
-    return ErrorResponse(message=message, type=type_phrase, code=code).model_dump()
+    """Build the pinned vLLM fork's nested OpenAI error response."""
+    return ErrorResponse(
+        error=ErrorInfo(message=message, type=type_phrase, code=code),
+    ).model_dump()
 
 
 # Guard so the fake/meta registration runs at most once per worker process.
@@ -1727,15 +1668,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             online_renderer=online_renderer,
             request_logger=None,
         )
-        self.openai_serving_tokenization = None
-        if ServingTokenization is not None:
-            self.openai_serving_tokenization = ServingTokenization(
-                models=models,
-                online_renderer=online_renderer,
-                request_logger=None,
-                chat_template=custom_chat_template_content,
-                chat_template_content_format="auto",
-            )
+        self.openai_serving_tokenization = ServingTokenization(
+            models=models,
+            online_renderer=online_renderer,
+            request_logger=None,
+            chat_template=custom_chat_template_content,
+            chat_template_content_format="auto",
+        )
         return engine
 
     async def _load_lora_from_disk(self, lora_path: str):
@@ -2008,8 +1947,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         Accepts a JSON-serializable payload: {"json": <request-body>, "headers": <headers-dict>}.
         Constructs a minimal request-like object for vLLM's openai_serving_chat.
-        Returns a plain dict, either a ChatCompletionResponse or an ErrorResponse, both defined
-        in vllm.entrypoints.openai.protocol.
+        Returns a plain dict containing either a chat response or a serving error.
         """
         return await self._handle_openai_request(request_payload, endpoint="/chat/completions")
 
@@ -2022,8 +1960,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         except Exception as e:
             return _build_error_response(str(e), HTTPStatus.BAD_REQUEST.phrase, HTTPStatus.BAD_REQUEST.value)
 
-        if self.openai_serving_tokenization is None:
-            raise RuntimeError("The configured vLLM version does not expose the shared rendering service")
         response = await self.openai_serving_tokenization.create_tokenize(request, _MinimalRequest(headers))
         assert isinstance(response, (TokenizeResponse, ErrorResponse))
         return response.model_dump()
@@ -2033,8 +1969,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         Accepts a JSON-serializable payload: {"json": <request-body>, "headers": <headers-dict>}.
         Constructs a minimal request-like object for vLLM's openai_serving_completion.
-        Returns a plain dict, either a CompletionResponse or an ErrorResponse, both defined
-        in vllm.entrypoints.openai.protocol.
+        Returns a plain dict containing either a completion response or a serving error.
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
 

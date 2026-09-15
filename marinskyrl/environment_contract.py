@@ -487,19 +487,20 @@ class EnvVarManager:
         """Resolve Python-wheel CUDA library paths for task and Ray worker processes."""
         nvidia_roots = [Path(root) / "nvidia" for root in site_packages if (Path(root) / "nvidia").is_dir()]
         library_paths = sorted(path for root in nvidia_roots for path in root.glob("*/lib") if path.is_dir())
-        nvrtc_homes = [root / "cu13" for root in nvidia_roots if (root / "cu13" / "lib").is_dir()]
+        cuda_roots = [root / "cu13" for root in nvidia_roots if (root / "cu13" / "lib").is_dir()]
         if not library_paths:
             raise RuntimeError("The frozen GPU runtime has no Python-wheel CUDA library directories")
-        if len(nvrtc_homes) != 1:
-            raise RuntimeError(f"The frozen GPU runtime must have exactly one NVRTC home; found {nvrtc_homes}")
+        if len(cuda_roots) != 1:
+            raise RuntimeError(f"The frozen GPU runtime must have exactly one CUDA root; found {cuda_roots}")
 
         library_path = os.pathsep.join(str(path) for path in library_paths)
+        cuda_root = cuda_roots[0]
         return cls(
             {
                 LD_LIBRARY_PATH_ENV: library_path,
-                NVRTC_HOME_ENV: str(nvrtc_homes[0]),
-                CUDA_HOME_ENV: str(nvrtc_homes[0]),
-                LIBRARY_PATH_ENV: str(nvrtc_homes[0].parents[3]),
+                NVRTC_HOME_ENV: str(cuda_root),
+                CUDA_HOME_ENV: str(cuda_root),
+                LIBRARY_PATH_ENV: str(cuda_root.parents[3]),
             }
         )
 

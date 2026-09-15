@@ -6,6 +6,7 @@ package="${1:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}"
 build_dir="$(realpath -m "${2:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}")"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 source_subdir=.
+python_version=3.12.14
 export MAX_JOBS=2
 case "$package" in
     flash-attn)
@@ -38,7 +39,7 @@ case "$package" in
 esac
 
 mkdir -p "$build_dir"
-uv venv --allow-existing --python 3.12.14 "$build_dir/venv"
+uv venv --allow-existing --python "$python_version" "$build_dir/venv"
 uv pip sync --python "$build_dir/venv/bin/python" \
     --link-mode copy \
     --extra-index-url https://download.pytorch.org/whl/cu132 \
@@ -57,11 +58,12 @@ git -C "$build_dir/source" submodule foreach --quiet --recursive \
     'test -z "$(git status --porcelain --untracked-files=all --ignore-submodules=none)"'
 
 export VIRTUAL_ENV="$build_dir/venv"
-export CUDA_HOME="$VIRTUAL_ENV/lib/python3.12/site-packages/nvidia/cu13"
+site_packages="$VIRTUAL_ENV/lib/python${python_version%.*}/site-packages"
+export CUDA_HOME="$site_packages/nvidia/cu13"
 # NVIDIA's runtime wheel ships the SONAME but no development linker name.
 ln -sf libcudart.so.13 "$CUDA_HOME/lib/libcudart.so"
 export PATH="$VIRTUAL_ENV/bin:$CUDA_HOME/bin:$PATH"
-export CPATH="$VIRTUAL_ENV/lib/python3.12/site-packages/nvidia/cudnn/include:$VIRTUAL_ENV/lib/python3.12/site-packages/nvidia/nccl/include"
+export CPATH="$site_packages/nvidia/cudnn/include:$site_packages/nvidia/nccl/include"
 export NVCC_THREADS=1
 nvcc --version
 c++ --version
