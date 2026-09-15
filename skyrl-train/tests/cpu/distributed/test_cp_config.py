@@ -90,6 +90,10 @@ ADDITIVE_ALGORITHM_FIELDS = {
     },
     "require_rollout_logprobs": False,
 }
+ADDITIVE_FULLY_ASYNC_FIELDS = {
+    "max_buffered_groups": None,
+    "policy_publication_steps": None,
+}
 ADDITIVE_DYNAMIC_SAMPLING_FIELDS = {
     "informative_on": "shaped",
     "min_reward_std": 0.0,
@@ -109,6 +113,7 @@ ADDITIVE_GENERATOR_FIELDS = {
     "r3_transport": "decentral",
     "r3_dispatch_put_timeout_seconds": 600,
     "gdn_backend": "torch",
+    "non_agentic_parser_protocol": None,
 }
 ADDITIVE_POLICY_MODEL_FIELDS = {
     "revision": None,
@@ -196,6 +201,8 @@ def test_all_defaults_is_structurally_identical_to_baseline():
         container["trainer"].pop(k, None)
     for k in ADDITIVE_ALGORITHM_FIELDS:
         container["trainer"]["algorithm"].pop(k, None)
+    for k in ADDITIVE_FULLY_ASYNC_FIELDS:
+        container["trainer"]["fully_async"].pop(k, None)
     for k in ADDITIVE_DYNAMIC_SAMPLING_FIELDS:
         container["trainer"]["algorithm"]["dynamic_sampling"].pop(k, None)
     for k in ADDITIVE_GROUP_ADMISSION_FIELDS:
