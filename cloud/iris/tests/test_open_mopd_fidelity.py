@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -6,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 import cloud.iris.open_mopd_fidelity as fidelity
-from cloud.iris.open_mopd_fidelity_task import StagedInputs, training_command
+import cloud.iris.open_mopd_fidelity_task as fidelity_task
+from cloud.iris.open_mopd_fidelity_task import FileVerification, StagedInputs, training_command, verify_lfs_files
 
 TASK_IMAGE = "registry.example/open-mopd@sha256:" + "1" * 64
 OUTPUT_URI = "s3://bucket/open-mopd/one-step"
@@ -20,6 +22,108 @@ def test_config_parser_rejects_unknown_nested_fields(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="training keys"):
         fidelity.load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "lfs_files",
+    [
+        [],
+        [{"path": ".", "size": 7, "sha256": "1" * 64}],
+        [{"path": "../model.safetensors", "size": 7, "sha256": "1" * 64}],
+        [
+            {"path": "model.safetensors", "size": 7, "sha256": "1" * 64},
+            {"path": "model.safetensors", "size": 7, "sha256": "2" * 64},
+        ],
+    ],
+)
+def test_config_parser_rejects_unsafe_or_ambiguous_lfs_manifests(
+    tmp_path: Path, lfs_files: list[dict[str, object]]
+) -> None:
+    raw = json.loads(fidelity.DEFAULT_CONFIG.read_text())
+    raw["artifacts"]["student"]["lfs_files"] = lfs_files
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(raw))
+
+    with pytest.raises(ValueError):
+        fidelity.load_config(config_path)
+
+
+def test_model_verification_reports_observed_integrity(tmp_path: Path) -> None:
+    content = b"weights"
+    model = tmp_path / "model.safetensors"
+    model.write_bytes(content)
+    expected = fidelity.LfsFile(
+        path=model.name,
+        size=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+    verified = verify_lfs_files(tmp_path, (expected,))
+
+    assert verified == (
+        FileVerification(
+            path=model.name,
+            expected_size=len(content),
+            observed_size=len(content),
+            expected_sha256=expected.sha256,
+            observed_sha256=expected.sha256,
+        ),
+    )
+
+
+@pytest.mark.parametrize("failure", ["missing", "size", "digest", "internal_symlink", "external_symlink"])
+def test_model_verification_rejects_untrusted_files(tmp_path: Path, failure: str) -> None:
+    content = b"weights"
+    expected_path = "model.safetensors"
+    expected_size = len(content)
+    expected_sha256 = hashlib.sha256(content).hexdigest()
+    if failure == "size":
+        (tmp_path / expected_path).write_bytes(content + b"!")
+    elif failure == "digest":
+        (tmp_path / expected_path).write_bytes(b"WEIGHTS")
+    elif failure == "internal_symlink":
+        actual = tmp_path / "actual.safetensors"
+        actual.write_bytes(content)
+        (tmp_path / expected_path).symlink_to(actual)
+    elif failure == "external_symlink":
+        outside = tmp_path.parent / f"{tmp_path.name}-outside"
+        outside.write_bytes(content)
+        (tmp_path / expected_path).symlink_to(outside)
+    expected = fidelity.LfsFile(path=expected_path, size=expected_size, sha256=expected_sha256)
+
+    with pytest.raises(ValueError, match="integrity verification failed"):
+        verify_lfs_files(tmp_path, (expected,))
+
+
+def test_dataset_verification_is_recorded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    content = b"parquet"
+    relative_path = "rl_prompt_mix/train.parquet"
+    dataset = tmp_path / relative_path
+    dataset.parent.mkdir()
+    dataset.write_bytes(content)
+    artifact = SimpleNamespace(
+        repository="organization/dataset",
+        revision="1" * 40,
+        path=relative_path,
+        size=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+    monkeypatch.setattr(fidelity_task, "_run", lambda *args, **kwargs: None)
+
+    path, verification = fidelity_task._dataset(SimpleNamespace(dataset=artifact), tmp_path)
+
+    assert path == dataset
+    assert verification.repository == artifact.repository
+    assert verification.revision == artifact.revision
+    assert verification.files == (
+        FileVerification(
+            path=relative_path,
+            expected_size=len(content),
+            observed_size=len(content),
+            expected_sha256=artifact.sha256,
+            observed_sha256=artifact.sha256,
+        ),
+    )
 
 
 def test_training_command_has_semantic_control_settings() -> None:
@@ -142,6 +246,8 @@ def test_plan_exposes_control_and_paper_prompt_limits() -> None:
     assert plan.prompt_limit == 2048
     assert plan.paper_prompt_limits == (1024, 2048, 2048)
     assert plan.prompt_limit != plan.paper_prompt_limits[0]
+    assert plan.evaluation_reference.repository == "BytedTsinghua-SIA/Open-MOPD-SmolLM3-3B-Final"
+    assert plan.evaluation_reference.revision == "228a146a5d95f00136057347ac4810e6635061b6"
 
 
 @pytest.mark.parametrize("output_uri", ["/tmp/output", "file:///tmp/output", "s3://bucket"])

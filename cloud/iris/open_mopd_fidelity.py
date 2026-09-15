@@ -9,7 +9,7 @@ import shlex
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -30,11 +30,26 @@ class Source:
 
 
 @dataclass(frozen=True)
-class Artifact:
+class LfsFile:
+    path: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class ModelArtifact:
     repository: str
     revision: str
-    path: str | None = None
-    sha256: str | None = None
+    lfs_files: tuple[LfsFile, ...]
+
+
+@dataclass(frozen=True)
+class DatasetArtifact:
+    repository: str
+    revision: str
+    path: str
+    size: int
+    sha256: str
 
 
 @dataclass(frozen=True)
@@ -42,6 +57,7 @@ class Teacher:
     domain: str
     repository: str
     revision: str
+    lfs_files: tuple[LfsFile, ...]
 
 
 @dataclass(frozen=True)
@@ -87,9 +103,10 @@ class Training:
 class FidelityConfig:
     schema_version: int
     source: Source
-    student: Artifact
+    student: ModelArtifact
     teachers: tuple[Teacher, Teacher, Teacher]
-    dataset: Artifact
+    evaluation_reference: ModelArtifact
+    dataset: DatasetArtifact
     hardware: Hardware
     environment: Environment
     training: Training
@@ -105,6 +122,7 @@ class FidelityLaunchPlan:
     launcher_commit: str
     task_image: str
     output_uri: str
+    evaluation_reference: ModelArtifact
     prompt_limit: int
     paper_prompt_limits: tuple[int, int, int]
     iris_command: tuple[str, ...]
@@ -153,23 +171,59 @@ def _triple(value: Any, name: str, item_parser: Any) -> tuple[Any, Any, Any]:
     return tuple(item_parser(item, f"{name}[{index}]") for index, item in enumerate(value))
 
 
-def _artifact(value: Any, name: str, *, dataset: bool = False) -> Artifact:
-    keys = {"repository", "revision", "path", "sha256"} if dataset else {"repository", "revision"}
-    item = _object(value, name, keys)
-    path = item.get("path")
-    sha256 = item.get("sha256")
-    if dataset and (
-        not isinstance(path, str)
-        or not path
-        or not isinstance(sha256, str)
-        or not re.fullmatch(r"[0-9a-f]{64}", sha256)
-    ):
-        raise ValueError("artifacts.dataset requires a path and 64-character SHA-256")
-    return Artifact(
-        _string(item["repository"], f"{name}.repository"),
-        _revision(item["revision"], f"{name}.revision"),
-        path,
-        sha256,
+def _sha256(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError(f"{name} must be a lowercase 64-character SHA-256")
+    return value
+
+
+def _lfs_files(value: Any, name: str) -> tuple[LfsFile, ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{name} must be a non-empty list")
+    files = []
+    for index, raw in enumerate(value):
+        item_name = f"{name}[{index}]"
+        item = _object(raw, item_name, {"path", "size", "sha256"})
+        path = _string(item["path"], f"{item_name}.path")
+        parsed_path = PurePosixPath(path)
+        if (
+            parsed_path.is_absolute()
+            or not parsed_path.parts
+            or path != parsed_path.as_posix()
+            or any(part in {".", ".."} for part in parsed_path.parts)
+        ):
+            raise ValueError(f"{item_name}.path must be a normalized safe relative path")
+        size = _integer(item["size"], f"{item_name}.size")
+        if size <= 0:
+            raise ValueError(f"{item_name}.size must be positive")
+        files.append(LfsFile(path=path, size=size, sha256=_sha256(item["sha256"], f"{item_name}.sha256")))
+    paths = [file.path for file in files]
+    if len(paths) != len(set(paths)):
+        raise ValueError(f"{name} paths must be unique")
+    return tuple(files)
+
+
+def _model_artifact(value: Any, name: str) -> ModelArtifact:
+    item = _object(value, name, {"repository", "revision", "lfs_files"})
+    return ModelArtifact(
+        repository=_string(item["repository"], f"{name}.repository"),
+        revision=_revision(item["revision"], f"{name}.revision"),
+        lfs_files=_lfs_files(item["lfs_files"], f"{name}.lfs_files"),
+    )
+
+
+def _dataset_artifact(value: Any) -> DatasetArtifact:
+    name = "artifacts.dataset"
+    item = _object(value, name, {"repository", "revision", "path", "size", "sha256"})
+    size = _integer(item["size"], f"{name}.size")
+    if size <= 0:
+        raise ValueError(f"{name}.size must be positive")
+    return DatasetArtifact(
+        repository=_string(item["repository"], f"{name}.repository"),
+        revision=_revision(item["revision"], f"{name}.revision"),
+        path=_string(item["path"], f"{name}.path"),
+        size=size,
+        sha256=_sha256(item["sha256"], f"{name}.sha256"),
     )
 
 
@@ -179,14 +233,14 @@ def load_config(path: Path) -> FidelityConfig:
         "config",
         {"schema_version", "source", "artifacts", "hardware", "environment", "training", "gates", "known_deviations"},
     )
-    if _integer(root["schema_version"], "schema_version") != 1:
-        raise ValueError("Open-MOPD fidelity config schema_version must be 1")
+    if _integer(root["schema_version"], "schema_version") != 2:
+        raise ValueError("Open-MOPD fidelity config schema_version must be 2")
     source_value = _object(root["source"], "source", {"repository", "commit"})
     source = Source(
         _string(source_value["repository"], "source.repository"),
         _revision(source_value["commit"], "source.commit"),
     )
-    artifacts = _object(root["artifacts"], "artifacts", {"student", "teachers", "dataset"})
+    artifacts = _object(root["artifacts"], "artifacts", {"student", "teachers", "evaluation_reference", "dataset"})
     teacher_values = artifacts["teachers"]
     if not isinstance(teacher_values, list) or len(teacher_values) != len(DOMAINS):
         raise ValueError("artifacts.teachers must contain exactly math, code, and if")
@@ -195,9 +249,10 @@ def load_config(path: Path) -> FidelityConfig:
             domain=_string(item["domain"], f"teachers[{index}].domain"),
             repository=_string(item["repository"], f"teachers[{index}].repository"),
             revision=_revision(item["revision"], f"teachers[{index}].revision"),
+            lfs_files=_lfs_files(item["lfs_files"], f"teachers[{index}].lfs_files"),
         )
         for index, value in enumerate(teacher_values)
-        for item in [_object(value, f"teachers[{index}]", {"domain", "repository", "revision"})]
+        for item in [_object(value, f"teachers[{index}]", {"domain", "repository", "revision", "lfs_files"})]
     )
     if tuple(teacher.domain for teacher in teachers) != DOMAINS:
         raise ValueError("Teacher order must be math, code, if because patched verl assigns teachers positionally")
@@ -246,11 +301,12 @@ def load_config(path: Path) -> FidelityConfig:
     if not isinstance(deviations, list) or not deviations or not all(isinstance(value, str) for value in deviations):
         raise ValueError("known_deviations must be a non-empty list of strings")
     return FidelityConfig(
-        schema_version=1,
+        schema_version=2,
         source=source,
-        student=_artifact(artifacts["student"], "artifacts.student"),
+        student=_model_artifact(artifacts["student"], "artifacts.student"),
         teachers=teachers,
-        dataset=_artifact(artifacts["dataset"], "artifacts.dataset", dataset=True),
+        evaluation_reference=_model_artifact(artifacts["evaluation_reference"], "artifacts.evaluation_reference"),
+        dataset=_dataset_artifact(artifacts["dataset"]),
         hardware=Hardware(
             gpu=_string(hardware_value["gpu"], "hardware.gpu"),
             cpu=_integer(hardware_value["cpu"], "hardware.cpu"),
@@ -400,6 +456,7 @@ def build_plan(
         launcher_commit=launcher_commit,
         task_image=pinned_image,
         output_uri=output_uri,
+        evaluation_reference=config.evaluation_reference,
         prompt_limit=config.training.prompt_limit,
         paper_prompt_limits=config.training.paper_prompt_limits,
         iris_command=command,
