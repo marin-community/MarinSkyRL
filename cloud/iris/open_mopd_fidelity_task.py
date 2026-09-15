@@ -24,6 +24,8 @@ from cloud.iris.open_mopd_fidelity import (
     validate_output_uri,
 )
 
+CONTROL_MANIFEST_NAME = "control-manifest.json"
+
 
 @dataclass(frozen=True)
 class FileVerification:
@@ -70,7 +72,7 @@ def validate_runtime(config: FidelityConfig) -> None:
             raise ValueError(f"{distribution} version mismatch: expected {expected}, found {actual}")
 
 
-def _checkout_source(config: FidelityConfig, destination: Path) -> Path:
+def checkout_source(config: FidelityConfig, destination: Path) -> Path:
     source = destination / "Open-MOPD"
     source.mkdir(parents=True)
     _run(["git", "init", "-q"], cwd=source)
@@ -120,7 +122,7 @@ def verify_lfs_files(destination: Path, expected_files: tuple[LfsFile, ...]) -> 
     return tuple(verified)
 
 
-def _snapshot(
+def snapshot_model(
     repository: str, revision: str, expected_files: tuple[LfsFile, ...], destination: Path
 ) -> tuple[Path, ArtifactVerification]:
     code = (
@@ -173,15 +175,15 @@ def _dataset(config: FidelityConfig, destination: Path) -> tuple[Path, ArtifactV
 
 
 def stage_inputs(config: FidelityConfig, root: Path) -> StagedInputs:
-    source = _checkout_source(config, root / "source")
-    student, student_verification = _snapshot(
+    source = checkout_source(config, root / "source")
+    student, student_verification = snapshot_model(
         config.student.repository,
         config.student.revision,
         config.student.lfs_files,
         root / "models" / "student",
     )
     teacher_snapshots = tuple(
-        _snapshot(
+        snapshot_model(
             teacher.repository,
             teacher.revision,
             teacher.lfs_files,
@@ -293,7 +295,7 @@ def training_command(
     return ["env", *(f"{key}={value}" for key, value in training_env.items()), *command]
 
 
-def _sync_tree(local: Path, output_uri: str) -> None:
+def sync_tree(local: Path, output_uri: str) -> None:
     filesystem, target = fs_and_path(output_uri)
     for source in local.rglob("*"):
         if not source.is_file():
@@ -303,18 +305,18 @@ def _sync_tree(local: Path, output_uri: str) -> None:
         filesystem.put_file(str(source), destination)
 
 
-def _reject_existing_output(output_uri: str) -> None:
+def reject_existing_output(output_uri: str, manifest_name: str = CONTROL_MANIFEST_NAME) -> None:
     filesystem, target = fs_and_path(output_uri)
-    if filesystem.exists(posixpath.join(target, "control-manifest.json")):
-        raise ValueError(f"Durable output already contains control-manifest.json: {output_uri}")
+    if filesystem.exists(posixpath.join(target, manifest_name)):
+        raise ValueError(f"Durable output already contains {manifest_name}: {output_uri}")
 
 
-def _periodic_sync(local: Path, output_uri: str, stop: threading.Event, interval: int) -> None:
+def periodic_sync(local: Path, output_uri: str, stop: threading.Event, interval: int) -> None:
     while not stop.wait(interval):
-        _sync_tree(local, output_uri)
+        sync_tree(local, output_uri)
 
 
-def _runtime_inventory(source: Path) -> dict[str, object]:
+def runtime_inventory(source: Path) -> dict[str, object]:
     return {
         "open_mopd_git_status": _run(["git", "status", "--porcelain"], cwd=source, capture_output=True).stdout,
         "python": sys.version,
@@ -342,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     validate_output_uri(args.output_uri)
     validate_runtime(config)
     world_size = gpu_count(args.gpu_slice)
-    _reject_existing_output(args.output_uri)
+    reject_existing_output(args.output_uri)
     if args.work_root.exists():
         raise ValueError(f"Work root already exists: {args.work_root}")
     args.work_root.mkdir(parents=True)
@@ -355,17 +357,18 @@ def main(argv: list[str] | None = None) -> int:
         "gate": args.gate,
         "steps": GATES[args.gate],
         "command": command,
-        "runtime": _runtime_inventory(inputs.source),
+        "runtime": runtime_inventory(inputs.source),
         "artifact_verifications": [asdict(verification) for verification in inputs.artifact_verifications],
         "task_image": args.task_image,
         "launcher_commit": args.launcher_commit,
         "gpu_slice": args.gpu_slice,
     }
-    (output / "control-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    _sync_tree(output, args.output_uri)
+    manifest_path = output / CONTROL_MANIFEST_NAME
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    sync_tree(output, args.output_uri)
     stop = threading.Event()
     uploader = threading.Thread(
-        target=_periodic_sync,
+        target=periodic_sync,
         args=(output, args.output_uri, stop, args.sync_interval),
         daemon=True,
         name="open-mopd-output-sync",
@@ -374,11 +377,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = subprocess.run(command, cwd=inputs.source, check=False)
         manifest["returncode"] = result.returncode
-        (output / "control-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     finally:
         stop.set()
         uploader.join(timeout=10)
-        _sync_tree(output, args.output_uri)
+        sync_tree(output, args.output_uri)
     return result.returncode
 
 
