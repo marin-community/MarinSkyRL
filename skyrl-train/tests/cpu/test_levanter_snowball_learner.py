@@ -288,17 +288,42 @@ def test_publication_rejects_one_missing_expert_slice_receipt(tmp_path):
     async def discard_publication(_batch):
         return None
 
+    async def record_weight_group_setup():
+        calls.append("group")
+        learner._weight_group = object()
+
     learner._inference_client = FakeInferenceClient()
-    learner._weight_group = object()
+    learner._ensure_weight_group = record_weight_group_setup
     learner._publish_weight_batch = discard_publication
 
     with pytest.raises(RuntimeError, match="rank-zero weight publication failed") as error:
         asyncio.run(learner.publish_policy())
     assert error.value.__cause__ is not None
     assert "incomplete inference expert-slice installation" in str(error.value.__cause__)
-    assert calls == ["pause", "begin", "finish"]
+    assert calls == ["pause", "group", "begin", "finish"]
     assert learner.state.lifecycle.value == "failed"
     learner._weight_group = None
+    learner.close()
+
+
+def test_publication_propagates_rank_zero_error_text_to_other_process(monkeypatch, tmp_path):
+    learner = _make_learner(tmp_path / "publication-error-propagation")
+    detail = b"ConnectionError: inference pause failed"
+    payload = np.zeros(5 + 4096, dtype=np.uint8)
+    payload[1:5] = np.frombuffer(len(detail).to_bytes(4, "little"), dtype=np.uint8)
+    payload[5 : 5 + len(detail)] = np.frombuffer(detail, dtype=np.uint8)
+
+    async def unexpected_operation():
+        raise AssertionError("nonzero process must not run the inference operation")
+
+    with monkeypatch.context() as context:
+        context.setattr(jax, "process_index", lambda: 1)
+        context.setattr(
+            "skyrl_train.learners.levanter_snowball.multihost_utils.broadcast_one_to_all",
+            lambda _value: payload,
+        )
+        with pytest.raises(RuntimeError, match="ConnectionError: inference pause failed"):
+            asyncio.run(learner._rank_zero_publication_call(unexpected_operation, "generation pause"))
     learner.close()
 
 

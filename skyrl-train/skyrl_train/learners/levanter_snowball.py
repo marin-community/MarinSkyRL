@@ -83,6 +83,7 @@ AutoConfig.register(GrugMoeConfig.model_type, GrugMoeConfig, exist_ok=True)
 
 _ROUTER_BIAS_SUFFIX = ".mlp.router.bias"
 _SNOWBALL_CE_BLOCK_SIZES = BlockSizes(b_block_size=8192, h_block_size=512, v_block_size=2048)
+_PUBLICATION_ERROR_MAX_BYTES = 4096
 
 
 class _SnowballTrainerConfig(TrainerConfig):
@@ -839,7 +840,15 @@ class LevanterSnowballLearner:
         if jax.process_index() == 0 and self._inference_client is None:
             raise RuntimeError("the inference engine must be connected before publishing")
         self._publication_status = PublicationStatus.PENDING
+
+        async def pause_generation() -> None:
+            await self._inference_client.pause_generation()
+
         try:
+            # Stop EngineCore before creating its auxiliary weight-transfer
+            # process group. If either step fails, leave generation paused: it
+            # is not safe to serve once a publication attempt has begun.
+            await self._rank_zero_publication_call(pause_generation, "generation pause")
             await self._rank_zero_publication_call(self._ensure_weight_group, "communicator setup")
             await self._publish_all_weights()
         except Exception:
@@ -862,10 +871,26 @@ class LevanterSnowballLearner:
                 await operation()
             except BaseException as exc:
                 error = exc
-        succeeded = np.asarray(0 if error is not None else 1, dtype=np.int32)
-        succeeded = multihost_utils.broadcast_one_to_all(succeeded)
-        if not bool(np.asarray(succeeded).item()):
-            raise RuntimeError(f"rank-zero weight publication failed during {stage}") from error
+                logger.exception("Rank-zero weight publication failed during %s", stage)
+
+        # Ray may surface a nonzero learner actor first. Carry a bounded copy of
+        # rank zero's error through the same collective so that actor still
+        # reports the underlying inference failure instead of only the stage.
+        payload = np.zeros(5 + _PUBLICATION_ERROR_MAX_BYTES, dtype=np.uint8)
+        payload[0] = error is None
+        if error is not None:
+            encoded = f"{type(error).__name__}: {error}".encode("utf-8", errors="replace")
+            encoded = encoded[:_PUBLICATION_ERROR_MAX_BYTES]
+            payload[1:5] = np.frombuffer(len(encoded).to_bytes(4, "little"), dtype=np.uint8)
+            payload[5 : 5 + len(encoded)] = np.frombuffer(encoded, dtype=np.uint8)
+        payload = np.asarray(multihost_utils.broadcast_one_to_all(payload), dtype=np.uint8)
+        if not bool(payload[0]):
+            detail_length = int.from_bytes(payload[1:5].tobytes(), "little")
+            detail = payload[5 : 5 + detail_length].tobytes().decode("utf-8", errors="replace")
+            message = f"rank-zero weight publication failed during {stage}"
+            if detail:
+                message = f"{message}: {detail}"
+            raise RuntimeError(message) from error
 
     async def _ensure_weight_group(self) -> None:
         if self._weight_group is not None:
@@ -938,18 +963,14 @@ class LevanterSnowballLearner:
         is_publisher = jax.process_index() == 0
         generator_dtype = str_to_torch_dtype(self.runtime.generator_dtype)
 
-        async def pause_generation() -> None:
-            await client.pause_generation()
-
         # Layerwise reload temporarily restores parameters that have not arrived
-        # yet to the meta device. Quiesce EngineCore before opening that bracket:
+        # yet to the meta device. publish_policy has already quiesced EngineCore
+        # before creating the weight-transfer group and opening this bracket:
         # vLLM's data-parallel busy loop otherwise executes dummy batches against
         # the incomplete model even when no user generation is in flight.
         #
         # Do not resume after any failure. A partial reload is not safe to serve,
         # and the enclosing lifecycle moves to FAILED so cleanup can replace it.
-        await self._rank_zero_publication_call(pause_generation, "generation pause")
-
         async def begin_reload() -> None:
             await client.begin_weight_reload()
 
