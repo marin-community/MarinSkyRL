@@ -255,6 +255,12 @@ def collect_actor_results(actor_infos: List[ActorInfo], object_refs: List[Object
         try:
             results[actor_index] = ray.get(object_ref)
         except Exception as error:
+            logger.opt(exception=error).error(
+                "Distributed actor task failed before peer termination: operation={} actor_index={} rank={}",
+                operation,
+                actor_index,
+                actor_infos[actor_index].rank,
+            )
             for actor_info in actor_infos:
                 try:
                     ray.kill(actor_info.handle, no_restart=True)
