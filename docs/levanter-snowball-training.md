@@ -4,10 +4,10 @@ The `skyrl_train.entrypoints.levanter_snowball` entrypoint runs one synchronous 
 orchestration and a Levanter learner. MSRL owns generation, rewards, advantages, and progress. Levanter owns the model,
 optimizer, random key, step, mesh, sharding, collectives, checkpoint, and Hugging Face export.
 
-An earlier feasibility run completed two Snowball 67B-A2B steps on four eight-H100 JAX learner hosts with a separate
-eight-H100 vLLM TP1/DP8/EP8 host. It predates the corrected objective and stronger publication checks, so it does not
-qualify the current revision. The current small gate covers two real update/generation cycles and DP2/EP2 publication;
-target-size qualification is recorded separately when it completes.
+The corrected target validation completed two Snowball 67B-A2B updates on four eight-H100 JAX learner hosts with a
+separate eight-H100 vLLM TP1/DP8/EP8 host. Both updates passed the exact unchanged-policy numerical gate, and every
+publication verified all expected expert slices across all eight inference workers. A bounded companion job restored
+the final native checkpoint, republished policy version 2, and generated a scored RLVR-math response from it.
 
 ## Supported workload
 
@@ -114,8 +114,9 @@ random-key metadata remained exact.
 
 A separate two-process CPU test now stops both JAX processes after saving, starts two new processes, restores every
 model, optimizer, RNG, and step leaf byte exactly on both ranks, and completes the next collective update. The target
-67B job logged successful atomic TensorStore commits and MSRL completion markers, but the retained environment could
-not list or restore those S3 objects from the devbox.
+67B job logged a successful atomic TensorStore commit and MSRL completion marker for `global_step_2`. A separate
+five-node job then loaded that complete checkpoint in 142.12 seconds, republished it, and generated without another
+optimizer step.
 
 The implementation can export the current in-memory model with Levanter's Hugging Face converter after a completed
 checkpoint. Unit tests cover the call and reject export from an incomplete checkpoint. The real-GPU gate did not load
@@ -222,6 +223,41 @@ addressable `[2, 8]` shards. A `[128, 64]` query weight used `P('model', 'data')
 shards. Timings include device synchronization before the learner reports completion. They describe this tiny
 reference-kernel gate and do not predict 67B throughput.
 
+### Corrected 67B validation
+
+Iris job `/romain/snowball-67b-exact-two-cycle-r4-01a0a1be` ran at MarinSkyRL
+`34056d565ae2e7a7b79ef9c28b4604aaa8613e53`, Levanter
+`779cd403521e02d1615d8c49290cd8de63efdde0`, and model revision
+`6808fe5c219471517bd51df35addefd38ebebf89`. Its topology was 32 learner H100s over four hosts plus one
+eight-H100 TP1/DP8/EP8 vLLM host. All five tasks exited 0 with no failures, retries, or preemptions.
+
+The two updates each consumed 128 trajectories. The first generated 445,242 response tokens in 77.524 seconds; the
+second, generated only after policy version 1 was installed, produced 717,953 response tokens in 86.133 seconds. The
+same-executable exact scoring passes took 70.984 and 65.397 seconds. The complete optimizer calls took 27.355 and
+26.552 seconds, while the synchronized learner update bodies reported 26.848 and 26.348 seconds. Both updates had
+finite losses, nonzero parameter-probe movement (`1.1653e-4` and `1.0050e-4`), zero frozen-router movement,
+score-difference mean and maximum exactly zero, ratio minimum/mean/maximum exactly one, and all clipping fractions
+zero. The valid-token weights were 445,242 and 717,953.
+
+Initial policy publication took 442.936 seconds. Publications after updates 1 and 2 took 445.877 and 444.308 seconds.
+Each publication verified 19,968 expert projection slices across all eight inference workers before resuming their
+schedulers. The single final native checkpoint committed at `global_step_2` in 288.94 seconds; no per-step checkpoint
+or HF export ran. vLLM reported 23.64 seconds of compilation inside 45.33 seconds of engine profile, cache creation,
+and warmup. JAX compilation was not instrumented separately; the first and second synchronized scorer/update timings
+above are reported without assigning their difference to compilation.
+
+The trainer generates at the start of each step, so the main job proves generation after policy version 1 but ends
+after publishing version 2. The bounded closure job
+`/romain/snowball-67b-final-policy-generation-01a0a1be`, at MarinSkyRL
+`d0f43253b1e60b4935530ee7e682f02ffea8823e`, loaded the committed step-2 state in 142.12 seconds, republished version
+2 in 449.776 seconds, and again verified all 19,968 expert slices. It skipped training and generated one retained
+RLVR-math evaluation response in four seconds; the complete evaluation took 28.79 seconds and scored 1.0. Checkpoint
+and HF export callbacks were disabled, and neither ran.
+
+The main run used 26.063 allocated H100-hours. The closure used 10.482. Including three earlier full-size attempts,
+the corrected validation used 53.834 of its 64 H100-hour budget. Targeted gates used 3.631 of 32 H100-hours. The raw
+commands, task logs, budget ledger, and evidence report are retained in the native validation session.
+
 ## Full-size inference diagnostic
 
 A later inference-only diagnostic loaded the pinned 67B-A2B checkpoint on one eight-H100 node with vLLM TP1/DP8/EP8.
@@ -242,13 +278,14 @@ complete MATH-500 result, and the timing is an inference measurement rather than
 
 ## Remaining scope
 
-Campaign learning quality, sustained learner throughput, a matched Megatron measurement, an exact restore of the
-retained 67B S3 checkpoint, and target qualification of the stronger per-expert receipt remain outside the completed
-r17 evidence. The tiny reference-kernel timings do not predict 67B throughput.
+Campaign learning quality, sustained learner throughput, a matched Megatron measurement, and loading a BF16 export in
+a separate production consumer remain outside this short-run qualification. The tiny reference-kernel timings do not
+predict 67B throughput, and the two target updates are feasibility evidence rather than a learning curve.
 
 With the currently resolved `marin-iris` package, Levanter cannot initialize its direct Iris metrics writer because
 that package lacks `iris.runtime.telemetry.resolve`. Levanter catches this failure and training continues; MSRL logs and
 the returned learner metrics remain available. Direct Levanter telemetry needs a compatible Iris package in a follow-up.
 
-The next expensive checks are a bounded TP1/DP8/EP8 publication using the stronger slice receipt and, when the retained
-checkpoint is accessible from a launch environment, a fresh four-host restore followed by one collective operation.
+The corrected two-update run, target-size publication receipt, final native checkpoint restore, and generation after
+both newly installed policies are qualified. A controlled learning or matched performance campaign can now use this
+path, but those experiments need their own goal and budget.
