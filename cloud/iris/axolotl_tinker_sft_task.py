@@ -59,9 +59,7 @@ def validate_runtime() -> dict[str, object]:
         "transformers": importlib.metadata.version("transformers"),
         "datasets": importlib.metadata.version("datasets"),
         "cuda_devices": devices,
-        "nvidia_smi": subprocess.run(
-            ["nvidia-smi", "-q"], check=True, capture_output=True, text=True
-        ).stdout,
+        "nvidia_smi": subprocess.run(["nvidia-smi", "-q"], check=True, capture_output=True, text=True).stdout,
         "pip_freeze": subprocess.run(
             [sys.executable, "-m", "pip", "freeze"], check=True, capture_output=True, text=True
         ).stdout.splitlines(),
@@ -152,9 +150,7 @@ def peft_artifacts(output_dir: Path) -> dict[str, object]:
     files = [config_path, *weight_files]
     return {
         "adapter_config": adapter_config,
-        "files": [
-            {"path": path.name, "size": path.stat().st_size, "sha256": file_sha256(path)} for path in files
-        ],
+        "files": [{"path": path.name, "size": path.stat().st_size, "sha256": file_sha256(path)} for path in files],
     }
 
 

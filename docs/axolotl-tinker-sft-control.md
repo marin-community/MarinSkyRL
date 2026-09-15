@@ -35,6 +35,12 @@ resolve the resulting tag to a digest, and use only that digest in the launch.
 The task revalidates Axolotl and the eight visible GPUs before downloading the
 pinned model or dataset.
 
+After the source commit is merged, dispatch `Build Axolotl Tinker SFT image` on
+that revision. The workflow uses its short-lived package token only while an
+Iris Kaniko task builds and pushes
+`ghcr.io/marin-community/marinskyrl:axolotl-tinker-sft-<commit>`; no personal
+registry credential or author-provided image is involved.
+
 Every invocation is a dry run unless `--submit` is present:
 
 ```bash

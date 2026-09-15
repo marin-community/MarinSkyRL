@@ -1,5 +1,4 @@
 import json
-from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -186,7 +185,6 @@ def test_control_image_pins_the_reviewed_axolotl_amd64_manifest() -> None:
     dockerfile = DOCKERFILE.read_text()
 
     assert (
-        "FROM docker.io/axolotlai/axolotl-uv@"
-        "sha256:ee66d1b20b1f308996857e3a08b8b20903f9c8df827bc8b50e37ccb7b9215fbd"
+        "FROM docker.io/axolotlai/axolotl-uv@sha256:ee66d1b20b1f308996857e3a08b8b20903f9c8df827bc8b50e37ccb7b9215fbd"
     ) in dockerfile
     assert 'org.opencontainers.image.revision="${GITSHA}"' in dockerfile
