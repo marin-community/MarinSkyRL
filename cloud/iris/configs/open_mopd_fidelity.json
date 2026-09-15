@@ -61,6 +61,7 @@
     "entropy_coefficient": 0.0,
     "loss_aggregation": "token-mean",
     "prompt_limit": 2048,
+    "paper_prompt_limits": [1024, 2048, 2048],
     "response_limit": 16384,
     "top_k": 16,
     "nucleus_p": 0.99,

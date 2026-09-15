@@ -128,6 +128,22 @@ def test_gpu_override_records_deviation_and_enforces_authors_world_size() -> Non
         fidelity.gpu_count("H100")
 
 
+def test_plan_exposes_control_and_paper_prompt_limits() -> None:
+    config = fidelity.load_config(fidelity.DEFAULT_CONFIG)
+    plan = fidelity.build_plan(
+        config,
+        config_path=fidelity.DEFAULT_CONFIG,
+        gate="one_step",
+        cluster_config=Path("/tmp/iris.yaml"),
+        output_uri=OUTPUT_URI,
+        task_image=TASK_IMAGE,
+    )
+
+    assert plan.prompt_limit == 2048
+    assert plan.paper_prompt_limits == (1024, 2048, 2048)
+    assert plan.prompt_limit != plan.paper_prompt_limits[0]
+
+
 @pytest.mark.parametrize("output_uri", ["/tmp/output", "file:///tmp/output", "s3://bucket"])
 def test_plan_rejects_non_durable_or_root_output_prefix(output_uri: str) -> None:
     with pytest.raises(ValueError, match="durable prefix"):

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -11,6 +12,43 @@ assert SPEC is not None and SPEC.loader is not None
 evaluator = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = evaluator
 SPEC.loader.exec_module(evaluator)
+
+
+class MemoryStorage:
+    def __init__(self, files: dict[str, bytes] | None = None) -> None:
+        self.files = files or {}
+
+    def list_dir(self, prefix: str) -> list[str]:
+        assert prefix == ""
+        return sorted(self.files)
+
+    def write(self, path: str, data: bytes) -> None:
+        self.files[path] = data
+
+
+def reproduction_manifest(
+    status: object = evaluator.ManifestStatus.STARTED, score_completed: float | None = None
+) -> object:
+    return evaluator.ReproductionManifest(
+        checkpoint="tinker://released",
+        dataset="HuggingFaceH4/aime_2024",
+        dataset_revision="revision",
+        model_name="Qwen/Qwen3.5-9B-Base",
+        renderer_name="qwen3_5",
+        runtime_versions={"tinker": "0.29.0"},
+        sampling=evaluator.SamplingContract(
+            concurrency=8,
+            context_window=65_536,
+            max_examples=1,
+            max_tokens=64_000,
+            num_samples=1,
+            temperature=1.0,
+            top_k=-1,
+            top_p=1.0,
+        ),
+        status=status,
+        score_completed=score_completed,
+    )
 
 
 def test_load_aime24_examples_pins_dataset_and_normalizes_rows() -> None:
@@ -102,3 +140,24 @@ def test_validate_comparable_result_accounts_for_smoke_limit_and_sample_count() 
         num_errors=0,
         num_truncated=0,
     )
+
+
+def test_claim_output_rejects_reused_prefix() -> None:
+    storage = MemoryStorage({"aime_2024": b"existing"})
+
+    with pytest.raises(RuntimeError, match="must be empty"):
+        evaluator.claim_output(storage, reproduction_manifest())
+
+
+def test_claim_and_complete_output_persist_reproduction_manifest() -> None:
+    storage = MemoryStorage()
+    started = reproduction_manifest()
+    complete = reproduction_manifest(evaluator.ManifestStatus.COMPLETE, score_completed=0.75)
+
+    evaluator.claim_output(storage, started)
+    assert json.loads(storage.files["reproduction-manifest.json"])["status"] == "started"
+
+    evaluator.write_manifest(storage, complete)
+    persisted = json.loads(storage.files["reproduction-manifest.json"])
+    assert persisted["status"] == "complete"
+    assert persisted["score_completed"] == 0.75

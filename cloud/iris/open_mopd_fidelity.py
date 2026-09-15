@@ -69,6 +69,7 @@ class Training:
     entropy_coefficient: float
     loss_aggregation: str
     prompt_limit: int
+    paper_prompt_limits: tuple[int, int, int]
     response_limit: int
     top_k: int
     nucleus_p: float
@@ -104,6 +105,8 @@ class FidelityLaunchPlan:
     launcher_commit: str
     task_image: str
     output_uri: str
+    prompt_limit: int
+    paper_prompt_limits: tuple[int, int, int]
     iris_command: tuple[str, ...]
     known_deviations: tuple[str, ...]
 
@@ -222,6 +225,7 @@ def load_config(path: Path) -> FidelityConfig:
         entropy_coefficient=_number(training_value["entropy_coefficient"], "training.entropy_coefficient"),
         loss_aggregation=_string(training_value["loss_aggregation"], "training.loss_aggregation"),
         prompt_limit=_integer(training_value["prompt_limit"], "training.prompt_limit"),
+        paper_prompt_limits=_triple(training_value["paper_prompt_limits"], "training.paper_prompt_limits", _integer),
         response_limit=_integer(training_value["response_limit"], "training.response_limit"),
         top_k=_integer(training_value["top_k"], "training.top_k"),
         nucleus_p=_number(training_value["nucleus_p"], "training.nucleus_p"),
@@ -269,10 +273,10 @@ def gpu_count(gpu_slice: str) -> int:
     return count
 
 
-def validate_output_uri(output_uri: str) -> None:
+def validate_output_uri(output_uri: str, *, option_name: str = "--output-uri") -> None:
     parsed = urlparse(output_uri)
     if parsed.scheme not in {"gs", "s3"} or not parsed.netloc or not parsed.path.strip("/"):
-        raise ValueError("--output-uri must be a non-root gs:// or s3:// durable prefix")
+        raise ValueError(f"{option_name} must be a non-root gs:// or s3:// durable prefix")
 
 
 def _provenance(task_image: str, source: LauncherSource) -> tuple[str, str]:
@@ -283,6 +287,14 @@ def _provenance(task_image: str, source: LauncherSource) -> tuple[str, str]:
 
 def _deviations(config: FidelityConfig, gpu_slice: str) -> tuple[str, ...]:
     deviations = list(config.known_deviations)
+    if any(limit != config.training.prompt_limit for limit in config.training.paper_prompt_limits):
+        paper_limits = ", ".join(
+            f"{domain}={limit:,}" for domain, limit in zip(DOMAINS, config.training.paper_prompt_limits, strict=True)
+        )
+        deviations.append(
+            f"The released launcher uses one {config.training.prompt_limit:,}-token prompt limit; "
+            f"paper limits are {paper_limits}."
+        )
     if gpu_slice != config.hardware.gpu:
         deviations.append(f"Hardware override uses {gpu_slice}; the authors report {config.hardware.gpu}.")
     return tuple(deviations)
@@ -388,6 +400,8 @@ def build_plan(
         launcher_commit=launcher_commit,
         task_image=pinned_image,
         output_uri=output_uri,
+        prompt_limit=config.training.prompt_limit,
+        paper_prompt_limits=config.training.paper_prompt_limits,
         iris_command=command,
         known_deviations=_deviations(config, gpu_slice),
     )

@@ -69,6 +69,9 @@ minibatch update.
 
 ## Known fidelity blockers
 
+- The released launcher exposes one global prompt limit. The launcher therefore uses 2,048 tokens for every domain,
+  while Table 8 specifies 1,024 for math and 2,048 for code and IF. Changing this requires an authors-code patch and
+  would no longer be an unchanged-source control.
 - The released patched `verl` tree exposes one global response limit. The launcher therefore uses 16,384 tokens
   for every domain, while Table 8 specifies 2,048 for IF. Changing this requires an authors-code patch and would no
   longer be an unchanged-source control.
