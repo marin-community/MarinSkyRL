@@ -43,6 +43,7 @@ class LevanterSnowballRuntimeConfig:
     log_dir: str
     model_revision: str | None = None
     offload_opt_state: bool = False
+    publication_scatter_experts: bool = False
     initial_weights_already_loaded: bool = False
     model_source_identity: str | None = None
 
@@ -63,6 +64,7 @@ class LevanterSnowballRuntimeConfig:
         expected_learning_rate_text = "1e-6" if regular_mask_enabled else "1e-5"
         expected_max_grad_norm = 1.0 if regular_mask_enabled else 0.5
         initial_weights_already_loaded = bool(levanter.get("initial_weights_already_loaded", False))
+        publication_scatter_experts = bool(levanter.get("publication_scatter_experts", False))
         model_revision = str(policy.model.revision) if policy.model.get("revision") else None
         model_source_identity = str(policy.model.source_identity) if policy.model.get("source_identity") else None
         immutable_model_identity = model_source_identity
@@ -157,6 +159,15 @@ class LevanterSnowballRuntimeConfig:
                 not initial_weights_already_loaded or trainer.resume_mode == "none",
                 "resume_mode=none when adopting already-loaded initial weights",
             ),
+            (
+                not publication_scatter_experts
+                or (
+                    int(generator.num_inference_engines) == 1
+                    and int(generator.inference_engine_expert_parallel_size)
+                    == int(generator.inference_engine_data_parallel_size)
+                ),
+                "expert scatter across one full inference data-parallel group",
+            ),
         )
         unsupported.extend(description for accepted, description in expected_values if not accepted)
 
@@ -239,6 +250,7 @@ class LevanterSnowballRuntimeConfig:
             log_dir=str(levanter.log_dir),
             model_revision=model_revision,
             offload_opt_state=bool(levanter.get("offload_opt_state", False)),
+            publication_scatter_experts=publication_scatter_experts,
             initial_weights_already_loaded=initial_weights_already_loaded,
             model_source_identity=immutable_model_identity,
         )

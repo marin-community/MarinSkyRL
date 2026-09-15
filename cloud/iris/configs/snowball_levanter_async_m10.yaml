@@ -90,6 +90,9 @@ trainer:
       publication_max_chunk_bytes: 2147483648
       publication_timeout_seconds: 1800
       offload_opt_state: true
+      # EP8 workers install disjoint contiguous expert ranges. Scatter those
+      # ranges instead of broadcasting the full 1.68 GB tensors eight times.
+      publication_scatter_experts: true
       # The launcher stages this one immutable source for both vLLM and
       # Levanter. Trained versions 1-5 still use full verified publication.
       initial_weights_already_loaded: true

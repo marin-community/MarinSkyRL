@@ -119,6 +119,9 @@ trainer:
       # Keep Adam moments in pinned host memory between compiled steps when a
       # full FP32 checkpoint would otherwise exceed accelerator memory.
       offload_opt_state: false
+      # With full expert parallelism, send each inference rank only its owned
+      # slice of stacked expert tensors. Ordinary parameters remain broadcast.
+      publication_scatter_experts: false
       # Version zero may skip its redundant transfer only when both sides just
       # loaded the same immutable model source. Pause/resume still establishes
       # serving-policy provenance; every trained version is transferred.

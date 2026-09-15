@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import jmp
 import numpy as np
+from equinox.nn import inference_mode
 from haliax import Axis
 from haliax.util import is_named_array
 from huggingface_hub import snapshot_download
@@ -33,12 +34,12 @@ from levanter.compat.hf_checkpoints import HFCheckpointConverter
 from levanter.distributed import DistributedConfig
 from levanter.grug.loss import BlockSizes, fused_linear_softmax_cross_entropy_loss
 from levanter.grug.sharding import compact_grug_mesh
-from levanter.metrics import Metric, ReductionType
+from levanter.metrics import Metric, ReductionType, unwrap_metrics
 from levanter.metrics import fold as fold_metric
 from levanter.models.snowball import GrugMoeHfConfig, SnowballConfig, SnowballLMHeadModel
 from levanter.optim.config import AdamConfig
 from levanter.tracker import NoopConfig
-from levanter.trainer import Trainer, TrainerConfig, _resolve_axis_in_tree
+from levanter.trainer import Trainer, TrainerConfig, TrainStepResult, _resolve_axis_in_tree
 from levanter.trainer import initialize as initialize_levanter
 from levanter.utils.mesh import MeshConfig
 from levanter.utils.jax_utils import zeros_like_tree
@@ -259,6 +260,7 @@ class _SnowballTrainer(Trainer):
     def __init__(self, *args, offload_opt_state: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
         self._offload_opt_state = offload_opt_state
+        self.last_offloaded_step_timings: dict[str, float] = {}
 
     def _compute_gradients_microbatched(self, loss_fn, model, *batch, **batch_kwargs):
         Batch = _resolve_axis_in_tree((batch, batch_kwargs), self.config.batch_axis_name)
@@ -280,23 +282,90 @@ class _SnowballTrainer(Trainer):
         """Run one normal donated optimizer step and retain its loss metrics."""
 
         if self._offload_opt_state:
-            return self._jit_train_step_fn_no_hook_offloaded(state, batch, {})
+            gradient_start = time.perf_counter()
+            loss, host_gradients, loss_metrics, new_key = self._jit_offloaded_gradient_step(
+                state.model,
+                state.training_key,
+                batch,
+                {},
+            )
+            jax.block_until_ready(host_gradients)
+            gradient_seconds = time.perf_counter() - gradient_start
+
+            input_transfer_start = time.perf_counter()
+            device_opt_state = _optimizer_state_to_memory_kind(state.opt_state, "device")
+            device_gradients = _optimizer_state_to_memory_kind(host_gradients, "device")
+            jax.block_until_ready((device_opt_state, device_gradients))
+            input_transfer_seconds = time.perf_counter() - input_transfer_start
+
+            apply_start = time.perf_counter()
+            device_state = dataclasses.replace(state, opt_state=device_opt_state)
+            device_new_state = self._jit_offloaded_optimizer_step(
+                device_state,
+                device_gradients,
+                loss,
+                new_key,
+            )
+            jax.block_until_ready(device_new_state)
+            apply_seconds = time.perf_counter() - apply_start
+
+            output_transfer_start = time.perf_counter()
+            host_opt_state = _optimizer_state_to_memory_kind(device_new_state.opt_state, "pinned_host")
+            jax.block_until_ready(host_opt_state)
+            new_state = dataclasses.replace(device_new_state, opt_state=host_opt_state)
+            output_transfer_seconds = time.perf_counter() - output_transfer_start
+
+            self.last_offloaded_step_timings = {
+                "gradient_compute_seconds": gradient_seconds,
+                "optimizer_input_transfer_seconds": input_transfer_seconds,
+                "optimizer_apply_seconds": apply_seconds,
+                "optimizer_output_transfer_seconds": output_transfer_seconds,
+            }
+            return TrainStepResult(
+                loss=loss,
+                new_state=new_state,
+                loss_metrics=loss_metrics,
+                hook_infos=None,
+            )
         return self._jit_train_step_fn_no_hook(state, batch, {})
 
     @functools.cached_property
-    def _jit_train_step_fn_no_hook_offloaded(self):
-        def offloaded_step(state, batch, batch_kwargs):
-            device_opt_state = _optimizer_state_to_memory_kind(state.opt_state, "device")
-            state = dataclasses.replace(state, opt_state=device_opt_state)
-            result = self._train_step(state, batch, batch_kwargs, _no_hooks=True)
-            host_opt_state = _optimizer_state_to_memory_kind(result.new_state.opt_state, "pinned_host")
-            new_state = dataclasses.replace(result.new_state, opt_state=host_opt_state)
-            return dataclasses.replace(result, new_state=new_state)
+    def _jit_offloaded_gradient_step(self):
+        def gradient_step(model, training_key, batch, batch_kwargs):
+            key, new_key = jax.random.split(training_key)
+            model = inference_mode(model, False)
+            loss, gradients, wrapped_metrics = self._compute_gradients_microbatched(
+                self.loss_fn,
+                model,
+                *batch,
+                **batch_kwargs,
+                key=key,
+            )
+            host_gradients = _optimizer_state_to_memory_kind(gradients, "pinned_host")
+            plain_metrics = unwrap_metrics(wrapped_metrics)
+            loss_metrics = {f"train/{name}": value for name, value in plain_metrics.items()}
+            return loss, host_gradients, loss_metrics, new_key
 
-        # The arguments already carry their global NamedShardings. Avoid
-        # named_jit's device-only output sharding so the optimizer moments can
-        # return directly to pinned host memory from the compiled step.
-        return jax.jit(offloaded_step, donate_argnums=(0,))
+        # Optimizer state is intentionally absent from this executable. Its
+        # output gradients land in host memory, so backward activations are
+        # gone before Adam moments enter HBM.
+        return jax.jit(gradient_step)
+
+    @functools.cached_property
+    def _jit_offloaded_optimizer_step(self):
+        def optimizer_step(state, gradients, loss, new_key):
+            new_state, _updates = state.take_step(
+                gradients,
+                obj_fun=None,
+                loss=loss,
+                key=new_key,
+            )
+            return hax.shard(new_state, self.parameter_axis_mapping)
+
+        # Both the model/Adam state and gradient tree may be reused for their
+        # corresponding outputs and updates. This is the ordinary AdamW
+        # transformation; only its executable boundary differs.
+        return jax.jit(optimizer_step, donate_argnums=(0, 1))
 
 
 def _resolve_local_model_snapshot(model_path: str, revision: str | None) -> str:
@@ -1015,6 +1084,7 @@ class LevanterSnowballLearner:
                 "router_bias_max_delta": router_bias_max_delta,
                 "training_update_seconds": update_seconds,
                 "optimizer_step": float(self._update_count),
+                **self._trainer.last_offloaded_step_timings,
             },
         )
 
@@ -1357,16 +1427,40 @@ class LevanterSnowballLearner:
     async def _publish_weight_batch(self, batch: list[tuple[str, torch.Tensor]]) -> None:
         import torch
 
+        expert_scatter = [
+            self.runtime.publication_scatter_experts
+            and bool(expected_expert_slice_names(name, tensor.shape[0] if tensor.ndim else 0))
+            for name, tensor in batch
+        ]
+        for (name, tensor), scatter_expert in zip(batch, expert_scatter, strict=True):
+            if scatter_expert and tensor.shape[0] % self.runtime.inference_world_size:
+                raise ValueError(
+                    f"cannot scatter expert weight {name!r} with shape {tuple(tensor.shape)} across "
+                    f"{self.runtime.inference_world_size} inference ranks"
+                )
         request = {
             "names": [name for name, _ in batch],
             "dtypes": [str(tensor.dtype) for _, tensor in batch],
             "shapes": [list(tensor.shape) for _, tensor in batch],
+            "expert_scatter": expert_scatter,
+            "expert_scatter_world_size": self.runtime.inference_world_size,
         }
         receivers = asyncio.create_task(self._inference_client.update_named_weights(request))
 
         def broadcast() -> None:
-            for _, tensor in batch:
-                torch.distributed.broadcast(tensor, src=0, group=self._weight_group)
+            for (_, tensor), scatter_expert in zip(batch, expert_scatter, strict=True):
+                if scatter_expert:
+                    chunks = list(tensor.chunk(self.runtime.inference_world_size, dim=0))
+                    source_output = torch.empty_like(chunks[0])
+                    source_placeholder = torch.empty_like(chunks[0])
+                    torch.distributed.scatter(
+                        source_output,
+                        scatter_list=[source_placeholder, *chunks],
+                        src=0,
+                        group=self._weight_group,
+                    )
+                else:
+                    torch.distributed.broadcast(tensor, src=0, group=self._weight_group)
 
         try:
             await asyncio.wait_for(

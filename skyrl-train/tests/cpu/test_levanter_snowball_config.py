@@ -47,6 +47,7 @@ def test_supported_config_lowers_without_importing_the_concrete_learner():
     assert runtime.publication_backend == "gloo"
     assert runtime.inference_world_size == 1
     assert not runtime.offload_opt_state
+    assert not runtime.publication_scatter_experts
 
 
 def test_optimizer_state_offload_lowers_before_allocation():
@@ -56,6 +57,21 @@ def test_optimizer_state_offload_lowers_before_allocation():
     runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
 
     assert runtime.offload_opt_state
+
+
+def test_expert_scatter_requires_one_full_expert_parallel_group():
+    cfg = _valid_config()
+    cfg.trainer.policy.levanter.publication_scatter_experts = True
+    cfg.generator.inference_engine_data_parallel_size = 2
+    cfg.generator.inference_engine_expert_parallel_size = 1
+
+    with pytest.raises(UnsupportedLearnerConfiguration, match="one full inference data-parallel group"):
+        LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    cfg.generator.inference_engine_expert_parallel_size = 2
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.publication_scatter_experts
 
 
 def test_initial_weight_adoption_requires_an_immutable_shared_source():

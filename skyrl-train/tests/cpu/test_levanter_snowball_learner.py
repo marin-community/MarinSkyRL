@@ -364,6 +364,54 @@ def test_publication_overlaps_next_host_chunk_with_previous_transfer(tmp_path):
     learner.close()
 
 
+def test_publication_scatters_stacked_experts_and_broadcasts_ordinary_weights(tmp_path, monkeypatch):
+    learner = _make_learner(tmp_path / "expert-scatter-publication")
+    learner.runtime = replace(
+        learner.runtime,
+        inference_world_size=2,
+        publication_scatter_experts=True,
+    )
+    learner._weight_group = object()
+    expert_name = "model.layers.0.mlp.experts.gate_proj.weight"
+    ordinary_name = "model.layers.0.input_layernorm.weight"
+    expert = torch.arange(16, dtype=torch.float32).reshape(4, 2, 2)
+    ordinary = torch.arange(4, dtype=torch.float32)
+    requests = []
+    scatter_lists = []
+    broadcasts = []
+
+    class FakeInferenceClient:
+        async def update_named_weights(self, request):
+            requests.append(request)
+
+    def record_scatter(output, scatter_list, src, group):
+        assert output.shape == (2, 2, 2)
+        assert src == 0
+        assert group is learner._weight_group
+        scatter_lists.append(scatter_list)
+
+    def record_broadcast(tensor, src, group):
+        assert src == 0
+        assert group is learner._weight_group
+        broadcasts.append(tensor.clone())
+
+    monkeypatch.setattr(torch.distributed, "scatter", record_scatter)
+    monkeypatch.setattr(torch.distributed, "broadcast", record_broadcast)
+    learner._inference_client = FakeInferenceClient()
+
+    asyncio.run(learner._publish_weight_batch([(expert_name, expert), (ordinary_name, ordinary)]))
+
+    assert requests[0]["expert_scatter"] == [True, False]
+    assert requests[0]["expert_scatter_world_size"] == 2
+    assert len(scatter_lists[0]) == 3  # one source placeholder plus two receiver shards
+    torch.testing.assert_close(scatter_lists[0][1], expert[:2])
+    torch.testing.assert_close(scatter_lists[0][2], expert[2:])
+    assert len(broadcasts) == 1
+    torch.testing.assert_close(broadcasts[0], ordinary)
+    learner._weight_group = None
+    learner.close()
+
+
 def test_publication_rejects_one_missing_expert_slice_receipt(tmp_path):
     learner = _make_learner(tmp_path / "missing-expert-receipt")
     state_dict = learner.model.to_state_dict()
@@ -596,6 +644,10 @@ def test_optimizer_state_offload_survives_a_donated_update(tmp_path):
     assert update.metrics["parameter_probe_delta_l2"] > 0
     assert int(learner._trainer_state.step) == 1
     assert set(_non_scalar_optimizer_memory_kinds(learner)) == {"pinned_host"}
+    assert update.metrics["gradient_compute_seconds"] > 0
+    assert update.metrics["optimizer_input_transfer_seconds"] > 0
+    assert update.metrics["optimizer_apply_seconds"] > 0
+    assert update.metrics["optimizer_output_transfer_seconds"] > 0
     learner.close()
 
 
