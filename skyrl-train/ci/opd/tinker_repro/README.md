@@ -34,7 +34,8 @@ OUTPUT_URI="s3://marin-us-east-02a/iris/cw-rno2a/experiments/tinker-opd-repro/${
 uv run --frozen python skyrl-train/ci/opd/tinker_repro/submit_training_iris.py \
   --stage sft_plumbing \
   --run-id "$RUN_ID" \
-  --output-uri "$OUTPUT_URI"
+  --output-uri "$OUTPUT_URI" \
+  --secrets-env "$HOME/Documents/secrets.env"
 ```
 
 After reviewing and preserving the dry-run JSON, add `--submit`. A full SFT
@@ -54,9 +55,12 @@ uv run --frozen python skyrl-train/ci/opd/tinker_repro/submit_training_iris.py \
 This still prints a dry run. Adding `--submit` is the distinct action that
 creates the Iris job.
 
-The submitter reads `TINKER_API_KEY` and `WANDB_API_KEY` only after `--submit`;
-`HF_TOKEN` is optional. Secret values are placed in Iris `EnvironmentSpec`, not
-the process arguments. Jobs run directly on `cw-rno2a`, request no accelerator,
+The submitter loads `--secrets-env` and reads `TINKER_API_KEY` and
+`WANDB_API_KEY` only after `--submit`; `HF_TOKEN` is optional. The path defaults
+to `$OT_AGENT_SECRETS_ENV` when set, otherwise to `~/Documents/secrets.env` when
+that file exists. The parser accepts `KEY=VALUE` and `export KEY=VALUE` lines
+without executing the file. Secret values are placed in Iris `EnvironmentSpec`,
+not the process arguments. Jobs run directly on `cw-rno2a`, request no accelerator,
 are non-preemptible, and have zero automatic retries. Smoke stages use
 interactive priority. Full stages use batch priority. SFT requests 4 CPU cores,
 32 GB memory, and 50 GB disk because its 384,000-row streaming shuffle buffer
@@ -157,11 +161,13 @@ OUTPUT_DIR='s3://marin-us-east-02a/iris/cw-rno2a/experiments/tinker-opd-aime24/r
 uv run --frozen python skyrl-train/ci/opd/tinker_repro/submit_iris.py \
   --checkpoint "$CHECKPOINT" \
   --save-dir "$OUTPUT_DIR" \
-  --max-examples 1
+  --max-examples 1 \
+  --secrets-env "$HOME/Documents/secrets.env"
 ```
 
 The submitter prints a secret-free JSON plan and does not submit by default. Review it, then repeat the command with
-`--submit`. The submitter reads `TINKER_API_KEY` only after the dry-run gate.
+`--submit`. It loads the same `--secrets-env` default described above and reads `TINKER_API_KEY` only after the
+dry-run gate.
 
 The submission goes directly to `cw-rno2a` at interactive priority. It requests
 2 CPU cores, 8 GB of memory, and 20 GB of disk on a non-preemptible worker, with

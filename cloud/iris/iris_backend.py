@@ -127,7 +127,7 @@ from cloud.iris.rl_config_translation import (
     resolve_rl_config_path,
 )
 from marinskyrl.distillation import LocalInferenceTeacherSpec, compile_distillation_plan
-from cloud.iris.secrets_env import load_secrets_env_into_os_environ
+from cloud.iris.secrets_env import default_secrets_env, load_secrets_env_into_os_environ
 from cloud.iris.runtime_bundle import build_runtime_bundle, resolve_launcher_source
 from cloud.iris.protocol import LaunchMode, ModelRoleKind, SkyRLJobSpec
 from cloud.iris.request_builder import derive_num_nodes, derive_role_plan, role_plan_is_configured
@@ -1347,11 +1347,6 @@ def prepare_federated_parent_credentials(args: argparse.Namespace) -> FederatedP
     return FederatedParentCredentials(login_record_json=json.dumps(record))
 
 
-def _default_secrets_env() -> Optional[str]:
-    cand = os.environ.get("OT_AGENT_SECRETS_ENV") or os.path.expanduser("~/Documents/secrets.env")
-    return cand if os.path.isfile(cand) else None
-
-
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Launch a MarinSkyRL RL training job on the Iris CoreWeave H100 cluster.",
@@ -1756,7 +1751,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--secrets-env",
         "--secrets_env",
         dest="secrets_env",
-        default=_default_secrets_env(),
+        default=default_secrets_env(),
         help="KEY=VALUE env file injected into the task (HF_TOKEN, WANDB_API_KEY, etc.). "
         "Defaults to $OT_AGENT_SECRETS_ENV, else ~/Documents/secrets.env.",
     )

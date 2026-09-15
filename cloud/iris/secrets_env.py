@@ -6,6 +6,13 @@ import os
 from pathlib import Path
 
 
+def default_secrets_env() -> str | None:
+    """Return the approved launch-host secrets file when it exists."""
+    candidate = os.environ.get("OT_AGENT_SECRETS_ENV") or "~/Documents/secrets.env"
+    path = Path(candidate).expanduser()
+    return str(path) if path.is_file() else None
+
+
 def load_secrets_env_into_os_environ(secrets_env: str | None) -> int:
     """Read ``secrets_env`` (KEY=VALUE) into ``os.environ`` on the launch host.
 
