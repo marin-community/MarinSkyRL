@@ -501,3 +501,7 @@ trajectory_runner:
     cpus_per_coordinator: 8
     executor_workers: 256
     rpc_timeout_seconds: 21600
+    # Evaluation reserves coordinator 0 by default, so one event loop carries every eval trial.
+    # true starts the eval session on every coordinator, splits the eval n_concurrent_trials
+    # across them, and holds training rollouts until the eval session stops.
+    eval_spread_coordinators: false

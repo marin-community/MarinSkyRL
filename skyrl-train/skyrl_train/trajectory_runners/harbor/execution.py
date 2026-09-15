@@ -65,6 +65,8 @@ class ProcessPoolResources:
     cpus_per_coordinator: int
     executor_workers: int
     rpc_timeout_seconds: float
+    # Run evaluation on every coordinator instead of reserving coordinator 0 for it.
+    eval_spread_coordinators: bool = False
 
     @classmethod
     def from_config(cls, config: DictConfig) -> ProcessPoolResources:
@@ -74,6 +76,7 @@ class ProcessPoolResources:
             cpus_per_coordinator=int(process_pool.cpus_per_coordinator),
             executor_workers=int(process_pool.executor_workers),
             rpc_timeout_seconds=float(process_pool.rpc_timeout_seconds),
+            eval_spread_coordinators=bool(process_pool.get("eval_spread_coordinators", False)),
         )
         if resources.num_coordinators <= 0 or resources.cpus_per_coordinator <= 0:
             raise ValueError("trajectory runner process-pool sizes must be positive")

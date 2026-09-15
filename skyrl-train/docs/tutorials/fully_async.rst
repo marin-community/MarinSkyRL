@@ -116,6 +116,12 @@ For fully async specifically, the following are the main knobs to tune:
 - ``trajectory_runner.process_pool.rpc_timeout_seconds``: The maximum time to wait for a Harbor rollout coordinator RPC. The default is six
   hours. Expiry cancels the coordinator request and fails the generation worker without converting its trials to agent timeouts.
   Harbor owns trial deadlines and retries; this watchdog only detects and unwinds a coordinator that does not return.
+- ``trajectory_runner.process_pool.eval_spread_coordinators``: By default evaluation reserves coordinator 0, so one event loop runs
+  every eval trial at the full eval ``n_concurrent_trials``. Set ``true`` to start the eval session on every coordinator, split that
+  concurrency across them, and route each eval group to the coordinator with the fewest in-flight eval trials. A coordinator in an
+  eval session runs every request as eval, so training rollouts wait while the session is active, and starting the session waits
+  for in-flight training groups on every coordinator to finish. Use it when evaluation is large (for example an eval-only probe);
+  leave it off when mid-training evaluation must not pause rollout generation.
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.
 

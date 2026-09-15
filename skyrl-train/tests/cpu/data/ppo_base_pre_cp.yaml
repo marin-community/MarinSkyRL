@@ -405,6 +405,7 @@ trajectory_runner:
     cpus_per_coordinator: 8
     executor_workers: 256
     rpc_timeout_seconds: 21600
+    eval_spread_coordinators: false
 deepspeed_config:
   train:
     zero_optimization:

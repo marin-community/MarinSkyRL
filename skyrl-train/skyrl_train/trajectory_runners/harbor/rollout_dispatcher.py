@@ -12,7 +12,7 @@ import itertools
 import os
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence
 
 import ray
 from omegaconf import DictConfig, OmegaConf
@@ -113,6 +113,19 @@ def _configured_concurrent_trials(terminal_bench_cfg: DictConfig) -> int:
     if harbor is not None:
         return int(harbor.get("n_concurrent_trials", DEFAULT_CONCURRENT_TRIALS))
     return int(terminal_bench_cfg.get("n_concurrent_trials", DEFAULT_CONCURRENT_TRIALS))
+
+
+def _split_eval_concurrency(total: int, num_coordinators: int) -> list[int]:
+    """Split the global eval concurrency into per-coordinator caps that sum to ``total``.
+
+    One cap per coordinator, larger caps first. A total below the coordinator count uses only
+    ``total`` coordinators, because a coordinator with a cap of zero could never run a trial.
+    """
+    if total <= 0:
+        raise ValueError(f"eval n_concurrent_trials must be positive; got {total}")
+    count = min(total, num_coordinators)
+    base, remainder = divmod(total, count)
+    return [base + (1 if index < remainder else 0) for index in range(count)]
 
 
 @ray.remote
@@ -284,20 +297,31 @@ class RolloutDispatcher:
         self._rr = itertools.cycle(range(self._num_coordinators))
         self._routing_condition = asyncio.Condition()
         self._pg = None
-        # Eval reserves shard 0. Training continues on the other shards while
+        # Eval reserves shard 0 by default. Training continues on the other shards while
         # evaluation uses shard 0's dedicated orchestrator.
         self._eval_session_active = False
+        # With eval_spread_coordinators, the session runs on every shard instead, with the
+        # global eval concurrency split across them (see start_eval_session). A Harbor runner
+        # routes every run() to its eval orchestrator while its session is active, whatever
+        # the request's phase, so training never shares a shard that holds the session: it
+        # waits for the session to stop when the session holds every shard.
+        self._eval_spread = resources.eval_spread_coordinators and self._num_coordinators > 1
+        self._eval_coordinators: tuple[int, ...] = ()
+        # In-flight eval trials per shard (rows, not RPCs). Never reset between sessions: an
+        # eval RPC still running from an earlier session releases its own count when it ends.
+        self._eval_inflight_trials = [0 for _ in range(self._num_coordinators)]
+        self._eval_next_coordinator = 0
         # evaluate() checks this to know it may issue every eval chunk up front instead of
-        # one at a time. Every eval group routes to shard 0 (above), whose eval orchestrator
-        # holds the UNSCALED n_concurrent_trials (#514), so feeding it the whole eval set at
-        # once is what keeps that global concurrency saturated; chunk-at-a-time would cap it
-        # at one chunk's rows. Training keeps the other shards either way.
+        # one at a time. The eval orchestrators together hold the UNSCALED n_concurrent_trials
+        # (#514), so feeding them the whole eval set at once is what keeps that global
+        # concurrency saturated; chunk-at-a-time would cap it at one chunk's rows.
         self.supports_concurrent_eval = True
 
         _log().info(
             f"[RolloutDispatcher] configured num_coordinators={self._num_coordinators}, "
             f"cpus_per_coordinator={self._cpus_per_coordinator}, "
-            f"coordinator_rpc_timeout={self._coordinator_rpc_timeout:g}s"
+            f"coordinator_rpc_timeout={self._coordinator_rpc_timeout:g}s, "
+            f"eval_spread_coordinators={self._eval_spread}"
         )
 
     def _current_global_step(self) -> Optional[int]:
@@ -428,22 +452,25 @@ class RolloutDispatcher:
     async def _run_group(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         metadata = input_batch.get("batch_metadata")
         training_phase = metadata.training_phase if metadata is not None else "train"
+        eval_trials = 0
         async with self._routing_condition:
-            while training_phase == "train" and self._eval_session_active and self._num_coordinators == 1:
+            while training_phase == "train" and self._eval_session_active and self._eval_holds_every_coordinator():
                 await self._routing_condition.wait()
             if training_phase == "eval":
                 if not self._eval_session_active:
                     raise RuntimeError("evaluation request received without an active eval session")
-                coordinator_index = 0
+                coordinator_index = self._pick_eval_coordinator()
+                eval_trials = len(input_batch["prompts"])
             else:
                 coordinator_index = next(self._rr)
-                while self._eval_session_active and coordinator_index == 0:
+                while self._eval_session_active and coordinator_index in self._eval_coordinators:
                     coordinator_index = next(self._rr)
             actor = self._actors[coordinator_index]
             loop = asyncio.get_running_loop()
             if self._actor_pending_rpcs[coordinator_index] == 0:
                 self._actor_last_progress[coordinator_index] = loop.time()
             self._actor_pending_rpcs[coordinator_index] += 1
+            self._eval_inflight_trials[coordinator_index] += eval_trials
         global_step = self._current_global_step()
         try:
             rpc = actor.run_shard.remote(input_batch, global_step)
@@ -478,10 +505,23 @@ class RolloutDispatcher:
                 return output
         finally:
             async with self._routing_condition:
+                self._eval_inflight_trials[coordinator_index] -= eval_trials
                 self._actor_pending_rpcs[coordinator_index] -= 1
                 if self._actor_pending_rpcs[coordinator_index] == 0:
                     self._actor_last_progress[coordinator_index] = None
                 self._routing_condition.notify_all()
+
+    def _eval_holds_every_coordinator(self) -> bool:
+        return len(self._eval_coordinators) == self._num_coordinators
+
+    def _pick_eval_coordinator(self) -> int:
+        """Return the session shard with the fewest in-flight eval trials, ties in round-robin order."""
+        candidates = self._eval_coordinators
+        start = self._eval_next_coordinator % len(candidates)
+        rotated = candidates[start:] + candidates[:start]
+        chosen = min(rotated, key=lambda index: self._eval_inflight_trials[index])
+        self._eval_next_coordinator = candidates.index(chosen) + 1
+        return chosen
 
     @staticmethod
     def _select_request_rows(input_batch: TrajectoryRequestBatch, indices: list[int]) -> TrajectoryRequestBatch:
@@ -531,9 +571,10 @@ class RolloutDispatcher:
         self._actors = []
 
     # ---- Eval session passthrough ----
-    # Eval reserves shard 0 and waits for its prior training work to drain before
-    # replacing that runner's active orchestrator. Other shards keep serving
-    # asynchronous training requests during evaluation.
+    # Eval reserves its shards (shard 0 by default, every shard with eval_spread_coordinators)
+    # and waits for their prior work to drain before replacing those runners' active
+    # orchestrators. Any other shard keeps serving asynchronous training requests during
+    # evaluation; when the session holds every shard, training waits for it to stop.
     async def start_eval_session(
         self,
         *,
@@ -544,34 +585,75 @@ class RolloutDispatcher:
     ) -> None:
         if not self._actors:
             return
+        eval_concurrent_trials = self._eval_concurrent_trials if n_concurrent_trials is None else n_concurrent_trials
+        if self._eval_spread:
+            eval_caps = _split_eval_concurrency(eval_concurrent_trials, self._num_coordinators)
+        else:
+            eval_caps = [eval_concurrent_trials]
+        eval_coordinators = tuple(range(len(eval_caps)))
         async with self._routing_condition:
             if self._eval_session_active:
                 raise RuntimeError("an eval session is already active")
             self._eval_session_active = True
-            while self._actor_pending_rpcs[0] > 0:
+            self._eval_coordinators = eval_coordinators
+            while any(self._actor_pending_rpcs[index] > 0 for index in eval_coordinators):
                 await self._routing_condition.wait()
         try:
-            eval_concurrent_trials = (
-                self._eval_concurrent_trials if n_concurrent_trials is None else n_concurrent_trials
+            if self._eval_spread:
+                _log().info(
+                    f"[RolloutDispatcher] eval session spread over {len(eval_coordinators)} coordinators "
+                    f"(n_concurrent_trials={eval_concurrent_trials} -> {eval_caps})"
+                )
+            results = await asyncio.gather(
+                *(
+                    self._actors[index].start_eval_session.remote(
+                        run_name=run_name,
+                        eval_step=eval_step,
+                        val_set_name=val_set_name,
+                        n_concurrent_trials=cap,
+                    )
+                    for index, cap in zip(eval_coordinators, eval_caps, strict=True)
+                ),
+                return_exceptions=True,
             )
-            await self._actors[0].start_eval_session.remote(
-                run_name=run_name,
-                eval_step=eval_step,
-                val_set_name=val_set_name,
-                n_concurrent_trials=eval_concurrent_trials,
-            )
+            failures = [result for result in results if isinstance(result, BaseException)]
+            if failures:
+                # A runner left holding a session would send later training trials to its eval
+                # orchestrator, so stop every session that did start before giving up.
+                started = [
+                    index for index, result in zip(eval_coordinators, results) if not isinstance(result, BaseException)
+                ]
+                await self._stop_coordinator_sessions(started)
+                raise failures[0]
         except BaseException:
             async with self._routing_condition:
                 self._eval_session_active = False
+                self._eval_coordinators = ()
                 self._routing_condition.notify_all()
             raise
 
     async def stop_eval_session(self) -> None:
         if not self._actors:
             return
+        eval_coordinators = self._eval_coordinators
+        if not eval_coordinators:
+            eval_coordinators = tuple(range(self._num_coordinators)) if self._eval_spread else (0,)
         try:
-            await self._actors[0].stop_eval_session.remote()
+            await self._stop_coordinator_sessions(eval_coordinators, raise_first=True)
         finally:
             async with self._routing_condition:
                 self._eval_session_active = False
+                self._eval_coordinators = ()
                 self._routing_condition.notify_all()
+
+    async def _stop_coordinator_sessions(self, indices: Sequence[int], *, raise_first: bool = False) -> None:
+        """Stop the eval session on every listed shard, even when one of the stops fails."""
+        results = await asyncio.gather(
+            *(self._actors[index].stop_eval_session.remote() for index in indices),
+            return_exceptions=True,
+        )
+        for index, result in zip(indices, results):
+            if isinstance(result, BaseException):
+                _log().warning(f"[RolloutDispatcher] coordinator {index} stop_eval_session failed: {result!r}")
+                if raise_first:
+                    raise result
