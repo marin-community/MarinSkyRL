@@ -14,10 +14,10 @@ import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
-from importlib.metadata import version
 from typing import Any, Protocol
 
 from datasets import Dataset, load_dataset
+from reproduction_artifacts import ArtifactStorage, claim_empty_output, runtime_versions, write_json
 
 AIME24_DATASET = "HuggingFaceH4/aime_2024"
 AIME24_REVISION = "2fe88a2f1091d5048c0f36abc874fb997b3dd99a"
@@ -69,14 +69,6 @@ class SamplingParamsFactory(Protocol):
     def __call__(self) -> SamplingParams: ...
 
 
-class ArtifactStorage(Protocol):
-    """Storage operations used to claim and finalize one result prefix."""
-
-    def list_dir(self, prefix: str) -> list[str]: ...
-
-    def write(self, path: str, data: bytes) -> None: ...
-
-
 MANIFEST_PATH = "reproduction-manifest.json"
 
 
@@ -113,21 +105,16 @@ class ReproductionManifest:
 
 def write_manifest(storage: ArtifactStorage, manifest: ReproductionManifest) -> None:
     """Persist a deterministic top-level reproduction manifest."""
-    storage.write(MANIFEST_PATH, (json.dumps(asdict(manifest), indent=2, sort_keys=True) + "\n").encode())
+    write_json(storage, MANIFEST_PATH, asdict(manifest))
 
 
 def claim_output(storage: ArtifactStorage, manifest: ReproductionManifest) -> None:
     """Claim an empty output prefix before any paid sampling request."""
-    existing = storage.list_dir("")
-    if existing:
-        raise RuntimeError(
-            f"Evaluation save_dir must be empty; found {existing}. Use a new output prefix for every run."
-        )
-    write_manifest(storage, manifest)
+    claim_empty_output(storage, MANIFEST_PATH, asdict(manifest))
 
 
 def _runtime_versions() -> dict[str, str]:
-    return {package: version(package) for package in ("datasets", "tinker", "tinker-cookbook", "transformers")}
+    return runtime_versions(("datasets", "tinker", "tinker-cookbook", "transformers"))
 
 
 def _manifest(config: EvaluationConfig) -> ReproductionManifest:

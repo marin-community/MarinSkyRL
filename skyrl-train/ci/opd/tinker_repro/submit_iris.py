@@ -6,26 +6,18 @@ import argparse
 import json
 import os
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 
-from cloud.iris.open_mopd_fidelity import validate_output_uri
+from iris_settings import CLUSTER, EVALUATION_RESOURCES, MAX_RETRIES, PREEMPTIBLE, REPLICAS, REPOSITORY_ROOT
 from iris.cli.connect import open_iris_client
 from iris.cluster.constraints import Constraint, preemptible_constraint
 from iris.cluster.types import Entrypoint, EnvironmentSpec, ResourceSpec
 from iris.rpc import job_pb2
+from reproduction_artifacts import validate_output_uri
 
-CLUSTER = "cw-rno2a"
 JOB_NAME = "tinker-opd-aime24"
-CPU = 2.0
-MEMORY = "8GB"
-DISK = "20GB"
-REPLICAS = 1
-MAX_RETRIES = 0
-PREEMPTIBLE = False
 PRIORITY_BAND = job_pb2.PRIORITY_BAND_INTERACTIVE
 PRIORITY_NAME = job_pb2.PriorityBand.Name(PRIORITY_BAND).removeprefix("PRIORITY_BAND_").lower()
 TINKER_API_KEY_ENV = "TINKER_API_KEY"
-REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 EVALUATOR_PATH = "skyrl-train/ci/opd/tinker_repro/evaluate_aime24.py"
 
 
@@ -96,12 +88,12 @@ def public_plan(config: SubmissionConfig) -> SubmissionPlan:
         checkpoint=config.checkpoint,
         cluster=CLUSTER,
         command=evaluator_command(config),
-        cpu=CPU,
-        disk=DISK,
+        cpu=EVALUATION_RESOURCES.cpu,
+        disk=EVALUATION_RESOURCES.disk,
         job_name=JOB_NAME,
         max_examples=config.max_examples,
         max_retries=MAX_RETRIES,
-        memory=MEMORY,
+        memory=EVALUATION_RESOURCES.memory,
         non_preemptible=not PREEMPTIBLE,
         priority=PRIORITY_NAME,
         replicas=REPLICAS,
@@ -116,7 +108,11 @@ def build_submission(config: SubmissionConfig, *, tinker_api_key: str) -> IrisSu
 
     return IrisSubmission(
         entrypoint=Entrypoint.from_command(*evaluator_command(config)),
-        resources=ResourceSpec(cpu=CPU, memory=MEMORY, disk=DISK),
+        resources=ResourceSpec(
+            cpu=EVALUATION_RESOURCES.cpu,
+            memory=EVALUATION_RESOURCES.memory,
+            disk=EVALUATION_RESOURCES.disk,
+        ),
         environment=EnvironmentSpec(env_vars={TINKER_API_KEY_ENV: tinker_api_key}, setup_scripts=[]),
         constraints=(preemptible_constraint(PREEMPTIBLE),),
         priority_band=PRIORITY_BAND,

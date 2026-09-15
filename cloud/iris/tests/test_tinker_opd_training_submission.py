@@ -1,0 +1,133 @@
+import importlib.util
+import json
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+MODULE_DIR = Path(__file__).parents[3] / "skyrl-train" / "ci" / "opd" / "tinker_repro"
+sys.path.insert(0, str(MODULE_DIR))
+SUBMITTER_PATH = MODULE_DIR / "submit_training_iris.py"
+SPEC = importlib.util.spec_from_file_location("tinker_opd_training_submitter", SUBMITTER_PATH)
+assert SPEC is not None and SPEC.loader is not None
+submitter = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = submitter
+SPEC.loader.exec_module(submitter)
+
+
+def full_sft_config(acknowledgement: Decimal | None) -> Any:
+    return submitter.SubmissionConfig(
+        plan=submitter.build_training_plan(
+            submitter.Stage.SFT_FULL,
+            run_id="repro-20260914",
+            output_uri="s3://marin-us-east-02a/experiments/repro-20260914/sft",
+        ),
+        cost_acknowledgement=acknowledgement,
+    )
+
+
+def test_submit_full_stage_keeps_credentials_out_of_argv_and_disables_retries(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class Client:
+        def submit(self, **kwargs: Any) -> SimpleNamespace:
+            captured["submit"] = kwargs
+            return SimpleNamespace(job_id="/ben/tinker-sft-full")
+
+    @contextmanager
+    def open_iris_client(*, cluster_name: str, workspace: Path) -> Iterator[Client]:
+        captured["cluster"] = cluster_name
+        captured["workspace"] = workspace
+        yield Client()
+
+    monkeypatch.setattr(submitter, "open_iris_client", open_iris_client)
+    credentials = submitter.Credentials(
+        tinker_api_key="sentinel-tinker-key",
+        wandb_api_key="sentinel-wandb-key",
+        hf_token="sentinel-hf-key",
+    )
+    job_id = submitter.submit(full_sft_config(Decimal("10000")), credentials=credentials)
+
+    assert job_id == "/ben/tinker-sft-full"
+    assert captured["cluster"] == "cw-rno2a"
+    assert captured["workspace"] == SUBMITTER_PATH.parents[4]
+    request = captured["submit"]
+    assert request["environment"].env_vars == {
+        "TINKER_API_KEY": "sentinel-tinker-key",
+        "WANDB_API_KEY": "sentinel-wandb-key",
+        "HF_TOKEN": "sentinel-hf-key",
+    }
+    command = request["entrypoint"].command
+    assert not any("sentinel" in argument for argument in command)
+    assert command[:4] == ["uv", "run", "--locked", "--script"]
+    assert command[-2:] == ["--acknowledge-cost-usd", "10000"]
+
+    resources = request["resources"].to_proto()
+    assert resources.cpu_millicores == 4_000
+    assert resources.memory_bytes == 32 * 1024**3
+    assert resources.disk_bytes == 50 * 1024**3
+    assert not resources.HasField("device")
+    assert request["constraints"][0].to_proto().value.string_value == "false"
+    assert submitter.job_pb2.PriorityBand.Name(request["priority_band"]) == "PRIORITY_BAND_BATCH"
+    assert request["replicas"] == 1
+    assert request["max_retries_failure"] == 0
+    assert request["max_task_failures"] == 0
+
+
+def test_full_submission_requires_exact_cost_acknowledgement_before_credentials() -> None:
+    with pytest.raises(ValueError, match="requires --acknowledge-cost-usd 10000"):
+        submitter.build_submission(
+            full_sft_config(None),
+            credentials=submitter.Credentials("unused", "unused"),
+        )
+
+
+def test_cli_defaults_to_dry_run_without_reading_credentials(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("TINKER_API_KEY", raising=False)
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    monkeypatch.setattr(submitter, "submit", lambda *args, **kwargs: pytest.fail("dry run submitted a job"))
+
+    assert (
+        submitter.main(
+            [
+                "--stage",
+                "sft_full",
+                "--run-id",
+                "repro-20260914",
+                "--output-uri",
+                "s3://marin-us-east-02a/experiments/repro-20260914/sft",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    plan = json.loads(output.split("\nDry run only.", 1)[0])
+    assert plan["training"]["stage"] == "sft_full"
+    assert plan["required_cost_acknowledgement_usd"] == "10000"
+    assert plan["priority"] == "batch"
+    assert "TINKER_API_KEY" not in output
+
+
+def test_cli_submit_full_stage_without_acknowledgement_cannot_reach_submission(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("TINKER_API_KEY", "unused")
+    monkeypatch.setenv("WANDB_API_KEY", "unused")
+    monkeypatch.setattr(submitter, "submit", lambda *args, **kwargs: pytest.fail("unauthorized full run submitted"))
+
+    with pytest.raises(SystemExit, match="requires --acknowledge-cost-usd 10000"):
+        submitter.main(
+            [
+                "--stage",
+                "sft_full",
+                "--run-id",
+                "repro-20260914",
+                "--output-uri",
+                "s3://marin-us-east-02a/experiments/repro-20260914/sft",
+                "--submit",
+            ]
+        )
+    capsys.readouterr()
