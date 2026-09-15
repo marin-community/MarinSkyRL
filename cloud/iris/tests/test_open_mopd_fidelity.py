@@ -196,6 +196,7 @@ def test_training_command_has_semantic_control_settings() -> None:
         "+actor_rollout_ref.rollout.log_prob_top_k": "16",
         "+actor_rollout_ref.rollout.top_k_strategy": "only_stu",
         "+actor_rollout_ref.rollout.reward_weight_mode": "student_p",
+        "actor_rollout_ref.rollout.max_num_batched_tokens": "18432",
         "actor_rollout_ref.rollout.temperature": "1.0",
         "actor_rollout_ref.rollout.top_p": "0.99",
         "reward_model.micro_batch_size_per_gpu": "1",
