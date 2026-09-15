@@ -268,6 +268,7 @@ def training_command(
         f"actor_rollout_ref.rollout.top_p={training.nucleus_p}",
         f"reward_model.micro_batch_size_per_gpu={training.micro_batch_size_per_gpu}",
         f"+reward_model.teacher_temperature={training.teacher_temperature}",
+        "+reward_model.reward_kwargs.compute_true_reward=False",
         "+data.sampler.class_path=pkg://verl.utils.dataset.domain_weighted_sampler",
         "+data.sampler.class_name=DomainWeightedSampler",
         *(f"+data.domain_weights.{domain}={weight}" for domain, weight in zip(DOMAINS, training.domain_weights)),
