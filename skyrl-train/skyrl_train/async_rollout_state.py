@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Protocol
 
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
+from skyrl_train.policy_version import PolicyVersionSegment
 
 
 @dataclass
@@ -14,7 +15,7 @@ class GeneratedOutputGroup:
     uid: str
     earliest_model_step: int
     source_prompts: List[dict]
-    behavior_policy_versions: List[int] | None = None
+    behavior_policy_version_segments: List[List[PolicyVersionSegment]] | None = None
 
 
 @dataclass

@@ -89,6 +89,7 @@ class WholeTrajectoryProjection:
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
             actual_global_step=minimum_captured_global_step(outputs),
         )
+        _attach_behavior_policy_versions(batch, outputs)
         attach_terminal_classifications(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
         return batch
@@ -149,6 +150,7 @@ class StepWiseTrajectoryProjection:
             exclude_from_baseline=[not step.disposition.baseline_eligible for step in steps],
             actual_global_step=minimum_captured_global_step(steps),
         )
+        _attach_behavior_policy_versions(batch, steps)
         attach_terminal_classifications(batch, steps)
         _attach_reward_channels(batch, steps, responses)
         return batch
@@ -176,6 +178,15 @@ def _loss_masks(outputs, responses, runner_cfg: DictConfig, tokenizer):
     if runner_cfg.apply_overlong_filtering:
         return apply_overlong_filtering(loss_masks, responses, tokenizer.eos_token_id)
     return loss_masks
+
+
+def _attach_behavior_policy_versions(batch: TrajectoryBatch, outputs: Sequence[AgentLoopOutput]) -> None:
+    """Project only receiver-observed spans; unknown transports keep the key absent."""
+
+    rows = [output.behavior_policy_version_segments for output in outputs]
+    if not any(row is not None for row in rows):
+        return
+    batch["behavior_policy_version_segments"] = [list(row) if row is not None else [] for row in rows]
 
 
 def project_loss_mask(output: TrainableInteraction, response: Sequence[int]) -> list[int]:

@@ -83,6 +83,13 @@ class LearnerConfig:
     update_epochs: int
     logprob_temperature: float
     max_sequence_length: int
+    require_rollout_logprobs: bool = False
+    offpolicy_mask_enabled: bool = False
+    offpolicy_mask_ratio: str = "mismatch"
+    offpolicy_mask_low: float = 0.5
+    offpolicy_mask_high: float = 5.0
+    offpolicy_mask_veto_ratio: float = 1.0e-5
+    offpolicy_mask_renormalize: bool = False
 
     def __post_init__(self) -> None:
         finite_values = {
@@ -91,6 +98,9 @@ class LearnerConfig:
             "dual_clip_ratio": self.dual_clip_ratio,
             "rollout_importance_ratio_cap": self.rollout_importance_ratio_cap,
             "logprob_temperature": self.logprob_temperature,
+            "offpolicy_mask_low": self.offpolicy_mask_low,
+            "offpolicy_mask_high": self.offpolicy_mask_high,
+            "offpolicy_mask_veto_ratio": self.offpolicy_mask_veto_ratio,
         }
         if self.reference_kl_coefficient is not None:
             finite_values["reference_kl_coefficient"] = self.reference_kl_coefficient
@@ -108,6 +118,26 @@ class LearnerConfig:
             raise UnsupportedLearnerConfiguration("update epochs and max sequence length must be positive")
         if self.logprob_temperature <= 0:
             raise UnsupportedLearnerConfiguration("log-probability temperature must be positive")
+        if self.offpolicy_mask_enabled:
+            if self.policy_loss is not PolicyLoss.REGULAR:
+                raise UnsupportedLearnerConfiguration("the JAX off-policy mask currently requires regular policy loss")
+            if self.offpolicy_mask_ratio not in ("mismatch", "full"):
+                raise UnsupportedLearnerConfiguration("off-policy mask ratio must be mismatch or full")
+            if not (0 < self.offpolicy_mask_veto_ratio <= self.offpolicy_mask_low <= self.offpolicy_mask_high):
+                raise UnsupportedLearnerConfiguration(
+                    "off-policy mask requires 0 < veto ratio <= low ratio <= high ratio"
+                )
+
+    @property
+    def requires_behavior_log_probs(self) -> bool:
+        """Whether the learner objective or strict transport contract consumes rollout probabilities."""
+
+        return (
+            self.require_rollout_logprobs
+            or self.offpolicy_mask_enabled
+            or self.use_rollout_importance_sampling
+            or self.policy_loss is PolicyLoss.BEHAVIOR_CLIP
+        )
 
 
 @dataclass(frozen=True)
@@ -132,7 +162,10 @@ class LearnerBatch:
             raise ValueError("response channels must align with the sequence rows and trailing positions")
         _require_shape("attention_mask", self.attention_mask, self.sequences.shape)
         _require_shape("loss_mask", self.loss_mask, self.response_mask.shape)
-        _require_shape("behavior_policy_versions", self.behavior_policy_versions, (batch_size,))
+        if self.behavior_policy_versions.shape not in ((batch_size,), self.response_mask.shape):
+            raise ValueError(
+                "behavior_policy_versions must contain one version per row or one aligned version per response token"
+            )
         if self.rollout_log_probs is not None:
             _require_shape("rollout_log_probs", self.rollout_log_probs, self.response_mask.shape)
         for name, mask in (("attention_mask", self.attention_mask), ("response_mask", self.response_mask)):
@@ -144,13 +177,24 @@ class LearnerBatch:
             raise ValueError("loss_mask cannot select padded or non-response positions")
         if np.any((self.response_mask > 0) & (self.attention_mask[:, -response_length:] == 0)):
             raise ValueError("response_mask cannot select positions excluded by attention_mask")
-        if np.any(self.behavior_policy_versions < 0):
-            raise ValueError("behavior policy versions must be non-negative")
+        if self.behavior_policy_versions.shape == (batch_size,):
+            if np.any(self.behavior_policy_versions < 0):
+                raise ValueError("row behavior policy versions must be non-negative")
+        elif np.any(self.behavior_policy_versions[self.loss_mask > 0] < 0):
+            raise ValueError("every selected response token must have a behavior policy version")
         _require_finite_array("rollout_log_probs", self.rollout_log_probs)
 
     @property
     def response_length(self) -> int:
         return self.response_mask.shape[1]
+
+    @property
+    def selected_behavior_policy_versions(self) -> np.ndarray:
+        """Return exact versions for selected tokens, expanding uniform rows lazily."""
+
+        if self.behavior_policy_versions.ndim == 1:
+            return np.broadcast_to(self.behavior_policy_versions[:, None], self.response_mask.shape)[self.loss_mask > 0]
+        return self.behavior_policy_versions[self.loss_mask > 0]
 
 
 @dataclass(frozen=True)
@@ -194,7 +238,7 @@ class UpdateRequest:
             _require_finite_array(name, value)
         if self.old_policy_version < 0 or self.global_step < 0:
             raise ValueError("policy version and global step must be non-negative")
-        if np.any(self.batch.behavior_policy_versions > self.old_policy_version):
+        if np.any(self.batch.selected_behavior_policy_versions > self.old_policy_version):
             raise ValueError("behavior policy versions cannot be newer than the recomputed old policy")
         if self.global_loss_denominator is not None and (
             not math.isfinite(self.global_loss_denominator) or self.global_loss_denominator <= 0

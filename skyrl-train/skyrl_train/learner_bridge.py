@@ -7,9 +7,11 @@ import torch
 
 from skyrl_train.learner import LearnerBatch, LogProbResult, UpdateRequest
 from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch
+from skyrl_train.policy_version import expand_policy_version_segments
 
 
 BEHAVIOR_POLICY_VERSIONS_METADATA_KEY = "behavior_policy_versions"
+BEHAVIOR_POLICY_VERSION_SEGMENTS_METADATA_KEY = "behavior_policy_version_segments"
 OLD_POLICY_VERSION_METADATA_KEY = "old_policy_version"
 
 
@@ -24,19 +26,32 @@ def learner_batch_from_training_input(
     """Copy an MSRL CPU Torch batch into the framework-neutral learner format."""
     metadata = training_input.metadata or {}
     versions = metadata.get(BEHAVIOR_POLICY_VERSIONS_METADATA_KEY)
-    if versions is None:
-        raise ValueError("learner batches require one receiver-observed behavior-policy version per row")
+    version_segments = metadata.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_METADATA_KEY)
+    if versions is not None and version_segments is not None:
+        raise ValueError("learner batches cannot mix row versions with token-span versions")
+    response_mask = _numpy_copy(training_input["response_mask"])
+    loss_mask = _numpy_copy(training_input["loss_mask"], dtype=np.dtype(np.float32))
+    if version_segments is not None:
+        behavior_policy_versions = expand_policy_version_segments(
+            version_segments,
+            response_mask,
+            required_mask=loss_mask,
+        )
+    elif versions is not None:
+        behavior_policy_versions = np.asarray(versions, dtype=np.int64)
+    else:
+        raise ValueError("learner batches require receiver-observed behavior-policy provenance")
     return LearnerBatch(
         sequences=_numpy_copy(training_input["sequences"], dtype=np.dtype(np.int64)),
         attention_mask=_numpy_copy(training_input["attention_mask"]),
-        response_mask=_numpy_copy(training_input["response_mask"]),
-        loss_mask=_numpy_copy(training_input["loss_mask"], dtype=np.dtype(np.float32)),
+        response_mask=response_mask,
+        loss_mask=loss_mask,
         rollout_log_probs=(
             _numpy_copy(training_input["rollout_logprobs"], dtype=np.dtype(np.float32))
             if training_input.get("rollout_logprobs") is not None
             else None
         ),
-        behavior_policy_versions=np.asarray(versions, dtype=np.int64),
+        behavior_policy_versions=behavior_policy_versions,
     )
 
 

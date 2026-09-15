@@ -21,7 +21,11 @@ from skyrl_train.fully_async_trainer import (
     _receiver_observed_behavior_policy_versions,
 )
 from skyrl_train.learner import LearnerPublicationIncomplete, PublicationStatus, UnsupportedLearnerConfiguration
-from skyrl_train.learner_bridge import BEHAVIOR_POLICY_VERSIONS_METADATA_KEY
+from skyrl_train.learner_bridge import (
+    BEHAVIOR_POLICY_VERSIONS_METADATA_KEY,
+    BEHAVIOR_POLICY_VERSION_SEGMENTS_METADATA_KEY,
+)
+from skyrl_train.policy_version import PublicationVersionHistory, expand_policy_version_segments
 from skyrl_train.testing.stateful_fake_learner import (
     FakeLearnerError,
     FakeLearnerOperation,
@@ -240,6 +244,46 @@ def test_learner_failures_never_report_completion(tmp_path):
     assert fresh.state.policy_version == fresh.state.update_count == 0
 
 
+def test_stateful_fake_preserves_regular_mask_denominator_and_rollout_probabilities(tmp_path):
+    trainer = _trainer(
+        tmp_path,
+        StatefulFakeLearner(),
+        use_reference=False,
+        changes={
+            "trainer.algorithm.offpolicy_mask.enabled": True,
+            "trainer.algorithm.offpolicy_mask.ratio": "mismatch",
+            "trainer.algorithm.offpolicy_mask.low": 0.5,
+            "trainer.algorithm.offpolicy_mask.high": 5.0,
+            "trainer.algorithm.offpolicy_mask.veto_ratio": 1.0e-5,
+            "trainer.algorithm.offpolicy_mask.renormalize": False,
+        },
+    )
+    _publish(trainer)
+    missing = _training_input()
+    missing["rollout_logprobs"] = None
+    missing = trainer.fwd_logprobs_values_reward(missing)
+    missing["advantages"] = torch.ones((2, 3))
+    with pytest.raises(ValueError, match="requires rollout log probabilities"):
+        trainer.train_critic_and_policy(missing)
+
+    batch = trainer.fwd_logprobs_values_reward(_training_input())
+    rollout_logprobs = batch["action_log_probs"].clone()
+    rollout_logprobs[0, 0] -= torch.log(torch.tensor(6.0))
+    rollout_logprobs[1, 0] -= torch.log(torch.tensor(1.0e-6))
+    batch["rollout_logprobs"] = rollout_logprobs
+    batch["advantages"] = torch.tensor([[1.0, -0.5, 0.0], [0.25, 0.0, 0.0]])
+
+    metrics = trainer.train_critic_and_policy(batch)
+
+    # One token survives. Its fake term is -0.5 * (1 + 12 % 7 / 10)=-0.75,
+    # still divided by all three originally selected tokens.
+    assert metrics["fake/update_signal"] == pytest.approx(-0.25)
+    assert metrics["offpolicy_mask/masked_fraction"] == pytest.approx(2 / 3)
+    assert metrics["offpolicy_mask/masked_fraction_low"] == pytest.approx(1 / 3)
+    assert metrics["offpolicy_mask/masked_fraction_high"] == pytest.approx(1 / 3)
+    assert metrics["offpolicy_mask/vetoed_sequence_fraction"] == pytest.approx(0.5)
+
+
 def test_skipped_and_non_finite_updates_preserve_state(tmp_path):
     learner = StatefulFakeLearner()
     trainer = _trainer(tmp_path, learner, use_reference=False)
@@ -270,6 +314,17 @@ def test_skipped_and_non_finite_updates_preserve_state(tmp_path):
         (
             {"trainer.algorithm.use_tis": True, "trainer.algorithm.tis_imp_ratio_cap": -1.0},
             "importance ratio cap",
+        ),
+        (
+            {"trainer.algorithm.offpolicy_mask.enabled": True, "trainer.algorithm.offpolicy_mask.low": 0.0},
+            "off-policy mask requires",
+        ),
+        (
+            {
+                "trainer.algorithm.offpolicy_mask.enabled": True,
+                "trainer.algorithm.policy_loss_type": "behavior_clip",
+            },
+            "off-policy mask currently requires regular",
         ),
     ],
 )
@@ -354,17 +409,23 @@ def test_async_serving_identity_is_per_row_and_independent_of_global_step(tmp_pa
             await self.release.wait()
             return {
                 "prompt_token_ids": [[1, 2], [1, 2]],
-                "response_ids": [[11], [13]],
+                "response_ids": [[11, 12], [13]],
                 "rewards": [1.0, 1.0],
                 "unshaped_rewards": [1.0, 1.0],
-                "loss_masks": [[1], [1]],
+                "loss_masks": [[1, 1], [1]],
                 "stop_reasons": ["stop", "stop"],
                 "rollout_metrics": {},
                 "rollout_logprobs": None,
                 "is_last_step": [True, True],
                 "exclude_from_baseline": [False, False],
                 "actual_global_step": 10,
-                BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY: [[0], [1]],
+                BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY: [
+                    [
+                        {"start": 0, "token_count": 1, "policy_version": 0},
+                        {"start": 1, "token_count": 1, "policy_version": 1},
+                    ],
+                    [{"start": 0, "token_count": 1, "policy_version": 1}],
+                ],
             }
 
     async def capture_group():
@@ -382,7 +443,9 @@ def test_async_serving_identity_is_per_row_and_independent_of_global_step(tmp_pa
                 "trainer.algorithm.resolved_group_advantage.physical_group_size": 2,
             },
         )
-        trainer.global_step = 10
+        # Deliberately disagree with the runner's actual_global_step=10. Serving
+        # provenance, not the trainer counter, determines this group's age.
+        trainer.global_step = 1
         trainer.async_train_dataloader = OnePromptDataloader()
         trainer.init_weight_sync_state()
         await trainer.async_sync_policy_weights_to_inference_engines()
@@ -403,19 +466,57 @@ def test_async_serving_identity_is_per_row_and_independent_of_global_step(tmp_pa
         return trainer, group
 
     trainer, group = asyncio.run(capture_group())
-    assert group.earliest_model_step == 10
-    assert group.behavior_policy_versions == [0, 1]
+    assert group.earliest_model_step == 1
+    assert group.behavior_policy_version_segments == [
+        [
+            {"start": 0, "token_count": 1, "policy_version": 0},
+            {"start": 1, "token_count": 1, "policy_version": 1},
+        ],
+        [{"start": 0, "token_count": 1, "policy_version": 1}],
+    ]
     batch = trainer.convert_generation_group_mini_batch_to_training_input([group])
-    assert batch.metadata[BEHAVIOR_POLICY_VERSIONS_METADATA_KEY] == [0, 1]
+    assert batch.metadata[BEHAVIOR_POLICY_VERSION_SEGMENTS_METADATA_KEY] == group.behavior_policy_version_segments
     batch = trainer.fwd_logprobs_values_reward(batch)
-    batch["advantages"] = torch.tensor([[1.0], [-0.25]])
+    batch["advantages"] = torch.tensor([[1.0, -0.5], [-0.25, 0.0]])
     result = trainer.train_critic_and_policy(batch)
     assert (result["fake/oldest_behavior_version"], result["fake/newest_behavior_version"]) == (0.0, 1.0)
 
     with pytest.raises(RuntimeError):
         _receiver_observed_behavior_policy_versions(
-            {"response_ids": [[11, 12]], BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY: [[0, 1]]}
+            {
+                "response_ids": [[11, 12]],
+                "loss_masks": [[1, 1]],
+                BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY: [[{"start": 0, "token_count": 1, "policy_version": 0}]],
+            }
         )
+
+
+def test_policy_version_segments_expand_only_at_the_learner_boundary():
+    rows = [
+        [
+            {"start": 0, "token_count": 1, "policy_version": 3},
+            {"start": 1, "token_count": 1, "policy_version": 4},
+            {"start": 2, "token_count": 1, "policy_version": None},
+        ],
+        [{"start": 0, "token_count": 1, "policy_version": 4}],
+    ]
+    response_mask = torch.tensor([[1, 1, 1], [1, 0, 0]]).numpy()
+    required_mask = torch.tensor([[1, 1, 0], [1, 0, 0]]).numpy()
+
+    dense = expand_policy_version_segments(rows, response_mask, required_mask=required_mask)
+
+    assert dense.tolist() == [[3, 4, -1], [4, -1, -1]]
+
+
+def test_publication_version_history_uses_engine_first_token_clock():
+    history = PublicationVersionHistory()
+    history.record_resume(10.0, 0)
+    history.record_resume(20.0, 1)
+
+    assert history.at_first_token(9.9) is None
+    assert history.at_first_token(10.0) == 0
+    assert history.at_first_token(19.9) == 0
+    assert history.at_first_token(20.0) == 1
 
 
 def test_async_checkpoint_commits_after_required_callbacks(tmp_path):

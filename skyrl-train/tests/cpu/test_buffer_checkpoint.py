@@ -40,7 +40,7 @@ def _make_item(uid: str, step: int) -> GeneratedOutputGroup:
         uid=uid,
         earliest_model_step=step,
         source_prompts=[{"uid": uid}],
-        behavior_policy_versions=[step - 1],
+        behavior_policy_version_segments=[[{"start": 0, "token_count": 3, "policy_version": step - 1}]],
     )
 
 
@@ -141,7 +141,7 @@ async def test_roundtrip_with_items():
         for i, item in enumerate(buffer_state.completed_groups):
             assert item.uid == f"uid_{i}"
             assert item.earliest_model_step == 5
-            assert item.behavior_policy_versions == [4]
+            assert item.behavior_policy_version_segments == [[{"start": 0, "token_count": 3, "policy_version": 4}]]
             assert item.source_prompts == [{"uid": f"uid_{i}"}]
             assert item.trajectory_batch["prompt_token_ids"] == [[1, 2, 3]]
             assert item.trajectory_batch["rewards"] == [1.0]
@@ -166,6 +166,32 @@ async def test_roundtrip_preserves_admitted_groups_outside_completed_queue():
         buffer_state = BufferCheckpointCallback.load_buffer_state(step_dir)
         assert [group.uid for group in buffer_state.admitted_groups] == ["admitted"]
         assert buffer_state.completed_groups == []
+
+
+def test_load_legacy_uniform_versions_migrates_to_compact_segments(tmp_path):
+    item = _make_item("legacy", step=5)
+    artifact_path = tmp_path / BufferCheckpointCallback.ARTIFACT_NAME
+    torch.save(
+        {
+            "completed_groups": [
+                {
+                    "trajectory_batch": dict(item.trajectory_batch),
+                    "uid": item.uid,
+                    "earliest_model_step": item.earliest_model_step,
+                    "source_prompts": item.source_prompts,
+                    "behavior_policy_versions": [4],
+                }
+            ],
+            "retry_prompts": [],
+        },
+        artifact_path,
+    )
+
+    restored = BufferCheckpointCallback.load_buffer_state(str(tmp_path))
+
+    assert restored.completed_groups[0].behavior_policy_version_segments == [
+        [{"start": 0, "token_count": 3, "policy_version": 4}]
+    ]
 
 
 def test_consumed_admitted_groups_are_only_included_by_final_flush_snapshot():
