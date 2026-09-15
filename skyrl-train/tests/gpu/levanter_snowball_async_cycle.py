@@ -129,8 +129,15 @@ class _AsyncGateTrainer(FullyAsyncRayPPOTrainer):
         self.defer_shutdown = True
         self.shutdown_requested = False
         self.updates: list[dict[str, object]] = []
+        self.training_intervals: list[dict[str, object]] = []
         self.update_intervals: list[dict[str, object]] = []
         self.publication_intervals: list[dict[str, object]] = []
+
+    async def _run_training(self, training_input):
+        started = time.perf_counter()
+        result = await super()._run_training(training_input)
+        self.training_intervals.append({"start": started, "end": time.perf_counter()})
+        return result
 
     def train_critic_and_policy(self, training_input):
         started = time.perf_counter()
@@ -188,7 +195,10 @@ def _async_config(model_path: str, run_path: Path):
     cfg.trainer.fully_async.num_parallel_generation_workers = 8
     cfg.trainer.fully_async.max_buffered_groups = 4
     cfg.trainer.fully_async.admission_stall_timeout = 120
-    cfg.generator.sampling_params.max_generate_length = 16
+    # Keep real decoding in flight while the first JAX forward compiles. The
+    # tiny 16-token version can drain its entire bounded backlog before the
+    # learner begins, which tests staleness but not scheduler overlap.
+    cfg.generator.sampling_params.max_generate_length = 96
     return cfg
 
 
@@ -242,12 +252,12 @@ def _run_async_gate(model_path: str, run_path: str) -> dict[str, object]:
         ]
         assert stale_updates, trainer.updates
         overlap_pairs = [
-            (generation_index, update_index)
+            (generation_index, training_index)
             for generation_index, generation in enumerate(runner.intervals)
-            for update_index, update in enumerate(trainer.update_intervals)
-            if generation["start"] < update["end"] and generation["end"] > update["start"]
+            for training_index, training in enumerate(trainer.training_intervals)
+            if generation["start"] < training["end"] and generation["end"] > training["start"]
         ]
-        assert overlap_pairs, (runner.intervals, trainer.update_intervals)
+        assert overlap_pairs, (runner.intervals, trainer.training_intervals)
 
         final_generation = asyncio.run(_final_generation(client, cfg))
         final_segments = final_generation["response_policy_version_segments"][0]
@@ -262,7 +272,9 @@ def _run_async_gate(model_path: str, run_path: str) -> dict[str, object]:
             "updates": trainer.updates,
             "publication_intervals": trainer.publication_intervals,
             "generation_intervals": runner.intervals,
-            "generation_update_overlap_pairs": overlap_pairs,
+            "training_intervals": trainer.training_intervals,
+            "optimizer_intervals": trainer.update_intervals,
+            "generation_training_overlap_pairs": overlap_pairs,
             "stale_update_count": len(stale_updates),
             "final_generation": {
                 "response_ids": final_generation["response_ids"],
