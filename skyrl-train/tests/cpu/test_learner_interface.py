@@ -25,7 +25,12 @@ from skyrl_train.learner_bridge import (
     BEHAVIOR_POLICY_VERSIONS_METADATA_KEY,
     BEHAVIOR_POLICY_VERSION_SEGMENTS_METADATA_KEY,
 )
-from skyrl_train.policy_version import PublicationVersionHistory, expand_policy_version_segments
+from skyrl_train.policy_version import (
+    PublicationVersionHistory,
+    append_policy_version_segment,
+    expand_policy_version_segments,
+    truncate_policy_version_segments,
+)
 from skyrl_train.testing.stateful_fake_learner import (
     FakeLearnerError,
     FakeLearnerOperation,
@@ -506,6 +511,24 @@ def test_policy_version_segments_expand_only_at_the_learner_boundary():
     dense = expand_policy_version_segments(rows, response_mask, required_mask=required_mask)
 
     assert dense.tolist() == [[3, 4, -1], [4, -1, -1]]
+
+
+def test_policy_version_segments_coalesce_and_truncate_without_relabeling():
+    segments = []
+    append_policy_version_segment(segments, token_count=2, policy_version=3)
+    append_policy_version_segment(segments, token_count=1, policy_version=3)
+    append_policy_version_segment(segments, token_count=4, policy_version=4)
+    append_policy_version_segment(segments, token_count=2, policy_version=5)
+
+    assert segments == [
+        {"start": 0, "token_count": 3, "policy_version": 3},
+        {"start": 3, "token_count": 4, "policy_version": 4},
+        {"start": 7, "token_count": 2, "policy_version": 5},
+    ]
+    assert truncate_policy_version_segments(segments, response_length=5) == [
+        {"start": 0, "token_count": 3, "policy_version": 3},
+        {"start": 3, "token_count": 2, "policy_version": 4},
+    ]
 
 
 def test_publication_version_history_uses_engine_first_token_clock():
