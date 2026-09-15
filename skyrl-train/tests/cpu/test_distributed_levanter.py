@@ -49,6 +49,7 @@ def test_merge_update_results_checks_numerics_and_reduces_host_timings():
             "optimizer_apply_seconds": 20.0,
             "optimizer_output_transfer_seconds": 6.0,
             "training_update_seconds": 60.0,
+            "new_phase_seconds": 3.0,
         },
     )
     second = UpdateResult(
@@ -61,6 +62,7 @@ def test_merge_update_results_checks_numerics_and_reduces_host_timings():
             "optimizer_apply_seconds": 19.0,
             "optimizer_output_transfer_seconds": 7.0,
             "training_update_seconds": 58.0,
+            "new_phase_seconds": 4.0,
         },
     )
 
@@ -74,6 +76,7 @@ def test_merge_update_results_checks_numerics_and_reduces_host_timings():
         "optimizer_apply_seconds": 20.0,
         "optimizer_output_transfer_seconds": 7.0,
         "training_update_seconds": 60.0,
+        "new_phase_seconds": 4.0,
     }
     with pytest.raises(RuntimeError, match="different final_loss metric"):
         distributed_levanter._merge_update_results(

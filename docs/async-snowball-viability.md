@@ -48,7 +48,7 @@ The bounded gate uses the measured regular-policy shape rather than the launcher
 | Train data | 1,024-row GSM8K parquet, identity `users/ahmad/documents/async-rl-snowball-gsm8k@2026.09.06.13:4c7ebfc9` |
 | Evaluation data | 256-row provisional Snowball mechanical battery, content SHA-256 `cb50e2b55a9cc12e9ca95e8e814c47a479d377ba720235e4784c81f267eb343a` |
 | Geometry | 32 prompts/update, four responses/prompt, 128 trajectories, five updates |
-| Objective | regular clipped GRPO, token mean, clip `0.2/0.2`, group standard-deviation normalization, one update epoch |
+| Objective | regular clipped GRPO, configured `token_mean` with effective equal-sequence weighting from one-sequence device microbatches, clip `0.2/0.2`, group standard-deviation normalization, one update epoch |
 | Behavior filter | sampled vLLM probabilities required; `regular_mask` mismatch ratio in `[0.5, 5.0]`, veto below `1e-5`, no renormalization |
 | Optimizer | AdamW, LR `1e-6`, betas `0.9/0.999`, epsilon `1e-8`, weight decay `0.01`, max norm `1.0`, constant schedule |
 | Async policy | deep pool, abort/retry, maximum age 4, explicit publication after updates 1 and 5 |
@@ -56,9 +56,23 @@ The bounded gate uses the measured regular-policy shape rather than the launcher
 | Learner | two nodes / 16 H100s, BF16 parameters and compute, FP32 loss outputs, host-resident Adam state between split executables |
 | Serving | one node / eight H100s, vLLM TP1/DP8/EP8, BF16, temperature `1.0` |
 
+Levanter preserves the measured recipe's effective mean of each sequence's masked-token mean explicitly. The 16-GPU
+BF16 Levanter learner differs from the 32-GPU Megatron learner used for Ahmad's quality and performance measurements,
+so this gate tests the selected M10 semantics rather than a like-for-like reproduction.
+
 The launcher stages the model and both parquet sources from the regional object store, records their immutable
 identities, and uses fresh output prefixes. Policy 0 can be adopted without copying weights only when the serving and
 learner identities match exactly. Trained policies still require complete ordinary-weight and expert-slice receipts.
+
+## Revision provenance
+
+The preserved stack starts at [MarinSkyRL `659cf49f`](https://github.com/marin-community/MarinSkyRL/commit/659cf49f7aec4f109ecffe5d21a90d8205ea5506).
+The final High-tier review covered [`97c0e9ef`](https://github.com/marin-community/MarinSkyRL/commit/97c0e9ef00a84824ad656578cf502831f8fab4f5),
+while the full r7 allocation ran [`89a9ca60`](https://github.com/marin-community/MarinSkyRL/commit/89a9ca6001f3a104d83cd419bedb2d8d09a8d4aa).
+The timing-merge correction at the reviewed revision has CPU regression coverage but has not run on the 67B topology.
+The post-review suffix classifier and provenance test are also CPU-only safeguards; neither adds full-checkpoint GPU
+evidence. The selected behavior was resolved against source pair [Marin `a453edb9`](https://github.com/marin-community/marin/commit/a453edb92b14da9a8406c005f6bc4c76d72bc34b)
+and [MarinSkyRL `ba5ba171`](https://github.com/marin-community/MarinSkyRL/commit/ba5ba17100d77be97a6fc9f9aa5e4197bd24bccc).
 
 ## Correctness and async evidence
 
@@ -148,6 +162,9 @@ fix. It still needs 24 H100s. Allowing 45-50 minutes, or 18-20 H100-hours, cover
 7.4-minute full publications, five updates, and terminal evaluation with a cleanup margin. The run should not add a
 matched Megatron comparison or longer learning horizon until this exact gate publishes versions 1 and 5, generates
 from version 5, and produces its fixed final evaluation.
+
+That estimate is a planning bound, not a first-try forecast. No full run has yet exercised the `[1, 5]` publication
+schedule, version-1 aging through updates 2-5, or version-5 generation, and each full allocation exposed a new blocker.
 
 Before treating the interface as a general production abstraction, put Torch training behind the learner protocol and
 collapse the repeated lifecycle branches. Keep that refactor separate from the next M10 rerun so its numerical and
