@@ -7,6 +7,7 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 
+from cloud.iris.secrets_env import default_secrets_env, load_secrets_env_into_os_environ
 from iris_settings import CLUSTER, EVALUATION_RESOURCES, MAX_RETRIES, PREEMPTIBLE, REPLICAS, REPOSITORY_ROOT
 from iris.cli.connect import open_iris_client
 from iris.cluster.constraints import Constraint, preemptible_constraint
@@ -28,6 +29,7 @@ class SubmissionConfig:
     checkpoint: str
     save_dir: str
     max_examples: int | None
+    secrets_env: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,7 @@ class SubmissionPlan:
     priority: str
     replicas: int
     save_dir: str
+    secrets_env: str | None
 
     def json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True)
@@ -98,6 +101,7 @@ def public_plan(config: SubmissionConfig) -> SubmissionPlan:
         priority=PRIORITY_NAME,
         replicas=REPLICAS,
         save_dir=config.save_dir,
+        secrets_env=config.secrets_env,
     )
 
 
@@ -143,6 +147,11 @@ def _parse_args(argv: list[str] | None = None) -> tuple[SubmissionConfig, bool]:
     parser.add_argument("--save-dir", required=True, help="Cloud directory for evaluation artifacts")
     parser.add_argument("--max-examples", type=int, help="Limit examples for a smoke test")
     parser.add_argument("--submit", action="store_true", help="Submit after printing the reviewed plan")
+    parser.add_argument(
+        "--secrets-env",
+        default=default_secrets_env(),
+        help="KEY=VALUE file loaded on the submitter only after --submit",
+    )
     args = parser.parse_args(argv)
     if args.max_examples is not None and args.max_examples <= 0:
         parser.error("--max-examples must be positive")
@@ -151,6 +160,7 @@ def _parse_args(argv: list[str] | None = None) -> tuple[SubmissionConfig, bool]:
             checkpoint=args.checkpoint,
             save_dir=args.save_dir,
             max_examples=args.max_examples,
+            secrets_env=args.secrets_env,
         ),
         args.submit,
     )
@@ -163,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     if not should_submit:
         print("Dry run only. Add --submit after reviewing the plan.")
         return 0
+    load_secrets_env_into_os_environ(config.secrets_env)
     api_key = os.environ.get(TINKER_API_KEY_ENV)
     if not api_key:
         raise SystemExit(f"{TINKER_API_KEY_ENV} must be set in the submitter environment")

@@ -87,10 +87,16 @@ def test_full_submission_requires_exact_cost_acknowledgement_before_credentials(
         )
 
 
-def test_cli_defaults_to_dry_run_without_reading_credentials(monkeypatch, capsys) -> None:
+def test_cli_defaults_to_dry_run_without_reading_credentials(monkeypatch, capsys, tmp_path: Path) -> None:
     monkeypatch.delenv("TINKER_API_KEY", raising=False)
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
     monkeypatch.setattr(submitter, "submit", lambda *args, **kwargs: pytest.fail("dry run submitted a job"))
+    monkeypatch.setattr(
+        submitter,
+        "load_secrets_env_into_os_environ",
+        lambda path: pytest.fail("dry run read the secrets file"),
+    )
+    secrets_env = tmp_path / "explicit-secrets.env"
 
     assert (
         submitter.main(
@@ -101,6 +107,8 @@ def test_cli_defaults_to_dry_run_without_reading_credentials(monkeypatch, capsys
                 "repro-20260914",
                 "--output-uri",
                 "s3://marin-us-east-02a/experiments/repro-20260914/sft",
+                "--secrets-env",
+                str(secrets_env),
             ]
         )
         == 0
@@ -110,7 +118,91 @@ def test_cli_defaults_to_dry_run_without_reading_credentials(monkeypatch, capsys
     assert plan["training"]["stage"] == "sft_full"
     assert plan["required_cost_acknowledgement_usd"] == "10000"
     assert plan["priority"] == "batch"
+    assert plan["secrets_env"] == str(secrets_env)
     assert "TINKER_API_KEY" not in output
+
+
+def test_cli_submit_loads_export_assignments_before_credential_lookup(monkeypatch, capsys, tmp_path: Path) -> None:
+    for key in ("TINKER_API_KEY", "WANDB_API_KEY", "HF_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    secrets_env = tmp_path / "submit-secrets.env"
+    secrets_env.write_text(
+        "export TINKER_API_KEY=sentinel-tinker\n"
+        "export WANDB_API_KEY='sentinel-wandb'\n"
+        'export HF_TOKEN="sentinel-hf"\n'
+    )
+    captured: dict[str, Any] = {}
+
+    def submit(config: Any, *, credentials: Any) -> str:
+        captured["config"] = config
+        captured["credentials"] = credentials
+        return "/ben/tinker-sft-plumbing"
+
+    monkeypatch.setattr(submitter, "submit", submit)
+
+    assert (
+        submitter.main(
+            [
+                "--stage",
+                "sft_plumbing",
+                "--run-id",
+                "repro-20260914",
+                "--output-uri",
+                "s3://marin-us-east-02a/experiments/repro-20260914/sft-plumbing",
+                "--secrets-env",
+                str(secrets_env),
+                "--submit",
+            ]
+        )
+        == 0
+    )
+
+    assert captured["config"].secrets_env == str(secrets_env)
+    assert captured["credentials"] == submitter.Credentials(
+        "sentinel-tinker",
+        "sentinel-wandb",
+        "sentinel-hf",
+    )
+    assert "/ben/tinker-sft-plumbing" in capsys.readouterr().out
+
+
+def test_cli_defaults_secrets_env_to_configured_approved_file(monkeypatch, capsys, tmp_path: Path) -> None:
+    secrets_env = tmp_path / "operator-secrets.env"
+    secrets_env.touch()
+    monkeypatch.setenv("OT_AGENT_SECRETS_ENV", str(secrets_env))
+    monkeypatch.setattr(
+        submitter,
+        "load_secrets_env_into_os_environ",
+        lambda path: pytest.fail("dry run read the secrets file"),
+    )
+
+    assert (
+        submitter.main(
+            [
+                "--stage",
+                "sft_plumbing",
+                "--run-id",
+                "repro-20260914",
+                "--output-uri",
+                "s3://marin-us-east-02a/experiments/repro-20260914/sft-default",
+            ]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    plan = json.loads(output.split("\nDry run only.", 1)[0])
+    assert plan["secrets_env"] == str(secrets_env)
+
+
+def test_default_secrets_env_falls_back_to_documents_file(monkeypatch, tmp_path: Path) -> None:
+    secrets_env = tmp_path / "Documents" / "secrets.env"
+    secrets_env.parent.mkdir()
+    secrets_env.touch()
+    monkeypatch.delenv("OT_AGENT_SECRETS_ENV", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert submitter.default_secrets_env() == str(secrets_env)
 
 
 def test_cli_submit_full_stage_without_acknowledgement_cannot_reach_submission(monkeypatch, capsys) -> None:

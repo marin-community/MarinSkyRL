@@ -8,6 +8,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 
+from cloud.iris.secrets_env import default_secrets_env, load_secrets_env_into_os_environ
 from iris_settings import (
     CLUSTER,
     MAX_RETRIES,
@@ -34,6 +35,7 @@ HF_TOKEN_ENV = "HF_TOKEN"
 class SubmissionConfig:
     plan: TrainingPlan
     cost_acknowledgement: Decimal | None
+    secrets_env: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,7 @@ class PublicSubmissionPlan:
     replicas: int
     max_retries: int
     required_cost_acknowledgement_usd: str | None
+    secrets_env: str | None
 
     def json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True)
@@ -121,6 +124,7 @@ def public_plan(config: SubmissionConfig) -> PublicSubmissionPlan:
         replicas=REPLICAS,
         max_retries=MAX_RETRIES,
         required_cost_acknowledgement_usd=plan.cost_acknowledgement_usd,
+        secrets_env=config.secrets_env,
     )
 
 
@@ -170,6 +174,11 @@ def _parse_args(argv: list[str] | None = None) -> tuple[SubmissionConfig, bool]:
     parser.add_argument("--output-uri", required=True)
     parser.add_argument("--sft-checkpoint")
     parser.add_argument("--acknowledge-cost-usd", type=Decimal)
+    parser.add_argument(
+        "--secrets-env",
+        default=default_secrets_env(),
+        help="KEY=VALUE file loaded on the submitter only after --submit",
+    )
     parser.add_argument("--submit", action="store_true", help="Submit after printing the reviewed plan")
     args = parser.parse_args(argv)
     try:
@@ -182,6 +191,7 @@ def _parse_args(argv: list[str] | None = None) -> tuple[SubmissionConfig, bool]:
         config = SubmissionConfig(
             plan=plan,
             cost_acknowledgement=args.acknowledge_cost_usd,
+            secrets_env=args.secrets_env,
         )
         public_plan(config)
     except ValueError as error:
@@ -209,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
         validate_cost_acknowledgement(config.plan, config.cost_acknowledgement)
     except ValueError as error:
         raise SystemExit(str(error)) from error
+    load_secrets_env_into_os_environ(config.secrets_env)
     print(submit(config, credentials=_credentials_from_environment()))
     return 0
 
