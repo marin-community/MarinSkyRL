@@ -51,7 +51,7 @@ because its post-lock install can alter the resolved environment.
 | `REGISTRY_TOKEN` | always; short-lived token that can push the selected repository |
 | `IMAGE_REPOSITORY` | optional; defaults to `ghcr.io/marin-community/marinskyrl` |
 | `PREBUILT_WHEEL_ARTIFACT_URI` and `PREBUILT_WHEEL_ARTIFACT_SHA256` | only for an explicitly selected `prebuilt-wheelhouse`; the URI may be S3, HTTPS, or a local staged file |
-| `HF_TOKEN`, `HF_WHEEL_REPOSITORY`, and `PUBLISH_WHEELHOUSE_HF=1` | when a source build must publish a reusable wheelhouse |
+| `HF_TOKEN` and `HF_WHEEL_REPOSITORY` | when a source build must publish a reusable wheelhouse |
 
 Architecture is derived from the build host. It selects the Dockerfile, crane/kaniko platform,
 wheel platform, cache repository, and arm64 tag suffix. Do not override those as an architecture
@@ -65,8 +65,8 @@ Use `WHEEL_SOURCE=wheel-builder` for arm64. On amd64, use `prebuilt-wheelhouse` 
 supplies an artifact URI and digest whose manifest matches the Dockerfile. `WHEEL_SOURCE=auto` checks the public,
 content-addressed Hugging Face wheelhouse first and compiles on a cache miss. A source build preserves a minimal
 wheel-only image under `wheels-<full-sha><arch-suffix>` and reuses the registry cache on retries. Set
-`PUBLISH_WHEELHOUSE_HF=1` only when an authorized Hugging Face token is available; the upload completes before the
-runtime image layers begin.
+`HF_WHEEL_REPOSITORY` only when an authorized Hugging Face token is available; the upload completes before the runtime
+image layers begin.
 
 ## Submit
 

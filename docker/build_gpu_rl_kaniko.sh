@@ -54,8 +54,7 @@ if [ "$REGISTRY_HOST" = "$IMAGE_REPOSITORY" ]; then
 fi
 
 WHEEL_SOURCE="${WHEEL_SOURCE:-$DEFAULT_WHEEL_SOURCE}"
-PUBLISH_WHEELHOUSE_HF="${PUBLISH_WHEELHOUSE_HF:-0}"
-HF_WHEEL_REPOSITORY="${HF_WHEEL_REPOSITORY:-open-athena/marinskyrl-gpu-wheelhouse}"
+HF_WHEEL_REPOSITORY="${HF_WHEEL_REPOSITORY:-}"
 INSTALL_MEGATRON="${INSTALL_MEGATRON:-0}"
 TAG_PREFIX="${TAG_PREFIX:-gpu-rl}"
 DOCKERFILE="${DOCKERFILE:-$DEFAULT_DOCKERFILE}"
@@ -72,6 +71,14 @@ dockerfile_arg() {
   sed -n "s/^ARG $1=//p" "$DOCKERFILE_PATH" | head -n 1 | tr -d '"'
 }
 
+verify_wheelhouse() {
+  local wheelhouse="$1"
+  cmp /tmp/expected-wheel-manifest "$wheelhouse/MANIFEST"
+  test "$(find "$wheelhouse" -maxdepth 1 -type f -name 'vllm-*.whl' | wc -l)" -eq 1
+  test "$(find "$wheelhouse" -maxdepth 1 -type f -name 'flash_attn-*.whl' | wc -l)" -eq 1
+  (cd "$wheelhouse" && sha256sum --check SHA256SUMS)
+}
+
 # Baked pins are DECLARED in the Dockerfile and read from there — the build never
 # carries a second copy of a version it might bake. A duplicate default in this
 # script once drifted a full harbor release behind the Dockerfile, and every build
@@ -82,8 +89,8 @@ dockerfile_arg() {
 # pin, edit the Dockerfile and commit it, so the image always matches the source
 # that claims to describe it.
 PINNED_ARGS=(HARBOR_COMMIT VLLM_FORK_COMMIT FLASH_ATTN_VERSION TORCH_VERSION)
-# The native donor names whose compiled extensions a prebuilt wheelhouse carries.
-# Only that path has one, so only that path requires the declaration.
+# The native donor names whose compiled extensions a prebuilt or automatically
+# resolved wheelhouse carries.
 if [ "$WHEEL_SOURCE" = "prebuilt-wheelhouse" ] || [ "$WHEEL_SOURCE" = "auto" ]; then
   PINNED_ARGS+=(VLLM_NATIVE_DONOR_COMMIT)
 fi
@@ -148,8 +155,16 @@ if [ "${PUSH_FLOATING:-0}" = "1" ]; then
 fi
 
 APT_PACKAGES=(ca-certificates curl tar)
-if [ "$WHEEL_SOURCE" = "prebuilt-wheelhouse" ] || [ "$WHEEL_SOURCE" = "auto" ] || [ "$PUBLISH_WHEELHOUSE_HF" = "1" ]; then
+if [ "$WHEEL_SOURCE" = "prebuilt-wheelhouse" ] || [ "$WHEEL_SOURCE" = "auto" ] || [ -n "$HF_WHEEL_REPOSITORY" ]; then
   APT_PACKAGES+=(python3-pip)
+fi
+
+if [ "$WHEEL_SOURCE" = "auto" ]; then
+  : "${HF_WHEEL_REPOSITORY:?WHEEL_SOURCE=auto requires HF_WHEEL_REPOSITORY}"
+  : "${HF_TOKEN:?WHEEL_SOURCE=auto requires HF_TOKEN so a cache miss can be published}"
+fi
+if [ "$WHEEL_SOURCE" = "wheel-builder" ] && [ -n "$HF_WHEEL_REPOSITORY" ]; then
+  : "${HF_TOKEN:?HF_WHEEL_REPOSITORY requires HF_TOKEN for source builds}"
 fi
 
 apt-get update -y
@@ -158,35 +173,35 @@ apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
 if [ "$WHEEL_SOURCE" = "auto" ]; then
   [ "$BUILD_ARCH" = x86_64 ] || { echo "automatic Hugging Face wheel reuse is currently amd64-only" >&2; exit 2; }
   HF_WHEEL_ROOT="https://huggingface.co/datasets/${HF_WHEEL_REPOSITORY}/resolve/main/wheelhouses/${WHEEL_PLATFORM_TAG}/${EXPECTED_WHEEL_MANIFEST_SHA256}"
-  if PREBUILT_WHEEL_ARTIFACT_SHA256=$(curl -fsSL "${HF_WHEEL_ROOT}/vllm-wheels.tar.gz.sha256" 2>/dev/null); then
+  HF_DIGEST_FILE=/tmp/hf-vllm-wheels.tar.gz.sha256
+  if ! HF_DIGEST_STATUS=$(curl -sS -L -o "$HF_DIGEST_FILE" -w '%{http_code}' "${HF_WHEEL_ROOT}/vllm-wheels.tar.gz.sha256"); then
+    echo "Hugging Face wheelhouse lookup failed before returning an HTTP status" >&2
+    exit 1
+  fi
+  if [ "$HF_DIGEST_STATUS" = "200" ]; then
+    PREBUILT_WHEEL_ARTIFACT_SHA256=$(cat "$HF_DIGEST_FILE")
     [[ "$PREBUILT_WHEEL_ARTIFACT_SHA256" =~ ^[[:xdigit:]]{64}$ ]] || {
       echo "Hugging Face wheel archive digest is malformed" >&2
       exit 1
     }
-    PREBUILT_WHEEL_ARTIFACT_URI=/tmp/hf-vllm-wheels.tar.gz
-    curl -fsSL "${HF_WHEEL_ROOT}/vllm-wheels.tar.gz" -o "$PREBUILT_WHEEL_ARTIFACT_URI"
+    curl -fsSL "${HF_WHEEL_ROOT}/vllm-wheels.tar.gz" -o /tmp/hf-vllm-wheels.tar.gz
+    PREBUILT_WHEEL_ARTIFACT_URI=file:///tmp/hf-vllm-wheels.tar.gz
     WHEEL_SOURCE=prebuilt-wheelhouse
     echo "using content-addressed Hugging Face wheelhouse ${HF_WHEEL_REPOSITORY}/${EXPECTED_WHEEL_MANIFEST_SHA256}"
-  else
+  elif [ "$HF_DIGEST_STATUS" = "404" ]; then
     WHEEL_SOURCE=wheel-builder
     echo "no matching Hugging Face wheelhouse; compiling native wheels"
+  else
+    echo "Hugging Face wheelhouse lookup returned HTTP ${HF_DIGEST_STATUS}" >&2
+    exit 1
   fi
-fi
-
-if [ "$PUBLISH_WHEELHOUSE_HF" != "0" ] && [ "$PUBLISH_WHEELHOUSE_HF" != "1" ]; then
-  echo "PUBLISH_WHEELHOUSE_HF must be 0 or 1" >&2
-  exit 2
-fi
-if [ "$WHEEL_SOURCE" = "wheel-builder" ] && [ "$PUBLISH_WHEELHOUSE_HF" = "1" ] && [ "${PRESERVE_WHEELS:-1}" != "1" ]; then
-  echo "PUBLISH_WHEELHOUSE_HF=1 requires PRESERVE_WHEELS=1 for source builds" >&2
-  exit 2
 fi
 
 if [ "$WHEEL_SOURCE" = "prebuilt-wheelhouse" ]; then
   : "${PREBUILT_WHEEL_ARTIFACT_URI:?}"
   : "${PREBUILT_WHEEL_ARTIFACT_SHA256:?}"
-  [[ "$PREBUILT_WHEEL_ARTIFACT_URI" == s3://* || "$PREBUILT_WHEEL_ARTIFACT_URI" == https://* || -f "$PREBUILT_WHEEL_ARTIFACT_URI" ]] || {
-    echo "PREBUILT_WHEEL_ARTIFACT_URI must use s3://, https://, or name a local file" >&2
+  [[ "$PREBUILT_WHEEL_ARTIFACT_URI" == s3://* || "$PREBUILT_WHEEL_ARTIFACT_URI" == https://* || "$PREBUILT_WHEEL_ARTIFACT_URI" == file://* ]] || {
+    echo "PREBUILT_WHEEL_ARTIFACT_URI must use s3://, https://, or file://" >&2
     exit 2
   }
   [[ "$PREBUILT_WHEEL_ARTIFACT_SHA256" =~ ^[[:xdigit:]]{64}$ ]] || {
@@ -214,7 +229,7 @@ with fsspec.open(sys.argv[1], "rb") as source, open(sys.argv[2], "wb") as output
 PY
       ;;
     https://*) curl -fsSL "$PREBUILT_WHEEL_ARTIFACT_URI" -o /tmp/vllm-wheels.tar.gz ;;
-    *) install -m 0644 "$PREBUILT_WHEEL_ARTIFACT_URI" /tmp/vllm-wheels.tar.gz ;;
+    file://*) install -m 0644 "${PREBUILT_WHEEL_ARTIFACT_URI#file://}" /tmp/vllm-wheels.tar.gz ;;
   esac
   NATIVE_ARCHIVE_SHA256=$(sha256sum /tmp/vllm-wheels.tar.gz | cut -d ' ' -f 1)
   if [ "${NATIVE_ARCHIVE_SHA256,,}" != "${PREBUILT_WHEEL_ARTIFACT_SHA256,,}" ]; then
@@ -226,10 +241,7 @@ PY
   tar -xzf /tmp/vllm-wheels.tar.gz -C "$ARTIFACT_DIR"
   ARTIFACT_WHEELS="${ARTIFACT_DIR}/wheels"
 
-  cmp /tmp/expected-wheel-manifest "$ARTIFACT_WHEELS/MANIFEST"
-  test "$(find "$ARTIFACT_WHEELS" -maxdepth 1 -type f -name 'vllm-*.whl' | wc -l)" -eq 1
-  test "$(find "$ARTIFACT_WHEELS" -maxdepth 1 -type f -name 'flash_attn-*.whl' | wc -l)" -eq 1
-  (cd "$ARTIFACT_WHEELS" && sha256sum --check SHA256SUMS)
+  verify_wheelhouse "$ARTIFACT_WHEELS"
 
   mkdir -p "$WHEELHOUSE"
   find "$WHEELHOUSE" -maxdepth 1 -type f \
@@ -265,7 +277,7 @@ unset REGISTRY_TOKEN
 # the runtime layers. The same files are archived by manifest digest on Hugging
 # Face when requested, so a later build can reuse them even if the registry cache
 # is unavailable.
-if [ "$WHEEL_SOURCE" = "wheel-builder" ] && [ "${PRESERVE_WHEELS:-1}" = "1" ]; then
+if [ "$WHEEL_SOURCE" = "wheel-builder" ]; then
   set -x
   /kaniko/executor \
     --context "dir://${DOCKER_CONTEXT}" \
@@ -285,14 +297,10 @@ if [ "$WHEEL_SOURCE" = "wheel-builder" ] && [ "${PRESERVE_WHEELS:-1}" = "1" ]; t
   WHEEL_IMAGE="${IMAGE_REPOSITORY}:wheels-${GITSHA}${ARCH_TAG_SUFFIX}"
   EXPORTED_WHEELHOUSE=$(mktemp -d /tmp/exported-wheelhouse.XXXXXX)
   crane export --platform "$KANIKO_PLATFORM" "$WHEEL_IMAGE" - | tar -xf - -C "$EXPORTED_WHEELHOUSE" wheels
-  cmp /tmp/expected-wheel-manifest "$EXPORTED_WHEELHOUSE/wheels/MANIFEST"
-  test "$(find "$EXPORTED_WHEELHOUSE/wheels" -maxdepth 1 -type f -name 'vllm-*.whl' | wc -l)" -eq 1
-  test "$(find "$EXPORTED_WHEELHOUSE/wheels" -maxdepth 1 -type f -name 'flash_attn-*.whl' | wc -l)" -eq 1
-  (cd "$EXPORTED_WHEELHOUSE/wheels" && sha256sum --check SHA256SUMS)
+  verify_wheelhouse "$EXPORTED_WHEELHOUSE/wheels"
   echo "preserved wheel-only image as $WHEEL_IMAGE"
 
-  if [ "$PUBLISH_WHEELHOUSE_HF" = "1" ]; then
-    : "${HF_TOKEN:?PUBLISH_WHEELHOUSE_HF=1 requires HF_TOKEN}"
+  if [ -n "$HF_WHEEL_REPOSITORY" ]; then
     PUBLISH_DIR=$(mktemp -d /tmp/published-wheelhouse.XXXXXX)
     tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
       -czf "$PUBLISH_DIR/vllm-wheels.tar.gz" -C "$EXPORTED_WHEELHOUSE" wheels

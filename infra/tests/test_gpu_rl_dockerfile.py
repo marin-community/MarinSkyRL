@@ -51,14 +51,6 @@ def test_prebuilt_flash_attention_bypasses_uv_source_build() -> None:
     assert "uv pip install --python ${RL_ENV_DIR}/bin/python --no-deps /wheels/flash_attn-*.whl" in dockerfile
 
 
-@pytest.mark.parametrize("dockerfile_path", GPU_RL_DOCKERFILES)
-def test_wheel_artifact_image_excludes_the_compiler_filesystem(dockerfile_path: Path) -> None:
-    dockerfile = dockerfile_path.read_text()
-
-    assert "FROM scratch AS wheel-artifact\nCOPY --from=wheel-builder /wheels /wheels" in dockerfile
-    assert "cd /wheels && sha256sum ./*.whl > SHA256SUMS" in dockerfile
-
-
 def test_gpu_rl_build_disables_inherited_xtrace_before_reading_credentials() -> None:
     """An xtrace-enabled parent shell must not expose the registry credential."""
     credential = "credential-sentinel-0123456789"

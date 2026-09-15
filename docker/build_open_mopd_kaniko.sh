@@ -30,7 +30,6 @@ exec env \
   TAG_PREFIX=opd-repro \
   DOCKERFILE=docker/Dockerfile.gpu-rl \
   INSTALL_MEGATRON=0 \
-  PUBLISH_WHEELHOUSE_HF=1 \
   HF_WHEEL_REPOSITORY=open-athena/marinskyrl-gpu-wheelhouse \
   WHEEL_SOURCE="$WHEEL_SOURCE" \
   bash "${SCRIPT_DIR}/build_gpu_rl_kaniko.sh"
