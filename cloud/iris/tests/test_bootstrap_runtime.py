@@ -175,16 +175,26 @@ def _run_bootstrap(
     )
 
 
-@pytest.mark.parametrize("profile", ["fsdp", "megatron"])
-def test_policy_bootstrap_rejects_runtime_without_flash_attention_extension(tmp_path: Path, profile: str) -> None:
+def test_fsdp_bootstrap_rejects_runtime_without_flash_attention_extension(tmp_path: Path) -> None:
     environment, process_environment = _fake_frozen_runtime(tmp_path)
     site_packages = next((environment / "lib").glob("python*/site-packages"))
     (site_packages / "flash_attn_2_cuda.py").unlink()
 
-    result = _run_bootstrap(environment, process_environment, profile)
+    result = _run_bootstrap(environment, process_environment, "fsdp")
 
     assert result.returncode != 0
     assert "No module named 'flash_attn_2_cuda'" in result.stderr
+
+
+def test_megatron_bootstrap_allows_runtime_without_flash_attention(tmp_path: Path) -> None:
+    environment, process_environment = _fake_frozen_runtime(tmp_path)
+    site_packages = next((environment / "lib").glob("python*/site-packages"))
+    (site_packages / "flash_attn.py").unlink()
+    (site_packages / "flash_attn_2_cuda.py").unlink()
+
+    result = _run_bootstrap(environment, process_environment, "megatron")
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_export_bootstrap_does_not_require_rollout_or_telemetry_packages(tmp_path: Path) -> None:

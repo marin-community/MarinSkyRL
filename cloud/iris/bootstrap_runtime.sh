@@ -71,9 +71,8 @@ source "$runtime_file"
 ln -sf "$CUDA_HOME/lib/libcudart.so.13" "$environment/lib/libcudart.so"
 runtime_architecture="$("$python" -c 'import platform; print(platform.machine())')"
 # The GB200 FSDP lane uses eager Grug attention and has no ARM FlashAttention wheel.
-# Megatron and every x86 policy runtime still validate their compiled extension here.
-if [[ "$profile" == megatron || "$profile" == megatron-export || \
-  ( "$runtime_architecture" != aarch64 && ( "$profile" == fsdp || "$profile" == fsdp-export ) ) ]]; then
+# The qualification Megatron closure also uses its configured eager attention backend.
+if [[ "$runtime_architecture" != aarch64 && ( "$profile" == fsdp || "$profile" == fsdp-export ) ]]; then
   "$python" -c "import flash_attn, flash_attn_2_cuda"
 fi
 if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then
