@@ -27,15 +27,7 @@ if [ "$REGISTRY_HOST" = "$IMAGE_REPOSITORY" ]; then
   exit 2
 fi
 
-cd /tmp
-CRANE_VERSION=v0.20.2
-curl -fsSL \
-  "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
-  -o crane.tgz
-tar -xzf crane.tgz crane
-install -m 0755 crane /usr/local/bin/crane
-crane export --platform linux/amd64 gcr.io/kaniko-project/executor:latest - | tar -xf - -C / || true
-test -x /kaniko/executor
+bash /app/docker/install_kaniko.sh x86_64 linux/amd64
 
 DOCKER_CONFIG_DIR=/kaniko/.docker
 REGISTRY_USER="$REGISTRY_USER" REGISTRY_TOKEN="$REGISTRY_TOKEN" \

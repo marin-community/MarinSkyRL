@@ -197,18 +197,7 @@ PY
 fi
 unset PREBUILT_WHEEL_ARTIFACT_URI PREBUILT_WHEEL_ARTIFACT_SHA256
 
-cd /tmp
-CRANE_VERSION=v0.20.2
-curl -fsSL \
-  "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${CRANE_ASSET_ARCH}.tar.gz" \
-  -o crane.tgz
-tar -xzf crane.tgz crane
-install -m 0755 crane /usr/local/bin/crane
-# The kaniko executor tag is a multi-arch manifest, and crane defaults to
-# linux/amd64 regardless of the host, so the platform has to be explicit or an
-# aarch64 builder unpacks amd64 binaries it cannot run.
-crane export --platform "$KANIKO_PLATFORM" gcr.io/kaniko-project/executor:latest - | tar -xf - -C / || true
-test -x /kaniko/executor
+bash "${SCRIPT_DIR}/install_kaniko.sh" "$CRANE_ASSET_ARCH" "$KANIKO_PLATFORM"
 
 export DOCKER_CONFIG=/kaniko/.docker
 REGISTRY_USER="$REGISTRY_USER" REGISTRY_TOKEN="$REGISTRY_TOKEN" \
