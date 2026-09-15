@@ -23,8 +23,10 @@ from cloud.iris.open_mopd_fidelity import (
     load_config,
     validate_output_uri,
 )
+from open_mopd_versions import versions_match
 
 CONTROL_MANIFEST_NAME = "control-manifest.json"
+HYDRA_REWARD_MODE_PATCH = "scripts/local/mt_opd.sh: declare the release-only rollout.reward_mode key"
 
 
 @dataclass(frozen=True)
@@ -68,7 +70,7 @@ def validate_runtime(config: FidelityConfig) -> None:
             actual = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError as error:
             raise ValueError(f"Required distribution is missing from the task image: {distribution}") from error
-        if actual != expected:
+        if not versions_match(expected, actual):
             raise ValueError(f"{distribution} version mismatch: expected {expected}, found {actual}")
 
 
@@ -83,6 +85,18 @@ def checkout_source(config: FidelityConfig, destination: Path) -> Path:
     if actual != config.source.commit:
         raise ValueError(f"Open-MOPD checkout mismatch: expected {config.source.commit}, found {actual}")
     return source
+
+
+def patch_source_compatibility(source: Path) -> tuple[str, ...]:
+    """Apply narrow, fail-closed compatibility fixes to the pinned authors' checkout."""
+    launcher = source / "scripts" / "local" / "mt_opd.sh"
+    text = launcher.read_text()
+    old = '"actor_rollout_ref.rollout.reward_mode=mt_opd"'
+    new = '"+actor_rollout_ref.rollout.reward_mode=mt_opd"'
+    if text.count(old) != 1 or new in text:
+        raise ValueError("Pinned Open-MOPD launcher no longer matches the expected reward_mode assignment")
+    launcher.write_text(text.replace(old, new))
+    return (HYDRA_REWARD_MODE_PATCH,)
 
 
 def verify_lfs_files(destination: Path, expected_files: tuple[LfsFile, ...]) -> tuple[FileVerification, ...]:
@@ -230,16 +244,17 @@ def training_command(
         f"actor_rollout_ref.actor.loss_agg_mode={training.loss_aggregation}",
         f"actor_rollout_ref.actor.clip_ratio_low={training.clip_low}",
         f"actor_rollout_ref.actor.clip_ratio_high={training.clip_high}",
-        "actor_rollout_ref.actor.opd_refresh_advantage=True",
-        "actor_rollout_ref.actor.opd_reward_weight_mode=student_p",
-        f"actor_rollout_ref.rollout.log_prob_top_k={training.top_k}",
-        "actor_rollout_ref.rollout.top_k_strategy=only_stu",
-        "actor_rollout_ref.rollout.reward_weight_mode=student_p",
+        "+actor_rollout_ref.actor.opd_refresh_advantage=True",
+        "+actor_rollout_ref.actor.opd_reward_weight_mode=student_p",
+        f"+actor_rollout_ref.rollout.log_prob_top_k={training.top_k}",
+        "+actor_rollout_ref.rollout.top_k_strategy=only_stu",
+        "+actor_rollout_ref.rollout.reward_weight_mode=student_p",
+        f"actor_rollout_ref.rollout.max_num_batched_tokens={training.prompt_limit + training.response_limit}",
         f"actor_rollout_ref.rollout.temperature={training.temperature}",
         f"actor_rollout_ref.rollout.top_p={training.nucleus_p}",
         f"reward_model.micro_batch_size_per_gpu={training.micro_batch_size_per_gpu}",
-        f"reward_model.teacher_temperature={training.teacher_temperature}",
-        "+data.sampler.class_path=verl.utils.dataset.domain_weighted_sampler",
+        f"+reward_model.teacher_temperature={training.teacher_temperature}",
+        "+data.sampler.class_path=pkg://verl.utils.dataset.domain_weighted_sampler",
         "+data.sampler.class_name=DomainWeightedSampler",
         *(f"+data.domain_weights.{domain}={weight}" for domain, weight in zip(DOMAINS, training.domain_weights)),
         "data.dataloader_num_workers=0",
@@ -351,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
     output = args.work_root / "output"
     output.mkdir()
     inputs = stage_inputs(config, args.work_root)
+    source_compatibility_patches = patch_source_compatibility(inputs.source)
     command = training_command(config, inputs, args.gate, output, world_size=world_size)
     manifest = {
         "config": asdict(config),
@@ -358,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
         "steps": GATES[args.gate],
         "command": command,
         "runtime": runtime_inventory(inputs.source),
+        "source_compatibility_patches": source_compatibility_patches,
         "artifact_verifications": [asdict(verification) for verification in inputs.artifact_verifications],
         "task_image": args.task_image,
         "launcher_commit": args.launcher_commit,

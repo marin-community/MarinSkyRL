@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+from open_mopd_versions import versions_match
 
 ROOT = Path(__file__).parents[2]
 BUILD_SCRIPT = ROOT / "docker" / "build_open_mopd_kaniko.sh"
@@ -27,7 +28,7 @@ SPEC.loader.exec_module(INSTALLER)
     ],
 )
 def test_versions_match_local_build_contract(expected: str, actual: str, matches: bool) -> None:
-    assert INSTALLER.versions_match(expected, actual) is matches
+    assert versions_match(expected, actual) is matches
 
 
 def test_open_mopd_runtime_manifest_rejects_a_missing_image_override(tmp_path: Path) -> None:
