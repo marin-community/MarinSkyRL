@@ -428,7 +428,10 @@ def _regular_grpo_loss(
             jnp.min(jnp.where(selected, ratio, jnp.inf)),
             ReductionType.MIN,
         ),
-        "ppo_ratio_mean": selected_mean(ratio),
+        # Aggregate the offset so an all-unit ratio reports exactly 1.0 after
+        # cross-device and microbatch reduction instead of accumulating a
+        # floating-point sum of ones.
+        "ppo_ratio_mean_delta": selected_mean(ratio - 1.0),
         "ppo_ratio_max": Metric.from_value(
             jnp.max(jnp.where(selected, ratio, -jnp.inf)),
             ReductionType.MAX,
@@ -819,7 +822,7 @@ class LevanterSnowballLearner:
                 "preupdate_logprob_mean_abs_diff": float(info.loss_metrics["train/preupdate_logprob_mean_abs_diff"]),
                 "preupdate_logprob_max_abs_diff": float(info.loss_metrics["train/preupdate_logprob_max_abs_diff"]),
                 "ppo_ratio_min": float(info.loss_metrics["train/ppo_ratio_min"]),
-                "ppo_ratio_mean": float(info.loss_metrics["train/ppo_ratio_mean"]),
+                "ppo_ratio_mean": 1.0 + float(info.loss_metrics["train/ppo_ratio_mean_delta"]),
                 "ppo_ratio_max": float(info.loss_metrics["train/ppo_ratio_max"]),
                 "ppo_clip_ratio": float(info.loss_metrics["train/ppo_clip_ratio"]),
                 "ppo_clip_ratio_low": float(info.loss_metrics["train/ppo_clip_ratio_low"]),
