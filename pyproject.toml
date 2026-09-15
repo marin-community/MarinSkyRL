@@ -197,6 +197,7 @@ override-dependencies = [
     "fast-hadamard-transform ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
     "fsspec==2026.4.0",
+    "nvidia-cutlass-dsl>=4.5.2,<4.6 ; sys_platform == 'linux'",
     # Megatron Bridge pins older serving libraries; share the selected vLLM ABI.
     "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux'",
