@@ -12,6 +12,11 @@ update on both eight-H100 learner hosts, but the driver rejected the two results
 measurements differed. It therefore did not publish trained policy 1 or run updates 2-5. There is no final evaluation,
 learning comparison, or matched Megatron throughput claim.
 
+The semantic boundary is narrow, but the current integration is not yet modest in code shape. The external learner is
+optional inside a trainer built around Torch actors, so model construction, publication, checkpointing, export, and
+shutdown contain repeated learner-specific branches. Converting the Torch backend to the same learner protocol would
+remove that branching, but it is a backend retrofit and was deliberately outside this viability experiment.
+
 ## Interface boundary
 
 MSRL still owns generation workers, completed and retry queues, group admission, the age-four limit, rewards,
@@ -143,3 +148,7 @@ fix. It still needs 24 H100s. Allowing 45-50 minutes, or 18-20 H100-hours, cover
 7.4-minute full publications, five updates, and terminal evaluation with a cleanup margin. The run should not add a
 matched Megatron comparison or longer learning horizon until this exact gate publishes versions 1 and 5, generates
 from version 5, and produces its fixed final evaluation.
+
+Before treating the interface as a general production abstraction, put Torch training behind the learner protocol and
+collapse the repeated lifecycle branches. Keep that refactor separate from the next M10 rerun so its numerical and
+runtime evidence remains attributable to the already tested path.

@@ -27,11 +27,19 @@ def test_external_rl_config_rejects_deleted_module_path_before_dry_run(tmp_path)
         normalize(args)
 
 
-def test_rl_config_resolves_named_terminal_bench_entrypoint(tmp_path):
+@pytest.mark.parametrize(
+    ("entrypoint", "module"),
+    [
+        ("terminal_bench", "skyrl_train.entrypoints.terminal_bench"),
+        ("levanter_snowball", "skyrl_train.entrypoints.levanter_snowball"),
+        ("fully_async_levanter_snowball", "skyrl_train.entrypoints.fully_async_levanter_snowball"),
+    ],
+)
+def test_rl_config_resolves_named_entrypoint(tmp_path, entrypoint, module):
     config = tmp_path / "rl.yaml"
     config.write_text(
-        """\
-entrypoint: terminal_bench
+        f"""\
+entrypoint: {entrypoint}
 context_budget:
   request_window_tokens: 2
   max_new_tokens_per_turn: 1
@@ -41,41 +49,7 @@ context_budget:
 
     parsed = parse_rl_config(str(config))
 
-    assert parsed.entrypoint == "skyrl_train.entrypoints.terminal_bench"
-
-
-def test_rl_config_resolves_named_levanter_snowball_entrypoint(tmp_path):
-    config = tmp_path / "rl.yaml"
-    config.write_text(
-        """\
-entrypoint: levanter_snowball
-context_budget:
-  request_window_tokens: 2
-  max_new_tokens_per_turn: 1
-  max_turns: 1
-"""
-    )
-
-    parsed = parse_rl_config(str(config))
-
-    assert parsed.entrypoint == "skyrl_train.entrypoints.levanter_snowball"
-
-
-def test_rl_config_resolves_named_fully_async_levanter_snowball_entrypoint(tmp_path):
-    config = tmp_path / "rl.yaml"
-    config.write_text(
-        """\
-entrypoint: fully_async_levanter_snowball
-context_budget:
-  request_window_tokens: 2
-  max_new_tokens_per_turn: 1
-  max_turns: 1
-"""
-    )
-
-    parsed = parse_rl_config(str(config))
-
-    assert parsed.entrypoint == "skyrl_train.entrypoints.fully_async_levanter_snowball"
+    assert parsed.entrypoint == module
 
 
 def test_rl_config_rejects_removed_opd_entrypoint(tmp_path):

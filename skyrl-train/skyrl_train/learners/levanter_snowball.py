@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import equinox as eqx
 import haliax as hax
@@ -24,6 +23,8 @@ import jax
 import jax.numpy as jnp
 import jmp
 import numpy as np
+import ray
+import torch
 from equinox.nn import inference_mode
 from haliax import Axis
 from haliax.util import is_named_array
@@ -45,6 +46,8 @@ from levanter.utils.mesh import MeshConfig
 from levanter.utils.jax_utils import zeros_like_tree
 from transformers import AutoConfig
 
+from skyrl_train.distributed.utils import init_custom_process_group
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.learner import (
     LearnerBatch,
     LearnerConfig,
@@ -61,18 +64,13 @@ from skyrl_train.learner import (
 )
 from skyrl_train.learners.levanter_config import LevanterSnowballRuntimeConfig
 from skyrl_train.models.grug_moe import GrugMoeConfig
+from skyrl_train.utils import get_tcp_url, str_to_torch_dtype
 from skyrl_train.utils.policy_math import LOG_PROB_DELTA_CLIP
 from skyrl_train.weight_sync.install_receipt import flatten_install_receipts, weight_name_digest
 from skyrl_train.weight_sync.vllm_weight_conversion import (
     expected_expert_slice_names,
     expected_vllm_parameter_names,
 )
-
-if TYPE_CHECKING:
-    import torch
-
-    from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-
 
 logger = logging.getLogger(__name__)
 
@@ -1208,10 +1206,6 @@ class LevanterSnowballLearner:
     async def _ensure_weight_group(self) -> None:
         if self._weight_group is not None:
             return
-        import ray
-
-        from skyrl_train.distributed.utils import init_custom_process_group
-        from skyrl_train.utils import get_tcp_url
 
         master_address = ray._private.services.get_node_ip_address()
         with socket.socket() as listener:
@@ -1250,10 +1244,6 @@ class LevanterSnowballLearner:
             yield name, host
 
     def _iter_publication_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
-        import torch
-
-        from skyrl_train.utils import str_to_torch_dtype
-
         generator_dtype = str_to_torch_dtype(self.runtime.generator_dtype)
         for name, host in self._iter_publication_host_arrays():
             dtype = torch.float32 if name.endswith(_ROUTER_BIAS_SUFFIX) else generator_dtype
@@ -1264,10 +1254,6 @@ class LevanterSnowballLearner:
             yield name, torch.from_numpy(np.array(host, copy=True, order="C")).to(dtype=dtype).contiguous()
 
     async def _publish_all_weights(self) -> _PublicationMeasurements:
-        import torch
-
-        from skyrl_train.utils import str_to_torch_dtype
-
         client = self._inference_client
         expected_names: list[str] = []
         expected_expert_slices: list[str] = []
@@ -1425,8 +1411,6 @@ class LevanterSnowballLearner:
         )
 
     async def _publish_weight_batch(self, batch: list[tuple[str, torch.Tensor]]) -> None:
-        import torch
-
         expert_scatter = [
             self.runtime.publication_scatter_experts
             and bool(expected_expert_slice_names(name, tensor.shape[0] if tensor.ndim else 0))
@@ -1550,8 +1534,6 @@ class LevanterSnowballLearner:
         if self._lifecycle is LearnerLifecycle.CLOSED:
             return
         if self._weight_group is not None:
-            import torch
-
             torch.distributed.destroy_process_group(self._weight_group)
             self._weight_group = None
         if self._trainer_entered and self._trainer is not None:

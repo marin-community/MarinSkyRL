@@ -9,23 +9,31 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import socket
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import ray
 from ray.util.placement_group import placement_group, remove_placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from skyrl_train.learner import LearnerLifecycle, LearnerState, PublicationStatus
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.learner import (
+    LearnerBatch,
+    LearnerConfig,
+    LearnerLifecycle,
+    LearnerState,
+    LogProbResult,
+    PublicationStatus,
+    UpdateRequest,
+    UpdateResult,
+)
 from skyrl_train.learners.levanter_config import LevanterSnowballRuntimeConfig
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 
-if TYPE_CHECKING:
-    from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-    from skyrl_train.learner import LearnerBatch, LearnerConfig, LogProbResult, UpdateRequest, UpdateResult
 
-
+logger = logging.getLogger(__name__)
 _PROCESS_LOCAL_TIMING_METRICS = frozenset(
     {
         "forward_validation_seconds",
@@ -299,7 +307,7 @@ class DistributedLevanterSnowballLearner:
             try:
                 ray.kill(actor, no_restart=True)
             except Exception:
-                pass
+                logger.warning("Failed to terminate a distributed Levanter actor during cleanup", exc_info=True)
         self._actors.clear()
         if self._placement_group is not None:
             remove_placement_group(self._placement_group)

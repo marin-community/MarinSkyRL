@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from omegaconf import DictConfig
 
+from marinskyrl.resource_locator import is_immutable_git_commit
 from skyrl_train.learner import UnsupportedLearnerConfiguration
 
 
@@ -68,11 +68,7 @@ class LevanterSnowballRuntimeConfig:
         model_revision = str(policy.model.revision) if policy.model.get("revision") else None
         model_source_identity = str(policy.model.source_identity) if policy.model.get("source_identity") else None
         immutable_model_identity = model_source_identity
-        if (
-            immutable_model_identity is None
-            and model_revision is not None
-            and re.fullmatch(r"[0-9a-f]{40}", model_revision)
-        ):
+        if immutable_model_identity is None and is_immutable_git_commit(model_revision):
             immutable_model_identity = f"hf-revision:{model_revision}"
 
         unsupported: list[str] = []
