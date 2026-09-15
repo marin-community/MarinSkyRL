@@ -1,11 +1,32 @@
 import json
+from types import SimpleNamespace
 
 import pytest
-from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.pre_tokenizers import WhitespaceSplit
 
 from skyrl_gym.envs.thinking_contract import post_thinking_segment, score_thinking_contract
+
+
+class _WordDecoder:
+    def __init__(self, vocabulary, special_tokens):
+        self._tokens = dict(enumerate(vocabulary))
+        self._ids = {token: token_id for token_id, token in self._tokens.items()}
+        self._special_tokens = frozenset(special_tokens)
+
+    def encode(self, text, add_special_tokens=False):
+        del add_special_tokens
+        return SimpleNamespace(ids=[self._ids.get(token, 0) for token in text.split()])
+
+    def token_to_id(self, token):
+        return self._ids.get(token)
+
+    def id_to_token(self, token):
+        return self._tokens.get(token)
+
+    def decode(self, ids, skip_special_tokens=True):
+        tokens = [self._tokens[token] for token in ids]
+        if skip_special_tokens:
+            tokens = [token for token in tokens if token not in self._special_tokens]
+        return " ".join(tokens)
 
 
 @pytest.fixture
@@ -23,10 +44,7 @@ def decoder():
         "reasoning",
         "user",
     ]
-    tokenizer = Tokenizer(WordLevel(dict(zip(vocabulary, range(len(vocabulary)))), unk_token="[UNK]"))
-    tokenizer.pre_tokenizer = WhitespaceSplit()
-    tokenizer.add_special_tokens(vocabulary[1:5])
-    return tokenizer
+    return _WordDecoder(vocabulary, vocabulary[1:5])
 
 
 def score(decoder, text, *, env_class="gsm8k", stop_reason="stop"):
