@@ -18,7 +18,7 @@ from skyrl_train.fully_async_trainer import (
     BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
     FullyAsyncRayPPOTrainer,
     _GenerationQueues,
-    _receiver_observed_behavior_policy_versions,
+    _validated_behavior_policy_version_segments,
 )
 from skyrl_train.learner import LearnerPublicationIncomplete, PublicationStatus, UnsupportedLearnerConfiguration
 from skyrl_train.learner_bridge import (
@@ -482,7 +482,7 @@ def test_async_serving_identity_is_per_row_and_independent_of_global_step(tmp_pa
     assert (result["fake/oldest_behavior_version"], result["fake/newest_behavior_version"]) == (0.0, 1.0)
 
     with pytest.raises(RuntimeError):
-        _receiver_observed_behavior_policy_versions(
+        _validated_behavior_policy_version_segments(
             {
                 "response_ids": [[11, 12]],
                 "loss_masks": [[1, 1]],

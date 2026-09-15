@@ -6,6 +6,8 @@ import math
 from dataclasses import dataclass, field
 from typing import TypedDict
 
+import numpy as np
+
 
 BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY = "behavior_policy_version_segments"
 
@@ -108,11 +110,12 @@ def validate_policy_version_segments(
 
 
 def expand_policy_version_segments(
-    rows: list[list[PolicyVersionSegment]], response_mask, *, required_mask=None,
+    rows: list[list[PolicyVersionSegment]],
+    response_mask,
+    *,
+    required_mask=None,
 ):
     """Expand compact row segments at the dense learner boundary only."""
-
-    import numpy as np
 
     if len(rows) != response_mask.shape[0]:
         raise ValueError("policy-version segment rows must align with the learner batch")
@@ -122,9 +125,7 @@ def expand_policy_version_segments(
     for row_index, (segments, mask) in enumerate(zip(rows, response_mask, strict=True)):
         response_length = int(np.sum(mask > 0))
         row_required = (
-            [bool(value) for value in required_mask[row_index, :response_length]]
-            if required_mask is not None
-            else None
+            [bool(value) for value in required_mask[row_index, :response_length]] if required_mask is not None else None
         )
         validate_policy_version_segments(
             segments,

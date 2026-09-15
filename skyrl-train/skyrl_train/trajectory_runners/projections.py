@@ -6,6 +6,7 @@ from typing import Generic, Protocol, Sequence, TypeVar
 from omegaconf import DictConfig
 
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
+from skyrl_train.policy_version import BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY
 from skyrl_gym.verification import RewardResult, TrainingDisposition
 from skyrl_train.trajectory_runners.types import (
     AgentLoopOutput,
@@ -186,7 +187,7 @@ def _attach_behavior_policy_versions(batch: TrajectoryBatch, outputs: Sequence[A
     rows = [output.behavior_policy_version_segments for output in outputs]
     if not any(row is not None for row in rows):
         return
-    batch["behavior_policy_version_segments"] = [list(row) if row is not None else [] for row in rows]
+    batch[BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY] = [list(row) if row is not None else [] for row in rows]
 
 
 def project_loss_mask(output: TrainableInteraction, response: Sequence[int]) -> list[int]:

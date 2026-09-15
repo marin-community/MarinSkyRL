@@ -20,6 +20,7 @@ from loguru import logger
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.policy_version import (
+    BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
     PolicyVersionSegment,
     append_policy_version_span,
     truncate_policy_version_segments,
@@ -865,7 +866,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if version_rows is not None:
             if len(version_rows) != len(truncated_responses):
                 raise ValueError("policy-version rows must align with batched responses")
-            trajectory_batch["behavior_policy_version_segments"] = [
+            trajectory_batch[BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY] = [
                 truncate_policy_version_segments(segments, len(response))
                 for segments, response in zip(version_rows, truncated_responses, strict=True)
             ]

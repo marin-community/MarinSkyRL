@@ -75,7 +75,7 @@ class GenerationStalledError(RuntimeError):
     """Raised when generation cannot make progress (no active producers, or dataset exhausted)."""
 
 
-def _receiver_observed_behavior_policy_versions(
+def _validated_behavior_policy_version_segments(
     trajectory_batch: TrajectoryBatch,
 ) -> List[List[PolicyVersionSegment]]:
     """Validate serving-observed token spans without collapsing cross-policy rows."""
@@ -1130,7 +1130,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 staleness_step = actual_step if actual_step is not None else global_step_at_start
                 behavior_policy_version_segments = None
                 if self.learner is not None:
-                    behavior_policy_version_segments = _receiver_observed_behavior_policy_versions(cur_trajectory_batch)
+                    behavior_policy_version_segments = _validated_behavior_policy_version_segments(cur_trajectory_batch)
                     bounds = policy_version_bounds(behavior_policy_version_segments)
                     if bounds is not None:
                         # Trainer global_step is one-based during generation while
