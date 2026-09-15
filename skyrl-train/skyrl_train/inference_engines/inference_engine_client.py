@@ -351,10 +351,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         """Publish every engine's capture before target-weight synchronization."""
         return await self._run_on_all_engines("seal_online_eagle_capture", destination)
 
-    async def update_draft_weights(self, weights_path: str, draft_revision: str) -> List[OnlineEagleResult]:
+    async def update_draft_weights(self, weights_path: str) -> List[OnlineEagleResult]:
         """Ask every live engine to best-effort update its resident draft."""
         awaitables = [
-            engine.update_draft_weights(weights_path, draft_revision)
+            engine.update_draft_weights(weights_path)
             for index, engine in enumerate(self.engines)
             if index not in self._dead_engines
         ]

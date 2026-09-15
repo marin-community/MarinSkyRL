@@ -382,7 +382,7 @@ def test_persistent_runtime_snapshot_restores_model_and_optimizer() -> None:
     with torch.no_grad():
         for parameter in runtime.model.parameters():
             parameter.add_(10)
-    runtime._restore(incumbent)
+    runtime._restore_snapshot(incumbent)
 
     assert all(torch.equal(runtime.model.state_dict()[name], value) for name, value in incumbent_parameters.items())
     assert runtime.optimizer.state_dict()["param_groups"] == incumbent_optimizer["param_groups"]

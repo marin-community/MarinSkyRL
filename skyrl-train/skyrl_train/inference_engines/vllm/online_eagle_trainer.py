@@ -93,6 +93,12 @@ def request_group_from_id(request_id: str) -> str:
     return request_id
 
 
+def request_id_for_group(group_id: object) -> str:
+    """Return a unique request ID carrying SkyRL's prompt-group digest."""
+    group_digest = hashlib.sha256(str(group_id).encode()).hexdigest()[:16]
+    return f"{_SKYRL_REQUEST_PREFIX}{group_digest}-{uuid4().hex}"
+
+
 def _window_group_id(window: Mapping[str, Any]) -> str:
     group_id = window.get("group_id")
     return str(group_id) if group_id is not None else request_group_from_id(str(window["request_id"]))
@@ -560,7 +566,7 @@ def _pack_windows(
 
 
 def _offload_optimizer_state(optimizer: torch.optim.Optimizer) -> None:
-    """Release update-only CUDA state before the candidate holdout forward."""
+    """Release gradients and move optimizer state to CPU."""
     optimizer.zero_grad(set_to_none=True)
     for state in optimizer.state.values():
         for name, value in state.items():
@@ -793,7 +799,7 @@ class OnlineEagleTrainerRuntime:
             **_capture_rng_states(self.device),
         }
 
-    def _restore(self, snapshot: Mapping[str, Any]) -> None:
+    def _restore_snapshot(self, snapshot: Mapping[str, Any]) -> None:
         _convert_trainable_parameters(self.model, torch.float32)
         _load_trainable_master_state(self.model, snapshot["master_parameters"])
         self.optimizer.load_state_dict(snapshot["optimizer"])
@@ -955,7 +961,7 @@ class OnlineEagleTrainerRuntime:
                 duration_seconds=time.perf_counter() - started_at,
             )
             if not accepted:
-                self._restore(incumbent_snapshot)
+                self._restore_snapshot(incumbent_snapshot)
                 return result
 
             draft_revision = f"draft-step-{job.step}"
@@ -986,5 +992,5 @@ class OnlineEagleTrainerRuntime:
                 )
             return replace(result, draft_revision=draft_revision)
         except BaseException:
-            self._restore(incumbent_snapshot)
+            self._restore_snapshot(incumbent_snapshot)
             raise

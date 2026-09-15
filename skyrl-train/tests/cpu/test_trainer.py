@@ -38,6 +38,7 @@ from skyrl_train.models.grug_query_bias import (
 )
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
 from skyrl_train.draft_trainer import DraftCheckpoint
+from skyrl_train.inference_engines.vllm.online_eagle_trainer import OnlineEagleUpdateResult
 import numpy as np
 from skyrl_train.distillation import SampledReverseKLInput, SparseForwardKLInput, TopKTeacherEvidence
 from skyrl_train.trajectory_runners.types import TrajectoryID
@@ -108,8 +109,8 @@ class _SpeculatorCaptureClient:
             ]
         ]
 
-    async def update_draft_weights(self, weights_path, draft_revision):
-        self.refreshes.append((weights_path, draft_revision))
+    async def update_draft_weights(self, weights_path):
+        self.refreshes.append(weights_path)
         return self.refresh_result
 
 
@@ -139,17 +140,17 @@ class _DraftTrainer:
 
     def _update(self, job):
         self.updates.append(job)
-        return {
-            "accepted": True,
-            "step": job.step,
-            "draft_revision": f"draft-step-{job.step}",
-            "candidate_uri": f"s3://bucket/checkpoints/drafts/draft-step-{job.step}",
-            "parent_draft_revision": "draft-step-1",
-            "trained_against_target_revision": job.target_revision,
-            "train_loss": 0.5,
-            "incumbent_holdout_loss": 0.4,
-            "candidate_holdout_loss": 0.3,
-        }
+        return OnlineEagleUpdateResult(
+            accepted=True,
+            step=job.step,
+            draft_revision=f"draft-step-{job.step}",
+            candidate_uri=f"s3://bucket/checkpoints/drafts/draft-step-{job.step}",
+            parent_draft_revision="draft-step-1",
+            trained_against_target_revision=job.target_revision,
+            train_loss=0.5,
+            incumbent_holdout_loss=0.4,
+            candidate_holdout_loss=0.3,
+        )
 
 
 def _online_speculator_trainer(interval_steps=1):
@@ -178,6 +179,7 @@ def _online_speculator_trainer(interval_steps=1):
     trainer._speculator_update_failures = 0
     trainer._speculator_install_count = 0
     trainer._speculator_install_failures = 0
+    trainer._speculator_checkpoint_poll_failures = 0
     trainer.inference_engine_client = _SpeculatorCaptureClient()
     trainer.all_metrics = {}
     trainer.all_timings = {}
@@ -254,7 +256,7 @@ def test_online_speculator_update_overlaps_then_refreshes_at_boundary(monkeypatc
     asyncio.run(scenario())
 
     assert trainer.inference_engine_client.refreshes == [
-        ("s3://bucket/checkpoints/drafts/draft-step-2/model.safetensors", "draft-step-2")
+        "s3://bucket/checkpoints/drafts/draft-step-2/model.safetensors"
     ]
     assert trainer._speculator_revision == "draft-step-2"
     assert trainer.all_metrics["speculator/install_count"] == 1.0
@@ -297,6 +299,20 @@ def test_online_speculator_stale_accepted_revision_still_refreshes_serving(monke
 
     assert trainer._speculator_revision == "draft-step-2"
     assert len(trainer.inference_engine_client.refreshes) == 1
+
+
+def test_online_speculator_checkpoint_poll_failure_is_nonfatal_and_counted(monkeypatch):
+    trainer = _online_speculator_trainer()
+
+    def fail_poll(_root, **_kwargs):
+        raise OSError("object store unavailable")
+
+    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", fail_poll)
+
+    asyncio.run(trainer._start_latest_speculator_refresh())
+
+    assert trainer._speculator_refresh_task is None
+    assert trainer.all_metrics["speculator/checkpoint_poll_failures"] == 1.0
 
 
 def test_online_speculator_busy_draft_trainer_skips_capture(monkeypatch) -> None:
@@ -368,6 +384,19 @@ def test_online_speculator_pending_update_keeps_the_incumbent(monkeypatch) -> No
     assert trainer.all_metrics["speculator/update_failures"] == 0.0
 
 
+def test_online_speculator_invalid_update_result_is_nonfatal(monkeypatch) -> None:
+    trainer = _online_speculator_trainer()
+    trainer._draft_trainer_update_ref = _ImmediateRef(None)
+    monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda _ref: (True, None))
+    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
+
+    asyncio.run(trainer._poll_speculator_lifecycle())
+
+    assert trainer._draft_trainer_update_ref is None
+    assert trainer.all_metrics["speculator/update_pending"] == 0.0
+    assert trainer.all_metrics["speculator/update_failures"] == 1.0
+
+
 def test_online_speculator_without_latest_checkpoint_keeps_initial_draft(monkeypatch):
     trainer = _online_speculator_trainer()
     monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
@@ -389,7 +418,7 @@ def test_online_speculator_normalizes_gcs_checkpoint_for_vllm(monkeypatch) -> No
     asyncio.run(trainer._refresh_latest_speculator(wait=True))
 
     assert trainer.inference_engine_client.refreshes == [
-        ("gs://bucket/checkpoints/drafts/draft-step-2/model.safetensors", "draft-step-2")
+        "gs://bucket/checkpoints/drafts/draft-step-2/model.safetensors"
     ]
 
 

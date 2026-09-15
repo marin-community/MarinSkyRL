@@ -375,24 +375,6 @@ def _legacy_role_plan(value: dict[str, Any]) -> SkyRLRolePlan:
             expert_parallel_size=1,
         ),
     )
-    draft_trainer_gpus = int(value.get("draft_trainer_num_gpus", 0))
-    if draft_trainer_gpus:
-        claims += (
-            ModelRoleClaim(
-                role_id=ModelRoleKind.DRAFT_TRAINER.value,
-                kind=ModelRoleKind.DRAFT_TRAINER,
-                execution=RoleExecution.LOCAL,
-                backend="legacy",
-                colocation_group=ModelRoleKind.DRAFT_TRAINER.value,
-                num_nodes=1,
-                gpus_per_node=gpus_per_node,
-                replicas=draft_trainer_gpus,
-                tensor_parallel_size=1,
-                pipeline_parallel_size=1,
-                data_parallel_size=1,
-                expert_parallel_size=1,
-            ),
-        )
     bundles = (
         RoleBundle(
             name=policy_group,
@@ -411,15 +393,6 @@ def _legacy_role_plan(value: dict[str, Any]) -> SkyRLRolePlan:
                 name=rollout_group,
                 role_ids=(ModelRoleKind.ROLLOUT.value,),
                 num_nodes=rollout_replicas,
-                gpus_per_node=gpus_per_node,
-            ),
-        )
-    if draft_trainer_gpus:
-        bundles += (
-            RoleBundle(
-                name=ModelRoleKind.DRAFT_TRAINER.value,
-                role_ids=(ModelRoleKind.DRAFT_TRAINER.value,),
-                num_nodes=1,
                 gpus_per_node=gpus_per_node,
             ),
         )

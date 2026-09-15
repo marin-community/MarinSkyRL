@@ -138,10 +138,10 @@ async def test_online_eagle_methods_cross_the_ray_actor_boundary() -> None:
 
     await engine.begin_online_eagle_capture({"step": 3})
     await engine.seal_online_eagle_capture("s3://bucket/captures/step-3")
-    await engine.update_draft_weights("s3://bucket/drafts/draft-3/model.safetensors", "draft-3")
+    await engine.update_draft_weights("s3://bucket/drafts/draft-3/model.safetensors")
 
     assert actor.calls == [
         ("begin_online_eagle_capture", ({"step": 3},)),
         ("seal_online_eagle_capture", ("s3://bucket/captures/step-3",)),
-        ("update_draft_weights", ("s3://bucket/drafts/draft-3/model.safetensors", "draft-3")),
+        ("update_draft_weights", ("s3://bucket/drafts/draft-3/model.safetensors",)),
     ]

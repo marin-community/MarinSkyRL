@@ -138,7 +138,7 @@ from skyrl_train.hf_export_schema import (
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
 
-def _active_online_eagle_results(results: list[Any]) -> list[dict[str, Any]]:
+def _active_online_eagle_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     return [item for engine_results in results for item in engine_results if item.get("active", False)]
 
 
@@ -245,6 +245,7 @@ class RayPPOTrainer:
         self._speculator_update_failures = 0
         self._speculator_install_count = 0
         self._speculator_install_failures = 0
+        self._speculator_checkpoint_poll_failures = 0
 
         # initialized in `build_models`
         self.policy_model: PPORayActorGroup = None
@@ -805,6 +806,8 @@ class RayPPOTrainer:
                 source_identity=self.speculative_decoding.model.source_identity,
             )
         except Exception as error:
+            self._speculator_checkpoint_poll_failures += 1
+            self.all_metrics["speculator/checkpoint_poll_failures"] = float(self._speculator_checkpoint_poll_failures)
             logger.warning("Draft checkpoint poll failed: {}", error)
             return
         if (
@@ -817,7 +820,6 @@ class RayPPOTrainer:
         self._speculator_refresh_task = asyncio.create_task(
             self.inference_engine_client.update_draft_weights(
                 runai_model_uri(checkpoint.weights_uri),
-                checkpoint.revision,
             )
         )
         await asyncio.sleep(0)
@@ -889,11 +891,18 @@ class RayPPOTrainer:
                 return
             if ready:
                 self._draft_trainer_update_ref = None
-                result = (
-                    payload
-                    if isinstance(payload, OnlineEagleUpdateResult)
-                    else OnlineEagleUpdateResult.from_mapping(payload)
-                )
+                if not isinstance(payload, OnlineEagleUpdateResult):
+                    self._draft_trainer_submitted_at = None
+                    self._speculator_update_failures += 1
+                    self.all_metrics["speculator/update_pending"] = 0.0
+                    self.all_metrics["speculator/update_failures"] = float(self._speculator_update_failures)
+                    logger.warning(
+                        "DraftTrainer returned {}, expected OnlineEagleUpdateResult",
+                        type(payload).__name__,
+                    )
+                    await self._refresh_latest_speculator()
+                    return
+                result = payload
                 submitted_at = self._draft_trainer_submitted_at
                 self._draft_trainer_submitted_at = None
                 if submitted_at is not None:

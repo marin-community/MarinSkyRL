@@ -591,30 +591,6 @@ class TestBuildJobSpec:
         assert parsed.request.topology.role_plan.claim("reference").colocation_group == "all"
         assert parsed.request.topology.role_plan.bundles[0].role_ids == ("policy", "reference", "rollout")
 
-    def test_legacy_draft_trainer_reservation_upgrades_during_protocol_parse(self, tmp_path):
-        spec = _build_basic_spec(
-            tmp_path,
-            config_overrides={"online_draft_training": True},
-        )
-        payload = asdict(spec)
-        payload["request"]["topology"]["role_plan"] = {
-            "colocate_all": True,
-            "policy_num_nodes": 2,
-            "policy_num_gpus_per_node": 8,
-            "num_inference_engines": 4,
-            "inference_engine_tensor_parallel_size": 4,
-            "train_batch_size": 64,
-            "policy_mini_batch_size": 32,
-            "micro_train_batch_size_per_gpu": 1,
-            "n_samples_per_prompt": 8,
-            "draft_trainer_num_gpus": 1,
-        }
-
-        parsed = job_spec(payload)
-
-        assert parsed.request.topology.role_plan.claim("draft_trainer").replicas == 1
-        assert parsed.request.topology.num_nodes == 3
-
     def test_round_trips_with_validation_data_and_overrides(self, tmp_path):
         spec = _build_basic_spec(
             tmp_path,

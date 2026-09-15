@@ -290,6 +290,25 @@ def test_latest_pointer_to_partial_checkpoint_is_rejected(cloud: _CloudFixture) 
         read_latest_draft_checkpoint(checkpoint_root)
 
 
+def test_draft_trainer_ignores_partial_latest_checkpoint_on_restart(cloud: _CloudFixture) -> None:
+    checkpoint_root = "s3://bucket/run/drafts/checkpoints"
+    cloud.write_bytes_atomic(
+        latest_draft_checkpoint_uri(checkpoint_root),
+        json.dumps(
+            {
+                "revision": "draft-step-4",
+                "completion_uri": f"{checkpoint_root}/draft-step-4/complete.json",
+                "source_identity": _DRAFT_REVISION,
+            }
+        ).encode(),
+    )
+
+    trainer = DraftTrainer(initial_model=_initial_model(), checkpoint_root=checkpoint_root)
+
+    assert trainer.status()["accepted_revision"] == _DRAFT_REVISION
+    assert trainer.status()["checkpoint"] is None
+
+
 def test_incomplete_upload_never_advances_latest(
     cloud: _CloudFixture,
     monkeypatch: pytest.MonkeyPatch,

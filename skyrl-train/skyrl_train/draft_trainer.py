@@ -20,12 +20,12 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     OnlineEagleUpdateResult,
     merge_online_eagle_captures,
 )
+from skyrl_train.hf_model_io import HF_WEIGHT_FILENAME
 from skyrl_train.io import io
 
 
 LATEST_DRAFT_FILENAME = "latest.json"
 COMPLETE_DRAFT_FILENAME = "complete.json"
-_DRAFT_WEIGHTS_FILENAME = "model.safetensors"
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ class DraftCheckpoint:
             raise ValueError("Draft checkpoint completion URI must be cloud-backed")
         if not isinstance(source_identity, str) or not source_identity:
             raise ValueError("Draft checkpoint source identity must be nonempty")
-        expected_weights_uri = join_resource_path(uri, _DRAFT_WEIGHTS_FILENAME)
+        expected_weights_uri = join_resource_path(uri, HF_WEIGHT_FILENAME)
         expected_completion_uri = join_resource_path(uri, COMPLETE_DRAFT_FILENAME)
         if weights_uri != expected_weights_uri or completion_uri != expected_completion_uri:
             raise ValueError("Draft checkpoint object URIs do not match its immutable directory")
@@ -166,6 +166,47 @@ class DraftTrainer:
         self._node_id = str(ray.get_runtime_context().get_node_id()) if ray.is_initialized() else None
         self._gpu_ids = [str(gpu_id) for gpu_id in ray.get_gpu_ids()] if ray.is_initialized() else []
 
+    def _publish_checkpoint(
+        self,
+        *,
+        step: int,
+        revision: str,
+        candidate_dir: Path,
+    ) -> DraftCheckpoint:
+        candidate_uri = join_resource_path(self._checkpoint_root, revision)
+        io.upload_directory(str(candidate_dir), candidate_uri)
+        weights_uri = join_resource_path(candidate_uri, HF_WEIGHT_FILENAME)
+        weights_size = (candidate_dir / HF_WEIGHT_FILENAME).stat().st_size
+        remote_weights_size = io.file_size(weights_uri)
+        if remote_weights_size != weights_size:
+            raise IOError(
+                f"Draft checkpoint upload is incomplete: expected {weights_size} bytes, got {remote_weights_size}"
+            )
+        completion_uri = join_resource_path(candidate_uri, COMPLETE_DRAFT_FILENAME)
+        checkpoint = DraftCheckpoint(
+            step=step,
+            revision=revision,
+            uri=candidate_uri,
+            weights_uri=weights_uri,
+            weights_size=weights_size,
+            completion_uri=completion_uri,
+            source_identity=self._initial_model.source_identity,
+        )
+        io.write_bytes_atomic(
+            completion_uri,
+            json.dumps(asdict(checkpoint), sort_keys=True).encode(),
+        )
+        pointer = _DraftCheckpointPointer(
+            revision=checkpoint.revision,
+            completion_uri=checkpoint.completion_uri,
+            source_identity=checkpoint.source_identity,
+        )
+        io.write_bytes_atomic(
+            latest_draft_checkpoint_uri(self._checkpoint_root),
+            json.dumps(asdict(pointer), sort_keys=True).encode(),
+        )
+        return checkpoint
+
     def update(self, request: DraftUpdateRequest) -> OnlineEagleUpdateResult:
         """Consume a cloud capture, train, and publish a completed candidate."""
         if not is_cloud_uri(request.capture_uri):
@@ -206,42 +247,14 @@ class DraftTrainer:
                 result = self._runtime.update(job)
                 if result.accepted:
                     assert result.draft_revision is not None
-                    candidate_uri = join_resource_path(self._checkpoint_root, result.draft_revision)
-                    io.upload_directory(str(candidate_dir), candidate_uri)
-                    weights_uri = join_resource_path(candidate_uri, _DRAFT_WEIGHTS_FILENAME)
-                    weights_size = (candidate_dir / _DRAFT_WEIGHTS_FILENAME).stat().st_size
-                    remote_weights_size = io.file_size(weights_uri)
-                    if remote_weights_size != weights_size:
-                        raise IOError(
-                            f"Draft checkpoint upload is incomplete: expected {weights_size} bytes, "
-                            f"got {remote_weights_size}"
-                        )
-                    completion_uri = join_resource_path(candidate_uri, COMPLETE_DRAFT_FILENAME)
-                    checkpoint = DraftCheckpoint(
+                    checkpoint = self._publish_checkpoint(
                         step=request.step,
                         revision=result.draft_revision,
-                        uri=candidate_uri,
-                        weights_uri=weights_uri,
-                        weights_size=weights_size,
-                        completion_uri=completion_uri,
-                        source_identity=self._initial_model.source_identity,
-                    )
-                    io.write_bytes_atomic(
-                        completion_uri,
-                        json.dumps(asdict(checkpoint), sort_keys=True).encode(),
-                    )
-                    pointer = _DraftCheckpointPointer(
-                        revision=checkpoint.revision,
-                        completion_uri=checkpoint.completion_uri,
-                        source_identity=checkpoint.source_identity,
-                    )
-                    io.write_bytes_atomic(
-                        latest_draft_checkpoint_uri(self._checkpoint_root),
-                        json.dumps(asdict(pointer), sort_keys=True).encode(),
+                        candidate_dir=candidate_dir,
                     )
                     self._latest = checkpoint
                     self._accepted_revision = checkpoint.revision
-                    result = replace(result, candidate_uri=candidate_uri)
+                    result = replace(result, candidate_uri=checkpoint.uri)
                 return result
         except Exception as error:
             logger.exception("DraftTrainer update failed at step {}", request.step)

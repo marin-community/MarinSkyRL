@@ -264,11 +264,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def seal_online_eagle_capture(self, destination: str):
         return await self.inference_engine_actor.seal_online_eagle_capture.remote(destination)
 
-    async def update_draft_weights(self, weights_path: str, draft_revision: str):
-        return await self.inference_engine_actor.update_draft_weights.remote(
-            weights_path,
-            draft_revision,
-        )
+    async def update_draft_weights(self, weights_path: str):
+        return await self.inference_engine_actor.update_draft_weights.remote(weights_path)
 
     async def get_stats(self, read_mode: IntervalReadMode = IntervalReadMode.RESET):
         """Return throughput, latency, cache, token, and request statistics."""

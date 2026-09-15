@@ -169,6 +169,6 @@ class InferenceEngineInterface(ABC):
         """Publish the active capture to cloud storage."""
         raise NotImplementedError()
 
-    async def update_draft_weights(self, weights_path: str, draft_revision: str) -> OnlineEagleResult:
+    async def update_draft_weights(self, weights_path: str) -> OnlineEagleResult:
         """Best-effort update the resident draft from one completed object."""
         raise NotImplementedError()

@@ -10,7 +10,6 @@ from http import HTTPStatus
 import ray
 import torch
 import asyncio
-import hashlib
 import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
@@ -27,6 +26,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     capture_rank_directory,
     capture_rank_name,
     per_worker_capture_token_credit,
+    request_id_for_group,
 )
 from skyrl_train.io import io
 
@@ -389,7 +389,7 @@ class WorkerWrap:
                 result = self.model_runner.seal_online_eagle_capture(str(rank_output_dir))
                 io.upload_directory(str(rank_output_dir), rank_destination)
         except Exception as error:
-            logger.exception("Online EAGLE capture upload failed for worker rank {}", worker_rank)
+            logger.exception("Online EAGLE capture seal or publication failed for worker rank {}", worker_rank)
             return {
                 "active": False,
                 "worker_rank": worker_rank,
@@ -1947,8 +1947,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             if session_ids is None:
                 request_id = uuid4().hex
             else:
-                group_digest = hashlib.sha256(str(session_ids[index]).encode()).hexdigest()[:16]
-                request_id = f"skyrl-group-{group_digest}-{uuid4().hex}"
+                request_id = request_id_for_group(session_ids[index])
             request_ids.append(request_id)
             task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params))
             tasks.append(task)
@@ -2020,16 +2019,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await engine.collective_rpc("seal_online_eagle_capture", args=(destination,))
 
-    async def update_draft_weights(self, weights_path: str, draft_revision: str):
+    async def update_draft_weights(self, weights_path: str):
         """Stream one completed checkpoint through vLLM's draft-update API."""
         engine = self._get_engine()
         await engine.start_draft_weight_update()
         await engine.update_weights(WeightTransferUpdateRequest(update_info={"weights_path": weights_path}))
         await engine.finish_weight_update()
-        return {
-            "active": True,
-            "draft_revision": draft_revision,
-        }
+        return {"active": True}
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         if "names" not in request:

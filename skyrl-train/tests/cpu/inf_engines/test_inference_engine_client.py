@@ -514,8 +514,8 @@ class _DraftUpdateEngine:
         self.result = result
         self.calls = []
 
-    async def update_draft_weights(self, weights_path, draft_revision):
-        self.calls.append((weights_path, draft_revision))
+    async def update_draft_weights(self, weights_path):
+        self.calls.append(weights_path)
         if isinstance(self.result, BaseException):
             raise self.result
         return self.result
@@ -524,19 +524,19 @@ class _DraftUpdateEngine:
 @pytest.mark.asyncio
 async def test_draft_refresh_retains_per_engine_exceptions() -> None:
     engines = [
-        _DraftUpdateEngine({"active": True, "draft_revision": "draft-step-4"}),
+        _DraftUpdateEngine({"active": True}),
         _DraftUpdateEngine(RuntimeError("load failed")),
     ]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
-    coverage = await client.update_draft_weights("s3://bucket/drafts/draft-step-4/model.safetensors", "draft-step-4")
+    weights_path = "s3://bucket/drafts/draft-step-4/model.safetensors"
+    coverage = await client.update_draft_weights(weights_path)
 
     assert coverage == [
-        {"active": True, "draft_revision": "draft-step-4"},
+        {"active": True},
         {"active": False, "error": "RuntimeError: load failed"},
     ]
-    expected_call = [("s3://bucket/drafts/draft-step-4/model.safetensors", "draft-step-4")]
-    assert [engine.calls for engine in engines] == [expected_call, expected_call]
+    assert [engine.calls for engine in engines] == [[weights_path], [weights_path]]
 
 
 @pytest.mark.asyncio
@@ -545,10 +545,11 @@ async def test_draft_refresh_skips_dead_engines() -> None:
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
     client._dead_engines.add(1)
 
-    coverage = await client.update_draft_weights("s3://bucket/drafts/draft-step-4/model.safetensors", "draft-step-4")
+    weights_path = "s3://bucket/drafts/draft-step-4/model.safetensors"
+    coverage = await client.update_draft_weights(weights_path)
 
     assert coverage == [{"active": True}]
-    assert engines[0].calls == [("s3://bucket/drafts/draft-step-4/model.safetensors", "draft-step-4")]
+    assert engines[0].calls == [weights_path]
     assert engines[1].calls == []
 
 
