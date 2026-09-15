@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import os
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from typing import Any, List, Optional
@@ -148,6 +149,10 @@ class RolloutCoordinator:
         self._shard_idx = shard_idx
         self._num_coordinators = num_coordinators
         self._executor_workers = executor_workers
+        # Daytona limits sandbox creation per org. harbor paces creates at HARBOR_DAYTONA_CREATE_RATE for the whole
+        # org and gives each of HARBOR_DAYTONA_CREATE_SHARES processes an equal part; every coordinator creates
+        # sandboxes, so each takes one share (an explicit value from the launcher wins).
+        os.environ.setdefault("HARBOR_DAYTONA_CREATE_SHARES", str(num_coordinators))
 
         scaled_tb_cfg = _scale_terminal_bench_cfg(spec.terminal_bench_config, num_coordinators)
         spec = spec.with_terminal_bench_config(scaled_tb_cfg)
