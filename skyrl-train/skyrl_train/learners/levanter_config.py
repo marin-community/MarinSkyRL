@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from omegaconf import DictConfig
@@ -41,6 +42,9 @@ class LevanterSnowballRuntimeConfig:
     require_accelerator: bool
     log_dir: str
     model_revision: str | None = None
+    offload_opt_state: bool = False
+    initial_weights_already_loaded: bool = False
+    model_source_identity: str | None = None
 
     @classmethod
     def from_msrl(cls, cfg: DictConfig) -> LevanterSnowballRuntimeConfig:
@@ -58,6 +62,16 @@ class LevanterSnowballRuntimeConfig:
         expected_learning_rate = 1e-6 if regular_mask_enabled else 1e-5
         expected_learning_rate_text = "1e-6" if regular_mask_enabled else "1e-5"
         expected_max_grad_norm = 1.0 if regular_mask_enabled else 0.5
+        initial_weights_already_loaded = bool(levanter.get("initial_weights_already_loaded", False))
+        model_revision = str(policy.model.revision) if policy.model.get("revision") else None
+        model_source_identity = str(policy.model.source_identity) if policy.model.get("source_identity") else None
+        immutable_model_identity = model_source_identity
+        if (
+            immutable_model_identity is None
+            and model_revision is not None
+            and re.fullmatch(r"[0-9a-f]{40}", model_revision)
+        ):
+            immutable_model_identity = f"hf-revision:{model_revision}"
 
         unsupported: list[str] = []
         expected_values = (
@@ -131,6 +145,18 @@ class LevanterSnowballRuntimeConfig:
             (levanter.compute_dtype == "bfloat16", "Levanter BF16 compute"),
             (levanter.output_dtype == "float32", "Levanter FP32 outputs"),
             (generator.model_dtype == "bfloat16", "generator.model_dtype=bfloat16"),
+            (
+                not initial_weights_already_loaded or generator.model_name == policy.model.path,
+                "the same initial model path for Levanter and vLLM",
+            ),
+            (
+                not initial_weights_already_loaded or immutable_model_identity is not None,
+                "an immutable model source identity when adopting already-loaded initial weights",
+            ),
+            (
+                not initial_weights_already_loaded or trainer.resume_mode == "none",
+                "resume_mode=none when adopting already-loaded initial weights",
+            ),
         )
         unsupported.extend(description for accepted, description in expected_values if not accepted)
 
@@ -211,5 +237,8 @@ class LevanterSnowballRuntimeConfig:
             generator_dtype=str(generator.model_dtype),
             require_accelerator=bool(levanter.require_accelerator),
             log_dir=str(levanter.log_dir),
-            model_revision=(str(policy.model.revision) if policy.model.get("revision") else None),
+            model_revision=model_revision,
+            offload_opt_state=bool(levanter.get("offload_opt_state", False)),
+            initial_weights_already_loaded=initial_weights_already_loaded,
+            model_source_identity=immutable_model_identity,
         )

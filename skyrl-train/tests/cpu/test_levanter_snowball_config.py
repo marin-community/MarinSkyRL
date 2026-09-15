@@ -46,6 +46,30 @@ def test_supported_config_lowers_without_importing_the_concrete_learner():
     assert runtime.train_batch_size == 2
     assert runtime.publication_backend == "gloo"
     assert runtime.inference_world_size == 1
+    assert not runtime.offload_opt_state
+
+
+def test_optimizer_state_offload_lowers_before_allocation():
+    cfg = _valid_config()
+    cfg.trainer.policy.levanter.offload_opt_state = True
+
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.offload_opt_state
+
+
+def test_initial_weight_adoption_requires_an_immutable_shared_source():
+    cfg = _valid_config()
+    cfg.trainer.policy.levanter.initial_weights_already_loaded = True
+
+    with pytest.raises(UnsupportedLearnerConfiguration, match="immutable model source identity"):
+        LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    cfg.trainer.policy.model.source_identity = "model@0123456789abcdef"
+    runtime = LevanterSnowballRuntimeConfig.from_msrl(cfg)
+
+    assert runtime.initial_weights_already_loaded
+    assert runtime.model_source_identity == "model@0123456789abcdef"
 
 
 def test_h100_flash_attention_config_lowers():

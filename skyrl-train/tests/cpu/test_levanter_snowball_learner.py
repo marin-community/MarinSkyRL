@@ -216,10 +216,10 @@ def _batch() -> LearnerBatch:
     )
 
 
-def _make_learner(log_dir: Path) -> LevanterSnowballLearner:
+def _make_learner(log_dir: Path, *, offload_opt_state: bool = False) -> LevanterSnowballLearner:
     model_config = _snowball_config()
     learner = LevanterSnowballLearner(
-        _runtime(log_dir),
+        replace(_runtime(log_dir), offload_opt_state=offload_opt_state),
         model_factory=lambda: SnowballLMHeadModel.init(
             Axis("vocab", model_config.vocab_size),
             model_config,
@@ -228,6 +228,18 @@ def _make_learner(log_dir: Path) -> LevanterSnowballLearner:
     )
     learner.initialize(_learner_config())
     return learner
+
+
+def _non_scalar_optimizer_memory_kinds(learner: LevanterSnowballLearner) -> list[str]:
+    kinds = []
+    for leaf in jax.tree_util.tree_leaves(learner._trainer_state.opt_state):
+        if not isinstance(leaf, jax.Array) or leaf.ndim == 0:
+            continue
+        sharding = leaf.sharding
+        mesh = getattr(sharding, "mesh", None)
+        if mesh is not None and len(getattr(mesh, "axis_names", ())) > 0:
+            kinds.append(sharding.memory_kind)
+    return kinds
 
 
 def test_publication_keeps_grug_experts_stacked_for_vllm(tmp_path):
@@ -241,6 +253,45 @@ def test_publication_keeps_grug_experts_stacked_for_vllm(tmp_path):
         published[stacked_name].numpy(),
         np.asarray(learner.model.to_state_dict()[stacked_name]),
     )
+    learner.close()
+
+
+def test_initial_policy_adoption_records_version_without_weight_transfer(tmp_path):
+    runtime = replace(
+        _runtime(tmp_path / "initial-policy-adoption"),
+        initial_weights_already_loaded=True,
+        model_source_identity="model@0123456789abcdef",
+    )
+    model_config = _snowball_config()
+    learner = LevanterSnowballLearner(
+        runtime,
+        model_factory=lambda: SnowballLMHeadModel.init(
+            Axis("vocab", model_config.vocab_size),
+            model_config,
+            key=jax.random.key(7),
+        ),
+    )
+    learner.initialize(_learner_config())
+    events = []
+
+    class FakeInferenceClient:
+        async def pause_generation(self):
+            events.append("pause")
+
+        async def resume_generation(self, policy_version=None):
+            events.append(("resume", policy_version))
+
+    async def unexpected_transfer():
+        raise AssertionError("version zero must not transfer checkpoint bytes")
+
+    learner._inference_client = FakeInferenceClient()
+    learner._publish_all_weights = unexpected_transfer
+    asyncio.run(learner.publish_policy())
+
+    assert events == ["pause", ("resume", 0)]
+    assert learner.state.installed_policy_version == 0
+    assert learner.state.publication_status.value == "installed"
+    assert learner._weight_group is None
     learner.close()
 
 
@@ -519,6 +570,35 @@ def test_scoring_and_update_reenter_mesh_in_async_worker_thread(tmp_path):
     learner.close()
 
 
+def test_optimizer_state_offload_survives_a_donated_update(tmp_path):
+    runtime = replace(_runtime(tmp_path / "optimizer-offload-logs"), offload_opt_state=True)
+    model_config = _snowball_config()
+    learner = LevanterSnowballLearner(
+        runtime,
+        model_factory=lambda: SnowballLMHeadModel.init(
+            Axis("vocab", model_config.vocab_size),
+            model_config,
+            key=jax.random.key(7),
+        ),
+    )
+    learner.initialize(_learner_config())
+
+    initial_memory_kinds = _non_scalar_optimizer_memory_kinds(learner)
+    assert initial_memory_kinds
+    assert set(initial_memory_kinds) == {"pinned_host"}
+
+    batch = _batch()
+    advantages = np.asarray([[1.0, -0.5, 0.0], [0.25, -1.0, 0.5]], dtype=np.float32)
+    old_log_probs = learner.compute_log_probs(batch).policy_log_probs
+    update = learner.update(UpdateRequest(batch, advantages, old_log_probs, 0, None, 0, None))
+
+    assert update.status.value == "succeeded"
+    assert update.metrics["parameter_probe_delta_l2"] > 0
+    assert int(learner._trainer_state.step) == 1
+    assert set(_non_scalar_optimizer_memory_kinds(learner)) == {"pinned_host"}
+    learner.close()
+
+
 def test_regular_mask_update_requires_and_consumes_rollout_probabilities(tmp_path):
     runtime = replace(
         _runtime(tmp_path / "regular-mask-update"),
@@ -661,6 +741,7 @@ def _multihost_learner_worker(
         training_gpus_per_node=2,
         training_gpus=4,
         train_batch_size=16,
+        offload_opt_state=True,
     )
     model_config = _snowball_config()
     learner = LevanterSnowballLearner(
@@ -675,6 +756,7 @@ def _multihost_learner_worker(
         distributed_process_count=2,
     )
     learner.initialize(_learner_config())
+    assert set(_non_scalar_optimizer_memory_kinds(learner)) == {"pinned_host"}
     assert learner._trainer_config.device_mesh.shape == {
         "replica_dcn": 1,
         "data": 4,
@@ -708,9 +790,11 @@ def _multihost_learner_worker(
     )
     if mode == "restore":
         learner.load_checkpoint(checkpoint_path)
+        assert set(_non_scalar_optimizer_memory_kinds(learner)) == {"pinned_host"}
         result = {f"restored::{name}": value for name, value in _multihost_state_arrays(learner).items()}
         old_log_probs = learner.compute_log_probs(batch).policy_log_probs
         update = learner.update(UpdateRequest(batch, advantages, old_log_probs, 1, None, 1, None))
+        assert set(_non_scalar_optimizer_memory_kinds(learner)) == {"pinned_host"}
         result.update(
             {
                 "log_probs": old_log_probs,
@@ -728,6 +812,7 @@ def _multihost_learner_worker(
 
     old_log_probs = learner.compute_log_probs(batch).policy_log_probs
     update = learner.update(UpdateRequest(batch, advantages, old_log_probs, 0, None, 0, None))
+    assert set(_non_scalar_optimizer_memory_kinds(learner)) == {"pinned_host"}
 
     published_chunks = []
     publication_events = []
@@ -1009,7 +1094,7 @@ def test_padding_compaction_preserves_each_response_predictor_position():
 
 
 def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
-    learner = _make_learner(tmp_path / "logs")
+    learner = _make_learner(tmp_path / "logs", offload_opt_state=True)
     batch = _batch()
     prepared = prepare_snowball_batch(batch, max_sequence_length=16)
     levanter_log_probs = learner.compute_log_probs(batch).policy_log_probs

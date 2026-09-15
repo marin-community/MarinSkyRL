@@ -89,6 +89,10 @@ trainer:
       # synchronization around the 125 GB publication.
       publication_max_chunk_bytes: 2147483648
       publication_timeout_seconds: 1800
+      offload_opt_state: true
+      # The launcher stages this one immutable source for both vLLM and
+      # Levanter. Trained versions 1-5 still use full verified publication.
+      initial_weights_already_loaded: true
       require_accelerator: true
       log_dir: /tmp/marinskyrl-levanter
   placement:

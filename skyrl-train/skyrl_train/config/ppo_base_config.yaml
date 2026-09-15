@@ -116,6 +116,13 @@ trainer:
       publication_backend: "gloo"
       publication_max_chunk_bytes: 67108864
       publication_timeout_seconds: 300
+      # Keep Adam moments in pinned host memory between compiled steps when a
+      # full FP32 checkpoint would otherwise exceed accelerator memory.
+      offload_opt_state: false
+      # Version zero may skip its redundant transfer only when both sides just
+      # loaded the same immutable model source. Pause/resume still establishes
+      # serving-policy provenance; every trained version is transferred.
+      initial_weights_already_loaded: false
       require_accelerator: true
       log_dir: "/tmp/marinskyrl-levanter"
     fsdp_config:

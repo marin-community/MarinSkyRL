@@ -97,6 +97,32 @@ class _PublicationMeasurements:
     chunk_count: int
 
 
+def _optimizer_state_to_memory_kind(tree, memory_kind: str):
+    """Move named-sharded optimizer arrays between device and host memory."""
+
+    def move(leaf):
+        if not isinstance(leaf, jax.Array):
+            return leaf
+        if leaf.ndim == 0:
+            # Scalar counters and schedule values are negligible in HBM.
+            return leaf
+        # Concrete arrays retain their real device mesh; tracers only expose
+        # the abstract mesh through jax.typeof().
+        sharding = getattr(leaf, "sharding", None)
+        if sharding is None:
+            sharding = jax.typeof(leaf).sharding
+        mesh = getattr(sharding, "mesh", None)
+        if mesh is None or len(getattr(mesh, "axis_names", ())) == 0:
+            # Some non-array metadata may not carry a named mesh through
+            # tracing.
+            return leaf
+        if sharding.memory_kind == memory_kind:
+            return leaf
+        return jax.device_put(leaf, sharding.with_memory_kind(memory_kind))
+
+    return jax.tree.map(move, tree)
+
+
 class _SnowballTrainerConfig(TrainerConfig):
     """Use one global FSDP axis for Snowball's explicit parameter specs.
 
@@ -230,6 +256,10 @@ def _reshape_named_batches_for_microbatch(Batch, Microbatch, AccumStep, inputs, 
 
 
 class _SnowballTrainer(Trainer):
+    def __init__(self, *args, offload_opt_state: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._offload_opt_state = offload_opt_state
+
     def _compute_gradients_microbatched(self, loss_fn, model, *batch, **batch_kwargs):
         Batch = _resolve_axis_in_tree((batch, batch_kwargs), self.config.batch_axis_name)
         grad_fn = eqx.filter_value_and_grad(loss_fn, has_aux=True)
@@ -249,7 +279,24 @@ class _SnowballTrainer(Trainer):
     def train_step_with_metrics(self, state, *batch):
         """Run one normal donated optimizer step and retain its loss metrics."""
 
+        if self._offload_opt_state:
+            return self._jit_train_step_fn_no_hook_offloaded(state, batch, {})
         return self._jit_train_step_fn_no_hook(state, batch, {})
+
+    @functools.cached_property
+    def _jit_train_step_fn_no_hook_offloaded(self):
+        def offloaded_step(state, batch, batch_kwargs):
+            device_opt_state = _optimizer_state_to_memory_kind(state.opt_state, "device")
+            state = dataclasses.replace(state, opt_state=device_opt_state)
+            result = self._train_step(state, batch, batch_kwargs, _no_hooks=True)
+            host_opt_state = _optimizer_state_to_memory_kind(result.new_state.opt_state, "pinned_host")
+            new_state = dataclasses.replace(result.new_state, opt_state=host_opt_state)
+            return dataclasses.replace(result, new_state=new_state)
+
+        # The arguments already carry their global NamedShardings. Avoid
+        # named_jit's device-only output sharding so the optimizer moments can
+        # return directly to pinned host memory from the compiled step.
+        return jax.jit(offloaded_step, donate_argnums=(0,))
 
 
 def _resolve_local_model_snapshot(model_path: str, revision: str | None) -> str:
@@ -768,7 +815,13 @@ class LevanterSnowballLearner:
             offpolicy_mask_high=config.offpolicy_mask_high,
             offpolicy_mask_veto_ratio=config.offpolicy_mask_veto_ratio,
         )
-        trainer = _SnowballTrainer(trainer_config, optimizer, objective, add_default_hooks=False)
+        trainer = _SnowballTrainer(
+            trainer_config,
+            optimizer,
+            objective,
+            add_default_hooks=False,
+            offload_opt_state=self.runtime.offload_opt_state,
+        )
         trainer.__enter__()
         self._trainer_entered = True
         try:
@@ -778,6 +831,12 @@ class LevanterSnowballLearner:
                 is_trainable=_trainability_mask(model),
             )
             state = dataclasses.replace(state, model=_restore_router_bias_storage_dtype(state.model))
+            if self.runtime.offload_opt_state:
+                state = dataclasses.replace(
+                    state,
+                    opt_state=_optimizer_state_to_memory_kind(state.opt_state, "pinned_host"),
+                )
+                jax.block_until_ready(state.opt_state)
         except Exception:
             trainer.__exit__(None, None, None)
             self._trainer_entered = False
@@ -963,6 +1022,14 @@ class LevanterSnowballLearner:
         self._require_ready()
         if jax.process_index() == 0 and self._inference_client is None:
             raise RuntimeError("the inference engine must be connected before publishing")
+        if (
+            self.runtime.initial_weights_already_loaded
+            and self._policy_version == 0
+            and self._update_count == 0
+            and self._installed_policy_version is None
+        ):
+            await self._adopt_initial_inference_policy()
+            return
         self._publication_status = PublicationStatus.PENDING
 
         async def pause_generation() -> None:
@@ -1003,6 +1070,35 @@ class LevanterSnowballLearner:
                 measurements.resume_seconds,
                 measurements.transferred_bytes,
                 measurements.chunk_count,
+            )
+
+    async def _adopt_initial_inference_policy(self) -> None:
+        """Record version zero when serving loaded the same immutable model."""
+
+        self._publication_status = PublicationStatus.PENDING
+
+        async def pause_generation() -> None:
+            await self._inference_client.pause_generation()
+
+        async def resume_generation() -> None:
+            await self._inference_client.resume_generation(policy_version=0)
+
+        adoption_start = time.perf_counter()
+        try:
+            await self._rank_zero_publication_call(pause_generation, "initial generation pause")
+            await self._rank_zero_publication_call(resume_generation, "initial generation resume")
+        except Exception:
+            self._publication_status = PublicationStatus.FAILED
+            self._lifecycle = LearnerLifecycle.FAILED
+            raise
+        self._installed_policy_version = 0
+        self._publication_status = PublicationStatus.INSTALLED
+        if jax.process_index() == 0:
+            logger.info(
+                "Levanter initial policy adopted policy_version=0 total_seconds=%.3f "
+                "model_source_identity=%s transferred_bytes=0 chunk_count=0",
+                time.perf_counter() - adoption_start,
+                self.runtime.model_source_identity,
             )
 
     async def _rank_zero_publication_call(
@@ -1324,6 +1420,12 @@ class LevanterSnowballLearner:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="levanter-checkpoint-load") as executor:
                 restored = executor.submit(restore).result()
         restored_trainer_state = restored["trainer_state"]
+        if self.runtime.offload_opt_state:
+            restored_trainer_state = dataclasses.replace(
+                restored_trainer_state,
+                opt_state=_optimizer_state_to_memory_kind(restored_trainer_state.opt_state, "pinned_host"),
+            )
+            jax.block_until_ready(restored_trainer_state.opt_state)
         restored_policy_version = int(jax.device_get(restored["policy_version"]))
         restored_update_count = int(jax.device_get(restored_trainer_state.step))
         if restored_policy_version != restored_update_count:
