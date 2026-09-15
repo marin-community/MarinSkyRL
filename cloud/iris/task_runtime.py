@@ -33,6 +33,7 @@ import glob
 import json
 import os
 import queue
+import re
 import signal
 import socket
 import subprocess
@@ -221,20 +222,20 @@ def stage_task_data(data_json: str, *, role: str) -> None:
 
 
 def _warm_model_snapshot_hash(model_path: str) -> str:
-    """Deterministic synthetic 40-hex 'commit' for the warm S3-synced snapshot dir.
+    """Return a deterministic synthetic warm snapshot name.
 
     Offline ``from_pretrained`` / ``snapshot_download(local_files_only=True)`` resolve a
     repo via ``<cache>/models--<org>--<name>/refs/main`` -> a ``snapshots/<hash>/`` dir.
-    Under HF_HUB_OFFLINE=1 there is no hash validation, so a STABLE synthetic hash
-    keyed on the repo id gives an idempotent, collision-free (``otwarm:`` prefixed)
-    snapshot dir that re-syncs skip-in-place on a ``--max-retries`` re-bring.
+    The flat warm mirror has no revision-bound manifest, so it must never be named
+    after a real Hugging Face commit. Unpinned launches use a stable synthetic hash
+    keyed on the repo ID.
     """
     import hashlib
 
     return hashlib.sha1(("otwarm:" + model_path).encode()).hexdigest()
 
 
-def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
+def _warm_sync_model_from_s3(model_path: str, warm_source: str, revision: str | None = None) -> bool:
     """In-region warm path for :func:`stage_model`.
 
     Sync the FLAT weight/config/tokenizer files seeded at ``warm_source`` (an ``s3://``
@@ -253,6 +254,12 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
     explicit botocore ``Config`` here so this call is correct even if invoked out of
     order.
     """
+    if revision:
+        _log(
+            "warm sync: the flat source has no revision-bound content manifest; "
+            f"refusing to label it as {model_path}@{revision}"
+        )
+        return False
     if not warm_source or not warm_source.startswith("s3://"):
         _log(f"warm sync: warm_source {warm_source!r} is not an s3:// URI; skipping warm path")
         return False
@@ -352,7 +359,7 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str) -> bool:
     return True
 
 
-def stage_model(model_path: str, warm_source: str | None = None) -> None:
+def stage_model(model_path: str, warm_source: str | None = None, revision: str | None = None) -> None:
     """Pre-download the policy model into this NODE's local HF cache on EVERY node.
 
     The controller runs on every node before Ray bootstrap, so pre-download the
@@ -370,6 +377,8 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     """
     if is_cloud_uri(model_path):
         raise ValueError(unsupported_model_path_message(model_path))
+    if revision and re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise ValueError("model revision must be an immutable lowercase 40-character commit")
     if not model_path or os.path.isdir(model_path):
         _log(f"stage_model: skip (model_path={model_path!r} is empty or a local directory)")
         return
@@ -382,10 +391,10 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     # is None unless the launcher forwarded --model-warm-source.
     if warm_source:
         try:
-            if _warm_sync_model_from_s3(model_path, warm_source):
+            if _warm_sync_model_from_s3(model_path, warm_source, revision):
                 return
             _log(
-                f"stage_model: warm source {warm_source} missing/empty/incomplete "
+                f"stage_model: warm source {warm_source} missing/empty/incomplete/unqualified "
                 f"-> HF snapshot_download prestage fallback"
             )
         except Exception as exc:  # noqa: BLE001 - never let the warm path block bring-up
@@ -409,10 +418,12 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     code = (
         "import sys\n"
         "from huggingface_hub import snapshot_download\n"
-        "p = snapshot_download(sys.argv[1], allow_patterns=sys.argv[2].split(','))\n"
+        "revision = sys.argv[3] or None\n"
+        "p = snapshot_download(sys.argv[1], revision=revision, allow_patterns=sys.argv[2].split(','))\n"
         "print('PRESTAGE_LOCAL_DIR=' + p)\n"
     )
-    _log(f"Pre-staging model on this node (rank {_rank()}/{_num_tasks()}): {model_path}")
+    model_display = model_path + (f"@{revision}" if revision else "")
+    _log(f"Pre-staging model on this node (rank {_rank()}/{_num_tasks()}): {model_display}")
     last_err = ""
     # A stalled snapshot_download (mid-download socket hang) blocks subprocess.run
     # forever without a per-attempt timeout. HF resumes the partial `.incomplete`
@@ -423,7 +434,7 @@ def stage_model(model_path: str, warm_source: str | None = None) -> None:
     for attempt in range(1, 7):
         try:
             proc = subprocess.run(
-                [sys.executable, "-c", code, model_path, ",".join(allow_patterns)],
+                [sys.executable, "-c", code, model_path, ",".join(allow_patterns), revision or ""],
                 env=child_env,
                 capture_output=True,
                 text=True,
@@ -2041,6 +2052,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "launcher (auto-derived from the repo id).",
     )
     parser.add_argument(
+        "--model-revision",
+        default="",
+        help="Immutable Hugging Face model commit staged for every model consumer.",
+    )
+    parser.add_argument(
         "--model-source-uri",
         default="",
         help="Object-store HF export to materialize on every node before Ray starts.",
@@ -2129,7 +2145,11 @@ def main() -> None:
     # Pre-download the policy weights into the node-local HF cache BEFORE Ray, so the
     # FSDP ranks load from a warm cache under HF_HUB_OFFLINE=1. See stage_model.
     if args.prestage_model:
-        stage_model(args.prestage_model, warm_source=(args.model_warm_source or None))
+        stage_model(
+            args.prestage_model,
+            warm_source=(args.model_warm_source or None),
+            revision=(args.model_revision or None),
+        )
     # Force the policy chat template onto the staged Hub snapshot or materialized local
     # model on every node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:

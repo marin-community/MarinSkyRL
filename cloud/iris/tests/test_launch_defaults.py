@@ -403,6 +403,19 @@ def test_task_command_stages_training_and_validation_selectors_on_every_node(tmp
     assert options["--val-data"] == [json.dumps([val_selector])]
 
 
+def test_task_command_leaves_standard_parquet_for_the_training_driver(tmp_path):
+    train_data = json.dumps(["s3://bucket/standard-rl.parquet"])
+    args = _args(tmp_path, "standard", ["--train-data", train_data])
+    Path(args.rl_config).write_text("entrypoint: levanter_snowball\ntrainer:\n  strategy: fsdp2\n")
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert "--train-data" not in options
+    assert options["--train_data"] == [train_data]
+
+
 def test_task_command_stages_terminal_bench_sidechannel_on_every_node(tmp_path):
     selector = "fixture-org/nemotron-ultra-swe@immutable::train"
     args = _args(tmp_path, "opencode")
@@ -688,6 +701,31 @@ def test_controller_rejects_object_store_model_path_before_staging():
         stage_model("s3://models/policy")
 
 
+def test_model_revision_is_immutable_and_forwarded_to_staging_and_training(tmp_path):
+    revision = "6" * 40
+    args = _args(tmp_path, "opencode", ["--model-revision", revision])
+    Path(args.rl_config).write_text("extra_env:\n  HF_HUB_OFFLINE: '1'\n")
+
+    normalize(args)
+    resolve_launch_defaults(args)
+    options = _shell_options(build_task_command(args)[-1])
+
+    assert options["--model-revision"] == [revision, revision]
+    assert "--model-warm-source" not in options
+
+
+def test_model_revision_rejects_a_mutable_ref(tmp_path):
+    args = _args(tmp_path, "opencode", ["--model-revision", "main"])
+
+    with pytest.raises(SystemExit, match="immutable lowercase 40-character commit"):
+        normalize(args)
+
+
+def test_controller_rejects_a_mutable_model_revision():
+    with pytest.raises(ValueError, match="immutable lowercase 40-character commit"):
+        stage_model("org/model", revision="main")
+
+
 def test_task_local_model_source_is_materialized_without_hf_prestage(tmp_path):
     args = _args(
         tmp_path,
@@ -897,6 +935,27 @@ def test_fsdp_config_selects_the_fsdp_profile(tmp_path):
     resolve_launch_defaults(args)
 
     assert args.runtime_profile is RuntimeProfile.FSDP
+
+
+def test_levanter_entrypoint_selects_the_levanter_profile(tmp_path):
+    config = tmp_path / "levanter.yaml"
+    config.write_text("entrypoint: levanter_snowball\ntrainer:\n  strategy: fsdp2\n")
+    args = create_parser().parse_args(
+        [
+            "--rl_config",
+            str(config),
+            "--model_path",
+            "Qwen/Model-30B",
+            "--cluster-config",
+            str(_cluster_config(tmp_path)),
+            "--num-nodes",
+            "2",
+        ]
+    )
+
+    resolve_launch_defaults(args)
+
+    assert args.runtime_profile is RuntimeProfile.LEVANTER
 
 
 @pytest.mark.parametrize(

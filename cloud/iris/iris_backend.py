@@ -965,6 +965,21 @@ def _rl_training_strategy(args: argparse.Namespace) -> Optional[str]:
     return strategy.strip().lower() if isinstance(strategy, str) and strategy.strip() else None
 
 
+def _rl_training_entrypoint(args: argparse.Namespace) -> Optional[str]:
+    """Return the effective packaged entrypoint used for runtime selection."""
+    override = getattr(args, "entrypoint", None)
+    if isinstance(override, str) and override:
+        return override
+    try:
+        with open(args.rl_config) as f:
+            config = yaml.safe_load(f) or {}
+        if not isinstance(config, dict):
+            return None
+        return resolve_rl_entrypoint(config.get("entrypoint"), config_path=Path(args.rl_config))
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+
+
 def _effective_gdn_backend(args: argparse.Namespace) -> str:
     """Resolve the GDN backend with the same precedence as the training command."""
     if args.gdn_flashqla is not None:
@@ -1029,13 +1044,15 @@ def resolve_launch_defaults(args: argparse.Namespace) -> None:
     strategy = _rl_training_strategy(args)
     expected_profile = runtime_profile_for_strategy(
         strategy,
+        entrypoint=_rl_training_entrypoint(args),
         mode=RuntimeMode.CHECKPOINT_EXPORT if _is_checkpoint_export(args) else RuntimeMode.TRAINING,
     )
     if args.runtime_profile is None:
         args.runtime_profile = expected_profile
     elif args.runtime_profile != expected_profile:
         raise SystemExit(
-            f"Runtime profile {args.runtime_profile.value!r} does not match trainer.strategy {strategy!r}."
+            f"Runtime profile {args.runtime_profile.value!r} does not match trainer.strategy {strategy!r} "
+            "and the configured entrypoint."
         )
 
     launcher_commit = resolve_launcher_source().commit
@@ -1356,6 +1373,13 @@ def create_parser() -> argparse.ArgumentParser:
         help="Hugging Face repo ID (e.g., Qwen/Qwen3-8B) or a directory available inside every task.",
     )
     parser.add_argument("--model-path", dest="model_path", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--model-revision",
+        "--model_revision",
+        dest="model_revision",
+        default=None,
+        help="Immutable 40-character Hugging Face model commit used by staging, training, and inference.",
+    )
 
     parser.add_argument(
         "--model-source-uri",
@@ -1379,8 +1403,9 @@ def create_parser() -> argparse.ArgumentParser:
         "node from HF Hub (the flaky path behind the 80B r4a/r4b bring-up failures). "
         "Default: AUTO-DERIVE s3://marin-us-east-02a/models/<org>--<name> from the "
         "repo id (a missing/empty source is a clean no-op -> HF prestage fallback, "
-        "byte-identical to today). Pass 'none'/'off' to DISABLE the warm path (pure "
-        "HF prestage). Only used when the config runs HF_HUB_OFFLINE=1 with a "
+        "byte-identical to today). Pinned revisions bypass this unversioned mirror "
+        "and use the Hub commit directly. Pass 'none'/'off' to DISABLE the warm path "
+        "(pure HF prestage). Only used when the config runs HF_HUB_OFFLINE=1 with a "
         "repo-id model_path (same gate as --prestage-model).",
     )
 
@@ -1979,6 +2004,11 @@ def normalize(args: argparse.Namespace) -> None:
     """Resolve the RL config and validate the requested worker topology."""
     if is_cloud_uri(args.model_path):
         raise SystemExit(unsupported_model_path_message(args.model_path))
+    if args.model_revision:
+        if not is_hugging_face_repo_id(args.model_path):
+            raise SystemExit("--model-revision requires a Hugging Face repo ID in --model_path")
+        if re.fullmatch(r"[0-9a-f]{40}", args.model_revision) is None:
+            raise SystemExit("--model-revision must be an immutable lowercase 40-character commit")
     try:
         model_source_for_path(args.model_path, args.model_source_uri, args.model_source_identity)
     except ModelLocatorError as error:
@@ -2084,6 +2114,8 @@ def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
     task-local models are used directly after optional object-store materialization.
     """
     model_args = model_source_cli_args(args.model_source_uri, args.model_source_identity)
+    if args.model_revision:
+        model_args.extend(["--model-revision", args.model_revision])
     is_hub_model = is_hugging_face_repo_id(args.model_path)
     if args.model_source_uri or not is_hub_model:
         model_args.extend(["--model-local-path", args.model_path])
@@ -2098,7 +2130,10 @@ def _model_bootstrap_args(args: argparse.Namespace) -> list[str]:
             warm_source = f"s3://marin-us-east-02a/models/{args.model_path.replace('/', '--')}"
         elif warm_source.strip().lower() in ("none", "off", ""):
             warm_source = None
-        if warm_source:
+        # The flat regional mirror has no revision-bound content manifest. Using it
+        # for a pinned launch would authenticate only the cache-directory label, not
+        # the bytes. Let task_runtime fetch the requested Hub commit instead.
+        if warm_source and not args.model_revision:
             model_args.extend(["--model-warm-source", warm_source])
     if policy_chat_template:
         model_args.extend(["--policy-chat-template", policy_chat_template])
@@ -2141,6 +2176,8 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
         "--ray_port",
         str(args.ray_port),
     ]
+    if args.model_revision:
+        train_cmd.extend(["--model-revision", args.model_revision])
     if args.entrypoint:
         train_cmd.extend(["--entrypoint", args.entrypoint])
     train_cmd.extend(model_source_cli_args(args.model_source_uri, args.model_source_identity))
@@ -2216,9 +2253,10 @@ def build_task_command(args: argparse.Namespace) -> List[str]:
     # on rank 0, while Ray may schedule rollout and evaluation workers on any node.
     # Forward both roles to the controller so every pod has identical task-local data.
     # Object-store locators use the separate typed materialization path below.
-    if args.train_data and args.train_data != EMPTY_JSON_LIST and not args.data_sources_json:
+    stage_task_selectors = _rl_config_is_agentic(args.rl_config)
+    if stage_task_selectors and args.train_data and args.train_data != EMPTY_JSON_LIST and not args.data_sources_json:
         controller_cmd.extend(["--train-data", args.train_data])
-    if args.val_data and args.val_data != EMPTY_JSON_LIST and not args.data_sources_json:
+    if stage_task_selectors and args.val_data and args.val_data != EMPTY_JSON_LIST and not args.data_sources_json:
         controller_cmd.extend(["--val-data", args.val_data])
     if args.data_sources_json:
         controller_cmd.extend(["--data-sources-json", args.data_sources_json])
@@ -2315,7 +2353,8 @@ def launch(args: argparse.Namespace, expected_launcher_commit: str) -> IrisLaunc
     )
     print(f"[rl-iris] Per node:   cpu={args.cpu} memory={args.memory} disk={args.disk}", flush=True)
     print(f"[rl-iris] Priority:   {args.priority}", flush=True)
-    print(f"[rl-iris] RL config:  {args.rl_config}  model={args.model_path}", flush=True)
+    model_display = args.model_path + (f"@{args.model_revision}" if args.model_revision else "")
+    print(f"[rl-iris] RL config:  {args.rl_config}  model={model_display}", flush=True)
     storage_paths = args.storage_paths
     if not _is_checkpoint_export(args):
         print(

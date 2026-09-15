@@ -42,6 +42,7 @@ class RLEntrypoint(StrEnum):
 
     FULLY_ASYNC = "fully_async"
     GENERATE = "generate"
+    LEVANTER_SNOWBALL = "levanter_snowball"
     MINI_SWE = "mini_swe"
     STANDARD = "standard"
     TERMINAL_BENCH = "terminal_bench"
@@ -51,6 +52,7 @@ class RLEntrypoint(StrEnum):
 RL_ENTRYPOINT_MODULES = {
     RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
     RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
+    RLEntrypoint.LEVANTER_SNOWBALL: "skyrl_train.entrypoints.levanter_snowball",
     RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
     RLEntrypoint.STANDARD: "skyrl_train.entrypoints.main_base",
     RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
@@ -789,6 +791,9 @@ def _apply_policy_model_source(trainer: Dict[str, Any], exp_args: Dict[str, Any]
         return None
     policy_model = trainer.setdefault("policy", {}).setdefault("model", {})
     policy_model["path"] = model_path
+    model_revision = exp_args.get("model_revision")
+    if model_revision:
+        policy_model["revision"] = model_revision
     model_source = model_source_for_path(
         model_path,
         exp_args.get("model_source_uri"),
@@ -949,6 +954,9 @@ def build_skyrl_hydra_args(
         # Harbor/LiteLLM requires model names with exactly one '/'.
         served_model_name = model_path.split("/")[-1] if "/" in model_path else model_path
         generator.setdefault("engine_init_kwargs", {})["served_model_name"] = served_model_name
+        model_revision = exp_args.get("model_revision")
+        if model_revision:
+            generator.setdefault("engine_init_kwargs", {})["revision"] = model_revision
 
     # HuggingFace Hub upload settings. Default to laion/<job_name> if not provided.
     hf_hub_repo_id = exp_args.get("hf_hub_repo_id")

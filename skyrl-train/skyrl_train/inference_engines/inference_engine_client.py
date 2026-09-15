@@ -928,7 +928,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         if self.generation_paused_event.is_set():
             raise RuntimeError("Generation is already paused, cannot pause again.")
         self.generation_paused_event.set()
-        await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
+        with self._routing_lock:
+            has_inflight_requests = any(self._engine_inflight)
+        if has_inflight_requests:
+            await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
         await self._run_on_all_engines("pause_generation")
 
     async def resume_generation(self) -> None:
@@ -977,18 +980,29 @@ class InferenceEngineClient(InferenceEngineInterface):
     def __getstate__(self):
         """
         Override to avoid pickling the server thread and the threading.Event object, which are not picklable.
-        Needed when passing InferenceEngineClient as an argument to async_run_ray_method(), mainly for
-        invoking `init_weight_sync_state()` and `broadcast_to_inference_engines()`, which do
-        not need these attributes.
+        Process-local synchronization objects are recreated by ``__setstate__`` so a Ray actor can
+        use the deserialized client for publication before its first generation.
         """
         state = self.__dict__.copy()
         state["_server_thread"] = None
+        state["_generation_was_paused"] = self.generation_paused_event.is_set()
         state["generation_paused_event"] = None
-        # threading.Lock is not picklable; the pickled copy is only used for weight-sync
-        # RPC args and never routes, so dropping the routing lock is safe.
+        # threading.Lock is not picklable. Recreate it in the receiving process.
         state["_routing_lock"] = None
         state["_http_bridge_stats"] = None
         return state
+
+    def __setstate__(self, state):
+        """Restore process-local synchronization state after Ray deserialization."""
+
+        state = state.copy()
+        generation_was_paused = bool(state.pop("_generation_was_paused", False))
+        self.__dict__.update(state)
+        self.generation_paused_event = threading.Event()
+        if generation_was_paused:
+            self.generation_paused_event.set()
+        self._routing_lock = threading.Lock()
+        self._http_bridge_stats = HTTPBridgeStatsAccumulator()
 
     def _spin_up_http_endpoint(self):
         from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (

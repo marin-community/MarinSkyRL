@@ -68,6 +68,18 @@ cuda = [
     "torchdata ; sys_platform == 'linux'",
     "torchvision==0.26.0 ; sys_platform == 'linux'",
 ]
+levanter = [
+    "marin-levanter @ git+https://github.com/marin-community/marin.git@779cd403521e02d1615d8c49290cd8de63efdde0#subdirectory=lib/levanter",
+]
+levanter-gpu = [
+    # Keep Snowball's H100 FA4 backward dependency aligned with the pinned
+    # Levanter source. The full Levanter GPU extra also carries Quack/Sonic
+    # kernels that this integration does not use.
+    "flash-attn-4[cu13]==4.0.0b16 ; sys_platform == 'linux'",
+    # Keep JAX on the same CUDA 12 package family as Torch and vLLM.
+    "jax[cuda12]==0.11.1 ; sys_platform == 'linux'",
+    "marin-levanter @ git+https://github.com/marin-community/marin.git@779cd403521e02d1615d8c49290cd8de63efdde0#subdirectory=lib/levanter ; sys_platform == 'linux'",
+]
 deepspeed = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "deepspeed==0.17.6 ; sys_platform == 'linux'",
@@ -163,6 +175,7 @@ prerelease = "allow"
 required-version = ">=0.8.10"
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }],
+    [{ extra = "cpu" }, { extra = "levanter-gpu" }],
     [{ extra = "cpu" }, { extra = "deepspeed" }],
     [{ extra = "cpu" }, { extra = "megatron" }],
     [{ extra = "cpu" }, { extra = "vllm" }],
@@ -177,6 +190,13 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
+    # A Levanter git subdirectory is part of Marin's uv workspace. Keep MSRL's
+    # independently released runtime packages on the versions this lockfile
+    # already used instead of letting uv substitute older workspace members.
+    "marin-finelog==0.2.28.dev31271949117",
+    "marin-finestore==0.2.91.dev32816546334",
+    "marin-iris==0.2.91.dev32816546334",
+    "marin-rigging==0.2.91.dev32816546334",
     "transformer-engine-cu13 ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
     "fsspec==2026.4.0",

@@ -14,7 +14,7 @@ profile="$4"
 install_mode="$5"
 
 case "$profile" in
-  fsdp|deepspeed|megatron|fsdp-export|deepspeed-export|megatron-export) ;;
+  fsdp|deepspeed|megatron|levanter|fsdp-export|deepspeed-export|megatron-export) ;;
   *)
     echo "unsupported runtime profile: $profile" >&2
     exit 2
@@ -30,7 +30,9 @@ case "$install_mode" in
     ;;
 esac
 
-if [[ "$profile" == *-export ]]; then
+if [[ "$profile" == levanter ]]; then
+  runtime_extras=(--extra levanter-gpu --extra vllm --extra telemetry)
+elif [[ "$profile" == *-export ]]; then
   strategy="${profile%-export}"
   runtime_extras=(--extra "$strategy")
   if [[ "$strategy" == fsdp ]]; then
@@ -70,6 +72,9 @@ if [[ "$profile" == fsdp || "$profile" == fsdp-export || "$profile" == megatron 
 fi
 if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then
   "$python" -c "import transformer_engine.common"
+fi
+if [[ "$profile" == levanter ]]; then
+  "$python" -c "import jax, levanter; print('[rl-iris] Levanter runtime ready:', jax.__version__)"
 fi
 if [[ "$profile" == *-export ]]; then
   "$python" -c "import ray, torch; from skyrl_train.checkpoint_exporter import CheckpointExporter"

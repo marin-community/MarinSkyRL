@@ -82,6 +82,7 @@ trainer:
     grug_query_bias_update_rate: null
     model:
       path: "Qwen/Qwen2.5-1.5B-Instruct"
+      revision: null
       source_uri: null
       source_identity: null
       lora:
@@ -103,6 +104,20 @@ trainer:
       num_warmup_steps: 0
       scheduler: "constant_with_warmup"
       optimizer_kwargs: {}
+    # Used only by skyrl_train.entrypoints.levanter_snowball. The reference
+    # kernels keep the first integration portable and numerically inspectable;
+    # faster kernels remain a separately qualified workload.
+    levanter:
+      parameter_dtype: "float32"
+      compute_dtype: "bfloat16"
+      output_dtype: "float32"
+      attention_implementation: "reference"
+      moe_implementation: "ring"
+      publication_backend: "gloo"
+      publication_max_chunk_bytes: 67108864
+      publication_timeout_seconds: 300
+      require_accelerator: true
+      log_dir: "/tmp/marinskyrl-levanter"
     fsdp_config:
       cpu_offload: false
       reshard_after_forward: true
