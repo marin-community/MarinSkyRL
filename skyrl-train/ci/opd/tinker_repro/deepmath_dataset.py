@@ -10,8 +10,9 @@ from typing import Any
 import datasets
 import pyarrow as pa
 
-DATASET = "zwhe99/DeepMath-103K"
-DATASET_REVISION = "5cf055d1fe3d7a2eb19719ac020211469736ae44"
+from training_plan import OPD_DATASET, OPD_DATASET_REVISION
+
+PROMPT_ONLY_ENV = "prompt_only"
 
 
 def convert_rows(rows: Iterable[Mapping[str, Any]]) -> pa.Table:
@@ -23,13 +24,26 @@ def convert_rows(rows: Iterable[Mapping[str, Any]]) -> pa.Table:
             raise ValueError(f"DeepMath row {index} has no non-empty question")
         converted.append(
             {
-                "data_source": DATASET,
+                "data_source": OPD_DATASET,
                 "prompt": [{"role": "user", "content": question}],
-                "env_class": "prompt_only",
+                "env_class": PROMPT_ONLY_ENV,
                 "extra_info": {"source_index": index},
             }
         )
     return pa.Table.from_pylist(converted)
+
+
+def materialize_dataset(path: Path, row_limit: int | None = None) -> int:
+    """Write the pinned DeepMath split and return its materialized row count."""
+    source = datasets.load_dataset(OPD_DATASET, split="train", revision=OPD_DATASET_REVISION)
+    if row_limit is not None:
+        if row_limit <= 0:
+            raise ValueError("row_limit must be positive")
+        source = source.select(range(min(row_limit, len(source))))
+    rows = (source[index] for index in range(len(source)))
+    table = convert_rows(rows)
+    datasets.Dataset(table).to_parquet(path)
+    return table.num_rows
 
 
 def main() -> None:
@@ -38,15 +52,11 @@ def main() -> None:
     parser.add_argument("--max-rows", type=int)
     args = parser.parse_args()
 
-    source = datasets.load_dataset(DATASET, split="train", revision=DATASET_REVISION)
-    if args.max_rows is not None:
-        if args.max_rows <= 0:
-            parser.error("--max-rows must be positive")
-        source = source.select(range(min(args.max_rows, len(source))))
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    rows = (source[index] for index in range(len(source)))
-    datasets.Dataset(convert_rows(rows)).to_parquet(args.output_dir / "train.parquet")
+    try:
+        materialize_dataset(args.output_dir / "train.parquet", args.max_rows)
+    except ValueError as error:
+        parser.error(str(error))
 
 
 if __name__ == "__main__":

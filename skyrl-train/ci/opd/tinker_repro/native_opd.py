@@ -12,14 +12,19 @@ import subprocess
 import sys
 import tempfile
 
-import datasets
-
-from deepmath_dataset import DATASET, DATASET_REVISION, convert_rows
+from deepmath_dataset import PROMPT_ONLY_ENV, materialize_dataset
+from reproduction_artifacts import validate_output_uri
 from skyrl_train.io.io import local_read_dir, upload_directory
+from training_plan import (
+    OPD_DATASET,
+    OPD_DATASET_REVISION,
+    OPD_STAGE_DEFINITIONS,
+    STUDENT_MODEL,
+    TEACHER_MODEL,
+    Stage as PlanStage,
+)
 
-STUDENT_MODEL = "Qwen/Qwen3.5-9B-Base"
 STUDENT_REVISION = "68c46c4b3498877f3ef123c856ecfde50c39f404"
-TEACHER_MODEL = "Qwen/Qwen3.5-9B"
 TEACHER_REVISION = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
 TOKENIZER_FINGERPRINT = "sha256:9040bcdb3add0466884acccc0be5029887530f65cbe9fa7354c1447eda51b9f8"
 LORA_TARGETS = (
@@ -52,11 +57,27 @@ class StageShape:
     dataset_rows: int | None
 
 
-STAGES = {
-    Stage.PLUMBING: StageShape(1, 4, 1, 256, 4),
-    Stage.FIDELITY_STEP: StageShape(1, 512, 4, 16_384, 512),
-    Stage.FULL: StageShape(200, 512, 4, 16_384, None),
+PLAN_STAGES = {
+    Stage.PLUMBING: PlanStage.OPD_PLUMBING,
+    Stage.FIDELITY_STEP: PlanStage.OPD_FIDELITY_STEP,
+    Stage.FULL: PlanStage.OPD_FULL,
 }
+POLICY_GPUS = 4
+
+
+def stage_shape(stage: Stage) -> StageShape:
+    definition = OPD_STAGE_DEFINITIONS[PLAN_STAGES[stage]]
+    groups_per_batch = (
+        max(definition.groups_per_batch, POLICY_GPUS) if stage is Stage.PLUMBING else definition.groups_per_batch
+    )
+    dataset_rows = None if stage is Stage.FULL else groups_per_batch
+    return StageShape(
+        steps=definition.steps,
+        groups_per_batch=groups_per_batch,
+        group_size=definition.group_size,
+        max_generate_length=definition.max_tokens,
+        dataset_rows=dataset_rows,
+    )
 
 
 @dataclass(frozen=True)
@@ -64,7 +85,7 @@ class RunManifest:
     schema_version: int
     status: str
     stage: str
-    shape: dict[str, int | None]
+    shape: StageShape
     student: str
     student_revision: str
     teacher: str
@@ -120,7 +141,7 @@ def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, outp
         "trainer.flash_attn=true",
         "trainer.use_sample_packing=false",
         "trainer.placement.colocate_all=false",
-        "trainer.placement.policy_num_gpus_per_node=4",
+        f"trainer.placement.policy_num_gpus_per_node={POLICY_GPUS}",
         "trainer.epochs=1",
         f"trainer.max_steps={shape.steps}",
         f"trainer.train_batch_size={batch_size}",
@@ -153,26 +174,15 @@ def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, outp
         "generator.weight_sync_backend=nccl",
         "generator.async_engine=true",
         "generator.batched=true",
-        "environment.env_class=prompt_only",
+        f"environment.env_class={PROMPT_ONLY_ENV}",
         "trajectory_runner.process_pool.num_coordinators=1",
         "trajectory_runner.process_pool.cpus_per_coordinator=4",
     )
 
 
-def materialize_dataset(path: Path, row_limit: int | None) -> int:
-    source = datasets.load_dataset(DATASET, split="train", revision=DATASET_REVISION)
-    if row_limit is not None:
-        source = source.select(range(min(row_limit, len(source))))
-    rows = (source[index] for index in range(len(source)))
-    table = convert_rows(rows)
-    datasets.Dataset(table).to_parquet(path)
-    return table.num_rows
-
-
 def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
-    if not output_uri.startswith("s3://") or not output_uri.removeprefix("s3://").strip("/"):
-        raise ValueError("--output-uri must be a non-root s3:// prefix")
-    shape = STAGES[stage]
+    validate_output_uri(output_uri)
+    shape = stage_shape(stage)
     with tempfile.TemporaryDirectory(prefix="tinker-native-opd-") as temporary:
         root = Path(temporary)
         output_root = root / "output"
@@ -189,14 +199,14 @@ def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
                 schema_version=1,
                 status="preparing",
                 stage=stage,
-                shape=asdict(shape),
+                shape=shape,
                 student=STUDENT_MODEL,
                 student_revision=STUDENT_REVISION,
                 teacher=TEACHER_MODEL,
                 teacher_revision=TEACHER_REVISION,
                 tokenizer_fingerprint=TOKENIZER_FINGERPRINT,
-                dataset=DATASET,
-                dataset_revision=DATASET_REVISION,
+                dataset=OPD_DATASET,
+                dataset_revision=OPD_DATASET_REVISION,
                 adapter_uri=adapter_uri,
                 command=command,
             )
@@ -234,9 +244,9 @@ def main(argv: list[str] | None = None) -> int:
     stage = Stage(args.stage)
     if args.dry_run:
         command = hydra_arguments(
-            STAGES[stage], Path("/data/deepmath.parquet"), Path("/model/adapter"), Path("/output")
+            stage_shape(stage), Path("/data/deepmath.parquet"), Path("/model/adapter"), Path("/output")
         )
-        print(json.dumps({"stage": stage, "shape": asdict(STAGES[stage]), "hydra_arguments": command}, indent=2))
+        print(json.dumps({"stage": stage, "shape": asdict(stage_shape(stage)), "hydra_arguments": command}, indent=2))
         return 0
     return run(stage, args.adapter_uri, args.output_uri)
 
