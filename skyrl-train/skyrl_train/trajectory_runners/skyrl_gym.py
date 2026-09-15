@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from uuid import uuid4
 import skyrl_gym
 from typing import Callable, Generic, List, Dict, Any, Optional, Sequence, Tuple, TypeVar
@@ -31,6 +31,7 @@ from skyrl_train.inference_engines.base import InferenceEngineInput, Conversatio
 from skyrl_train.error_treatment import ErrorTreatment
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.envs.thinking_contract import THINKING_CONTRACT_VERSION, score_thinking_contract
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
@@ -172,6 +173,17 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         else:
             self.env_executor = None
 
+        parser_protocol = trajectory_runner_cfg.get("non_agentic_parser_protocol")
+        if (
+            isinstance(trajectory_runner_cfg, DictConfig)
+            and parser_protocol is not None
+            and not isinstance(parser_protocol, str)
+        ):
+            raise TypeError("non_agentic_parser_protocol must be a string or null")
+        # Several legacy unit tests use an open-ended MagicMock for the config.
+        # Such a mock synthesizes a value for every missing key; treat that as
+        # the absent optional setting it represents.
+        self.parser_protocol = parser_protocol if isinstance(parser_protocol, str) else None
         self._validate_cfg(trajectory_runner_cfg)
         self.collector.validate()
 
@@ -210,6 +222,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         self.genrm_judge = OpenAIJudge(**dict(genrm_judge)) if genrm_judge is not None else None
 
     def _validate_cfg(self, trajectory_runner_cfg: DictConfig):
+        if self.parser_protocol is not None:
+            if self.parser_protocol != THINKING_CONTRACT_VERSION:
+                raise ValueError("Unknown non-agentic parser protocol")
+            if trajectory_runner_cfg.batched or trajectory_runner_cfg.max_turns != 1 or self.custom_chat_template:
+                raise ValueError("Post-thinking parsing requires single-turn, unbatched token-preserving collection")
+            vocabulary = self.tokenizer.get_vocab()
+            if not {"<|start_think|>", "<|end_think|>"} <= vocabulary.keys():
+                raise ValueError("Post-thinking parsing requires the model's declared thinking tokens")
         if len(trajectory_runner_cfg.chat_template_kwargs) and trajectory_runner_cfg.batched:
             raise ValueError(
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
@@ -280,6 +300,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         """Run one environment loop and always release its environment."""
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
+        if self.parser_protocol is not None:
+            if env_class not in {"gsm8k", "aime", "reasoning_gym"}:
+                raise ValueError("Post-thinking parsing is only qualified for math environments")
+            if env_class == "aime" and float(env_config.get("length_penalty_weight", 0)) != 0:
+                raise ValueError("Post-thinking parsing requires unshaped native AIME rewards")
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
         try:
             return await self._run_agent_loop(
@@ -411,6 +436,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         token_provenance = TokenProvenance.ENGINE
         behavior_policy_version_segments: list[PolicyVersionSegment] | None = []
         saw_behavior_policy_versions = False
+        non_agentic_contract: dict[str, Any] | None = None
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -529,6 +555,37 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 },
             )
             env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+            if self.parser_protocol is not None:
+                gold_key = "reward_spec" if env_class == "gsm8k" else "reward_model"
+                verdict = score_thinking_contract(
+                    env_class=env_class,
+                    ground_truth=env_extras[gold_key]["ground_truth"],
+                    native_response=output,
+                    prompt_tokens=input_ids,
+                    response_tokens=output_ids,
+                    stop_reason=stop_reason,
+                    decoder=self.tokenizer.backend_tokenizer,
+                )
+                if env_step_output["reward"] != verdict.legacy_full_text_reward:
+                    raise ValueError("Native reward differs from the declared unshaped verifier")
+                non_agentic_contract = asdict(verdict)
+                env_step_output = {
+                    **env_step_output,
+                    "reward": verdict.verifier_reward,
+                    "verification": VerificationResult.verified(
+                        verdict.verifier_reward,
+                        passed=bool(verdict.contract_correct),
+                        diagnostics=non_agentic_contract,
+                    ),
+                    "reward_result": RewardResult(
+                        unshaped_reward=verdict.verifier_reward,
+                        optimization_reward=verdict.verifier_reward,
+                    ),
+                    "metadata": {
+                        **{f"legacy_full_text/{key}": value for key, value in env_step_output["metadata"].items()},
+                        **non_agentic_contract,
+                    },
+                }
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             verification_results.append(verification_from_env_step(env_step_output))
@@ -712,6 +769,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             prompt_token_ids=tuple(prompt_ids),
             response_token_ids=tuple(response_ids),
             behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
+            metadata=({"non_agentic_contract": non_agentic_contract} if non_agentic_contract is not None else {}),
         )
         reward_result = RewardResult(
             unshaped_reward=unshaped_reward,

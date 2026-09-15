@@ -106,6 +106,7 @@ class TrajectoryBatch(TypedDict):
     error_treatments: Optional[List[Optional[str]]]
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
+    non_agentic_contract: NotRequired[List[Dict[str, Any]]]
     behavior_policy_version_segments: NotRequired[List[List[PolicyVersionSegment]]]
     rollout_routed_experts: Optional[List[List[List[List[int]]]]]
     token_level_shaping: Optional[List[List[float]]]

@@ -283,3 +283,5 @@ def test_snowball_levanter_async_m10_config_composes_and_lowers():
     assert cfg.trainer.fully_async.num_parallel_generation_workers == 160
     assert cfg.trainer.fully_async.max_buffered_groups == 32
     assert cfg.generator.sampling_params.logprobs == 0
+    assert cfg.generator.non_agentic_parser_protocol == "post-thinking-native-v1"
+    assert cfg.trainer.eval_interval == 6

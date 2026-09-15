@@ -55,7 +55,8 @@ trainer:
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
   eval_before_train: true
-  eval_interval: 5
+  # Keep the initial and train-end evaluations without duplicating step 5.
+  eval_interval: 6
   ckpt_interval: 6
   hf_save_interval: -1
   max_ckpts_to_keep: 1
@@ -111,6 +112,7 @@ generator:
   batched: false
   enable_http_endpoint: false
   use_conversation_multi_turn: false
+  non_agentic_parser_protocol: post-thinking-native-v1
   sampling_params:
     temperature: 1.0
     top_p: 1.0
