@@ -700,7 +700,9 @@ class RayPPOTrainer:
             with Timer("load_checkpoints", self.all_startup_timings):
                 self.global_step, _ = self.load_checkpoints()
 
-        await self._sync_policy_for_rollouts(reason="initial")
+        # Diagnostic ablation: vLLM already loaded the same checkpoint from disk. Leaving
+        # its initial weights untouched separates checkpoint/vLLM behavior from CUDA-IPC reload.
+        logger.warning("Skipping the initial policy-to-vLLM sync for the Snowball corruption ablation")
 
         # Synchronize before checking completion so a requested final evaluation uses
         # the checkpoint weights. The loaded global_step is the completed step count;
