@@ -79,18 +79,18 @@ the reproduction runtime:
 uv lock --script skyrl-train/ci/opd/tinker_repro/run_training.py
 ```
 
-The public recipes do not accept Hugging Face dataset revisions. Before any
-Tinker request, the worker therefore requires the current OpenThoughts3 or
-DeepMath repository head to equal the reviewed revision recorded in the plan.
-This detects later drift but does not force `load_dataset` to use the revision,
-and the revisions used for the originally published runs were not disclosed.
-Eliminating that residual race requires a narrowly reviewed Cookbook change or
-a pinned local dataset builder.
+The public recipes do not accept Hugging Face dataset revisions. A local adapter
+binds every OpenThoughts3 and DeepMath `load_dataset` call to the reviewed
+revision recorded in the plan. The worker also verifies that revision is still
+the repository head before making a Tinker request. The revisions used for the
+originally published runs were not disclosed, so these pins reproduce the data
+reviewed for this harness rather than claiming an unknown historical snapshot.
 
-The Cookbook's `temperature` CLI field is currently not forwarded into the OPD
-training config. The published value still holds because the underlying config
-also defaults to 1.0. Treat a change to either behavior as a fidelity review,
-not an automatic dependency update.
+The pinned Cookbook's OPD CLI parses the configured `temperature` but does not
+forward it to the training config. The same local adapter forwards that parsed
+value explicitly instead of relying on the underlying config default; the
+current reproduction plan configures 1.0. Treat a change to either pin or
+temperature as a fidelity review, not an automatic dependency update.
 
 ## AIME 2024 evaluation
 
