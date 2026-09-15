@@ -3,20 +3,47 @@ Main entrypoint for evaluation-only.
 """
 
 import asyncio
+from pathlib import Path
+from typing import Any, Protocol
 
 import hydra
 import ray
 from loguru import logger
 from omegaconf import DictConfig
-from typing import Any
 
 from skyrl_train.entrypoints.main_base import (
     BasePPOExp,
     config_dir,
 )
+from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest
 from skyrl_train.utils.utils import validate_generator_cfg, initialize_ray
 from skyrl_train.evaluate import evaluate
 from skyrl_train.utils.trainer_utils import build_dataloader
+
+
+class PolicyAdapterClient(Protocol):
+    async def update_named_weights(self, request: NamedWeightsUpdateRequest) -> Any: ...
+
+
+async def load_initial_policy_adapter(inference_engine_client: PolicyAdapterClient, cfg: DictConfig) -> None:
+    """Load a configured policy LoRA before an evaluation-only rollout."""
+    adapter_path = cfg.trainer.policy.model.lora.adapter_path
+    if adapter_path is None:
+        return
+    if not cfg.generator.run_engines_locally:
+        raise ValueError("evaluation-only LoRA loading requires local inference engines")
+    if cfg.generator.backend != "vllm":
+        raise ValueError("evaluation-only LoRA loading currently requires the vLLM backend")
+    path = Path(adapter_path)
+    if not path.is_absolute() or not path.is_dir():
+        raise ValueError("evaluation-only LoRA adapter_path must be an existing absolute directory")
+    request: NamedWeightsUpdateRequest = {
+        "names": ["lora_disk_load"],
+        "dtypes": [],
+        "shapes": [],
+        "extras": [{"lora_disk_path": str(path)}],
+    }
+    await inference_engine_client.update_named_weights(request)
 
 
 class EvalOnlyEntrypoint(BasePPOExp):
@@ -29,6 +56,7 @@ class EvalOnlyEntrypoint(BasePPOExp):
 
         inference_engine_client = self.create_inference_engine_client()
         await inference_engine_client.wake_up()
+        await load_initial_policy_adapter(inference_engine_client, self.cfg)
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
 
         results: dict[str, Any] = await evaluate(

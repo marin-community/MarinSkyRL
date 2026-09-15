@@ -1,9 +1,9 @@
 # Tinker rank-128 reasoning reproduction
 
-This directory contains two independent harnesses for the public Tinker
-reasoning result: a staged OpenThoughts3 SFT and DeepMath OPD training pipeline,
-and an AIME 2024 evaluator for released or reproduced sampler checkpoints. Iris
-only orchestrates CPU clients; Tinker hosts the model training and sampling.
+This directory contains Tinker-hosted and native MarinSkyRL harnesses for the
+public Tinker reasoning result. The hosted path runs OpenThoughts3 SFT, DeepMath
+OPD, and AIME 2024 sampling through Tinker. The native path trains and evaluates
+the same pinned Qwen3.5 model family on Iris GPUs.
 
 ## Training stages
 
@@ -116,6 +116,30 @@ The runner refuses a symlinked vLLM source tree rather than modifying Iris's
 shared uv cache. `--no-sync` is required because Iris's managed setup currently
 hardcodes symlink mode before applying job environment overrides. Use a unique
 output URI for every attempt.
+
+`native_aime24.py` evaluates an SFT or OPD LoRA adapter with MarinSkyRL's AIME
+environment. It uses the same pinned 30-problem dataset, system prompt,
+temperature 1.0, top-p 1.0, disabled top-k, one sample per problem, and 64,000
+generated-token limit as the Tinker evaluator. The manifest reports accuracy in
+addition to MarinSkyRL's centered `+1/-1` reward mean. A full run fails if any
+response reaches the generation limit.
+
+Pass the exact `lora_adapter` checkpoint prefix, not the parent checkpoint or
+experiment prefix:
+
+```bash
+uv run iris --cluster cw-rno2a job run \
+  --enable-extra-resources --gpu H100x8 --no-sync \
+  -- env UV_CACHE_DIR=/tmp/tinker-native-aime-uv-cache UV_LINK_MODE=copy \
+  uv run --frozen --extra fsdp --extra vllm python \
+  skyrl-train/ci/opd/tinker_repro/native_aime24.py \
+  --stage smoke --adapter-uri "$ADAPTER_URI" --output-uri "$OUTPUT_URI"
+```
+
+Use a new output URI and change `--stage smoke` to `--stage full` after the
+single-problem smoke run completes. Evaluation-only LoRA runs reject remote
+engines, non-vLLM backends, and missing local adapter directories. These checks
+prevent `main_generate` from silently evaluating the base model.
 
 ## AIME 2024 evaluation
 
