@@ -209,6 +209,7 @@ def test_training_command_has_semantic_control_settings() -> None:
         "actor_rollout_ref.rollout.top_p": "0.99",
         "reward_model.micro_batch_size_per_gpu": "1",
         "+reward_model.teacher_temperature": "1.0",
+        "+reward_model.reward_kwargs.compute_true_reward": "False",
         "+data.sampler.class_path": "pkg://verl.utils.dataset.domain_weighted_sampler",
         "+data.sampler.class_name": "DomainWeightedSampler",
         "+data.domain_weights.math": "2",
