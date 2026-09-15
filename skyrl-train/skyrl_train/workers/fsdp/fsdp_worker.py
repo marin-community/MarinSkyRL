@@ -25,6 +25,7 @@ from skyrl_train.models.grug_moe import (
     GRUG_MOE_MODEL_TYPE,
     validate_grug_expert_parallel_options,
 )
+from skyrl_train.inference_engines.base import lora_disk_load_request
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy, peft_config_payload
 from skyrl_train.utils import get_physical_gpu_id, str_to_torch_dtype, torch_dtype_to_str
 from skyrl_train.numa_policy import MemoryPolicy, cpu_numa_topology, current_memory_policy
@@ -925,13 +926,8 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             with io.open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
                 json.dump(peft_config, f, ensure_ascii=False, indent=4)
 
-            # Send LoRA disk loading request to inference engine. `lora_disk_load` is a specific identifier
-            # to tell the inference engine to extract the `lora_disk_path`.
-            lora_request = {
-                "names": ["lora_disk_load"],
-                "extras": [{"lora_disk_path": lora_sync_path}],
-            }
-            await inference_engine_client.update_named_weights(lora_request)
+            # Load the saved adapter through the inference engine's named-weight protocol.
+            await inference_engine_client.update_named_weights(lora_disk_load_request(lora_sync_path))
 
         torch.distributed.barrier()
 

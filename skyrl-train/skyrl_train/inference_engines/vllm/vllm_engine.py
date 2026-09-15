@@ -69,6 +69,8 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
+    LORA_DISK_LOAD_NAME,
+    LORA_DISK_PATH_KEY,
 )
 from skyrl_train.inference_engines.opencode_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
@@ -1088,11 +1090,11 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
     def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
         """Check if this is a LoRA disk loading request."""
-        is_lora = request["names"][0] == "lora_disk_load"
+        is_lora = request["names"][0] == LORA_DISK_LOAD_NAME
         if is_lora:
-            assert request.get("extras") and len(request["extras"]) > 0 and "lora_disk_path" in request["extras"][0], (
-                "vLLM LoRA weight update requests must contain the disk load path under key `lora_disk_path`"
-            )
+            assert (
+                request.get("extras") and len(request["extras"]) > 0 and LORA_DISK_PATH_KEY in request["extras"][0]
+            ), f"vLLM LoRA weight update requests must contain the disk load path under key `{LORA_DISK_PATH_KEY}`"
         return is_lora
 
     def reset_prefix_cache(self):
@@ -1207,7 +1209,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         # Handle LoRA disk loading request
         if self._is_lora_disk_loading_request(request):
-            lora_path = request["extras"][0]["lora_disk_path"]
+            lora_path = request["extras"][0][LORA_DISK_PATH_KEY]
             return await self._load_lora_from_disk(lora_path)
 
         # Use the weight loader to coordinate weight transfer
@@ -1941,7 +1943,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         # Check for LoRA disk loading request
         if self._is_lora_disk_loading_request(request):
-            lora_path = request["extras"][0]["lora_disk_path"]
+            lora_path = request["extras"][0][LORA_DISK_PATH_KEY]
             return await self._load_lora_from_disk(lora_path)
 
         # Use the weight loader to coordinate weight transfer

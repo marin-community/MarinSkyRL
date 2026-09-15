@@ -17,19 +17,22 @@ from enum import StrEnum
 from typing import Any, Protocol
 
 from datasets import Dataset, load_dataset
+from aime24_protocol import (
+    AIME24_DATASET,
+    AIME24_REVISION,
+    AIME24_SIZE,
+    AIME24_SPLIT,
+    CONTEXT_WINDOW,
+    MAX_TOKENS,
+    MODEL_NAME,
+    RENDERER_NAME,
+    SYSTEM_PROMPT,
+    TEMPERATURE,
+    TOP_K,
+    TOP_P,
+)
 from reproduction_artifacts import ArtifactStorage, claim_empty_output, runtime_versions, write_json
 
-AIME24_DATASET = "HuggingFaceH4/aime_2024"
-AIME24_REVISION = "2fe88a2f1091d5048c0f36abc874fb997b3dd99a"
-AIME24_SPLIT = "train"
-AIME24_SIZE = 30
-MODEL_NAME = "Qwen/Qwen3.5-9B-Base"
-RENDERER_NAME = "qwen3_5"
-MAX_TOKENS = 64_000
-CONTEXT_WINDOW = 65_536
-TEMPERATURE = 1.0
-TOP_P = 1.0
-TOP_K = -1
 TIMEOUT_SECONDS = 1_800
 
 
@@ -203,7 +206,7 @@ def _benchmark_builder(examples: list[AIME24Example]) -> Any:
 
     class AIME24Benchmark(BenchmarkBuilder):
         name = "aime_2024"
-        recommended_system_prompt = "Put your final answer in \\boxed{}."
+        recommended_system_prompt = SYSTEM_PROMPT
 
         def make_envs(self, renderer: Any, config: Any) -> list[Any]:
             selected = examples[: config.max_examples]
