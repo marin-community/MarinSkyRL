@@ -196,6 +196,8 @@ def test_dry_run_exposes_immutable_inputs_without_submitting(
     assert plan["data_revision"] == "9e897efe3257599d4300e2d5ee865a1cc714af87"
     assert plan["planned_completions"] == 6
     assert plan["maximum_output_tokens"] == 3_072
+    assert plan["job_name"].startswith("open-mopd-final-eval-smoke-")
+    assert plan["job_name"] == plan["iris_command"][plan["iris_command"].index("--job-name") + 1]
     assert "--no-sync" in plan["iris_command"]
     assert "--no-preemptible" in plan["iris_command"]
     assert "--max-retries" in plan["iris_command"]
@@ -221,6 +223,23 @@ def test_submission_requires_omission_acknowledgement(
             ]
         )
     capsys.readouterr()
+
+
+def test_distinct_output_prefixes_produce_distinct_job_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    root = evaluation.DEFAULT_CONFIG.parents[3]
+    monkeypatch.setattr(evaluation, "resolve_launcher_source", lambda: SimpleNamespace(root=root, commit="abc123"))
+    config = evaluation.load_evaluation_config(evaluation.DEFAULT_CONFIG)
+    common = {
+        "config_path": evaluation.DEFAULT_CONFIG,
+        "gate": "smoke",
+        "cluster_config": Path("/tmp/iris.yaml"),
+        "task_image": TASK_IMAGE,
+    }
+
+    first = evaluation.build_plan(config, output_uri=f"{OUTPUT_URI}-first", **common)
+    second = evaluation.build_plan(config, output_uri=f"{OUTPUT_URI}-second", **common)
+
+    assert first.job_name != second.job_name
 
 
 @pytest.mark.parametrize("output_uri", ["/tmp/results", "file:///tmp/results", "s3://bucket"])
