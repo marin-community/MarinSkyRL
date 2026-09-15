@@ -11,7 +11,6 @@ from omegaconf import DictConfig
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.entrypoints.levanter_snowball import create_levanter_snowball_learner
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.learners.levanter_config import LevanterSnowballRuntimeConfig
 
 
@@ -66,6 +65,11 @@ class FullyAsyncLevanterSnowballExp(BasePPOExp):
         trajectory_runner,
         colocate_pg,
     ):
+        # The launcher-only environment intentionally omits Torch. Keep the
+        # trainer import inside the GPU-owning entrypoint task so callers can
+        # compose and validate this configuration without training extras.
+        from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer  # noqa: PLC0415
+
         self.learner.connect_inference_engine(inference_engine_client)
         return FullyAsyncRayPPOTrainer(
             cfg=cfg,
