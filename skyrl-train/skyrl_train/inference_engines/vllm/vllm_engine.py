@@ -1165,6 +1165,10 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Apply affinity on every synchronous vLLM worker."""
         return await set_sync_worker_numa_affinity(self.llm.collective_rpc)
 
+    async def report_engine_hosts(self):
+        """Wait for the synchronous engine's workers to load before weight sync."""
+        return await asyncio.to_thread(self.llm.collective_rpc, "report_host")
+
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
 
