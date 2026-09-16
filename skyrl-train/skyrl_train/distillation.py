@@ -33,6 +33,8 @@ class TeacherScoreRequest:
     response_mask: torch.Tensor
     evidence: TeacherEvidenceKind
     top_k: Optional[int] = None
+    student_topk_indices: Optional[torch.Tensor] = None
+    behavior_topk_logprobs: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,16 @@ class TopKTeacherEvidence(TeacherEvidence):
     kind: ClassVar[TeacherEvidenceKind] = TeacherEvidenceKind.TOPK_DISTRIBUTION
 
 
-TeacherEvidenceBatch = ChosenTokenTeacherEvidence | TopKTeacherEvidence
+@dataclass(frozen=True)
+class StudentSelectedTeacherEvidence(TeacherEvidence):
+    """Teacher scores on the exact student-selected token IDs in the request."""
+
+    student_topk_indices: torch.Tensor
+    teacher_on_student_logprobs: torch.Tensor
+    kind: ClassVar[TeacherEvidenceKind] = TeacherEvidenceKind.STUDENT_SELECTED_TOPK
+
+
+TeacherEvidenceBatch = ChosenTokenTeacherEvidence | TopKTeacherEvidence | StudentSelectedTeacherEvidence
 
 
 @dataclass(frozen=True)
@@ -426,17 +437,37 @@ def validate_teacher_score_request(request: TeacherScoreRequest) -> None:
         raise ValueError("teacher score request token IDs must be non-negative")
     if request.prompt_token_ids.shape[0] != batch_size or request.response_token_ids.shape[0] != batch_size:
         raise ValueError("teacher score request tensors must align with trajectory_ids")
+    if request.evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
+        if request.student_topk_indices is None or request.behavior_topk_logprobs is None:
+            raise ValueError("student-selected teacher requests require indices and behavior logprobs")
+        if (
+            request.student_topk_indices.ndim != 3
+            or request.student_topk_indices.shape[:2] != request.response_mask.shape
+        ):
+            raise ValueError("student-selected indices must have [batch, response_len, K] coordinates")
+        if request.student_topk_indices.shape[-1] == 0:
+            raise ValueError("student-selected requests require at least one token per valid position")
+        if request.behavior_topk_logprobs.shape != request.student_topk_indices.shape:
+            raise ValueError("student-selected behavior logprobs must match selected indices")
+        if isinstance(request.top_k, bool) or request.top_k != request.student_topk_indices.shape[-1]:
+            raise ValueError("student-selected top_k must match selected indices")
+        if request.student_topk_indices.dtype not in (torch.int32, torch.int64):
+            raise ValueError("student-selected indices must have integer dtype")
+        _validate_selected_token_ids(request.student_topk_indices, request.response_mask, "student-selected")
+        _validate_masked_logprobs(request.behavior_topk_logprobs, request.response_mask, "behavior top-K logprobs")
+    elif request.student_topk_indices is not None or request.behavior_topk_logprobs is not None:
+        raise ValueError("student-selected fields require student-selected teacher evidence")
     if request.evidence is TeacherEvidenceKind.TOPK_DISTRIBUTION:
         if isinstance(request.top_k, bool) or not isinstance(request.top_k, int) or request.top_k <= 0:
             raise ValueError("top-K teacher score requests require a positive top_k")
-    elif request.top_k is not None:
+    elif request.evidence is not TeacherEvidenceKind.STUDENT_SELECTED_TOPK and request.top_k is not None:
         raise ValueError("top_k is only valid for top-K teacher score requests")
 
 
 def validate_teacher_evidence(request: TeacherScoreRequest, evidence: TeacherEvidenceBatch) -> None:
     """Reject evidence whose identity, token coordinates, shape, or values are ambiguous."""
     validate_teacher_score_request(request)
-    if not isinstance(evidence, (ChosenTokenTeacherEvidence, TopKTeacherEvidence)):
+    if not isinstance(evidence, (ChosenTokenTeacherEvidence, TopKTeacherEvidence, StudentSelectedTeacherEvidence)):
         raise TypeError(f"unsupported teacher evidence type: {type(evidence).__name__}")
     _validate_evidence_coordinates(
         evidence,
@@ -457,6 +488,17 @@ def validate_teacher_evidence(request: TeacherScoreRequest, evidence: TeacherEvi
         if evidence.chosen_logprobs.shape != evidence.valid_mask.shape:
             raise ValueError("teacher chosen_logprobs must match valid_mask")
         _validate_masked_logprobs(evidence.chosen_logprobs, evidence.valid_mask, "teacher chosen_logprobs")
+        return
+
+    if isinstance(evidence, StudentSelectedTeacherEvidence):
+        assert request.student_topk_indices is not None
+        if not torch.equal(evidence.student_topk_indices, request.student_topk_indices):
+            raise ValueError("teacher evidence must identify the exact student-selected token IDs")
+        if evidence.teacher_on_student_logprobs.shape != request.student_topk_indices.shape:
+            raise ValueError("teacher scores must match student-selected token coordinates")
+        _validate_masked_logprobs(
+            evidence.teacher_on_student_logprobs, evidence.valid_mask, "teacher-on-student logprobs"
+        )
         return
 
     _validate_topk_distribution(
@@ -513,6 +555,31 @@ def prepare_sparse_forward_kl(
     )
 
 
+def prepare_student_topk_policy_surrogate(
+    request: TeacherScoreRequest,
+    evidence: StudentSelectedTeacherEvidence,
+    *,
+    coefficient: float,
+    route_weights: torch.Tensor,
+) -> StudentTopKPolicySurrogateInput:
+    """Compile exact student-selected evidence into the shared learner payload."""
+    validate_teacher_evidence(request, evidence)
+    if not math.isfinite(coefficient) or coefficient <= 0:
+        raise ValueError("distillation coefficient must be a positive finite number")
+    if route_weights.shape != evidence.valid_mask.shape:
+        raise ValueError("distillation route_weights must match teacher response coordinates")
+    _validate_loss_weights(route_weights, "distillation route_weights")
+    assert request.student_topk_indices is not None
+    assert request.behavior_topk_logprobs is not None
+    return StudentTopKPolicySurrogateInput(
+        student_topk_indices=request.student_topk_indices,
+        behavior_topk_logprobs=request.behavior_topk_logprobs,
+        teacher_on_student_logprobs=evidence.teacher_on_student_logprobs,
+        valid_mask=evidence.valid_mask,
+        loss_weights=route_weights * coefficient,
+    )
+
+
 def validate_sampled_reverse_kl_attachment(
     evidence: ChosenTokenTeacherEvidence,
     distillation: SampledReverseKLInput,
@@ -556,6 +623,34 @@ def validate_distillation_attachment(
             trajectory_ids=trajectory_ids,
             response_mask=response_mask,
         )
+        return
+    if isinstance(evidence, StudentSelectedTeacherEvidence) and isinstance(
+        distillation, StudentTopKPolicySurrogateInput
+    ):
+        _validate_evidence_coordinates(evidence, trajectory_ids=trajectory_ids, response_mask=response_mask)
+        if not torch.equal(distillation.student_topk_indices, evidence.student_topk_indices):
+            raise ValueError("prepared student-selected token IDs do not match teacher evidence")
+        if distillation.student_topk_indices.shape[:2] != response_mask.shape:
+            raise ValueError("prepared student-selected token IDs do not match response coordinates")
+        if not torch.equal(distillation.valid_mask, evidence.valid_mask):
+            raise ValueError("prepared student-selected valid_mask does not match teacher evidence")
+        _validate_selected_token_ids(distillation.student_topk_indices, distillation.valid_mask, "student-selected")
+        if distillation.behavior_topk_logprobs.shape != distillation.student_topk_indices.shape:
+            raise ValueError("prepared student-selected behavior scores do not match selected token IDs")
+        _validate_masked_logprobs(
+            distillation.behavior_topk_logprobs, distillation.valid_mask, "prepared behavior top-K logprobs"
+        )
+        if not torch.allclose(
+            distillation.teacher_on_student_logprobs,
+            evidence.teacher_on_student_logprobs,
+            rtol=0,
+            atol=0,
+            equal_nan=True,
+        ):
+            raise ValueError("prepared student-selected teacher scores do not match teacher evidence")
+        if distillation.loss_weights.shape != response_mask.shape:
+            raise ValueError("prepared distillation loss_weights must match trajectory response coordinates")
+        _validate_loss_weights(distillation.loss_weights, "prepared distillation loss_weights")
         return
     if not isinstance(evidence, TopKTeacherEvidence) or not isinstance(distillation, SparseForwardKLInput):
         raise ValueError("teacher evidence and prepared distillation objective kinds must match")
