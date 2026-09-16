@@ -351,6 +351,20 @@ class DistributedTorchRayActor:
         return self._master_addr, self._master_port
 
 
+def log_r3_resident_set(rank: int, data: TrainingInputBatch) -> None:
+    """Per-rank marker that the rollout's routed-experts chunk is resident.
+
+    Ungated INFO so a run can be read rank-by-rank: every rank that receives a
+    batch carrying ``rollout_routed_experts`` logs its size on arrival. Strict
+    no-op signal when the batch carries no routes.
+    """
+    if "rollout_routed_experts" in data.keys() and data["rollout_routed_experts"] is not None:
+        routes = data["rollout_routed_experts"]
+        logger.info(
+            f"R3_RESIDENT_SET rank={rank} nbytes={int(routes.nbytes)} dtype={routes.dtype} shape={tuple(routes.shape)}"
+        )
+
+
 class Worker(DistributedTorchRayActor):
     def __init__(self, cfg: DictConfig, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -550,18 +564,9 @@ class Worker(DistributedTorchRayActor):
         # (peers' tasks never scheduled). With the drain working, ALL FSDP shard ranks
         # (e.g. 0/8/16/24) must print this. Cheap one-line INFO; keep it.
         logger.info(f"WORKER_FORWARD_ENTER rank={self._rank}")
-        # R3 RESIDENT-SET per-rank marker (ungated). The by-value forward-arg spill
-        # fix ships `rollout_routed_experts` as a single ray.put ObjectRef shared
-        # across each dp-group (skyrl_train/distributed/dispatch.py) rather than
-        # re-serialized per actor. This line lets us SEE the resident R3 chunk land
-        # on EVERY rank (the A/B PASS criterion: all 32 ranks log R3_RESIDENT_SET +
-        # WORKER_FORWARD_ENTER + a completed step, no watchdog). nbytes==0 when R3 is
-        # off (8B / flag-off), so the marker is a strict no-op signal there.
-        if "rollout_routed_experts" in data.keys() and data["rollout_routed_experts"] is not None:
-            _r3 = data["rollout_routed_experts"]
-            logger.info(
-                f"R3_RESIDENT_SET rank={self._rank} nbytes={int(_r3.nbytes)} dtype={_r3.dtype} shape={tuple(_r3.shape)}"
-            )
+        # R3 RESIDENT-SET per-rank marker: lets us SEE the resident routed-experts
+        # chunk land on EVERY rank (ungated; no-op when the batch carries no routes).
+        log_r3_resident_set(self._rank, data)
         # run in micro batches of cfg.trainer.micro_forward_batch_size_per_gpu
         # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
         micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
@@ -998,44 +1003,28 @@ class PolicyWorkerBase(Worker):
         return causal_lm if isinstance(causal_lm, GrugMoeForCausalLM) else None
 
     def _drain_r3_decentral_stagger(self, train_data: TrainingInputBatch) -> None:
-        """Co-arrival drain before the first training collective (80B gs1 SIGABRT #1-6).
+        """Co-arrival barrier for the staggered R3-decentral dispatch path.
 
-        Under fully_async + SKYRL_R3_DECENTRAL, `ppo_train` is dispatched STAGGERED
-        per-dp-group: MeshDispatch relocates each dp-group's multi-GB `rollout_routed_experts`
-        (R3) chunk to its consumer node sequentially (dispatch.py `_relocate_chunk_to_node`
-        under `decentral`), so the 8 members of a `mesh_fsdp` shard group — one per dp-group,
-        since the FSDP shard dim is ORTHOGONAL to the dp/dispatch dim — begin `ppo_train` at
-        up to ~12 min apart (observed dp=0 vs dp=1 ≈ 12 min). Each actor method only starts
-        once its R3 arg ObjectRef resolves, so the fastest member enters, runs the first
-        micro-batch forward, and issues the first training unshard (`mesh_fsdp
-        _ALLGATHER_BASE`, SeqNum=6936) while its peers are still transferring their R3 chunk.
-        The unshard blocks for them; the arrival spread exceeds the 600 s `mesh_fsdp` submesh
-        PG timeout -> NCCL-watchdog SIGABRT.
+        Under ``r3_transport=decentral`` the mesh dispatch relocates each
+        dp-group's multi-gigabyte routed-experts chunk to its consumer node
+        sequentially, so members of a model-shard group begin ``ppo_train``
+        minutes apart. The fastest member would otherwise enter compute and
+        issue the first shard-wide collective alone, blowing the shard
+        sub-process-group timeout. Call at the very top of ``ppo_train``:
+        every rank's routes have already materialized there (the argument
+        ObjectRef must have resolved for the method to run), so one barrier
+        over the DEFAULT/WORLD process group — whose timeout must exceed the
+        shard subgroups' — absorbs the arrival spread before any compute.
 
-        The `forward` phase was already hardened against exactly this desync (async entry +
-        `asyncio.to_thread` + the pre-forward `barrier_all` drain: fsdp_worker.py:908 /
-        worker.py:560). Mirror the drain's PRIMITIVE here, at the one placement that actually
-        collapses THIS stagger — the top of `ppo_train`, BEFORE any compute (hence before
-        unshard #6936) but AFTER each rank's R3 chunk has materialized (guaranteed: the arg
-        ObjectRef is already resolved for the actor method to be running). Each rank waits on
-        a `torch.distributed.barrier()` over the DEFAULT/WORLD PG, whose timeout is
-        SKYRL_WORKER_NCCL_TIMEOUT_IN_S (worker.py:156; 3600 s in the 80B config) — LONGER
-        than the 600 s `mesh_fsdp` submesh timeout. So this barrier ABSORBS the multi-minute
-        R3 arrival spread and RE-SYNCHRONIZES every rank; all shard-group members then
-        co-arrive at the first unshard within the barrier's release (sub-second) instead of
-        ~12 min apart, so the submesh timeout is never approached. A barrier changes only
-        timing, never a tensor -> value-neutral (loss/grad bit-identical).
-        `torch.cuda.synchronize()` first (mirrors `barrier_all`) so the post-backload H2D
-        copies are quiesced before the collective. Gated to the R3-decentral MoE path (the
-        ONLY path with the staggered relocation) so the non-decentral / no-routes path is
-        byte-identical; does NOT raise the submesh unshard timeout.
+        Timing-only (no tensor is touched) and gated to the R3-decentral path
+        with routes present, so every other configuration is unchanged.
         """
         staggered = (
             self.cfg.generator.r3_transport == R3Transport.DECENTRAL and "rollout_routed_experts" in train_data.keys()
         )
         if staggered and self._world_size > 1 and torch.distributed.is_initialized():
-            # UNGATED per-rank marker: the timestamp CLUSTER at release proves co-arrival;
-            # the first unshard must NOT time out afterward.
+            # Ungated per-rank marker: the timestamp cluster at release proves
+            # co-arrival; the first shard collective must not time out after it.
             logger.info(f"WORKER_PPO_TRAIN_DRAIN_BARRIER rank={self._rank}")
             torch.cuda.synchronize()
             torch.distributed.barrier()

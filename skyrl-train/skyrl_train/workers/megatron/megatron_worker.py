@@ -50,6 +50,7 @@ from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
     CriticWorkerBase,
+    log_r3_resident_set,
 )
 from skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronForwardMicroBatch,
@@ -154,15 +155,7 @@ class MegatronWorker:
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
-        # R3 RESIDENT-SET per-rank marker (mirrors Worker.forward): lets us SEE
-        # the resident routed-experts chunk land on EVERY rank. nbytes==0 when R3
-        # is off, so the marker is a strict no-op signal there.
-        if "rollout_routed_experts" in data.keys() and data["rollout_routed_experts"] is not None:
-            routes = data["rollout_routed_experts"]
-            logger.info(
-                f"R3_RESIDENT_SET rank={self._rank} nbytes={int(routes.nbytes)} dtype={routes.dtype} "
-                f"shape={tuple(routes.shape)}"
-            )
+        log_r3_resident_set(self._rank, data)
         # Run in micro batches grouped into a single mini-batch
         micro_bsz = self.cfg.trainer.micro_forward_batch_size_per_gpu
         micro_batches = data.chunk(micro_bsz)
