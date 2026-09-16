@@ -765,8 +765,21 @@ def concatenate_trajectory_batches(
                     rollout_logprobs_concat.append([0.0] * len(response_ids))
 
     unshaped_rewards_concat = None
+    unshaped_reward_available_concat = None
     if any(output.get("unshaped_rewards") is not None for output in trajectory_batches):
         unshaped_rewards_concat = [reward for output in trajectory_batches for reward in get_outcome_rewards(output)]
+        if any(
+            output.get("unshaped_reward_available") is not None or output.get("unshaped_rewards") is None
+            for output in trajectory_batches
+        ):
+            unshaped_reward_available_concat = [
+                available
+                for output in trajectory_batches
+                for available in (
+                    output.get("unshaped_reward_available")
+                    or [output.get("unshaped_rewards") is not None] * len(output["response_ids"])
+                )
+            ]
 
     disposition_channels: dict[str, list[str | None]] = {}
     for key in ("exception_types", "error_treatments"):
@@ -874,6 +887,8 @@ def concatenate_trajectory_batches(
         result["response_span_tags"] = response_span_tags_concat
     if unshaped_rewards_concat is not None:
         result["unshaped_rewards"] = unshaped_rewards_concat
+    if unshaped_reward_available_concat is not None:
+        result["unshaped_reward_available"] = unshaped_reward_available_concat
     for key, values in disposition_channels.items():
         result[key] = values
     if baseline_exclusions_concat is not None:
