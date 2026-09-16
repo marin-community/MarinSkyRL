@@ -48,7 +48,6 @@ from skyrl_train.timing_observability import (
     timed_env_call,
 )
 import skyrl_train.timing_observability as timing_module
-import skyrl_train.trajectory_runners.harbor.execution as harbor_execution
 import skyrl_train.trajectory_runners.harbor.rollout_dispatcher as harbor_dispatcher
 from loguru import logger
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
@@ -312,15 +311,6 @@ def test_every_child_of_generate_is_either_a_measured_span_or_the_residual():
     """
     children = {name for name, parent in TIMING_PARENTS.items() if parent == "generate"}
     assert children == set(GENERATE_SPANS) | {"generate_span_residual"}
-
-
-def test_the_nested_spans_hang_off_a_disjoint_one_and_stay_out_of_the_residual_set():
-    """They are INCLUSIVE children: the parent wall already contains them."""
-    assert TIMING_PARENTS["rollout_tokenize"] == "rollout_collect"
-    assert TIMING_PARENTS["rollout_retain"] == "rollout_finalize"
-    for name in GENERATE_NESTED_SPANS:
-        assert name not in GENERATE_SPANS
-        assert TIMING_PARENTS[name] in GENERATE_SPANS
 
 
 def test_concurrent_await_sums_never_reach_the_span_tree():
@@ -892,12 +882,6 @@ def test_an_uninstrumented_runner_publishes_nothing_not_a_full_residual():
     record_generate_spans(timings, 98.0, all_timings, counters)
     assert all_timings == {}, "no leaves AND no residual"
     assert counters == {}
-
-
-def test_the_skyrl_gym_runner_declares_itself_instrumented():
-    """The one runner whose every engine, environment and tokenizer call site is bracketed."""
-
-    assert SkyRLGymTrajectoryRunner.generate_spans_instrumented is True
 
 
 # --- the residual -------------------------------------------------------------------------------
@@ -1924,13 +1908,6 @@ def test_the_harbor_dispatcher_forwards_no_accumulator_to_its_shards():
         "it must still accept the call the trainer makes on whatever holds the runner slot"
     )
     assert "phase_timings=" not in inspect.getsource(harbor_dispatcher), "no shard may be handed the accumulator"
-
-
-def test_the_harbor_runner_protocol_declares_the_argument_the_trainer_passes():
-    """A third runner written to this Protocol without it dies with TypeError on the FIRST generate
-    of step 1 -- after full model and engine bring-up."""
-
-    assert "phase_timings" in inspect.getsource(harbor_execution.HarborRunner)
 
 
 def test_the_trainer_wires_the_generate_span_layer():

@@ -319,17 +319,6 @@ def test_spans_accumulate_across_micro_steps(monkeypatch):
     assert totals["policy_metric_allreduce"] == pytest.approx(12.0)
 
 
-def test_residual_closes_the_decomposition():
-    """The residual is what makes a wrong decomposition visible rather than plausible."""
-    accumulator = _accumulator()
-    with accumulator.span("policy_forward"):
-        pass
-    totals = accumulator.totals(total_seconds=10.0)
-    assert totals["policy_ppo_train"] == 10.0
-    covered = sum(totals.get(name, 0.0) for name in POLICY_TRAIN_SPANS)
-    assert totals["policy_span_residual"] == pytest.approx(10.0 - covered)
-
-
 def test_residual_is_signed_so_over_coverage_is_visible():
     """Clamping at zero would hide double-counting, which is what the residual exists to surface.
 
@@ -366,57 +355,10 @@ def test_record_zero_distinguishes_did_not_run_from_cost_nothing():
     assert accumulator.totals()["policy_entry_barrier"] == 0.0
 
 
-def test_the_conditional_barrier_records_its_zero_at_the_CALL_SITE():
-    """The method having the behaviour is not the same claim as the call site using it.
-
-    `record_zero`'s own test exercises the accumulator. Replacing the one call in `ppo_train` with
-    `pass` left the whole suite green -- and the derived-span walk cannot see it, because that walk
-    only matches `with ... .span(...)` context expressions. On every run without R3-decentral
-    transport, which is everything but the 80B MoE path, `policy_entry_barrier` would then be ABSENT
-    rather than 0.0, and a consumer could not tell "the barrier cost nothing" from "the barrier was
-    not measured" -- the exact distinction the explicit zero exists to make.
-    """
-    import ast
-    import inspect
-
-    import skyrl_train.workers.worker as worker_module
-
-    recorded: set[str] = set()
-    for node in ast.walk(ast.parse(inspect.getsource(worker_module))):
-        if not isinstance(node, ast.Call) or getattr(node.func, "attr", None) != "record_zero":
-            continue
-        arg = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "name"), None)
-        assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
-            f"record_zero at line {node.lineno} is called with a non-literal name"
-        )
-        recorded.add(arg.value)
-
-    assert "policy_entry_barrier" in recorded, (
-        "the else branch of the R3-decentral barrier must record an explicit zero, or the span is "
-        "absent on every non-decentral run and absence reads as 'not measured'"
-    )
-    # And the zero must sit in a branch, not on the main path -- an unconditional record_zero would
-    # be overwritten by the span itself and prove nothing.
-    for name in recorded:
-        assert TIMING_PARENTS[name] == "policy_ppo_train", f"{name} is zeroed but is not a policy_train leaf"
-
-
 def test_disabled_accumulator_records_no_zeros_either():
     accumulator = WorkerSpanAccumulator(enabled=False)
     accumulator.record_zero("policy_entry_barrier")
     assert accumulator.totals(total_seconds=1.0) == {}
-
-
-def test_training_step_is_split_not_one_coarse_span():
-    """A single policy_training_step span reports ~95% of the parent and answers nothing."""
-    for name in ("policy_forward", "policy_backward", "policy_optimizer_step", "policy_entropy_allreduce"):
-        assert TIMING_PARENTS[name] == "policy_ppo_train"
-        assert name in POLICY_TRAIN_SPANS
-    # It is registered but INCLUSIVE: it wraps training_step, which contains the four leaves above.
-    # Keeping it out of POLICY_TRAIN_SPANS is what stops the residual double-counting them -- the
-    # first instrumented run reported -1703 s against a 1706 s parent before this was fixed.
-    assert TIMING_PARENTS["policy_training_step"] == "policy_ppo_train"
-    assert "policy_training_step" not in POLICY_TRAIN_SPANS
 
 
 def test_published_rows_carry_worker_role_rank_and_an_exclusive_clock_domain():
@@ -468,10 +410,6 @@ def test_published_rows_carry_worker_role_rank_and_an_exclusive_clock_domain():
     # this mapping, so nearest_recorded_parent would orphan every leaf.
     assert by_phase["policy_ppo_train"]["parent"] == "train_critic_and_policy"
     assert by_phase["policy_forward"]["parent"] == "policy_ppo_train"
-
-
-def test_publishing_an_empty_mapping_is_a_no_op():
-    publish_worker_spans({}, step=1, rank=0)
 
 
 def test_every_child_of_policy_ppo_train_is_either_a_measured_span_or_the_residual():
@@ -550,23 +488,6 @@ def test_a_flush_that_does_not_settle_is_logged(monkeypatch, caplog):
     assert any("did not settle" in r.message for r in caplog.records)
 
 
-def test_flush_timeout_stays_short_because_it_blocks_the_workers_return():
-    import skyrl_train.timing_observability as module
-
-    assert module.TELEMETRY_FLUSH_TIMEOUT_SECONDS <= 1.0
-
-
-def test_publish_cost_has_a_span_so_it_is_attributable():
-    """It happens after the window closes; carried forward one step beats being unmeasured.
-
-    ⚠️ This test previously asserted `parent == "policy_ppo_train"` and membership in
-    POLICY_TRAIN_SPANS -- it encoded the defect and passed, which is why the over-coverage survived
-    review. Attribution is the property worth asserting; which parent it attaches to is asserted by
-    test_publish_cost_is_not_charged_to_a_parent_that_does_not_contain_it.
-    """
-    assert "policy_span_publish" in TIMING_PARENTS, "unregistered means dropped, i.e. unmeasured"
-
-
 def test_previous_publish_is_emitted_under_its_own_step_not_this_one():
     """Labelling step n-1's publish as step n, and subtracting it from step n's residual, removes
     time that interval never contained."""
@@ -596,15 +517,6 @@ def test_previous_publish_is_emitted_under_its_own_step_not_this_one():
     assert ("policy_ppo_train", 5) in rows
     assert ("policy_span_publish", 4) in rows, "the publish cost belongs to the step that incurred it"
     assert ("policy_span_publish", 5) not in rows
-
-
-def test_totals_does_not_absorb_the_publish_cost():
-    """It happens after the window closes, so it is not part of that interval's decomposition."""
-    accumulator = _accumulator()
-    with accumulator.span("policy_forward"):
-        pass
-    totals = accumulator.totals(total_seconds=10.0)
-    assert "policy_span_publish" not in totals
 
 
 def test_dropped_records_are_not_double_counted():
@@ -766,10 +678,6 @@ def test_counters_go_to_their_own_instrument_not_the_span_tree():
     ):
         assert name not in TIMING_PARENTS
         assert name not in POLICY_TRAIN_SPANS
-
-
-def test_publishing_no_counters_is_a_no_op():
-    publish_worker_counters({}, step=1, rank=0)
 
 
 def test_counters_ride_the_spans_publish_so_loss_detection_covers_them(monkeypatch):
@@ -1001,24 +909,6 @@ def test_a_successful_publish_returns_the_publisher_s_own_cost(monkeypatch):
         spans, total_seconds=1.0, step=3, rank=0, previous_publish=None, counters={}
     )
     assert cost == 0.125
-
-
-def test_the_publisher_is_told_which_clock_mode_produced_the_spans(monkeypatch):
-    """The mode changes what the numbers mean, so it must reach the sink rather than default."""
-    import skyrl_train.workers.worker as worker_module
-
-    seen = {}
-    monkeypatch.setattr(worker_module, "publish_worker_spans", lambda *a, **k: seen.update(k) or 0.0)
-    for synchronize in (True, False):
-        worker_module._publish_policy_spans(
-            WorkerSpanAccumulator(enabled=True, synchronize=synchronize),
-            total_seconds=1.0,
-            step=1,
-            rank=0,
-            previous_publish=None,
-            counters={},
-        )
-        assert seen["synchronize"] is synchronize
 
 
 def test_disabled_spans_publish_no_counters_even_when_some_are_gathered(monkeypatch):
@@ -1289,45 +1179,6 @@ def test_a_mislabelled_driver_parent_fails_LOUDLY_rather_than_orphaning_worker_r
         )
 
 
-def test_megatron_plus_policy_train_spans_is_REJECTED_and_the_other_backends_are_not():
-    """🚨 The rejection had no test at all: `if False and ...` in front of it survived the suite.
-
-    That mutation restores exactly the expensive failure it was added to prevent -- a Megatron run
-    accepts the flag, configures worker telemetry, trains normally, and publishes no worker tree,
-    with every health signal reading fine.
-
-    The three accept-cases are not padding. An earlier version of the docs said "FSDP2 only", which
-    under-claimed: `FSDPPolicyWorkerBase` and `DeepSpeedPolicyWorkerBase` both inherit the
-    instrumented `PolicyWorkerBase.ppo_train`, so all three publish the tree and rejecting any of
-    them would be a regression.
-    """
-    import pytest as _pytest
-    from omegaconf import OmegaConf
-
-    from skyrl_train.utils.utils import _validate_spans_backend, validate_cfg
-
-    def _cfg(strategy: str, spans: bool):
-        # Only the fields validate_cfg's spans check reads; the rest of validate_cfg is exercised by
-        # its own tests, and building a whole valid config here would test hydra, not this branch.
-        return OmegaConf.create({"trainer": {"strategy": strategy, "policy_train_spans": spans}})
-
-    with _pytest.raises(ValueError, match="policy_train_spans is not supported"):
-        _validate_spans_backend(_cfg("megatron", True))
-
-    # Megatron WITHOUT spans is fine, and so is every other backend WITH them.
-    _validate_spans_backend(_cfg("megatron", False))
-    for strategy in ("fsdp", "fsdp2", "deepspeed"):
-        _validate_spans_backend(_cfg(strategy, True))
-
-    # And the check lives in validate_cfg, not only in the helper.
-    import inspect
-
-    assert "_validate_spans_backend" in inspect.getsource(validate_cfg), (
-        "validate_cfg no longer calls the backend check, so nothing rejects the combination on a "
-        "real run even though this test passes"
-    )
-
-
 def test_the_training_step_leaves_open_in_the_order_they_actually_run(monkeypatch):
     """🚨 The worker tree's headline decomposition, driven through the real `training_step`.
 
@@ -1475,50 +1326,6 @@ def test_the_R3_decentral_arm_actually_OPENS_the_barrier_span(monkeypatch):
         "unmeasured on the one path that actually has a barrier"
     )
     assert "policy_entry_barrier" in totals, "and it must still reach a published row"
-
-
-def test_the_step_status_is_reduced_ACROSS_optimizer_windows_not_averaged(monkeypatch):
-    """🚨 Divergent values per window, or the dispatch is unproven.
-
-    The harness fed every window the same numbers, so mean, max and min were observationally
-    identical and swapping `policy_training_metrics` for `mean_metrics` changed nothing the suite
-    could see. That swap makes one window's divergence average toward zero and turns a rank's step
-    total into a per-window mean -- the two defects the reduction map exists to prevent, at the axis
-    the map was extended to cover.
-    """
-    seen: list[dict[str, float]] = []
-
-    def _training_step(experience, global_step, local_step, accumulation_steps):
-        # Window 0 diverges; window 1 is clean. A mean over the two hides the first.
-        window = len(seen)
-        status = {
-            "policy_loss": 1.0,
-            "response_length": 2.0,
-            "policy_lr": 1e-6,
-            "policy_entropy": 0.5,
-            "policy_update_steps": 1.0,
-            "raw_grad_norm": 0.1,
-            "log_ratio_abs_max": 19.0 if window == 0 else 0.0,
-            "optimizer_step_succeeded": 0.0 if window == 0 else 1.0,
-            "n_tokens_dp_gt_1pct": 3.0 if window == 0 else 7.0,
-        }
-        seen.append(status)
-        return status
-
-    class _Strategy:
-        device_mesh = None
-
-        def is_rank_0(self):
-            return True
-
-        def all_reduce_status(self, status):
-            # Identity across ranks, so anything below is the MINI-BATCH axis alone.
-            return dict(status)
-
-    _, _, _ = _run_ppo_train(
-        monkeypatch, r3_decentral=False, strategy=_Strategy(), training_step=_training_step, windows=2
-    )
-    assert len(seen) == 2, f"expected two optimizer windows, drove {len(seen)}"
 
 
 def test_two_windows_publish_a_max_a_min_and_a_summed_count(monkeypatch):

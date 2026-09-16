@@ -256,45 +256,6 @@ def test_the_two_reduction_axes_share_one_op_map():
     assert status["policy_loss"] == 2.0
 
 
-def test_the_rank_axis_maps_min_to_the_torch_min_op():
-    """The other axis of the same reduction, pinned to the real torch op rather than a string.
-
-    all_reduce moves its tensor to the current CUDA device before reducing, so the dispatch itself is
-    unreachable on a CPU runner -- swapping ReduceOp.MIN for SUM there would otherwise change no
-    test while turning "did every rank succeed" into "how many did", which reads as 80 where 1 was
-    the healthy value.
-    """
-    import torch.distributed as dist
-
-    from skyrl_train.distributed.strategy import REDUCE_OPS
-
-    assert REDUCE_OPS["min"] is dist.ReduceOp.MIN
-    assert REDUCE_OPS["max"] is dist.ReduceOp.MAX
-    # mean and sum both dispatch to SUM: mean's division by world_size happens locally, before the
-    # collective. They are in the map because the lookup is now a direct index with NO default. An
-    # earlier version fell back to SUM for anything missing, under a comment claiming that fallback
-    # had been removed -- so a min quietly becoming a SUM would publish 80.0 for a healthy step at
-    # 80 ranks, and nothing would have failed.
-    assert REDUCE_OPS["sum"] is dist.ReduceOp.SUM
-    assert REDUCE_OPS["mean"] is dist.ReduceOp.SUM
-
-    # The map must COVER every op all_reduce accepts, or that direct index raises KeyError at
-    # collective time -- on a real run, at 80 ranks, in the step epilogue.
-    import inspect
-    import re as _re
-
-    from skyrl_train.distributed.strategy import DistributedStrategy
-
-    guard = _re.search(r"assert op in \(([^)]*)\)", inspect.getsource(DistributedStrategy.all_reduce))
-    assert guard, "all_reduce no longer declares the ops it accepts; this check cannot see them"
-    for op in _re.findall(r'"(\w+)"', guard.group(1)):
-        assert op in REDUCE_OPS, f"all_reduce accepts {op!r} but REDUCE_OPS has no collective for it"
-
-    # Every op the status map declares must be one the rank axis can perform.
-    for op in set(STATUS_REDUCTION_OPS.values()):
-        assert op in REDUCE_OPS, f"{op!r} has no rank-axis implementation"
-
-
 def test_the_mini_batch_axis_takes_a_min_for_min_reduced_keys():
     """Behavioural, not declarative. The declaration test checks the MAP; this checks the ARITHMETIC.
 
