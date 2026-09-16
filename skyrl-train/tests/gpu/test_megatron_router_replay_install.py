@@ -242,7 +242,9 @@ def test_replay_keeps_gradients_flowing_through_the_gate(tiny_model):
     controller.assert_drained()
 
     for router in _routers(tiny_model):
-        grad = router.weight.main_grad if router.weight.main_grad is not None else router.weight.grad
+        grad = getattr(router.weight, "main_grad", None)
+        if grad is None:
+            grad = router.weight.grad
         assert grad is not None and torch.isfinite(grad).all(), router.layer_number
 
 
