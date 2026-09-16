@@ -1543,9 +1543,7 @@ def test_the_tokenize_walk_names_every_rollout_module_that_tokenizes():
     # One direction only. A module that STOPS tokenizing upstream is not a defect here, and
     # asserting it is turned an unrelated upstream change into a failure on this branch. What
     # matters is a module that starts tokenizing without a region to charge it to.
-    assert not (found - declared), (
-        f"undeclared modules tokenize on the rollout path: {sorted(found - declared)}"
-    )
+    assert not (found - declared), f"undeclared modules tokenize on the rollout path: {sorted(found - declared)}"
 
 
 @pytest.mark.parametrize("module_name", sorted(EXPECTED_TOKENIZE_REGIONS))
@@ -1666,9 +1664,7 @@ def test_every_wait_site_is_inside_a_trajectory_scope(module_name):
             scoped.update(range(node.lineno, node.end_lineno + 1))
             continue
         if node.name in TRAJECTORY_SCOPED_BY_DELEGATION:
-            assert not decorated, (
-                f"{module_name}.{node.name} inherits its caller's scope; a second scope would nest"
-            )
+            assert not decorated, f"{module_name}.{node.name} inherits its caller's scope; a second scope would nest"
             scoped.update(range(node.lineno, node.end_lineno + 1))
             continue
         if node.name not in TRAJECTORY_SCOPED_FUNCTIONS:
