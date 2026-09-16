@@ -171,6 +171,7 @@ Megatron Configuration
       context_parallel_size: 1
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: null
+      optimizer_checkpoint_sharding_type: fully_reshardable
 
       ddp_config: # pass-through config to Megatron's `DistributedDataParallelConfig` object
         # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/distributed/distributed_data_parallel_config.py#L8
@@ -187,6 +188,13 @@ Megatron Configuration
       # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
       # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
       empty_cuda_cache: true
+
+``optimizer_checkpoint_sharding_type`` chooses the Megatron distributed-optimizer checkpoint layout.
+``fully_reshardable`` is the default and permits changes to model-parallel geometry, but gathers optimizer state
+onto the CPU of data-parallel rank zero during save. ``dp_reshardable`` saves DP-local shards without that gather;
+use it only when subsequent training will keep the same tensor, pipeline, context, and expert geometry. The loader
+reads each checkpoint's recorded format, so a run can resume an older ``fully_reshardable`` checkpoint and write
+new ``dp_reshardable`` checkpoints.
 
 
 - ``megatron_config.tensor_model_parallel_size``: Tensor model parallel size for reducing memory across model parameters and activations. Sequence parallelism (unrelated to ulysses sequence parallelism) is also enabled by default if tensor parallel size is greater than 1.

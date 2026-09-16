@@ -19,7 +19,7 @@ import torch
 import os
 import shutil
 import tempfile
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import Dataset
 from unittest.mock import MagicMock
 from transformers import AutoTokenizer
@@ -49,7 +49,9 @@ class DummyDataset(Dataset):
         return batch
 
 
-def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> DictConfig:
+def get_test_trainer_config(
+    strategy: str, fsdp2_cpu_offload: bool = False, optimizer_checkpoint_sharding_type: str | None = None
+) -> DictConfig:
     """Create minimal trainer config for testing"""
     with hydra.initialize_config_dir(config_dir=config_dir):
         cfg = hydra.compose(config_name="ppo_base_config")
@@ -80,9 +82,13 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> D
 
     # Megatron-specific
     if strategy == "megatron":
+        OmegaConf.update(cfg, "trainer.algorithm.max_seq_len", 128, force_add=True)
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
         cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.optimizer_checkpoint_sharding_type = optimizer_checkpoint_sharding_type
         cfg.trainer.placement.policy_num_gpus_per_node = 4
+        cfg.trainer.train_batch_size = 4
+        cfg.trainer.policy_mini_batch_size = 4
         # Disable critic for megatron
         cfg.trainer.critic.model.path = ""
 
@@ -129,17 +135,29 @@ def create_minimal_trainer(cfg: DictConfig):
     return trainer
 
 
+def saved_optimizer_format(checkpoint_dir: str) -> str:
+    # Megatron is optional for the other strategies in this module.
+    from megatron.core import dist_checkpointing
+    from skyrl_train.distributed.megatron.megatron_strategy import _saved_optimizer_sharding_type
+
+    common_state = dist_checkpointing.load_common_state_dict(os.path.join(checkpoint_dir, "policy"))
+    return _saved_optimizer_sharding_type(common_state)
+
+
 @pytest.mark.parametrize(
-    ("strategy, fsdp2_cpu_offload"),
+    ("strategy, fsdp2_cpu_offload, initial_sharding_type, resumed_sharding_type"),
     [
-        ("deepspeed", False),
-        ("fsdp", False),
-        ("fsdp2", False),
-        ("fsdp2", True),
-        pytest.param("megatron", False, marks=pytest.mark.megatron),
+        ("deepspeed", False, None, None),
+        ("fsdp", False, None, None),
+        ("fsdp2", False, None, None),
+        ("fsdp2", True, None, None),
+        pytest.param("megatron", False, "fully_reshardable", "dp_reshardable", marks=pytest.mark.megatron),
+        pytest.param("megatron", False, "dp_reshardable", "dp_reshardable", marks=pytest.mark.megatron),
     ],
 )
-def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offload):
+def test_trainer_full_checkpointing(
+    ray_init_fixture, strategy, fsdp2_cpu_offload, initial_sharding_type, resumed_sharding_type
+):
     """
     Test full trainer checkpointing by:
     1. Creating trainer and setting it up
@@ -151,7 +169,7 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
     7. Verifying all state matches
     8. Continuing training to ensure it works
     """
-    cfg = get_test_trainer_config(strategy, fsdp2_cpu_offload)
+    cfg = get_test_trainer_config(strategy, fsdp2_cpu_offload, initial_sharding_type)
 
     checkpoint_dir = None
     try:
@@ -167,6 +185,13 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
 
         # Build models
         trainer1.build_models(PolicyWorker, CriticWorker, RefWorker)
+        if strategy == "megatron":
+            # A real optimizer step initializes Adam moments, which the checkpoint must preserve.
+            # Keep this Megatron-only fixture out of non-Megatron test collection.
+            from tests.gpu.test_megatron_worker import get_test_training_batch
+
+            batch = get_test_training_batch(batch_size=4)
+            ray.get(trainer1.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
 
         # Set initial global step as if 2 steps were completed
         trainer1.global_step = 2
@@ -189,6 +214,8 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
             expected_files.append(os.path.join(checkpoint_dir, "critic"))
         for expected_file in expected_files:
             assert os.path.exists(expected_file), f"Expected checkpoint file/dir not found: {expected_file}"
+        if strategy == "megatron":
+            assert saved_optimizer_format(checkpoint_dir) == initial_sharding_type
 
         # Verify atomic tracking file
         latest_ckpt_file = os.path.join(cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
@@ -218,7 +245,7 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
         print("Phase 2: Resume from checkpoint")
         ray_init_for_tests()
         # Create new config with resume enabled
-        cfg_resume = get_test_trainer_config(strategy, fsdp2_cpu_offload)
+        cfg_resume = get_test_trainer_config(strategy, fsdp2_cpu_offload, resumed_sharding_type)
         cfg_resume.trainer.resume_mode = "from_path"  # Enable resume
         cfg_resume.trainer.resume_path = checkpoint_dir  # Set resume path
         cfg_resume.trainer.export_path = cfg.trainer.export_path  # Use same export path
@@ -245,6 +272,8 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
 
         next_checkpoint_dir = os.path.join(cfg.trainer.export_path, f"global_step_{trainer2.global_step}")
         assert os.path.exists(next_checkpoint_dir), "Could not save checkpoint after resume"
+        if strategy == "megatron":
+            assert saved_optimizer_format(next_checkpoint_dir) == resumed_sharding_type
 
         # Verify atomic tracking file is updated
         latest_ckpt_file = os.path.join(cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
