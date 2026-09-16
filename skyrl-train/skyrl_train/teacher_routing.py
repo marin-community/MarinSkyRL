@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from marinskyrl.distillation import DistillationPlan, TeacherEvidenceKind
-from skyrl_train.batch_sampling import filter_trajectory_batch
+from skyrl_train.batch_sampling import RowOwnership, filter_trajectory_batch
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
 
 
@@ -56,7 +56,7 @@ class PlanTeacherRouter:
 
 @dataclass(frozen=True)
 class RoutedTrajectoryPartition:
-    """Rows for one logical teacher plus their original batch coordinates."""
+    """Read-only borrowed rows for one teacher plus original batch coordinates."""
 
     teacher_id: str
     original_indices: tuple[int, ...]
@@ -110,7 +110,9 @@ def route_trajectory_batch(
                 teacher_id=teacher_id,
                 original_indices=original_indices,
                 routes=tuple(resolved_routes[index] for index in indices),
-                trajectory_batch=filter_trajectory_batch(trajectory_batch, indices),
+                trajectory_batch=filter_trajectory_batch(
+                    trajectory_batch, indices, row_ownership=RowOwnership.BORROWED
+                ),
             )
         )
 

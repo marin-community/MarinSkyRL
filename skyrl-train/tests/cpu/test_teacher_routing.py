@@ -85,6 +85,32 @@ def _trajectory_batch():
     }
 
 
+def test_routing_borrows_token_evidence_rows_without_copying_large_payloads():
+    batch = _trajectory_batch()
+    topk_rows = [
+        [[11, 12], [13, 14]],
+        [[21, 22]],
+        [[31, 32]],
+        [[41, 42], [43, 44], [45, 46]],
+    ]
+    batch["student_topk_indices"] = topk_rows
+
+    routed = route_trajectory_batch(
+        batch,
+        route_keys=("math", "code", "math", "code"),
+        router=PlanTeacherRouter(_plan()),
+    )
+
+    math_rows = routed.partitions[0].trajectory_batch["student_topk_indices"]
+    code_rows = routed.partitions[1].trajectory_batch["student_topk_indices"]
+    assert math_rows is not topk_rows
+    assert code_rows is not topk_rows
+    assert math_rows[0] is topk_rows[0]
+    assert math_rows[1] is topk_rows[2]
+    assert code_rows[0] is topk_rows[1]
+    assert code_rows[1] is topk_rows[3]
+
+
 class RoutingTeacherService:
     def __init__(
         self,
