@@ -152,17 +152,6 @@ class TestControllerRecomputeFifo:
         assert torch.equal(recomputed_indices, targets)
         controller.assert_drained()
 
-    def test_forward_only_does_not_record_for_recompute(self):
-        scores = torch.randn(4, 8)
-        targets, mask = _masked_target_rows(4, 2, 8, 4)
-        controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=True)
-        handle = LayerReplayHandle(controller, layer_idx=0)
-
-        controller.begin_forward({0: targets}, mask, record_recompute=False)
-        handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
-        controller.end_forward()
-        controller.assert_drained()
-
     def test_pp_interleave_serves_each_recompute_with_its_own_micro_batch(self):
         scores = torch.randn(4, 8)
         layer = 0

@@ -178,6 +178,8 @@ class MegatronRouterReplay:
         the router's token order; ``mask`` is the ``[N]`` replay gate.
         ``response_mask`` (optional, ``[N]``) marks response-window rows before
         sentinel exclusion and feeds the ``sentinel_fraction`` metric.
+        ``record_recompute`` is true for training forwards whose backward will
+        replay activation-checkpointed layers, even when forward runs under no_grad.
         """
         if self._phase is not _Phase.IDLE:
             raise RuntimeError("router replay: begin_forward while a forward is already armed (phase must be IDLE)")

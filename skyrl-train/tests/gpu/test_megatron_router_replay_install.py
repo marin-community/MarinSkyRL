@@ -259,14 +259,10 @@ def test_install_rejects_incompatible_router_configs(tiny_model):
         ("moe_enable_routing_replay", True, "moe_enable_routing_replay"),
     ]
     original = {name: getattr(config, name) for name, _, _ in overrides}
-    try:
-        for name, value, message in overrides:
-            setattr(config, name, value)
-            try:
-                with pytest.raises(ValueError, match=message):
-                    install_megatron_router_replay(tiny_model, recompute_enabled=True)
-            finally:
-                setattr(config, name, original[name])
-    finally:
-        for name, value in original.items():
-            setattr(config, name, value)
+    for name, value, message in overrides:
+        setattr(config, name, value)
+        try:
+            with pytest.raises(ValueError, match=message):
+                install_megatron_router_replay(tiny_model, recompute_enabled=True)
+        finally:
+            setattr(config, name, original[name])
