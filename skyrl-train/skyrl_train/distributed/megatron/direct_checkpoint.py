@@ -13,6 +13,8 @@ from skyrl_train.io.s3fs import get_s3_fs, s3_refresh_if_expiring
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 
 
+# MCore 0.18 does not expose a storage-writer hook. Keep the adapter narrow: it
+# preserves MCore's state translation and planner and replaces only the writer.
 class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
     """Save MCore torch-dist shards directly to S3 through PyTorch DCP."""
 

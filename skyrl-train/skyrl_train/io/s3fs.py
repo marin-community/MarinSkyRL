@@ -8,6 +8,7 @@ import fsspec
 from fsspec.exceptions import FSTimeoutError
 from loguru import logger
 from rigging.filesystem.s3_compat import s3_python_config_kwargs
+from rigging.filesystem.storage_path import StoragePath
 
 # Optional AWS deps (present when s3fs is installed)
 try:
@@ -71,20 +72,24 @@ def get_s3_fs():
 
 
 def abort_multipart_uploads(path: str) -> int:
-    """Abort incomplete multipart uploads below one S3 checkpoint prefix."""
-    if not path.startswith("s3://"):
+    """Abort incomplete uploads below a checkpoint and return the number aborted."""
+    checkpoint_path = StoragePath(path)
+    if checkpoint_path.scheme != "s3":
         raise ValueError(f"Expected an S3 path, got: {path}")
+    if str(checkpoint_path) != path or not checkpoint_path.key:
+        raise ValueError(f"Expected a canonical S3 checkpoint path, got: {path}")
 
     filesystem = get_s3_fs()
     s3_refresh_if_expiring(filesystem)
-    bucket, key, _ = filesystem.split_path(path)
-    prefix = key.rstrip("/") + "/"
+    # Prefix is an S3 API selector, not a storage path. StoragePath guarantees
+    # the parsed key has no trailing separator before we add the directory boundary.
+    prefix = f"{checkpoint_path.key}/"
     response = call_with_s3_retry(
         filesystem,
         filesystem.call_s3,
         "list_multipart_uploads",
         max_attempts=1,
-        Bucket=bucket,
+        Bucket=checkpoint_path.bucket,
         Prefix=prefix,
     )
     uploads = response.get("Uploads", [])
@@ -94,7 +99,7 @@ def abort_multipart_uploads(path: str) -> int:
             filesystem.call_s3,
             "abort_multipart_upload",
             max_attempts=1,
-            Bucket=bucket,
+            Bucket=checkpoint_path.bucket,
             Key=upload["Key"],
             UploadId=upload["UploadId"],
         )

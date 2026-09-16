@@ -5,7 +5,6 @@ import math
 import os
 
 from fsspec import AbstractFileSystem
-from fsspec.core import url_to_fs
 from loguru import logger
 import torch
 from torch.distributed.checkpoint import FileSystemWriter, SavePlan, WriteItem
@@ -16,13 +15,11 @@ DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
 
 
 class _AbortableFsspecFileSystem(FsspecFileSystem):
-    def __init__(self, filesystem: AbstractFileSystem | None = None) -> None:
+    def __init__(self, filesystem: AbstractFileSystem) -> None:
         super().__init__()
         self.fs = filesystem
 
-    def init_path(self, path: str | os.PathLike, **kwargs) -> str | os.PathLike:
-        if self.fs is None:
-            self.fs, _ = url_to_fs(path, **kwargs)
+    def init_path(self, path: str | os.PathLike, **_kwargs) -> str | os.PathLike:
         return path
 
     @contextmanager
@@ -46,6 +43,7 @@ class _AbortableFsspecFileSystem(FsspecFileSystem):
 
 
 def _tensor_write_item_bytes(item: WriteItem) -> int | None:
+    """Return the tensor payload size, or None for a non-tensor item."""
     if item.tensor_data is None:
         return None
     return math.prod(item.tensor_data.size) * torch._utils._element_size(item.tensor_data.properties.dtype)
@@ -58,9 +56,8 @@ class StreamingFsspecWriter(FileSystemWriter):
         self,
         path: str,
         *,
-        filesystem: AbstractFileSystem | None = None,
+        filesystem: AbstractFileSystem,
         tensor_copy_ahead_bytes: int = DEFAULT_TENSOR_COPY_AHEAD_BYTES,
-        **filesystem_kwargs,
     ) -> None:
         if tensor_copy_ahead_bytes <= 0:
             raise ValueError("tensor_copy_ahead_bytes must be positive")
@@ -72,7 +69,7 @@ class StreamingFsspecWriter(FileSystemWriter):
             per_thread_copy_ahead=tensor_copy_ahead_bytes,
         )
         self.fs = _AbortableFsspecFileSystem(filesystem)
-        self.path = self.fs.init_path(path, **filesystem_kwargs)
+        self.path = self.fs.init_path(path)
         self.tensor_copy_ahead_bytes = tensor_copy_ahead_bytes
 
     def prepare_local_plan(self, plan: SavePlan) -> SavePlan:

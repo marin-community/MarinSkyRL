@@ -1,4 +1,6 @@
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import multiprocessing
 from multiprocessing.connection import Connection
@@ -14,6 +16,7 @@ import pytest
 import rigging.filesystem.s3_compat as rigging_s3_compat
 import torch
 from torch.distributed import checkpoint
+from torch.distributed.checkpoint.api import CheckpointException
 
 from skyrl_train.io import io, s3fs
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
@@ -24,8 +27,23 @@ _UPLOAD_PROCESS_TIMEOUT = 10
 _UPLOAD_REQUEST_TIMEOUT = 0.2
 
 
+@dataclass(frozen=True)
+class _WithholdingEndpoint:
+    url: str
+    headers_seen: threading.Event
+    aborts_seen: threading.Event
+
+
+@dataclass(frozen=True)
+class _UploadResult:
+    error_type: str | None
+    elapsed: float
+    error_notes: tuple[str, ...] = ()
+    failed_ranks: tuple[int, ...] = ()
+
+
 @contextmanager
-def _withholding_s3_endpoint():
+def _withholding_s3_endpoint() -> Generator[_WithholdingEndpoint, None, None]:
     headers_seen = threading.Event()
     aborts_seen = threading.Event()
 
@@ -80,14 +98,18 @@ def _withholding_s3_endpoint():
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}", headers_seen, aborts_seen
+        yield _WithholdingEndpoint(
+            url=f"http://127.0.0.1:{server.server_port}",
+            headers_seen=headers_seen,
+            aborts_seen=aborts_seen,
+        )
     finally:
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=5)
 
 
-def _upload_to_withholding_endpoint(endpoint: str, checkpoint_shard: str, result_sender: Connection) -> None:
+def _configure_withholding_s3(endpoint: str):
     rigging_s3_compat._S3_TOTAL_TIMEOUT = _UPLOAD_REQUEST_TIMEOUT
     request_bounds = rigging_s3_compat.s3_python_config_kwargs()
     request_bounds["retries"] = {"total_max_attempts": 1, "mode": "standard"}
@@ -104,38 +126,32 @@ def _upload_to_withholding_endpoint(endpoint: str, checkpoint_shard: str, result
             "no_proxy": "127.0.0.1",
         }
     )
-    filesystem = s3fs.get_s3_fs()
+    return s3fs.get_s3_fs()
+
+
+def _upload_to_withholding_endpoint(endpoint: str, checkpoint_shard: str, result_sender: Connection) -> None:
+    filesystem = _configure_withholding_s3(endpoint)
     filesystem.retries = 1
 
     started = time.monotonic()
     try:
         io.upload_file(checkpoint_shard, "s3://bucket/checkpoint.distcp")
     except (FSTimeoutError, ReadTimeoutError, TimeoutError) as error:
-        result_sender.send((type(error).__name__, time.monotonic() - started, getattr(error, "__notes__", [])))
+        result_sender.send(
+            _UploadResult(
+                error_type=type(error).__name__,
+                elapsed=time.monotonic() - started,
+                error_notes=tuple(getattr(error, "__notes__", ())),
+            )
+        )
     else:
-        result_sender.send((None, time.monotonic() - started, None))
+        result_sender.send(_UploadResult(error_type=None, elapsed=time.monotonic() - started))
     finally:
         result_sender.close()
 
 
 def _stream_dcp_to_withholding_endpoint(endpoint: str, result_sender: Connection) -> None:
-    rigging_s3_compat._S3_TOTAL_TIMEOUT = _UPLOAD_REQUEST_TIMEOUT
-    request_bounds = rigging_s3_compat.s3_python_config_kwargs()
-    request_bounds["retries"] = {"total_max_attempts": 1, "mode": "standard"}
-    s3fs.s3_python_config_kwargs = request_bounds.copy
-    s3fs._S3_FS = None
-    os.environ.update(
-        {
-            "AWS_ACCESS_KEY_ID": "test",
-            "AWS_SECRET_ACCESS_KEY": "test",
-            "AWS_DEFAULT_REGION": "us-east-1",
-            "AWS_ENDPOINT_URL": endpoint,
-            "OT_AGENT_S3_ADDRESSING_STYLE": "path",
-            "NO_PROXY": "127.0.0.1",
-            "no_proxy": "127.0.0.1",
-        }
-    )
-    filesystem = s3fs.get_s3_fs()
+    filesystem = _configure_withholding_s3(endpoint)
     tensor = torch.zeros(_MULTIPART_TEST_FILE_SIZE, dtype=torch.uint8)
 
     started = time.monotonic()
@@ -147,12 +163,42 @@ def _stream_dcp_to_withholding_endpoint(endpoint: str, result_sender: Connection
                 filesystem=filesystem,
             ),
         )
-    except BaseException as error:
-        result_sender.send((type(error).__name__, str(error), time.monotonic() - started))
+    except CheckpointException as error:
+        notes = tuple(note for failure, _trace in error.failures.values() for note in getattr(failure, "__notes__", ()))
+        result_sender.send(
+            _UploadResult(
+                error_type=type(error).__name__,
+                elapsed=time.monotonic() - started,
+                error_notes=notes,
+                failed_ranks=tuple(sorted(error.failures)),
+            )
+        )
     else:
-        result_sender.send((None, None, time.monotonic() - started))
+        result_sender.send(_UploadResult(error_type=None, elapsed=time.monotonic() - started))
     finally:
         result_sender.close()
+
+
+def _run_upload_process(target: Callable[..., None], *args: str) -> _UploadResult:
+    context = multiprocessing.get_context("spawn")
+    result_receiver, result_sender = context.Pipe(duplex=False)
+    process = context.Process(target=target, args=(*args, result_sender), daemon=True)
+    process.start()
+    result_sender.close()
+    process.join(timeout=_UPLOAD_PROCESS_TIMEOUT)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=1)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1)
+        pytest.fail(f"upload exceeded the {_UPLOAD_PROCESS_TIMEOUT}-second process deadline")
+
+    assert process.exitcode == 0
+    assert result_receiver.poll(), "upload process exited without a result"
+    result: _UploadResult = result_receiver.recv()
+    result_receiver.close()
+    return result
 
 
 def test_s3_client_uses_shared_request_bounds_and_bounded_retries(monkeypatch):
@@ -210,77 +256,31 @@ def test_s3_multipart_upload_fails_when_peer_withholds_continue(tmp_path):
     with checkpoint_shard.open("wb") as shard_file:
         shard_file.truncate(_MULTIPART_TEST_FILE_SIZE)
 
-    with _withholding_s3_endpoint() as (endpoint, headers_seen, _aborts_seen):
-        context = multiprocessing.get_context("spawn")
-        result_receiver, result_sender = context.Pipe(duplex=False)
-        process = context.Process(
-            target=_upload_to_withholding_endpoint,
-            args=(endpoint, str(checkpoint_shard), result_sender),
-            daemon=True,
-        )
-        process.start()
-        result_sender.close()
-        process.join(timeout=_UPLOAD_PROCESS_TIMEOUT)
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=1)
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=1)
-            pytest.fail(f"multipart upload exceeded the {_UPLOAD_PROCESS_TIMEOUT}-second process deadline")
+    with _withholding_s3_endpoint() as endpoint:
+        result = _run_upload_process(_upload_to_withholding_endpoint, endpoint.url, str(checkpoint_shard))
 
-        assert process.exitcode == 0
-        assert result_receiver.poll(), "upload process exited without a result"
-        error_type, elapsed, error_notes = result_receiver.recv()
-        result_receiver.close()
-
-    assert headers_seen.is_set(), "the peer did not receive an Expect request"
-    assert error_type in {"FSTimeoutError", "ReadTimeoutError", "TimeoutError"}
-    assert any(str(checkpoint_shard) in note for note in error_notes)
-    assert any("s3://bucket/checkpoint.distcp" in note for note in error_notes)
-    assert 0.1 < elapsed < 10
+    assert endpoint.headers_seen.is_set(), "the peer did not receive an Expect request"
+    assert result.error_type in {"FSTimeoutError", "ReadTimeoutError", "TimeoutError"}
+    assert any(str(checkpoint_shard) in note for note in result.error_notes)
+    assert any("s3://bucket/checkpoint.distcp" in note for note in result.error_notes)
+    assert 0.1 < result.elapsed < _UPLOAD_PROCESS_TIMEOUT
 
 
 def test_streaming_dcp_upload_fails_and_aborts_when_peer_withholds_continue():
-    with _withholding_s3_endpoint() as (endpoint, headers_seen, aborts_seen):
-        context = multiprocessing.get_context("spawn")
-        result_receiver, result_sender = context.Pipe(duplex=False)
-        process = context.Process(
-            target=_stream_dcp_to_withholding_endpoint,
-            args=(endpoint, result_sender),
-            daemon=True,
-        )
-        process.start()
-        result_sender.close()
-        process.join(timeout=_UPLOAD_PROCESS_TIMEOUT)
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=1)
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=1)
-            pytest.fail(f"streaming DCP upload exceeded the {_UPLOAD_PROCESS_TIMEOUT}-second process deadline")
+    with _withholding_s3_endpoint() as endpoint:
+        result = _run_upload_process(_stream_dcp_to_withholding_endpoint, endpoint.url)
 
-        assert process.exitcode == 0
-        assert result_receiver.poll(), "upload process exited without a result"
-        error_type, error_message, elapsed = result_receiver.recv()
-        result_receiver.close()
-
-    assert headers_seen.is_set(), "the peer did not receive an Expect request"
-    assert aborts_seen.is_set(), "the failed multipart upload was not aborted"
-    assert error_type == "CheckpointException"
-    assert "__0_0.distcp" in error_message
-    assert 0.1 < elapsed < 10
+    assert endpoint.headers_seen.is_set(), "the peer did not receive an Expect request"
+    assert endpoint.aborts_seen.is_set(), "the failed multipart upload was not aborted"
+    assert result.error_type == "CheckpointException"
+    assert result.failed_ranks == (0,)
+    assert 0.1 < result.elapsed < _UPLOAD_PROCESS_TIMEOUT
 
 
 def test_abort_multipart_uploads_limits_cleanup_to_checkpoint_prefix(monkeypatch):
     class RecordingFilesystem:
         def __init__(self):
             self.calls = []
-
-        def split_path(self, path):
-            assert path == "s3://bucket/checkpoints/global_step_4/policy"
-            return "bucket", "checkpoints/global_step_4/policy", None
 
         def call_s3(self, operation, **kwargs):
             self.calls.append((operation, kwargs))
@@ -326,6 +326,11 @@ def test_abort_multipart_uploads_limits_cleanup_to_checkpoint_prefix(monkeypatch
             },
         ),
     ]
+
+
+def test_abort_multipart_uploads_rejects_noncanonical_checkpoint_path():
+    with pytest.raises(ValueError):
+        s3fs.abort_multipart_uploads("s3://bucket/checkpoints/global_step_4/policy//")
 
 
 @pytest.mark.parametrize(

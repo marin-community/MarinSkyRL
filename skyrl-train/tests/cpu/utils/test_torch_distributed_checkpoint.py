@@ -1,8 +1,11 @@
+import warnings
+
 import fsspec
 from fsspec import AbstractFileSystem
 import pytest
 import torch
 from torch.distributed import checkpoint
+from torch.distributed.checkpoint.api import CheckpointException
 
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 
@@ -17,7 +20,8 @@ def test_streaming_fsspec_writer_round_trips_one_object_per_item():
         "second": torch.arange(6).reshape(2, 3),
     }
 
-    with pytest.warns(UserWarning, match="torch.distributed is disabled"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
         checkpoint.save(state, storage_writer=StreamingFsspecWriter(checkpoint_uri, filesystem=filesystem))
 
     files = filesystem.find("/streaming-checkpoint/step")
@@ -28,7 +32,8 @@ def test_streaming_fsspec_writer_round_trips_one_object_per_item():
         "first": torch.zeros_like(state["first"]),
         "second": torch.zeros_like(state["second"]),
     }
-    with pytest.warns(UserWarning, match="torch.distributed is disabled"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
         checkpoint.load(restored, checkpoint_id=checkpoint_uri)
     assert torch.equal(restored["first"], state["first"])
     assert torch.equal(restored["second"], state["second"])
@@ -80,8 +85,10 @@ def test_streaming_fsspec_writer_aborts_failed_object():
     filesystem = _FailingFilesystem()
     writer = StreamingFsspecWriter("memory://failed-checkpoint/step", filesystem=filesystem)
 
-    with pytest.warns(UserWarning, match="torch.distributed is disabled"), pytest.raises(BaseException):
-        checkpoint.save({"tensor": torch.arange(8)}, storage_writer=writer)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with pytest.raises(CheckpointException):
+            checkpoint.save({"tensor": torch.arange(8)}, storage_writer=writer)
 
     assert filesystem.streams
     assert all(stream.discarded for stream in filesystem.streams)
