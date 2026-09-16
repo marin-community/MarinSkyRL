@@ -19,7 +19,7 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
 from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
-from skyrl_train.env_vars import EnvVarScope, managed_environment_names
+from skyrl_train.env_vars import EnvVarScope, VLLM_USE_V2_MODEL_RUNNER_ENV, managed_environment_names
 from skyrl_train.utils import (
     get_all_env_variables,
     get_ray_pg_ready_with_timeout,
@@ -147,7 +147,7 @@ def _build_inference_engine_runtime_env(*, require_v1_model_runner: bool = False
     if require_v1_model_runner:
         # Selected-ID prompt scoring is implemented in vLLM's V1 GPU runner.
         # Set this before actor import so the EngineCore and TP workers agree.
-        env_vars["VLLM_USE_V2_MODEL_RUNNER"] = "0"
+        env_vars[VLLM_USE_V2_MODEL_RUNNER_ENV] = "0"
     if not env_vars:
         return None
     logger.info(f"Forwarding managed environment to vLLM engine actors via runtime_env: {sorted(env_vars)}")
