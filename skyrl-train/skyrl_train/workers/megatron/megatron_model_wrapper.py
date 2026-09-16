@@ -251,6 +251,7 @@ class MegatronModelWrapper:
         position_ids,
         rollout_routed_experts: Optional[torch.Tensor] = None,
         num_actions: Optional[int] = None,
+        record_recompute: bool = False,
     ):
         """Run the shared packed or left-unpadded Megatron model boundary.
 
@@ -272,7 +273,7 @@ class MegatronModelWrapper:
             per_layer, mask, response_mask = self._build_router_replay_targets(
                 sequences, attention_mask, rollout_routed_experts, num_actions, layer_indices
             )
-            self.router_replay.begin_forward(per_layer, mask, response_mask)
+            self.router_replay.begin_forward(per_layer, mask, response_mask, record_recompute=record_recompute)
             armed = True
         try:
             if self.use_sample_packing:
@@ -498,6 +499,7 @@ class MegatronModelWrapper:
                 batch.position_ids,
                 rollout_routed_experts=batch.rollout_routed_experts,
                 num_actions=batch.num_actions,
+                record_recompute=True,
             )
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)
