@@ -54,8 +54,8 @@ from .placement_geometry import validate_colocated_engine_geometry
 MOE_ROUTER_REPLAY_STRATEGIES = frozenset({"fsdp", "fsdp2"})
 
 
-def moe_router_replay_requested(cfg: DictConfig) -> bool:
-    return bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False))
+def moe_router_replay_requested(cfg: DictConfig, role: str = "policy") -> bool:
+    return bool(cfg.trainer[role].fsdp_config.get("moe_router_replay", False))
 
 
 def moe_router_replay_enabled(cfg: DictConfig) -> bool:
