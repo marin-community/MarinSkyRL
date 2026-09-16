@@ -1,4 +1,4 @@
-"""Evaluate a native Qwen3.5 LoRA checkpoint on pinned AIME 2024."""
+"""Evaluate a native Qwen3.5 base model or LoRA checkpoint on pinned AIME 2024."""
 
 from __future__ import annotations
 
