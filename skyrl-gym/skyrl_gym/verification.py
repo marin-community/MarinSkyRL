@@ -34,6 +34,8 @@ class RolloutEvidence:
     prompt_token_ids: tuple[int, ...] = ()
     response_token_ids: tuple[int, ...] = ()
     behavior_logprobs: tuple[float, ...] | None = None
+    student_topk_indices: tuple[tuple[int, ...], ...] | None = None
+    behavior_topk_logprobs: tuple[tuple[float, ...], ...] | None = None
     routed_experts: tuple[tuple[tuple[int, ...], ...], ...] | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -45,6 +47,15 @@ class RolloutEvidence:
                 _normalize_finite(logprob, field_name=f"behavior_logprobs[{index}]")
             if len(self.behavior_logprobs) != len(self.response_token_ids):
                 raise ValueError("behavior_logprobs must align with response_token_ids")
+        if (self.student_topk_indices is None) != (self.behavior_topk_logprobs is None):
+            raise ValueError("student top-K IDs and behavior scores must be provided together")
+        if self.student_topk_indices is not None:
+            if len(self.student_topk_indices) != len(self.response_token_ids):
+                raise ValueError("student top-K rows must align with response_token_ids")
+            if any(
+                len(ids) != len(scores) for ids, scores in zip(self.student_topk_indices, self.behavior_topk_logprobs)
+            ):
+                raise ValueError("student top-K IDs and behavior scores must have matching widths")
         if self.routed_experts is not None:
             if len(self.routed_experts) != len(self.response_token_ids):
                 raise ValueError("routed_experts must align with response_token_ids")

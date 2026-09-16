@@ -9,7 +9,7 @@ import skyrl_gym
 from typing import Callable, List, Dict, Any, Optional, Tuple
 
 from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch
-from skyrl_train.trajectory_runners.types import AgentLoopOutput
+from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
@@ -22,6 +22,7 @@ from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
 )
 from skyrl_train.trajectory_runners.trajectory_processing import normalize_token_ids
 from skyrl_train.trajectory_runners.collectors import collect_agent_loops
+from skyrl_train.trajectory_runners.selected_topk import align_student_topk
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 
@@ -182,6 +183,11 @@ class StepWiseRolloutCollector:
                 captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
+            sampled_ids = list(output_ids)
+            topk_ids_batch = engine_output.get("student_topk_indices")
+            topk_scores_batch = engine_output.get("behavior_topk_logprobs")
+            if (topk_ids_batch is None) != (topk_scores_batch is None):
+                raise ValueError("Inference engine must return student top-K IDs and behavior scores together")
             stop_reason = engine_output["stop_reasons"][0]
             response_logprobs = engine_output.get("response_logprobs", None)
             if response_logprobs is not None:
@@ -235,6 +241,17 @@ class StepWiseRolloutCollector:
 
             per_step_rewards.append((step_reward, response_end_idx))
             response_ids = copy.deepcopy(input_ids[current_prompt_length:])
+            selected = (
+                align_student_topk(
+                    response_ids,
+                    loss_mask,
+                    sampled_ids,
+                    topk_ids_batch[0] if topk_ids_batch is not None else None,
+                    topk_scores_batch[0] if topk_scores_batch is not None else None,
+                )
+                if not retokenize_chat_history and engine_output["token_provenance"] == TokenProvenance.ENGINE
+                else None
+            )
             per_step_output = AgentLoopOutput(
                 evidence=RolloutEvidence(
                     response=output,
@@ -243,6 +260,8 @@ class StepWiseRolloutCollector:
                     prompt_token_ids=tuple(input_ids[:current_prompt_length]),
                     response_token_ids=tuple(response_ids),
                     behavior_logprobs=None if response_logprobs is None else tuple(response_logprobs),
+                    student_topk_indices=None if selected is None else selected.indices,
+                    behavior_topk_logprobs=None if selected is None else selected.behavior_logprobs,
                 ),
                 verification=verification,
                 reward=reward_from_env_step(env_step_output, verification),

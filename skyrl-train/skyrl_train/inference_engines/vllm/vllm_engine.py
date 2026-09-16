@@ -72,6 +72,7 @@ from skyrl_train.inference_engines.base import (
     LORA_DISK_LOAD_NAME,
     LORA_DISK_PATH_KEY,
 )
+from skyrl_train.inference_engines.response_topk import select_response_topk
 from skyrl_train.inference_engines.opencode_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync import WeightLoader
@@ -1022,12 +1023,14 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         return prompt_token_ids, sampling_params
 
-    def _postprocess_outputs(self, outputs):
+    def _postprocess_outputs(self, outputs, response_top_k: int | None = None):
         """Common output processing logic."""
         responses: List[str] = []
         stop_reasons: List[str] = []
         response_ids: List[List[int]] = []
         response_logprobs: Optional[List[List[float]]] = []
+        student_topk_indices: List[List[List[int]]] = []
+        behavior_topk_logprobs: List[List[List[float]]] = []
         all_prompt_logprobs: Optional[List] = None
 
         for output in outputs:
@@ -1040,6 +1043,8 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             stop_reasons.append(resp.finish_reason)
             response_ids.append(resp.token_ids)
             _logprobs = None
+            selected_ids = []
+            selected_scores = []
             if resp.logprobs:
                 _logprobs = []
                 for i, token_logprobs in enumerate(resp.logprobs):
@@ -1047,8 +1052,17 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                     token_id = resp.token_ids[i]
                     logprob = token_logprobs[token_id].logprob
                     _logprobs.append(logprob)
+                    if response_top_k is not None and response_top_k > 0:
+                        ids, scores = select_response_topk(token_logprobs, response_top_k)
+                        selected_ids.append(ids)
+                        selected_scores.append(scores)
                     del token_logprobs
             response_logprobs.append(_logprobs)
+            if response_top_k is not None and response_top_k > 0:
+                if len(selected_ids) != len(resp.token_ids):
+                    raise ValueError("vLLM omitted response top-K logprobs for generated tokens")
+                student_topk_indices.append(selected_ids)
+                behavior_topk_logprobs.append(selected_scores)
 
             # Extract prompt_logprobs if available (used for teacher scoring)
             if hasattr(output, "prompt_logprobs") and output.prompt_logprobs is not None:
@@ -1072,13 +1086,17 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         if len(response_logprobs) and response_logprobs[0] is None:
             response_logprobs = None  # hack: assume uniform sampling params
 
-        return InferenceEngineOutput(
+        result = InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs,
             prompt_logprobs=all_prompt_logprobs,
         )
+        if response_top_k is not None and response_top_k > 0:
+            result["student_topk_indices"] = student_topk_indices
+            result["behavior_topk_logprobs"] = behavior_topk_logprobs
+        return result
 
     def _get_engine(self):
         """Get the underlying engine for RPC calls."""
@@ -1155,7 +1173,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             lora_request=lora_requests,
         )
 
-        return self._postprocess_outputs(outputs)
+        return self._postprocess_outputs(outputs, sampling_params.logprobs)
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
@@ -1900,7 +1918,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
             raise
 
-        return self._postprocess_outputs(outputs)
+        return self._postprocess_outputs(outputs, sampling_params.logprobs)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
