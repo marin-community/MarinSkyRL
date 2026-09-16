@@ -7,7 +7,6 @@ from dataclasses import replace
 from typing import TypeVar
 
 from marinskyrl.distillation import DistillationPlan
-from skyrl_train.distillation import StudentTopKPolicySurrogateInput
 from skyrl_train.distillation_adapters import (
     AsyncRoutedTeacherScoreTicket,
     AsyncTeacherQueueLimits,
@@ -82,8 +81,6 @@ class SyncDistillationRuntime:
         forwarded, scored = await self._adapter.score_routed_while_model_forwarding(work, model_forward)
         self.domain_balance_metrics = {}
         if self.domain_balancer is not None:
-            if not isinstance(scored.distillation, StudentTopKPolicySurrogateInput):
-                raise ValueError("domain gradient balance requires student-selected top-K evidence")
             balanced, self.domain_balance_metrics = self.domain_balancer.apply(
                 scored.distillation, tuple(route.route_id for route in scored.routes)
             )
@@ -130,7 +127,7 @@ class AsyncDistillationRuntime:
         training_input: TrainingInputBatch,
         scored_groups: Sequence[RoutedScoredDistillationBatch],
     ) -> dict[str, float]:
-        """Attach scored groups in admission order, including safe learner padding rows."""
+        """Attach scored groups and return per-domain balance metrics, if enabled."""
         if not scored_groups:
             raise ValueError("fully-async distillation requires at least one scored group")
         response_shape = training_input["response_mask"].shape
@@ -152,8 +149,6 @@ class AsyncDistillationRuntime:
         assembled = assemble_distillation_inputs(indexed_inputs, tuple(response_shape))
         balance_metrics: dict[str, float] = {}
         if self.domain_balancer is not None:
-            if not isinstance(assembled, StudentTopKPolicySurrogateInput):
-                raise ValueError("domain gradient balance requires student-selected top-K evidence")
             route_ids = tuple(route.route_id for scored in scored_groups for route in scored.routes)
             assembled, balance_metrics = self.domain_balancer.apply(assembled, route_ids)
         training_input.update(assembled.training_tensors())

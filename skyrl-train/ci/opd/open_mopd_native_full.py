@@ -22,6 +22,7 @@ from skyrl_train.io import io
 from cloud.iris.artifacts import fs_and_path
 from cloud.iris.open_mopd_fidelity import load_config
 from marinskyrl.checkpoint_paths import LATEST_CHECKPOINT_FILE
+from marinskyrl.resource_locator import join_resource_path
 
 ROOT = Path(__file__).resolve().parents[3]
 FIDELITY_CONFIG = ROOT / "cloud/iris/configs/open_mopd_fidelity.json"
@@ -29,7 +30,7 @@ SCHEDULE_SHA256 = "01d9c3904b13324f218f61e51db187e52872c641a466025b300295eef707d
 SCHEDULE_ROWS = 204_800
 SCHEDULE_STEPS = 200
 POLICY_GPUS = 4
-CHECKPOINT_INTERVAL = 2
+CHECKPOINT_INTERVAL = load_config(FIDELITY_CONFIG).training.save_every
 
 
 def hydra_arguments(
@@ -140,12 +141,7 @@ def hydra_arguments(
 
 
 def stage_schedule(source_uri: str, destination: Path) -> None:
-    io.download_file(source_uri, str(destination))
-    with destination.open("rb") as data:
-        digest = hashlib.file_digest(data, "sha256").hexdigest()
-    if digest != SCHEDULE_SHA256:
-        raise ValueError(f"Open-MOPD schedule digest mismatch: {digest}")
-    metadata = pq.ParquetFile(destination).metadata
+    metadata = _verified_parquet(source_uri, destination, SCHEDULE_SHA256)
     if metadata.num_rows != SCHEDULE_ROWS or metadata.num_row_groups != SCHEDULE_STEPS:
         raise ValueError(
             f"Unexpected Open-MOPD schedule geometry: {metadata.num_rows} rows, {metadata.num_row_groups} groups"
@@ -153,15 +149,19 @@ def stage_schedule(source_uri: str, destination: Path) -> None:
 
 
 def stage_validation(source_uri: str, destination: Path, expected_sha256: str) -> None:
+    metadata = _verified_parquet(source_uri, destination, expected_sha256)
+    columns = set(metadata.schema.names)
+    if metadata.num_rows != 30 or not {"prompt", "env_class", "reward_model"} <= columns:
+        raise ValueError(f"AIME validation dataset has {metadata.num_rows} rows and columns {sorted(columns)}")
+
+
+def _verified_parquet(source_uri: str, destination: Path, expected_sha256: str) -> pq.FileMetaData:
     io.download_file(source_uri, str(destination))
     with destination.open("rb") as data:
         digest = hashlib.file_digest(data, "sha256").hexdigest()
     if digest != expected_sha256:
-        raise ValueError(f"AIME validation dataset digest mismatch: {digest}")
-    metadata = pq.ParquetFile(destination).metadata
-    columns = set(metadata.schema.names)
-    if metadata.num_rows != 30 or not {"prompt", "env_class", "reward_model"} <= columns:
-        raise ValueError(f"AIME validation dataset has {metadata.num_rows} rows and columns {sorted(columns)}")
+        raise ValueError(f"Parquet dataset digest mismatch for {source_uri}: {digest}")
+    return pq.ParquetFile(destination).metadata
 
 
 def run(
@@ -200,9 +200,8 @@ def run(
             raise ValueError("Open-MOPD resume identity differs from the existing run")
         if previous.get("status") == "complete":
             raise ValueError("Cannot resume a completed Open-MOPD run")
-        checkpoint_fs, checkpoint_path = fs_and_path(checkpoint_uri)
-        marker = f"{checkpoint_path.rstrip('/')}/{LATEST_CHECKPOINT_FILE}"
-        if not checkpoint_fs.exists(marker):
+        marker_fs, marker_path = fs_and_path(join_resource_path(checkpoint_uri, LATEST_CHECKPOINT_FILE))
+        if not marker_fs.exists(marker_path):
             raise FileNotFoundError(f"Open-MOPD resume has no durable checkpoint marker: {checkpoint_uri}")
     with tempfile.TemporaryDirectory(prefix="open-mopd-native-") as directory:
         schedule = Path(directory) / "weighted_200step_schedule.parquet"

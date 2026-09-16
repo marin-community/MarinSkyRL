@@ -9,10 +9,11 @@ from dataclasses import replace
 import torch
 
 from marinskyrl.distillation import DomainGradientBalanceSpec
-from skyrl_train.distillation import StudentTopKPolicySurrogateInput
+from skyrl_train.distillation import DistillationInput, StudentTopKPolicySurrogateInput
 
 MIN_GAP_DRIFT = 0.05
 MAX_GAP_DRIFT = 20.0
+DOMAIN_METRIC_PREFIX = "distillation/domain"
 
 
 class DomainGradientBalancer:
@@ -40,8 +41,10 @@ class DomainGradientBalancer:
         self._anchor = {str(domain): float(value) for domain, value in anchor.items()}
 
     def apply(
-        self, evidence: StudentTopKPolicySurrogateInput, route_ids: Sequence[str]
+        self, evidence: DistillationInput, route_ids: Sequence[str]
     ) -> tuple[StudentTopKPolicySurrogateInput, dict[str, float]]:
+        if not isinstance(evidence, StudentTopKPolicySurrogateInput):
+            raise ValueError("domain gradient balance requires student-selected top-K evidence")
         mask = evidence.valid_mask
         if mask.ndim != 2 or evidence.loss_weights.shape != mask.shape:
             raise ValueError("domain gradient balance requires aligned response masks and weights")
@@ -77,12 +80,12 @@ class DomainGradientBalancer:
             drift = min(max(drift, MIN_GAP_DRIFT), MAX_GAP_DRIFT)
             scale = (configured[route] / target_total) / (domain_tokens / total_tokens) * drift
             row_scale[indices] = scale
-            metrics[f"distillation/domain/{route}/token_share"] = domain_tokens / total_tokens
-            metrics[f"distillation/domain/{route}/gap_abs_mean"] = magnitude
+            metrics[f"{DOMAIN_METRIC_PREFIX}/{route}/token_share"] = domain_tokens / total_tokens
+            metrics[f"{DOMAIN_METRIC_PREFIX}/{route}/gap_abs_mean"] = magnitude
         normalizer = total_tokens / (row_scale * counts).sum().item()
         row_scale *= normalizer
         for route in present:
             index = route_ids.index(route)
-            metrics[f"distillation/domain/{route}/loss_weight"] = row_scale[index].item()
+            metrics[f"{DOMAIN_METRIC_PREFIX}/{route}/loss_weight"] = row_scale[index].item()
         loss_weights = evidence.loss_weights * row_scale.unsqueeze(-1)
         return replace(evidence, loss_weights=loss_weights), metrics
