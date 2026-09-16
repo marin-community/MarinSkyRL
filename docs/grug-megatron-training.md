@@ -68,8 +68,14 @@ Policy nodes for the 67B-A2B Snowball checkpoint use 1800GB of host memory and
 1000GB of disk. The Snowball configs select Megatron's `dp_reshardable`
 optimizer format, which writes data-parallel-local shards without gathering the
 optimizer state onto data-parallel rank zero. Resume must keep the tensor,
-pipeline, context, and expert geometry fixed. The writer still stages each
-torch-dist shard in `/tmp` until its S3 upload finishes.
+pipeline, context, and expert geometry fixed.
+
+SkyRL currently gives Megatron a local work directory, then uploads the completed
+torch-dist files to S3. This is a SkyRL storage-adapter limitation, not a Megatron
+checkpoint-format requirement. Megatron Core 0.18's Multi-Storage Client path is
+not enabled because its object writer buffers each complete remote file in
+`BytesIO` before uploading it; for Snowball's tens-of-GB rank files, that would
+move staging from disk to host memory instead of removing it.
 
 On the GPU, the last pipeline stage holds the vocab-sized logits; the loss
 computes entropy under no_grad unless an entropy loss is configured, which
