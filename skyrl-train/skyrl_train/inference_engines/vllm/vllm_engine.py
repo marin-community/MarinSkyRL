@@ -1,5 +1,7 @@
 import json
 import os
+from pathlib import Path
+import tempfile
 import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
 from dataclasses import dataclass, fields as _dataclass_fields, replace
@@ -12,12 +14,21 @@ import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 
+from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.config.behavior_logprobs import (
     ROLLOUT_LOGPROB_VALIDATION_KEY,
     validate_behavior_logprob_sampling,
 )
+from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
+    capture_rank_directory,
+    capture_rank_name,
+    per_worker_capture_token_credit,
+    request_id_for_group,
+)
+from skyrl_train.io import io
 
 # vLLM 0.16+ reorganized entrypoints into sub-packages.
 # Try new paths first, fall back to old paths for backwards compatibility.
@@ -331,6 +342,62 @@ class WorkerWrap:
         """Test RPC call to worker"""
         return args, kwargs
 
+    def begin_online_eagle_capture(self, config):
+        """Begin bounded verifier-state capture on the resident model runner."""
+        resolved = dict(config)
+        parallel_config = self.model_runner.parallel_config
+        if parallel_config.tensor_parallel_size != 1 or parallel_config.pipeline_parallel_size != 1:
+            raise RuntimeError("Online EAGLE training requires vLLM tensor and pipeline parallel size 1")
+        worker_rank = parallel_config.data_parallel_rank
+        worker_count = parallel_config.data_parallel_size
+        global_token_budget = int(resolved["max_tokens"])
+        if global_token_budget < worker_count:
+            raise ValueError("Online EAGLE capture token budget must cover every data-parallel rank")
+        resolved["max_tokens"] = per_worker_capture_token_credit(
+            global_max_tokens=global_token_budget,
+            max_window_tokens=int(resolved["max_window_tokens"]),
+            worker_count=worker_count,
+            worker_index=worker_rank,
+        )
+        resolved["capture_target_snapshot"] = worker_rank == 0
+        reserved_gpu_memory_gib = float(resolved.pop("reserved_gpu_memory_gib"))
+        total_memory_gib = torch.cuda.get_device_properties(self.device).total_memory / 2**30
+        gpu_memory_utilization = float(self.model_runner.cache_config.gpu_memory_utilization)
+        unreserved_memory_gib = total_memory_gib * (1 - gpu_memory_utilization)
+        if reserved_gpu_memory_gib > unreserved_memory_gib:
+            raise RuntimeError(
+                "Online EAGLE training reserves "
+                f"{reserved_gpu_memory_gib:.2f} GiB, but vLLM gpu_memory_utilization="
+                f"{gpu_memory_utilization:.3f} leaves only {unreserved_memory_gib:.2f} GiB "
+                f"on this {total_memory_gib:.2f} GiB device"
+            )
+        result = self.model_runner.begin_online_eagle_capture(resolved)
+        return {
+            **result,
+            "node_id": str(ray.get_runtime_context().get_node_id()),
+            "capture_token_credit": resolved["max_tokens"],
+        }
+
+    def seal_online_eagle_capture(self, destination):
+        """Seal verifier-state capture and publish it to cloud storage."""
+        if not is_cloud_uri(destination):
+            raise ValueError(f"Online EAGLE capture destination must be cloud-backed: {destination}")
+        worker_rank = self.model_runner.parallel_config.data_parallel_rank
+        rank_destination = join_resource_path(destination, capture_rank_name(worker_rank))
+        try:
+            with tempfile.TemporaryDirectory(prefix="marinskyrl-eagle-capture-") as scratch:
+                rank_output_dir = capture_rank_directory(Path(scratch), worker_rank)
+                result = self.model_runner.seal_online_eagle_capture(str(rank_output_dir))
+                io.upload_directory(str(rank_output_dir), rank_destination)
+        except Exception as error:
+            logger.exception("Online EAGLE capture seal or publication failed for worker rank {}", worker_rank)
+            return {
+                "active": False,
+                "worker_rank": worker_rank,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        return {**result, "active": True, "path": rank_destination}
+
     def init_weight_update_communicator(
         self,
         master_address,
@@ -519,6 +586,9 @@ class WorkerWrap:
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             finalize_layerwise_reload(model, self.model_config)
         self._skyrl_weight_update_active = False
+        speculative_config = self.vllm_config.speculative_config
+        if speculative_config is not None and speculative_config.method == "eagle3":
+            self.model_runner.refresh_online_eagle_target_owned_weights()
 
     def begin_weight_update(self) -> None:
         """Start accumulating weights for batched load_weights call.
@@ -1903,13 +1973,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
 
+        session_ids = input_batch.get("session_ids")
+        if session_ids is not None and len(session_ids) != len(prompt_token_ids):
+            raise ValueError("session_ids must align one-for-one with prompt_token_ids")
+
         tasks = []
         request_ids: list[str] = []
         per_prompt = sampling_params if isinstance(sampling_params, list) else [sampling_params] * len(prompt_token_ids)
-        for prompt, row_sampling_params in zip(prompt_token_ids, per_prompt, strict=True):
+        for index, (prompt, row_sampling_params) in enumerate(zip(prompt_token_ids, per_prompt, strict=True)):
             # Schedule the collection of outputs for each prompt.
             # Avoid duplicate request_ids
-            request_id = str(uuid4().hex)
+            if session_ids is None:
+                request_id = uuid4().hex
+            else:
+                request_id = request_id_for_group(session_ids[index])
             request_ids.append(request_id)
             task = asyncio.create_task(self._collect_outputs(prompt, request_id, row_sampling_params))
             tasks.append(task)
@@ -1970,6 +2047,24 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             "init_weight_update_communicator",
             args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
         )
+
+    async def begin_online_eagle_capture(self, config: Dict[str, Any]):
+        """Begin bounded capture on every worker rank."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("begin_online_eagle_capture", args=(config,))
+
+    async def seal_online_eagle_capture(self, destination: str):
+        """Publish capture from every rank before target synchronization."""
+        engine = self._get_engine()
+        return await engine.collective_rpc("seal_online_eagle_capture", args=(destination,))
+
+    async def update_draft_weights(self, weights_path: str):
+        """Stream one completed checkpoint through vLLM's draft-update API."""
+        engine = self._get_engine()
+        await engine.start_draft_weight_update()
+        await engine.update_weights(WeightTransferUpdateRequest(update_info={"weights_path": weights_path}))
+        await engine.finish_weight_update()
+        return {"active": True}
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         if "names" not in request:

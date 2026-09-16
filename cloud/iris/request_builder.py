@@ -225,6 +225,7 @@ def derive_role_plan(config: dict[str, Any]) -> SkyRLRolePlan:
     claims = _core_model_claims(config, values)
     claims.append(_rollout_claim(config, values))
     claims.extend(_teacher_claims(config))
+    claims.extend(_draft_trainer_claims(config, values))
     bundles = _physical_bundles(tuple(claims))
     return SkyRLRolePlan(
         claims=tuple(claims),
@@ -285,6 +286,28 @@ def _teacher_claims(config: dict[str, Any]) -> tuple[ModelRoleClaim, ...]:
             )
         )
     return tuple(claims)
+
+
+def _draft_trainer_claims(config: dict[str, Any], values: dict[str, Any]) -> tuple[ModelRoleClaim, ...]:
+    speculative_decoding = _optional_at(config, "generator.speculative_decoding")
+    if not isinstance(speculative_decoding, dict) or speculative_decoding.get("training") is None:
+        return ()
+    return (
+        ModelRoleClaim(
+            role_id=ModelRoleKind.DRAFT_TRAINER.value,
+            kind=ModelRoleKind.DRAFT_TRAINER,
+            execution=RoleExecution.LOCAL,
+            backend="torch",
+            colocation_group=ModelRoleKind.DRAFT_TRAINER.value,
+            num_nodes=1,
+            gpus_per_node=values["policy_num_gpus_per_node"],
+            replicas=1,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            expert_parallel_size=1,
+        ),
+    )
 
 
 def _physical_bundles(claims: tuple[ModelRoleClaim, ...]) -> tuple[RoleBundle, ...]:

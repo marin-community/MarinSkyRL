@@ -28,6 +28,7 @@ class ModelRoleKind(StrEnum):
     REFERENCE = "reference"
     CRITIC = "critic"
     ROLLOUT = "rollout"
+    DRAFT_TRAINER = "draft_trainer"
     TEACHER = "teacher"
 
 
@@ -154,14 +155,15 @@ class SkyRLRolePlan:
 
     @property
     def colocate_all(self) -> bool:
-        """Whether all local non-teacher roles, including rollout, share one bundle."""
+        """Whether the policy-side roles and rollout share one bundle."""
         rollout = self.claim(ModelRoleKind.ROLLOUT)
         if rollout.execution is RoleExecution.REMOTE:
             return False
         groups = {
             claim.colocation_group
             for claim in self.claims
-            if claim.execution is RoleExecution.LOCAL and claim.kind is not ModelRoleKind.TEACHER
+            if claim.execution is RoleExecution.LOCAL
+            and claim.kind not in {ModelRoleKind.TEACHER, ModelRoleKind.DRAFT_TRAINER}
         }
         return len(groups) == 1
 
