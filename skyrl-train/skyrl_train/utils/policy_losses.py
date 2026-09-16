@@ -314,10 +314,11 @@ def compute_policy_objective(
             old_action_log_probs=old_action_log_probs,
             student_selected_logprobs=student_topk_logprobs,
             loss_mask=loss_mask,
+            config=config,
         )
         combined_auxiliary_loss = combined_auxiliary_loss + distillation_loss
     elif student_topk_logprobs is not None:
-        raise ValueError("student top-K logprobs require distillation evidence")
+        raise ValueError("selected student logprobs require distillation evidence")
 
     unscaled_loss = policy_loss + combined_auxiliary_loss
     optimization_loss = _scale_policy_objective(

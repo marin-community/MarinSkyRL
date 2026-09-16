@@ -17,6 +17,7 @@ from skyrl_train.distributed.megatron.model_utils import (
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.distillation import DistillationInput, student_topk_logprobs
+from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
 
@@ -29,12 +30,29 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     scatter_token_values,
     unpack_packed_token_values,
 )
+from skyrl_train.models.megatron_router_replay import (
+    sequence_major_flatten,
+    slice_sequence_parallel,
+    validate_replay_geometry,
+)
+from skyrl_train.models.router_replay import dense_replay_targets
 
 
 # Sentinel: distinguishes "caller did not pass logprob_chunk_size" (=> fall back to
 # the policy config key, preserving prior behavior) from an explicit None (=> chunking
 # disabled). A plain None default could not tell these apart.
 _UNSET = object()
+
+
+@dataclass(frozen=True)
+class MegatronForwardMicroBatch:
+    """Typed forward-only payload consumed by the Megatron pipeline scheduler."""
+
+    sequences: torch.Tensor
+    attention_mask: torch.Tensor
+    position_ids: torch.Tensor
+    num_actions: int
+    rollout_routed_experts: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -53,9 +71,14 @@ class MegatronPolicyMicroBatch:
     response_span_tags: Optional[torch.Tensor]
     global_loss_denom: Optional[float]
     distillation: Optional[DistillationInput] = None
+    rollout_routed_experts: Optional[torch.Tensor] = None
 
 
 class MegatronModelWrapper:
+    # MoE router replay (R3); set as an instance attribute by the worker after
+    # install. Class-level None keeps flag-off behavior for every wrapper.
+    router_replay: Optional[MegatronRouterReplay] = None
+
     def __init__(
         self,
         config,
@@ -147,33 +170,137 @@ class MegatronModelWrapper:
             return unpack_packed_token_values(token_entropies, packed_seq_params, attention_mask)
         return scatter_token_values(token_entropies, attention_mask, drop_last=False)
 
-    def _forward_micro_batch(self, model, sequences, attention_mask, position_ids):
-        """Run the shared packed or left-unpadded Megatron model boundary."""
-        attention_mask = attention_mask.to(bool)
-        if self.use_sample_packing:
-            model_sequences, packed_seq_params = preprocess_packed_seqs(
-                sequences,
-                attention_mask,
-                pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-            )
-            model_attention_mask = None
-            model_position_ids = None
-        else:
-            model_sequences, model_attention_mask, model_position_ids = remove_left_padding(
-                sequences,
-                attention_mask,
-                position_ids,
-                pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
-            )
-            packed_seq_params = None
+    def _build_router_replay_targets(
+        self,
+        sequences: torch.Tensor,
+        attention_mask: torch.Tensor,
+        rollout_routed_experts: torch.Tensor,
+        num_actions: int,
+    ):
+        """Build per-layer router targets in the exact token order the routers see.
 
-        outputs = model(
-            model_sequences,
-            model_position_ids,
-            model_attention_mask,
-            packed_seq_params=packed_seq_params,
-            fp32_output=False,
+        Pushes the dense ``[B, S, L, K]`` targets and the replay / response
+        masks through the SAME sequence transform the model input takes
+        (packing or left-pad removal, with the CP chunk split), flattens
+        sequence-major (``s*B + b``, mirroring the router view), and slices to
+        this TP rank's contiguous sequence chunk under sequence parallelism.
+        Returns ``(per_layer, mask, response_mask)`` keyed by capture index for
+        the layers this rank owns.
+        """
+        controller = self.router_replay
+        assert controller is not None
+        config = get_model_config(self.actor_module[0])
+        batch_size, seq_len = sequences.shape
+        _, response_len, _, _ = rollout_routed_experts.shape
+        validate_replay_geometry(
+            num_layers_captured=rollout_routed_experts.shape[2],
+            expected_moe_layers=controller.num_moe_layers_total,
+            topk_captured=rollout_routed_experts.shape[3],
+            expected_topk=controller.topk,
+            num_experts=config.num_moe_experts,
+            targets=rollout_routed_experts,
+            response_len=response_len,
+            num_actions=num_actions,
         )
+
+        device = sequences.device
+        dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
+        response_BS = torch.zeros_like(mask_BS)
+        response_BS[:, seq_len - response_len :] = True
+
+        if self.use_sample_packing:
+            # The routes tensor is ours, not the pipeline's input: always run the
+            # packing arithmetic locally (pre_process=True) so every PP stage
+            # derives its own layer targets from the replicated batch.
+            dense, _ = preprocess_packed_seqs(dense, attention_mask, pre_process=True)
+            mask_BS, _ = preprocess_packed_seqs(mask_BS, attention_mask, pre_process=True)
+            response_BS, _ = preprocess_packed_seqs(response_BS, attention_mask, pre_process=True)
+        else:
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids = position_ids.masked_fill(attention_mask == 0, 0)
+            dense, _, _ = remove_left_padding(dense, attention_mask, position_ids, pre_process=True)
+            mask_BS, _, _ = remove_left_padding(mask_BS, attention_mask, position_ids, pre_process=True)
+            response_BS, _, _ = remove_left_padding(response_BS, attention_mask, position_ids, pre_process=True)
+
+        flat = sequence_major_flatten(dense)
+        mask = sequence_major_flatten(mask_BS)
+        response_mask = sequence_major_flatten(response_BS)
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+        if tp_size > 1:
+            # Under TP sequence parallelism the router sees this rank's
+            # contiguous chunk of the sequence dim.
+            transform_batch, transform_seq = dense.shape[0], dense.shape[1]
+            slice_kwargs = dict(
+                seq_len=transform_seq,
+                batch_size=transform_batch,
+                tp_rank=mpu.get_tensor_model_parallel_rank(),
+                tp_size=tp_size,
+            )
+            flat = slice_sequence_parallel(flat, **slice_kwargs)
+            mask = slice_sequence_parallel(mask, **slice_kwargs)
+            response_mask = slice_sequence_parallel(response_mask, **slice_kwargs)
+        per_layer = {idx: flat[:, idx, :].to(device) for idx in controller.local_layer_indices}
+        return per_layer, mask.to(device), response_mask.to(device)
+
+    def _forward_micro_batch(
+        self,
+        model,
+        sequences,
+        attention_mask,
+        position_ids,
+        rollout_routed_experts: Optional[torch.Tensor] = None,
+        num_actions: Optional[int] = None,
+    ):
+        """Run the shared packed or left-unpadded Megatron model boundary.
+
+        When router replay is installed and routes are present, brackets the
+        model call with ``begin_forward`` / ``end_forward`` (never falling back
+        to native routing); with replay installed but no routes, fails fast
+        before the model runs.
+        """
+        attention_mask = attention_mask.to(bool)
+        armed = False
+        if self.router_replay is not None:
+            if rollout_routed_experts is None:
+                raise ValueError("moe_router_replay is on but the micro-batch carries no rollout_routed_experts")
+            per_layer, mask, response_mask = self._build_router_replay_targets(
+                sequences, attention_mask, rollout_routed_experts, num_actions
+            )
+            self.router_replay.begin_forward(per_layer, mask, response_mask)
+            armed = True
+        try:
+            if self.use_sample_packing:
+                model_sequences, packed_seq_params = preprocess_packed_seqs(
+                    sequences,
+                    attention_mask,
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                )
+                model_attention_mask = None
+                model_position_ids = None
+            else:
+                model_sequences, model_attention_mask, model_position_ids = remove_left_padding(
+                    sequences,
+                    attention_mask,
+                    position_ids,
+                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                )
+                packed_seq_params = None
+
+            outputs = model(
+                model_sequences,
+                model_position_ids,
+                model_attention_mask,
+                packed_seq_params=packed_seq_params,
+                fp32_output=False,
+            )
+            if armed:
+                self.router_replay.end_forward()
+        except BaseException:
+            if armed:
+                # A strict end_forward would raise its own "layer never fired"
+                # error and mask the original failure; reset and re-raise.
+                self.router_replay.abort_forward()
+            raise
         return outputs, packed_seq_params
 
     def __call__(self, *args, **kwargs):
@@ -181,7 +308,7 @@ class MegatronModelWrapper:
 
     def forward(
         self,
-        micro_batches: List[dict],
+        micro_batches: List[MegatronForwardMicroBatch],
         seq_len: int,
         micro_batch_size: int,
         temperature: float = 1.0,
@@ -190,8 +317,7 @@ class MegatronModelWrapper:
         Forward-only inference to compute log-probs over a full mini-batch consisting of multiple micro-batches.
 
         Args:
-            micro_batches: List of micro-batch dicts with keys: "sequences", "attention_mask", "position_ids",
-                           and "num_actions".
+            micro_batches: Typed forward micro-batches.
             seq_len: Padded sequence length per sample.
             micro_batch_size: Per-micro-batch size.
             temperature: Optional temperature scaling for logits.
@@ -202,20 +328,24 @@ class MegatronModelWrapper:
         forward_backward_func = get_forward_backward_func()
 
         def collection_func(logits, data, packed_seq_params):
-            sequences = data["sequences"]
+            sequences = data.sequences
 
             if temperature != 1.0:
                 logits.div_(temperature)
 
-            token_logprobs = self._token_logprobs(logits, sequences, data["attention_mask"].to(bool), packed_seq_params)
+            token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
-            sequences = batch["sequences"]
-            attention_mask = batch["attention_mask"]
-            position_ids = batch["position_ids"]
-            outputs, packed_seq_params = self._forward_micro_batch(model, sequences, attention_mask, position_ids)
+            outputs, packed_seq_params = self._forward_micro_batch(
+                model,
+                batch.sequences,
+                batch.attention_mask,
+                batch.position_ids,
+                rollout_routed_experts=batch.rollout_routed_experts,
+                num_actions=batch.num_actions,
+            )
 
             return outputs, partial(collection_func, data=batch, packed_seq_params=packed_seq_params)
 
@@ -231,16 +361,22 @@ class MegatronModelWrapper:
             forward_only=True,
         )
 
+        if self.router_replay is not None:
+            # No backward ran, so nothing may be left to recompute; discard the
+            # pass's metrics so they do not bleed into the next train step.
+            self.router_replay.assert_drained()
+            self.router_replay.pop_metrics()
+
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
             log_probs = [o["log_probs"] for o in output]
             log_probs = torch.cat(log_probs, dim=0)
             # take last num_actions tokens per micro; concatenate later
             # Assume all micros have same num_actions
-            num_actions = micro_batches[0]["num_actions"]
+            num_actions = micro_batches[0].num_actions
             log_probs = log_probs[:, -num_actions:]
         else:
             # return dummy tensor for non-last pp stages
-            device = micro_batches[0]["sequences"].device
+            device = micro_batches[0].sequences.device
             log_probs = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
         return log_probs
 
@@ -255,9 +391,11 @@ class MegatronModelWrapper:
         if token_ids is None:
             return None
         if self.use_sample_packing or mpu.get_context_parallel_world_size() != 1:
-            raise ValueError("sparse forward KL on Megatron does not yet support sample packing or context parallelism")
+            raise ValueError(
+                "selected-ID distillation on Megatron does not yet support sample packing or context parallelism"
+            )
         if mpu.get_tensor_model_parallel_world_size() != 1:
-            raise ValueError("sparse forward KL on Megatron requires a tensor-parallel top-K gather")
+            raise ValueError("selected-ID distillation on Megatron requires a tensor-parallel top-K gather")
         response_logits = logits[:, -data.num_actions - 1 : -1]
         return student_topk_logprobs(response_logits, token_ids)
 
@@ -347,10 +485,14 @@ class MegatronModelWrapper:
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
 
-            sequences = batch.sequences
-            attention_mask = batch.attention_mask
-            position_ids = batch.position_ids
-            outputs, packed_seq_params = self._forward_micro_batch(model, sequences, attention_mask, position_ids)
+            outputs, packed_seq_params = self._forward_micro_batch(
+                model,
+                batch.sequences,
+                batch.attention_mask,
+                batch.position_ids,
+                rollout_routed_experts=batch.rollout_routed_experts,
+                num_actions=batch.num_actions,
+            )
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)
 
@@ -365,6 +507,20 @@ class MegatronModelWrapper:
             micro_batch_size=micro_batch_size,
             forward_only=False,
         )
+
+        if self.router_replay is not None:
+            # Fail before the optimizer step: a non-empty FIFO or a masked row
+            # that was not replayed means a layout bug, not a metric.
+            self.router_replay.assert_drained()
+            replay_metrics = self.router_replay.pop_metrics()
+            if replay_metrics["hit_fraction"] != 1.0:
+                raise ValueError(
+                    f"router replay: hit_fraction {replay_metrics['hit_fraction']} != 1.0; "
+                    "masked rows fell through to native routing"
+                )
+            if mpu.is_pipeline_last_stage(ignore_virtual=True):
+                metrics_list[-1]["router_replay/hit_fraction"] = replay_metrics["hit_fraction"]
+                metrics_list[-1]["router_replay/sentinel_fraction"] = replay_metrics["sentinel_fraction"]
 
         # broadcast metrics to all pp ranks
         if not mpu.is_pipeline_last_stage(ignore_virtual=True):

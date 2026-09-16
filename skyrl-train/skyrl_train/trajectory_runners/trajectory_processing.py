@@ -764,9 +764,35 @@ def concatenate_trajectory_batches(
                 for response_ids in output["response_ids"]:
                     rollout_logprobs_concat.append([0.0] * len(response_ids))
 
+    selected_topk_concat = None
+    behavior_topk_concat = None
+    if any(output.get("student_topk_indices") is not None for output in trajectory_batches):
+        if any(
+            output.get("student_topk_indices") is None or output.get("behavior_topk_logprobs") is None
+            for output in trajectory_batches
+        ):
+            raise ValueError("student-selected top-K evidence cannot be concatenated with missing rollout scores")
+        selected_topk_concat = [row for output in trajectory_batches for row in output["student_topk_indices"]]
+        behavior_topk_concat = [row for output in trajectory_batches for row in output["behavior_topk_logprobs"]]
+    elif any(output.get("behavior_topk_logprobs") is not None for output in trajectory_batches):
+        raise ValueError("student-selected behavior scores require selected token IDs")
+
     unshaped_rewards_concat = None
+    unshaped_reward_available_concat = None
     if any(output.get("unshaped_rewards") is not None for output in trajectory_batches):
         unshaped_rewards_concat = [reward for output in trajectory_batches for reward in get_outcome_rewards(output)]
+        if any(
+            output.get("unshaped_reward_available") is not None or output.get("unshaped_rewards") is None
+            for output in trajectory_batches
+        ):
+            unshaped_reward_available_concat = [
+                available
+                for output in trajectory_batches
+                for available in (
+                    output.get("unshaped_reward_available")
+                    or [output.get("unshaped_rewards") is not None] * len(output["response_ids"])
+                )
+            ]
 
     disposition_channels: dict[str, list[str | None]] = {}
     for key in ("exception_types", "error_treatments"):
@@ -868,12 +894,17 @@ def concatenate_trajectory_batches(
     }
     if rollout_routed_experts_concat is not None:
         result["rollout_routed_experts"] = rollout_routed_experts_concat
+    if selected_topk_concat is not None:
+        result["student_topk_indices"] = selected_topk_concat
+        result["behavior_topk_logprobs"] = behavior_topk_concat
     if token_level_shaping_concat is not None:
         result["token_level_shaping"] = token_level_shaping_concat
     if response_span_tags_concat is not None:
         result["response_span_tags"] = response_span_tags_concat
     if unshaped_rewards_concat is not None:
         result["unshaped_rewards"] = unshaped_rewards_concat
+    if unshaped_reward_available_concat is not None:
+        result["unshaped_reward_available"] = unshaped_reward_available_concat
     for key, values in disposition_channels.items():
         result[key] = values
     if baseline_exclusions_concat is not None:

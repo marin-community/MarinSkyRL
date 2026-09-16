@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 
 import aiohttp
 
-from marinskyrl.distillation import OpenAICompatibleTeacherSpec, TeacherEndpointSpec
+from marinskyrl.distillation import OpenAICompatibleTeacherSpec, TeacherEndpointSpec, TeacherEvidenceKind
 from skyrl_train.distillation import TeacherEvidenceBatch, TeacherScoreRequest
 from skyrl_train.inference_engines.vllm_teacher_oracle import teacher_evidence_from_prompt_logprobs
 from skyrl_train.teacher_oracle import TeacherCapabilities, TeacherEndpointUnavailable
@@ -137,6 +137,8 @@ class OpenAICompatibleTeacherOracle:
     async def score(self, request: TeacherScoreRequest) -> TeacherEvidenceBatch:
         if self._closed:
             raise RuntimeError("remote teacher oracle is closed")
+        if request.evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
+            raise ValueError("OpenAI-compatible prompt top-K cannot score arbitrary student-selected token IDs")
         full_sequences = [
             request.prompt_token_ids[row][request.prompt_mask[row]].tolist()
             + request.response_token_ids[row][request.response_mask[row]].tolist()

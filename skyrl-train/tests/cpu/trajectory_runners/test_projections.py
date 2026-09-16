@@ -89,6 +89,30 @@ def test_step_wise_projection_preserves_group_identity_and_final_step():
     assert output["rollout_metrics"]["generate/token_provenance/reconstructed_fraction"] == 0.5
 
 
+def test_step_wise_projection_preserves_student_topk_candidates():
+    projection = StepWiseTrajectoryProjection(_config(), _Tokenizer())
+    first = _step([3], 1.0)
+    first.evidence = replace(
+        first.evidence,
+        student_topk_indices=((3, 4),),
+        behavior_topk_logprobs=((-0.1, -1.1),),
+    )
+    second = _step([5], 0.0)
+    second.evidence = replace(
+        second.evidence,
+        student_topk_indices=((5, 6),),
+        behavior_topk_logprobs=((-0.2, -1.2),),
+    )
+
+    output = projection.project(
+        [[first, second]],
+        {"env_classes": ["math"], "trajectory_ids": [TrajectoryID("task", 0)], "sampling_params": {"logprobs": 2}},
+    )
+
+    assert output["student_topk_indices"] == [[[3, 4]], [[5, 6]]]
+    assert output["behavior_topk_logprobs"] == [[[-0.1, -1.1]], [[-0.2, -1.2]]]
+
+
 def test_projection_derives_mask_baseline_and_token_credit_from_contracts():
     projection = WholeTrajectoryProjection(_config(), _Tokenizer())
     step = _step([3, 4], 0.0)
@@ -109,4 +133,5 @@ def test_projection_derives_mask_baseline_and_token_credit_from_contracts():
     assert output["token_level_shaping"] == [[0.1, -0.1]]
     assert output["exception_types"] == ["TurnCapExhaustedError"]
     assert output["error_treatments"] == ["passthrough"]
-    assert "unshaped_rewards" not in output
+    assert output["unshaped_rewards"] == [0.0]
+    assert output["unshaped_reward_available"] == [False]

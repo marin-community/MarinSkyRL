@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import csv
 import json
 from datetime import UTC, datetime, timedelta
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 import subprocess
 import tarfile
@@ -522,6 +523,56 @@ def test_rl_status_only_refreshes_current_state_from_log_tail(monkeypatch, tmp_p
     assert row[4] == "0.91"
 
 
+def test_rl_report_row_uses_fresh_pod_metrics_when_finelog_omits_step(tmp_path):
+    pod_dir = tmp_path / "pod_logs"
+    pod_dir.mkdir()
+    pod_log = pod_dir / "current-pod.log"
+    pod_log.write_text(
+        "Training Batches Processed: 3/128\n"
+        'WANDB_MIRROR kind=train step=1 metrics={"reward/avg_raw_reward": 0.7712, '
+        '"policy/policy_loss": 1.05}\n'
+    )
+    (tmp_path / "finelog.log").write_text("Training Batches Processed: 3/128\n")
+    artifacts = watch_coreweave_rl.ArtifactResult(
+        "synced", "synced", "synced", "synced", None, None, (), pod_log_files=(pod_log,)
+    )
+
+    row = _rl_report_row(tmp_path, artifacts=artifacts)
+
+    assert row[3] == "1/128"
+    assert row[4] == "0.7712"
+    assert row[5] == "1.05"
+
+
+def test_rl_report_row_uses_newer_finelog_step_over_pod_metrics(tmp_path):
+    pod_log = tmp_path / "pod_logs" / "current-pod.log"
+    pod_log.parent.mkdir()
+    pod_log.write_text('WANDB_MIRROR kind=train step=1 metrics={"reward/avg_raw_reward": 0.7}\n')
+    artifacts = watch_coreweave_rl.ArtifactResult(
+        "synced", "synced", "synced", "synced", None, None, (), pod_log_files=(pod_log,)
+    )
+
+    row = _rl_report_row(
+        tmp_path,
+        'Training Step Progress: 2 / 128\nWANDB_MIRROR kind=train step=2 metrics={"reward/avg_raw_reward": 0.8}\n',
+        artifacts=artifacts,
+    )
+
+    assert row[3] == "2/128"
+    assert row[4] == "0.8"
+
+
+def test_rl_status_only_does_not_reuse_old_pod_metrics(tmp_path):
+    pod_log = tmp_path / "pod_logs" / "old-pod.log"
+    pod_log.parent.mkdir()
+    pod_log.write_text('WANDB_MIRROR kind=train step=7 metrics={"reward/avg_raw_reward": 0.9}\n')
+
+    row = _rl_report_row(tmp_path, "Training Step Progress: 1 / 128\n")
+
+    assert row[3] == "1/128"
+    assert row[4] == "—"
+
+
 def test_rl_report_row_keeps_artifact_exceptions_out_of_trend(tmp_path):
     artifacts = watch_coreweave_rl.ArtifactResult(
         "unavailable",
@@ -713,6 +764,30 @@ job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json,task_state
     assert errors == []
     assert [job.short_name for job in jobs] == ["rl-live", "rl-failed"]
     assert [job.is_terminal for job in jobs] == [False, True]
+
+
+def test_rl_discovery_accepts_large_entrypoint_csv_field(monkeypatch):
+    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
+    entrypoint = "task_runtime.py " + "x" * 150_000 + " --train_data '[\"live\"]'"
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(("job_id", "state", "submitted_at_ms", "finished_at_ms", "entrypoint_json", "task_state"))
+    writer.writerow(("/benjaminfeuer/rl-large", 3, 1000, "", entrypoint, 3))
+
+    monkeypatch.setattr(
+        watch_coreweave_rl,
+        "run_iris",
+        lambda _cluster, arguments, **_kwargs: subprocess.CompletedProcess(
+            arguments, 0, stdout=output.getvalue(), stderr=""
+        ),
+    )
+
+    jobs, errors = watch_coreweave_rl.discover_rl_jobs(cluster, "benjaminfeuer")
+
+    assert errors == []
+    assert len(jobs) == 1
+    assert jobs[0].job_id == "/benjaminfeuer/rl-large"
+    assert jobs[0].entrypoint == entrypoint
 
 
 def test_rl_discovery_parses_active_task_state_column(monkeypatch):

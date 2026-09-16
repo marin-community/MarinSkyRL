@@ -104,7 +104,11 @@ def stub_megatron_modules() -> None:
         "megatron.core.transformer.module": {"Float16Module": type("Float16Module", (), {})},
         "megatron.core.optimizer": {"ChainedOptimizer": type("ChainedOptimizer", (), {})},
         "megatron.core.utils": {"get_attr_wrapped_model": lambda *args, **kwargs: None},
-        "megatron.core.packed_seq_params": {"PackedSeqParams": type("PackedSeqParams", (), {})},
+        "megatron.core.packed_seq_params": {
+            "PackedSeqParams": type(
+                "PackedSeqParams", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}
+            )
+        },
     }
     for name, members in stub_attrs.items():
         module = sys.modules.setdefault(name, types.ModuleType(name))

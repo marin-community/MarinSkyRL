@@ -10,12 +10,11 @@ from typing import Literal, Optional, TypeAlias
 
 import torch
 
-from skyrl_train.tensor_math import masked_mean
+from skyrl_train.tensor_math import TOKEN_MEAN_LOSS_REDUCTION, masked_mean
 from skyrl_train.utils.policy_math import right_pad_to_match
 
 
 SPAN_THINK_TAG: int = 1  # mirrors span_tagger.SPAN_THINK (kept local to avoid a torch-free import cycle)
-TOKEN_MEAN_LOSS_REDUCTION = "token_mean"
 SEQUENCE_MEAN_LOSS_REDUCTION = "sequence_mean"
 SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION = "seq_mean_token_sum_norm"
 GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION = "seq_mean_token_sum_norm_global"
