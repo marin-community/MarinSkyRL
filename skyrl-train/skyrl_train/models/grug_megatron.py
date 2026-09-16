@@ -230,8 +230,21 @@ class GrugTopKRouter(TopKRouter):
     def routing(self, logits: torch.Tensor, padding_mask: torch.Tensor | None = None):
         logits = logits.view(-1, self.config.num_moe_experts).float()
         biased_logits = logits + self.expert_bias
-        _, topk_indices = jax_top_k(biased_logits, self.topk + 1)
-        selected = topk_indices[:, : self.topk]
+        if self.router_replay is None:
+            _, topk_indices = jax_top_k(biased_logits, self.topk + 1)
+            selected = topk_indices[:, : self.topk]
+        else:
+            # Grug overrides MCore's routing method, so its replay hook must be
+            # called here. Selection uses biased logits; combine weights below
+            # still use the original, unbiased logits.
+            def native_topk(scores, topk, num_groups=None, group_topk=None):
+                if num_groups is not None or group_topk is not None:
+                    raise ValueError("Grug router replay does not support grouped top-k")
+                _, indices = jax_top_k(scores, topk + 1)
+                indices = indices[:, :topk]
+                return scores.gather(1, indices), indices
+
+            _, selected = self.router_replay.get_replay_topk(biased_logits, self.topk, None, None, native_topk)
         combine = torch.sigmoid(torch.gather(logits, dim=-1, index=selected))
         combine = combine * (GRUG_ROUTING_RENORM_SUM / (combine.sum(dim=-1, keepdim=True) + GRUG_ROUTER_RENORM_EPS))
         probs = torch.zeros_like(logits).scatter(1, selected, combine)
