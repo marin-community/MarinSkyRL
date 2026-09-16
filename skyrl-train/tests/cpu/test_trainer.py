@@ -36,6 +36,9 @@ from skyrl_train.models.grug_query_bias import (
     next_loss_free_query_bias,
     next_query_bias,
 )
+from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
+from skyrl_train.draft_trainer import DraftCheckpoint
+from skyrl_train.inference_engines.vllm.online_eagle_trainer import OnlineEagleUpdateResult
 import numpy as np
 from skyrl_train.distillation import SampledReverseKLInput, SparseForwardKLInput, TopKTeacherEvidence
 from skyrl_train.trajectory_runners.types import TrajectoryID
@@ -44,6 +47,397 @@ from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
 from tests.grug_training_parity import ORACLE_FIXTURE_DIR
+
+
+_DRAFT_REVISION = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
+
+
+def _draft_checkpoint(uri: str) -> DraftCheckpoint:
+    return DraftCheckpoint(
+        step=2,
+        revision="draft-step-2",
+        uri=uri,
+        weights_uri=f"{uri}/model.safetensors",
+        weights_size=5,
+        completion_uri=f"{uri}/complete.json",
+        source_identity=_DRAFT_REVISION,
+    )
+
+
+class _SpeculatorCaptureClient:
+    def __init__(self):
+        self.begins = []
+        self.seals = []
+        self.refreshes = []
+        self.refresh_result = [
+            {
+                "active": True,
+                "draft_revision": "draft-step-2",
+            }
+        ]
+        self.engines = [object()]
+
+    async def begin_online_eagle_capture(self, config):
+        self.begins.append(config)
+        return [
+            [
+                {"active": True, "worker_rank": 0},
+                {"active": True, "worker_rank": 1},
+            ]
+        ]
+
+    async def seal_online_eagle_capture(self, output_root):
+        self.seals.append(output_root)
+        return [
+            [
+                {
+                    "active": True,
+                    "worker_rank": 0,
+                    "captured_rows": 41,
+                    "dropped_windows": 2,
+                    "windows": [{"path": "window-000000.safetensors"}],
+                    "path": "s3://bucket/checkpoints/drafts/captures/step-2/rank-00000/manifest.json",
+                },
+                {
+                    "active": True,
+                    "worker_rank": 1,
+                    "captured_rows": 43,
+                    "dropped_windows": 1,
+                    "windows": [{"path": "window-000000.safetensors"}],
+                    "path": "s3://bucket/checkpoints/drafts/captures/step-2/rank-00001/manifest.json",
+                },
+            ]
+        ]
+
+    async def update_draft_weights(self, weights_path):
+        self.refreshes.append(weights_path)
+        return self.refresh_result
+
+
+class _ImmediateRef:
+    def __init__(self, value):
+        self.value = value
+
+    def __await__(self):
+        async def resolve():
+            return self.value
+
+        return resolve().__await__()
+
+
+class _RemoteMethod:
+    def __init__(self, fn):
+        self.fn = fn
+
+    def remote(self, *args, **kwargs):
+        return _ImmediateRef(self.fn(*args, **kwargs))
+
+
+class _DraftTrainer:
+    def __init__(self):
+        self.updates = []
+        self.update = _RemoteMethod(self._update)
+
+    def _update(self, job):
+        self.updates.append(job)
+        return OnlineEagleUpdateResult(
+            accepted=True,
+            step=job.step,
+            draft_revision=f"draft-step-{job.step}",
+            candidate_uri=f"s3://bucket/checkpoints/drafts/draft-step-{job.step}",
+            parent_draft_revision="draft-step-1",
+            trained_against_target_revision=job.target_revision,
+            train_loss=0.5,
+            incumbent_holdout_loss=0.4,
+            candidate_holdout_loss=0.3,
+        )
+
+
+def _online_speculator_trainer(interval_steps=1):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.speculative_decoding = SpeculativeDecodingConfig.from_mapping(
+        {
+            "method": "eagle3",
+            "model": {
+                "source_uri": "hf://laion/snowball-64k-eagle3-draft-r2egym",
+                "source_identity": _DRAFT_REVISION,
+            },
+            "num_speculative_tokens": 3,
+            "training": {"interval_steps": interval_steps},
+        }
+    )
+    trainer.global_step = 2
+    trainer._speculator_capture_active = False
+    trainer._speculator_revision = "draft-step-1"
+    trainer._sealed_speculator_capture_uri = None
+    trainer._speculator_checkpoint_root = "s3://bucket/checkpoints/drafts"
+    trainer._draft_trainer = _DraftTrainer()
+    trainer._draft_trainer_update_ref = None
+    trainer._draft_trainer_submitted_at = None
+    trainer._speculator_refresh_task = None
+    trainer._speculator_requested_revision = None
+    trainer._speculator_update_failures = 0
+    trainer._speculator_install_count = 0
+    trainer._speculator_install_failures = 0
+    trainer._speculator_checkpoint_poll_failures = 0
+    trainer.inference_engine_client = _SpeculatorCaptureClient()
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {"seed": 17, "ckpt_path": "s3://bucket/checkpoints"},
+            "generator": {"num_inference_engines": 1, "inference_engine_data_parallel_size": 2},
+        }
+    )
+    return trainer
+
+
+def test_online_speculator_capture_seals_target_snapshot_before_training_boundary(monkeypatch):
+    trainer = _online_speculator_trainer(interval_steps=2)
+    monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
+
+    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._seal_speculator_capture())
+
+    assert trainer.inference_engine_client.begins == [
+        {
+            "step": 2,
+            "max_tokens": 16_384,
+            "max_window_tokens": 16_384,
+            "target_revision": "policy-step-1",
+            "draft_revision": "draft-step-1",
+            "reserved_gpu_memory_gib": 8,
+        }
+    ]
+    assert trainer.inference_engine_client.seals == ["s3://bucket/checkpoints/drafts/captures/step-2"]
+    assert trainer._sealed_speculator_capture_uri == "s3://bucket/checkpoints/drafts/captures/step-2"
+    assert trainer.all_metrics["speculator/sealed_rows"] == 84.0
+    assert trainer.all_metrics["speculator/sealed_windows"] == 2.0
+    assert trainer.all_metrics["speculator/capture_dropped_windows"] == 3.0
+    assert trainer._speculator_capture_active is False
+
+
+def test_online_speculator_capture_cadence_is_idempotent(monkeypatch):
+    trainer = _online_speculator_trainer(interval_steps=3)
+    monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
+
+    asyncio.run(trainer._begin_speculator_capture())
+    assert trainer.inference_engine_client.begins == []
+
+    trainer.global_step = 3
+    asyncio.run(trainer._begin_speculator_capture())
+    asyncio.run(trainer._begin_speculator_capture())
+
+    assert len(trainer.inference_engine_client.begins) == 1
+
+
+def test_online_speculator_update_overlaps_then_refreshes_at_boundary(monkeypatch):
+    trainer = _online_speculator_trainer()
+    monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
+    monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda ref: (True, ref.value))
+    monkeypatch.setattr(
+        trainer_module,
+        "read_latest_draft_checkpoint",
+        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
+    )
+
+    async def scenario():
+        await trainer._begin_speculator_capture()
+        await trainer._seal_speculator_capture()
+        await trainer._start_speculator_update()
+        assert trainer._draft_trainer_update_ref is not None
+        job = trainer._draft_trainer.updates[0]
+        assert job.capture_uri.endswith("/captures/step-2")
+        assert job.target_revision == "policy-step-1"
+        assert job.seed == 17
+        await trainer._poll_speculator_lifecycle()
+        await trainer._refresh_latest_speculator(wait=True)
+
+    asyncio.run(scenario())
+
+    assert trainer.inference_engine_client.refreshes == [
+        "s3://bucket/checkpoints/drafts/draft-step-2/model.safetensors"
+    ]
+    assert trainer._speculator_revision == "draft-step-2"
+    assert trainer.all_metrics["speculator/install_count"] == 1.0
+    assert trainer.all_metrics["speculator/candidate_accepted"] == 1.0
+
+
+def test_online_speculator_failed_engine_is_recorded_without_rejecting_accepted_revision(monkeypatch):
+    trainer = _online_speculator_trainer()
+    monkeypatch.setattr(
+        trainer_module,
+        "read_latest_draft_checkpoint",
+        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
+    )
+    trainer.inference_engine_client.refresh_result = [
+        {
+            "active": False,
+            "error": "RuntimeError: draft load failed",
+        }
+    ]
+
+    asyncio.run(trainer._refresh_latest_speculator(wait=True))
+
+    assert trainer._speculator_revision == "draft-step-1"
+    assert trainer._speculator_requested_revision is None
+    assert trainer.all_metrics["speculator/install_successful_engines"] == 0.0
+    assert trainer.all_metrics["speculator/install_failed_engines"] == 1.0
+    assert trainer.all_metrics["speculator/install_failures"] == 1.0
+
+
+def test_online_speculator_stale_accepted_revision_still_refreshes_serving(monkeypatch):
+    trainer = _online_speculator_trainer()
+    monkeypatch.setattr(
+        trainer_module,
+        "read_latest_draft_checkpoint",
+        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
+    )
+    trainer.global_step = 5
+
+    asyncio.run(trainer._refresh_latest_speculator(wait=True))
+
+    assert trainer._speculator_revision == "draft-step-2"
+    assert len(trainer.inference_engine_client.refreshes) == 1
+
+
+def test_online_speculator_checkpoint_poll_failure_is_nonfatal_and_counted(monkeypatch):
+    trainer = _online_speculator_trainer()
+
+    def fail_poll(_root, **_kwargs):
+        raise OSError("object store unavailable")
+
+    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", fail_poll)
+
+    asyncio.run(trainer._start_latest_speculator_refresh())
+
+    assert trainer._speculator_refresh_task is None
+    assert trainer.all_metrics["speculator/checkpoint_poll_failures"] == 1.0
+
+
+def test_online_speculator_busy_draft_trainer_skips_capture(monkeypatch) -> None:
+    trainer = _online_speculator_trainer()
+    trainer._draft_trainer_update_ref = _ImmediateRef(None)
+    monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda _ref: (False, None))
+    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
+
+    asyncio.run(trainer._begin_speculator_capture())
+
+    assert trainer.inference_engine_client.begins == []
+
+
+def test_online_speculator_capture_accepts_multiple_vllm_ranks(monkeypatch) -> None:
+    trainer = _online_speculator_trainer()
+    monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
+
+    async def begin_cross_node(_config):
+        return [
+            [
+                {"active": True, "worker_rank": 0},
+                {"active": True, "worker_rank": 1},
+            ]
+        ]
+
+    trainer.inference_engine_client.begin_online_eagle_capture = begin_cross_node
+
+    asyncio.run(trainer._begin_speculator_capture())
+
+    assert trainer._speculator_capture_active is True
+
+
+def test_online_speculator_partial_capture_is_still_handed_off(monkeypatch) -> None:
+    trainer = _online_speculator_trainer()
+    monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
+    asyncio.run(trainer._begin_speculator_capture())
+
+    async def partial_seal(_destination):
+        return [
+            [
+                {
+                    "active": True,
+                    "worker_rank": 0,
+                    "captured_rows": 41,
+                    "windows": [],
+                },
+                {"active": False, "worker_rank": 1},
+            ]
+        ]
+
+    trainer.inference_engine_client.seal_online_eagle_capture = partial_seal
+
+    asyncio.run(trainer._seal_speculator_capture())
+
+    assert trainer._sealed_speculator_capture_uri is not None
+
+
+def test_online_speculator_pending_update_keeps_the_incumbent(monkeypatch) -> None:
+    trainer = _online_speculator_trainer()
+    trainer._draft_trainer_update_ref = _ImmediateRef(None)
+    monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda _ref: (False, None))
+    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
+
+    asyncio.run(trainer._poll_speculator_lifecycle())
+
+    assert trainer._speculator_revision == "draft-step-1"
+    assert trainer.inference_engine_client.refreshes == []
+    assert trainer.all_metrics["speculator/update_pending"] == 1.0
+    assert trainer.all_metrics["speculator/update_failures"] == 0.0
+
+
+def test_online_speculator_invalid_update_result_is_nonfatal(monkeypatch) -> None:
+    trainer = _online_speculator_trainer()
+    trainer._draft_trainer_update_ref = _ImmediateRef(None)
+    monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda _ref: (True, None))
+    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
+
+    asyncio.run(trainer._poll_speculator_lifecycle())
+
+    assert trainer._draft_trainer_update_ref is None
+    assert trainer.all_metrics["speculator/update_pending"] == 0.0
+    assert trainer.all_metrics["speculator/update_failures"] == 1.0
+
+
+def test_online_speculator_without_latest_checkpoint_keeps_initial_draft(monkeypatch):
+    trainer = _online_speculator_trainer()
+    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
+
+    asyncio.run(trainer._refresh_latest_speculator(wait=True))
+
+    assert trainer._speculator_revision == "draft-step-1"
+    assert trainer.inference_engine_client.refreshes == []
+
+
+def test_online_speculator_normalizes_gcs_checkpoint_for_vllm(monkeypatch) -> None:
+    trainer = _online_speculator_trainer()
+    monkeypatch.setattr(
+        trainer_module,
+        "read_latest_draft_checkpoint",
+        lambda _root, **_kwargs: _draft_checkpoint("gcs://bucket/checkpoints/drafts/draft-step-2"),
+    )
+
+    asyncio.run(trainer._refresh_latest_speculator(wait=True))
+
+    assert trainer.inference_engine_client.refreshes == [
+        "gs://bucket/checkpoints/drafts/draft-step-2/model.safetensors"
+    ]
+
+
+def test_online_speculator_refresh_failure_is_retryable(monkeypatch) -> None:
+    trainer = _online_speculator_trainer()
+    monkeypatch.setattr(
+        trainer_module,
+        "read_latest_draft_checkpoint",
+        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
+    )
+    trainer.inference_engine_client.refresh_result = [{"active": False, "error": "load failed"}]
+
+    asyncio.run(trainer._refresh_latest_speculator(wait=True))
+    assert trainer._speculator_requested_revision is None
+    trainer.inference_engine_client.refresh_result = [{"active": True}]
+    asyncio.run(trainer._refresh_latest_speculator(wait=True))
+
+    assert trainer._speculator_revision == "draft-step-2"
+    assert len(trainer.inference_engine_client.refreshes) == 2
 
 
 def test_sync_group_admission_uses_elapsed_time_instead_of_batch_count():
@@ -156,6 +550,19 @@ class _ResidencyPolicyGroup:
             self.optimizer_on_gpu = False
         if offload_model:
             self.model_on_gpu = False
+
+
+class _CheckpointResidencyPolicyGroup(_ResidencyPolicyGroup):
+    def __init__(self):
+        super().__init__()
+        self.restore_residencies = []
+
+    def async_run_ray_method(self, dispatch_type, method_name, **kwargs):
+        assert dispatch_type == "pass_through"
+        assert method_name == "load_checkpoint"
+        assert kwargs["load_training_state"]
+        self.restore_residencies.append((self.model_on_gpu, self.optimizer_on_gpu))
+        return []
 
 
 class _ResidencyInferenceClient:
@@ -630,6 +1037,34 @@ def test_load_checkpoints_accepts_trailing_slash_resume_path(dummy_config):
     exists.assert_called_once_with(resume_path.rstrip("/"))
 
 
+def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore(dummy_config, tmp_path, monkeypatch):
+    checkpoint_path = tmp_path / "global_step_12"
+    (checkpoint_path / trainer_module.POLICY_CHECKPOINT_SUBDIRECTORY).mkdir(parents=True)
+    torch.save({"global_step": 12}, checkpoint_path / trainer_module.TRAINER_STATE_FILENAME)
+    dummy_config.trainer.resume_path = str(checkpoint_path)
+    dummy_config.trainer.offload_optimizer_during_rollouts = True
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.colocate_all = False
+    trainer.all_startup_timings = {}
+    trainer.train_dataloader = MagicMock()
+    trainer.policy_model = _CheckpointResidencyPolicyGroup()
+    trainer.policy_model.model_on_gpu = True
+    trainer.policy_model.optimizer_on_gpu = True
+    trainer.critic_model = None
+    trainer._domain_balancer = None
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+
+    global_step, restored_path = trainer.load_checkpoints()
+
+    assert global_step == 12
+    assert restored_path == str(checkpoint_path)
+    assert trainer.policy_model.restore_residencies == [(True, False)]
+    assert "offload_policy_optimizer_before_checkpoint_load" in trainer.all_startup_timings
+
+
 class _CursorDataLoader:
     def __init__(self):
         self.cursor = 0
@@ -671,6 +1106,7 @@ def test_load_checkpoints_restores_refill_state_only_with_dataloader_cursor(
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = dummy_config
     trainer.resume_mode = ResumeMode.FROM_PATH
+    trainer.colocate_all = True
     trainer.train_dataloader = _CursorDataLoader()
     trainer.policy_model = MagicMock()
     trainer.policy_model.async_run_ray_method.return_value = []
@@ -714,6 +1150,7 @@ def test_load_checkpoints_can_start_a_new_stage_with_continued_model_training_st
     trainer.policy_model = MagicMock()
     trainer.policy_model.async_run_ray_method.return_value = []
     trainer.critic_model = None
+    trainer.colocate_all = True
     trainer._domain_balancer = None
 
     with patch("skyrl_train.trainer.ray.get", return_value=None):
