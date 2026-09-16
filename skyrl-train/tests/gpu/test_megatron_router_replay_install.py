@@ -120,7 +120,7 @@ def _capture_mapping(model: list[torch.nn.Module]) -> dict[int, int]:
 
 
 def _model_input(device: str) -> torch.Tensor:
-    generator = torch.Generator().manual_seed(11)
+    generator = torch.Generator(device="cuda").manual_seed(11)
     return torch.randint(10, 500, (1, SEQ_LEN), dtype=torch.long, device=device, generator=generator)
 
 
