@@ -109,4 +109,5 @@ def test_projection_derives_mask_baseline_and_token_credit_from_contracts():
     assert output["token_level_shaping"] == [[0.1, -0.1]]
     assert output["exception_types"] == ["TurnCapExhaustedError"]
     assert output["error_treatments"] == ["passthrough"]
-    assert "unshaped_rewards" not in output
+    assert output["unshaped_rewards"] == [0.0]
+    assert output["unshaped_reward_available"] == [False]

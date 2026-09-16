@@ -88,6 +88,10 @@ def group_is_informative_for_dynamic_sampling(
     outcomes = _aligned_sequence(trajectory_batch, reward_key, row_count)
     if outcomes is None:
         raise ValueError(f"dynamic sampling filter requires {reward_key} for every generated group")
+    if criteria.reward_source is DynamicSamplingRewardSource.UNSHAPED:
+        availability = _aligned_sequence(trajectory_batch, "unshaped_reward_available", row_count)
+        if availability is not None and any(not availability[index] for index in row_indices):
+            return False
     is_last_step = _aligned_sequence(trajectory_batch, "is_last_step", row_count)
 
     final_outcomes = []

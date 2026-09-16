@@ -200,9 +200,11 @@ def _attach_reward_channels(
 
 
 def attach_unshaped_rewards(batch: TrajectoryBatch, rewards: Sequence[float | None]) -> None:
-    """Project a complete raw-reward channel onto the trainer transport."""
-    if all(reward is not None for reward in rewards):
-        batch["unshaped_rewards"] = [float(reward) for reward in rewards if reward is not None]
+    """Preserve raw outcomes and identify rows whose verifier did not produce one."""
+    availability = [reward is not None for reward in rewards]
+    batch["unshaped_rewards"] = [float(reward) if reward is not None else 0.0 for reward in rewards]
+    if not all(availability):
+        batch["unshaped_reward_available"] = availability
 
 
 def _token_provenance_metrics(outputs: Sequence[AgentLoopOutput]) -> dict[str, float]:
