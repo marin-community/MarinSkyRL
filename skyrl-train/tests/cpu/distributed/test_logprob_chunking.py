@@ -158,6 +158,21 @@ def test_chunked_backward_does_not_allocate_a_full_fp32_gradient(single_rank_gro
     assert logits.grad.dtype is torch.bfloat16
 
 
+def test_chunked_backward_does_not_materialize_dense_one_hot(single_rank_group, monkeypatch):
+    """The target update needs O(tokens), not O(tokens * local vocabulary), scratch."""
+    logits = torch.randn(2, 11, 24, dtype=torch.float32).requires_grad_(True)
+    targets = torch.randint(0, 24, (2, 11))
+
+    def reject_one_hot(*args, **kwargs):
+        raise AssertionError("chunked backward materialized a dense one-hot tensor")
+
+    monkeypatch.setattr(model_utils.torch.nn.functional, "one_hot", reject_one_hot)
+    _logprobs(logits, targets, single_rank_group, chunk_size=3, inference_only=False).sum().backward()
+
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
+
+
 def test_vocab_parallel_entropy_and_logprob_share_logits_without_corrupting_backward(single_rank_group, monkeypatch):
     """Entropy and policy losses must backpropagate through the same logits tensor."""
     monkeypatch.setattr(model_utils.mpu, "get_tensor_model_parallel_group", lambda: single_rank_group, raising=False)

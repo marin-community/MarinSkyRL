@@ -238,17 +238,23 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
             )
             softmax_output = softmax_output.exp()
 
-            # 1 if it's the chosen log prob, 0 otherwise
-            is_chosen = (~(target_mask[:, chunk_start:chunk_end])).unsqueeze(-1) * torch.nn.functional.one_hot(
-                masked_target[:, chunk_start:chunk_end],
-                num_classes=partition_vocab_size,
+            # d log p(target) / d logits = one_hot(target) - softmax. Apply
+            # the scalar upstream gradient in-place, then add it back only at
+            # chosen indices. A dense one_hot (and its float32 conversion)
+            # duplicates the entire [B, chunk, V_local] tensor at peak memory.
+            chunk_grad = grad_output[:, chunk_start:chunk_end]
+            softmax_output.mul_(chunk_grad.unsqueeze(-1)).neg_()
+            chosen = masked_target[:, chunk_start:chunk_end]
+            valid = ~target_mask[:, chunk_start:chunk_end]
+            chosen_offsets = (
+                torch.arange(chosen.numel(), device=chosen.device).view_as(chosen) * partition_vocab_size + chosen
             )
+            softmax_output.view(-1).scatter_add_(
+                0, chosen_offsets.masked_select(valid), chunk_grad.masked_select(valid)
+            )
+            grad_input[:, chunk_start:chunk_end, :].copy_(softmax_output)
 
-            grad_input_chunk = grad_input[:, chunk_start:chunk_end, :]
-            grad_input_chunk.copy_(is_chosen.float().sub_(softmax_output))
-            grad_input_chunk.mul_(grad_output[:, chunk_start:chunk_end].unsqueeze(dim=-1))
-
-            del softmax_output, is_chosen, logits
+            del softmax_output, logits
 
         # TODO: Investigate PrimeRL's streamed token-and-vocab LM-head backward
         # (`prime_rl/trainer/models/layers/lm_head.py:_SequenceChunkedLogProbEntropyFn`)
