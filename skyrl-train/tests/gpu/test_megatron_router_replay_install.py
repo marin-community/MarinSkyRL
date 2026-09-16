@@ -28,6 +28,7 @@ from skyrl_train.models.megatron_router_replay import (
     expand_moe_layer_freq,
 )
 from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
+from tests.gpu.router_replay_fixtures import random_unique_routes
 
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 NUM_LAYERS = 8
@@ -151,7 +152,7 @@ def _captured_routing_maps(model: list[torch.nn.Module], input_ids: torch.Tensor
 
 def _replay_targets(n: int, num_experts: int, topk: int, n_masked: int, device: str):
     generator = torch.Generator().manual_seed(23)
-    targets = torch.rand((n, num_experts), generator=generator).argsort(dim=-1)[:, :topk].to(device)
+    targets = random_unique_routes((n, topk), num_experts, generator=generator).to(device)
     mask = torch.zeros(n, dtype=torch.bool, device=device)
     mask[:n_masked] = True
     return targets, mask

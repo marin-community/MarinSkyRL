@@ -32,6 +32,7 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
+from tests.gpu.router_replay_fixtures import random_unique_routes
 from tests.gpu.test_grug_megatron import (
     NUM_EXPERTS,
     NUM_LAYERS,
@@ -79,8 +80,7 @@ def _routed_batch(pad_token_id: int, *, captured: bool) -> TrainingInputBatch:
     if not captured:
         routes = torch.zeros(shape, dtype=torch.long)  # empty capture: everything routes natively
     else:
-        scores = torch.rand((*shape[:-1], NUM_EXPERTS), generator=generator)
-        routes = scores.argsort(dim=-1)[..., :TOPK]
+        routes = random_unique_routes(shape, NUM_EXPERTS, generator=generator)
         routes[1] = 0  # one sample with fully-lost capture routes natively
     batch["rollout_routed_experts"] = routes.to(torch.int32)
     return batch

@@ -25,6 +25,7 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_serving import rank0_validation_snapshot
+from tests.gpu.router_replay_fixtures import random_unique_routes
 from tests.gpu.test_grug_megatron import (
     NUM_EXPERTS,
     NUM_LAYERS,
@@ -60,19 +61,17 @@ def _routed_batch(pad_token_id: int, *, routes: str = "random", seed: int = 29) 
     generator = torch.Generator().manual_seed(seed)
     shape = (batch["sequences"].shape[0], RESPONSE_LENGTH, NUM_LAYERS, TOPK)
 
-    def unique_routes(route_shape):
-        scores = torch.rand((*route_shape[:-1], NUM_EXPERTS), generator=generator)
-        return scores.argsort(dim=-1)[..., : route_shape[-1]]
-
     if routes == "random":
-        rollout_routed_experts = unique_routes(shape)
+        rollout_routed_experts = random_unique_routes(shape, NUM_EXPERTS, generator=generator)
         rollout_routed_experts[1] = 0  # one sample with fully-lost capture routes natively
     elif routes == "sentinel":
         rollout_routed_experts = torch.zeros(shape, dtype=torch.long)
     elif routes == "wrong_layers":
-        rollout_routed_experts = unique_routes((*shape[:2], NUM_LAYERS - 1, TOPK))
+        rollout_routed_experts = random_unique_routes(
+            (*shape[:2], NUM_LAYERS - 1, TOPK), NUM_EXPERTS, generator=generator
+        )
     elif routes == "wrong_response":
-        rollout_routed_experts = unique_routes((*shape[:2], NUM_LAYERS, TOPK))[:, :-1]
+        rollout_routed_experts = random_unique_routes(shape, NUM_EXPERTS, generator=generator)[:, :-1]
     else:
         raise ValueError(routes)
     batch["rollout_routed_experts"] = rollout_routed_experts.to(torch.int32)
