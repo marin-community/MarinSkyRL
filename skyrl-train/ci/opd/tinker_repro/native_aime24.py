@@ -40,6 +40,7 @@ from skyrl_train.evaluate import evaluation_dump_dir
 from skyrl_train.io.io import local_read_dir, upload_directory
 from skyrl_train.models.qwen3_5_vlm import (
     QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING,
+    is_qwen3_5_text_tower,
     is_qwen3_5_vlm_shell,
     unwrap_to_text_causal_lm,
 )
@@ -133,9 +134,10 @@ def merge_adapter_for_vllm(adapter_path: Path, destination: Path) -> None:
         device_map="cpu",
         trust_remote_code=False,
     )
-    if not is_qwen3_5_vlm_shell(model.config):
-        raise ValueError("Pinned Qwen3.5 base model is no longer a multimodal shell")
-    model = unwrap_to_text_causal_lm(model)
+    if is_qwen3_5_vlm_shell(model.config):
+        model = unwrap_to_text_causal_lm(model)
+    elif not is_qwen3_5_text_tower(model.config):
+        raise ValueError("Pinned Qwen3.5 base model is not a supported text tower or multimodal shell")
     adapted = PeftModel.from_pretrained(
         model,
         adapter_path,
