@@ -2590,11 +2590,16 @@ wheels = [
 [[package]]
 name = "langdetect"
 version = "1.0.9"
-source = { registry = "https://pypi.org/simple" }
+source = { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/langdetect-1.0.9-py3-none-any.whl" }
 dependencies = [
     { name = "six" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz", hash = "sha256:cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0", size = 981474, upload-time = "2021-05-07T07:54:13.562Z" }
+wheels = [
+    { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/langdetect-1.0.9-py3-none-any.whl", hash = "sha256:689ac91b643e003990a31fb6e06d3b388e155ed4c8d9f013b326194b5db3cd28" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "six" }]
 
 [[package]]
 name = "lark"
@@ -2955,6 +2960,7 @@ dependencies = [
     { name = "huggingface-hub" },
     { name = "hydra-core" },
     { name = "jaxtyping" },
+    { name = "langdetect" },
     { name = "loguru" },
     { name = "marin-finelog" },
     { name = "marin-finelog-server" },
@@ -2970,6 +2976,8 @@ dependencies = [
     { name = "pandas", version = "3.0.5", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "polars" },
     { name = "pyarrow" },
+    { name = "pycosat", version = "0.6.6", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "pycosat", version = "0.6.6", source = { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/pycosat-0.6.6-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "pyyaml" },
     { name = "ray" },
     { name = "reasoning-gym" },
@@ -3142,6 +3150,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.34.0" },
     { name = "hydra-core", specifier = "==1.3.2" },
     { name = "jaxtyping" },
+    { name = "langdetect", url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/langdetect-1.0.9-py3-none-any.whl" },
     { name = "loguru" },
     { name = "mamba-ssm", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/erictang000/mamba/releases/download/v2.3.1-torch2.11/mamba_ssm-2.3.1-cp312-cp312-linux_aarch64.whl" },
     { name = "mamba-ssm", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = ">=2.2,<3" },
@@ -3169,6 +3178,8 @@ requires-dist = [
     { name = "peft", marker = "extra == 'cpu'", specifier = ">=0.19" },
     { name = "polars" },
     { name = "pyarrow", specifier = ">=18" },
+    { name = "pycosat", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'", specifier = "==0.6.6" },
+    { name = "pycosat", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/pycosat-0.6.6-cp312-cp312-linux_x86_64.whl" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "quack-kernels", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.5.0" },
     { name = "ray", specifier = "==2.51.1" },
@@ -5018,7 +5029,22 @@ wheels = [
 name = "pycosat"
 version = "0.6.6"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "sys_platform == 'darwin'",
+    "platform_machine == 'aarch64' and sys_platform == 'linux'",
+]
 sdist = { url = "https://files.pythonhosted.org/packages/5b/81/cf8ebf77fc4f06f680ad3ee43d0d01826f6d6054828f1cf3b42d944b82a1/pycosat-0.6.6.tar.gz", hash = "sha256:a376cfae20b16fcfbef24bf3c047a8a294c35032bb051fa98842c12bbab6f0ff", size = 71623, upload-time = "2023-10-03T15:45:48.058Z" }
+
+[[package]]
+name = "pycosat"
+version = "0.6.6"
+source = { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/pycosat-0.6.6-cp312-cp312-linux_x86_64.whl" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
+wheels = [
+    { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/pycosat-0.6.6-cp312-cp312-linux_x86_64.whl", hash = "sha256:744b881af42f32d467300e6932f6ec6bd9e55e253a6ad99067336492d617d1de" },
+]
 
 [[package]]
 name = "pycountry"
@@ -5481,7 +5507,8 @@ dependencies = [
     { name = "bfi" },
     { name = "cellpylib" },
     { name = "magiccube" },
-    { name = "pycosat" },
+    { name = "pycosat", version = "0.6.6", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "pycosat", version = "0.6.6", source = { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/pycosat-0.6.6-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-deepspeed') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "pyfiglet" },
     { name = "pytz" },
     { name = "pyyaml" },

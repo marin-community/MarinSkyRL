@@ -24,6 +24,7 @@ dependencies = [
     "math-verify==0.8.0",
     "hydra-core==1.3.2",
     "jaxtyping",
+    "langdetect==1.0.9",
     "loguru",
     "marin-finelog",
     "marin-finelog-server",
@@ -37,6 +38,7 @@ dependencies = [
     "pandas",
     "polars",
     "pyarrow>=18",
+    "pycosat==0.6.6",
     "pyyaml>=6.0",
     "ray==2.51.1",
     "requests",
@@ -206,6 +208,8 @@ transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_to
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
 
 [tool.uv.sources]
+langdetect = { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/langdetect-1.0.9-py3-none-any.whl" }
+pycosat = { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/pycosat-0.6.6-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
 flash-attn = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/flash-attn-cu129-torch2.11-2.8.3/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
