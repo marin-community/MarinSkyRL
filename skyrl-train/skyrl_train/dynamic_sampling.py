@@ -77,7 +77,7 @@ def group_is_informative_for_dynamic_sampling(
     *,
     criteria: DynamicSamplingCriteria,
 ) -> bool:
-    """Return whether a group's configured final rewards have sufficient spread."""
+    """Return whether a group has available outcomes with sufficient final-reward spread."""
     response_ids = trajectory_batch.get("response_ids")
     if not isinstance(response_ids, Sequence) or isinstance(response_ids, (str, bytes)):
         raise ValueError("response_ids must be a sequence")
@@ -88,6 +88,10 @@ def group_is_informative_for_dynamic_sampling(
     outcomes = _aligned_sequence(trajectory_batch, reward_key, row_count)
     if outcomes is None:
         raise ValueError(f"dynamic sampling filter requires {reward_key} for every generated group")
+    if criteria.reward_source is DynamicSamplingRewardSource.UNSHAPED:
+        availability = _aligned_sequence(trajectory_batch, "unshaped_reward_available", row_count)
+        if availability is not None and any(not availability[index] for index in row_indices):
+            return False
     is_last_step = _aligned_sequence(trajectory_batch, "is_last_step", row_count)
 
     final_outcomes = []

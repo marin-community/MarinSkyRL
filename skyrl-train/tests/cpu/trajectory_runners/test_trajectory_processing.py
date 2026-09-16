@@ -1024,6 +1024,7 @@ def test_concatenation_preserves_unshaped_rewards_with_incomplete_timeout_output
     merged = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=0.005)
 
     assert merged["unshaped_rewards"] == ([0.0, 1.0] if timeout_first else [1.0, 0.0])
+    assert merged["unshaped_reward_available"] == ([False, True] if timeout_first else [True, False])
 
 
 def test_partial_failure_metrics_are_rejected_during_concatenation():

@@ -95,6 +95,7 @@ class TrajectoryBatch(TypedDict):
     response_ids: List[List[int]]
     rewards: Union[List[float], List[List[float]]]
     unshaped_rewards: Optional[List[float]]
+    unshaped_reward_available: Optional[List[bool]]
     reward_shaping_components: Optional[List[RewardShapingComponents]]
     reward_shaping_loop_spans: Optional[List[List[RewardShapingLoopSpan]]]
     loop_advantages: Optional[List[List[float]]]

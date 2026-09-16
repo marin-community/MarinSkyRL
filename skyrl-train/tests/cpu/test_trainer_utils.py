@@ -19,6 +19,7 @@ from skyrl_train.utils.trainer_utils import (
     build_dataloader,
 )
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
+from skyrl_train.trajectory_runners.projections import attach_unshaped_rewards
 from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from typing import Union
 import ray
@@ -633,6 +634,46 @@ def test_handle_filter_sampling_insufficient_prompts_continue():
     assert state is not None
     assert state["num_prompts_in_batch"] == 1
     assert state["sample_batch_count"] == 1
+
+
+def test_unshaped_filter_refills_group_with_missing_raw_reward():
+    def batch(rewards):
+        output = {
+            "prompt_token_ids": [[1]] * len(rewards),
+            "response_ids": [[index + 2] for index in range(len(rewards))],
+            "rewards": [float(index % 2) for index in range(len(rewards))],
+            "loss_masks": [[0] if reward is None else [1] for reward in rewards],
+            "stop_reasons": ["stop"] * len(rewards),
+            "rollout_metrics": None,
+            "rollout_logprobs": None,
+        }
+        attach_unshaped_rewards(output, rewards)
+        return output
+
+    config = {
+        "train_batch_size": 2,
+        "n_samples_per_prompt": 2,
+        "tis_lcs_alert_threshold": 0.005,
+        "criteria": resolve_dynamic_sampling_criteria("unshaped"),
+    }
+    state = {"sample_batch_count": 1}
+
+    first = handle_filter_sampling(
+        batch([None, 1.0, 0.0, 1.0]),
+        ["failed", "failed", "original", "original"],
+        config,
+        state,
+    )
+
+    assert first.keep_sampling
+    assert state["num_prompts_in_batch"] == 1
+
+    state["sample_batch_count"] += 1
+    accepted = handle_filter_sampling(batch([0.0, 1.0]), ["replacement"] * 2, config, state)
+
+    assert not accepted.keep_sampling
+    assert accepted.uids == ["original", "original", "replacement", "replacement"]
+    assert accepted.trajectory_batch["unshaped_rewards"] == [0.0, 1.0, 0.0, 1.0]
 
 
 def test_handle_filter_sampling_accumulation():
