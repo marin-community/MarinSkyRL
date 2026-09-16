@@ -84,6 +84,16 @@ class ExportJobSpec:
     memory: str | None = None
     disk: str | None = None
     storage_user: str | None = None
+    allocation_gpus_per_node: int | None = None
+
+    @property
+    def allocated_gpus_per_node(self) -> int:
+        allocation = self.allocation_gpus_per_node
+        if allocation is None:
+            allocation = self.request.gpus_per_node
+        if allocation < self.request.gpus_per_node:
+            raise ValueError("Export allocation cannot have fewer GPUs than the saved policy geometry")
+        return allocation
 
 
 def build_command(spec: ExportJobSpec) -> list[str]:
@@ -91,6 +101,7 @@ def build_command(spec: ExportJobSpec) -> list[str]:
     request = spec.request
 
     overrides = [
+        format_hydra_arg("trainer.placement.policy_num_gpus_per_node", request.gpus_per_node),
         format_hydra_arg("checkpoint_export.step", request.step, prefix="++"),
         format_hydra_arg("checkpoint_export.checkpoint_path", request.checkpoint_path, prefix="++"),
         format_hydra_arg("checkpoint_export.export_root", request.export_path, prefix="++"),
@@ -111,7 +122,7 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         "--num-nodes",
         str(request.num_nodes),
         "--gpus-per-node",
-        str(request.gpus_per_node),
+        str(spec.allocated_gpus_per_node),
         "--cluster",
         spec.cluster,
         "--entrypoint",
@@ -167,6 +178,11 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--storage-user")
     ap.add_argument("--num-nodes", type=int)
     ap.add_argument("--gpus-per-node", type=int)
+    ap.add_argument(
+        "--allocation-gpus-per-node",
+        type=int,
+        help="reserve a whole-node GPU slice while retaining the policy rank count stored in --request",
+    )
     ap.add_argument("--priority", default="batch")
     ap.add_argument("--export_path", help="defaults to <ckpt_path parent>/exports")
     ap.add_argument("--job-name", dest="job_name")
@@ -237,6 +253,7 @@ def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_w
         memory=args.memory,
         disk=args.disk,
         storage_user=args.storage_user,
+        allocation_gpus_per_node=args.allocation_gpus_per_node,
     )
 
 
@@ -276,8 +293,8 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
 
 def _run_export(spec: ExportJobSpec, command: list[str]) -> None:
     print(
-        f"[export-hf] geometry {spec.request.num_nodes}x{spec.request.gpus_per_node} GPU — this MUST match "
-        f"the training geometry or the sharded load will not resolve"
+        f"[export-hf] policy geometry {spec.request.num_nodes}x{spec.request.gpus_per_node} GPU ranks, "
+        f"allocation {spec.request.num_nodes}x{spec.allocated_gpus_per_node} GPUs"
     )
     exit_code = subprocess.call(command, cwd=str(_REPO_ROOT))
     if exit_code != 0:
