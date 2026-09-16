@@ -61,8 +61,8 @@ to `$OT_AGENT_SECRETS_ENV` when set, otherwise to `~/Documents/secrets.env` when
 that file exists. The parser accepts `KEY=VALUE` and `export KEY=VALUE` lines
 without executing the file. Secret values are placed in Iris `EnvironmentSpec`,
 not the process arguments. Jobs run directly on `cw-rno2a`, request no accelerator,
-are non-preemptible, and have zero automatic retries. Smoke stages use
-interactive priority. Full stages use batch priority. SFT requests 4 CPU cores,
+are non-preemptible, and have zero automatic retries. Training and AIME 2024
+evaluation use interactive priority. SFT requests 4 CPU cores,
 32 GB memory, and 50 GB disk because its 384,000-row streaming shuffle buffer
 has not yet been measured on Iris; OPD requests 2 CPU cores, 8 GB memory, and
 20 GB disk.
