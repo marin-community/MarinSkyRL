@@ -10,7 +10,7 @@ from skyrl_train.distillation import (
     ChosenTokenTeacherEvidence,
     SparseForwardKLInput,
     SampledReverseKLInput,
-    StudentTopKReverseKLInput,
+    StudentTopKPolicySurrogateInput,
     TeacherScoreRequest,
     TopKTeacherEvidence,
     distillation_input_from_tensors,
@@ -355,7 +355,7 @@ def test_student_topk_surrogate_matches_selected_policy_gradient_at_behavior_pol
     selected_ids = torch.tensor([[[0, 1]]])
     behavior_logprobs = behavior_probs.log()[selected_ids]
     teacher_logprobs = teacher_probs.log()[selected_ids]
-    distillation = StudentTopKReverseKLInput(
+    distillation = StudentTopKPolicySurrogateInput(
         student_topk_indices=selected_ids,
         behavior_topk_logprobs=behavior_logprobs,
         teacher_on_student_logprobs=teacher_logprobs,
@@ -394,7 +394,7 @@ def test_student_topk_surrogate_matches_selected_policy_gradient_at_behavior_pol
 
 def test_student_topk_surrogate_clips_improving_high_ratio_update():
     logits = torch.log(torch.tensor([[[0.9, 0.1]]], dtype=torch.float64)).requires_grad_()
-    distillation = StudentTopKReverseKLInput(
+    distillation = StudentTopKPolicySurrogateInput(
         student_topk_indices=torch.tensor([[[0]]]),
         behavior_topk_logprobs=torch.log(torch.tensor([[[0.6]]], dtype=torch.float64)),
         teacher_on_student_logprobs=torch.log(torch.tensor([[[0.95]]], dtype=torch.float64)),
@@ -418,7 +418,7 @@ def test_student_topk_surrogate_clips_improving_high_ratio_update():
 
 def test_student_topk_surrogate_applies_negative_advantage_dual_clip():
     logits = torch.log(torch.tensor([[[0.95, 0.02, 0.02, 0.01]]], dtype=torch.float64)).requires_grad_()
-    distillation = StudentTopKReverseKLInput(
+    distillation = StudentTopKPolicySurrogateInput(
         student_topk_indices=torch.tensor([[[0]]]),
         behavior_topk_logprobs=torch.log(torch.tensor([[[0.3]]], dtype=torch.float64)),
         teacher_on_student_logprobs=torch.log(torch.tensor([[[0.05]]], dtype=torch.float64)),
@@ -743,7 +743,7 @@ def test_training_batch_iterator_preserves_student_selected_teacher_scores():
 
     [experience] = list(TrainingBatchIterator(batch, sample_batch_size=1))
 
-    assert isinstance(experience.distillation, StudentTopKReverseKLInput)
+    assert isinstance(experience.distillation, StudentTopKPolicySurrogateInput)
     torch.testing.assert_close(experience.distillation.student_token_ids(), torch.tensor([[[1, 2], [3, 4]]]))
     torch.testing.assert_close(
         experience.distillation.teacher_on_student_logprobs,
@@ -770,7 +770,7 @@ def test_student_topk_payload_rejects_mixed_or_partial_evidence():
 
 
 def test_student_topk_surrogate_rejects_plausible_invalid_teacher_scores():
-    distillation = StudentTopKReverseKLInput(
+    distillation = StudentTopKPolicySurrogateInput(
         student_topk_indices=torch.tensor([[[1, 2], [-1, -1]]]),
         behavior_topk_logprobs=torch.tensor([[[-0.5, -0.8], [float("nan"), float("nan")]]]),
         teacher_on_student_logprobs=torch.tensor([[[-0.4, -0.9], [-0.3, -0.7]]]),

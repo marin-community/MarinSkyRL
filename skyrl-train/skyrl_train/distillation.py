@@ -10,11 +10,12 @@ import torch
 from omegaconf import DictConfig
 
 from marinskyrl.distillation import TeacherEvidenceKind
-from skyrl_train.tensor_math import masked_mean, safe_exp_delta
+from skyrl_train.tensor_math import TOKEN_MEAN_LOSS_REDUCTION, masked_mean, safe_exp_delta
 
 INVALID_TOPK_INDEX = -1
 RETAINED_MASS_ATOL = 1e-6
 DISTILLATION_SCORED_TOKENS_METRIC = "distillation/scored_tokens"
+DISTILLATION_TOPK_METRIC = "distillation_topk"
 
 
 @dataclass(frozen=True)
@@ -170,7 +171,7 @@ class SparseForwardKLInput:
 
 
 @dataclass(frozen=True)
-class StudentTopKReverseKLInput:
+class StudentTopKPolicySurrogateInput:
     """Learner payload for the released student-selected top-K OPD surrogate."""
 
     student_topk_indices: torch.Tensor
@@ -221,7 +222,7 @@ class StudentTopKReverseKLInput:
         del action_log_probs, old_action_log_probs
         if student_selected_logprobs is None:
             raise ValueError("student-top-K OPD requires student logprobs at the selected IDs")
-        return student_topk_reverse_kl_surrogate_loss(student_selected_logprobs, self, loss_mask, config)
+        return student_topk_policy_surrogate_loss(student_selected_logprobs, self, loss_mask, config)
 
 
 class DistillationInput(Protocol):
@@ -281,7 +282,7 @@ def distillation_input_from_tensors(
         assert student_topk_indices is not None
         assert behavior_topk_logprobs is not None
         assert teacher_on_student_logprobs is not None
-        return StudentTopKReverseKLInput(
+        return StudentTopKPolicySurrogateInput(
             student_topk_indices, behavior_topk_logprobs, teacher_on_student_logprobs, valid_mask, loss_weights
         )
     if any(value is None for value in topk_values):
@@ -320,6 +321,18 @@ def _validate_loss_weights(loss_weights: torch.Tensor, label: str) -> None:
         raise ValueError(f"{label} must be finite and non-negative")
 
 
+def _validate_selected_token_ids(indices: torch.Tensor, valid_mask: torch.Tensor, label: str) -> None:
+    valid_indices = indices[valid_mask]
+    if torch.any(valid_indices < 0):
+        raise ValueError(f"valid {label} indices must be non-negative")
+    if not torch.all(indices[~valid_mask] == INVALID_TOPK_INDEX):
+        raise ValueError(f"invalid {label} indices must use the {INVALID_TOPK_INDEX} sentinel")
+    if valid_indices.numel():
+        sorted_indices = valid_indices.sort(dim=-1).values
+        if torch.any(sorted_indices[..., 1:] == sorted_indices[..., :-1]):
+            raise ValueError(f"valid {label} indices must be unique per token")
+
+
 def _validate_topk_distribution(
     indices: torch.Tensor,
     logprobs: torch.Tensor,
@@ -339,23 +352,15 @@ def _validate_topk_distribution(
     _validate_masked_logprobs(logprobs, valid_mask, "teacher top-K logprobs")
     if not torch.is_floating_point(retained_mass):
         raise ValueError("teacher retained_mass must have floating-point dtype")
-    valid_indices = indices[valid_mask]
     valid_logprobs = logprobs[valid_mask]
     valid_mass = retained_mass[valid_mask]
-    if torch.any(valid_indices < 0):
-        raise ValueError("valid teacher top-K indices must be non-negative")
+    _validate_selected_token_ids(indices, valid_mask, "teacher top-K")
     if not torch.all(torch.isfinite(valid_mass)) or torch.any(
         (valid_mass <= 0) | (valid_mass > 1 + RETAINED_MASS_ATOL)
     ):
         raise ValueError("valid teacher retained_mass must lie in (0, 1]")
     if not torch.all(torch.isnan(retained_mass[~valid_mask])):
         raise ValueError("invalid teacher retained_mass must be NaN")
-    if not torch.all(indices[~valid_mask] == INVALID_TOPK_INDEX):
-        raise ValueError(f"invalid teacher top-K indices must use the {INVALID_TOPK_INDEX} sentinel")
-    if valid_indices.numel():
-        sorted_indices = valid_indices.sort(dim=-1).values
-        if torch.any(sorted_indices[..., 1:] == sorted_indices[..., :-1]):
-            raise ValueError("valid teacher top-K indices must be unique per token")
     observed_mass = valid_logprobs.float().exp().sum(dim=-1)
     if not torch.allclose(observed_mass, valid_mass.float(), rtol=1e-4, atol=RETAINED_MASS_ATOL):
         raise ValueError("teacher retained_mass must equal the probability mass of top-K logprobs")
@@ -625,27 +630,12 @@ def sampled_reverse_kl_loss(
     return masked_mean(token_loss, effective_mask, dim=-1).mean()
 
 
-def student_topk_reverse_kl_surrogate_loss(
+def _validate_student_topk_surrogate_input(
     student_selected_logprobs: torch.Tensor,
-    distillation: StudentTopKReverseKLInput,
+    distillation: StudentTopKPolicySurrogateInput,
     loss_mask: Optional[torch.Tensor],
-    config: DictConfig,
-) -> tuple[torch.Tensor, dict[str, float]]:
-    """Return the released Open-MOPD student-top-K clipped policy surrogate.
-
-    This is not a KL divergence: the student-weighted rewards are detached, and
-    the per-ID importance ratios receive dual clipping before summing over K.
-    """
-    if config.loss_reduction != "token_mean":
-        raise ValueError("student-top-K OPD requires token_mean loss reduction")
-    clip_low = float(config.eps_clip_low)
-    clip_high = float(config.eps_clip_high)
-    clip_ratio_c = float(config.clip_ratio_c)
-    if not all(math.isfinite(value) for value in (clip_low, clip_high, clip_ratio_c)):
-        raise ValueError("student-top-K OPD clip ratios must be finite")
-    if clip_low < 0 or clip_low >= 1 or clip_high < 0 or clip_ratio_c <= 1:
-        raise ValueError("student-top-K OPD requires 0 <= clip_low < 1, clip_high >= 0, clip_ratio_c > 1")
-
+) -> torch.Tensor:
+    """Validate aligned selected-ID evidence and return the effective token mask."""
     indices = distillation.student_topk_indices
     if indices.ndim != 3 or indices.shape[-1] == 0 or indices.dtype not in (torch.int32, torch.int64):
         raise ValueError("student-top-K indices must have integer [batch, response_len, K] shape with K > 0")
@@ -668,15 +658,7 @@ def student_topk_reverse_kl_surrogate_loss(
     if distillation.valid_mask.device != indices.device or distillation.loss_weights.device != indices.device:
         raise ValueError("student-top-K masks and weights must be on the selected-ID device")
     _validate_loss_weights(distillation.loss_weights, "student-top-K loss_weights")
-    valid_indices = indices[distillation.valid_mask]
-    if torch.any(valid_indices < 0):
-        raise ValueError("valid student-top-K indices must be non-negative")
-    if valid_indices.numel():
-        sorted_indices = valid_indices.sort(dim=-1).values
-        if torch.any(sorted_indices[:, 1:] == sorted_indices[:, :-1]):
-            raise ValueError("student-top-K indices must be unique per response position")
-    if not torch.all(indices[~distillation.valid_mask] == INVALID_TOPK_INDEX):
-        raise ValueError("invalid student-top-K indices must use the -1 sentinel")
+    _validate_selected_token_ids(indices, distillation.valid_mask, "student-top-K")
 
     effective_mask = distillation.valid_mask
     if loss_mask is not None:
@@ -685,6 +667,31 @@ def student_topk_reverse_kl_surrogate_loss(
         effective_mask = effective_mask & loss_mask.to(torch.bool)
     if not torch.any(effective_mask):
         raise ValueError("student-top-K OPD has no valid training tokens")
+    return effective_mask
+
+
+def student_topk_policy_surrogate_loss(
+    student_selected_logprobs: torch.Tensor,
+    distillation: StudentTopKPolicySurrogateInput,
+    loss_mask: Optional[torch.Tensor],
+    config: DictConfig,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Return the released Open-MOPD student-top-K clipped policy surrogate.
+
+    This is not a KL divergence: the student-weighted rewards are detached, and
+    the per-ID importance ratios receive dual clipping before summing over K.
+    """
+    if config.loss_reduction != TOKEN_MEAN_LOSS_REDUCTION:
+        raise ValueError("student-top-K OPD requires token_mean loss reduction")
+    clip_low = float(config.eps_clip_low)
+    clip_high = float(config.eps_clip_high)
+    clip_ratio_c = float(config.clip_ratio_c)
+    if not all(math.isfinite(value) for value in (clip_low, clip_high, clip_ratio_c)):
+        raise ValueError("student-top-K OPD clip ratios must be finite")
+    if clip_low < 0 or clip_low >= 1 or clip_high < 0 or clip_ratio_c <= 1:
+        raise ValueError("student-top-K OPD requires 0 <= clip_low < 1, clip_high >= 0, clip_ratio_c > 1")
+
+    effective_mask = _validate_student_topk_surrogate_input(student_selected_logprobs, distillation, loss_mask)
 
     current = student_selected_logprobs[effective_mask]
     behavior = distillation.behavior_topk_logprobs[effective_mask]
@@ -703,7 +710,7 @@ def student_topk_reverse_kl_surrogate_loss(
     per_token = dual_clipped_loss.sum(dim=-1) * distillation.loss_weights[effective_mask]
     loss = per_token.mean()
     metrics = {
-        "distillation_topk": float(expected_shape[-1]),
+        DISTILLATION_TOPK_METRIC: float(distillation.student_topk_indices.shape[-1]),
         "distillation_student_retained_mass_mean": behavior.exp().sum(dim=-1).mean().item(),
         "distillation_clip_fraction": (clipped_loss > raw_loss).float().mean().item(),
         "distillation_dual_clip_fraction": ((advantages < 0) & (pessimistic_loss > -advantages * clip_ratio_c))
@@ -797,6 +804,6 @@ def sparse_forward_kl_loss(
     metrics = {
         "distillation_retained_mass_mean": retained_mass.mean().item(),
         "distillation_retained_mass_min": retained_mass.min().item(),
-        "distillation_topk": float(expected_shape[-1]),
+        DISTILLATION_TOPK_METRIC: float(expected_shape[-1]),
     }
     return loss, metrics
