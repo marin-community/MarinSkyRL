@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import csv
 import json
 from datetime import UTC, datetime, timedelta
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 import subprocess
 import tarfile
@@ -713,6 +714,30 @@ job_id,state,submitted_at_ms,finished_at_ms,entrypoint_json,task_state
     assert errors == []
     assert [job.short_name for job in jobs] == ["rl-live", "rl-failed"]
     assert [job.is_terminal for job in jobs] == [False, True]
+
+
+def test_rl_discovery_accepts_large_entrypoint_csv_field(monkeypatch):
+    cluster = watch_coreweave_rl.Cluster("cw-rno2a", Path("/tmp/kubeconfig"), None)
+    entrypoint = "task_runtime.py " + "x" * 150_000 + " --train_data '[\"live\"]'"
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(("job_id", "state", "submitted_at_ms", "finished_at_ms", "entrypoint_json", "task_state"))
+    writer.writerow(("/benjaminfeuer/rl-large", 3, 1000, "", entrypoint, 3))
+
+    monkeypatch.setattr(
+        watch_coreweave_rl,
+        "run_iris",
+        lambda _cluster, arguments, **_kwargs: subprocess.CompletedProcess(
+            arguments, 0, stdout=output.getvalue(), stderr=""
+        ),
+    )
+
+    jobs, errors = watch_coreweave_rl.discover_rl_jobs(cluster, "benjaminfeuer")
+
+    assert errors == []
+    assert len(jobs) == 1
+    assert jobs[0].job_id == "/benjaminfeuer/rl-large"
+    assert jobs[0].entrypoint == entrypoint
 
 
 def test_rl_discovery_parses_active_task_state_column(monkeypatch):
