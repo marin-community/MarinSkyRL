@@ -74,22 +74,27 @@ def install_megatron_router_replay(
     pattern = expand_moe_layer_freq(config.moe_layer_freq, config.num_layers)
     mapping = capture_layer_indices(pattern)
 
-    expected_local: set[int] = set()
+    chunk_layers = []
     for vp_stage, chunk in enumerate(actor_module):
         offset = get_transformer_layer_offset(config, vp_stage=vp_stage)
         num_local = get_num_layers_to_build(config, vp_stage=vp_stage)
-        expected_local.update(
-            mapping[layer_number]
-            for layer_number in range(offset + 1, offset + num_local + 1)
-            if layer_number in mapping
+        indices = tuple(
+            sorted(
+                mapping[layer_number]
+                for layer_number in range(offset + 1, offset + num_local + 1)
+                if layer_number in mapping
+            )
         )
+        chunk_layers.append((chunk, indices))
 
+    expected_local = {idx for _, indices in chunk_layers for idx in indices}
     controller = MegatronRouterReplay(sorted(expected_local), recompute_enabled=recompute_enabled)
     controller.num_moe_layers_total = num_moe_layers(pattern)
     controller.topk = config.moe_router_topk
+    controller.local_indices_for_module = {id(chunk): indices for chunk, indices in chunk_layers}
 
     found: set[int] = set()
-    for chunk in actor_module:
+    for chunk, _indices in chunk_layers:
         for module in chunk.modules():
             if not isinstance(module, TopKRouter):
                 continue
