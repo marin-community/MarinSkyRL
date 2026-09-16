@@ -336,6 +336,9 @@ def test_stage_checkpoint_model_downloads_only_model_state_and_merges(
         def find(self, target: str) -> list[str]:
             return [path for path in files if path.startswith(f"{target}/")]
 
+        def info(self, path: str) -> dict[str, int]:
+            return {"size": len(files[path])}
+
         def get_file(self, remote: str, local: str) -> None:
             self.downloaded.append(remote)
             Path(local).write_bytes(files[remote])

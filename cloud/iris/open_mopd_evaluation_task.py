@@ -13,7 +13,9 @@ import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from cloud.iris.artifacts import fs_and_path, relative_object_key
+from fsspec.spec import AbstractFileSystem
+
+from cloud.iris.artifacts import FileEntry, copy_file_inventory, fs_and_path, relative_object_key
 from cloud.iris.open_mopd_evaluation import (
     GATES,
     SMOKE_MAX_TOKENS,
@@ -40,6 +42,9 @@ from cloud.iris.open_mopd_fidelity_task import (
 from cloud.iris.open_mopd_vllm_rollout import evaluation_port_seed
 
 ROLLOUT_WRAPPER = Path(__file__).with_name("open_mopd_vllm_rollout.py")
+FSDP_CONFIG_NAME = "fsdp_config.json"
+HUGGINGFACE_METADATA_DIRECTORY = "huggingface"
+FSDP_MODEL_SHARD_PATTERN = re.compile(r"model_world_size_(\d+)_rank_(\d+)\.pt")
 
 
 @dataclass(frozen=True)
@@ -172,59 +177,61 @@ def _checkpoint_file(path: Path, relative: str) -> CheckpointFile:
     return CheckpointFile(path=relative, size=path.stat().st_size, sha256=sha256)
 
 
-def stage_checkpoint_model(
-    source: Path,
+def _committed_checkpoint_step(
+    filesystem: AbstractFileSystem,
+    target: str,
     checkpoint_uri: str,
-    checkpoint_step: int,
-    checkpoint_dir: Path,
-    model_dir: Path,
-) -> tuple[Path, CheckpointVerification]:
-    """Download and merge one committed FSDP actor checkpoint."""
-    validate_checkpoint_source(checkpoint_uri, checkpoint_step)
-    filesystem, target = fs_and_path(checkpoint_uri)
+    requested_step: int,
+) -> int:
     checkpoint_root = posixpath.dirname(posixpath.dirname(target))
     pointer = posixpath.join(checkpoint_root, LATEST_CHECKPOINT_NAME)
     if not filesystem.exists(pointer):
         raise ValueError(f"Checkpoint commit pointer is missing for {checkpoint_uri}")
     with filesystem.open(pointer, encoding="utf-8") as pointer_file:
         committed_value = pointer_file.read().strip()
-    if not committed_value.isdigit() or int(committed_value) < checkpoint_step:
-        raise ValueError(f"Checkpoint step {checkpoint_step} is not durably committed under {checkpoint_uri}")
+    if not committed_value.isdigit() or int(committed_value) < requested_step:
+        raise ValueError(f"Checkpoint step {requested_step} is not durably committed under {checkpoint_uri}")
+    return int(committed_value)
 
-    shard_pattern = re.compile(r"model_world_size_(\d+)_rank_(\d+)\.pt")
-    selected: list[tuple[str, str]] = []
+
+def _checkpoint_model_inventory(filesystem: AbstractFileSystem, target: str) -> tuple[tuple[str, FileEntry], ...]:
+    selected = []
     for remote_path in filesystem.find(target):
         relative = relative_object_key(target, remote_path)
-        if relative == "fsdp_config.json" or relative.startswith("huggingface/") or shard_pattern.fullmatch(relative):
-            selected.append((remote_path, relative))
-    if not selected:
-        raise ValueError(f"No actor model files found under {checkpoint_uri}")
-    checkpoint_dir.mkdir(parents=True)
-    downloaded = []
-    for remote_path, relative in sorted(selected, key=lambda item: item[1]):
-        destination = checkpoint_dir / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        filesystem.get_file(remote_path, str(destination))
-        downloaded.append(_checkpoint_file(destination, relative))
+        if (
+            relative == FSDP_CONFIG_NAME
+            or relative.startswith(f"{HUGGINGFACE_METADATA_DIRECTORY}/")
+            or FSDP_MODEL_SHARD_PATTERN.fullmatch(relative)
+        ):
+            selected.append((remote_path, FileEntry(path=relative, size=int(filesystem.info(remote_path)["size"]))))
+    return tuple(sorted(selected, key=lambda item: item[1].path))
 
-    fsdp_config_path = checkpoint_dir / "fsdp_config.json"
+
+def _validate_checkpoint_files(
+    checkpoint_dir: Path,
+    inventory: tuple[FileEntry, ...],
+    checkpoint_uri: str,
+) -> None:
+    fsdp_config_path = checkpoint_dir / FSDP_CONFIG_NAME
     if not fsdp_config_path.is_file():
-        raise ValueError(f"Checkpoint is missing fsdp_config.json: {checkpoint_uri}")
+        raise ValueError(f"Checkpoint is missing {FSDP_CONFIG_NAME}: {checkpoint_uri}")
     fsdp_config = json.loads(fsdp_config_path.read_text())
     world_size = fsdp_config.get("world_size")
     if not isinstance(world_size, int) or world_size <= 0:
         raise ValueError(f"Checkpoint has an invalid FSDP world size: {checkpoint_uri}")
     expected_shards = {f"model_world_size_{world_size}_rank_{rank}.pt" for rank in range(world_size)}
-    observed_shards = {item.path for item in downloaded if shard_pattern.fullmatch(item.path)}
+    observed_shards = {item.path for item in inventory if FSDP_MODEL_SHARD_PATTERN.fullmatch(item.path)}
     if observed_shards != expected_shards:
         missing = sorted(expected_shards - observed_shards)
         extra = sorted(observed_shards - expected_shards)
         raise ValueError(
             f"Checkpoint model shards do not match world size {world_size}: missing={missing}, extra={extra}"
         )
-    if not (checkpoint_dir / "huggingface" / "config.json").is_file():
+    if not (checkpoint_dir / HUGGINGFACE_METADATA_DIRECTORY / "config.json").is_file():
         raise ValueError(f"Checkpoint is missing Hugging Face model metadata: {checkpoint_uri}")
 
+
+def _merge_checkpoint(source: Path, checkpoint_dir: Path, model_dir: Path, checkpoint_uri: str) -> None:
     merger = source / "training" / "verl" / "scripts" / "legacy_model_merger.py"
     _run(
         [
@@ -242,11 +249,32 @@ def stage_checkpoint_model(
     )
     if not (model_dir / "config.json").is_file() or not tuple(model_dir.glob("*.safetensors")):
         raise ValueError(f"FSDP merger did not produce a loadable Hugging Face model for {checkpoint_uri}")
+
+
+def stage_checkpoint_model(
+    source: Path,
+    checkpoint_uri: str,
+    checkpoint_step: int,
+    checkpoint_dir: Path,
+    model_dir: Path,
+) -> tuple[Path, CheckpointVerification]:
+    """Download and merge one committed FSDP actor checkpoint."""
+    checkpoint_uri = checkpoint_uri.rstrip("/")
+    validate_checkpoint_source(checkpoint_uri, checkpoint_step)
+    filesystem, target = fs_and_path(checkpoint_uri)
+    committed_step = _committed_checkpoint_step(filesystem, target, checkpoint_uri, checkpoint_step)
+    inventory = _checkpoint_model_inventory(filesystem, target)
+    if not inventory:
+        raise ValueError(f"No actor model files found under {checkpoint_uri}")
+    copied = copy_file_inventory(filesystem, inventory, checkpoint_dir)
+    _validate_checkpoint_files(checkpoint_dir, copied, checkpoint_uri)
+    _merge_checkpoint(source, checkpoint_dir, model_dir, checkpoint_uri)
+    downloaded = tuple(_checkpoint_file(checkpoint_dir / item.path, item.path) for item in copied)
     verification = CheckpointVerification(
         checkpoint_uri=checkpoint_uri,
         step=checkpoint_step,
-        committed_through_step=int(committed_value),
-        files=tuple(downloaded),
+        committed_through_step=committed_step,
+        files=downloaded,
     )
     return model_dir, verification
 

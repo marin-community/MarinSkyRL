@@ -15,8 +15,10 @@ from pathlib import Path
 
 from cloud.iris.artifacts import fs_and_path, read_json, relative_object_key
 from cloud.iris.open_mopd_fidelity import (
+    CHECKPOINT_DIRECTORY_NAME,
     DOMAINS,
     GATES,
+    GLOBAL_STEP_PREFIX,
     FidelityConfig,
     LfsFile,
     gpu_count,
@@ -315,7 +317,7 @@ def training_command(
         "--output",
         str(output),
         "--checkpoint",
-        str(output / "checkpoints"),
+        str(output / CHECKPOINT_DIRECTORY_NAME),
         "--gpus",
         str(world_size),
     ]
@@ -372,10 +374,10 @@ def restore_latest_checkpoint(output_uri: str, output: Path) -> int | None:
         raise ValueError(f"Invalid checkpoint iteration {value!r} under {output_uri}")
     step = int(value)
     checkpoint_root = posixpath.dirname(pointer)
-    step_root = posixpath.join(checkpoint_root, f"global_step_{step}")
+    step_root = posixpath.join(checkpoint_root, f"{GLOBAL_STEP_PREFIX}{step}")
     checkpoint_files = [path for path in remote_files if path.startswith(f"{step_root}/")]
     if not checkpoint_files:
-        raise ValueError(f"Checkpoint pointer selects missing global_step_{step} under {output_uri}")
+        raise ValueError(f"Checkpoint pointer selects missing {GLOBAL_STEP_PREFIX}{step} under {output_uri}")
     for remote_path in [*sorted(checkpoint_files), pointer]:
         relative = relative_object_key(target, remote_path)
         destination = output / relative

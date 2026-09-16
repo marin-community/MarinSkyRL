@@ -13,7 +13,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from cloud.iris.open_mopd_fidelity import Hardware, gpu_count, load_config, validate_output_uri
+from cloud.iris.open_mopd_fidelity import (
+    Hardware,
+    actor_checkpoint_relative_path,
+    gpu_count,
+    load_config,
+    validate_output_uri,
+)
 from cloud.iris.runtime_bundle import resolve_launcher_source
 
 DEFAULT_CONFIG = Path(__file__).with_name("configs") / "open_mopd_evaluation.json"
@@ -316,7 +322,7 @@ def validate_checkpoint_source(checkpoint_uri: str | None, checkpoint_step: int 
     validate_output_uri(checkpoint_uri)
     if checkpoint_step <= 0:
         raise ValueError("--checkpoint-step must be positive")
-    expected_suffix = f"/checkpoints/global_step_{checkpoint_step}/actor"
+    expected_suffix = f"/{actor_checkpoint_relative_path(checkpoint_step)}"
     if not checkpoint_uri.rstrip("/").endswith(expected_suffix):
         raise ValueError(f"--checkpoint-uri must end with {expected_suffix}")
 
@@ -335,6 +341,7 @@ def build_plan(
 ) -> EvaluationLaunchPlan:
     validate_output_uri(output_uri)
     validate_checkpoint_source(checkpoint_uri, checkpoint_step)
+    normalized_checkpoint_uri = checkpoint_uri.rstrip("/") if checkpoint_uri is not None else None
     source = resolve_launcher_source()
     if not re.fullmatch(r"[^@]+@sha256:[0-9a-f]{64}", task_image):
         raise ValueError("--task-image must be a digest-addressed image reference")
@@ -367,8 +374,8 @@ def build_plan(
         "--launcher-commit",
         source.commit,
     )
-    if checkpoint_uri is not None and checkpoint_step is not None:
-        task_args += ("--checkpoint-uri", checkpoint_uri.rstrip("/"), "--checkpoint-step", str(checkpoint_step))
+    if normalized_checkpoint_uri is not None and checkpoint_step is not None:
+        task_args += ("--checkpoint-uri", normalized_checkpoint_uri, "--checkpoint-step", str(checkpoint_step))
     command = (
         "uv",
         "run",
@@ -411,9 +418,9 @@ def build_plan(
         launcher_commit=source.commit,
         source_commit=fidelity.source.commit,
         protocol_source_commit=config.protocol.source_commit,
-        model_repository=fidelity.evaluation_reference.repository if checkpoint_uri is None else None,
-        model_revision=fidelity.evaluation_reference.revision if checkpoint_uri is None else None,
-        checkpoint_uri=checkpoint_uri.rstrip("/") if checkpoint_uri is not None else None,
+        model_repository=fidelity.evaluation_reference.repository if normalized_checkpoint_uri is None else None,
+        model_revision=fidelity.evaluation_reference.revision if normalized_checkpoint_uri is None else None,
+        checkpoint_uri=normalized_checkpoint_uri,
         checkpoint_step=checkpoint_step,
         data_repository=config.data.repository,
         data_revision=config.data.revision,
