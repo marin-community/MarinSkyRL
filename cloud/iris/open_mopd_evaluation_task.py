@@ -1,16 +1,19 @@
-"""Run the pinned Open-MOPD final-checkpoint evaluation inside one Iris task."""
+"""Run the pinned Open-MOPD evaluation against a released model or training checkpoint."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import posixpath
+import re
 import subprocess
 import sys
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from cloud.iris.artifacts import fs_and_path, relative_object_key
 from cloud.iris.open_mopd_evaluation import (
     GATES,
     SMOKE_MAX_TOKENS,
@@ -19,11 +22,13 @@ from cloud.iris.open_mopd_evaluation import (
     benchmark_coverage,
     evaluation_scale,
     load_evaluation_config,
+    validate_checkpoint_source,
 )
 from cloud.iris.open_mopd_fidelity import DatasetArtifact, FidelityConfig, gpu_count, load_config, validate_output_uri
 from cloud.iris.open_mopd_fidelity_task import (
     ArtifactVerification,
     FileVerification,
+    LATEST_CHECKPOINT_NAME,
     checkout_source,
     periodic_sync,
     reject_existing_output,
@@ -45,11 +50,26 @@ class StagedBenchmark:
 
 
 @dataclass(frozen=True)
+class CheckpointFile:
+    path: str
+    size: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class CheckpointVerification:
+    checkpoint_uri: str
+    step: int
+    committed_through_step: int
+    files: tuple[CheckpointFile, ...]
+
+
+@dataclass(frozen=True)
 class EvaluationInputs:
     source: Path
     model: Path
     benchmarks: tuple[StagedBenchmark, ...]
-    model_verification: ArtifactVerification
+    model_verification: ArtifactVerification | CheckpointVerification
 
 
 @dataclass(frozen=True)
@@ -146,14 +166,116 @@ def _download_benchmark(config: EvaluationConfig, benchmark: EvaluationBenchmark
     return StagedBenchmark(benchmark=benchmark, path=path, verification=verification)
 
 
-def stage_evaluation_inputs(evaluation: EvaluationConfig, fidelity: FidelityConfig, root: Path) -> EvaluationInputs:
-    source = checkout_source(fidelity, root / "source")
-    model, model_verification = snapshot_model(
-        fidelity.evaluation_reference.repository,
-        fidelity.evaluation_reference.revision,
-        fidelity.evaluation_reference.lfs_files,
-        root / "model",
+def _checkpoint_file(path: Path, relative: str) -> CheckpointFile:
+    with path.open("rb") as source:
+        sha256 = hashlib.file_digest(source, "sha256").hexdigest()
+    return CheckpointFile(path=relative, size=path.stat().st_size, sha256=sha256)
+
+
+def stage_checkpoint_model(
+    source: Path,
+    checkpoint_uri: str,
+    checkpoint_step: int,
+    checkpoint_dir: Path,
+    model_dir: Path,
+) -> tuple[Path, CheckpointVerification]:
+    """Download and merge one committed FSDP actor checkpoint."""
+    validate_checkpoint_source(checkpoint_uri, checkpoint_step)
+    filesystem, target = fs_and_path(checkpoint_uri)
+    checkpoint_root = posixpath.dirname(posixpath.dirname(target))
+    pointer = posixpath.join(checkpoint_root, LATEST_CHECKPOINT_NAME)
+    if not filesystem.exists(pointer):
+        raise ValueError(f"Checkpoint commit pointer is missing for {checkpoint_uri}")
+    with filesystem.open(pointer, encoding="utf-8") as pointer_file:
+        committed_value = pointer_file.read().strip()
+    if not committed_value.isdigit() or int(committed_value) < checkpoint_step:
+        raise ValueError(f"Checkpoint step {checkpoint_step} is not durably committed under {checkpoint_uri}")
+
+    shard_pattern = re.compile(r"model_world_size_(\d+)_rank_(\d+)\.pt")
+    selected: list[tuple[str, str]] = []
+    for remote_path in filesystem.find(target):
+        relative = relative_object_key(target, remote_path)
+        if relative == "fsdp_config.json" or relative.startswith("huggingface/") or shard_pattern.fullmatch(relative):
+            selected.append((remote_path, relative))
+    if not selected:
+        raise ValueError(f"No actor model files found under {checkpoint_uri}")
+    checkpoint_dir.mkdir(parents=True)
+    downloaded = []
+    for remote_path, relative in sorted(selected, key=lambda item: item[1]):
+        destination = checkpoint_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        filesystem.get_file(remote_path, str(destination))
+        downloaded.append(_checkpoint_file(destination, relative))
+
+    fsdp_config_path = checkpoint_dir / "fsdp_config.json"
+    if not fsdp_config_path.is_file():
+        raise ValueError(f"Checkpoint is missing fsdp_config.json: {checkpoint_uri}")
+    fsdp_config = json.loads(fsdp_config_path.read_text())
+    world_size = fsdp_config.get("world_size")
+    if not isinstance(world_size, int) or world_size <= 0:
+        raise ValueError(f"Checkpoint has an invalid FSDP world size: {checkpoint_uri}")
+    expected_shards = {f"model_world_size_{world_size}_rank_{rank}.pt" for rank in range(world_size)}
+    observed_shards = {item.path for item in downloaded if shard_pattern.fullmatch(item.path)}
+    if observed_shards != expected_shards:
+        missing = sorted(expected_shards - observed_shards)
+        extra = sorted(observed_shards - expected_shards)
+        raise ValueError(
+            f"Checkpoint model shards do not match world size {world_size}: missing={missing}, extra={extra}"
+        )
+    if not (checkpoint_dir / "huggingface" / "config.json").is_file():
+        raise ValueError(f"Checkpoint is missing Hugging Face model metadata: {checkpoint_uri}")
+
+    merger = source / "training" / "verl" / "scripts" / "legacy_model_merger.py"
+    _run(
+        [
+            sys.executable,
+            str(merger),
+            "merge",
+            "--backend",
+            "fsdp",
+            "--local_dir",
+            str(checkpoint_dir),
+            "--target_dir",
+            str(model_dir),
+        ],
+        cwd=source / "training" / "verl",
     )
+    if not (model_dir / "config.json").is_file() or not tuple(model_dir.glob("*.safetensors")):
+        raise ValueError(f"FSDP merger did not produce a loadable Hugging Face model for {checkpoint_uri}")
+    verification = CheckpointVerification(
+        checkpoint_uri=checkpoint_uri,
+        step=checkpoint_step,
+        committed_through_step=int(committed_value),
+        files=tuple(downloaded),
+    )
+    return model_dir, verification
+
+
+def stage_evaluation_inputs(
+    evaluation: EvaluationConfig,
+    fidelity: FidelityConfig,
+    root: Path,
+    *,
+    checkpoint_uri: str | None = None,
+    checkpoint_step: int | None = None,
+) -> EvaluationInputs:
+    source = checkout_source(fidelity, root / "source")
+    validate_checkpoint_source(checkpoint_uri, checkpoint_step)
+    if checkpoint_uri is None or checkpoint_step is None:
+        model, model_verification = snapshot_model(
+            fidelity.evaluation_reference.repository,
+            fidelity.evaluation_reference.revision,
+            fidelity.evaluation_reference.lfs_files,
+            root / "model",
+        )
+    else:
+        model, model_verification = stage_checkpoint_model(
+            source,
+            checkpoint_uri,
+            checkpoint_step,
+            root / "checkpoint",
+            root / "model",
+        )
     benchmarks = tuple(_download_benchmark(evaluation, benchmark, root / "data") for benchmark in evaluation.benchmarks)
     return EvaluationInputs(
         source=source,
@@ -267,6 +389,8 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpu-slice", required=True)
     parser.add_argument("--task-image", required=True)
     parser.add_argument("--launcher-commit", required=True)
+    parser.add_argument("--checkpoint-uri")
+    parser.add_argument("--checkpoint-step", type=int)
     parser.add_argument("--work-root", type=Path, default=Path("/tmp/open-mopd-final-eval"))
     parser.add_argument("--sync-interval", type=int, default=300)
     return parser
@@ -281,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
     evaluation = load_evaluation_config(args.config)
     fidelity = load_config(args.fidelity_config)
     validate_output_uri(args.output_uri)
+    validate_checkpoint_source(args.checkpoint_uri, args.checkpoint_step)
     validate_runtime(fidelity)
     world_size = gpu_count(args.gpu_slice)
     reject_existing_output(args.output_uri, "evaluation-manifest.json")
@@ -303,6 +428,8 @@ def main(argv: list[str] | None = None) -> int:
         "launcher_commit": args.launcher_commit,
         "gpu_slice": args.gpu_slice,
         "vllm_port_seed": vllm_port_seed,
+        "checkpoint_uri": args.checkpoint_uri,
+        "checkpoint_step": args.checkpoint_step,
     }
     _write_manifest(manifest_path, manifest)
     sync_tree(output, args.output_uri)
@@ -315,7 +442,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     uploader.start()
     try:
-        inputs = stage_evaluation_inputs(evaluation, fidelity, args.work_root)
+        inputs = stage_evaluation_inputs(
+            evaluation,
+            fidelity,
+            args.work_root,
+            checkpoint_uri=args.checkpoint_uri,
+            checkpoint_step=args.checkpoint_step,
+        )
         commands = rollout_commands(
             evaluation,
             inputs,

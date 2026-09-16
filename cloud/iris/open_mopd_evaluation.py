@@ -1,4 +1,4 @@
-"""Build an inspectable Iris evaluation command for the released Open-MOPD checkpoint."""
+"""Build an inspectable Iris evaluation command for an Open-MOPD model or training checkpoint."""
 
 from __future__ import annotations
 
@@ -91,8 +91,10 @@ class EvaluationLaunchPlan:
     launcher_commit: str
     source_commit: str
     protocol_source_commit: str
-    model_repository: str
-    model_revision: str
+    model_repository: str | None
+    model_revision: str | None
+    checkpoint_uri: str | None
+    checkpoint_step: int | None
     data_repository: str
     data_revision: str
     output_uri: str
@@ -305,6 +307,20 @@ def evaluation_job_name(gate: str, output_uri: str) -> str:
     return f"open-mopd-final-eval-{gate}-{output_id}"
 
 
+def validate_checkpoint_source(checkpoint_uri: str | None, checkpoint_step: int | None) -> None:
+    """Validate an optional durable FSDP actor checkpoint selector."""
+    if checkpoint_uri is None and checkpoint_step is None:
+        return
+    if checkpoint_uri is None or checkpoint_step is None:
+        raise ValueError("--checkpoint-uri and --checkpoint-step must be specified together")
+    validate_output_uri(checkpoint_uri)
+    if checkpoint_step <= 0:
+        raise ValueError("--checkpoint-step must be positive")
+    expected_suffix = f"/checkpoints/global_step_{checkpoint_step}/actor"
+    if not checkpoint_uri.rstrip("/").endswith(expected_suffix):
+        raise ValueError(f"--checkpoint-uri must end with {expected_suffix}")
+
+
 def build_plan(
     config: EvaluationConfig,
     *,
@@ -314,8 +330,11 @@ def build_plan(
     output_uri: str,
     task_image: str,
     gpu_slice: str | None = None,
+    checkpoint_uri: str | None = None,
+    checkpoint_step: int | None = None,
 ) -> EvaluationLaunchPlan:
     validate_output_uri(output_uri)
+    validate_checkpoint_source(checkpoint_uri, checkpoint_step)
     source = resolve_launcher_source()
     if not re.fullmatch(r"[^@]+@sha256:[0-9a-f]{64}", task_image):
         raise ValueError("--task-image must be a digest-addressed image reference")
@@ -332,6 +351,24 @@ def build_plan(
     omissions = list(config.known_omissions)
     if selected_slice != config.hardware.gpu:
         omissions.append(f"Hardware override uses {selected_slice}; the authors report {config.hardware.gpu}.")
+    task_args = (
+        "--config",
+        task_config.as_posix(),
+        "--fidelity-config",
+        fidelity_path.as_posix(),
+        "--gate",
+        gate,
+        "--output-uri",
+        output_uri,
+        "--gpu-slice",
+        selected_slice,
+        "--task-image",
+        task_image,
+        "--launcher-commit",
+        source.commit,
+    )
+    if checkpoint_uri is not None and checkpoint_step is not None:
+        task_args += ("--checkpoint-uri", checkpoint_uri.rstrip("/"), "--checkpoint-step", str(checkpoint_step))
     command = (
         "uv",
         "run",
@@ -365,20 +402,7 @@ def build_plan(
         "python",
         "-m",
         TASK_MODULE,
-        "--config",
-        task_config.as_posix(),
-        "--fidelity-config",
-        fidelity_path.as_posix(),
-        "--gate",
-        gate,
-        "--output-uri",
-        output_uri,
-        "--gpu-slice",
-        selected_slice,
-        "--task-image",
-        task_image,
-        "--launcher-commit",
-        source.commit,
+        *task_args,
     )
     return EvaluationLaunchPlan(
         gate=gate,
@@ -387,8 +411,10 @@ def build_plan(
         launcher_commit=source.commit,
         source_commit=fidelity.source.commit,
         protocol_source_commit=config.protocol.source_commit,
-        model_repository=fidelity.evaluation_reference.repository,
-        model_revision=fidelity.evaluation_reference.revision,
+        model_repository=fidelity.evaluation_reference.repository if checkpoint_uri is None else None,
+        model_revision=fidelity.evaluation_reference.revision if checkpoint_uri is None else None,
+        checkpoint_uri=checkpoint_uri.rstrip("/") if checkpoint_uri is not None else None,
+        checkpoint_step=checkpoint_step,
         data_repository=config.data.repository,
         data_revision=config.data.revision,
         output_uri=output_uri,
@@ -409,6 +435,8 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-uri", required=True)
     parser.add_argument("--task-image", required=True)
     parser.add_argument("--gpu-slice")
+    parser.add_argument("--checkpoint-uri")
+    parser.add_argument("--checkpoint-step", type=int)
     parser.add_argument("--allow-known-omissions", action="store_true")
     parser.add_argument("--submit", action="store_true")
     return parser
@@ -425,6 +453,8 @@ def main(argv: list[str] | None = None) -> int:
         output_uri=args.output_uri,
         task_image=args.task_image,
         gpu_slice=args.gpu_slice,
+        checkpoint_uri=args.checkpoint_uri,
+        checkpoint_step=args.checkpoint_step,
     )
     print(plan.json())
     print(shlex.join(plan.iris_command))
