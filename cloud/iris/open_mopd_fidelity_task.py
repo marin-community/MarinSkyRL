@@ -333,12 +333,48 @@ def training_command(
     return ["env", *(f"{key}={value}" for key, value in training_env.items()), *command]
 
 
+def _checkpoint_step(relative: Path) -> int | None:
+    """Return the checkpoint step encoded by a payload path, if present."""
+    if len(relative.parts) < 3 or relative.parts[0] != CHECKPOINT_DIRECTORY_NAME:
+        return None
+    step_directory = relative.parts[1]
+    if not step_directory.startswith(GLOBAL_STEP_PREFIX):
+        return None
+    step = step_directory[len(GLOBAL_STEP_PREFIX) :]
+    return int(step) if step.isdigit() else None
+
+
 def sync_tree(local: Path, output_uri: str) -> None:
     filesystem, target = fs_and_path(output_uri)
     sources = sorted((source for source in local.rglob("*") if source.is_file()), key=lambda path: path.as_posix())
     sources.sort(key=lambda path: path.name == LATEST_CHECKPOINT_NAME)
-    for source in sources:
-        destination = posixpath.join(target, source.relative_to(local).as_posix())
+    pointer = local / CHECKPOINT_DIRECTORY_NAME / LATEST_CHECKPOINT_NAME
+    committed_step = None
+    if pointer.is_file():
+        pointer_value = pointer.read_text().strip()
+        if not pointer_value.isdigit():
+            raise ValueError(f"Invalid local checkpoint iteration {pointer_value!r}")
+        committed_step = int(pointer_value)
+    source_entries = [
+        (source, source.relative_to(local), _checkpoint_step(source.relative_to(local))) for source in sources
+    ]
+    upload_entries = [
+        (source, relative, step)
+        for source, relative, step in source_entries
+        if step is None or (committed_step is not None and step <= committed_step)
+    ]
+    checkpoint_sources = {source for source, _relative, step in upload_entries if step is not None}
+    remote_sizes: dict[str, int] = {}
+    if checkpoint_sources:
+        remote_details = filesystem.find(target, detail=True, withdirs=False)
+        remote_sizes = {
+            relative_object_key(target, remote_path): int(details["size"])
+            for remote_path, details in remote_details.items()
+        }
+    for source, relative, _step in upload_entries:
+        destination = posixpath.join(target, relative.as_posix())
+        if source in checkpoint_sources and remote_sizes.get(relative.as_posix()) == source.stat().st_size:
+            continue
         filesystem.makedirs(posixpath.dirname(destination), exist_ok=True)
         filesystem.put_file(str(source), destination)
 
