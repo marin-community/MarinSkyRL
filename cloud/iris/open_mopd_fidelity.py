@@ -391,7 +391,7 @@ def _iris_command(
         "--disk",
         config.hardware.disk,
         "--priority",
-        "batch",
+        "interactive",
         "--no-preemptible",
         "--max-retries",
         "0",

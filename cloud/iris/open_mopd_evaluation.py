@@ -351,7 +351,7 @@ def build_plan(
         "--disk",
         config.hardware.disk,
         "--priority",
-        "batch",
+        "interactive",
         "--no-preemptible",
         "--max-retries",
         "0",

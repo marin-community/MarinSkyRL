@@ -229,6 +229,7 @@ def test_dry_run_exposes_immutable_inputs_without_submitting(
     assert plan["job_name"] == plan["iris_command"][plan["iris_command"].index("--job-name") + 1]
     assert "--no-sync" in plan["iris_command"]
     assert "--no-preemptible" in plan["iris_command"]
+    assert plan["iris_command"][plan["iris_command"].index("--priority") + 1] == "interactive"
     assert "--max-retries" in plan["iris_command"]
 
 
