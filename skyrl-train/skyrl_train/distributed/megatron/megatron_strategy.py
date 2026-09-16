@@ -43,33 +43,33 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from skyrl_train import hf_model_io
 
 
-# Optimizer checkpoint format and gather transport.
-#
-# Save and load the optimizer state with megatron's 'fully_reshardable' format in its
-# memory-efficient mode (`distrib_optim_fully_reshardable_mem_efficient=True`). This mode does
-# two things:
-#   * It makes standard (non-flattened) ShardedTensors. The torch_dist save strategy accepts
-#     these. Megatron's default format, 'fully_sharded_model_space', makes `flattened_range`
-#     tensors instead. torch_dist rejects those (`ShardedTensor.flattened_range is not
-#     supported`), which crashed the east18 run at the gs1 checkpoint.
-#   * It gathers the DP-rank-0 optimizer state over gloo (`device="cpu"`), not CUDA.
-#
-# We used 'dp_zero_gather_scatter' before. torch_dist accepts its tensors too. But its
-# `sharded_param_state_dp_zero` always calls `get_parameter_state_dp_zero(use_gloo_comm=False)`,
-# which stages the gather on the GPU (`send_tensor.cuda()`). Right after a training step the model,
-# the fp32 grad buffer, and the optimizer state all sit on the GPU. So that gather runs out of
-# memory at save: a 30B-A3B run died at gs1 when it asked for 6.75 GiB with 5.95 GiB free. Upstream
-# also marks that format "will be deprecated". 'fully_reshardable' + mem_efficient is megatron's own
-# knob for this problem: the gloo gather needs no GPU memory, so we do not patch megatron internals.
-#
-# Pass this through `metadata=`. The positional `sharding_type=` argument is deprecated in
-# megatron-core 0.18. Save and load must use the same format. Megatron writes the format into the
-# checkpoint (`param_state_sharding_type`) and reads it back on load. We still pass it on load so the
-# load template matches.
-_MEGATRON_OPTIM_CKPT_METADATA = {
-    "distrib_optim_sharding_type": "fully_reshardable",
-    "distrib_optim_fully_reshardable_mem_efficient": True,
-}
+# Both formats make non-flattened ShardedTensors accepted by torch_dist. The default
+# fully_reshardable format gathers optimizer state onto DP rank zero's CPU; dp_reshardable
+# writes DP-local optimizer shards without a gather but cannot change non-DP geometry on load.
+_OPTIMIZER_CHECKPOINT_SHARDING_TYPES = {"fully_reshardable", "dp_reshardable"}
+
+
+def _optimizer_checkpoint_metadata(sharding_type: str) -> dict:
+    if sharding_type not in _OPTIMIZER_CHECKPOINT_SHARDING_TYPES:
+        raise ValueError(f"Unsupported Megatron optimizer checkpoint sharding type: {sharding_type}")
+    metadata = {"distrib_optim_sharding_type": sharding_type}
+    if sharding_type == "fully_reshardable":
+        metadata["distrib_optim_fully_reshardable_mem_efficient"] = True
+    return metadata
+
+
+def _saved_optimizer_sharding_type(common_state: dict) -> str:
+    optimizer_state = common_state["optimizer"]
+    if "param_state_sharding_type" in optimizer_state:
+        saved_types = {optimizer_state["param_state_sharding_type"]}
+    else:
+        saved_types = {state["param_state_sharding_type"] for state in optimizer_state.values()}
+    if len(saved_types) != 1:
+        raise ValueError(f"Checkpoint contains mixed optimizer sharding types: {saved_types}")
+    sharding_type = saved_types.pop()
+    _optimizer_checkpoint_metadata(sharding_type)
+    return sharding_type
+
 
 _NODE_LOCAL_CHECKPOINT_CACHE = os.path.join(tempfile.gettempdir(), "marinskyrl-megatron-checkpoints")
 
@@ -90,6 +90,8 @@ class MegatronStrategy(DistributedStrategy):
         self.optimizer_config = optimizer_config
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
+        if optimizer_config is not None:
+            _optimizer_checkpoint_metadata(megatron_config.optimizer_checkpoint_sharding_type)
 
         # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
         # short-lived background workers, which does not work well with Ray.
@@ -198,7 +200,8 @@ class MegatronStrategy(DistributedStrategy):
         sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                model_sharded_state_dict, metadata=_MEGATRON_OPTIM_CKPT_METADATA
+                model_sharded_state_dict,
+                metadata=_optimizer_checkpoint_metadata(self.megatron_config.optimizer_checkpoint_sharding_type),
             )
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
@@ -264,14 +267,18 @@ class MegatronStrategy(DistributedStrategy):
         sharded_state_dict = {}
         model_sharded_state_dict = unwrapped_model.sharded_state_dict()
         sharded_state_dict["model"] = model_sharded_state_dict
-        if optimizer and load_training_state:
-            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
-                model_sharded_state_dict, is_loading=True, metadata=_MEGATRON_OPTIM_CKPT_METADATA
-            )
         if scheduler and load_training_state:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
         with io.node_cached_read_dir(ckpt_dir, _NODE_LOCAL_CHECKPOINT_CACHE) as read_dir:
+            if optimizer and load_training_state:
+                common_state = dist_checkpointing.load_common_state_dict(read_dir)
+                saved_type = _saved_optimizer_sharding_type(common_state)
+                sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
+                    model_sharded_state_dict,
+                    is_loading=True,
+                    metadata=_optimizer_checkpoint_metadata(saved_type),
+                )
             # Load the checkpoint in parallel.
             load_strategy = get_default_load_sharded_strategy(read_dir)
             load_strategy = FullyParallelLoadStrategyWrapper(
