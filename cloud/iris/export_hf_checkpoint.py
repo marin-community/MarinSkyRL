@@ -84,11 +84,17 @@ class ExportJobSpec:
     memory: str | None = None
     disk: str | None = None
     storage_user: str | None = None
+    allocation_gpus_per_node: int | None = None
 
 
 def build_command(spec: ExportJobSpec) -> list[str]:
     """Return the Iris backend command that performs an export-only run."""
     request = spec.request
+    allocation_gpus = (
+        spec.allocation_gpus_per_node if spec.allocation_gpus_per_node is not None else request.gpus_per_node
+    )
+    if allocation_gpus < request.gpus_per_node:
+        raise ValueError("Export allocation cannot have fewer GPUs than the saved policy geometry")
 
     overrides = [
         format_hydra_arg("checkpoint_export.step", request.step, prefix="++"),
@@ -111,7 +117,7 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         "--num-nodes",
         str(request.num_nodes),
         "--gpus-per-node",
-        str(request.gpus_per_node),
+        str(allocation_gpus),
         "--cluster",
         spec.cluster,
         "--entrypoint",
@@ -167,6 +173,11 @@ def argument_parser() -> argparse.ArgumentParser:
     ap.add_argument("--storage-user")
     ap.add_argument("--num-nodes", type=int)
     ap.add_argument("--gpus-per-node", type=int)
+    ap.add_argument(
+        "--allocation-gpus-per-node",
+        type=int,
+        help="reserve a whole-node GPU slice while retaining the policy rank count stored in --request",
+    )
     ap.add_argument("--priority", default="batch")
     ap.add_argument("--export_path", help="defaults to <ckpt_path parent>/exports")
     ap.add_argument("--job-name", dest="job_name")
@@ -237,6 +248,7 @@ def operational_spec(args: argparse.Namespace, request: HFExportRequest, *, no_w
         memory=args.memory,
         disk=args.disk,
         storage_user=args.storage_user,
+        allocation_gpus_per_node=args.allocation_gpus_per_node,
     )
 
 
@@ -276,8 +288,9 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
 
 def _run_export(spec: ExportJobSpec, command: list[str]) -> None:
     print(
-        f"[export-hf] geometry {spec.request.num_nodes}x{spec.request.gpus_per_node} GPU — this MUST match "
-        f"the training geometry or the sharded load will not resolve"
+        f"[export-hf] policy geometry {spec.request.num_nodes}x{spec.request.gpus_per_node} GPU ranks, "
+        f"allocation {spec.request.num_nodes}x"
+        f"{spec.allocation_gpus_per_node if spec.allocation_gpus_per_node is not None else spec.request.gpus_per_node} GPUs"
     )
     exit_code = subprocess.call(command, cwd=str(_REPO_ROOT))
     if exit_code != 0:
