@@ -9,11 +9,24 @@ from torch.distributed.tensor import DeviceMesh
 from typing import Optional, Dict, Any, Union, TypeVar
 import torch.optim as optim
 from jaxtyping import Float
+
+from skyrl_train.utils.importance_ratio_diagnostics import STATUS_REDUCTION_OPS
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedTokenizer
 from skyrl_train.io import io
 
 
 DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])
+
+
+# The collective each reduction op dispatches to. EVERY op all_reduce accepts must be here, so the
+# lookup can be a direct index with no default -- see the note at the dispatch. `mean` maps to SUM
+# because the division by world_size happens locally, before the collective.
+REDUCE_OPS = {
+    "max": dist.ReduceOp.MAX,
+    "min": dist.ReduceOp.MIN,
+    "sum": dist.ReduceOp.SUM,
+    "mean": dist.ReduceOp.SUM,
+}
 
 
 class DistributedStrategy(ABC):
@@ -79,7 +92,7 @@ class DistributedStrategy(ABC):
 
     def all_reduce(self, data: DataT, op="mean") -> DataT:
         """Perform all_reduce across all processes"""
-        assert op in ("mean", "max", "sum")
+        assert op in ("mean", "max", "sum", "min")
         if isinstance(data, dict):
             ret = {}
             for k, v in data.items():
@@ -96,10 +109,30 @@ class DistributedStrategy(ABC):
                 data = data.to(torch.cuda.current_device())
             if op == "mean":
                 data /= self.world_size
-            dist.all_reduce(data, op=dist.ReduceOp.MAX if op == "max" else dist.ReduceOp.SUM)
+            # Indexed, with no default. The previous form was
+            # `REDUCE_OPS[op] if op in REDUCE_OPS else SUM` under a comment claiming the silent
+            # `.get(op, SUM)` default had been removed -- that IS .get, written out, and the assert
+            # beside it was dead because line 91 already closes the set. An op missing from the map
+            # would have become a SUM, and a `min` that quietly becomes a SUM publishes 80.0 for a
+            # healthy step at 80 ranks. A KeyError here is the loud failure that was intended.
+            dist.all_reduce(data, op=REDUCE_OPS[op])
             if is_cpu_tensor:
                 data = data.cpu()
             return data.item() if not is_tensor else data
+
+    def all_reduce_status(self, status: Dict[str, Any]) -> Dict[str, Any]:
+        """Reduce a per-rank status dict, giving each key the op its meaning requires.
+
+        The default is a mean, which is right for a per-rank mean or fraction and a category error
+        for a max or a count. See STATUS_REDUCTION_OPS for which keys are which and why.
+        """
+        by_op: Dict[str, Dict[str, Any]] = {}
+        for name, value in status.items():
+            by_op.setdefault(STATUS_REDUCTION_OPS.get(name, "mean"), {})[name] = value
+        reduced: Dict[str, Any] = {}
+        for op, values in by_op.items():
+            reduced.update(self.all_reduce(values, op=op))
+        return reduced
 
     def all_gather(self, data: DataT) -> DataT:
         """Perform all_gather across all processes"""

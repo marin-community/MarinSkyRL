@@ -12,6 +12,69 @@ from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_d
 
 
 TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log_ratio_abs_mean")
+
+# How each status key must be combined ACROSS RANKS, and across the mini-batches of one step.
+# Everything unlisted is a mean, which is the historical default and is right for a per-rank mean or
+# fraction. These are the keys where a mean is a category error.
+#
+# A max folded into a mean cannot see a divergence confined to a few ranks. Each rank computes a true
+# local max over its own tokens, so at 80 ranks one rank at 19.0 -- the value this repo has already
+# seen from MoE router replay -- with 79 clean publishes 0.2375, which reads as zero. That is the
+# expected shape of a sharding, kernel or routing bug, and the mean is what hides it.
+#
+# ⚠️ Two keys are deliberately ABSENT, because for them neither available op is right.
+#
+# `n_tokens_dp_gt_*pct` are token COUNTS, so a mean reads low by the number of UNIQUE data shards
+# (the world size only when every rank holds distinct data) -- 1000 offending tokens on one of 80
+# data-parallel ranks publishes 12.5. But a SUM is worse: Strategy.all_reduce reduces over
+# WORLD, and under sequence, context, expert or Megatron tensor/pipeline parallelism the replicas
+# hold the SAME tokens, so a sum multiplies the count by the replication factor (16x at CP2xEP8).
+# A correct global count needs a reduction over the data-parallel group alone, which the current
+# primitive cannot express. Until it can, these stay a mean ACROSS RANKS and are read as a per-rank
+# average. ⚠️ Across MINI-BATCHES they are summed -- see MINI_BATCH_REDUCTION_OPS. The replication
+# argument above does not apply there: one rank's optimizer windows hold different tokens, not the
+# same ones, so the published value is that rank's step TOTAL rather than its per-window average.
+#
+# `log_ratio_abs_p99` stays a mean because a max of per-rank p99 APPROXIMATIONS is not a quantile
+# either. It is monitoring-grade colour rather than a gate.
+MAX_REDUCED_METRIC_KEYS = ("log_ratio_abs_max", "log_ratio_diagnostics_failed")
+
+# Token COUNTS. Named once so the rank axis and the mini-batch axis refer to the same set rather
+# than two hand-lists that can drift.
+TOKEN_COUNT_METRIC_KEYS = ("n_tokens_dp_gt_1pct", "n_tokens_dp_gt_10pct", "n_tokens_dp_gt_50pct")
+
+# The op to apply per key, for both reduction axes: across ranks (Strategy.all_reduce_status) and
+# across a step's mini-batches (policy_training_metrics). Keeping one map is what stops the two
+# axes disagreeing -- reducing correctly across ranks and then averaging the result back down is
+# the same category error one level lower.
+# A binary did-every-rank-succeed flag: one rank skipping its optimizer step must publish 0, not
+# 79/80. Under the default mean that reads 0.9875, which is 1 on any dashboard -- the same category
+# error this map exists to prevent, on the most gate-like value in the status dict. `min` is the only
+# right op; max and sum are both wrong, which is why Strategy.all_reduce had to learn it rather than
+# the flag being bent to fit an op that was already there.
+MIN_REDUCED_METRIC_KEYS = ("optimizer_step_succeeded",)
+
+STATUS_REDUCTION_OPS: dict[str, str] = {
+    **{key: "max" for key in MAX_REDUCED_METRIC_KEYS},
+    **{key: "min" for key in MIN_REDUCED_METRIC_KEYS},
+}
+
+# 🚨 The one place the two axes genuinely DISAGREE, so one map cannot serve both.
+#
+# The rank-axis reasoning above is right and unchanged: a WORLD sum multiplies these counts by the
+# replication factor, so across ranks they stay a mean. But that argument is about REPLICAS holding
+# the SAME tokens. Within ONE rank the optimizer windows hold DIFFERENT tokens, so a mean there is
+# a plain category error -- windows of 3 and 7 offending tokens published 5.0 where the rank's step
+# total is 10, and a 32-window step understated the count by ~32x.
+#
+# Anything not listed here uses STATUS_REDUCTION_OPS, so the two axes still cannot drift apart by
+# accident: disagreeing takes an explicit entry, with a reason.
+MINI_BATCH_REDUCTION_OPS: dict[str, str] = {
+    **STATUS_REDUCTION_OPS,
+    **{key: "sum" for key in TOKEN_COUNT_METRIC_KEYS},
+}
+
+
 LOG_RATIO_BASE_METRIC_KEYS = (
     "log_ratio_abs_mean",
     "log_ratio_abs_max",

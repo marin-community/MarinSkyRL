@@ -206,6 +206,11 @@ class SkyRLLaunchRequest:
     output: SkyRLOutputPaths
     seed: int
     overrides: tuple[str, ...]
+    # A measurement run sets ``trainer.ckpt_interval: 0`` and commits no checkpoint, so there is
+    # nothing for the terminal export to read and it fails on the missing marker. This says the
+    # caller meant that, and the run succeeds with no model. Defaulted, and last, so an envelope
+    # from a Marin that predates the field still parses.
+    telemetry_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -221,6 +226,9 @@ class IrisLaunchOptions:
     max_retries: int
     job_name: str
     wandb_entity: str | None
+    # Defaulted, and last, so an envelope from a Marin that predates this field still parses. The
+    # value mirrors iris's own client default rather than 0, so omitting it changes nothing.
+    max_retries_preemption: int = 1000
 
 
 @dataclass(frozen=True)
@@ -275,6 +283,7 @@ def job_spec(value: dict[str, Any]) -> SkyRLJobSpec:
             output=SkyRLOutputPaths(**request["output"]),
             seed=int(request["seed"]),
             overrides=tuple(request.get("overrides", ())),
+            telemetry_only=bool(request.get("telemetry_only", False)),
         ),
         execution=IrisLaunchOptions(**value["execution"]),
     )

@@ -42,12 +42,21 @@ def configure(*, endpoint: str, service: str, attributes: Mapping[str, str]) -> 
     pass
 
 
-def event(name: str, fields: Mapping[str, object], *, attributes: Mapping[str, str] | None = None) -> None:
-    pass
+def event(name: str, body: object, *, attributes: Mapping[str, str] | None = None) -> None:
+    """Signature mirrors rigging's ``event(name, body: EventBody, *, attributes)``.
+
+    It previously named the second parameter ``fields: Mapping[str, object]``, which type-checked a
+    caller passing a bare dict and hid a real ``AttributeError`` on the live path.
+    """
 
 
 def runtime_status() -> _Status:
     return _status
+
+
+def flush(timeout: float = 5.0) -> bool:
+    """Nothing is queued, so the queue is trivially settled."""
+    return True
 
 
 def shutdown(timeout: float = 5.0) -> None:

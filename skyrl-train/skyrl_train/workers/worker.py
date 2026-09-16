@@ -1,8 +1,11 @@
 import asyncio
+import atexit
 import contextlib
+import time
 import logging
 import os
 import socket
+from collections.abc import Mapping
 from typing import Dict, Optional, Type, List, Any, Callable
 from skyrl_train.utils.progress import configure_progress, tqdm
 from marinskyrl.runtime_options import R3Transport
@@ -34,6 +37,13 @@ from skyrl_train.utils.numa import physical_gpu_id_for_worker, set_numa_affinity
 from skyrl_train.tensor_math import masked_mean
 from skyrl_train.distributed.dispatch import ActorInfo, Dispatch, DispatchRegistry, DispatchSettings, MeshRank
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
+from skyrl_train.telemetry import WORKER_ROLE, process_telemetry
+from skyrl_train.timing_observability import (
+    WorkerSpanAccumulator,
+    StepMemoryProbe,
+    publish_worker_spans,
+    unconfigured_telemetry_reason,
+)
 from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
@@ -356,6 +366,20 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         configure_progress(cfg.trainer.progress)
+        # Rigging discards every record while unconfigured, and a Ray actor never enters
+        # process_telemetry on its own -- main_base does it for the trainer and driver roles only.
+        # Without this the worker spans below publish silently into nothing, which reads exactly
+        # like a phase that costs nothing. Gated on the same flag so nothing changes for runs that
+        # do not ask for the spans.
+        self._policy_span_telemetry: contextlib.ExitStack | None = None
+        if (cfg.get("trainer", {}) if hasattr(cfg, "get") else {}).get("policy_train_spans", False):
+            self._policy_span_telemetry = contextlib.ExitStack()
+            self._policy_span_telemetry.enter_context(process_telemetry(WORKER_ROLE))
+            # Best effort only. Ray tears actors down with ray.kill, which does not run atexit
+            # handlers, so durability comes from the flush after each step's publish -- see
+            # publish_worker_spans -- and not from here.
+            atexit.register(self._policy_span_telemetry.close)
+            _require_configured_telemetry()
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
 
     def init_model(self, *args, **kwargs):
@@ -950,6 +974,94 @@ class PPORayActorGroup:
                 pass  # Actor may already be dead
 
 
+def _require_configured_telemetry() -> None:
+    """Fail the actor rather than run a job that measures nothing.
+
+    `policy_train_spans` is opt-in, and on a runtime without an endpoint `record()` is a no-op,
+    `flush()` returns True and `lost_records` stays 0 -- every signal reads healthy while the run
+    produces no rows at all. Somebody who asked for the spans wants to know now, not after paying
+    for the run. Lifted out of `__init__` so it can be driven directly; the call is asserted too,
+    because moving a check into a testable helper and leaving the call site unguarded just relocates
+    the hole.
+    """
+    reason = unconfigured_telemetry_reason()
+    if reason is not None:
+        raise RuntimeError(f"policy_train_spans is enabled but {reason}")
+
+
+def _publish_policy_spans(
+    spans,
+    *,
+    total_seconds: float,
+    step: int,
+    rank: int,
+    previous_publish: tuple[int, float] | None,
+    counters: Mapping[str, float],
+) -> float:
+    """Publish one worker's spans and report what publishing cost, never raising.
+
+    This runs after the step's GPU work is already paid for, so a telemetry failure here would
+    discard a completed step -- an hour of 80 H100s at E6 geometry -- to lose a row.
+    docs/telemetry.md states the contract that export failures do not change training results, and
+    retain_trajectories guards itself for the same reason.
+
+    A failure still returns the REAL elapsed cost. Returning zero would understate the next step's
+    policy_span_publish by exactly what the failure cost: a false measurement in place of a gap.
+    """
+    started = time.perf_counter()
+    try:
+        return publish_worker_spans(
+            spans.totals(total_seconds=total_seconds),
+            step=step,
+            rank=rank,
+            previous_publish=previous_publish,
+            counters=counters if spans.enabled else None,
+            # The mode is part of what the numbers MEAN, so it rides with them.
+            synchronize=spans.synchronize,
+        )
+    except Exception:
+        logger.exception("policy_train span publish failed; the step itself is unaffected")
+        return time.perf_counter() - started
+
+
+def _policy_span_counters(worker, spans, train_data, policy_update_steps: float) -> dict[str, float]:
+    """The per-step counters published beside the policy_train spans.
+
+    Split out so the caller can guard it: every value here costs a CUDA synchronise or an allocator
+    query, and it runs after the step's GPU work is already paid for.
+    """
+    if not spans.enabled:
+        return {}
+    # H3's multiplier and H7's padding keystone. Counted from the batch itself rather than derived
+    # from config, so a mismatch between the two is visible instead of assumed.
+    counters = {"micro_step_count": float(policy_update_steps)}
+    attention_mask = train_data["attention_mask"] if "attention_mask" in train_data.keys() else None
+    if attention_mask is not None:
+        lengths = attention_mask.sum(dim=-1).to(torch.float64)
+        counters.update(
+            {
+                # `_rank_` in the name, deliberately. These are THIS rank's tokens, published per
+                # rank and never reduced, so a consumer that sums them across rows gets the global
+                # total only when every rank holds distinct data -- under sequence, context, expert
+                # or Megatron tensor/pipeline parallelism the replicas hold the SAME tokens and the
+                # sum is multiplied by the replication factor. The old names said "tokens" and
+                # invited exactly that.
+                "rank_tokens_real": float(attention_mask.sum().item()),
+                "rank_tokens_padded": float(attention_mask.numel()),
+                # Eager attention is quadratic on the PADDED shape, so the linear padded fraction
+                # understates its cost; this ratio is the attention-work proxy.
+                "attention_work_ratio": float(
+                    (attention_mask.shape[0] * attention_mask.shape[-1] ** 2)
+                    / max(float((lengths**2).sum().item()), 1.0)
+                ),
+            }
+        )
+    # Allocator counters, rebased at begin_step so they describe THIS step. See StepMemoryProbe for
+    # why the raw values are a trap.
+    counters.update(worker._step_memory.counters())
+    return counters
+
+
 class PolicyWorkerBase(Worker):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -998,6 +1110,23 @@ class PolicyWorkerBase(Worker):
         return causal_lm if isinstance(causal_lm, GrugMoeForCausalLM) else None
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
+        # Started here, at true function entry, NOT after the drain barrier below: the barrier can
+        # absorb a multi-minute arrival spread, and timing from after it would hide exactly the wait
+        # the driver is paying for. Off unless trainer.policy_train_spans is set, so the overhead
+        # on/off pair is a config flip rather than two revisions.
+        _trainer_cfg = self.cfg.get("trainer", {}) if hasattr(self.cfg, "get") else {}
+        _policy_spans = WorkerSpanAccumulator(
+            enabled=bool(_trainer_cfg.get("policy_train_spans", False)),
+            synchronize=bool(_trainer_cfg.get("policy_train_spans_synchronize", True)),
+        )
+        self._policy_spans = _policy_spans
+        # Rides the same flag. begin_step is the ONLY place the allocator peak is reset: without it
+        # the published peak is a process-lifetime high-water mark wearing a step attribute, and
+        # every step after the one that sets it republishes the same number.
+        self._step_memory = StepMemoryProbe(enabled=_policy_spans.enabled)
+        self._step_memory.begin_step()
+        _policy_spans_started = time.perf_counter()
+
         # ── Co-arrival drain before the first training FSDP unshard (80B gs1 SIGABRT #1-6) ──
         # Under fully_async + SKYRL_R3_DECENTRAL, `ppo_train` is dispatched STAGGERED
         # per-dp-group: MeshDispatch relocates each dp-group's multi-GB `rollout_routed_experts`
@@ -1039,8 +1168,17 @@ class PolicyWorkerBase(Worker):
             # (staggered entry), then RELEASE together — the timestamp CLUSTER at release proves
             # co-arrival; unshard #6936 must NOT time out afterward.
             logger.info(f"WORKER_PPO_TRAIN_DRAIN_BARRIER rank={self._rank}")
-            torch.cuda.synchronize()
-            torch.distributed.barrier()
+            # presync=False: this region synchronises itself, and a leading sync would drain the
+            # queue first and leave the wrapped one timing nothing.
+            with _policy_spans.span("policy_entry_barrier", presync=False):
+                torch.cuda.synchronize()
+                torch.distributed.barrier()
+        else:
+            # Recorded as an explicit zero. Without this the span is simply absent when R3 is off,
+            # and a missing row is indistinguishable from a barrier that cost nothing -- while the
+            # arrival spread has not vanished, it has moved into the first micro-batch's unshard,
+            # inside the compute spans.
+            _policy_spans.record_zero("policy_entry_barrier")
 
         global_step = train_data.metadata["global_step"]
 
@@ -1155,18 +1293,22 @@ class PolicyWorkerBase(Worker):
                         local_step=local_step,
                     ),
                 ):
-                    status = self.training_step(
-                        experience,
-                        global_step,
-                        local_step,
-                        accumulation_steps,
-                    )
+                    with _policy_spans.span("policy_training_step"):
+                        status = self.training_step(
+                            experience,
+                            global_step,
+                            local_step,
+                            accumulation_steps,
+                        )
                 policy_update_steps += 1
 
                 # for DP
                 # TODO (sumanthrh): this assumes all workers are data parallel.
                 # We assume that outputs are replicated within tp or sp group, otherwise this is not correct.
-                status = self.strategy.all_reduce(status)
+                # One collective per micro-step, and at micro_train_batch_size_per_gpu=1 that is 64
+                # of them per rank per step at E6's geometry. Timed because nobody has attributed it.
+                with _policy_spans.span("policy_metric_allreduce"):
+                    status = self.strategy.all_reduce_status(status)
 
                 # weighted mean for kl
                 # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
@@ -1180,8 +1322,37 @@ class PolicyWorkerBase(Worker):
                     all_metrics[k].append(v)
                 pbar.set_postfix(policy_progress_metrics(status))
 
-        torch.distributed.barrier()
+        with _policy_spans.span("policy_final_barrier"):
+            torch.distributed.barrier()
         status_mean = policy_training_metrics(all_metrics, policy_update_steps / accumulation_steps)
+
+        # Published from the worker, not returned: trainer.py keeps only policy_statuses[0]'s
+        # "train_status", so a sibling key here would be transported and then dropped -- and rank 0
+        # is the wrong rank, because the driver waits for the slowest.
+        # ⚠️ Everything from here to the publish runs AFTER the optimizer step and the final barrier,
+        # i.e. after this step's GPU work is already paid for, and it issues CUDA reductions,
+        # .item() synchronisations and allocator queries. A failure in any of them would discard a
+        # completed step -- at E6 geometry, an hour of 80 H100s -- to lose a telemetry row.
+        # docs/telemetry.md states the contract: export failures do not change training results.
+        # retain_trajectories guards itself for exactly this reason and for exactly this reason only;
+        # this is that precedent, not a general licence to swallow exceptions.
+        try:
+            _counters = _policy_span_counters(self, _policy_spans, train_data, policy_update_steps)
+        except Exception:
+            logger.exception("policy_train counters failed; publishing spans without them")
+            _counters = {}
+
+        self._policy_span_publish = (
+            global_step,
+            _publish_policy_spans(
+                _policy_spans,
+                total_seconds=time.perf_counter() - _policy_spans_started,
+                step=global_step,
+                rank=self._rank,
+                previous_publish=getattr(self, "_policy_span_publish", None),
+                counters=_counters,
+            ),
+        )
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
@@ -1228,6 +1399,10 @@ class PolicyWorkerBase(Worker):
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
+        # Read off self rather than taken as an argument: training_step is overridden by subclasses
+        # and stubbed by tests, so adding a parameter to its signature breaks callers that have every
+        # right not to know about spans. Absent, the spans are an inert no-op.
+        _spans = getattr(self, "_policy_spans", None) or WorkerSpanAccumulator(enabled=False)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_ENTER)
         self.model.train()
         experience.to_device(torch.cuda.current_device())
@@ -1257,7 +1432,13 @@ class PolicyWorkerBase(Worker):
 
         # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        # A real `with`, not a manual __enter__/__exit__ pair. On any raise inside the forward or
+        # compute_policy_objective -- OOM being the documented failure of this exact region -- the
+        # manual form never ran __exit__, so the generator's finally (which calls
+        # torch.cuda.synchronize() when synchronize=True) fired later from the GC finalizer and
+        # recorded an elapsed value bounded by GC timing rather than by the forward. policy_backward
+        # two blocks down already does it this way.
+        with _spans.span("policy_forward"), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
             action_log_probs, output = self.model(
                 sequences,
@@ -1306,7 +1487,7 @@ class PolicyWorkerBase(Worker):
         _cp_backward_span = getattr(self.model, "cp_backward_dispatcher_span", None)
         _cp_span_cm = _cp_backward_span() if _cp_backward_span is not None else contextlib.nullcontext()
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.BACKWARD_ENTER)
-        with _cp_span_cm:
+        with _spans.span("policy_backward"), _cp_span_cm:
             self.strategy.backward(loss, self.model, self.optimizer)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.BACKWARD_EXIT)
 
@@ -1345,14 +1526,15 @@ class PolicyWorkerBase(Worker):
             stale_min = getattr(self, "_current_stale_min", None)
             lr_scale = stale_clip.compute_lr_scale(stale_min) if stale_clip is not None else 1.0
 
-            grad_norm = self.strategy.optimizer_step(
-                self.optimizer,
-                self.model,
-                self.scheduler,
-                name="actor",
-                z_clip=z_clip,
-                stale_clip_lr_scale=lr_scale,
-            )
+            with _spans.span("policy_optimizer_step"):
+                grad_norm = self.strategy.optimizer_step(
+                    self.optimizer,
+                    self.model,
+                    self.scheduler,
+                    name="actor",
+                    z_clip=z_clip,
+                    stale_clip_lr_scale=lr_scale,
+                )
             optimizer_step_succeeded = (
                 bool(self.strategy.last_optimizer_step_succeeded) if grug_causal_lm is not None else True
             )
@@ -1374,7 +1556,8 @@ class PolicyWorkerBase(Worker):
                 # Smoking gun (Perlmutter 52905223): metrics show
                 #   triggered=0.625 / scale=0.8125 at stale_min=1
                 # = 5/8 ranks applying scale=0.7 and 3/8 applying 1.0.
-                entropy_global = self.strategy.all_reduce(entropy.item(), op="mean")
+                with _spans.span("policy_entropy_allreduce"):
+                    entropy_global = self.strategy.all_reduce(entropy.item(), op="mean")
                 stale_clip.update_entropy(entropy_global)
 
             # Surface decisions for logging.
@@ -1606,7 +1789,11 @@ class CriticWorkerBase(Worker):
                 # TODO (sumanthrh): this assumes all workers are data parallel.
                 # We should get more accurate metrics with seq parallel or TP.
                 # There are metrics like entropy where we get average over local data size
-                status = self.strategy.all_reduce(status)
+                # all_reduce_status, not all_reduce: STATUS_REDUCTION_OPS is keyed by METRIC NAME,
+                # not by worker, so the plain mean here would silently apply to the first key the
+                # critic and policy ever share. No such key exists today -- optimizer_step_succeeded
+                # is emitted only on the policy side -- which is exactly why this would go unnoticed.
+                status = self.strategy.all_reduce_status(status)
 
                 for k, v in status.items():
                     all_metrics[k].append(v)

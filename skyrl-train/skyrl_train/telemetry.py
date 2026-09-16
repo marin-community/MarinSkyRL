@@ -2,7 +2,7 @@ import contextlib
 import os
 import socket
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -262,6 +262,21 @@ def record_rollout_buffer(depth: int, queue_capacity: int) -> None:
     rollout_capacity.set(queue_capacity, attributes=attributes)
 
 
+def _event_body(fields: Mapping[str, object]) -> "telemetry.serialization.EventBody":
+    """Wrap a plain mapping as an EventBody, dropping fields Rigging cannot serialise.
+
+    Two separate hazards, both of which fail silently. ``event()`` takes an ``EventBody``, and
+    passing a bare dict raises ``AttributeError`` inside ``event_fields`` (``dict(body.fields)``) --
+    which the exporter swallows into ``lost_records``, so the event simply never appears. And
+    ``event_fields`` rejects anything that is not str/int/float/bool, so a ``None`` -- which
+    ``policy_step``, ``queue_depth`` and the progress timestamp all can be before the first step --
+    would raise and lose the whole event rather than the one field.
+    """
+    return telemetry.serialization.EventBody(
+        {key: value for key, value in fields.items() if isinstance(value, (str, int, float, bool))}
+    )
+
+
 class ProcessTelemetry:
     def __init__(self, config: TelemetryConfig, role: str) -> None:
         self._config = config
@@ -284,7 +299,7 @@ class ProcessTelemetry:
         )
         self._configured = telemetry.runtime_status().configured
         if self._configured:
-            telemetry.event("lifecycle", {"state": "started"}, attributes={"role": self._role})
+            telemetry.event("lifecycle", _event_body({"state": "started"}), attributes={"role": self._role})
         return self
 
     def collector_or_inert(self, collector: _BackgroundCollector) -> _BackgroundCollector:
@@ -296,16 +311,18 @@ class ProcessTelemetry:
             export = telemetry.runtime_status()
             telemetry.event(
                 "terminal",
-                {
-                    "status": "completed" if exc_type is None else "failed",
-                    "reason": "normal_exit" if exc_type is None else getattr(exc_type, "__name__", "exception"),
-                    "export_queued_records": export.queued_records,
-                    "export_lost_records": export.lost_records,
-                    "policy_step": _process_state.policy_step,
-                    "last_progress_time_seconds": _process_state.last_progress_timestamp,
-                    "queue_depth": _process_state.queue_depth,
-                    "queue_capacity": _process_state.queue_capacity,
-                },
+                _event_body(
+                    {
+                        "status": "completed" if exc_type is None else "failed",
+                        "reason": "normal_exit" if exc_type is None else getattr(exc_type, "__name__", "exception"),
+                        "export_queued_records": export.queued_records,
+                        "export_lost_records": export.lost_records,
+                        "policy_step": _process_state.policy_step,
+                        "last_progress_time_seconds": _process_state.last_progress_timestamp,
+                        "queue_depth": _process_state.queue_depth,
+                        "queue_capacity": _process_state.queue_capacity,
+                    }
+                ),
                 attributes={"role": self._role},
             )
             telemetry.shutdown(SHUTDOWN_TIMEOUT_SECONDS)

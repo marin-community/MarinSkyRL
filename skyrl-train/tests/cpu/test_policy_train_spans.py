@@ -1,0 +1,1462 @@
+# Copyright The Marin Authors
+# SPDX-License-Identifier: Apache-2.0
+
+"""Worker-side decomposition of policy_train.
+
+policy_train is a leaf on the driver -- a Ray dispatch plus a wait for the slowest policy worker --
+and on a 67B-A2B MoE run it is ~90% of the step with nothing measured inside it. These tests cover
+the span layer that decomposes it, and specifically the three ways it could look like it works while
+reporting nothing.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import inspect
+import pathlib
+import sys
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from skyrl_train.timing_observability import (
+    StepMemoryProbe,
+    POLICY_TRAIN_SPANS,
+    TIMING_PARENTS,
+    WorkerSpanAccumulator,
+    WorkerTimingSink,
+    phase_timing_observations,
+    publish_worker_counters,
+    publish_worker_spans,
+)
+
+
+def _stub_telemetry(monkeypatch, module, *, settled=True, lost_delta=0):
+    """Stub the export surface: flush result plus the counters loss is actually detected from."""
+    from types import SimpleNamespace
+
+    calls = {"flush": [], "status": 0}
+    # ⚠️ The baseline is NOT zero. `lost_records` is process-cumulative, so a stub starting at 0
+    # makes the absolute value and the delta numerically identical -- and `dropped =
+    # after.lost_records`, which re-warns about every earlier step's losses on every step for the
+    # rest of the run, passed every test in this file.
+    baseline = 7
+
+    def _status():
+        calls["status"] += 1
+        lost = baseline + lost_delta if calls["status"] > 1 else baseline
+        return SimpleNamespace(lost_records=lost, rejected_records=0)
+
+    monkeypatch.setattr(module.telemetry, "flush", lambda timeout: calls["flush"].append(timeout) or settled)
+    monkeypatch.setattr(module.telemetry, "runtime_status", _status)
+    monkeypatch.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+    return calls
+
+
+def _accumulator(**kwargs) -> WorkerSpanAccumulator:
+    kwargs.setdefault("enabled", True)
+    kwargs.setdefault("synchronize", False)
+    return WorkerSpanAccumulator(**kwargs)
+
+
+def test_every_span_is_registered_in_the_timing_tree():
+    """An unregistered span is dropped in silence.
+
+    phase_timing_observations filters on membership in TIMING_PARENTS, so a span missing from it
+    publishes nothing at all -- which is indistinguishable from a phase that costs nothing.
+    """
+    for name in (*POLICY_TRAIN_SPANS, "policy_ppo_train", "policy_span_residual"):
+        assert name in TIMING_PARENTS, f"{name} would be silently dropped"
+    # train_critic_and_policy, not policy_train: the worker cannot know which driver phase wrapped
+    # it, and policy_train is ABSENT when the critic overlaps (trainer.py:1977). Naming it made the
+    # whole worker subtree claim a parent that does not exist on that path.
+    assert TIMING_PARENTS["policy_ppo_train"] == "train_critic_and_policy"
+    for name in (*POLICY_TRAIN_SPANS, "policy_span_residual"):
+        assert TIMING_PARENTS[name] == "policy_ppo_train"
+
+
+def test_no_span_is_opened_with_a_manual_enter_exit_pair():
+    """A manual __enter__/__exit__ leaks the span on any raise between them.
+
+    The generator's finally calls torch.cuda.synchronize() under synchronize=True, so on an
+    exception it runs later from the GC finalizer and records an elapsed value bounded by garbage
+    collection rather than by the region. OOM inside the forward is the documented failure of
+    exactly that region, so the leak fires precisely when the timing would be read.
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    import ast
+
+    source = inspect.getsource(worker_module)
+    assert ".__enter__()" not in source, "open spans with `with`, so an exception still closes them"
+    assert ".__exit__(None, None, None)" not in source
+
+    # Forbidding two strings is not enough: DELETING the span outright satisfies both while
+    # policy_forward vanishes from the tree into the residual.
+    #
+    # And collecting `.span("<name>")` calls ANYWHERE is not enough either -- a bare
+    # `_spans.span("policy_forward")` statement creates the context manager and never enters it,
+    # which is the same defect as the manual pair this test replaced, and it passed. So walk `With`
+    # nodes and take only the context expressions.
+    opened: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if not isinstance(call, ast.Call) or getattr(call.func, "attr", None) != "span" or not call.args:
+                continue
+            arg = call.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                opened.add(arg.value)
+    # Every span the residual subtracts must be entered somewhere, not just the three obvious ones:
+    # deleting policy_metric_allreduce or policy_final_barrier was green under the narrower list.
+    #
+    # And policy_training_step with them. It is deliberately NOT in POLICY_TRAIN_SPANS -- it is
+    # INCLUSIVE, wrapping the four exclusive leaves -- so a set built from POLICY_TRAIN_SPANS alone
+    # left the one row that bounds the children against their parent deletable with the whole suite
+    # green. The residual cannot see its loss either, for the same reason: it is computed from
+    # POLICY_TRAIN_SPANS.
+    inclusive = {name for name, parent in TIMING_PARENTS.items() if parent == "policy_ppo_train"}
+    entered_by_the_worker = (set(POLICY_TRAIN_SPANS) | inclusive) - {
+        "policy_span_publish",  # emitted for the PREVIOUS step, not opened as a region here
+        "policy_span_residual",  # computed, never entered
+    }
+    missing = sorted(entered_by_the_worker - opened)
+    assert not missing, f"{missing} are declared children of policy_ppo_train but never entered as a `with`"
+
+
+def test_the_worker_reports_an_unsettled_flush_even_when_rows_were_also_lost(monkeypatch):
+    """The worker half of the same `elif` defect, which the driver-side test does not cover.
+
+    An endpoint that both rejects rows and times out reported only the rejections, so rows still in
+    flight read as delivered -- on the path that carries the gate-grade metric. Reverting just this
+    line to `elif` left both existing worker tests passing.
+    """
+    import skyrl_train.timing_observability as module
+
+    warned: list[str] = []
+    state = {"flushed": False}
+
+    def _flush(timeout):
+        state["flushed"] = True
+        return False
+
+    monkeypatch.setattr(module.telemetry, "flush", _flush)
+    monkeypatch.setattr(
+        module.telemetry,
+        "runtime_status",
+        # Cumulative, and non-zero before this publish: the delta is 2, the absolute value is 9.
+        lambda: SimpleNamespace(lost_records=9 if state["flushed"] else 7, rejected_records=0),
+    )
+    monkeypatch.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+    monkeypatch.setattr(module.logger, "warning", lambda m, *a, **k: warned.append(str(m) % a if a else str(m)))
+
+    publish_worker_spans({"policy_forward": 1.0}, step=3, rank=0)
+
+    assert [w for w in warned if "lost 2 record(s)" in w], "the loss must be reported"
+    assert [w for w in warned if "did not settle" in w], (
+        "and the rows still in flight with it; under elif they were silent whenever anything was lost"
+    )
+
+
+def test_the_parent_walk_skips_phases_that_were_not_recorded():
+    """The walk-up is what keeps a consumer from orphaning a row when a phase is absent.
+
+    Collapsing it to a single `TIMING_PARENTS.get(name)` left the whole suite green, so
+    nothing exercised the loop -- and this helper is exactly the mechanism that makes an absent
+    driver phase survivable. `policy_train` is one such phase: the trainer runs
+    `policy_critic_overlap_train` instead of it whenever a critic is configured.
+
+    ⚠️ Survivable *for driver rows only*, which is why this and the reparent above are not in
+    conflict. `WorkerTimingSink.publish` emits `TIMING_PARENTS.get(name)` verbatim and never walks,
+    so a worker row whose declared parent is absent is orphaned outright. The walk rescues the
+    driver half; only choosing an unconditional parent rescues the worker half.
+    """
+    from skyrl_train.timing_observability import declared_root, nearest_recorded_parent
+
+    # policy_forward -> policy_ppo_train -> train_critic_and_policy -> run_training -> step.
+    # With only the far ancestor recorded, the walk must climb past the ones that are missing.
+    assert nearest_recorded_parent("policy_forward", {"policy_ppo_train": 1.0}) == "policy_ppo_train"
+    assert nearest_recorded_parent("policy_forward", {"train_critic_and_policy": 1.0}) == "train_critic_and_policy"
+    assert nearest_recorded_parent("policy_forward", {"step": 1.0}) == "step"
+    # Nothing recorded: the walk runs off the top and says so rather than inventing a parent.
+    assert nearest_recorded_parent("policy_forward", {}) is None
+    # And the root is the top of the declared chain, not the nearest recorded one.
+    assert declared_root("policy_forward") == "step"
+
+
+def test_publish_cost_is_not_charged_to_a_parent_that_does_not_contain_it():
+    """policy_span_publish happens after policy_ppo_train's wall is already measured.
+
+    Parented there and listed in POLICY_TRAIN_SPANS, the exclusive children summed to
+    parent + publish while the signed residual -- the only automatic double-counting detector --
+    stayed at 0.0, because the residual is computed from POLICY_TRAIN_SPANS. The tree was over
+    its parent and said nothing. It belongs to the driver's policy_train wait, which does contain it.
+    """
+    assert TIMING_PARENTS["policy_span_publish"] == "train_critic_and_policy"
+    assert "policy_span_publish" not in POLICY_TRAIN_SPANS, (
+        "subtracting it makes the children over-cover the parent, invisibly to the residual"
+    )
+
+
+def _unconditional_driver_phases() -> set[str]:
+    """Phase names every trainer opens a Timer for on every path.
+
+    ⚠️ DERIVED, not hand-listed. The earlier version excluded a two-name literal
+    {policy_train, policy_critic_overlap_train} -- and was already incomplete: `run_training` is a
+    declared parent in TIMING_PARENTS but is timed ONLY in fully_async_trainer.py:851, so a worker
+    span parented there is orphaned on every sync-trainer step and the hand-list passed it. Reading
+    the trainers means the over-broad version is unrepresentable rather than merely tested against.
+
+    A name qualifies only if BOTH trainers open it and NEITHER does so under an `if`/`try`/`while`.
+
+    ⚠️ **What this does NOT prove.** It is lexical. It does not see `ast.For` (a loop body can run
+    zero times), it cannot tell that a `Timer` inside a conditionally-CALLED function is
+    conditional, and a dead conditional expression -- `Timer(...) if False else Timer("x", ...)` --
+    passes it. Adding more node types does not fix the class; syntax cannot prove runtime
+    containment. It is kept as defence in depth, and the thing that actually makes a mislabelled
+    parent survivable is the read-back asserted in
+    `test_a_mislabelled_driver_parent_fails_LOUDLY_rather_than_orphaning_worker_rows`.
+
+    ⚠️ Do NOT add `ast.For` to the branch tuple to "tighten" this: every phase in `_train_loop` sits
+    under the epoch and dataloader loops, so the intersection would lose `train_critic_and_policy`
+    and the inertness canary below would fire.
+    """
+    import ast
+
+    import skyrl_train.fully_async_trainer as fully_async_module
+    import skyrl_train.trainer as trainer_module
+
+    def _unconditional(module) -> set[str]:
+        found: set[str] = set()
+        conditional: set[str] = set()
+
+        def walk(node: ast.AST, under_branch: bool) -> None:
+            for field, value in ast.iter_fields(node):
+                for child in value if isinstance(value, list) else [value]:
+                    if not isinstance(child, ast.AST):
+                        continue
+                    branch = under_branch or (
+                        isinstance(node, (ast.If, ast.Try, ast.While))
+                        and field in ("body", "orelse", "handlers", "finalbody")
+                    )
+                    if isinstance(child, ast.Call) and getattr(child.func, "id", None) == "Timer" and child.args:
+                        name = child.args[0]
+                        if isinstance(name, ast.Constant) and isinstance(name.value, str):
+                            (conditional if branch else found).add(name.value)
+                    walk(child, branch)
+
+        walk(ast.parse(pathlib.Path(module.__file__).read_text()), False)
+        return found - conditional
+
+    sync = _unconditional(trainer_module)
+    fully_async = _unconditional(fully_async_module)
+    assert "train_critic_and_policy" in sync & fully_async, (
+        "the walk found nothing it should have -- the Timer call shape changed and this guard is inert"
+    )
+    return sync & fully_async
+
+
+def test_no_worker_span_names_a_driver_phase_that_a_path_can_omit():
+    """The worker sink emits `TIMING_PARENTS.get(name)` verbatim -- no walk-up rescues it.
+
+    So every worker span's declared parent must be a phase BOTH trainers open unconditionally, or
+    another worker span. `policy_train` and `policy_critic_overlap_train` are alternatives
+    (trainer.py:1964 vs :1977); `run_training` is absent from the sync trainer entirely. Naming any
+    of them makes the whole worker subtree claim a parent that is missing on that path, which is
+    false machine-readable hierarchy -- worse than a coarser true one.
+    """
+    published = {*POLICY_TRAIN_SPANS, "policy_ppo_train", "policy_span_publish", "policy_training_step"}
+    safe = _unconditional_driver_phases() | published
+    for name in (*published, "policy_span_residual"):
+        assert TIMING_PARENTS[name] in safe, (
+            f"{name} is parented to {TIMING_PARENTS[name]!r}, which at least one trainer never "
+            "records -- the row would be orphaned on that path"
+        )
+
+
+def test_disabled_accumulator_records_nothing_and_costs_nothing():
+    accumulator = WorkerSpanAccumulator(enabled=False)
+    with accumulator.span("policy_forward"):
+        pass
+    assert accumulator.totals(total_seconds=1.0) == {}
+
+
+def test_spans_accumulate_across_micro_steps(monkeypatch):
+    """🚨 The word in the name is ACCUMULATE, and nothing tested it.
+
+    The old version drove three iterations on the real clock and asserted the key set plus
+    `value >= 0.0` -- both of which hold whether `span()` sums or ASSIGNS. That leaves the core
+    arithmetic of the whole worker tree unguarded: at E6 geometry, with 64 micro-steps per step, an
+    assign publishes the LAST micro-step instead of the sum, so `policy_forward` reads ~1 s against
+    a 200 s parent and the residual reports that policy_train is 99.5% unaccounted for. That is the
+    -1703 s incident this file is built around, sign-flipped.
+
+    A fake clock and an equality. Three zero-length spans would satisfy `>= 0.0` too.
+    """
+    import skyrl_train.timing_observability as timing_module
+
+    # forward: 5 + 3 + 1 = 9. metric_allreduce: 2 + 4 + 6 = 12.
+    ticks = iter([100, 105, 200, 202, 300, 303, 400, 404, 500, 501, 600, 606])
+    monkeypatch.setattr(timing_module, "time", SimpleNamespace(perf_counter=lambda: next(ticks)))
+
+    accumulator = _accumulator()
+    for _ in range(3):
+        with accumulator.span("policy_forward"):
+            pass
+        with accumulator.span("policy_metric_allreduce"):
+            pass
+
+    assert not list(ticks), "the scripted clock was not fully consumed; the span shape changed"
+    totals = accumulator.totals()
+    assert set(totals) == {"policy_forward", "policy_metric_allreduce"}
+    assert totals["policy_forward"] == pytest.approx(9.0), (
+        f"policy_forward is {totals['policy_forward']}; an accumulator that ASSIGNS publishes the "
+        "last micro-step (1.0) and reports the rest of the phase as unaccounted for"
+    )
+    assert totals["policy_metric_allreduce"] == pytest.approx(12.0)
+
+
+def test_residual_is_signed_so_over_coverage_is_visible():
+    """Clamping at zero would hide double-counting, which is what the residual exists to surface.
+
+    ⚠️ The assertion is on the NEGATIVE VALUE, not on `<= 0.0`. A `max(0.0, total - covered)` clamp
+    returns exactly 0.0, which satisfies `<= 0.0` -- so the guard against the clamp was passed by
+    the clamp. Pin the coverage so the expected residual is an exact number the clamp cannot produce.
+    """
+    import skyrl_train.timing_observability as timing_module
+
+    # ⚠️ Drive the REAL context manager on a scripted clock. Writing `_totals` directly -- which an
+    # earlier version did -- proves the SUBTRACTION and nothing about the MEASUREMENT: making
+    # `span()` record `+ 0.0` for every region left that version passing, so the residual could
+    # read a decomposition that measured nothing and call it closed.
+    ticks = iter([100.0, 104.0])
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(timing_module, "time", SimpleNamespace(perf_counter=lambda: next(ticks)))
+        accumulator = _accumulator()
+        with accumulator.span("policy_final_barrier"):
+            pass
+    finally:
+        monkey.undo()
+
+    totals = accumulator.totals(total_seconds=1.0)
+    assert totals["policy_final_barrier"] == pytest.approx(4.0), "the real timer must have measured it"
+    assert totals["policy_span_residual"] == pytest.approx(-3.0)
+
+
+def test_record_zero_distinguishes_did_not_run_from_cost_nothing():
+    """A conditional region must say which; a missing row and a zero row are different claims."""
+    accumulator = _accumulator()
+    assert "policy_entry_barrier" not in accumulator.totals()
+    accumulator.record_zero("policy_entry_barrier")
+    assert accumulator.totals()["policy_entry_barrier"] == 0.0
+
+
+def test_disabled_accumulator_records_no_zeros_either():
+    accumulator = WorkerSpanAccumulator(enabled=False)
+    accumulator.record_zero("policy_entry_barrier")
+    assert accumulator.totals(total_seconds=1.0) == {}
+
+
+def test_published_rows_carry_worker_role_rank_and_an_exclusive_clock_domain():
+    """Leaves must not share inclusive_wall with the driver's spans, or a consumer double-counts."""
+    recorded: list[tuple[float, dict[str, str]]] = []
+
+    class _Probe(WorkerTimingSink):
+        pass
+
+    sink = _Probe(rank=5)
+    observations = phase_timing_observations(
+        {
+            "policy_ppo_train": 9.0,
+            # ⚠️ The OTHER inclusive row, and the one that was undefended: dropping it from the
+            # containment tuple shipped it as exclusive_wall with the whole suite green. A consumer
+            # following the docs then sums it alongside the four leaves it contains and reads ~2x
+            # the parent, with no residual signal -- policy_training_step is deliberately outside
+            # POLICY_TRAIN_SPANS, so the residual cannot see it.
+            "policy_training_step": 8.5,
+            "policy_forward": 6.0,
+            "policy_final_barrier": 1.0,
+        }
+    )
+    import skyrl_train.timing_observability as module
+
+    original = module.phase_duration
+
+    class _Histogram:
+        def record(self, value, attributes):
+            recorded.append((value, attributes))
+
+    module.phase_duration = _Histogram()
+    try:
+        sink.publish(observations, step=7)
+    finally:
+        module.phase_duration = original
+
+    by_phase = {attributes["phase"]: attributes for _, attributes in recorded}
+    assert set(by_phase) == {"policy_ppo_train", "policy_training_step", "policy_forward", "policy_final_barrier"}
+    for attributes in by_phase.values():
+        assert attributes["role"] == "worker"
+        assert attributes["rank"] == "5"
+        assert attributes["step"] == "7"
+    assert by_phase["policy_ppo_train"]["clock_domain"] == "inclusive_wall"
+    assert by_phase["policy_training_step"]["clock_domain"] == "inclusive_wall"
+    assert by_phase["policy_forward"]["clock_domain"] == "exclusive_wall"
+    assert by_phase["policy_final_barrier"]["clock_domain"] == "exclusive_wall"
+    # The parent is the declared one, not the nearest *recorded* one: the driver phase is never in
+    # this mapping, so nearest_recorded_parent would orphan every leaf.
+    assert by_phase["policy_ppo_train"]["parent"] == "train_critic_and_policy"
+    assert by_phase["policy_forward"]["parent"] == "policy_ppo_train"
+
+
+def test_every_child_of_policy_ppo_train_is_either_a_measured_span_or_the_residual():
+    """Guards the two halves against drift.
+
+    A name registered under policy_ppo_train but absent from POLICY_TRAIN_SPANS is excluded from the
+    residual arithmetic, so its time would be counted twice -- once in its own row and again inside
+    the residual.
+    """
+    children = {name for name, parent in TIMING_PARENTS.items() if parent == "policy_ppo_train"}
+    # policy_training_step is the one INCLUSIVE child: it wraps training_step, which contains
+    # forward/backward/optimizer/entropy. It is registered so the tree is navigable, and excluded
+    # from POLICY_TRAIN_SPANS so the residual does not count its children a second time.
+    assert children == set(POLICY_TRAIN_SPANS) | {"policy_span_residual", "policy_training_step"}
+
+
+def test_presync_false_leaves_a_self_synchronising_region_measurable():
+    """A leading sync would drain the queue and leave the wrapped sync timing nothing."""
+    calls: list[str] = []
+
+    accumulator = WorkerSpanAccumulator(enabled=True, synchronize=True)
+    accumulator._sync = lambda: calls.append("sync")  # type: ignore[method-assign]
+
+    with accumulator.span("policy_forward"):
+        pass
+    assert calls == ["sync", "sync"], "a normal span brackets itself with synchronises"
+
+    calls.clear()
+    with accumulator.span("policy_entry_barrier", presync=False):
+        pass
+    assert calls == ["sync"], "presync=False must not synchronise before the region starts"
+
+
+def test_publish_flushes_so_the_last_step_survives_ray_kill(monkeypatch):
+    """Ray does not run atexit handlers on ray.kill, so durability has to be at publish time."""
+    import skyrl_train.timing_observability as module
+
+    calls = _stub_telemetry(monkeypatch, module)
+    elapsed = publish_worker_spans({"policy_ppo_train": 1.0}, step=3, rank=0)
+    assert calls["flush"] == [module.TELEMETRY_FLUSH_TIMEOUT_SECONDS]
+    assert elapsed >= 0.0, "the publish cost is returned so it can be carried into the next step"
+
+    calls["flush"].clear()
+    assert publish_worker_spans({}, step=3, rank=0) == 0.0
+    assert calls["flush"] == [], "nothing to publish means nothing to flush"
+
+
+def test_dropped_records_are_detected_from_counters_not_from_the_flush_result(monkeypatch, caplog):
+    """flush() returns True once dropped records have SETTLED, so True does not mean delivered.
+
+    Detecting loss from the return value alone would let a short row set -- which understates max and
+    p95 over ranks -- pass as a clean measurement.
+    """
+    import logging
+
+    import skyrl_train.timing_observability as module
+
+    _stub_telemetry(monkeypatch, module, settled=True, lost_delta=3)
+    with caplog.at_level(logging.WARNING, logger=module.logger.name):
+        publish_worker_spans({"policy_ppo_train": 1.0}, step=9, rank=2)
+
+    assert any("lost 3 record" in r.message for r in caplog.records), (
+        "a True flush with dropped records must still warn"
+    )
+
+
+def test_a_flush_that_does_not_settle_is_logged(monkeypatch, caplog):
+    import logging
+
+    import skyrl_train.timing_observability as module
+
+    _stub_telemetry(monkeypatch, module, settled=False)
+    with caplog.at_level(logging.WARNING, logger=module.logger.name):
+        publish_worker_spans({"policy_ppo_train": 1.0}, step=9, rank=2)
+
+    assert any("did not settle" in r.message for r in caplog.records)
+
+
+def test_previous_publish_is_emitted_under_its_own_step_not_this_one():
+    """Labelling step n-1's publish as step n, and subtracting it from step n's residual, removes
+    time that interval never contained."""
+    import skyrl_train.timing_observability as module
+
+    rows: list[tuple[str, int]] = []
+
+    class _Histogram:
+        def record(self, value, attributes):
+            rows.append((attributes["phase"], int(attributes["step"])))
+
+    import pytest as _pytest
+
+    monkey = _pytest.MonkeyPatch()
+    try:
+        monkey.setattr(module, "phase_duration", _Histogram())
+        monkey.setattr(module.telemetry, "flush", lambda timeout: True)
+        monkey.setattr(
+            module.telemetry,
+            "runtime_status",
+            lambda: type("S", (), {"lost_records": 0, "rejected_records": 0})(),
+        )
+        publish_worker_spans({"policy_ppo_train": 9.0}, step=5, rank=0, previous_publish=(4, 0.25))
+    finally:
+        monkey.undo()
+
+    assert ("policy_ppo_train", 5) in rows
+    assert ("policy_span_publish", 4) in rows, "the publish cost belongs to the step that incurred it"
+    assert ("policy_span_publish", 5) not in rows
+
+
+def test_dropped_records_are_not_double_counted():
+    """Rigging already folds rejected records into lost_records; summing both reports 2N for N."""
+    import logging
+
+    import skyrl_train.timing_observability as module
+
+    import pytest as _pytest
+
+    monkey = _pytest.MonkeyPatch()
+    seen = {"n": 0}
+
+    def _status():
+        seen["n"] += 1
+        lost = 3 if seen["n"] > 1 else 0
+        return type("S", (), {"lost_records": lost, "rejected_records": lost})()
+
+    try:
+        monkey.setattr(module.telemetry, "runtime_status", _status)
+        monkey.setattr(module.telemetry, "flush", lambda timeout: True)
+        monkey.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+        import _pytest.logging  # noqa: F401
+
+        records: list[str] = []
+        handler = logging.Handler()
+        handler.emit = lambda r: records.append(r.getMessage())  # type: ignore[method-assign]
+        module.logger.addHandler(handler)
+        try:
+            publish_worker_spans({"policy_ppo_train": 1.0}, step=1, rank=0)
+        finally:
+            module.logger.removeHandler(handler)
+    finally:
+        monkey.undo()
+
+    assert any("lost 3 record" in m for m in records), f"expected 3, got: {records}"
+
+
+def test_worker_init_configures_telemetry_for_the_worker_role():
+    """The wiring that stops the spans publishing into nothing.
+
+    Rigging discards every record while unconfigured, and a Ray actor never enters
+    ``process_telemetry`` on its own -- ``main_base`` does it for the trainer and driver roles only.
+    Without this the spans emit silently into nothing, which is indistinguishable from a phase that
+    costs nothing.
+
+    Asserted on the source of ``Worker.__init__`` because the constructor cannot be exercised
+    off-actor: it needs a live torch.distributed rendezvous. A structural check is weak, but it does
+    catch the regression that matters -- someone deleting the wiring and leaving a green suite.
+    """
+
+    from skyrl_train.workers.worker import Worker
+
+    source = inspect.getsource(Worker.__init__)
+    assert "process_telemetry(WORKER_ROLE)" in source
+    assert '"policy_train_spans", False' in source
+    # Ray kills actors rather than unwinding them, so the drain must be registered, not relied upon.
+    assert "atexit.register" in source
+
+
+def test_ppo_train_wires_the_span_layer():
+    """The wiring itself, which no behavioural test can reach.
+
+    ⚠️ This docstring used to claim ``ppo_train`` "needs a live torch.distributed rendezvous and a
+    Ray actor", which is why everything here is a source assertion. **That was wrong**, and
+    ``_run_ppo_train`` below disproves it: ``object.__new__`` plus a fake strategy, a stubbed
+    ``training_step`` and four ``torch.distributed`` stubs runs all 249 lines on CPU. Anything here
+    that CAN move to that harness should; what remains are orderings inside the function body that a
+    behavioural test cannot observe -- which clock is taken before which barrier, and what is carried
+    forward between steps.
+    """
+
+    import skyrl_train.workers.worker as worker_module
+    from skyrl_train.workers.worker import PolicyWorkerBase
+
+    # PolicyWorkerBase, not Worker: CriticWorkerBase has its own ppo_train and is not instrumented.
+    source = inspect.getsource(PolicyWorkerBase.ppo_train)
+    # The clock starts before the drain barrier, not after it.
+    assert source.index("_policy_spans_started = time.perf_counter()") < source.index("WORKER_PPO_TRAIN_DRAIN_BARRIER")
+    # The self-synchronising region opts out of the leading synchronise.
+    assert 'span("policy_entry_barrier", presync=False)' in source
+    # The previous step's publish cost is passed with its own step label, and this step's retained.
+    # The previous step's publish cost is carried forward and this step's retained. Both now go
+    # through _publish_policy_spans, whose behaviour is asserted directly below.
+    assert 'previous_publish=getattr(self, "_policy_span_publish", None)' in source
+    assert "self._policy_span_publish = (" in source
+    # The counter call G3 found untested rides the spans publish rather than standing alone, so a
+    # dropped counter row is not invisible. That gating now lives in _publish_policy_spans and is
+    # asserted behaviourally below.
+    # The counters live in their own function so the caller can guard them; assert the names there.
+    counters_source = inspect.getsource(worker_module._policy_span_counters)
+    assert "micro_step_count" in counters_source
+    assert "attention_work_ratio" in counters_source
+    # 🚨 Neither gathering nor publishing may kill a step. Both run AFTER the optimizer step and the
+    # final barrier, and both issue CUDA synchronisations and allocator queries; a raise there
+    # discards work already paid for -- an hour of 80 H100s at E6 geometry -- to lose a telemetry
+    # row. docs/telemetry.md states the contract: export failures do not change training results.
+    assert "except Exception:" in source, "the counter gathering is not guarded"
+    # The publish path's own guarantees are asserted BEHAVIOURALLY below, against the function
+    # rather than against this source text.
+    assert "_publish_policy_spans(" in source
+    # H2's keystone. Three OOMs in this workstream asked for the eager attention score tensor and
+    # no memory series existed to see any of them coming. The counters now come from the probe.
+    assert "_step_memory.counters()" in counters_source
+    # Rebased at the TOP, before any forward. Published raw, max_memory_allocated is the peak since
+    # the process began, so a step attribute on it is a lie: after whichever step sets the
+    # high-water mark, every later step republishes the same number.
+    assert source.index("self._step_memory.begin_step()") < source.index("WORKER_PPO_TRAIN_DRAIN_BARRIER")
+    # And reset NOWHERE ELSE -- asserted on the probe, not on this source text. The old guard read
+    # `"reset_peak_memory_stats" not in source` and went vacuous the moment the call moved into
+    # begin_step: it passed because the string had left ppo_train, not because the invariant held.
+    import skyrl_train.timing_observability as timing_module
+
+    probe_source = inspect.getsource(timing_module.StepMemoryProbe)
+    assert probe_source.count("reset_peak_memory_stats") == 1
+    assert "reset_peak_memory_stats" in inspect.getsource(timing_module.StepMemoryProbe.begin_step)
+
+
+def test_counters_go_to_their_own_instrument_not_the_span_tree():
+    """They are counts and ratios, not durations.
+
+    Riding phase_duration would put a units mismatch into the span tree, where nothing downstream
+    would notice it being summed into policy_ppo_train or subtracted from the residual.
+    """
+    import skyrl_train.timing_observability as module
+
+    import pytest as _pytest
+
+    recorded: list[tuple[float, dict]] = []
+    monkey = _pytest.MonkeyPatch()
+    try:
+        monkey.setattr(
+            module,
+            "policy_step_counter",
+            type("_H", (), {"record": lambda self, v, attributes: recorded.append((v, attributes))})(),
+        )
+        monkey.setattr(
+            module, "phase_duration", type("_H", (), {"record": lambda *a, **k: pytest.fail("wrong instrument")})()
+        )
+        publish_worker_counters({"micro_step_count": 64.0, "rank_tokens_real": 12.0}, step=2, rank=7)
+    finally:
+        monkey.undo()
+
+    by_name = {a["counter"]: (v, a) for v, a in recorded}
+    assert by_name["micro_step_count"][0] == 64.0
+    assert by_name["rank_tokens_real"][1]["rank"] == "7"
+    assert by_name["rank_tokens_real"][1]["step"] == "2"
+    assert by_name["micro_step_count"][1]["role"] == "worker"
+    # And they must not be registered as spans, or they would join the residual arithmetic.
+    for name in (
+        "micro_step_count",
+        "rank_tokens_real",
+        "rank_tokens_padded",
+        "attention_work_ratio",
+        "peak_allocated_bytes",
+        "peak_reserved_bytes",
+        "alloc_retries",
+        "alloc_ooms",
+    ):
+        assert name not in TIMING_PARENTS
+        assert name not in POLICY_TRAIN_SPANS
+
+
+def test_counters_ride_the_spans_publish_so_loss_detection_covers_them(monkeypatch):
+    """Published separately they sat outside the before/after loss window and were invisible."""
+    import skyrl_train.timing_observability as module
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(module.telemetry, "flush", lambda timeout: True)
+    monkeypatch.setattr(
+        module.telemetry,
+        "runtime_status",
+        lambda: type("S", (), {"lost_records": 0, "rejected_records": 0})(),
+    )
+    monkeypatch.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+    monkeypatch.setattr(
+        module,
+        "policy_step_counter",
+        type("_H", (), {"record": lambda self, v, attributes: seen.setdefault(attributes["counter"], v)})(),
+    )
+
+    module.publish_worker_spans({"policy_ppo_train": 1.0}, step=4, rank=1, counters={"micro_step_count": 64.0})
+    assert seen == {"micro_step_count": 64.0}
+
+
+def test_counters_alone_still_publish():
+    """Spans may be empty on a step that produced none; the counters must not be dropped with them."""
+    import skyrl_train.timing_observability as module
+
+    import pytest as _pytest
+
+    seen: list[str] = []
+    monkey = _pytest.MonkeyPatch()
+    try:
+        monkey.setattr(module.telemetry, "flush", lambda timeout: True)
+        monkey.setattr(
+            module.telemetry,
+            "runtime_status",
+            lambda: type("S", (), {"lost_records": 0, "rejected_records": 0})(),
+        )
+        monkey.setattr(module, "phase_duration", type("_H", (), {"record": lambda *a, **k: None})())
+        monkey.setattr(
+            module,
+            "policy_step_counter",
+            type("_H", (), {"record": lambda self, v, attributes: seen.append(attributes["counter"])})(),
+        )
+        module.publish_worker_spans({}, step=4, rank=1, counters={"rank_tokens_real": 7.0})
+    finally:
+        monkey.undo()
+    assert seen == ["rank_tokens_real"]
+
+
+# --- allocator counters, and the trap in the raw values ------------------------------------------
+
+
+class _FakeCuda:
+    """A scripted allocator. `peaks` and `allocs` are consumed in call order."""
+
+    def __init__(self, peaks, allocs, retries=0, ooms=0):
+        self._peaks, self._allocs = iter(peaks), iter(allocs)
+        self.retries, self.ooms, self.resets = retries, ooms, 0
+
+    is_available = staticmethod(lambda: True)
+    is_initialized = staticmethod(lambda: True)
+
+    def reset_peak_memory_stats(self):
+        self.resets += 1
+
+    def max_memory_allocated(self):
+        return next(self._peaks)
+
+    def max_memory_reserved(self):
+        return 0.0
+
+    def memory_allocated(self):
+        return next(self._allocs)
+
+    def memory_stats(self):
+        return {"num_alloc_retries": self.retries, "num_ooms": self.ooms}
+
+
+def _with_cuda(monkeypatch, cuda):
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=cuda))
+
+
+def test_the_memory_probe_is_inert_when_disabled():
+    """It rides trainer.policy_train_spans, so an off run pays nothing and publishes nothing."""
+    probe = StepMemoryProbe(enabled=False)
+    probe.begin_step()
+    assert probe.counters() == {}
+
+
+def test_the_allocator_peak_is_rebased_so_it_describes_this_step(monkeypatch):
+    """🚨 max_memory_allocated is "peak since the beginning of this program".
+
+    Published per step without a baseline it is a process-lifetime high-water mark wearing a step
+    attribute: after whichever step sets it, every later step republishes the same number and the
+    series looks flat and healthy while measuring nothing. begin_step is the only reset.
+    """
+    cuda = _FakeCuda(peaks=[500.0], allocs=[])
+    _with_cuda(monkeypatch, cuda)
+    probe = StepMemoryProbe(enabled=True)
+    probe.begin_step()
+    assert cuda.resets == 1, "the peak must be rebased at the top of the step"
+    assert probe.counters()["peak_allocated_bytes"] == 500.0
+
+
+def test_the_cumulative_allocator_counters_are_published_as_deltas(monkeypatch):
+    """num_alloc_retries and num_ooms are cumulative for the PROCESS.
+
+    Published raw and tagged by step, summing them across steps counts old events again. A step that
+    had no retries must publish zero, not the running total.
+    """
+    cuda = _FakeCuda(peaks=[0.0], allocs=[], retries=7, ooms=2)
+    _with_cuda(monkeypatch, cuda)
+    probe = StepMemoryProbe(enabled=True)
+    probe.begin_step()
+    cuda.retries, cuda.ooms = 9, 2  # two more retries during the step, no new OOM
+    counters = probe.counters()
+    assert counters["alloc_retries"] == 2.0, "the seven that predate this step are not ours"
+    assert counters["alloc_ooms"] == 0.0
+
+
+def test_a_byte_valued_counter_does_not_ride_the_unit_one_instrument(monkeypatch):
+    """A byte value on a unit-1 histogram is a lie a consumer cannot see.
+
+    Same suffix dispatch the driver counters already use.
+    """
+    import skyrl_train.timing_observability as module
+
+    counts: list[str] = []
+    byte_rows: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "policy_step_counter",
+        type("_H", (), {"record": lambda self, v, attributes: counts.append(attributes["counter"])})(),
+    )
+    monkeypatch.setattr(
+        module,
+        "policy_step_bytes",
+        type("_H", (), {"record": lambda self, v, attributes: byte_rows.append(attributes["counter"])})(),
+    )
+    module.publish_worker_counters(
+        {"peak_allocated_bytes": 1.0, "micro_step_count": 2.0, "optimizer_step_peak_delta_bytes": 3.0},
+        step=1,
+        rank=0,
+    )
+    assert sorted(byte_rows) == ["optimizer_step_peak_delta_bytes", "peak_allocated_bytes"]
+    assert counts == ["micro_step_count"]
+
+
+def test_unsynchronized_spans_do_not_ship_the_synchronized_clock_domain():
+    """🚨 The mode decides what the number means, so it must be visible on the row.
+
+    Without a device synchronise a span measures kernel LAUNCH time and charges a backward's real
+    cost to whatever later call happens to block; with it, the span measures execution and the
+    pipeline is serialised. The accumulator's docstring says never to compare the two -- and a
+    consumer cannot obey that if both arrive under the same label.
+    """
+    import skyrl_train.timing_observability as timing_module
+
+    def _domains(synchronize):
+        rows: list[dict[str, str]] = []
+        monkey = pytest.MonkeyPatch()
+        try:
+            monkey.setattr(
+                timing_module,
+                "phase_duration",
+                type("_H", (), {"record": lambda self, v, attributes: rows.append(attributes)})(),
+            )
+            timing_module.WorkerTimingSink(0, synchronize=synchronize).publish(
+                # ⚠️ policy_training_step is the OTHER inclusive row, and it was covered only in
+                # the synchronized test. A mutation making it inclusive ONLY when synchronized --
+                # i.e. exclusive_launch on the mode production actually runs -- survived the suite,
+                # which would let a consumer sum an inclusive parent beside its own children.
+                timing_module.phase_timing_observations(
+                    {"policy_ppo_train": 9.0, "policy_training_step": 8.5, "policy_backward": 4.0}
+                ),
+                step=1,
+            )
+        finally:
+            monkey.undo()
+        return {row["phase"]: row["clock_domain"] for row in rows}
+
+    synced = _domains(True)
+    launched = _domains(False)
+    assert synced == {
+        "policy_ppo_train": "inclusive_wall",
+        "policy_training_step": "inclusive_wall",
+        "policy_backward": "exclusive_wall",
+    }
+    assert launched == {
+        "policy_ppo_train": "inclusive_launch",
+        "policy_training_step": "inclusive_launch",
+        "policy_backward": "exclusive_launch",
+    }
+    assert not set(synced.values()) & set(launched.values()), "the two modes must not share a label"
+
+
+def test_a_failing_publish_does_not_raise_and_reports_its_real_cost(monkeypatch):
+    """🚨 Behavioural, not a source-text match.
+
+    This runs after the step's GPU work is already paid for. A raise here discards a completed step
+    -- an hour of 80 H100s at E6 geometry -- to lose a telemetry row. And the cost it reports must be
+    the REAL elapsed time: the next step subtracts it as policy_span_publish, so a convenient zero
+    would understate that step by exactly what the failure cost.
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    def _boom(*args, **kwargs):
+        time.sleep(0.02)
+        raise RuntimeError("finelog is down")
+
+    monkeypatch.setattr(worker_module, "publish_worker_spans", _boom)
+    spans = WorkerSpanAccumulator(enabled=True, synchronize=False)
+
+    cost = worker_module._publish_policy_spans(
+        spans, total_seconds=1.0, step=3, rank=0, previous_publish=None, counters={}
+    )
+    assert cost >= 0.02, f"a failed publish reported {cost}s; it actually spent at least 0.02s"
+
+
+def test_a_successful_publish_returns_the_publisher_s_own_cost(monkeypatch):
+    """The happy path must pass the publisher's number through untouched, not re-time it."""
+    import skyrl_train.workers.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "publish_worker_spans", lambda *a, **k: 0.125)
+    spans = WorkerSpanAccumulator(enabled=True, synchronize=False)
+    cost = worker_module._publish_policy_spans(
+        spans, total_seconds=1.0, step=3, rank=0, previous_publish=None, counters={}
+    )
+    assert cost == 0.125
+
+
+def test_disabled_spans_publish_no_counters_even_when_some_are_gathered(monkeypatch):
+    """The counters ride the spans publish. With spans off, none may reach the sink.
+
+    Behavioural: the old assertion matched the source line `counters=... if enabled else None`,
+    which a rename would break and a logic inversion would not.
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    seen = {}
+    monkeypatch.setattr(worker_module, "publish_worker_spans", lambda *a, **k: seen.update(k) or 0.0)
+    counters = {"micro_step_count": 4.0}
+
+    worker_module._publish_policy_spans(
+        WorkerSpanAccumulator(enabled=False),
+        total_seconds=1.0,
+        step=1,
+        rank=0,
+        previous_publish=None,
+        counters=counters,
+    )
+    assert seen["counters"] is None, "spans are off; nothing may be published"
+
+    worker_module._publish_policy_spans(
+        WorkerSpanAccumulator(enabled=True),
+        total_seconds=1.0,
+        step=1,
+        rank=0,
+        previous_publish=None,
+        counters=counters,
+    )
+    assert seen["counters"] == counters
+
+
+# --- driving the real ppo_train -------------------------------------------------------------------
+#
+# 🚨 These replace source-text guards that a behaviour-preserving mutation walked straight past.
+# An AST walk proved a string was present; it could not see the receiver, an alias, or a dead
+# conditional. Syntactic presence can never prove runtime containment, so drive the real method.
+
+
+def _run_ppo_train(monkeypatch, *, r3_decentral: bool, strategy, training_step=None, windows=1, on_barrier=None):
+    """Drive the REAL PolicyWorkerBase.ppo_train on CPU and return (output, published_spans)."""
+    import torch
+    from omegaconf import OmegaConf
+
+    import skyrl_train.timing_observability as timing_module
+    import skyrl_train.workers.worker as worker_module
+    from skyrl_train.training_batch import TrainingInputBatch
+    from skyrl_train.workers.worker import PolicyWorkerBase
+
+    worker = object.__new__(PolicyWorkerBase)
+    worker.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "micro_train_batch_size_per_gpu": 1,
+                "update_epochs_per_batch": 1,
+                "policy_train_spans": True,
+                "policy_train_spans_synchronize": False,
+                "algorithm": {"policy_loss_type": "regular"},
+                "policy": {
+                    "optimizer_config": {"max_grad_norm": 1.0},
+                    "fsdp_config": {},
+                    "grug_query_bias_update_mode": "frozen",
+                    "grug_query_bias_update_interval": 0,
+                },
+            },
+            "generator": {"r3_transport": "decentral" if r3_decentral else "colocate"},
+        }
+    )
+    worker._rank = 0
+    # ⚠️ world_size > 1 on the decentral arm, or the barrier branch is unreachable and the parameter
+    # is decorative: `worker.py:1148` needs r3-decentral AND world_size > 1 AND is_initialized.
+    worker._world_size = 2 if r3_decentral else 1
+    worker.policy_mini_batch_size_per_gpu = 1
+    worker.record_memory = False
+    worker._grug_query_bias_window = None
+    worker.model = worker.optimizer = worker.scheduler = None
+    worker.strategy = strategy
+    worker.training_step = training_step or (
+        lambda experience, gs, ls, acc: {
+            "policy_loss": 1.0,
+            "response_length": 2.0,
+            "policy_lr": 1e-6,
+            "policy_entropy": 0.5,
+            "policy_update_steps": 1.0,
+            "raw_grad_norm": 0.1,
+            "log_ratio_abs_max": 0.5,
+            "optimizer_step_succeeded": 1.0,
+        }
+    )
+
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    # ⚠️ The hook goes through the harness. A caller that patches `barrier` itself is overwritten
+    # here and its observations silently never fire -- which reads as "the barrier did not run".
+    monkeypatch.setattr(torch.distributed, "barrier", lambda *a, **k: on_barrier and on_barrier())
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: r3_decentral)
+
+    # 🚨 Stub only the EXTERNAL boundary -- the histogram, the flush, the runtime status. The real
+    # `_publish_policy_spans` and `publish_worker_spans` run, so the conversion from accumulator
+    # totals to emitted rows is exercised. Patching either publisher and capturing `spans.totals()`
+    # instead -- which an earlier version did -- reproduces the blind spot it was meant to close: a
+    # filter dropping `policy_entry_barrier` on its way to the sink left the private capture still
+    # showing the row while production emitted none.
+    rows: list[dict[str, str]] = []
+
+    class _Histogram:
+        def record(self, value, attributes):
+            rows.append({**attributes, "value": value})
+
+    monkeypatch.setattr(timing_module, "phase_duration", _Histogram())
+    monkeypatch.setattr(timing_module, "rollout_count", _Histogram())
+    monkeypatch.setattr(timing_module.telemetry, "flush", lambda timeout: True)
+    monkeypatch.setattr(
+        timing_module.telemetry, "runtime_status", lambda: SimpleNamespace(lost_records=0, rejected_records=0)
+    )
+    assert worker_module._publish_policy_spans.__module__ == worker_module.__name__, (
+        "the real publisher was replaced; this harness must exercise it"
+    )
+
+    # accumulation_steps is policy_mini_batch / micro_train_batch = 1 here, so every micro-batch IS
+    # an optimizer window and one row drives one window. That is what lets a caller give each window
+    # a DIFFERENT value and so prove the per-window reduction actually dispatches, rather than
+    # feeding values for which mean, max and min are observationally identical.
+    batch_size, seq_len, actions = max(2, windows), 4, 2
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.zeros(batch_size, seq_len, dtype=torch.long),
+            "action_log_probs": torch.zeros(batch_size, actions),
+            "base_action_log_probs": torch.zeros(batch_size, actions),
+            "values": torch.zeros(batch_size, actions),
+            "returns": torch.zeros(batch_size, actions),
+            "advantages": torch.zeros(batch_size, actions),
+            "attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
+            "loss_mask": torch.ones(batch_size, actions),
+            "response_mask": torch.ones(batch_size, actions),
+        }
+    )
+    data.metadata = {"global_step": 0, "response_length": actions}
+    if r3_decentral:
+        data["rollout_routed_experts"] = torch.zeros(batch_size, 1)
+
+    output = worker.ppo_train(data)
+    assert rows, "ppo_train emitted no telemetry rows at all"
+    # Keyed by phase, from the rows that actually reached the histogram.
+    emitted = {row["phase"]: row for row in rows if "phase" in row}
+    return output, {name: row["value"] for name, row in emitted.items()}, emitted
+
+
+def test_the_barrier_publishes_an_explicit_zero_on_every_NON_decentral_step(monkeypatch):
+    """🚨 Driven, not walked. The AST version proved a `record_zero("policy_entry_barrier")` literal
+    existed somewhere in the module -- it could not see the RECEIVER, so calling it on a throwaway
+    `WorkerSpanAccumulator(enabled=False)` published nothing and left the suite green. Every
+    non-R3-decentral step -- which is everything but the 80B MoE path -- would then omit the row,
+    and a consumer could not tell "the barrier cost nothing" from "the barrier was not measured".
+    """
+
+    class _Strategy:
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            return dict(status)
+
+    _, totals, emitted = _run_ppo_train(monkeypatch, r3_decentral=False, strategy=_Strategy())
+    assert "policy_entry_barrier" in totals, "the explicit zero never reached an EMITTED row"
+    assert totals["policy_entry_barrier"] == 0.0, (
+        f"published {totals['policy_entry_barrier']}; a non-decentral step does not run the barrier"
+    )
+    # Exactly one row, carrying the attributes a consumer joins on.
+    assert sum(1 for row in emitted.values() if row["phase"] == "policy_entry_barrier") == 1
+    row = emitted["policy_entry_barrier"]
+    assert row["role"] == "worker" and row["parent"] == "policy_ppo_train" and row["step"] == "0"
+
+
+def test_the_status_dict_keeps_its_per_key_ops_through_the_real_ppo_train(monkeypatch):
+    """🚨 Driven, not walked. The AST version matched any argument subtree containing an identifier
+    literally named `status`, so `metrics = status; all_reduce(metrics)` bypassed it with the suite
+    green -- and that path means a rank-local log_ratio_abs_max of 19.0 publishes ~0.24 across 80
+    ranks, which reads as zero on the one value this branch exists to make visible.
+
+    So assert the RESULT: a max survives as a max, a min as a min, an ordinary metric means.
+    """
+    PEER = 19.0
+
+    class _Strategy:
+        """A second rank whose log_ratio_abs_max is 19.0 and whose optimizer step FAILED."""
+
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            from skyrl_train.utils.importance_ratio_diagnostics import STATUS_REDUCTION_OPS
+
+            peers = {"log_ratio_abs_max": PEER, "optimizer_step_succeeded": 0.0}
+            out = {}
+            for name, value in status.items():
+                peer = peers.get(name, value)
+                op = STATUS_REDUCTION_OPS.get(name)
+                out[name] = max(value, peer) if op == "max" else min(value, peer) if op == "min" else (value + peer) / 2
+            return out
+
+        def all_reduce(self, data, op="mean"):
+            # The plain reducer: a mean for everything, which is the defect.
+            peers = {"log_ratio_abs_max": PEER, "optimizer_step_succeeded": 0.0}
+            return {name: (value + peers.get(name, value)) / 2 for name, value in data.items()}
+
+    output, _, _ = _run_ppo_train(monkeypatch, r3_decentral=False, strategy=_Strategy())
+    status = output.metadata["train_status"]
+
+    assert status["log_ratio_abs_max"] == PEER, (
+        f"published {status['log_ratio_abs_max']}, not the max: one rank's divergence was averaged "
+        "away, which is the exact failure the reduction map exists to prevent"
+    )
+    assert status["optimizer_step_succeeded"] == 0.0, (
+        "a rank that skipped its optimizer step must publish 0, not 79/80 rounded to 1"
+    )
+    assert status["policy_loss"] == pytest.approx(1.0), "an ordinary metric still means"
+
+
+def test_a_mislabelled_driver_parent_fails_LOUDLY_rather_than_orphaning_worker_rows():
+    """Why the derived AST walk being weak is tolerable, written down so nobody removes the reason.
+
+    `_unconditional_driver_phases` is lexical: it cannot see that a `Timer` in a dead conditional
+    expression never runs, so `Timer(...) if False else Timer("unrelated", ...)` passes it. The
+    reported consequence was that production would publish worker rows naming a missing parent.
+
+    It would not go unnoticed. BOTH trainers read that exact key straight back off `all_timings`,
+    and `all_timings` is a plain `dict` rather than a `defaultdict` -- so a mislabelled Timer raises
+    KeyError on the first training step. Loud, not silent.
+
+    ⚠️ **"Loud" is not "pre-emptive", and an earlier version of this docstring said it was.** The
+    worker rows are published from inside `ppo_train`, which runs INSIDE
+    `Timer("train_critic_and_policy")` (`trainer.py:731-733`), while the read-back is at `:735` --
+    after the `with` block closes. So step 1's rows DO go out naming a parent that will never be
+    recorded, and then the run dies. The damage is bounded to one step and impossible to miss, which
+    is why this is still the right trade against a heavyweight trainer harness; it is not zero.
+
+    That read-back is load-bearing and nothing else records it. A `defaultdict` here, or dropping
+    the `train_duration` line, would convert a crash into exactly the silent orphaning the walk is
+    too weak to catch.
+    """
+    import inspect
+
+    import skyrl_train.fully_async_trainer as fully_async_module
+    import skyrl_train.trainer as trainer_module
+    from skyrl_train.trainer import RayPPOTrainer
+
+    # A plain dict: a missing key raises. `collections.defaultdict(float)` would return 0.0 and
+    # publish a step that took no time, which is the failure mode this is guarding.
+    init = inspect.getsource(RayPPOTrainer.__init__)
+    assert "self.all_timings = {}" in init, (
+        "all_timings is no longer a plain dict literal; a defaultdict would turn a mislabelled "
+        "Timer from a crash into a silent zero"
+    )
+
+    for module in (trainer_module, fully_async_module):
+        source = inspect.getsource(module)
+        assert 'self.all_timings["train_critic_and_policy"]' in source, (
+            f"{module.__name__} no longer reads the training phase back; without that read the "
+            "derived parent walk is the only guard, and it cannot see a dead conditional"
+        )
+
+
+def test_the_training_step_leaves_open_in_the_order_they_actually_run(monkeypatch):
+    """🚨 The worker tree's headline decomposition, driven through the real `training_step`.
+
+    Swapping the `policy_forward` and `policy_backward` labels left the whole suite green. The only
+    guard builds a SET of the names opened, and a swap preserves a set — so `policy_backward` 23.5 s
+    against `policy_forward` 21.2 s could have been reported the other way round with nothing to
+    catch it. That is the exact mislabel closed on the GENERATE side in `d4e60350` and left open
+    here, one file over.
+
+    ⚠️ Assert ORDER, not durations. On CPU all four regions are sub-millisecond, so a duration
+    assertion would be a coin flip. Order is what a swap breaks and what the clock cannot muddy.
+
+    ⚠️ And `training_step` reads its accumulator off `self` (`worker.py:1344`), falling back to a
+    DISABLED one when absent -- which is why `test_tis_diagnostics_backends.py` drives the real
+    method and still records nothing. A live accumulator has to be attached, or this test measures
+    the fallback.
+    """
+
+    from skyrl_train.workers.worker import PolicyWorkerBase
+
+    opened: list[str] = []
+
+    class _Recording(WorkerSpanAccumulator):
+        def span(self, name, presync=True):
+            opened.append(name)
+            return super().span(name, presync=presync)
+
+    # Reuse the TIS harness's fakes: it is the one place that already drives the real training_step.
+    from tests.cpu.test_tis_diagnostics_backends import _fsdp_training_step_status
+
+    spans = _Recording(enabled=True, synchronize=False)
+    original = PolicyWorkerBase.training_step
+
+    def _with_spans(self, *args, **kwargs):
+        self._policy_spans = spans
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(PolicyWorkerBase, "training_step", _with_spans)
+    _fsdp_training_step_status(use_tis=False, monkeypatch=monkeypatch)
+
+    assert opened, "no span opened -- training_step fell back to the disabled accumulator again"
+    # accumulation_steps=2 with local_step=0 skips the optimizer branch, so those two are absent by
+    # construction; the two that always run must appear, and in this order.
+    assert "policy_forward" in opened and "policy_backward" in opened, opened
+    assert opened.index("policy_forward") < opened.index("policy_backward"), (
+        f"opened {opened}: forward must open before backward, and a swapped pair is exactly the "
+        "mislabel a set-membership guard cannot see"
+    )
+
+
+def test_the_R3_barrier_runs_INSIDE_the_span_that_reports_it(monkeypatch):
+    """🚨 Containment, not entry. The test below proves the region was ENTERED; it does not prove
+    the synchronise and the barrier ran inside it.
+
+    Moving them one line out leaves an empty span reporting a plausible near-zero while the real
+    multi-minute arrival spread -- the twelve-minute stagger this barrier exists to absorb -- sits
+    outside every span and lands in the residual. So observe the ACTIVE span from inside the barrier
+    itself, and check the closing barrier reports the other name, because "some barrier ran under
+    some span" would pass while the two were swapped.
+    """
+
+    import skyrl_train.workers.worker as worker_module
+
+    active: list[str] = []
+    observed: list[str] = []
+
+    class _Recording(WorkerSpanAccumulator):
+        def span(self, name, presync=True):
+            outer = super().span(name, presync=presync)
+
+            @contextlib.contextmanager
+            def _tracked():
+                active.append(name)
+                try:
+                    with outer:
+                        yield
+                finally:
+                    active.pop()
+
+            return _tracked()
+
+    monkeypatch.setattr(worker_module, "WorkerSpanAccumulator", _Recording)
+
+    class _Strategy:
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            return dict(status)
+
+    _run_ppo_train(
+        monkeypatch,
+        r3_decentral=True,
+        strategy=_Strategy(),
+        on_barrier=lambda: observed.append(active[-1] if active else "<none>"),
+    )
+
+    assert observed, "no barrier ran at all"
+    assert observed[0] == "policy_entry_barrier", (
+        f"the first barrier ran under {observed[0]!r}: the entry barrier is outside the span that "
+        "reports it, so that span times an empty region"
+    )
+    assert observed[-1] == "policy_final_barrier", (
+        f"the closing barrier ran under {observed[-1]!r}, so the two barrier labels are swapped"
+    )
+
+
+def test_the_R3_decentral_arm_actually_OPENS_the_barrier_span(monkeypatch):
+    """The other half of the conditional, and the reason `r3_decentral=True` is not decorative.
+
+    `record_zero` says "this region did not run". Nothing asserted the region DOES run when it
+    should, so a barrier that silently stopped being measured on the 80B MoE path -- the only path
+    that has one, and the path whose 12-minute arrival spread the barrier exists to absorb -- would
+    look exactly like the non-decentral case: a 0.0 row, published, plausible.
+
+    ⚠️ Assert the span OPENED, not its duration. The barrier is stubbed out here, so its wall is ~0
+    on CPU and indistinguishable from the explicit zero it must be distinguished from.
+    """
+    opened: list[str] = []
+
+    class _Recording(WorkerSpanAccumulator):
+        def span(self, name, presync=True):
+            opened.append(name)
+            return super().span(name, presync=presync)
+
+    import skyrl_train.workers.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "WorkerSpanAccumulator", _Recording)
+
+    class _Strategy:
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            return dict(status)
+
+    _, totals, _ = _run_ppo_train(monkeypatch, r3_decentral=True, strategy=_Strategy())
+
+    assert "policy_entry_barrier" in opened, (
+        f"the decentral arm opened {opened}; the barrier region was never entered, so its cost is "
+        "unmeasured on the one path that actually has a barrier"
+    )
+    assert "policy_entry_barrier" in totals, "and it must still reach a published row"
+
+
+def test_two_windows_publish_a_max_a_min_and_a_summed_count(monkeypatch):
+    """The assertions for the run above, on the returned status rather than on the call log."""
+    windows = iter(
+        [
+            {"log_ratio_abs_max": 19.0, "optimizer_step_succeeded": 0.0, "n_tokens_dp_gt_1pct": 3.0},
+            {"log_ratio_abs_max": 0.0, "optimizer_step_succeeded": 1.0, "n_tokens_dp_gt_1pct": 7.0},
+        ]
+    )
+
+    def _training_step(experience, global_step, local_step, accumulation_steps):
+        extra = next(windows)
+        return {
+            "policy_loss": 1.0,
+            "response_length": 2.0,
+            "policy_lr": 1e-6,
+            "policy_entropy": 0.5,
+            "policy_update_steps": 1.0,
+            "raw_grad_norm": 0.1,
+            **extra,
+        }
+
+    class _Strategy:
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            return dict(status)
+
+    output, _, _ = _run_ppo_train(
+        monkeypatch, r3_decentral=False, strategy=_Strategy(), training_step=_training_step, windows=2
+    )
+    status = output.metadata["train_status"]
+    assert status["log_ratio_abs_max"] == 19.0, "a max over windows, not a mean of 9.5"
+    assert status["optimizer_step_succeeded"] == 0.0, "a min over windows, not a mean of 0.5"
+    assert status["n_tokens_dp_gt_1pct"] == 10.0, "a rank's STEP total, not the per-window mean of 5"
+
+
+def test_the_residual_excludes_the_INCLUSIVE_span_pinned_to_an_independent_number(monkeypatch):
+    """🚨 Pinned, not re-derived. The other residual tests recompute `covered` with the same
+    comprehension production uses, so they cannot disagree with it -- adding `policy_training_step`
+    to that sum survived the suite. It is the one INCLUSIVE child of the worker tree, so counting it
+    beside the leaves it contains makes the residual roughly minus the whole decomposition: the
+    −1703 s shape this instrument exists to surface, published as if it were a measurement.
+    """
+    import skyrl_train.timing_observability as timing_module
+
+    # policy_forward 1.0 nested inside policy_training_step 5.0, against a 10.0 parent.
+    ticks = iter([100.0, 105.0, 200.0, 201.0])
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(timing_module, "time", SimpleNamespace(perf_counter=lambda: next(ticks)))
+        accumulator = _accumulator()
+        with accumulator.span("policy_training_step"):
+            pass
+        with accumulator.span("policy_forward"):
+            pass
+    finally:
+        monkey.undo()
+
+    totals = accumulator.totals(total_seconds=10.0)
+    assert totals["policy_training_step"] == pytest.approx(5.0)
+    assert totals["policy_forward"] == pytest.approx(1.0)
+    # 10.0 minus the LEAF only. Writing 9.0 rather than recomputing it is the whole point: a
+    # re-derivation would move with the defect.
+    assert totals["policy_span_residual"] == pytest.approx(9.0), (
+        "the residual counted the inclusive span beside the leaf it contains"
+    )
+
+
+def test_every_worker_label_is_pinned_to_the_region_it_names(monkeypatch):
+    """🚨 Order, for all of them. Round 10 pinned forward against backward and stopped there, so
+    `policy_metric_allreduce` still swapped freely with `policy_final_barrier`, and
+    `policy_optimizer_step` with `policy_entropy_allreduce`. A swap reports the optimizer step as a
+    small collective and the collective as the optimizer step, and a set-membership guard cannot see
+    it because a swap preserves a set.
+    """
+    opened: list[str] = []
+
+    class _Recording(WorkerSpanAccumulator):
+        def span(self, name, presync=True):
+            opened.append(name)
+            return super().span(name, presync=presync)
+
+    import skyrl_train.workers.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "WorkerSpanAccumulator", _Recording)
+
+    class _Strategy:
+        device_mesh = None
+
+        def is_rank_0(self):
+            return True
+
+        def all_reduce_status(self, status):
+            return dict(status)
+
+    _run_ppo_train(monkeypatch, r3_decentral=False, strategy=_Strategy())
+
+    # The order ppo_train itself opens them, outside training_step (which is stubbed here).
+    assert opened.index("policy_training_step") < opened.index("policy_metric_allreduce"), opened
+    assert opened.index("policy_metric_allreduce") < opened.index("policy_final_barrier"), (
+        f"opened {opened}: the per-micro-step collective must precede the closing barrier, and "
+        "swapping those two labels reports each as the other"
+    )
+
+
+def test_enabling_the_spans_on_an_unconfigured_runtime_FAILS_the_actor(monkeypatch):
+    """🚨 The R10 remedy itself, and it had no behavioural guard: `if reason is not None and False:`
+    survived the suite, because the only test asserted three source substrings.
+
+    This is the behaviour the documentation now advertises -- an opt-in flag fails fast where the
+    always-on counters only warn -- so if it silently stops raising, the docs become false and a
+    multi-hour run once again produces nothing while reading healthy.
+    """
+    import skyrl_train.workers.worker as worker_module
+
+    monkeypatch.setattr(worker_module, "unconfigured_telemetry_reason", lambda: None)
+    worker_module._require_configured_telemetry()  # configured: returns quietly
+
+    monkeypatch.setattr(worker_module, "unconfigured_telemetry_reason", lambda: "the endpoint is unset")
+    with pytest.raises(RuntimeError, match="policy_train_spans is enabled but the endpoint is unset"):
+        worker_module._require_configured_telemetry()
+
+    # And the call site, or the check has merely been relocated into a function nobody invokes.
+    # ⚠️ `Worker.__init__`, not `PolicyWorkerBase.__init__` -- the telemetry setup lives on the
+    # shared base so every worker role gets it, and asserting the wrong class would have passed for
+    # the wrong reason had the check ever moved.
+    assert "_require_configured_telemetry()" in inspect.getsource(worker_module.Worker.__init__), (
+        "the worker no longer calls the check, so a real run would not fail fast even though this test passes"
+    )
