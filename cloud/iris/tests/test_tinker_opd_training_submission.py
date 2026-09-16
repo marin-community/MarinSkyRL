@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from iris.rpc import job_pb2
 
 MODULE_DIR = Path(__file__).parents[3] / "skyrl-train" / "ci" / "opd" / "tinker_repro"
 sys.path.insert(0, str(MODULE_DIR))
@@ -73,7 +74,7 @@ def test_submit_full_stage_keeps_credentials_out_of_argv_and_disables_retries(mo
     assert resources.disk_bytes == 50 * 1024**3
     assert not resources.HasField("device")
     assert request["constraints"][0].to_proto().value.string_value == "false"
-    assert submitter.job_pb2.PriorityBand.Name(request["priority_band"]) == "PRIORITY_BAND_BATCH"
+    assert job_pb2.PriorityBand.Name(request["priority_band"]) == "PRIORITY_BAND_INTERACTIVE"
     assert request["replicas"] == 1
     assert request["max_retries_failure"] == 0
     assert request["max_task_failures"] == 0
@@ -117,7 +118,7 @@ def test_cli_defaults_to_dry_run_without_reading_credentials(monkeypatch, capsys
     plan = json.loads(output.split("\nDry run only.", 1)[0])
     assert plan["training"]["stage"] == "sft_full"
     assert plan["required_cost_acknowledgement_usd"] == "10000"
-    assert plan["priority"] == "batch"
+    assert plan["priority"] == "interactive"
     assert plan["secrets_env"] == str(secrets_env)
     assert "TINKER_API_KEY" not in output
 
