@@ -8,10 +8,13 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+from fsspec.implementations.memory import MemoryFileSystem
 from hydra import compose, initialize_config_dir
 import pyarrow as pa
 import pytest
 from safetensors.torch import save_file
+from skyrl_train.hf_export import write_hf_export_request
+from skyrl_train.hf_export_schema import HFExportRequest, HFExportStatus
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.entrypoints.main_generate import load_initial_policy_adapter
 import torch
@@ -376,13 +379,15 @@ def test_native_checkpoint_publication_commits_only_complete_verified_steps(tmp_
     monkeypatch.setattr(PUBLICATION, "fs_and_path", lambda uri: (filesystem, uri.removeprefix("s3://")))
 
     with pytest.raises(OSError, match="storage unavailable"):
-        PUBLICATION.publish_committed_checkpoints(checkpoint_root, "s3://bucket/run/checkpoints", policy_ranks=2)
+        PUBLICATION.publish_committed_checkpoints(
+            checkpoint_root, "s3://bucket/run/checkpoints", policy_ranks=2, retain_local_checkpoints=2
+        )
     assert not any(path.endswith("commit.json") for path in filesystem.files)
     assert "bucket/run/checkpoints/latest_ckpt_global_step.txt" not in filesystem.files
 
     filesystem.fail_on = None
     published = PUBLICATION.publish_committed_checkpoints(
-        checkpoint_root, "s3://bucket/run/checkpoints", policy_ranks=2
+        checkpoint_root, "s3://bucket/run/checkpoints", policy_ranks=2, retain_local_checkpoints=2
     )
 
     assert published == (2,)
@@ -410,12 +415,95 @@ def test_native_checkpoint_publication_commits_only_complete_verified_steps(tmp_
     filesystem.files[missing_remote_file] = adapter_payload
     (checkpoint_root / "latest_ckpt_global_step.txt").write_text("1")
     with pytest.raises(ValueError, match="newer than local"):
-        PUBLICATION.publish_committed_checkpoints(checkpoint_root, "s3://bucket/run/checkpoints", policy_ranks=2)
+        PUBLICATION.publish_committed_checkpoints(
+            checkpoint_root, "s3://bucket/run/checkpoints", policy_ranks=2, retain_local_checkpoints=2
+        )
     assert filesystem.files["bucket/run/checkpoints/latest_ckpt_global_step.txt"] == b"2"
     (checkpoint_root / "latest_ckpt_global_step.txt").write_text("2")
     (step_root / "policy/lora_adapter/adapter_model.safetensors").unlink()
     with pytest.raises(ValueError, match="missing"):
-        PUBLICATION.publish_committed_checkpoints(checkpoint_root, "s3://bucket/run/checkpoints", policy_ranks=2)
+        PUBLICATION.publish_committed_checkpoints(
+            checkpoint_root, "s3://bucket/run/checkpoints", policy_ranks=2, retain_local_checkpoints=2
+        )
+
+
+def test_native_checkpoint_publication_prunes_only_remotely_verified_old_steps(tmp_path: Path, monkeypatch):
+    checkpoint_root = tmp_path / "checkpoints"
+
+    def write_step(step: int) -> Path:
+        step_root = checkpoint_root / f"global_step_{step}"
+        for relative in PUBLICATION.required_checkpoint_files(policy_ranks=2):
+            path = step_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"step-{step}:{relative}".encode())
+        return step_root
+
+    for step in (2, 4, 6):
+        write_step(step)
+    (checkpoint_root / "latest_ckpt_global_step.txt").write_text("6")
+    filesystem = MemoryFileSystem()
+    output_uri = f"s3://bucket/{tmp_path.name}/checkpoints"
+    monkeypatch.setattr(PUBLICATION, "fs_and_path", lambda uri: (filesystem, "/" + uri.removeprefix("s3://")))
+    original_put_file = filesystem.put_file
+
+    def fail_step_four(local: str, remote: str) -> None:
+        if "global_step_4" in remote:
+            raise OSError("storage unavailable")
+        original_put_file(local, remote)
+
+    monkeypatch.setattr(filesystem, "put_file", fail_step_four)
+    with pytest.raises(OSError, match="storage unavailable"):
+        PUBLICATION.publish_committed_checkpoints(
+            checkpoint_root, output_uri, policy_ranks=2, retain_local_checkpoints=2
+        )
+    assert all((checkpoint_root / f"global_step_{step}").is_dir() for step in (2, 4, 6))
+
+    monkeypatch.setattr(filesystem, "put_file", original_put_file)
+    export_request = HFExportRequest(
+        step=2,
+        checkpoint_base_path=str(checkpoint_root),
+        checkpoint_path=str(checkpoint_root / "global_step_2"),
+        export_path=f"{output_uri}/exports",
+        model_path="org/model",
+        num_nodes=1,
+        gpus_per_node=2,
+    )
+    write_hf_export_request(export_request)
+    PUBLICATION.publish_committed_checkpoints(checkpoint_root, output_uri, policy_ranks=2, retain_local_checkpoints=2)
+    assert (checkpoint_root / "global_step_2").is_dir()
+
+    write_hf_export_request(export_request.with_status(HFExportStatus.COMPLETE))
+    PUBLICATION.publish_committed_checkpoints(checkpoint_root, output_uri, policy_ranks=2, retain_local_checkpoints=2)
+
+    assert not (checkpoint_root / "global_step_2").exists()
+    assert (checkpoint_root / "global_step_4").is_dir()
+    assert (checkpoint_root / "global_step_6").is_dir()
+    assert filesystem.cat_file(output_uri.removeprefix("s3://") + "/latest_ckpt_global_step.txt") == b"6"
+    for step in (2, 4, 6):
+        assert PUBLICATION.verify_remote_checkpoint(f"{output_uri}/global_step_{step}").step == step
+
+    step_eight = write_step(8)
+    (checkpoint_root / "latest_ckpt_global_step.txt").write_text("8")
+    original_rmtree = PUBLICATION.shutil.rmtree
+
+    def interrupt_deletion(_path: Path) -> None:
+        raise OSError("local deletion interrupted")
+
+    monkeypatch.setattr(PUBLICATION.shutil, "rmtree", interrupt_deletion)
+    with pytest.raises(OSError, match="local deletion interrupted"):
+        PUBLICATION.publish_committed_checkpoints(
+            checkpoint_root, output_uri, policy_ranks=2, retain_local_checkpoints=2
+        )
+    staged = checkpoint_root / ".pruning-global_step_4"
+    assert staged.is_dir()
+    assert not (checkpoint_root / "global_step_4").exists()
+
+    monkeypatch.setattr(PUBLICATION.shutil, "rmtree", original_rmtree)
+    PUBLICATION.publish_committed_checkpoints(checkpoint_root, output_uri, policy_ranks=2, retain_local_checkpoints=2)
+    assert not staged.exists()
+    assert (checkpoint_root / "global_step_6").is_dir()
+    assert step_eight.is_dir()
+    assert PUBLICATION.verify_remote_checkpoint(f"{output_uri}/global_step_8").step == 8
 
 
 def test_native_training_wrapper_publishes_checkpoint_before_terminal_manifest(tmp_path: Path, monkeypatch):
