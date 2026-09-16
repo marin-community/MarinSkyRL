@@ -47,6 +47,7 @@ __all__ = [
     "RouterReplay",
     "SENTINEL_EXPERT_ID",
     "dense_replay_targets",
+    "require_scalar_num_actions",
     "set_active_replay",
     "get_active_replay",
     "install_router_replay_patch",
@@ -60,6 +61,14 @@ __all__ = [
 SENTINEL_EXPERT_ID = 0
 
 
+def require_scalar_num_actions(num_actions) -> None:
+    """Reject per-sample ``num_actions`` lists/arrays (dense replay needs a scalar)."""
+    if isinstance(num_actions, (list, np.ndarray)):
+        raise NotImplementedError(
+            "router_replay requires a scalar num_actions (dense unpacked path); got a per-sample list/array."
+        )
+
+
 def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions):
     """Build the dense per-position replay target and mask, layout-agnostic.
 
@@ -69,20 +78,17 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
     ``[B, seq_len]`` bool tensor True only on response positions whose captured
     row is non-sentinel (a row is sentinel iff all K captured experts equal
     ``SENTINEL_EXPERT_ID``). Prompt / pad / sentinel rows fall through to
-    native routing. Shared by the HF (FSDP) and Megatron replay paths.
+    native routing.
     """
-    if isinstance(num_actions, (list, np.ndarray)):
-        raise NotImplementedError(
-            "router_replay requires a scalar num_actions (dense unpacked path); got a per-sample list/array."
-        )
+    require_scalar_num_actions(num_actions)
     device = rollout_routed_experts.device
-    re = rollout_routed_experts.to(device=device, dtype=torch.long)
-    B, response_len, L, K = re.shape
+    captured = rollout_routed_experts.to(dtype=torch.long)
+    B, response_len, L, K = captured.shape
     assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
     assert response_len == num_actions, f"router_replay response_len {response_len} != num_actions {num_actions}"
 
     full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
-    full[:, seq_len - response_len : seq_len, :, :] = re
+    full[:, seq_len - response_len : seq_len, :, :] = captured
 
     response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
     response_pos[:, seq_len - response_len : seq_len] = True

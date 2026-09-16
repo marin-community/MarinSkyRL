@@ -264,6 +264,22 @@ class MegatronWorker:
                 f"exact fraction {(diff == 0).float().mean().item():.4f}"
             )
 
+    def _maybe_install_router_replay(self, role: str) -> None:
+        """Install the MoE router replay controller when the role requests it.
+
+        Called after ``self.model`` and ``self.actor_module`` exist. The knob
+        lives on ``trainer.<role>.fsdp_config.moe_router_replay``; for
+        ``strategy=megatron`` the top-level config guard admits it only once
+        the replay plumbing is complete, so tests enable it after
+        ``validate_cfg``.
+        """
+        if not moe_router_replay_requested(self.cfg, role=role):
+            return
+        self.model.router_replay = install_megatron_router_replay(
+            self.actor_module,
+            recompute_enabled=get_model_config(self.actor_module[0]).recompute_granularity is not None,
+        )
+
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
         self.strategy.save_hf_model(
@@ -409,11 +425,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
             ),
         )
-        if moe_router_replay_requested(self.cfg, role="policy"):
-            self.model.router_replay = install_megatron_router_replay(
-                self.actor_module,
-                recompute_enabled=get_model_config(self.actor_module[0]).recompute_granularity is not None,
-            )
+        self._maybe_install_router_replay("policy")
 
         # Initialize weight extractor
         self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
@@ -805,11 +817,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
                 self.cfg, "trainer.ref.megatron_config.logprob_chunk_size", default=None
             ),
         )
-        if moe_router_replay_requested(self.cfg, role="ref"):
-            self.model.router_replay = install_megatron_router_replay(
-                self.actor_module,
-                recompute_enabled=get_model_config(self.actor_module[0]).recompute_granularity is not None,
-            )
+        self._maybe_install_router_replay("ref")
 
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""

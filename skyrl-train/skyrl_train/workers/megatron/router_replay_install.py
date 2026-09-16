@@ -24,6 +24,7 @@ from megatron.core.transformer.transformer_layer import get_transformer_layer_of
 
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.models.megatron_router_replay import (
+    MIN_ROUTER_TOPK,
     LayerReplayHandle,
     MegatronRouterReplay,
     capture_layer_indices,
@@ -32,16 +33,8 @@ from skyrl_train.models.megatron_router_replay import (
 )
 
 
-def install_megatron_router_replay(actor_module: Sequence[nn.Module], *, recompute_enabled: bool) -> MegatronRouterReplay:
-    """Install per-router replay handles on every local ``TopKRouter``.
-
-    ``actor_module`` is the per-VPP-chunk model list the worker built. Fails
-    fast (``ValueError`` naming the config field) on any mcore routing feature
-    whose code path bypasses or corrupts the replay hook. Returns the
-    controller; PP stages that own no MoE layers get a controller with no
-    local layers (their forward never fires a router).
-    """
-    config = get_model_config(actor_module[0])
+def _validate_replay_compatible_config(config) -> None:
+    """Reject mcore routing features that bypass or corrupt the replay hook."""
     if config.moe_enable_routing_replay:
         raise ValueError(
             "router replay: moe_enable_routing_replay must stay False; the trainer owns the "
@@ -56,11 +49,27 @@ def install_megatron_router_replay(actor_module: Sequence[nn.Module], *, recompu
         raise ValueError("router replay: moe_router_load_balancing_type='sinkhorn' uses a separate routing path")
     if config.moe_expert_capacity_factor is not None:
         raise ValueError(
-            "router replay: moe_expert_capacity_factor drops tokens after top-k and would silently "
-            "drop replayed tokens"
+            "router replay: moe_expert_capacity_factor drops tokens after top-k and would silently drop replayed tokens"
         )
-    if config.moe_router_topk < 2:
-        raise ValueError("router replay: moe_router_topk must be >= 2 for the all-K sentinel convention")
+    if config.moe_router_topk < MIN_ROUTER_TOPK:
+        raise ValueError(
+            f"router replay: moe_router_topk must be >= {MIN_ROUTER_TOPK} for the all-K sentinel convention"
+        )
+
+
+def install_megatron_router_replay(
+    actor_module: Sequence[nn.Module], *, recompute_enabled: bool
+) -> MegatronRouterReplay:
+    """Install per-router replay handles on every local ``TopKRouter``.
+
+    ``actor_module`` is the per-VPP-chunk model list the worker built. Fails
+    fast (``ValueError`` naming the config field) on any mcore routing feature
+    whose code path bypasses or corrupts the replay hook. Returns the
+    controller; PP stages that own no MoE layers get a controller with no
+    local layers (their forward never fires a router).
+    """
+    config = get_model_config(actor_module[0])
+    _validate_replay_compatible_config(config)
 
     pattern = expand_moe_layer_freq(config.moe_layer_freq, config.num_layers)
     mapping = capture_layer_indices(pattern)
@@ -69,7 +78,11 @@ def install_megatron_router_replay(actor_module: Sequence[nn.Module], *, recompu
     for vp_stage, chunk in enumerate(actor_module):
         offset = get_transformer_layer_offset(config, vp_stage=vp_stage)
         num_local = get_num_layers_to_build(config, vp_stage=vp_stage)
-        expected_local.update(mapping[layer_number] for layer_number in range(offset + 1, offset + num_local + 1) if layer_number in mapping)
+        expected_local.update(
+            mapping[layer_number]
+            for layer_number in range(offset + 1, offset + num_local + 1)
+            if layer_number in mapping
+        )
 
     controller = MegatronRouterReplay(sorted(expected_local), recompute_enabled=recompute_enabled)
     controller.num_moe_layers_total = num_moe_layers(pattern)
@@ -82,11 +95,11 @@ def install_megatron_router_replay(actor_module: Sequence[nn.Module], *, recompu
                 continue
             layer_number = getattr(module, "layer_number", None)
             if layer_number is None:
-                raise ValueError(
-                    "router replay: TopKRouter.layer_number is None; MoELayer.set_layer_number never ran"
-                )
+                raise ValueError("router replay: TopKRouter.layer_number is None; MoELayer.set_layer_number never ran")
             if layer_number not in mapping:
-                raise ValueError(f"router replay: TopKRouter at layer_number={layer_number} is not a MoE layer by the pattern")
+                raise ValueError(
+                    f"router replay: TopKRouter at layer_number={layer_number} is not a MoE layer by the pattern"
+                )
             capture_idx = mapping[layer_number]
             module.router_replay = LayerReplayHandle(controller, capture_idx)
             found.add(capture_idx)

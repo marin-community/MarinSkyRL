@@ -35,6 +35,7 @@ from skyrl_train.models.grug_moe import (
     validate_grug_training_strategy,
 )
 from skyrl_train.models.layers.moe_checkpoint import moe_recompute_context_fn
+from skyrl_train.models.router_replay import dense_replay_targets
 from skyrl_train.utils.flash_attention import (
     flash_pad_input,
     flash_unpad_input,
@@ -1441,8 +1442,6 @@ class HFModelWrapper(nn.Module):
         by ``nonzero`` → never in ``nnz_indices`` (automatic). The controller is
         layout-agnostic (only checks ``shape[0]``).
         """
-        from skyrl_train.models.router_replay import dense_replay_targets
-
         device = sequences.device
         batch_size, seq_len = sequences.shape
         full, replay_mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)

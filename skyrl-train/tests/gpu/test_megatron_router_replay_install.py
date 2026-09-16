@@ -1,12 +1,12 @@
-"""1-GPU install test for Megatron MoE router replay (R3), Stage 2.
+"""1-GPU install test for Megatron MoE router replay (R3).
 
 Builds a tiny random-init Grug MoE Megatron model at TP1/PP1/EP1 through the
 same bridge/provider path the worker uses and drives the replay controller
 directly: capture-layer mapping from real ``TopKRouter.layer_number`` values,
 replayed indices controlling ``routing_map`` on masked rows only, gradients
 flowing through the gate, bit-identity of the substitution math when no row is
-replayed, and the fail-fast install asserts. Worker/micro-batch plumbing is
-Stage 3; this file must not depend on it.
+replayed, and the fail-fast install asserts. Worker and micro-batch plumbing
+are covered elsewhere; this file must not depend on them.
 
 Requires 1 GPU; run on an otherwise idle node (not part of the CPU PR gate).
 """
@@ -88,7 +88,7 @@ def _build_megatron_model(model_path: str) -> list[torch.nn.Module]:
     provider.masked_softmax_fusion = True
     provider.moe_token_dispatcher_type = "alltoall"
     # No activation recompute: exactly one router entry per forward, so the
-    # recompute FIFO stays out of the picture (Stage 3 covers recompute).
+    # recompute FIFO stays out of the picture (covered by the training-step tests).
     provider.recompute_granularity = None
     provider.recompute_method = None
     provider.recompute_num_layers = None
@@ -108,6 +108,13 @@ def _clear_handles(model: list[torch.nn.Module]) -> None:
     """Return every router to its flag-off state (router_replay is None)."""
     for router in _routers(model):
         router.router_replay = None
+
+
+def _capture_mapping(model: list[torch.nn.Module]) -> dict[int, int]:
+    """The layer_number -> capture-index mapping implied by the built config."""
+    config = get_model_config(model[0])
+    pattern = expand_moe_layer_freq(config.moe_layer_freq, config.num_layers)
+    return capture_layer_indices(pattern)
 
 
 def _model_input(device: str) -> torch.Tensor:
@@ -156,9 +163,8 @@ def tiny_model(tmp_path_factory) -> list[torch.nn.Module]:
 
 
 def test_installed_capture_indices_match_the_layer_pattern(tiny_model):
+    expected = _capture_mapping(tiny_model)
     config = get_model_config(tiny_model[0])
-    pattern = expand_moe_layer_freq(config.moe_layer_freq, config.num_layers)
-    expected = capture_layer_indices(pattern)
 
     controller = install_megatron_router_replay(tiny_model, recompute_enabled=True)
 
@@ -179,8 +185,7 @@ def test_replayed_indices_control_routing_on_masked_rows_only(tiny_model):
     assert all(router.router_replay is None for router in _routers(tiny_model)), "flag-off router_replay must be None"
 
     controller = install_megatron_router_replay(tiny_model, recompute_enabled=False)
-    pattern = expand_moe_layer_freq(config.moe_layer_freq, config.num_layers)
-    mapping = capture_layer_indices(pattern)
+    mapping = _capture_mapping(tiny_model)
     targets, mask = _replay_targets(SEQ_LEN, config.num_moe_experts, config.moe_router_topk, SEQ_LEN // 2, device)
 
     per_layer = {mapping[layer_number]: targets for layer_number in mapping}
@@ -208,8 +213,7 @@ def test_all_false_mask_replay_is_bit_identical_to_native(tiny_model):
 
     controller = install_megatron_router_replay(tiny_model, recompute_enabled=False)
     config = get_model_config(tiny_model[0])
-    pattern = expand_moe_layer_freq(config.moe_layer_freq, config.num_layers)
-    mapping = capture_layer_indices(pattern)
+    mapping = _capture_mapping(tiny_model)
     targets = torch.zeros(SEQ_LEN, config.moe_router_topk, dtype=torch.long, device=device)
     mask = torch.zeros(SEQ_LEN, dtype=torch.bool, device=device)
 
@@ -226,8 +230,7 @@ def test_replay_keeps_gradients_flowing_through_the_gate(tiny_model):
     input_ids = _model_input(device)
     controller = install_megatron_router_replay(tiny_model, recompute_enabled=False)
     config = get_model_config(tiny_model[0])
-    pattern = expand_moe_layer_freq(config.moe_layer_freq, config.num_layers)
-    mapping = capture_layer_indices(pattern)
+    mapping = _capture_mapping(tiny_model)
     targets, mask = _replay_targets(SEQ_LEN, config.num_moe_experts, config.moe_router_topk, SEQ_LEN, device)
 
     controller.begin_forward({idx: targets for idx in mapping.values()}, mask)

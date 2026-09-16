@@ -5,7 +5,6 @@ slice, the per-layer controller state machine (forward / recompute FIFO), the
 geometry validation, and the dense-target builder shared with the FSDP path.
 """
 
-import numpy as np
 import pytest
 import torch
 
@@ -24,9 +23,9 @@ from skyrl_train.models.router_replay import SENTINEL_EXPERT_ID, dense_replay_ta
 
 def _fake_compute_topk(scores, topk, num_groups=None, group_topk=None):
     """Deterministic stand-in for mcore's _compute_topk: last-k columns reversed."""
-    indices = torch.arange(scores.shape[1] - topk, scores.shape[1], device=scores.device).expand(
-        scores.shape[0], -1
-    ).flip(-1)
+    indices = (
+        torch.arange(scores.shape[1] - topk, scores.shape[1], device=scores.device).expand(scores.shape[0], -1).flip(-1)
+    )
     return scores.gather(1, indices), indices
 
 
@@ -212,7 +211,6 @@ class TestEndForward:
         t1, _ = _masked_target_rows(4, 2, 8, 4)
         controller = MegatronRouterReplay(local_layer_indices=[0, 1], recompute_enabled=False)
         handle0 = LayerReplayHandle(controller, layer_idx=0)
-        handle1 = LayerReplayHandle(controller, layer_idx=1)
         controller.begin_forward({0: t0, 1: t1}, mask)
         handle0.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
         with pytest.raises(ValueError, match=r"layer\(s\) \[1\] never fired"):
@@ -258,27 +256,25 @@ class TestValidateReplayGeometry:
     def test_valid_geometry_passes(self):
         validate_replay_geometry(**self._kwargs())
 
-    def test_layer_count_mismatch_names_quantities(self):
-        with pytest.raises(ValueError, match="expected_moe_layers"):
-            validate_replay_geometry(**self._kwargs(num_layers_captured=2))
-
-    def test_topk_mismatch_names_quantities(self):
-        with pytest.raises(ValueError, match="expected_topk"):
-            validate_replay_geometry(**self._kwargs(topk_captured=4))
-
-    def test_topk_below_two_is_rejected(self):
-        with pytest.raises(ValueError, match="expected_topk"):
-            validate_replay_geometry(**self._kwargs(expected_topk=1, topk_captured=1))
+    @pytest.mark.parametrize(
+        ("overrides", "match"),
+        [
+            (dict(num_layers_captured=2), "expected_moe_layers"),
+            (dict(topk_captured=4), "expected_topk"),
+            (dict(expected_topk=1, topk_captured=1), "expected_topk"),
+            (dict(num_actions=4), "response_len"),
+        ],
+        ids=["layer_count", "topk", "topk_below_min", "response_len"],
+    )
+    def test_geometry_mismatch_names_the_offending_quantity(self, overrides, match):
+        with pytest.raises(ValueError, match=match):
+            validate_replay_geometry(**self._kwargs(**overrides))
 
     def test_out_of_range_expert_id_names_quantities(self):
         targets = torch.randint(0, 8, (2, 5, 3, 2))
         targets[0, 0, 0, 0] = 8
         with pytest.raises(ValueError, match="num_experts"):
             validate_replay_geometry(**self._kwargs(targets=targets))
-
-    def test_response_len_mismatch_names_quantities(self):
-        with pytest.raises(ValueError, match="response_len"):
-            validate_replay_geometry(**self._kwargs(num_actions=4))
 
     def test_list_num_actions_raises_not_implemented(self):
         with pytest.raises(NotImplementedError, match="scalar num_actions"):
@@ -305,32 +301,33 @@ class TestExpandMoeLayerFreq:
 
 
 class TestDenseReplayTargets:
-    def _reference_dense(self, rollout, batch_size, seq_len, num_actions):
-        """Inline copy of the pre-refactor builder in HFModelWrapper."""
-        device = rollout.device
-        re = rollout.to(device=device, dtype=torch.long)
-        _, response_len, _, _ = re.shape
-        full = torch.full((batch_size, seq_len, re.shape[2], re.shape[3]), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
-        full[:, seq_len - response_len : seq_len, :, :] = re
-        response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
-        response_pos[:, seq_len - response_len : seq_len] = True
-        non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)
-        return full, response_pos & non_sentinel
-
-    def test_matches_pre_refactor_builder_on_random_inputs(self):
+    @pytest.mark.parametrize(
+        ("batch_size", "seq_len", "response_len", "num_layers", "topk", "num_experts"),
+        [(3, 12, 5, 4, 2, 8), (1, 8, 8, 1, 4, 6), (2, 10, 3, 2, 2, 4)],
+        ids=["padded", "full_response", "short_response"],
+    )
+    def test_fills_response_window_and_masks_lost_capture(
+        self, batch_size, seq_len, response_len, num_layers, topk, num_experts
+    ):
         torch.manual_seed(4)
-        for batch_size, seq_len, response_len, num_layers, topk, num_experts in [
-            (3, 12, 5, 4, 2, 8),
-            (1, 8, 8, 1, 4, 6),
-            (2, 10, 3, 2, 2, 4),
-        ]:
-            rollout = torch.randint(0, num_experts, (batch_size, response_len, num_layers, topk))
-            if batch_size >= 2:
-                rollout[1] = SENTINEL_EXPERT_ID  # fully-lost capture for one sample
-            got_full, got_mask = dense_replay_targets(rollout, batch_size, seq_len, response_len)
-            want_full, want_mask = self._reference_dense(rollout, batch_size, seq_len, response_len)
-            assert torch.equal(got_full, want_full)
-            assert torch.equal(got_mask, want_mask)
+        rollout = torch.randint(0, num_experts, (batch_size, response_len, num_layers, topk))
+        if batch_size >= 2:
+            rollout[1] = SENTINEL_EXPERT_ID  # fully-lost capture for one sample
+
+        full, mask = dense_replay_targets(rollout, batch_size, seq_len, response_len)
+
+        for b in range(batch_size):
+            prompt_start = seq_len - response_len
+            # Outside the response window: sentinel everywhere, mask False.
+            assert (full[b, :prompt_start] == SENTINEL_EXPERT_ID).all()
+            assert not mask[b, :prompt_start].any()
+            for t in range(response_len):
+                row = full[b, prompt_start + t]
+                row_is_sentinel = all(
+                    row[layer][k] == SENTINEL_EXPERT_ID for layer in range(num_layers) for k in range(topk)
+                )
+                assert torch.equal(row[:, :], rollout[b, t])
+                assert mask[b, prompt_start + t].item() == (not row_is_sentinel)
 
     def test_list_num_actions_raises_not_implemented(self):
         rollout = torch.zeros(2, 5, 3, 2, dtype=torch.long)

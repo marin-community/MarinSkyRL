@@ -28,14 +28,14 @@ from collections import deque
 from enum import Enum
 from typing import Callable, Mapping, Optional, Sequence, Tuple
 
-import numpy as np
 import torch
 
-from skyrl_train.models.router_replay import SENTINEL_EXPERT_ID
+from skyrl_train.models.router_replay import SENTINEL_EXPERT_ID, require_scalar_num_actions
 
 __all__ = [
     "MegatronRouterReplay",
     "LayerReplayHandle",
+    "MIN_ROUTER_TOPK",
     "capture_layer_indices",
     "expand_moe_layer_freq",
     "num_moe_layers",
@@ -43,6 +43,10 @@ __all__ = [
     "slice_sequence_parallel",
     "validate_replay_geometry",
 ]
+
+# The all-K-sentinel capture convention is only unambiguous when native top-k
+# indices are distinct, which requires top-k >= 2.
+MIN_ROUTER_TOPK = 2
 
 
 def capture_layer_indices(moe_layer_pattern: Sequence[int]) -> dict[int, int]:
@@ -136,7 +140,8 @@ class MegatronRouterReplay:
 
     def __init__(self, local_layer_indices: Sequence[int], *, recompute_enabled: bool) -> None:
         self.local_layer_indices: tuple[int, ...] = tuple(sorted(local_layer_indices))
-        # Filled by the installer (Stage 2) for geometry validation (Stage 3).
+        # Filled by the installer from the resolved model config; the target
+        # builder validates every batch against them before arming.
         self.num_moe_layers_total: Optional[int] = None
         self.topk: Optional[int] = None
         self._recompute_enabled = recompute_enabled
@@ -230,13 +235,14 @@ class MegatronRouterReplay:
             Callable[[torch.Tensor, int, Optional[int], Optional[int]], Tuple[torch.Tensor, torch.Tensor]]
         ] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Substitute rollout expert choices on masked rows, native elsewhere.
+        """Return ``(probs, top_indices)`` with rollout choices on masked rows.
 
-        Runs the native ``default_compute_topk`` unconditionally (identical
-        autograd and sorted behaviour to a flag-off forward; supplies the
-        native indices for prompt / pad rows), then ``torch.where``s the
-        replay targets in and re-gathers probs from the live scores so
-        gradients flow through the gate.
+        Masked rows return the captured target experts; every other row returns
+        the native top-k. ``probs`` are always the live routing scores gathered
+        at the returned indices, so gradients flow through the gate on both
+        replayed and native rows. Runs mcore's ``default_compute_topk``
+        unconditionally to keep the autograd graph identical to a flag-off
+        forward.
         """
         probs, native_idx = default_compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
         targets, mask = self._targets_for_call(layer_idx, scores)
@@ -334,22 +340,17 @@ def validate_replay_geometry(
 
     Raises ``ValueError`` naming the offending quantity on any mismatch;
     raises ``NotImplementedError`` for a per-sample ``num_actions`` list
-    (mirrors the FSDP path). ``expected_topk >= 2`` is required because the
-    sentinel convention (all-K equal ``SENTINEL_EXPERT_ID``) is only
-    unambiguous when native top-k indices are distinct.
+    (mirrors the FSDP path).
     """
-    if isinstance(num_actions, (list, np.ndarray)):
-        raise NotImplementedError(
-            "router_replay requires a scalar num_actions (dense unpacked path); got a per-sample list/array."
-        )
+    require_scalar_num_actions(num_actions)
     if num_layers_captured != expected_moe_layers:
         raise ValueError(
             f"router replay: rollout_routed_experts carries L={num_layers_captured} layers but the model has "
             f"expected_moe_layers={expected_moe_layers} MoE layers"
         )
-    if expected_topk < 2:
+    if expected_topk < MIN_ROUTER_TOPK:
         raise ValueError(
-            f"router replay: expected_topk={expected_topk} < 2; the all-K sentinel convention is "
+            f"router replay: expected_topk={expected_topk} < {MIN_ROUTER_TOPK}; the all-K sentinel convention is "
             "ambiguous when native top-k indices need not be distinct"
         )
     if topk_captured != expected_topk:
