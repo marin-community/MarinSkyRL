@@ -195,6 +195,20 @@ class MegatronRouterReplay:
         self._response_mask = None
         self._phase = _Phase.IDLE
 
+    def abort_forward(self) -> None:
+        """Force-reset after a mid-forward failure; never raises.
+
+        Clears the armed targets and any partial recompute FIFO entries so the
+        controller is usable again; the caller re-raises the original error.
+        """
+        self._current = {}
+        self._expected = ()
+        self._consumed = set()
+        self._response_mask = None
+        self._phase = _Phase.IDLE
+        for fifo in self._fifo.values():
+            fifo.clear()
+
     def assert_drained(self) -> None:
         """Assert the recompute FIFO is empty and no forward is armed.
 
@@ -287,7 +301,10 @@ class MegatronRouterReplay:
                 raise ValueError(f"router replay: layer {layer_idx} consumed twice in one forward")
             self._consumed.add(layer_idx)
             targets, mask = self._current[layer_idx]
-            if self._recompute_enabled:
+            # Record for backward recompute only on grad-enabled forwards: a
+            # forward-only pass (old-logprob / reference) never recomputes, so
+            # recording there would leave the FIFO undrained forever.
+            if self._recompute_enabled and torch.is_grad_enabled():
                 if layer_idx not in self._fifo:
                     raise ValueError(f"router replay: layer {layer_idx} has no FIFO; not a local layer")
                 self._fifo[layer_idx].append((targets, mask))
