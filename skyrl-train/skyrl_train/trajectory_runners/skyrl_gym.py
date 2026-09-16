@@ -699,7 +699,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             response_token_ids=tuple(response_ids),
             behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
             student_topk_indices=None if selected is None else selected.indices,
-            behavior_topk_logprobs=None if selected is None else selected.behavior_logprobs,
+            behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
         )
         reward_result = RewardResult(
             unshaped_reward=unshaped_reward,

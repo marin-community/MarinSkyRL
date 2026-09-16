@@ -5,15 +5,10 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 
-@runtime_checkable
-class _LogprobValue(Protocol):
-    logprob: float
-
-
-def select_response_topk(logprobs: Mapping[int, float | _LogprobValue], top_k: int) -> tuple[list[int], list[float]]:
+def select_response_topk(logprobs: Mapping[int, float], top_k: int) -> tuple[list[int], list[float]]:
     """Select the actual top K even when serving also reports the sampled token."""
     if top_k <= 0:
         raise ValueError("response top-K width must be positive")
@@ -21,7 +16,7 @@ def select_response_topk(logprobs: Mapping[int, float | _LogprobValue], top_k: i
     for token_id, value in logprobs.items():
         if not isinstance(token_id, int) or token_id < 0:
             raise ValueError("response top-K requires exact non-negative token IDs")
-        score = float(value.logprob if isinstance(value, _LogprobValue) else value)
+        score = float(value)
         if not math.isfinite(score) or score > 0:
             raise ValueError("response top-K requires finite non-positive log probabilities")
         candidates.append((token_id, score))

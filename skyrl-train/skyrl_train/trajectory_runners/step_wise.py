@@ -261,7 +261,7 @@ class StepWiseRolloutCollector:
                     response_token_ids=tuple(response_ids),
                     behavior_logprobs=None if response_logprobs is None else tuple(response_logprobs),
                     student_topk_indices=None if selected is None else selected.indices,
-                    behavior_topk_logprobs=None if selected is None else selected.behavior_logprobs,
+                    behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
                 ),
                 verification=verification,
                 reward=reward_from_env_step(env_step_output, verification),

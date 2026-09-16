@@ -1053,7 +1053,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                     logprob = token_logprobs[token_id].logprob
                     _logprobs.append(logprob)
                     if response_top_k is not None and response_top_k > 0:
-                        ids, scores = select_response_topk(token_logprobs, response_top_k)
+                        ids, scores = select_response_topk(
+                            {token_id: value.logprob for token_id, value in token_logprobs.items()}, response_top_k
+                        )
                         selected_ids.append(ids)
                         selected_scores.append(scores)
                     del token_logprobs

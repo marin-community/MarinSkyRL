@@ -1,7 +1,5 @@
 """Behavior-policy response top-K capture contracts."""
 
-from types import SimpleNamespace
-
 import pytest
 
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk, select_response_topk
@@ -10,7 +8,7 @@ from skyrl_train.inference_engines.response_topk import select_chat_response_top
 def test_selected_token_outside_topk_is_not_forced_into_student_candidates():
     # vLLM includes the sampled token in addition to the requested top K.
     ids, scores = select_response_topk(
-        {9: SimpleNamespace(logprob=-7.0), 3: SimpleNamespace(logprob=-0.2), 2: SimpleNamespace(logprob=-0.1)},
+        {9: -7.0, 3: -0.2, 2: -0.1},
         2,
     )
     assert ids == [2, 3]
