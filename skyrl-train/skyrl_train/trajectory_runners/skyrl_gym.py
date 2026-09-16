@@ -82,12 +82,16 @@ class BatchedTrajectoryCollector:
     async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False):
         del disable_tqdm
         runner = self._runner
+        sampling_params = request.get("sampling_params")
+        max_tokens = runner.trajectory_runner_cfg.sampling_params.max_generate_length
+        if sampling_params is not None:
+            max_tokens = sampling_params.get("max_tokens", sampling_params.get("max_new_tokens", max_tokens))
         batch = await runner.collect_batched(
             request["prompts"],
             request["env_classes"],
             request["env_extras"],
-            runner.trajectory_runner_cfg.sampling_params.max_generate_length,
-            request.get("sampling_params"),
+            max_tokens,
+            sampling_params,
         )
         return batch
 

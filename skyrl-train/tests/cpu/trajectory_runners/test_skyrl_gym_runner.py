@@ -1020,6 +1020,36 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
 
 
 @pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_generate_batched_uses_evaluation_token_budget(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    response_ids = [1, 2, 3, 4, 5, 6]
+    mock_llm.generate = AsyncMock(
+        return_value={
+            "responses": ["long evaluation response"],
+            "response_ids": [response_ids],
+            "stop_reasons": ["stop"],
+        }
+    )
+    runner = SkyRLGymTrajectoryRunner(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    batch = await runner.run(
+        {
+            "prompts": [[{"role": "user", "content": "Question"}]],
+            "env_extras": [{}],
+            "env_classes": [mock_env_cfg.env_class],
+            "sampling_params": {"max_tokens": 8},
+        }
+    )
+
+    assert batch["response_ids"] == [response_ids]
+    assert batch["loss_masks"] == [[1] * len(response_ids)]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("batched", [True, False])
 async def test_generate_aggregates_aime_step_metadata(mock_tokenizer, mock_llm, generator_cfg, batched):
     generator_cfg.batched = batched
