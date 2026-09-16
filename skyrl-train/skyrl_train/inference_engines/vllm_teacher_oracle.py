@@ -65,6 +65,8 @@ def teacher_evidence_from_prompt_logprobs(
     prompt_logprobs: PromptLogprobs,
 ) -> TeacherEvidenceBatch:
     """Normalize prompt scores from local or remote vLLM into shared evidence."""
+    if request.evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
+        raise ValueError("prompt top-K responses cannot score arbitrary student-selected token IDs")
     if request.evidence is TeacherEvidenceKind.CHOSEN_TOKEN:
         chosen = torch.full(request.response_mask.shape, torch.nan, dtype=torch.float32)
         for row, prompt_length in enumerate(prompt_lengths):
@@ -146,6 +148,8 @@ class VLLMTeacherOracle:
     async def score(self, request: TeacherScoreRequest) -> TeacherEvidenceBatch:
         if self._closed:
             raise RuntimeError("vLLM teacher oracle is closed")
+        if request.evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
+            raise ValueError("vLLM prompt top-K cannot score arbitrary student-selected token IDs")
         full_sequences = [
             request.prompt_token_ids[row][request.prompt_mask[row]].tolist()
             + request.response_token_ids[row][request.response_mask[row]].tolist()

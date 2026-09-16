@@ -27,6 +27,7 @@ class DistillationRewardMode(StrEnum):
 class TeacherEvidenceKind(StrEnum):
     CHOSEN_TOKEN = "chosen_token"
     TOPK_DISTRIBUTION = "topk_distribution"
+    STUDENT_SELECTED_TOPK = "student_selected_topk"
 
 
 class TeacherSource(StrEnum):
