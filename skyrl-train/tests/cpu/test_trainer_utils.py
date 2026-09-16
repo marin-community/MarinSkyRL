@@ -337,6 +337,27 @@ def test_dump_per_dataset_eval_results_comprehensive(mock_file):
             continue
 
 
+def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
+    tokenizer = Mock()
+    tokenizer.decode.side_effect = lambda tokens: str(tokens)
+    batch = {
+        "prompt_token_ids": [[1], [2]],
+        "response_ids": [[3], [4]],
+        "rewards": [1.0, -1.0],
+        "stop_reasons": ["stop", "error"],
+        "exception_types": [None, "TimeoutError"],
+        "error_treatments": [None, "mask"],
+    }
+
+    dump_per_dataset_eval_results(tmp_path, tokenizer, batch, ["aime_2024"] * 2, ["aime"] * 2, [{}, {}], {})
+
+    rows = [json.loads(line) for line in (tmp_path / "aime_2024.jsonl").read_text().splitlines()]
+    assert [(row["exception_type"], row["error_treatment"]) for row in rows] == [
+        (None, None),
+        ("TimeoutError", "mask"),
+    ]
+
+
 def test_handle_dynamic_sampling_null_strategy():
     """Test that null strategy returns input unchanged."""
     trajectory_batch = {

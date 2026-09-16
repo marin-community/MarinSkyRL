@@ -278,17 +278,17 @@ def test_native_aime_rows_preserve_the_published_prompt_and_answers():
 
 
 def test_native_aime_config_uses_the_published_sampling_contract(tmp_path: Path):
-    adapter_path = tmp_path / "adapter"
-    adapter_path.mkdir()
-    arguments = AIME.hydra_arguments(adapter_path, tmp_path / "aime.parquet", tmp_path / "output", 30)
+    merged_path = tmp_path / "merged-model"
+    arguments = AIME.hydra_arguments(str(merged_path), tmp_path / "aime.parquet", tmp_path / "output", 30)
 
     with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
         config = compose(config_name="ppo_base_config", overrides=list(arguments))
     validate_cfg(config)
 
-    assert config.trainer.policy.model.path == OPD.STUDENT_MODEL
-    assert config.trainer.policy.model.revision == OPD.STUDENT_REVISION
-    assert config.trainer.policy.model.lora.adapter_path == str(adapter_path)
+    assert config.trainer.policy.model.path == str(merged_path)
+    assert config.trainer.policy.model.revision is None
+    assert config.trainer.policy.model.lora.rank == 0
+    assert config.trainer.policy.model.lora.adapter_path is None
     assert config.trainer.eval_batch_size == 30
     assert config.generator.eval_n_samples_per_prompt == 1
     assert config.generator.eval_sampling_params.max_generate_length == 64_000
@@ -298,7 +298,7 @@ def test_native_aime_config_uses_the_published_sampling_contract(tmp_path: Path)
 
 
 def test_native_aime_base_control_does_not_enable_lora(tmp_path: Path):
-    arguments = AIME.hydra_arguments(None, tmp_path / "aime.parquet", tmp_path / "output", 1)
+    arguments = AIME.hydra_arguments(OPD.STUDENT_MODEL, tmp_path / "aime.parquet", tmp_path / "output", 1)
 
     with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
         config = compose(config_name="ppo_base_config", overrides=list(arguments))
@@ -516,14 +516,41 @@ def test_native_aime_metrics_report_accuracy_not_centered_reward(tmp_path: Path)
     assert metrics["aime24_accuracy"] == 0.5
     assert metrics["aime24_correct"] == 1
     assert metrics["aime24_total"] == 2
+    assert metrics["aime24_completed_only_accuracy"] == 0.5
+    assert metrics["aime24_completed"] == 2
+    assert metrics["aime24_errors"] == 0
     assert metrics["aime24_truncated"] == 0
+    assert metrics["aime24_comparable"] is False
 
 
-def test_native_aime_full_result_rejects_truncated_responses(tmp_path: Path):
+def test_native_aime_full_result_reports_truncations_and_errors_without_losing_accuracy(tmp_path: Path):
     eval_root = tmp_path / "evaluation" / "dumped_evals" / "eval_only"
     eval_root.mkdir(parents=True)
     (eval_root / "aggregated_results.jsonl").write_text('{"eval/all/avg_score": -1.0}\n')
-    (eval_root / "aime_2024.jsonl").write_text('{"score": -1.0, "stop_reason": "length"}\n')
+    (eval_root / "aime_2024.jsonl").write_text(
+        '{"score": 1.0, "stop_reason": "stop"}\n'
+        '{"score": -1.0, "stop_reason": "stop"}\n'
+        '{"score": -1.0, "stop_reason": "length"}\n'
+        '{"score": -1.0, "stop_reason": "error", "exception_type": "TimeoutError", "error_treatment": "mask"}\n'
+    )
 
-    with pytest.raises(RuntimeError, match="1 truncated responses"):
-        AIME.read_evaluation_metrics(tmp_path, expected_rows=1, stage=AIME.Stage.FULL)
+    metrics = AIME.read_evaluation_metrics(tmp_path, expected_rows=4, stage=AIME.Stage.FULL)
+
+    assert metrics["aime24_accuracy"] == 0.25
+    assert metrics["aime24_completed_only_accuracy"] == 0.5
+    assert metrics["aime24_completed"] == 2
+    assert metrics["aime24_errors"] == 1
+    assert metrics["aime24_truncated"] == 1
+    assert metrics["aime24_comparable"] is False
+
+
+def test_native_aime_full_result_marks_complete_30_problem_run_comparable(tmp_path: Path):
+    eval_root = tmp_path / "evaluation" / "dumped_evals" / "eval_only"
+    eval_root.mkdir(parents=True)
+    (eval_root / "aggregated_results.jsonl").write_text('{"eval/all/avg_score": -1.0}\n')
+    (eval_root / "aime_2024.jsonl").write_text('{"score": -1.0, "stop_reason": "stop"}\n' * 30)
+
+    metrics = AIME.read_evaluation_metrics(tmp_path, expected_rows=30, stage=AIME.Stage.FULL)
+
+    assert metrics["aime24_total"] == 30
+    assert metrics["aime24_comparable"] is True

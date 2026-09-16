@@ -249,6 +249,8 @@ def dump_per_dataset_eval_results(
                     "output_response": output_responses[i],
                     "score": trajectory_batch["rewards"][i],
                     "stop_reason": trajectory_batch.get("stop_reasons", [None] * len(input_prompts))[i],
+                    "exception_type": (trajectory_batch.get("exception_types") or [None] * len(input_prompts))[i],
+                    "error_treatment": (trajectory_batch.get("error_treatments") or [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
                     "env_extras": concat_env_extras[i],
                     "data_source": data_source,

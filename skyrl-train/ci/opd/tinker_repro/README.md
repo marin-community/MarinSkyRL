@@ -142,9 +142,16 @@ model, rank, alpha, and target modules before loading the student.
 `native_aime24.py` evaluates an SFT or OPD LoRA adapter with MarinSkyRL's AIME
 environment. It uses the same pinned 30-problem dataset, system prompt,
 temperature 1.0, top-p 1.0, disabled top-k, one sample per problem, and 64,000
-generated-token limit as the Tinker evaluator. The manifest reports accuracy in
-addition to MarinSkyRL's centered `+1/-1` reward mean. A full run fails if any
-response reaches the generation limit.
+generated-token limit as the Tinker evaluator. The manifest reports raw and
+completed-only accuracy, sampling errors, and truncated responses in addition
+to MarinSkyRL's centered `+1/-1` reward mean. The `aime24_comparable` flag is
+true only for a full 30-problem evaluation with no sampling errors or truncated
+responses. Incomplete evaluations retain their metrics and trajectories for
+diagnosis and backfill. For adapter evaluations, the evaluator merges the pinned
+PEFT adapter into a temporary text-only Qwen3.5 model before vLLM starts: vLLM's
+Qwen3.5 LoRA loader expects fused Gated DeltaNet QKV projections and cannot
+load the split-QKV adapter used by the SFT and native OPD trainers. The source
+adapter and committed checkpoint remain unchanged.
 
 For a native OPD checkpoint, pass its exact `global_step_N` prefix with
 `--checkpoint-uri`. The evaluator requires that step's `commit.json`, verifies

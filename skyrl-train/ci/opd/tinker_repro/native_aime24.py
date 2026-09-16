@@ -4,18 +4,23 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 import json
 from pathlib import Path
 import sys
 import tempfile
 
+from peft import PeftModel
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from aime24_dataset import materialize_dataset
 
 from aime24_protocol import (
     AIME24_DATASET,
     AIME24_REVISION,
+    AIME24_SIZE,
     CONTEXT_WINDOW,
     MAX_TOKENS,
     NUM_SAMPLES,
@@ -29,14 +34,16 @@ from native_opd import (
     STUDENT_MODEL,
     STUDENT_REVISION,
     TOKENIZER_FINGERPRINT,
-    installed_qwen35_source,
-    patch_qwen35_embedding_lora,
 )
 from reproduction_artifacts import validate_output_uri
 from skyrl_train.evaluate import evaluation_dump_dir
-from skyrl_train.io.io import local_read_dir
+from skyrl_train.io.io import local_read_dir, upload_directory
+from skyrl_train.models.qwen3_5_vlm import (
+    QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING,
+    is_qwen3_5_vlm_shell,
+    unwrap_to_text_causal_lm,
+)
 
-LORA_RANK = 128
 NUM_INFERENCE_ENGINES = 8
 EVALUATION_EXPORT_DIR = "evaluation"
 
@@ -61,10 +68,10 @@ class EvaluationManifest:
     checkpoint_uri: str | None
     checkpoint_commit_sha256: str | None
     sampling: SamplingContract
-    runtime_patches: tuple[str, ...]
+    model_materialization: str
     command: tuple[str, ...]
     returncode: int | None = None
-    metrics: dict[str, float | int] | None = None
+    metrics: dict[str, float | int | bool | None] | None = None
     failure: str | None = None
 
 
@@ -78,15 +85,13 @@ class SamplingContract:
     top_p: float
 
 
-def hydra_arguments(
-    adapter_path: Path | None, data_path: Path, output_root: Path, dataset_rows: int
-) -> tuple[str, ...]:
+def hydra_arguments(model_path: str, data_path: Path, output_root: Path, dataset_rows: int) -> tuple[str, ...]:
     """Return the native evaluation configuration for the pinned protocol."""
     arguments = (
         "data.train_data=[]",
         f"data.val_data=['{data_path}']",
-        f"trainer.policy.model.path={STUDENT_MODEL}",
-        f"trainer.policy.model.revision={STUDENT_REVISION}",
+        f"trainer.policy.model.path={model_path}",
+        f"trainer.policy.model.revision={STUDENT_REVISION if model_path == STUDENT_MODEL else 'null'}",
         "trainer.placement.colocate_all=false",
         "trainer.eval_interval=1",
         f"trainer.eval_batch_size={dataset_rows}",
@@ -116,22 +121,40 @@ def hydra_arguments(
         f"environment.skyrl_gym.aime.evaluation_token_budget={MAX_TOKENS}",
         f"environment.skyrl_gym.aime.max_gen_length={MAX_TOKENS}",
     )
-    if adapter_path is None:
-        return arguments
-    return arguments + (
-        f"trainer.policy.model.lora.rank={LORA_RANK}",
-        "trainer.policy.model.lora.alpha=1",
-        f"trainer.policy.model.lora.adapter_path={adapter_path}",
+    return arguments
+
+
+def merge_adapter_for_vllm(adapter_path: Path, destination: Path) -> None:
+    """Materialize a text-only model because vLLM cannot load split-QKV Qwen3.5 LoRA."""
+    model = AutoModelForCausalLM.from_pretrained(
+        STUDENT_MODEL,
+        revision=STUDENT_REVISION,
+        dtype=torch.bfloat16,
+        device_map="cpu",
+        trust_remote_code=False,
     )
+    if not is_qwen3_5_vlm_shell(model.config):
+        raise ValueError("Pinned Qwen3.5 base model is no longer a multimodal shell")
+    model = unwrap_to_text_causal_lm(model)
+    adapted = PeftModel.from_pretrained(
+        model,
+        adapter_path,
+        is_trainable=False,
+        key_mapping=QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING,
+    )
+    adapted.merge_and_unload(safe_merge=True).save_pretrained(destination, safe_serialization=True)
+    AutoTokenizer.from_pretrained(STUDENT_MODEL, revision=STUDENT_REVISION).save_pretrained(destination)
 
 
-def read_evaluation_metrics(output_root: Path, expected_rows: int, stage: Stage) -> dict[str, float | int]:
+def read_evaluation_metrics(
+    output_root: Path, expected_rows: int, stage: Stage
+) -> dict[str, float | int | bool | None]:
     eval_root = evaluation_dump_dir(output_root / EVALUATION_EXPORT_DIR, global_step=None)
     path = eval_root / "aggregated_results.jsonl"
     rows = path.read_text().splitlines()
     if len(rows) != 1:
         raise RuntimeError(f"Expected one aggregate metrics row in {path}, found {len(rows)}")
-    metrics: dict[str, float | int] = json.loads(rows[0])
+    metrics: dict[str, float | int | bool | None] = json.loads(rows[0])
     if not isinstance(metrics, dict) or "eval/all/avg_score" not in metrics:
         raise RuntimeError(f"Evaluation metrics are incomplete in {path}")
     trajectory_path = eval_root / "aime_2024.jsonl"
@@ -141,15 +164,34 @@ def read_evaluation_metrics(output_root: Path, expected_rows: int, stage: Stage)
             f"Expected {expected_rows} AIME trajectories in {trajectory_path}, found {len(trajectories)}"
         )
     truncated = sum(row.get("stop_reason") == "length" for row in trajectories)
-    if stage is Stage.FULL and truncated:
-        raise RuntimeError(f"Full AIME evaluation produced {truncated} truncated responses")
+    errors = sum(
+        row.get("stop_reason") == "error"
+        or row.get("exception_type") is not None
+        or row.get("error_treatment") is not None
+        for row in trajectories
+    )
+    completed_rows = [
+        row
+        for row in trajectories
+        if row.get("stop_reason") not in {"length", "error"}
+        and row.get("exception_type") is None
+        and row.get("error_treatment") is None
+    ]
     correct = sum(float(row["score"]) > 0 for row in trajectories)
+    completed_correct = sum(float(row["score"]) > 0 for row in completed_rows)
     metrics.update(
         {
             "aime24_accuracy": correct / len(trajectories),
             "aime24_correct": correct,
             "aime24_total": len(trajectories),
+            "aime24_completed_only_accuracy": completed_correct / len(completed_rows) if completed_rows else None,
+            "aime24_completed": len(completed_rows),
+            "aime24_errors": errors,
             "aime24_truncated": truncated,
+            "aime24_comparable": stage is Stage.FULL
+            and expected_rows == AIME24_SIZE
+            and errors == 0
+            and truncated == 0,
         }
     )
     return metrics
@@ -165,51 +207,61 @@ def run(stage: Stage, adapter_uri: str | None, output_uri: str, checkpoint_uri: 
         commit_sha256 = verified.commit_sha256
     else:
         commit_sha256 = None
-    runtime_patches = (patch_qwen35_embedding_lora(installed_qwen35_source()),) if adapter_uri is not None else ()
     with tempfile.TemporaryDirectory(prefix="tinker-native-aime24-") as temporary:
         root = Path(temporary)
         output_root = root / "output"
         output_root.mkdir()
         data_path = root / "aime24.parquet"
         rows = materialize_dataset(data_path, row_limit=1 if stage is Stage.SMOKE else None)
+        manifest_path = output_root / "native-aime24-manifest.json"
+        manifest = EvaluationManifest(
+            schema_version=1,
+            status="preparing",
+            stage=stage,
+            dataset=AIME24_DATASET,
+            dataset_revision=AIME24_REVISION,
+            dataset_rows=rows,
+            student=STUDENT_MODEL,
+            student_revision=STUDENT_REVISION,
+            tokenizer_fingerprint=TOKENIZER_FINGERPRINT,
+            adapter_uri=adapter_uri,
+            checkpoint_uri=checkpoint_uri,
+            checkpoint_commit_sha256=commit_sha256,
+            sampling=SamplingContract(
+                context_window=CONTEXT_WINDOW,
+                max_tokens=MAX_TOKENS,
+                num_samples=NUM_SAMPLES,
+                temperature=TEMPERATURE,
+                top_k=TOP_K,
+                top_p=TOP_P,
+            ),
+            model_materialization="peft_merge" if adapter_uri is not None else "pinned_base",
+            command=(),
+        )
         adapter_context = local_read_dir(adapter_uri) if adapter_uri is not None else nullcontext(None)
         with adapter_context as adapter_path:
+            model_path = STUDENT_MODEL
+            if adapter_path is not None:
+                merged_path = root / "merged-model"
+                try:
+                    merge_adapter_for_vllm(Path(adapter_path), merged_path)
+                except Exception as error:
+                    failed = replace(manifest, status="failed", failure=f"Adapter merge failed: {error}")
+                    manifest_path.write_text(json.dumps(asdict(failed), indent=2, sort_keys=True) + "\n")
+                    upload_directory(str(output_root), output_uri)
+                    raise
+                model_path = str(merged_path)
             command = (
                 sys.executable,
                 "-m",
                 "skyrl_train.entrypoints.main_generate",
-                *hydra_arguments(
-                    Path(adapter_path) if adapter_path is not None else None, data_path, output_root, rows
-                ),
+                *hydra_arguments(model_path, data_path, output_root, rows),
             )
-            manifest = EvaluationManifest(
-                schema_version=1,
-                status="running",
-                stage=stage,
-                dataset=AIME24_DATASET,
-                dataset_revision=AIME24_REVISION,
-                dataset_rows=rows,
-                student=STUDENT_MODEL,
-                student_revision=STUDENT_REVISION,
-                tokenizer_fingerprint=TOKENIZER_FINGERPRINT,
-                adapter_uri=adapter_uri,
-                checkpoint_uri=checkpoint_uri,
-                checkpoint_commit_sha256=commit_sha256,
-                sampling=SamplingContract(
-                    context_window=CONTEXT_WINDOW,
-                    max_tokens=MAX_TOKENS,
-                    num_samples=NUM_SAMPLES,
-                    temperature=TEMPERATURE,
-                    top_k=TOP_K,
-                    top_p=TOP_P,
-                ),
-                runtime_patches=runtime_patches,
-                command=command,
-            )
+            manifest = replace(manifest, status="running", command=command)
             return run_artifact_command(
                 command=command,
                 initial_manifest=manifest,
-                manifest_path=output_root / "native-aime24-manifest.json",
+                manifest_path=manifest_path,
                 output_root=output_root,
                 output_uri=output_uri,
                 complete_manifest=lambda current, returncode: replace(
