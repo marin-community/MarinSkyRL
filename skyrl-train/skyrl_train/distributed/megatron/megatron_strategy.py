@@ -47,6 +47,7 @@ from skyrl_train import hf_model_io
 # fully_reshardable format gathers optimizer state onto DP rank zero's CPU; dp_reshardable
 # writes DP-local optimizer shards without a gather but cannot change non-DP geometry on load.
 _OPTIMIZER_CHECKPOINT_SHARDING_TYPES = {"fully_reshardable", "dp_reshardable"}
+_PARAM_STATE_SHARDING_TYPE_KEY = "param_state_sharding_type"
 
 
 def _optimizer_checkpoint_metadata(sharding_type: str) -> dict:
@@ -60,10 +61,10 @@ def _optimizer_checkpoint_metadata(sharding_type: str) -> dict:
 
 def _saved_optimizer_sharding_type(common_state: dict) -> str:
     optimizer_state = common_state["optimizer"]
-    if "param_state_sharding_type" in optimizer_state:
-        saved_types = {optimizer_state["param_state_sharding_type"]}
+    if _PARAM_STATE_SHARDING_TYPE_KEY in optimizer_state:
+        saved_types = {optimizer_state[_PARAM_STATE_SHARDING_TYPE_KEY]}
     else:
-        saved_types = {state["param_state_sharding_type"] for state in optimizer_state.values()}
+        saved_types = {state[_PARAM_STATE_SHARDING_TYPE_KEY] for state in optimizer_state.values()}
     if len(saved_types) != 1:
         raise ValueError(f"Checkpoint contains mixed optimizer sharding types: {saved_types}")
     sharding_type = saved_types.pop()
