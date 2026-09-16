@@ -50,6 +50,9 @@ trainer:
   debug_mode: "light"
   # null follows debug_mode (on for light/distributed); true/false explicitly overrides it.
   collective_phase_diagnostics: null
+  # Mirror the trainer's scalar metric families and lifecycle events to Finelog for the
+  # async RL dashboard. Off by default: it adds one record per scalar per optimizer step.
+  training_metrics: false
   distributed:
     placement_group_timeout_seconds: 180
     worker_collective_timeout_seconds: 1800
