@@ -176,12 +176,12 @@ uv run iris --cluster cw-rno2a job run \
 ```
 
 Use a new output URI and change `--stage smoke` to `--stage full` after the
-single-problem smoke run completes. Evaluation-only LoRA runs reject remote
-engines, non-vLLM backends, and missing local adapter directories. These checks
-prevent `main_generate` from silently evaluating the base model.
-For the Axolotl SFT initialization, pass the immutable converted adapter directory
-and its recorded SHA-256 digests. Do not pass the raw Axolotl export. Omit both
-adapter options for the base-model control.
+single-problem smoke run completes. The evaluator verifies the checkpoint or
+converted adapter, merges it into the full Qwen3.5 shell, then evaluates that
+merged model with local vLLM engines. For the Axolotl SFT initialization, pass
+the immutable converted adapter directory with `--adapter-uri`; its conversion
+manifest records the SHA-256 digests. Do not pass the raw Axolotl export. Omit
+both adapter options for the base-model control.
 
 ## AIME 2024 evaluation
 

@@ -8,17 +8,11 @@ import json
 from pathlib import Path
 import posixpath
 
-from cloud.iris.artifacts import fs_and_path
+from cloud.iris.artifacts import FileEntry, fs_and_path
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from marinskyrl.resource_locator import join_resource_path
 
 COMMIT_FILENAME = "commit.json"
-
-
-@dataclass(frozen=True)
-class CheckpointFile:
-    path: str
-    size: int
 
 
 @dataclass(frozen=True)
@@ -44,7 +38,7 @@ def required_checkpoint_files(policy_ranks: int) -> set[str]:
     return required
 
 
-def checkpoint_inventory(step_root: Path, policy_ranks: int) -> tuple[CheckpointFile, ...]:
+def checkpoint_inventory(step_root: Path, policy_ranks: int) -> tuple[FileEntry, ...]:
     """Validate the loadable FSDP2/LoRA checkpoint shape and list its files."""
     required = required_checkpoint_files(policy_ranks)
     files = {
@@ -58,7 +52,7 @@ def checkpoint_inventory(step_root: Path, policy_ranks: int) -> tuple[Checkpoint
     empty = [relative for relative, path in files.items() if path.stat().st_size == 0]
     if empty:
         raise ValueError(f"Incomplete native checkpoint {step_root}: empty {sorted(empty)}")
-    return tuple(CheckpointFile(path=relative, size=path.stat().st_size) for relative, path in sorted(files.items()))
+    return tuple(FileEntry(path=relative, size=path.stat().st_size) for relative, path in sorted(files.items()))
 
 
 def verify_remote_checkpoint(checkpoint_uri: str) -> VerifiedCheckpoint:

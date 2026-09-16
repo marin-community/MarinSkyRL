@@ -19,12 +19,7 @@ from aime24_protocol import (
     AIME24_DATASET,
     AIME24_REVISION,
     AIME24_SIZE,
-    CONTEXT_WINDOW,
-    MAX_TOKENS,
-    NUM_SAMPLES,
-    TEMPERATURE,
-    TOP_K,
-    TOP_P,
+    evaluation_hydra_arguments,
 )
 from deepmath_dataset import PROMPT_ONLY_ENV, materialize_dataset
 from native_artifact_run import run_artifact_command
@@ -82,6 +77,9 @@ PLAN_STAGES = {
     Stage.FULL: PlanStage.OPD_FULL,
 }
 POLICY_GPUS = 4
+OPD_CHECKPOINT_EVAL_INTERVAL = 2
+LORA_RANK = 128
+LORA_ALPHA = 1
 ROLLOUT_GPU_MEMORY_UTILIZATION = 0.9
 ROLLOUT_MAX_NUM_SEQS = 512
 TEACHER_GPU_MEMORY_UTILIZATION = 0.7
@@ -172,8 +170,8 @@ def hydra_arguments(
         "++teacher_routing.opd.routes.default.weight=1.0",
         f"trainer.policy.model.path={STUDENT_MODEL}",
         f"trainer.policy.model.revision={STUDENT_REVISION}",
-        "trainer.policy.model.lora.rank=128",
-        "trainer.policy.model.lora.alpha=1",
+        f"trainer.policy.model.lora.rank={LORA_RANK}",
+        f"trainer.policy.model.lora.alpha={LORA_ALPHA}",
         "trainer.policy.model.lora.dropout=0.0",
         f"trainer.policy.model.lora.adapter_path={adapter_path}",
         f"trainer.policy.model.lora.target_modules=[{targets}]",
@@ -197,9 +195,9 @@ def hydra_arguments(
         "trainer.update_epochs_per_batch=1",
         "trainer.max_prompt_length=1024",
         "trainer.eval_before_train=false",
-        f"trainer.eval_interval={2 if aime_data_path is not None else -1}",
-        f"trainer.ckpt_interval={2 if shape.steps > 1 else 1}",
-        f"trainer.hf_save_interval={2 if shape.steps > 1 else 1}",
+        f"trainer.eval_interval={OPD_CHECKPOINT_EVAL_INTERVAL if aime_data_path is not None else -1}",
+        f"trainer.ckpt_interval={OPD_CHECKPOINT_EVAL_INTERVAL if shape.steps > 1 else 1}",
+        f"trainer.hf_save_interval={OPD_CHECKPOINT_EVAL_INTERVAL if shape.steps > 1 else 1}",
         "trainer.resume_mode=null",
         f"trainer.dump_eval_results={'true' if aime_data_path is not None else 'false'}",
         "trainer.logger=console",
@@ -227,17 +225,7 @@ def hydra_arguments(
     )
     if aime_data_path is None:
         return arguments
-    return arguments + (
-        "trainer.eval_batch_size=1",
-        f"generator.eval_n_samples_per_prompt={NUM_SAMPLES}",
-        f"++generator.engine_init_kwargs.max_model_len={CONTEXT_WINDOW}",
-        f"generator.eval_sampling_params.max_generate_length={MAX_TOKENS}",
-        f"generator.eval_sampling_params.temperature={TEMPERATURE}",
-        f"generator.eval_sampling_params.top_p={TOP_P}",
-        f"generator.eval_sampling_params.top_k={TOP_K}",
-        f"environment.skyrl_gym.aime.evaluation_token_budget={MAX_TOKENS}",
-        f"environment.skyrl_gym.aime.max_gen_length={MAX_TOKENS}",
-    )
+    return arguments + ("trainer.eval_batch_size=1",) + evaluation_hydra_arguments()
 
 
 def patch_qwen35_embedding_lora(source_path: Path) -> str:
@@ -307,13 +295,9 @@ def verify_sft_adapter(adapter_path: Path, *, config_sha256: str, model_sha256: 
         if actual != expected:
             raise ValueError(f"SFT adapter digest mismatch for {filename}: expected {expected}, found {actual}")
     config = verify_fused_qkv_adapter(adapter_path)
-    if (
-        config.get("base_model_name_or_path") != STUDENT_MODEL
-        or config.get("r") != 128
-        or config.get("lora_alpha") != 1
-    ):
+    if config.base_model_name_or_path != STUDENT_MODEL or config.rank != LORA_RANK or config.alpha != LORA_ALPHA:
         raise ValueError("SFT adapter model, rank, or alpha differs from the native OPD contract")
-    if set(config.get("target_modules", [])) != set(LORA_TARGETS):
+    if config.target_modules != frozenset(LORA_TARGETS):
         raise ValueError("SFT adapter target_modules differ from the native OPD contract")
 
 

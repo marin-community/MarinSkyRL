@@ -8,6 +8,7 @@ from typing import Any
 import pyarrow as pa
 
 from cloud.iris.open_mopd_fidelity import DOMAINS
+from skyrl_train.domain_sampling import ROUTE_COLUMN
 
 PROMPT_ONLY_ENV = "prompt_only"
 
@@ -37,7 +38,7 @@ def convert_rows(rows: Iterable[Mapping[str, Any]]) -> pa.Table:
                 "data_source": data_source,
                 "prompt": prompt,
                 "env_class": PROMPT_ONLY_ENV,
-                "teacher_route": domain,
+                ROUTE_COLUMN: domain,
                 "source_index": index,
             }
         )

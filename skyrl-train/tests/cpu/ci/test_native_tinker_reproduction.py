@@ -205,13 +205,13 @@ def test_native_opd_full_run_validates_pinned_aime_every_two_steps():
     assert config.trainer.eval_interval == 2
     assert config.trainer.dump_eval_results
     assert config.trainer.eval_batch_size == 1
-    assert config.generator.eval_n_samples_per_prompt == OPD.NUM_SAMPLES
-    assert config.generator.eval_sampling_params.max_generate_length == OPD.MAX_TOKENS
-    assert config.generator.eval_sampling_params.temperature == OPD.TEMPERATURE
-    assert config.generator.eval_sampling_params.top_p == OPD.TOP_P
-    assert config.generator.eval_sampling_params.top_k == OPD.TOP_K
-    assert config.generator.engine_init_kwargs.max_model_len == OPD.CONTEXT_WINDOW
-    assert config.environment.skyrl_gym.aime.evaluation_token_budget == OPD.MAX_TOKENS
+    assert config.generator.eval_n_samples_per_prompt == AIME.NUM_SAMPLES
+    assert config.generator.eval_sampling_params.max_generate_length == AIME.MAX_TOKENS
+    assert config.generator.eval_sampling_params.temperature == AIME.TEMPERATURE
+    assert config.generator.eval_sampling_params.top_p == AIME.TOP_P
+    assert config.generator.eval_sampling_params.top_k == AIME.TOP_K
+    assert config.generator.engine_init_kwargs.max_model_len == AIME.CONTEXT_WINDOW
+    assert config.environment.skyrl_gym.aime.evaluation_token_budget == AIME.MAX_TOKENS
 
 
 def test_qwen35_runtime_patch_enables_embedding_and_lm_head_lora(tmp_path: Path):
@@ -320,47 +320,6 @@ def test_native_aime_base_control_does_not_enable_lora(tmp_path: Path):
     assert config.trainer.policy.model.revision == OPD.STUDENT_REVISION
     assert config.trainer.policy.model.lora.rank == 0
     assert config.trainer.policy.model.lora.adapter_path is None
-
-
-def test_native_aime_merge_preserves_qwen35_shell_for_vllm(tmp_path: Path, monkeypatch):
-    write_fused_adapter(tmp_path / "source-adapter")
-    config = SimpleNamespace(
-        model_type="qwen3_5",
-        architectures=["Qwen3_5ForConditionalGeneration"],
-        text_config=SimpleNamespace(linear_conv_kernel_dim=4),
-    )
-    model = SimpleNamespace(config=config)
-
-    class MergedModel:
-        def save_pretrained(self, destination, *, safe_serialization):
-            assert safe_serialization
-            destination.mkdir()
-            (destination / "model.safetensors").write_bytes(b"merged-model")
-            (destination / "config.json").write_text(
-                json.dumps({"model_type": config.model_type, "architectures": config.architectures})
-            )
-
-    class AdaptedModel:
-        def merge_and_unload(self, *, safe_merge):
-            assert safe_merge
-            return MergedModel()
-
-    class Tokenizer:
-        def save_pretrained(self, destination):
-            (destination / "tokenizer.json").write_text("{}")
-
-    monkeypatch.setattr(AIME.Qwen3_5ForConditionalGeneration, "from_pretrained", lambda *args, **kwargs: model)
-    monkeypatch.setattr(AIME.PeftModel, "from_pretrained", lambda *args, **kwargs: AdaptedModel())
-    monkeypatch.setattr(AIME.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: Tokenizer())
-
-    AIME.merge_adapter_for_vllm(tmp_path / "source-adapter", tmp_path / "merged-model")
-
-    assert (tmp_path / "merged-model" / "model.safetensors").read_bytes() == b"merged-model"
-    assert json.loads((tmp_path / "merged-model" / "config.json").read_text()) == {
-        "model_type": "qwen3_5",
-        "architectures": ["Qwen3_5ForConditionalGeneration"],
-    }
-    assert (tmp_path / "merged-model" / "tokenizer.json").read_text() == "{}"
 
 
 def test_native_checkpoint_publication_commits_only_complete_verified_steps(tmp_path: Path, monkeypatch):

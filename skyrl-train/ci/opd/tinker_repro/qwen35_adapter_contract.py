@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 from pathlib import Path
 
@@ -11,8 +12,16 @@ SPLIT_QKV_TARGETS = {"in_proj_q", "in_proj_k", "in_proj_v"}
 FUSED_QKV_TARGET = "in_proj_qkv"
 
 
-def verify_fused_qkv_adapter(adapter_path: Path) -> dict:
-    """Reject split-QKV adapters that PEFT would otherwise partly load without error."""
+@dataclass(frozen=True)
+class FusedAdapterConfig:
+    base_model_name_or_path: str | None
+    rank: int
+    alpha: int
+    target_modules: frozenset[str]
+
+
+def verify_fused_qkv_adapter(adapter_path: Path) -> FusedAdapterConfig:
+    """Return the verified adapter shape, rejecting split-QKV weights that PEFT would partly load."""
     config = json.loads((adapter_path / "adapter_config.json").read_text(encoding="utf-8"))
     targets = set(config["target_modules"])
     if targets & SPLIT_QKV_TARGETS or FUSED_QKV_TARGET not in targets:
@@ -29,4 +38,9 @@ def verify_fused_qkv_adapter(adapter_path: Path) -> dict:
         raise ValueError("Qwen3.5 adapter still contains split Q/K/V LoRA weights")
     if not any(f".{FUSED_QKV_TARGET}." in key for key in keys):
         raise ValueError("Qwen3.5 adapter has no fused QKV LoRA weights")
-    return config
+    return FusedAdapterConfig(
+        base_model_name_or_path=config.get("base_model_name_or_path"),
+        rank=rank,
+        alpha=alpha,
+        target_modules=frozenset(targets),
+    )

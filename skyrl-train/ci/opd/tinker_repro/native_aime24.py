@@ -27,6 +27,7 @@ from aime24_protocol import (
     TEMPERATURE,
     TOP_K,
     TOP_P,
+    evaluation_hydra_arguments,
 )
 from native_artifact_run import run_artifact_command
 from native_checkpoint_publication import verify_remote_checkpoint
@@ -108,17 +109,9 @@ def hydra_arguments(model_path: str, data_path: Path, output_root: Path, dataset
         "generator.batched=true",
         "generator.gpu_memory_utilization=0.9",
         "generator.max_num_seqs=8",
-        f"++generator.engine_init_kwargs.max_model_len={CONTEXT_WINDOW}",
-        f"generator.eval_sampling_params.max_generate_length={MAX_TOKENS}",
-        f"generator.eval_sampling_params.temperature={TEMPERATURE}",
-        f"generator.eval_sampling_params.top_p={TOP_P}",
-        f"generator.eval_sampling_params.top_k={TOP_K}",
-        f"generator.eval_n_samples_per_prompt={NUM_SAMPLES}",
         "environment.env_class=aime",
-        f"environment.skyrl_gym.aime.evaluation_token_budget={MAX_TOKENS}",
-        f"environment.skyrl_gym.aime.max_gen_length={MAX_TOKENS}",
     )
-    return arguments
+    return arguments + evaluation_hydra_arguments()
 
 
 def merge_adapter_for_vllm(adapter_path: Path, destination: Path) -> None:

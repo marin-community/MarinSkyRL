@@ -31,7 +31,7 @@ from pathlib import Path
 from skyrl_train.io import io
 from skyrl_train.checkpoint_listing import extract_step_from_path, list_checkpoint_dirs
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
-from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler
+from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler, SamplingKind
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.domain_sampling import DomainWeightedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -530,7 +530,7 @@ def build_dataloader(
         if cfg.trainer.step_wise_training:
             raise ValueError("data.sampling.kind requires per-prompt uids; step_wise_training is not supported")
         sampling_seed = cfg.data.sampling.seed if cfg.data.sampling.seed is not None else cfg.trainer.seed
-        if cfg.data.sampling.kind == "domain-weighted":
+        if cfg.data.sampling.kind == SamplingKind.DOMAIN_WEIGHTED:
             sampler = DomainWeightedSampler(
                 dataset.dataframe,
                 weights=cfg.data.sampling.domain_weights,
