@@ -159,7 +159,7 @@ def _upload(local_path: str, cloud_path: str, *, recursive: bool) -> None:
                 local_path,
                 destination,
                 recursive=recursive,
-                retry_attempts=1,
+                max_attempts=1,
             )
         except Exception as error:
             error.add_note(f"S3 upload failed from {local_path} to {cloud_path}")

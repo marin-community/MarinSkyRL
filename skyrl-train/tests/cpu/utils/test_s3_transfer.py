@@ -108,11 +108,18 @@ def _upload_to_withholding_endpoint(endpoint: str, checkpoint_shard: str, result
         result_sender.close()
 
 
-def test_s3_client_has_explicit_transfer_timeouts_and_retries(monkeypatch):
+def test_s3_client_uses_shared_request_bounds_and_bounded_retries(monkeypatch):
     sentinel = SimpleNamespace(retries=None)
+    shared_request_bounds = {
+        "connect_timeout": object(),
+        "read_timeout": object(),
+        "max_pool_connections": object(),
+        "http_session_cls": object(),
+    }
     calls = []
     monkeypatch.setattr(s3fs, "_S3_FS", None)
     monkeypatch.delenv("OT_AGENT_S3_ADDRESSING_STYLE", raising=False)
+    monkeypatch.setattr(s3fs, "s3_python_config_kwargs", lambda: shared_request_bounds.copy())
     monkeypatch.setattr(
         s3fs.fsspec,
         "filesystem",
@@ -125,11 +132,8 @@ def test_s3_client_has_explicit_transfer_timeouts_and_retries(monkeypatch):
             "s3",
             {
                 "config_kwargs": {
-                    "connect_timeout": 30,
-                    "read_timeout": 120,
+                    **shared_request_bounds,
                     "retries": {"total_max_attempts": 2, "mode": "standard"},
-                    "max_pool_connections": 128,
-                    "http_session_cls": rigging_s3_compat.TotalDeadlineAIOHTTPSession,
                     "s3": {"addressing_style": "virtual"},
                 }
             },

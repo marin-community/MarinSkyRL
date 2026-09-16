@@ -125,11 +125,11 @@ def _refresh_s3_credentials(fs) -> None:
         logger.opt(exception=True).warning("Failed to refresh S3 credentials before retry")
 
 
-def call_with_s3_retry(fs, fn, *args, retry_attempts: int = _S3_TRANSFER_MAX_ATTEMPTS, **kwargs):
+def call_with_s3_retry(fs, fn, *args, max_attempts: int = _S3_TRANSFER_MAX_ATTEMPTS, **kwargs):
     """Call an S3 operation with bounded retries for credentials and transient transport failures."""
-    if retry_attempts < 1:
-        raise ValueError("retry_attempts must be positive")
-    for attempt in range(1, retry_attempts + 1):
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
+    for attempt in range(1, max_attempts + 1):
         try:
             return fn(*args, **kwargs)
         except (ClientError, *_TRANSIENT_S3_ERRORS, OSError) as error:
@@ -140,14 +140,14 @@ def call_with_s3_retry(fs, fn, *args, retry_attempts: int = _S3_TRANSFER_MAX_ATT
                 _refresh_s3_credentials(fs)
             retry_error = error
 
-        if attempt == retry_attempts:
+        if attempt == max_attempts:
             raise retry_error
         delay = _S3_RETRY_BASE_SECONDS * (2 ** (attempt - 1)) * random.uniform(0.8, 1.2)
         logger.warning(
             "S3 operation failed with {}; retrying attempt {}/{} in {:.1f}s",
             type(retry_error).__name__,
             attempt + 1,
-            retry_attempts,
+            max_attempts,
             delay,
         )
         time.sleep(delay)
