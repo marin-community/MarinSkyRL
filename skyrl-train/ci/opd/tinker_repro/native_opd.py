@@ -78,6 +78,7 @@ PLAN_STAGES = {
 }
 POLICY_GPUS = 4
 OPD_CHECKPOINT_EVAL_INTERVAL = 2
+LOCAL_CHECKPOINT_RETENTION = 2
 LORA_RANK = 128
 LORA_ALPHA = 1
 ROLLOUT_GPU_MEMORY_UTILIZATION = 0.9
@@ -368,6 +369,7 @@ def run(
                     output_root / "checkpoints",
                     join_resource_path(output_uri, "checkpoints"),
                     policy_ranks=POLICY_GPUS,
+                    retain_local_checkpoints=LOCAL_CHECKPOINT_RETENTION,
                 ),
                 complete_manifest=lambda current, returncode: replace(
                     current,

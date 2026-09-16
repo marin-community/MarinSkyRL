@@ -183,6 +183,12 @@ the immutable converted adapter directory with `--adapter-uri`; its conversion
 manifest records the SHA-256 digests. Do not pass the raw Axolotl export. Omit
 both adapter options for the base-model control.
 
+The native AIME dataset asks for a boxed integer, so the native evaluator uses
+`strict_box_verify=true`. The environment's older Minerva default expects an
+`Answer:` prefix and can mark a correct boxed response wrong. Re-score any
+older native AIME trajectories with the strict-box verifier before comparing
+checkpoints; a successful training job does not validate its original score.
+
 ## AIME 2024 evaluation
 
 This evaluator measures a Tinker sampler checkpoint on the 30-problem

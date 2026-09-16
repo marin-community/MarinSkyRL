@@ -21,6 +21,9 @@ def test_vllm_stats_reach_finelog():
             metric("prefix_cache_hits", 5),
             metric("prefix_cache_queries", 8),
             metric("num_preemptions", 1),
+            metric("spec_decode_num_drafts", 10),
+            metric("spec_decode_num_draft_tokens", 30),
+            metric("spec_decode_num_accepted_tokens", 12),
             metric("request_success", 1, finished_reason="length"),
             Record(
                 name="vllm:request_time_per_output_token_seconds",
@@ -60,9 +63,15 @@ def test_vllm_stats_reach_finelog():
     assert values["num_requests_waiting"] == 4
     assert values["generation_tokens_total"] == 12
     assert values["prefix_cache_hits_total"] == 5
+    assert values["spec_decode_num_drafts_total"] == 10
+    assert values["spec_decode_num_draft_tokens_total"] == 30
+    assert values["spec_decode_num_accepted_tokens_total"] == 12
     reasons = {r.attributes["finished_reason"]: r.value for r in engine if r.name == "request_success_total"}
     assert reasons == {"stop": 0, "length": 1, "abort": 0, "error": 0, "repetition": 0}
     assert values["request_time_per_output_token_seconds_sum"] == 0.07
     assert all(record.attributes["engine"] == "physical-a" for record in engine)
     assert all("engine" not in record.attributes for record in http)
-    assert trainer_metrics(snapshot)["vllm/total_finished_requests"] == 1
+    projected = trainer_metrics(snapshot)
+    assert projected["vllm/total_finished_requests"] == 1
+    assert projected["vllm/spec_decode_acceptance_rate"] == 0.4
+    assert projected["vllm/spec_decode_mean_acceptance_length"] == 2.2

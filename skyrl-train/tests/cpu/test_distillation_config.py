@@ -113,6 +113,32 @@ def test_compile_distillation_plan_accepts_student_topk_policy_surrogate():
     assert plan.teachers[0].top_k == 16
 
 
+def test_compile_distillation_plan_accepts_balancing_only_for_all_student_selected_routes():
+    config = _mopd_config()
+    config["trainer"]["algorithm"]["distillation"]["objective"] = "student_topk_policy_surrogate"
+    for teacher in config["teachers"].values():
+        teacher["evidence"] = "student_selected_topk"
+        teacher["top_k"] = 16
+    balance = {"target_shares": {"math": 1.0, "swe": 1.0}, "gap_scale_alpha": 1.0}
+    config["trainer"]["algorithm"]["distillation"]["domain_gradient_balance"] = balance
+
+    plan = compile_distillation_plan(config)
+
+    assert plan is not None
+    assert plan.domain_gradient_balance is not None
+    assert dict(plan.domain_gradient_balance.target_shares) == {"math": 1.0, "swe": 1.0}
+    assert plan.domain_gradient_balance.gap_scale_alpha == 1.0
+
+    del balance["target_shares"]["swe"]
+    with pytest.raises(ValueError, match="must name exactly the routed domains"):
+        compile_distillation_plan(config)
+
+    balance["target_shares"]["swe"] = 1.0
+    config["trainer"]["algorithm"]["distillation"]["objective"] = "sampled_reverse_kl"
+    with pytest.raises(ValueError, match="requires student_topk_policy_surrogate"):
+        compile_distillation_plan(config)
+
+
 def test_compile_distillation_plan_requires_top_k_for_student_selected_evidence():
     config = _mopd_config()
     config["trainer"]["algorithm"]["distillation"]["objective"] = "student_topk_policy_surrogate"

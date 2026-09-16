@@ -29,6 +29,7 @@ class AIMEEnv(BaseTextEnv):
         self.verifier = AIMEVerifier(
             ground_truth=self.ground_truth,
             evaluation_token_budget=int(env_config.get("evaluation_token_budget", 8192)),
+            strict_box_verify=bool(env_config.get("strict_box_verify", False)),
         )
         self.reward_policy = AIMERewardPolicy(
             length_penalty_weight=float(env_config.get("length_penalty_weight", 0.0)),

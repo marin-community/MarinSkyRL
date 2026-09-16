@@ -1,5 +1,10 @@
 """Behavior tests for terminal checkpoint export command construction."""
 
+from dataclasses import replace
+
+import pytest
+
+from cloud.iris import export_hf_checkpoint
 from cloud.iris.export_hf_checkpoint import ExportJobSpec, build_command
 from cloud.iris.terminal_policy import storage_user_from_resource_path
 from skyrl_train.hf_export_schema import HFExportRequest
@@ -77,3 +82,31 @@ def test_export_command_preserves_federated_submission_configs() -> None:
 def test_storage_user_is_derived_from_policy_paths() -> None:
     assert storage_user_from_resource_path("s3://bucket/tmp/ttl=14d/skyrl/users/alice/run/checkpoints") == "alice"
     assert storage_user_from_resource_path("s3://bucket/run/checkpoints") is None
+
+
+def test_requested_four_rank_export_reserves_whole_eight_gpu_node(monkeypatch, parse_hydra_overrides) -> None:
+    request = HFExportRequest(
+        step=2,
+        checkpoint_base_path="s3://bucket/marin/users/alice/run/checkpoints",
+        checkpoint_path="s3://bucket/marin/users/alice/run/checkpoints/global_step_2",
+        export_path="s3://bucket/marin/users/alice/run/exports",
+        model_path="BytedTsinghua-SIA/Open-MOPD-SmolLM3-3B-MixSFT",
+        num_nodes=1,
+        gpus_per_node=4,
+    )
+    monkeypatch.setattr(export_hf_checkpoint, "_read_hf_export_request", lambda _path: request)
+    parser = export_hf_checkpoint.argument_parser()
+    args = parser.parse_args(
+        ["--request", request.checkpoint_path, "--rl_config", "config.yaml", "--allocation-gpus-per-node", "8"]
+    )
+
+    spec = export_hf_checkpoint.request_spec(args, parser)
+    command = build_command(spec)
+    encoded = [command[index + 1] for index, value in enumerate(command) if value == "--skyrl_override"]
+    overrides = parse_hydra_overrides(encoded)
+
+    assert spec.request.gpus_per_node == 4
+    assert command[command.index("--gpus-per-node") + 1] == "8"
+    assert overrides["trainer.placement.policy_num_gpus_per_node"] == 4
+    with pytest.raises(ValueError, match="fewer GPUs than the saved policy geometry"):
+        build_command(replace(spec, allocation_gpus_per_node=2))

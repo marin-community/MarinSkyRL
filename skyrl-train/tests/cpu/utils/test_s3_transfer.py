@@ -1,17 +1,125 @@
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import multiprocessing
+from multiprocessing.connection import Connection
+import os
 from pathlib import Path
+import threading
+import time
+from types import SimpleNamespace
 
 from botocore.exceptions import ClientError, ReadTimeoutError
 from fsspec.exceptions import FSTimeoutError
 import pytest
+import rigging.filesystem.s3_compat as rigging_s3_compat
 
 from skyrl_train.io import io, s3fs
 
 
-def test_s3_client_has_explicit_transfer_timeouts_and_retries(monkeypatch):
-    sentinel = object()
+_MULTIPART_TEST_FILE_SIZE = 100 * 2**20
+_UPLOAD_PROCESS_TIMEOUT = 10
+_UPLOAD_REQUEST_TIMEOUT = 0.2
+
+
+@contextmanager
+def _withholding_s3_endpoint():
+    headers_seen = threading.Event()
+
+    class WithholdingS3Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, _format, *args):
+            pass
+
+        def handle_expect_100(self):
+            headers_seen.set()
+            return False
+
+        def do_POST(self):
+            payload = (
+                b'<?xml version="1.0" encoding="UTF-8"?>'
+                b'<CreateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                b"<Bucket>bucket</Bucket><Key>checkpoint.distcp</Key>"
+                b"<UploadId>withheld-upload</UploadId></CreateMultipartUploadResult>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            payload = (
+                b'<?xml version="1.0" encoding="UTF-8"?>'
+                b'<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                b"<Name>bucket</Name><Prefix>checkpoint.distcp/</Prefix><KeyCount>0</KeyCount>"
+                b"<MaxKeys>1</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_DELETE(self):
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), WithholdingS3Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", headers_seen
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=5)
+
+
+def _upload_to_withholding_endpoint(endpoint: str, checkpoint_shard: str, result_sender: Connection) -> None:
+    rigging_s3_compat._S3_TOTAL_TIMEOUT = _UPLOAD_REQUEST_TIMEOUT
+    request_bounds = rigging_s3_compat.s3_python_config_kwargs()
+    request_bounds["retries"] = {"total_max_attempts": 1, "mode": "standard"}
+    s3fs.s3_python_config_kwargs = request_bounds.copy
+    s3fs._S3_FS = None
+    os.environ.update(
+        {
+            "AWS_ACCESS_KEY_ID": "test",
+            "AWS_SECRET_ACCESS_KEY": "test",
+            "AWS_DEFAULT_REGION": "us-east-1",
+            "AWS_ENDPOINT_URL": endpoint,
+            "OT_AGENT_S3_ADDRESSING_STYLE": "path",
+            "NO_PROXY": "127.0.0.1",
+            "no_proxy": "127.0.0.1",
+        }
+    )
+    filesystem = s3fs.get_s3_fs()
+    filesystem.retries = 1
+
+    started = time.monotonic()
+    try:
+        io.upload_file(checkpoint_shard, "s3://bucket/checkpoint.distcp")
+    except (FSTimeoutError, ReadTimeoutError, TimeoutError) as error:
+        result_sender.send((type(error).__name__, time.monotonic() - started, getattr(error, "__notes__", [])))
+    else:
+        result_sender.send((None, time.monotonic() - started, None))
+    finally:
+        result_sender.close()
+
+
+def test_s3_client_uses_shared_request_bounds_and_bounded_retries(monkeypatch):
+    sentinel = SimpleNamespace(retries=None)
+    shared_request_bounds = {
+        "connect_timeout": object(),
+        "read_timeout": object(),
+        "max_pool_connections": object(),
+        "http_session_cls": object(),
+    }
     calls = []
     monkeypatch.setattr(s3fs, "_S3_FS", None)
     monkeypatch.delenv("OT_AGENT_S3_ADDRESSING_STYLE", raising=False)
+    monkeypatch.setattr(s3fs, "s3_python_config_kwargs", lambda: shared_request_bounds.copy())
     monkeypatch.setattr(
         s3fs.fsspec,
         "filesystem",
@@ -24,29 +132,66 @@ def test_s3_client_has_explicit_transfer_timeouts_and_retries(monkeypatch):
             "s3",
             {
                 "config_kwargs": {
-                    "connect_timeout": 60,
-                    "read_timeout": 300,
-                    "retries": {"max_attempts": 10, "mode": "adaptive"},
+                    **shared_request_bounds,
+                    "retries": {"total_max_attempts": 2, "mode": "standard"},
                     "s3": {"addressing_style": "virtual"},
                 }
             },
         )
     ]
+    assert sentinel.retries == 1
 
 
 def test_s3_client_allows_addressing_style_override(monkeypatch):
     calls = []
+    sentinel = SimpleNamespace(retries=None)
     monkeypatch.setattr(s3fs, "_S3_FS", None)
     monkeypatch.setenv("OT_AGENT_S3_ADDRESSING_STYLE", "path")
     monkeypatch.setattr(
         s3fs.fsspec,
         "filesystem",
-        lambda protocol, **kwargs: calls.append((protocol, kwargs)) or object(),
+        lambda protocol, **kwargs: calls.append((protocol, kwargs)) or sentinel,
     )
 
     s3fs.get_s3_fs()
 
     assert calls[0][1]["config_kwargs"]["s3"] == {"addressing_style": "path"}
+
+
+def test_s3_multipart_upload_fails_when_peer_withholds_continue(tmp_path):
+    checkpoint_shard = tmp_path / "checkpoint.distcp"
+    with checkpoint_shard.open("wb") as shard_file:
+        shard_file.truncate(_MULTIPART_TEST_FILE_SIZE)
+
+    with _withholding_s3_endpoint() as (endpoint, headers_seen):
+        context = multiprocessing.get_context("spawn")
+        result_receiver, result_sender = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_upload_to_withholding_endpoint,
+            args=(endpoint, str(checkpoint_shard), result_sender),
+            daemon=True,
+        )
+        process.start()
+        result_sender.close()
+        process.join(timeout=_UPLOAD_PROCESS_TIMEOUT)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=1)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1)
+            pytest.fail(f"multipart upload exceeded the {_UPLOAD_PROCESS_TIMEOUT}-second process deadline")
+
+        assert process.exitcode == 0
+        assert result_receiver.poll(), "upload process exited without a result"
+        error_type, elapsed, error_notes = result_receiver.recv()
+        result_receiver.close()
+
+    assert headers_seen.is_set(), "the peer did not receive an Expect request"
+    assert error_type in {"FSTimeoutError", "ReadTimeoutError", "TimeoutError"}
+    assert any(str(checkpoint_shard) in note for note in error_notes)
+    assert any("s3://bucket/checkpoint.distcp" in note for note in error_notes)
+    assert 0.1 < elapsed < 10
 
 
 @pytest.mark.parametrize(

@@ -64,6 +64,7 @@ nemotron_ultra:
 
 aime:
   evaluation_token_budget: 8192
+  strict_box_verify: false
   length_penalty_weight: 0.0
   target_length: 768
   truncated_penalty: -2.0

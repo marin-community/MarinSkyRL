@@ -43,6 +43,7 @@ def _make_config(
     policy_mini_batch_size: int = 32,
     micro_train_batch_size_per_gpu: int = 1,
     n_samples_per_prompt: int = 8,
+    online_draft_training: bool = False,
     colocate_policy_ref: bool = True,
     use_reference: bool = True,
     critic: bool = False,
@@ -79,6 +80,8 @@ def _make_config(
     }
     if strategy is not None:
         config["trainer"]["strategy"] = strategy
+    if online_draft_training:
+        config["generator"]["speculative_decoding"] = {"training": {"interval_steps": 4}}
     return config
 
 
@@ -239,6 +242,23 @@ class TestRolePlanAccounting:
     def test_disaggregated_with_one_engine(self):
         plan = derive_role_plan(_make_config(colocate_all=False, policy_num_nodes=1, num_inference_engines=1))
         assert derive_num_nodes(plan) == 2
+
+    def test_online_draft_training_adds_a_dedicated_node(self):
+        plan = derive_role_plan(
+            _make_config(
+                colocate_all=False,
+                policy_num_nodes=4,
+                num_inference_engines=1,
+                online_draft_training=True,
+            )
+        )
+
+        draft_trainer = plan.claim("draft_trainer")
+        assert draft_trainer.backend == "torch"
+        assert draft_trainer.replicas == 1
+        assert draft_trainer.colocation_group == "draft_trainer"
+        assert plan.bundles[-1].role_ids == ("draft_trainer",)
+        assert derive_num_nodes(plan) == 6
 
     def test_policy_reference_colocation_and_rollout_resolve_to_ten_nodes(self):
         plan = derive_role_plan(
@@ -531,6 +551,17 @@ class TestBuildJobSpec:
         spec = _build_basic_spec(tmp_path, run_id="round-trip")
         parsed = job_spec(asdict(spec))
         assert parsed == spec
+
+    def test_online_draft_role_round_trips_through_job_spec(self, tmp_path):
+        spec = _build_basic_spec(
+            tmp_path,
+            config_overrides={"online_draft_training": True},
+        )
+
+        parsed = job_spec(asdict(spec))
+
+        assert parsed == spec
+        assert parsed.request.topology.role_plan.claim("draft_trainer").replicas == 1
 
     def test_serialized_plan_rejects_bundle_geometry_that_disagrees_with_claims(self, tmp_path):
         spec = _build_basic_spec(tmp_path)

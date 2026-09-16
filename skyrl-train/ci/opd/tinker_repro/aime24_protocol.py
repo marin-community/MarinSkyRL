@@ -29,5 +29,6 @@ def evaluation_hydra_arguments() -> tuple[str, ...]:
         f"generator.eval_sampling_params.top_k={TOP_K}",
         f"generator.eval_n_samples_per_prompt={NUM_SAMPLES}",
         f"environment.skyrl_gym.aime.evaluation_token_budget={MAX_TOKENS}",
+        "environment.skyrl_gym.aime.strict_box_verify=true",
         f"environment.skyrl_gym.aime.max_gen_length={MAX_TOKENS}",
     )

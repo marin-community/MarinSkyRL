@@ -1,18 +1,19 @@
-# Snowball 67B-A2B on the Megatron trainer: four PP2 x EP8 policy nodes and one
-# expert-parallel vLLM node. Sized as a two-step smoke of rollout, update, and sync.
-# Launch policy nodes with 1800GB of host memory and 1000GB of disk. The Megatron
-# checkpoint writer keeps optimizer state sharded across data-parallel ranks and
-# stages each torch-dist shard in /tmp until its S3 upload finishes. Resume with
-# the same tensor, pipeline, context, and expert geometry.
+# Snowball 67B-A2B with an online EAGLE-3 draft on long-form RLVR-MATH. The policy uses four
+# PP2 x EP8 Megatron nodes; one DP8/EP8 vLLM node serves while a dedicated
+# DraftTrainer actor runs on the extra node derived by the Iris request builder.
+# The exact target revision is supplied to the launcher, while the immutable
+# public draft loads directly from Hugging Face. Every fourth step captures up to
+# 131,072 tokens for an asynchronous update. Candidates that pass the holdout
+# gate become the accepted draft and refresh serving ranks at the next boundary.
 entrypoint: standard
 
 context_budget:
-  request_window_tokens: 2048
-  max_new_tokens_per_turn: 512
+  request_window_tokens: 9856
+  max_new_tokens_per_turn: 8192
   max_turns: 1
 
 environment:
-  env_class: gsm8k
+  env_class: aime
 
 trainer:
   strategy: megatron
@@ -24,7 +25,7 @@ trainer:
     advantage_estimator: grpo
     use_kl_loss: false
   epochs: 1
-  max_steps: 2
+  max_steps: 25
   update_epochs_per_batch: 1
   train_batch_size: 32
   policy_mini_batch_size: 32
@@ -33,7 +34,7 @@ trainer:
   micro_train_batch_size_per_gpu: 1
   eval_before_train: false
   eval_interval: -1
-  ckpt_interval: 2
+  ckpt_interval: 5
   resume_mode: none
   logger: console
   policy:
@@ -46,7 +47,6 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
-      optimizer_checkpoint_sharding_type: dp_reshardable
   placement:
     colocate_all: false
     policy_num_nodes: 4
@@ -67,6 +67,28 @@ generator:
   weight_sync_backend: nccl
   async_engine: true
   batched: false
+  engine_init_kwargs:
+    async_scheduling: false
+  speculative_decoding:
+    method: eagle3
+    model:
+      source_uri: hf://laion/snowball-64k-eagle3-draft-r2egym
+      source_identity: 4bdb47c08e5b5190bea3c7a93c3e14470230e469
+    num_speculative_tokens: 3
+    training:
+      interval_steps: 4
+      max_tokens_per_update: 131072
+      max_window_tokens: 16384
+      max_tokens_per_micro_batch: 8192
+      max_sequences_per_prompt_group: 2
+      min_train_sequences: 6
+      holdout_fraction: 0.25
+      min_holdout_sequences: 3
+      epochs_per_update: 1
+      learning_rate: 5.0e-5
+      max_validation_loss_increase: 0.05
+      max_validation_agreement_decrease: 0.01
+      reserved_gpu_memory_gib: 12
   sampling_params:
     temperature: 1.0
     top_p: 1.0

@@ -3,6 +3,7 @@ from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
+OnlineEagleResult = Dict[str, Any] | List[Dict[str, Any]]
 
 
 class PromptSamplingOverride(TypedDict):
@@ -170,4 +171,16 @@ class InferenceEngineInterface(ABC):
     @abstractmethod
     async def resume_generation(self) -> None:
         """Resume the scheduler after a weight update."""
+        raise NotImplementedError()
+
+    async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> OnlineEagleResult:
+        """Begin a bounded online-EAGLE capture interval when supported."""
+        raise NotImplementedError()
+
+    async def seal_online_eagle_capture(self, destination: str) -> OnlineEagleResult:
+        """Publish the active capture to cloud storage."""
+        raise NotImplementedError()
+
+    async def update_draft_weights(self, weights_path: str) -> OnlineEagleResult:
+        """Best-effort update the resident draft from one completed object."""
         raise NotImplementedError()

@@ -97,6 +97,19 @@ def find_files(path: str) -> dict[str, int]:
     return {str(file_path): int(detail["size"]) for file_path, detail in details.items()}
 
 
+def file_size(path: str) -> int:
+    """Return the size of one exact local or cloud object."""
+    filesystem = _get_filesystem(path)
+    normalized = filesystem._strip_protocol(path) if is_cloud_path(path) else path
+    if path.startswith("s3://"):
+        detail = call_with_s3_retry(filesystem, filesystem.info, normalized)
+    else:
+        detail = filesystem.info(normalized)
+    if detail.get("type") == "directory":
+        raise IsADirectoryError(path)
+    return int(detail["size"])
+
+
 def makedirs(path: str, exist_ok: bool = True) -> None:
     """Create directories. Only applies to local filesystem paths."""
     if not is_cloud_path(path):
@@ -149,7 +162,21 @@ def _upload(local_path: str, cloud_path: str, *, recursive: bool) -> None:
     is_s3_path = cloud_path.startswith("s3://")
     destination = filesystem._strip_protocol(cloud_path) if is_s3_path else cloud_path
     if is_s3_path:
-        call_with_s3_retry(filesystem, filesystem.put, local_path, destination, recursive=recursive)
+        try:
+            # Botocore retries a request within its current multipart upload. Retrying
+            # the whole directory here would restart completed shard uploads and
+            # multiply the whole-request deadline.
+            call_with_s3_retry(
+                filesystem,
+                filesystem.put,
+                local_path,
+                destination,
+                recursive=recursive,
+                max_attempts=1,
+            )
+        except Exception as error:
+            error.add_note(f"S3 upload failed from {local_path} to {cloud_path}")
+            raise
     else:
         filesystem.put(local_path, destination, recursive=recursive)
 

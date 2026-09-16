@@ -30,6 +30,7 @@ import yaml
 from cloud.iris.paths import resolve_paths_in_dict
 from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, validate_distillation_runtime_support
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
+from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 
 # Directory containing the bundled example RL config YAML files.
@@ -53,7 +54,7 @@ RL_ENTRYPOINT_MODULES = {
     RLEntrypoint.FULLY_ASYNC: "skyrl_train.entrypoints.fully_async",
     RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
     RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
-    RLEntrypoint.STANDARD: "skyrl_train.entrypoints.main_base",
+    RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
     RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
     RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
 }
@@ -436,6 +437,7 @@ SKYRL_INTERNAL_ENGINE_KWARGS = frozenset(
         "tokenizer",  # Passed from external tokenizer
         "custom_weight_loader",  # Hardcoded SkyRL path
         "skip_tokenizer_init",  # Hardcoded True for SGLang
+        "speculative_config",  # Derived from generator.speculative_decoding
     }
 )
 
@@ -615,7 +617,21 @@ def parse_rl_config(
     # regardless of the working directory at runtime. Skip data.train_data /
     # data.val_data as they may be HF repo IDs.
     trainer = resolve_paths_in_dict(trainer, skip_keys={"policy.model.path"})
-    generator = resolve_paths_in_dict(generator)
+    generator = resolve_paths_in_dict(generator, skip_keys={"speculative_decoding.model.source_uri"})
+
+    parse_speculative_decoding_config(
+        generator.get("speculative_decoding"),
+        backend=generator.get("backend", "vllm"),
+        run_engines_locally=generator.get("run_engines_locally", True),
+        entrypoint=entrypoint,
+        colocate_all=trainer.get("placement", {}).get("colocate_all", True),
+        num_inference_engines=generator.get("num_inference_engines", 1),
+        tensor_parallel_size=generator.get("inference_engine_tensor_parallel_size", 4),
+        pipeline_parallel_size=generator.get("inference_engine_pipeline_parallel_size", 1),
+        async_engine=generator.get("async_engine", True),
+        engine_init_kwargs=generator.get("engine_init_kwargs", {}),
+        context=f"{path}: generator.speculative_decoding",
+    )
 
     if model_override:
         trainer.setdefault("policy", {}).setdefault("model", {})["path"] = model_override
@@ -772,6 +788,7 @@ def format_hydra_arg(key: str, value: Any, prefix: str = "") -> str:
 _OPTIONAL_HYDRA_PATTERNS = {
     ".distillation",
     ".engine_init_kwargs",
+    ".speculative_decoding",
     ".hf_hub_",
     ".enable_db_registration",
     ".optimizer_kwargs",
@@ -806,11 +823,9 @@ def _role_gpus_per_node(
     placement: Dict[str, Any],
     key: str,
     launch_gpus_per_node: int,
-    *,
-    preserve_smaller_value: bool,
 ) -> int:
     configured = placement.get(key)
-    if preserve_smaller_value and configured is not None and int(configured) <= launch_gpus_per_node:
+    if configured is not None and int(configured) <= launch_gpus_per_node:
         return int(configured)
     return launch_gpus_per_node
 
@@ -831,7 +846,6 @@ def build_checkpoint_export_hydra_args(
         placement,
         "policy_num_gpus_per_node",
         gpus_per_node,
-        preserve_smaller_value=False,
     )
     _apply_policy_model_source(trainer, exp_args)
 
@@ -911,7 +925,6 @@ def build_skyrl_hydra_args(
             placement,
             key,
             gpus_per_node,
-            preserve_smaller_value=True,
         )
 
     placement["policy_num_gpus_per_node"] = _resolve_gpus_per_node("policy_num_gpus_per_node")

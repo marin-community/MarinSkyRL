@@ -1,12 +1,13 @@
 import torch
 from skyrl_train.utils.progress import tqdm
 from typing import Any, Dict, List, Protocol
-from pathlib import Path
 from loguru import logger
 from collections import defaultdict
 from dataclasses import dataclass
 
 from skyrl_train.utils import Timer
+from skyrl_train.io import io
+from marinskyrl.resource_locator import join_resource_path
 
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
@@ -54,10 +55,10 @@ class _EvaluationAccumulator(Protocol):
     def record(self, request: TrajectoryRequestBatch, batch: TrajectoryBatch, uids: List[str]) -> None: ...
 
 
-def evaluation_dump_dir(export_path: Path, global_step: int | None) -> Path:
+def evaluation_dump_dir(export_path: str, global_step: int | None) -> str:
     """Return the directory containing one evaluation session's persisted results."""
     session = "eval_only" if global_step is None else f"global_step_{global_step}_evals"
-    return export_path / "dumped_evals" / session
+    return join_resource_path(export_path, "dumped_evals", session)
 
 
 @dataclass
@@ -188,9 +189,8 @@ def _dump_eval_results(
     if not cfg.trainer.dump_eval_results:
         return
     with Timer("dump_eval_results"):
-        # TODO(Ben): route eval dumps through skyrl_train.io when evaluation exports support cloud paths.
-        data_save_dir = evaluation_dump_dir(Path(cfg.trainer.export_path), global_step)
-        data_save_dir.mkdir(parents=True, exist_ok=True)
+        data_save_dir = evaluation_dump_dir(str(cfg.trainer.export_path), global_step)
+        io.makedirs(data_save_dir, exist_ok=True)
         dump_per_dataset_eval_results(
             data_save_dir,
             tokenizer,
