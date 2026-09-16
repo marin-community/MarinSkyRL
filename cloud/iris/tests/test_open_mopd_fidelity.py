@@ -324,6 +324,12 @@ def test_sync_tree_skips_published_checkpoint_files_and_commits_pointer_last(
         def put_file(self, local: str, remote: str) -> None:
             self.files[remote] = Path(local).read_bytes()
             self.uploads.append(remote)
+            if remote == "bucket/run/control-manifest.json":
+                pointer.write_text("6")
+
+        def pipe_file(self, remote: str, payload: bytes) -> None:
+            self.files[remote] = payload
+            self.uploads.append(remote)
 
     checkpoint_root = tmp_path / "checkpoints"
     step_2 = checkpoint_root / "global_step_2" / "actor" / "model.pt"
@@ -347,8 +353,23 @@ def test_sync_tree_skips_published_checkpoint_files_and_commits_pointer_last(
     assert filesystem.files["bucket/run/checkpoints/global_step_4/actor/model.pt"] == b"new-weights"
     assert "bucket/run/checkpoints/global_step_6/actor/model.pt" not in filesystem.files
     assert filesystem.files["bucket/run/control-manifest.json"] == b"new-manifest"
+    assert pointer.read_text() == "6"
     assert filesystem.files["bucket/run/checkpoints/latest_checkpointed_iteration.txt"] == b"4"
     assert filesystem.uploads[-1] == "bucket/run/checkpoints/latest_checkpointed_iteration.txt"
+    pointer.unlink()
+    original_rglob = Path.rglob
+
+    def rglob_after_checkpoint(tmp_path_: Path, pattern: str):
+        pointer.write_text("2")
+        return original_rglob(tmp_path_, pattern)
+
+    filesystem.uploads.clear()
+    monkeypatch.setattr(Path, "rglob", rglob_after_checkpoint)
+
+    sync_tree(tmp_path, OUTPUT_URI)
+
+    assert "bucket/run/checkpoints/latest_checkpointed_iteration.txt" not in filesystem.uploads
+    assert filesystem.files["bucket/run/checkpoints/latest_checkpointed_iteration.txt"] == b"4"
 
 
 def test_resume_manifest_rejects_mismatched_run_identity() -> None:

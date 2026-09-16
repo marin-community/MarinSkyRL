@@ -346,22 +346,25 @@ def _checkpoint_step(relative: Path) -> int | None:
 
 def sync_tree(local: Path, output_uri: str) -> None:
     filesystem, target = fs_and_path(output_uri)
-    sources = sorted((source for source in local.rglob("*") if source.is_file()), key=lambda path: path.as_posix())
-    sources.sort(key=lambda path: path.name == LATEST_CHECKPOINT_NAME)
     pointer = local / CHECKPOINT_DIRECTORY_NAME / LATEST_CHECKPOINT_NAME
+    pointer_payload = None
     committed_step = None
     if pointer.is_file():
-        pointer_value = pointer.read_text().strip()
+        pointer_payload = pointer.read_bytes()
+        pointer_value = pointer_payload.decode().strip()
         if not pointer_value.isdigit():
             raise ValueError(f"Invalid local checkpoint iteration {pointer_value!r}")
         committed_step = int(pointer_value)
+    sources = sorted((source for source in local.rglob("*") if source.is_file()), key=lambda path: path.as_posix())
+    sources.sort(key=lambda path: path.name == LATEST_CHECKPOINT_NAME)
     source_entries = [
         (source, source.relative_to(local), _checkpoint_step(source.relative_to(local))) for source in sources
     ]
     upload_entries = [
         (source, relative, step)
         for source, relative, step in source_entries
-        if step is None or (committed_step is not None and step <= committed_step)
+        if (source != pointer or pointer_payload is not None)
+        and (step is None or (committed_step is not None and step <= committed_step))
     ]
     checkpoint_sources = {source for source, _relative, step in upload_entries if step is not None}
     remote_sizes: dict[str, int] = {}
@@ -376,7 +379,11 @@ def sync_tree(local: Path, output_uri: str) -> None:
         if source in checkpoint_sources and remote_sizes.get(relative.as_posix()) == source.stat().st_size:
             continue
         filesystem.makedirs(posixpath.dirname(destination), exist_ok=True)
-        filesystem.put_file(str(source), destination)
+        if source == pointer:
+            assert pointer_payload is not None
+            filesystem.pipe_file(destination, pointer_payload)
+        else:
+            filesystem.put_file(str(source), destination)
 
 
 def reject_existing_output(output_uri: str, manifest_name: str = CONTROL_MANIFEST_NAME) -> None:
