@@ -26,6 +26,7 @@ import math
 import pytest
 import ray
 import torch
+from omegaconf import open_dict
 from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
@@ -69,6 +70,9 @@ def _layout_config(tmp_path, layout) -> tuple:
     cfg.trainer.use_sample_packing = packing
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    if cp > 1:
+        with open_dict(cfg.trainer.policy.megatron_config.transformer_config_kwargs):
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs.cp_comm_type = "all_gather"
     cfg.trainer.policy.fsdp_config.moe_router_replay = True
     return cfg, model_path
 
