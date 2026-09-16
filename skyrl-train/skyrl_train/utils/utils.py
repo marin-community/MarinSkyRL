@@ -583,6 +583,20 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 def validate_cfg(cfg: DictConfig):
     distillation_plan = compile_distillation_plan_from_config(cfg)
     validate_distillation_runtime_support(distillation_plan)
+    if (
+        distillation_plan is not None
+        and distillation_plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+        and cfg.trainer.strategy in {"fsdp", "fsdp2", "deepspeed"}
+        and (
+            cfg.trainer.use_sample_packing
+            or cfg.trainer.policy.sequence_parallel_size != 1
+            or cfg.trainer.policy.fsdp_config.context_parallel_size != 1
+        )
+    ):
+        raise ValueError(
+            "student_topk_policy_surrogate on FSDP2/DeepSpeed requires trainer.use_sample_packing=false, "
+            "trainer.policy.sequence_parallel_size=1, and trainer.policy.fsdp_config.context_parallel_size=1"
+        )
     trajectory_selector = trajectory_selector_from_config(cfg)
     if trajectory_selector is not None:
         if cfg.trainer.step_wise_training:

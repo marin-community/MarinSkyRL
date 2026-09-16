@@ -96,9 +96,65 @@ def test_selected_topk_rollouts_require_matching_teacher_width():
     )
     cfg.trainer.logger = "console"
     cfg.generator.sampling_params.logprobs = 16
+    cfg.trainer.use_sample_packing = False
 
     validate_cfg(cfg)
 
     cfg.generator.sampling_params.logprobs = 8
     with pytest.raises(ValueError, match="matching teacher top_k"):
+        validate_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        ("trainer.use_sample_packing", True),
+        ("trainer.policy.sequence_parallel_size", 2),
+        ("trainer.policy.fsdp_config.context_parallel_size", 2),
+    ],
+)
+def test_selected_topk_rejects_unsupported_policy_geometry_before_allocation(path, value):
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="ppo_base_config")
+    OmegaConf.set_struct(cfg, False)
+    cfg = OmegaConf.merge(
+        cfg,
+        {
+            "trainer": {
+                "algorithm": {
+                    "distillation": {
+                        "objective": "student_topk_policy_surrogate",
+                        "routing_plan": "opd",
+                        "coefficient": 1.0,
+                        "reward_mode": "replace",
+                    }
+                }
+            },
+            "teachers": {
+                "primary": {
+                    "source": "local_inference",
+                    "placement": "pinned",
+                    "model": {"path": "Qwen/teacher", "revision": "teacher-revision"},
+                    "backend": "vllm",
+                    "evidence": "student_selected_topk",
+                    "top_k": 16,
+                    "resources": {
+                        "num_nodes": 1,
+                        "gpus_per_node": 1,
+                        "tensor_parallel_size": 1,
+                        "colocation_group": "teacher",
+                    },
+                }
+            },
+            "teacher_routing": {
+                "opd": {"revision": "route-revision", "routes": {"default": {"teacher": "primary", "weight": 1.0}}}
+            },
+        },
+    )
+    cfg.trainer.logger = "console"
+    cfg.trainer.use_sample_packing = False
+    cfg.generator.sampling_params.logprobs = 16
+    OmegaConf.update(cfg, path, value)
+
+    with pytest.raises(ValueError, match="requires trainer.use_sample_packing=false"):
         validate_cfg(cfg)
