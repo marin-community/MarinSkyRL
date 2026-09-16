@@ -111,6 +111,12 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
     )
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 
+    requested_logprobs = [
+        value
+        for value in (cfg.generator.sampling_params.logprobs, cfg.generator.eval_sampling_params.logprobs)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    ]
+
     role = InferenceEngineRoleConfig(
         pretrain=cfg.trainer.policy.model.path,
         backend=cfg.generator.backend,
@@ -128,6 +134,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         decode_context_parallel_size=cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
         shared_pg=colocate_pg,
         inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
+        max_logprobs=max([1, *requested_logprobs]),
     )
     engine_init_kwargs = {
         **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
