@@ -135,6 +135,7 @@ def main() -> None:
     cases.append(("grug_block_random_init", *_real_block_rows()))
 
     print(f"tokens={TOKENS} top_k={TOP_K} experts={EXPERTS} hidden={HIDDEN} repeats={REPEATS}")
+    varied: list[str] = []
     for name, rows, indices, num_tokens in cases:
         inexact_bound = _possibly_inexact_fraction(rows, indices, num_tokens)
         former = _count_varying(_former_combine, rows, indices, num_tokens)
@@ -151,12 +152,14 @@ def main() -> None:
             f"combine_routed_rows varied fp32={fixed[0]} bf16={fixed[1]}"
         )
         if fixed != (0, 0):
-            raise SystemExit(f"combine_routed_rows varied between launches on {name}: fp32={fixed[0]} bf16={fixed[1]}")
+            varied.append(f"{name}: fp32={fixed[0]} bf16={fixed[1]}")
     print()
     print("READ IT LIKE THIS:")
     print("  former varied fp32 > 0   -> the shipped combine was nondeterministic on this device, this shape.")
     print("  former varied bf16 > 0   -> and it reached the residual stream, which the routers downstream amplify.")
     print("  combine_routed_rows must read 0 / 0 on every row.")
+    if varied:
+        raise SystemExit("combine_routed_rows varied between launches on " + "; ".join(varied))
 
 
 if __name__ == "__main__":

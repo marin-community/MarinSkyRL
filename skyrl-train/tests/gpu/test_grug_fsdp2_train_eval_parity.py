@@ -50,13 +50,14 @@ TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 POLICY_WORLD_SIZE = 2
 # The batch is built with exactly this many rows and train_batch_size is set to match. They must
 # agree: the ratio diagnostics finalize on the LAST micro-step of the accumulation window
-# (`worker.py:1455`), so a batch wider than train_batch_size leaves that window open and the metric
+# (`worker.py:1338`), so a batch wider than train_batch_size leaves that window open and the metric
 # never appears -- which is how the first run of this test died on a bare KeyError.
 BATCH_ROWS = 4
 
 # Russell Power's tolerance for the same gate on the Megatron backend. Not zero: cuBLAS picks
 # kernels per GEMM shape, so equal micro-batch sizes are required and a little rounding remains.
-# Our failing arms report 1.697, three orders of magnitude above this.
+# Our E6-geometry arm reports 1.697 and the widest cluster arm 2.2 -- both three orders of
+# magnitude above this.
 TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE = 1e-3
 
 # Snowball's attention geometry and window at a fraction of its width and depth.
@@ -118,7 +119,7 @@ def _config(model_path: str, *, use_grouped_mm: bool):
     cfg.trainer.policy_mini_batch_size = BATCH_ROWS
     # 🚨 n_samples_per_prompt MULTIPLIES the per-rank mini-batch:
     #   policy_mini_batch_size_per_gpu = policy_mini_batch_size * n_samples_per_prompt // dp_size
-    # (`worker.py:1069`), and accumulation_steps is that divided by the micro size. The base config
+    # (`worker.py:988`), and accumulation_steps is that divided by the micro size. The base config
     # ships 5, which made the window 10 micro-steps wide while each rank held only 2 rows -- so
     # `(local_step + 1) % accumulation_steps == 0` never fired, the ratio diagnostics never
     # finalized, and every arm reported no metric at all. The batch here is a fixed set of rows,

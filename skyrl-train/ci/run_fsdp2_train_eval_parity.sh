@@ -46,18 +46,33 @@ probe_status=$?
 echo "::: COMBINE PROBE EXIT=$probe_status"
 
 # No -x anywhere below: every arm is an independent result and -x would report the first failure while
-# silently running none of the others. Of the Qwen grouped-GEMM gates only the parity arms (G3b-1 against
-# HF eager, G3b-4 flag-off) run here: G3b-2 asserts the router-replay controller is gone after a
-# grad-enabled forward, which the Stage-7 teardown deferral (model_wrapper.py) made false, and G3b-5 then
-# inherits that leaked controller. Both fail on the branch this one started from, not because of it.
+# silently running none of the others. G3b-2 stays out: it asserts the router-replay controller is gone
+# after a grad-enabled forward, which the Stage-7 teardown deferral (model_wrapper.py) made false, and it
+# fails on the branch this one started from rather than because of it. G3b-5 is back in -- it was dropped
+# for inheriting G3b-2's leaked controller, but this filter already excludes G3b-2, so in a fresh process
+# there is nothing to inherit, and G3b-5 is the only exact-equality (torch.equal) arm on the grouped path
+# whose numerics this change alters. The surviving alternatives cannot stand in for it: G3b-1 runs at
+# atol 2e-2, which is blind to a last-bit change, and G3b-4 exercises the flag-off path.
 "$PYTHON" -m pytest tests/gpu/gpu_ci/test_grug_grouped_mm_parity.py tests/gpu/gpu_ci/test_grouped_gemm_parity.py \
-  -k "g4a or g3b_1 or g3b_4" -q -rA -s -p no:cacheprovider
-one_gpu_status=$?
+  -k "g4a or g3b_1 or g3b_4 or g3b_5" -q -rA -s -p no:cacheprovider 2>&1 | tee one_gpu.log
+one_gpu_status=${PIPESTATUS[0]}
 echo "::: ONE-GPU PARITY EXIT=$one_gpu_status"
 
-"$PYTHON" -m pytest tests/gpu/test_grug_fsdp2_train_eval_parity.py -q -rA -s -p no:cacheprovider
-fsdp2_status=$?
+"$PYTHON" -m pytest tests/gpu/test_grug_fsdp2_train_eval_parity.py -q -rA -s -p no:cacheprovider 2>&1 | tee fsdp2.log
+fsdp2_status=${PIPESTATUS[0]}
 echo "::: FSDP2 PARITY EXIT=$fsdp2_status"
+
+# An all-skip pytest exits 0, so a green status is not evidence that anything was measured. The GPU
+# count above catches only one of the three ways require_hoppers skips (it also skips on a narrowed
+# CUDA_VISIBLE_DEVICES and on compute capability below 9). Assert on the OUTCOME instead of
+# re-deriving the preconditions, so this cannot drift from the helper it stands in for.
+for stage in one_gpu fsdp2; do
+  eval "status=\$${stage}_status"
+  if [ "$status" -eq 0 ] && ! grep -qE "[0-9]+ passed" "$stage.log"; then
+    echo "::: $stage MEASURED NOTHING -- every arm skipped, which exits 0"
+    eval "${stage}_status=1"
+  fi
+done
 
 # Every stage ran; now let the job's state say whether any of them failed.
 [ "$probe_status" -eq 0 ] && [ "$one_gpu_status" -eq 0 ] && [ "$fsdp2_status" -eq 0 ]

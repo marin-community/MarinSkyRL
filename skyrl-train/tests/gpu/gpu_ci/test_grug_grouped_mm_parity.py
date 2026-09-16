@@ -1,6 +1,6 @@
 """Native-Grug grouped_mm parity gates (1 GPU, EP=1).
 
-The workstream turns `trainer.policy.fsdp_config.use_grouped_mm=true` on to replace the eager
+Turning `trainer.policy.fsdp_config.use_grouped_mm=true` on replaces the eager
 256-expert Python loop, and then reads the step time as a result. Nothing gated that path before
 this file: `test_grouped_gemm_parity.py` covers the *generic HF* `moe_grouped_gemm` swap and never
 passes `use_grouped_mm=True`, so the native Grug path -- `GrugMoeSparseMoeBlock.enable_grouped_mm`
@@ -17,6 +17,9 @@ Gates:
   G4a-4  eager vs grouped backward parity.
   G4a-5  grouped forward is deterministic across repeats -- reading uninitialized memory would not
          be, and this catches it without depending on a tolerance.
+  G4a-6  the combine is repeatable while another stream contends for the device. This is the arm
+         that sees the atomic-ordering defect: the CPU tests pin the reduction ORDER but cannot
+         reach a CUDA atomic, so nothing below the GPU holds this invariant.
 
 Run::
 

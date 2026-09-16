@@ -33,9 +33,17 @@ def test_combine_routed_rows_sums_each_token_in_ascending_expert_order():
 
     Per token t, in ascending expert order, the rows are ``big, 1, -big, 3 + t`` with ``big`` at least
     2**24, so ``big + 1`` rounds back to ``big`` in float32 and the chain reduces to exactly ``3 + t``.
-    Four of the 24 orders, the ones that leave the residual last and let the big pair cancel first,
-    give the same answer; the other twenty, the reversed chain among them, and a bf16 accumulator do
-    not.
+    Two of the 24 orders reproduce that on every token -- the two that absorb the ``1`` into ``big``
+    before the big pair cancels; two more do it for every token but t=0, where ``1 - 2**24`` happens
+    to be exact in float32. Enumerated, not argued.
+
+    ⚠️ What this pins is the ORDER, and only that. It does not catch a revert to the shipped
+    ``scatter_add`` kernel: CPU ``scatter_add`` reduces in flat source order and the stable argsort by
+    token preserves flat order within a token, so the two are bit-identical on CPU for every input.
+    The atomic-ordering defect is a CUDA-only invariant and the GPU gates are what hold it. Nor does
+    this pin the accumulator dtype -- the fixture values are all exact in bf16, so a bf16 accumulator
+    leaves it green; ``test_combine_routed_rows_is_exact_when_the_rows_share_a_scale`` and
+    ``test_grug_moe.py::test_bfloat16_sparse_moe_forward_uses_float32_accumulation`` cover that.
     """
     num_tokens = 6
     selected, token_indices, expert_of_row = _routing(num_tokens, seed=3)
