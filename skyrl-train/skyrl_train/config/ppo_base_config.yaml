@@ -122,7 +122,7 @@ trainer:
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: 1
       moe_token_dispatcher_type: "alltoall"
-      moe_router_replay: false
+      moe_router_replay: false  # replay rollout-captured expert choices; strategies: fsdp, fsdp2, megatron
       moe_grouped_gemm: false
       use_grouped_mm: false
       ep_comm_backend: "torch"
@@ -148,7 +148,7 @@ trainer:
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: 1
       moe_token_dispatcher_type: "alltoall"
-      moe_router_replay: false
+      moe_router_replay: false  # replay rollout-captured expert choices; strategies: fsdp, fsdp2, megatron
       moe_grouped_gemm: false
       use_grouped_mm: false
       ep_comm_backend: "torch"

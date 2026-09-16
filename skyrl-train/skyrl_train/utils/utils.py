@@ -55,7 +55,7 @@ from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTI
 from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
-MOE_ROUTER_REPLAY_STRATEGIES = frozenset({"fsdp", "fsdp2"})
+MOE_ROUTER_REPLAY_STRATEGIES = frozenset({"fsdp", "fsdp2", "megatron"})
 
 
 def moe_router_replay_requested(cfg: DictConfig, role: str = "policy") -> bool:
@@ -67,7 +67,7 @@ def moe_router_replay_enabled(cfg: DictConfig) -> bool:
 
 
 def validate_moe_router_replay_config(cfg: DictConfig) -> None:
-    """Reject router replay on strategies that silently ignore captured routes."""
+    """Reject router replay on strategies whose workers never consume captured routes."""
     if moe_router_replay_requested(cfg) and cfg.trainer.strategy not in MOE_ROUTER_REPLAY_STRATEGIES:
         supported = ", ".join(sorted(MOE_ROUTER_REPLAY_STRATEGIES))
         raise ValueError(
@@ -483,6 +483,28 @@ def validate_megatron_cfg(cfg: DictConfig):
         assert config.sequence_parallel_size == 1, (
             f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"
         )
+        # The fused router bypasses the replay hook entirely; catch it at config
+        # validation on the launcher CPU instead of at model build on the GPUs.
+        if config.fsdp_config.get("moe_router_replay", False):
+            for kwargs_name in ("transformer_config_kwargs", "model_config_kwargs"):
+                for key_path, value in _iter_config_kwargs(config.megatron_config.get(kwargs_name, {})):
+                    if key_path[-1] == "moe_router_fusion" and value:
+                        raise ValueError(
+                            f"trainer.{worker_type}.megatron_config.{kwargs_name}.{'.'.join(key_path)} "
+                            "must stay false with moe_router_replay: the fused router bypasses the replay hook"
+                        )
+
+
+def _iter_config_kwargs(node):
+    """Yield ``(key_path, value)`` for every leaf in a (possibly nested) kwargs mapping."""
+    if not node:
+        return
+    for key, value in node.items():
+        if isinstance(value, dict):
+            for path, leaf in _iter_config_kwargs(value):
+                yield (key, *path), leaf
+        else:
+            yield (key,), value
 
 
 def _validate_cp_cfg(cfg: DictConfig):
