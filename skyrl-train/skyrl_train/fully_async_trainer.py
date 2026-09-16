@@ -482,6 +482,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.admission_stall_timeout = int(cfg.trainer.fully_async.admission_stall_timeout)
         if self.admission_stall_timeout <= 0:
             raise ValueError("trainer.fully_async.admission_stall_timeout must be positive")
+        configured_publication_steps = OmegaConf.select(
+            cfg,
+            "trainer.fully_async.policy_publication_steps",
+            default=None,
+        )
+        self.policy_publication_steps = (
+            None
+            if configured_publication_steps is None
+            else frozenset(int(step) for step in configured_publication_steps)
+        )
         self._group_selection_policy = GroupSelectionPolicy.for_fully_async(
             cfg.trainer.algorithm.dynamic_sampling.type,
             criteria=resolve_dynamic_sampling_criteria(
@@ -908,24 +918,35 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     #    max_staleness_steps accounting — exactly like stock
                     #    fully_async, which never drains trial orchestration. This
                     #    block is now byte-identical for fan-out ON and OFF.
-                    with Timer("sync_weights", self.all_timings) as weight_update_timer:
-                        if self.learner is not None:
-                            # The learner owns its atomic publication and receiver
-                            # acknowledgement. A second outer pause would deadlock/fail.
-                            await self.async_sync_policy_weights_to_inference_engines()
-                        else:
-                            await self.inference_engine_client.pause_generation()
-                            await self.async_sync_policy_weights_to_inference_engines()
-                            # Drain the policy workers' event loops to a hard sync point so
-                            # every FSDP shard rank is free before the NEXT step's forward is
-                            # dispatched (the MoE-RL async-dispatch wedge fix). See
-                            # _drain_policy_event_loops.
-                            await self._drain_policy_event_loops()
-                            await self.inference_engine_client.resume_generation()
-                    self._log_weight_update_completed(
-                        reason="training_step",
-                        duration_seconds=weight_update_timer.duration,
+                    publication_due = (
+                        self.policy_publication_steps is None or self.global_step in self.policy_publication_steps
                     )
+                    if publication_due:
+                        with Timer("sync_weights", self.all_timings) as weight_update_timer:
+                            if self.learner is not None:
+                                # The learner owns its atomic publication and receiver
+                                # acknowledgement. A second outer pause would deadlock/fail.
+                                await self.async_sync_policy_weights_to_inference_engines()
+                            else:
+                                await self.inference_engine_client.pause_generation()
+                                await self.async_sync_policy_weights_to_inference_engines()
+                                # Drain the policy workers' event loops to a hard sync point so
+                                # every FSDP shard rank is free before the NEXT step's forward is
+                                # dispatched (the MoE-RL async-dispatch wedge fix). See
+                                # _drain_policy_event_loops.
+                                await self._drain_policy_event_loops()
+                                await self.inference_engine_client.resume_generation()
+                        self._log_weight_update_completed(
+                            reason="training_step",
+                            duration_seconds=weight_update_timer.duration,
+                        )
+                    else:
+                        self.all_metrics["async/policy_publication_deferred"] = 1.0
+                        logger.info(
+                            "Policy publication deferred: step={} next_steps={}",
+                            self.global_step,
+                            sorted(self.policy_publication_steps or ()),
+                        )
 
                     # 5. Run callback-requested work before closing the inclusive step timer.
                     logger.info(status)

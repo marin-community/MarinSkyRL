@@ -33,7 +33,6 @@ import glob
 import json
 import os
 import queue
-import re
 import signal
 import socket
 import subprocess
@@ -56,7 +55,7 @@ from cloud.iris.env_vars import (
 )
 from cloud.iris.model_paths import unsupported_model_path_message
 from cloud.iris.telemetry_env import telemetry_environment
-from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
+from marinskyrl.resource_locator import is_cloud_uri, is_immutable_git_commit, join_resource_path
 from cloud.iris.paths import resolve_repo_path
 from cloud.iris.ray_storage import (
     DEFAULT_RAY_SPILL_DIR,
@@ -244,8 +243,9 @@ def _warm_sync_model_from_s3(model_path: str, warm_source: str, revision: str | 
     ranks + vLLM engines resolve ``from_pretrained(<repo-id>)`` from the warm node-local
     cache — ``model.path`` stays the repo-id, the ranks are untouched.
 
-    Returns True if the warm source existed + synced cleanly; False if it is missing /
-    empty / incomplete so the caller falls back to the HF ``snapshot_download`` prestage.
+    Returns True if the warm source existed and synced cleanly. Returns False for a
+    pinned revision or a missing, empty, or incomplete source so the caller falls back
+    to the authenticated Hugging Face snapshot.
     Idempotent + resumable: size-skips files already present.
 
     Reuses the SAME boto3 + ``AWS_ENDPOINT_URL`` creds path the rendezvous / spill /
@@ -377,7 +377,7 @@ def stage_model(model_path: str, warm_source: str | None = None, revision: str |
     """
     if is_cloud_uri(model_path):
         raise ValueError(unsupported_model_path_message(model_path))
-    if revision and re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+    if revision and not is_immutable_git_commit(revision):
         raise ValueError("model revision must be an immutable lowercase 40-character commit")
     if not model_path or os.path.isdir(model_path):
         _log(f"stage_model: skip (model_path={model_path!r} is empty or a local directory)")

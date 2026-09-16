@@ -1,5 +1,8 @@
 # Levanter Snowball training
 
+For the newer asynchronous interface, exact M10 configuration, and its qualified limits, see
+[Asynchronous Snowball viability](async-snowball-viability.md).
+
 The `skyrl_train.entrypoints.levanter_snowball` entrypoint runs one synchronous Snowball GRPO workload with MSRL
 orchestration and a Levanter learner. MSRL owns generation, rewards, advantages, and progress. Levanter owns the model,
 optimizer, random key, step, mesh, sharding, collectives, checkpoint, and Hugging Face export.
@@ -283,8 +286,9 @@ complete MATH-500 result, and the timing is an inference measurement rather than
 ## Remaining scope
 
 Campaign learning quality, sustained learner throughput, a matched Megatron measurement, and loading a BF16 export in
-a separate production consumer remain outside this short-run qualification. The tiny reference-kernel timings do not
-predict 67B throughput, and the two target updates are feasibility evidence rather than a learning curve.
+a separate production consumer remain outside this synchronous short-run qualification. The linked asynchronous
+viability report supplies the later bounded learning and matched Megatron evidence. The tiny reference-kernel timings
+do not predict 67B throughput, and the two target updates are feasibility evidence rather than a learning curve.
 
 With the currently resolved `marin-iris` package, Levanter cannot initialize its direct Iris metrics writer because
 that package lacks `iris.runtime.telemetry.resolve`. Levanter catches this failure and training continues; MSRL logs and

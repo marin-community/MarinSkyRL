@@ -114,6 +114,7 @@ from marinskyrl.resource_locator import (
     ModelLocatorError,
     is_cloud_uri,
     is_hugging_face_repo_id,
+    is_immutable_git_commit,
     join_resource_path,
     model_source_for_path,
 )
@@ -976,7 +977,7 @@ def _rl_training_entrypoint(args: argparse.Namespace) -> Optional[str]:
         if not isinstance(config, dict):
             return None
         return resolve_rl_entrypoint(config.get("entrypoint"), config_path=Path(args.rl_config))
-    except (OSError, ValueError, yaml.YAMLError):
+    except (OSError, yaml.YAMLError):
         return None
 
 
@@ -2007,7 +2008,7 @@ def normalize(args: argparse.Namespace) -> None:
     if args.model_revision:
         if not is_hugging_face_repo_id(args.model_path):
             raise SystemExit("--model-revision requires a Hugging Face repo ID in --model_path")
-        if re.fullmatch(r"[0-9a-f]{40}", args.model_revision) is None:
+        if not is_immutable_git_commit(args.model_revision):
             raise SystemExit("--model-revision must be an immutable lowercase 40-character commit")
     try:
         model_source_for_path(args.model_path, args.model_source_uri, args.model_source_identity)

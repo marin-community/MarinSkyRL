@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
 import os
@@ -41,6 +42,7 @@ from skyrl_train.learners.levanter_snowball import (
     _parameter_probe,
     _replicated_host_copy,
     _regular_grpo_loss,
+    _regular_grpo_objective,
     _resolve_local_model_snapshot,
     prepare_snowball_batch,
 )
@@ -214,10 +216,10 @@ def _batch() -> LearnerBatch:
     )
 
 
-def _make_learner(log_dir: Path) -> LevanterSnowballLearner:
+def _make_learner(log_dir: Path, *, offload_opt_state: bool = False) -> LevanterSnowballLearner:
     model_config = _snowball_config()
     learner = LevanterSnowballLearner(
-        _runtime(log_dir),
+        replace(_runtime(log_dir), offload_opt_state=offload_opt_state),
         model_factory=lambda: SnowballLMHeadModel.init(
             Axis("vocab", model_config.vocab_size),
             model_config,
@@ -226,6 +228,18 @@ def _make_learner(log_dir: Path) -> LevanterSnowballLearner:
     )
     learner.initialize(_learner_config())
     return learner
+
+
+def _non_scalar_optimizer_memory_kinds(learner: LevanterSnowballLearner) -> list[str]:
+    kinds = []
+    for leaf in jax.tree_util.tree_leaves(learner._trainer_state.opt_state):
+        if not isinstance(leaf, jax.Array) or leaf.ndim == 0:
+            continue
+        sharding = leaf.sharding
+        mesh = getattr(sharding, "mesh", None)
+        if mesh is not None and len(getattr(mesh, "axis_names", ())) > 0:
+            kinds.append(sharding.memory_kind)
+    return kinds
 
 
 def test_publication_keeps_grug_experts_stacked_for_vllm(tmp_path):
@@ -239,6 +253,162 @@ def test_publication_keeps_grug_experts_stacked_for_vllm(tmp_path):
         published[stacked_name].numpy(),
         np.asarray(learner.model.to_state_dict()[stacked_name]),
     )
+    learner.close()
+
+
+def test_initial_policy_adoption_records_version_without_weight_transfer(tmp_path):
+    runtime = replace(
+        _runtime(tmp_path / "initial-policy-adoption"),
+        initial_weights_already_loaded=True,
+        model_source_identity="model@0123456789abcdef",
+    )
+    model_config = _snowball_config()
+    learner = LevanterSnowballLearner(
+        runtime,
+        model_factory=lambda: SnowballLMHeadModel.init(
+            Axis("vocab", model_config.vocab_size),
+            model_config,
+            key=jax.random.key(7),
+        ),
+    )
+    learner.initialize(_learner_config())
+    events = []
+
+    class FakeInferenceClient:
+        async def pause_generation(self):
+            events.append("pause")
+
+        async def resume_generation(self, policy_version=None):
+            events.append(("resume", policy_version))
+
+    async def unexpected_transfer():
+        raise AssertionError("version zero must not transfer checkpoint bytes")
+
+    learner._inference_client = FakeInferenceClient()
+    learner._publish_all_weights = unexpected_transfer
+    asyncio.run(learner.publish_policy())
+
+    assert events == ["pause", ("resume", 0)]
+    assert learner.state.installed_policy_version == 0
+    assert learner.state.publication_status.value == "installed"
+    assert learner._weight_group is None
+    learner.close()
+
+
+def test_publication_overlaps_next_host_chunk_with_previous_transfer(tmp_path):
+    learner = _make_learner(tmp_path / "pipelined-publication")
+    learner.runtime = replace(learner.runtime, publication_max_chunk_bytes=8)
+    names = [
+        "model.embed_tokens.weight",
+        "model.layers.0.input_layernorm.weight",
+        "model.norm.weight",
+    ]
+    parameters = sorted(expected_vllm_parameter_names(names))
+    events: list[str] = []
+
+    class FakeInferenceClient:
+        async def begin_weight_reload(self):
+            events.append("begin")
+
+        async def finish_weight_reload(self):
+            events.append("finish")
+            return [
+                {
+                    "kind": "weight_install_receipt",
+                    "finalized": True,
+                    "received_weight_count": len(names),
+                    "received_name_digest": weight_name_digest(names),
+                    "loaded_parameter_count": len(parameters),
+                    "loaded_parameter_digest": weight_name_digest(parameters),
+                    "loaded_expert_slices": [],
+                    "host": "fake-worker",
+                }
+            ]
+
+        async def reset_prefix_cache(self):
+            events.append("reset")
+
+        async def resume_generation(self, policy_version=None):
+            events.append(f"resume:{policy_version}")
+
+    async def exercise() -> None:
+        first_transfer_started = asyncio.Event()
+        release_first_transfer = asyncio.Event()
+
+        def host_arrays():
+            yield names[0], np.ones(2, dtype=np.float32)
+            yield names[1], np.ones(2, dtype=np.float32)
+            assert first_transfer_started.is_set()
+            events.append("materialize-third")
+            release_first_transfer.set()
+            yield names[2], np.ones(2, dtype=np.float32)
+
+        async def transfer(batch):
+            name = batch[0][0]
+            events.append(f"transfer-start:{name}")
+            if name == names[0]:
+                first_transfer_started.set()
+                await release_first_transfer.wait()
+            events.append(f"transfer-end:{name}")
+
+        learner._iter_publication_host_arrays = host_arrays
+        learner._publish_weight_batch = transfer
+        await learner._publish_all_weights()
+
+    learner._inference_client = FakeInferenceClient()
+    asyncio.run(exercise())
+
+    assert events.index("transfer-start:model.embed_tokens.weight") < events.index("materialize-third")
+    assert events.index("materialize-third") < events.index("transfer-end:model.embed_tokens.weight")
+    assert events[-3:] == ["finish", "reset", "resume:0"]
+    learner.close()
+
+
+def test_publication_scatters_stacked_experts_and_broadcasts_ordinary_weights(tmp_path, monkeypatch):
+    learner = _make_learner(tmp_path / "expert-scatter-publication")
+    learner.runtime = replace(
+        learner.runtime,
+        inference_world_size=2,
+        publication_scatter_experts=True,
+    )
+    learner._weight_group = object()
+    expert_name = "model.layers.0.mlp.experts.gate_proj.weight"
+    ordinary_name = "model.layers.0.input_layernorm.weight"
+    expert = torch.arange(16, dtype=torch.float32).reshape(4, 2, 2)
+    ordinary = torch.arange(4, dtype=torch.float32)
+    requests = []
+    scatter_lists = []
+    broadcasts = []
+
+    class FakeInferenceClient:
+        async def update_named_weights(self, request):
+            requests.append(request)
+
+    def record_scatter(output, scatter_list, src, group):
+        assert output.shape == (2, 2, 2)
+        assert src == 0
+        assert group is learner._weight_group
+        scatter_lists.append(scatter_list)
+
+    def record_broadcast(tensor, src, group):
+        assert src == 0
+        assert group is learner._weight_group
+        broadcasts.append(tensor.clone())
+
+    monkeypatch.setattr(torch.distributed, "scatter", record_scatter)
+    monkeypatch.setattr(torch.distributed, "broadcast", record_broadcast)
+    learner._inference_client = FakeInferenceClient()
+
+    asyncio.run(learner._publish_weight_batch([(expert_name, expert), (ordinary_name, ordinary)]))
+
+    assert requests[0]["expert_scatter"] == [True, False]
+    assert requests[0]["expert_scatter_world_size"] == 2
+    assert len(scatter_lists[0]) == 3  # one source placeholder plus two receiver shards
+    torch.testing.assert_close(scatter_lists[0][1], expert[:2])
+    torch.testing.assert_close(scatter_lists[0][2], expert[2:])
+    assert len(broadcasts) == 1
+    torch.testing.assert_close(broadcasts[0], ordinary)
+    learner._weight_group = None
     learner.close()
 
 
@@ -282,8 +452,8 @@ def test_publication_rejects_one_missing_expert_slice_receipt(tmp_path):
             calls.append("reset")
             return None
 
-        async def resume_generation(self):
-            calls.append("resume")
+        async def resume_generation(self, policy_version=None):
+            calls.append(("resume", policy_version))
 
     async def discard_publication(_batch):
         return None
@@ -382,7 +552,7 @@ def test_microbatching_does_not_split_batch_sized_model_arrays(tmp_path):
     learner.close()
 
 
-def test_scoring_uses_the_training_step_without_mutating_state(tmp_path):
+def test_independent_forward_scoring_does_not_mutate_training_state(tmp_path):
     runtime = replace(_runtime(tmp_path / "compute-dtype-logs"), compute_dtype="bfloat16")
     model_config = _snowball_config()
     learner = LevanterSnowballLearner(
@@ -418,22 +588,128 @@ def test_scoring_uses_the_training_step_without_mutating_state(tmp_path):
             None,
         )
     )
-    assert update.metrics["preupdate_logprob_max_abs_diff"] == 0.0
-    assert update.metrics["preupdate_logprob_mean_abs_diff"] == 0.0
-    assert update.metrics["ppo_ratio_min"] == 1.0
-    assert update.metrics["ppo_ratio_mean"] == 1.0
-    assert update.metrics["ppo_ratio_max"] == 1.0
+    assert update.metrics["preupdate_logprob_max_abs_diff"] < 1.0e-6
+    assert update.metrics["preupdate_logprob_mean_abs_diff"] < 1.0e-6
+    assert update.metrics["ppo_ratio_min"] == pytest.approx(1.0, abs=1.0e-6)
+    assert update.metrics["ppo_ratio_mean"] == pytest.approx(1.0, abs=1.0e-6)
+    assert update.metrics["ppo_ratio_max"] == pytest.approx(1.0, abs=1.0e-6)
     assert update.metrics["ppo_clip_ratio"] == 0.0
     learner.close()
 
 
-def test_scoring_failure_invalidates_the_donated_learner_state(tmp_path):
+def test_scoring_and_update_reenter_mesh_in_async_worker_thread(tmp_path):
+    learner = _make_learner(tmp_path / "async-thread-logs")
+    batch = _batch()
+    advantages = np.asarray([[1.0, -0.5, 0.0], [0.25, -1.0, 0.5]], dtype=np.float32)
+
+    # FullyAsyncRayPPOTrainer calls both methods through asyncio.to_thread.
+    # The explicit Levanter/JAX mesh must therefore be entered by the method,
+    # rather than inherited from the thread that initialized the learner.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        old_log_probs = executor.submit(learner.compute_log_probs, batch).result().policy_log_probs
+        update = executor.submit(
+            learner.update,
+            UpdateRequest(batch, advantages, old_log_probs, 0, None, 0, None),
+        ).result()
+
+    assert update.status.value == "succeeded"
+    assert np.isfinite(update.metrics["final_loss"])
+    assert update.metrics["preupdate_logprob_max_abs_diff"] < 1.0e-6
+    learner.close()
+
+
+@pytest.mark.parametrize("parameter_dtype", ["float32", "bfloat16"])
+def test_optimizer_state_offload_survives_a_donated_update(tmp_path, parameter_dtype):
+    runtime = replace(
+        _runtime(tmp_path / "optimizer-offload-logs"),
+        offload_opt_state=True,
+        parameter_dtype=parameter_dtype,
+    )
+    model_config = _snowball_config()
+    learner = LevanterSnowballLearner(
+        runtime,
+        model_factory=lambda: SnowballLMHeadModel.init(
+            Axis("vocab", model_config.vocab_size),
+            model_config,
+            key=jax.random.key(7),
+        ),
+    )
+    learner.initialize(_learner_config())
+
+    initial_memory_kinds = _non_scalar_optimizer_memory_kinds(learner)
+    assert initial_memory_kinds
+    assert set(initial_memory_kinds) == {"pinned_host"}
+
+    batch = _batch()
+    advantages = np.asarray([[1.0, -0.5, 0.0], [0.25, -1.0, 0.5]], dtype=np.float32)
+    old_log_probs = learner.compute_log_probs(batch).policy_log_probs
+    update = learner.update(UpdateRequest(batch, advantages, old_log_probs, 0, None, 0, None))
+
+    assert update.status.value == "succeeded"
+    assert update.metrics["parameter_probe_delta_l2"] > 0
+    assert int(learner._trainer_state.step) == 1
+    assert set(_non_scalar_optimizer_memory_kinds(learner)) == {"pinned_host"}
+    assert update.metrics["gradient_compute_seconds"] > 0
+    assert update.metrics["optimizer_input_transfer_seconds"] > 0
+    assert update.metrics["optimizer_apply_seconds"] > 0
+    assert update.metrics["optimizer_output_transfer_seconds"] > 0
+    learner.close()
+
+
+def test_regular_mask_update_requires_and_consumes_rollout_probabilities(tmp_path):
+    runtime = replace(
+        _runtime(tmp_path / "regular-mask-update"),
+        learning_rate=1.0e-6,
+        max_grad_norm=1.0,
+    )
+    model_config = _snowball_config()
+    learner = LevanterSnowballLearner(
+        runtime,
+        model_factory=lambda: SnowballLMHeadModel.init(
+            Axis("vocab", model_config.vocab_size),
+            model_config,
+            key=jax.random.key(7),
+        ),
+    )
+    learner.initialize(
+        replace(
+            _learner_config(),
+            require_rollout_logprobs=True,
+            offpolicy_mask_enabled=True,
+            offpolicy_mask_ratio="mismatch",
+            offpolicy_mask_low=0.5,
+            offpolicy_mask_high=5.0,
+            offpolicy_mask_veto_ratio=1.0e-5,
+            offpolicy_mask_renormalize=False,
+        )
+    )
+    batch = _batch()
+    old_log_probs = learner.compute_log_probs(batch).policy_log_probs
+    advantages = np.asarray([[1.0, -0.5, 0.0], [0.25, -1.0, 0.5]], dtype=np.float32)
+    request = UpdateRequest(batch, advantages, old_log_probs, 0, None, 0, None)
+
+    with pytest.raises(ValueError, match="requires rollout log probabilities"):
+        learner.update(request)
+
+    mismatch_ratios = np.asarray([[1.0, 0.4, 1.0], [1.0e-6, 1.0, 6.0]], dtype=np.float32)
+    rollout_log_probs = old_log_probs - np.log(mismatch_ratios)
+    result = learner.update(replace(request, batch=replace(batch, rollout_log_probs=rollout_log_probs)))
+
+    assert result.metrics["policy_loss"] == pytest.approx(-0.25, abs=1e-6)
+    assert result.metrics["offpolicy_mask/masked_fraction"] == pytest.approx(0.8)
+    assert result.metrics["offpolicy_mask/masked_fraction_low"] == pytest.approx(0.4)
+    assert result.metrics["offpolicy_mask/masked_fraction_high"] == pytest.approx(0.2)
+    assert result.metrics["offpolicy_mask/vetoed_sequence_fraction"] == pytest.approx(0.5)
+    learner.close()
+
+
+def test_scoring_failure_invalidates_the_learner_state(tmp_path):
     learner = _make_learner(tmp_path / "score-failure-logs")
 
     def fail_score(*_args, **_kwargs):
         raise RuntimeError("injected scoring failure")
 
-    learner._trainer.train_step_with_metrics = fail_score
+    learner._score_fn = fail_score
     with pytest.raises(RuntimeError, match="injected scoring failure"):
         learner.compute_log_probs(_batch())
 
@@ -475,15 +751,15 @@ def _four_device_learner_worker(log_dir: str) -> None:
         behavior_policy_versions=np.zeros(4, dtype=np.int64),
     )
     train_step = learner._trainer.train_step_with_metrics
-    apply_update_calls = []
+    train_step_calls = []
 
-    def train_step_with_sharding_check(state, *training_batch, apply_update):
+    def train_step_with_sharding_check(state, *training_batch):
         for value in training_batch:
             batch_spec = value.array.sharding.spec[0]
             batch_axes = (batch_spec,) if isinstance(batch_spec, str) else batch_spec
             assert "data" in batch_axes
-        apply_update_calls.append(apply_update)
-        return train_step(state, *training_batch, apply_update=apply_update)
+        train_step_calls.append(True)
+        return train_step(state, *training_batch)
 
     learner._trainer.train_step_with_metrics = train_step_with_sharding_check
     old_log_probs = learner.compute_log_probs(batch).policy_log_probs
@@ -501,9 +777,9 @@ def _four_device_learner_worker(log_dir: str) -> None:
             global_loss_denominator=None,
         )
     )
-    assert apply_update_calls == [False, True]
+    assert train_step_calls == [True]
     assert result.status.value == "succeeded"
-    assert result.metrics["preupdate_logprob_max_abs_diff"] == 0.0
+    assert result.metrics["preupdate_logprob_max_abs_diff"] < 1.0e-6
     assert np.isfinite(result.metrics["final_loss"])
     learner.close()
 
@@ -522,6 +798,7 @@ def _multihost_learner_worker(
         training_gpus_per_node=2,
         training_gpus=4,
         train_batch_size=16,
+        offload_opt_state=True,
     )
     model_config = _snowball_config()
     learner = LevanterSnowballLearner(
@@ -536,6 +813,7 @@ def _multihost_learner_worker(
         distributed_process_count=2,
     )
     learner.initialize(_learner_config())
+    assert set(_non_scalar_optimizer_memory_kinds(learner)) == {"pinned_host"}
     assert learner._trainer_config.device_mesh.shape == {
         "replica_dcn": 1,
         "data": 4,
@@ -569,9 +847,11 @@ def _multihost_learner_worker(
     )
     if mode == "restore":
         learner.load_checkpoint(checkpoint_path)
+        assert set(_non_scalar_optimizer_memory_kinds(learner)) == {"pinned_host"}
         result = {f"restored::{name}": value for name, value in _multihost_state_arrays(learner).items()}
         old_log_probs = learner.compute_log_probs(batch).policy_log_probs
         update = learner.update(UpdateRequest(batch, advantages, old_log_probs, 1, None, 1, None))
+        assert set(_non_scalar_optimizer_memory_kinds(learner)) == {"pinned_host"}
         result.update(
             {
                 "log_probs": old_log_probs,
@@ -589,6 +869,7 @@ def _multihost_learner_worker(
 
     old_log_probs = learner.compute_log_probs(batch).policy_log_probs
     update = learner.update(UpdateRequest(batch, advantages, old_log_probs, 0, None, 0, None))
+    assert set(_non_scalar_optimizer_memory_kinds(learner)) == {"pinned_host"}
 
     published_chunks = []
     publication_events = []
@@ -636,8 +917,8 @@ def _multihost_learner_worker(
                 publication_events.append("reset")
                 return None
 
-            async def resume_generation(self):
-                publication_events.append("resume")
+            async def resume_generation(self, policy_version=None):
+                publication_events.append(("resume", policy_version))
 
         learner._inference_client = FakeInferenceClient()
         learner._weight_group = object()
@@ -647,7 +928,7 @@ def _multihost_learner_worker(
     if int(process_id) == 0:
         assert published_chunks
         assert publication_events[:2] == ["pause", "begin"]
-        assert publication_events[-3:] == ["finish", "reset", "resume"]
+        assert publication_events[-3:] == ["finish", "reset", ("resume", 1)]
         assert set(publication_events[2:-3]) == {"chunk"}
         learner._weight_group = None
     learner.save_checkpoint(checkpoint_path)
@@ -812,6 +1093,52 @@ def _torch_loss(torch_model, tokens, old_log_probs, advantages, loss_mask):
     return loss, log_probs
 
 
+def test_regular_mask_value_and_gradient_match_independent_unequal_length_reference():
+    old = torch.full((2, 4), -1.0, dtype=torch.float32)
+    ppo_ratios = torch.tensor([[1.1, 0.9, 1.3, 1.0], [0.8, 1.1, 1.0, 1.0]], dtype=torch.float32)
+    current = (old + ppo_ratios.log()).requires_grad_(True)
+    mismatch_ratios = torch.tensor([[1.0, 0.4, 6.0, 1.0], [1.0e-6, 1.0, 1.0, 1.0]], dtype=torch.float32)
+    rollout = old - mismatch_ratios.log()
+    advantages = torch.tensor([[2.0, 3.0, 4.0, 50.0], [5.0, 6.0, 70.0, 80.0]], dtype=torch.float32)
+    mask = torch.tensor([[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
+
+    def reference(current_log_probs):
+        selected = mask > 0
+        mismatch = torch.exp(torch.clamp(old - rollout, -20.0, 20.0))
+        vetoed_rows = (selected & (mismatch < 1.0e-5)).any(dim=-1, keepdim=True)
+        removed = selected & ((mismatch < 0.5) | (mismatch > 5.0) | vetoed_rows)
+        effective_advantages = torch.where(removed, 0.0, advantages)
+        ratio = torch.exp(torch.clamp(current_log_probs - old, -20.0, 20.0))
+        surrogate = ratio * effective_advantages
+        clipped = torch.clamp(ratio, 0.8, 1.2) * effective_advantages
+        token_loss = -torch.minimum(surrogate, clipped) * mask
+        return (token_loss.sum(dim=-1) / mask.sum(dim=-1).clamp_min(1.0)).mean()
+
+    torch_loss = reference(current)
+    torch_loss.backward()
+    jax_loss, jax_gradient = jax.value_and_grad(
+        lambda values: _regular_grpo_objective(
+            values,
+            jnp.asarray(old.numpy()),
+            jnp.asarray(rollout.numpy()),
+            jnp.asarray(advantages.numpy()),
+            jnp.asarray(mask.numpy()),
+            clip_low=0.2,
+            clip_high=0.2,
+            offpolicy_mask_enabled=True,
+            offpolicy_mask_low=0.5,
+            offpolicy_mask_high=5.0,
+            offpolicy_mask_veto_ratio=1.0e-5,
+        )[0]
+    )(jnp.asarray(current.detach().numpy()))
+
+    np.testing.assert_allclose(np.asarray(jax_loss), torch_loss.detach().numpy(), rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(np.asarray(jax_gradient), current.grad.numpy(), rtol=1e-6, atol=1e-7)
+    expected_gradient = np.zeros((2, 4), dtype=np.float32)
+    expected_gradient[0, 0] = -2.2 / 6.0
+    np.testing.assert_allclose(np.asarray(jax_gradient), expected_gradient, rtol=1e-6, atol=1e-7)
+
+
 def test_padding_compaction_preserves_each_response_predictor_position():
     prepared = prepare_snowball_batch(_batch(), max_sequence_length=16)
 
@@ -824,7 +1151,7 @@ def test_padding_compaction_preserves_each_response_predictor_position():
 
 
 def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
-    learner = _make_learner(tmp_path / "logs")
+    learner = _make_learner(tmp_path / "logs", offload_opt_state=True)
     batch = _batch()
     prepared = prepare_snowball_batch(batch, max_sequence_length=16)
     levanter_log_probs = learner.compute_log_probs(batch).policy_log_probs
@@ -859,14 +1186,17 @@ def test_logprob_loss_gradient_and_first_adamw_update_match_torch(tmp_path):
             model,
             hax.named(jnp.asarray(prepared.tokens), (Batch, Pos)),
             hax.named(jnp.asarray(dense_old), (Batch, Prediction)),
+            hax.named(jnp.zeros_like(jnp.asarray(dense_old)), (Batch, Prediction)),
             hax.named(jnp.asarray(dense_advantages), (Batch, Prediction)),
             hax.named(jnp.asarray(dense_mask), (Batch, Prediction)),
-            hax.named(jnp.arange(Batch.size, dtype=jnp.int32), (Batch,)),
             key=jax.random.key(0),
             temperature=1.0,
             clip_low=0.2,
             clip_high=0.2,
-            full_batch_size=Batch.size,
+            offpolicy_mask_enabled=False,
+            offpolicy_mask_low=0.5,
+            offpolicy_mask_high=5.0,
+            offpolicy_mask_veto_ratio=1.0e-5,
         )
 
     with learner._trainer_config.use_device_mesh():

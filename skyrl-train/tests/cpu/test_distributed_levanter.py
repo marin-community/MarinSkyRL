@@ -41,11 +41,29 @@ def test_import_does_not_initialize_jax_or_levanter():
 def test_merge_update_results_checks_numerics_and_reduces_host_timings():
     first = UpdateResult(
         UpdateStatus.SUCCEEDED,
-        {"final_loss": 1.25, "forward_validation_seconds": 12.0, "training_update_seconds": 60.0},
+        {
+            "final_loss": 1.25,
+            "forward_validation_seconds": 12.0,
+            "gradient_compute_seconds": 40.0,
+            "optimizer_input_transfer_seconds": 5.0,
+            "optimizer_apply_seconds": 20.0,
+            "optimizer_output_transfer_seconds": 6.0,
+            "training_update_seconds": 60.0,
+            "new_phase_seconds": 3.0,
+        },
     )
     second = UpdateResult(
         UpdateStatus.SUCCEEDED,
-        {"final_loss": 1.25, "forward_validation_seconds": 13.5, "training_update_seconds": 58.0},
+        {
+            "final_loss": 1.25,
+            "forward_validation_seconds": 13.5,
+            "gradient_compute_seconds": 42.0,
+            "optimizer_input_transfer_seconds": 4.0,
+            "optimizer_apply_seconds": 19.0,
+            "optimizer_output_transfer_seconds": 7.0,
+            "training_update_seconds": 58.0,
+            "new_phase_seconds": 4.0,
+        },
     )
 
     merged = distributed_levanter._merge_update_results([first, second])
@@ -53,7 +71,12 @@ def test_merge_update_results_checks_numerics_and_reduces_host_timings():
     assert merged.metrics == {
         "final_loss": 1.25,
         "forward_validation_seconds": 13.5,
+        "gradient_compute_seconds": 42.0,
+        "optimizer_input_transfer_seconds": 5.0,
+        "optimizer_apply_seconds": 20.0,
+        "optimizer_output_transfer_seconds": 7.0,
         "training_update_seconds": 60.0,
+        "new_phase_seconds": 4.0,
     }
     with pytest.raises(RuntimeError, match="different final_loss metric"):
         distributed_levanter._merge_update_results(
