@@ -2,9 +2,10 @@
 
 Each layout attacks one layout assumption: TP2 exercises the
 sequence-parallel slice, PP2 the 1F1B recompute FIFO and the layer-number
-mapping across pipeline stages, EP2 the alltoall dispatch, CP2+packing the
+mapping across pipeline stages, EP2 the alltoall dispatch, CP2 the
 two-chunk-per-rank split applied to routes, and packing on/off the two
-target transforms. The oracle is behavioral and needs no in-actor hooks: a
+target transforms. CP2 uses unpacked sequences because Transformer Engine's
+all_gather path rejects padding_causal masks. The oracle is behavioral and needs no in-actor hooks: a
 completed training step proves token-exact replay on every rank (the
 per-rank hit-fraction check and the FIFO drain assert turn a wrong layout
 into a loud failure), an empty capture must reproduce native log-probs
@@ -56,7 +57,7 @@ LAYOUTS = [
     ("tp2", 2, 2, 1, 1, 1, False),
     ("pp2", 2, 1, 2, 1, 1, False),
     ("ep2", 2, 1, 1, 2, 1, False),
-    ("cp2_packed", 2, 1, 1, 1, 2, True),
+    ("cp2", 2, 1, 1, 1, 2, False),
     ("tp2_pp2", 4, 2, 2, 1, 1, False),
 ]
 
