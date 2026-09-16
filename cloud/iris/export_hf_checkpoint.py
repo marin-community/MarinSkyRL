@@ -86,17 +86,22 @@ class ExportJobSpec:
     storage_user: str | None = None
     allocation_gpus_per_node: int | None = None
 
+    @property
+    def allocated_gpus_per_node(self) -> int:
+        allocation = self.allocation_gpus_per_node
+        if allocation is None:
+            allocation = self.request.gpus_per_node
+        if allocation < self.request.gpus_per_node:
+            raise ValueError("Export allocation cannot have fewer GPUs than the saved policy geometry")
+        return allocation
+
 
 def build_command(spec: ExportJobSpec) -> list[str]:
     """Return the Iris backend command that performs an export-only run."""
     request = spec.request
-    allocation_gpus = (
-        spec.allocation_gpus_per_node if spec.allocation_gpus_per_node is not None else request.gpus_per_node
-    )
-    if allocation_gpus < request.gpus_per_node:
-        raise ValueError("Export allocation cannot have fewer GPUs than the saved policy geometry")
 
     overrides = [
+        format_hydra_arg("trainer.placement.policy_num_gpus_per_node", request.gpus_per_node),
         format_hydra_arg("checkpoint_export.step", request.step, prefix="++"),
         format_hydra_arg("checkpoint_export.checkpoint_path", request.checkpoint_path, prefix="++"),
         format_hydra_arg("checkpoint_export.export_root", request.export_path, prefix="++"),
@@ -117,7 +122,7 @@ def build_command(spec: ExportJobSpec) -> list[str]:
         "--num-nodes",
         str(request.num_nodes),
         "--gpus-per-node",
-        str(allocation_gpus),
+        str(spec.allocated_gpus_per_node),
         "--cluster",
         spec.cluster,
         "--entrypoint",
@@ -289,8 +294,7 @@ def manual_spec(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Ex
 def _run_export(spec: ExportJobSpec, command: list[str]) -> None:
     print(
         f"[export-hf] policy geometry {spec.request.num_nodes}x{spec.request.gpus_per_node} GPU ranks, "
-        f"allocation {spec.request.num_nodes}x"
-        f"{spec.allocation_gpus_per_node if spec.allocation_gpus_per_node is not None else spec.request.gpus_per_node} GPUs"
+        f"allocation {spec.request.num_nodes}x{spec.allocated_gpus_per_node} GPUs"
     )
     exit_code = subprocess.call(command, cwd=str(_REPO_ROOT))
     if exit_code != 0:

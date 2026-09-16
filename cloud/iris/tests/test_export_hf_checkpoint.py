@@ -84,7 +84,7 @@ def test_storage_user_is_derived_from_policy_paths() -> None:
     assert storage_user_from_resource_path("s3://bucket/run/checkpoints") is None
 
 
-def test_requested_four_rank_export_reserves_whole_eight_gpu_node(monkeypatch) -> None:
+def test_requested_four_rank_export_reserves_whole_eight_gpu_node(monkeypatch, parse_hydra_overrides) -> None:
     request = HFExportRequest(
         step=2,
         checkpoint_base_path="s3://bucket/marin/users/alice/run/checkpoints",
@@ -102,8 +102,11 @@ def test_requested_four_rank_export_reserves_whole_eight_gpu_node(monkeypatch) -
 
     spec = export_hf_checkpoint.request_spec(args, parser)
     command = build_command(spec)
+    encoded = [command[index + 1] for index, value in enumerate(command) if value == "--skyrl_override"]
+    overrides = parse_hydra_overrides(encoded)
 
     assert spec.request.gpus_per_node == 4
     assert command[command.index("--gpus-per-node") + 1] == "8"
+    assert overrides["trainer.placement.policy_num_gpus_per_node"] == 4
     with pytest.raises(ValueError, match="fewer GPUs than the saved policy geometry"):
         build_command(replace(spec, allocation_gpus_per_node=2))
