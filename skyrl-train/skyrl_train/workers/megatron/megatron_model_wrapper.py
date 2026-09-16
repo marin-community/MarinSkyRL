@@ -17,6 +17,7 @@ from skyrl_train.distributed.megatron.model_utils import (
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.distillation import DistillationInput, student_topk_logprobs
+from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
 
@@ -69,6 +70,9 @@ class MegatronModelWrapper:
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
         self.use_sample_packing = self.cfg.trainer.use_sample_packing
+        # MoE router replay (R3): set by the worker after install; None = flag-off,
+        # every forward runs native routing.
+        self.router_replay: Optional[MegatronRouterReplay] = None
         # Optional sequence-dim chunk size for the vocab-parallel logprob
         # computation. None => the whole [B, S, vocab//TP] fp32 exp is
         # materialized at once, which OOMs on long sequences. A non-null value

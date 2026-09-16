@@ -37,6 +37,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -44,6 +45,9 @@ import torch.nn as nn
 __all__ = [
     "RouterReplayAction",
     "RouterReplay",
+    "SENTINEL_EXPERT_ID",
+    "dense_replay_targets",
+    "require_scalar_num_actions",
     "set_active_replay",
     "get_active_replay",
     "install_router_replay_patch",
@@ -55,6 +59,45 @@ __all__ = [
 # non-generated token rows (trajectory_runners/trajectory_processing.py). Rows whose captured
 # targets are all this value fall through to native routing.
 SENTINEL_EXPERT_ID = 0
+
+
+def require_scalar_num_actions(num_actions) -> None:
+    """Reject per-sample ``num_actions`` lists/arrays (dense replay needs a scalar)."""
+    if isinstance(num_actions, (list, np.ndarray)):
+        raise NotImplementedError(
+            "router_replay requires a scalar num_actions (dense unpacked path); got a per-sample list/array."
+        )
+
+
+def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions):
+    """Build the dense per-position replay target and mask, layout-agnostic.
+
+    ``rollout_routed_experts`` is ``[B, response_len, L, K]`` on the response
+    axis. Returns ``(full, mask)`` where ``full`` is a ``[B, seq_len, L, K]``
+    long tensor sentinel-filled outside the response window and ``mask`` is a
+    ``[B, seq_len]`` bool tensor True only on response positions whose captured
+    row is non-sentinel (a row is sentinel iff all K captured experts equal
+    ``SENTINEL_EXPERT_ID``). Prompt / pad / sentinel rows fall through to
+    native routing.
+    """
+    require_scalar_num_actions(num_actions)
+    device = rollout_routed_experts.device
+    captured = rollout_routed_experts.to(dtype=torch.long)
+    B, response_len, L, K = captured.shape
+    assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
+    assert response_len == num_actions, f"router_replay response_len {response_len} != num_actions {num_actions}"
+
+    full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
+    full[:, seq_len - response_len : seq_len, :, :] = captured
+
+    response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+    response_pos[:, seq_len - response_len : seq_len] = True
+    # non-sentinel per [B, seq_len, L]; collapse over L: a position is valid
+    # for replay only where every layer carries real data. Use layer 0 as the
+    # representative (the capture rail writes the same sentinel pattern across
+    # layers for a given token), then AND with response_pos.
+    non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)  # [B, seq_len]
+    return full, response_pos & non_sentinel
 
 
 # --------------------------------------------------------------------------- #

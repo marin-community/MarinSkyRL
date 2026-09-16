@@ -35,6 +35,7 @@ from skyrl_train.models.grug_moe import (
     validate_grug_training_strategy,
 )
 from skyrl_train.models.layers.moe_checkpoint import moe_recompute_context_fn
+from skyrl_train.models.router_replay import dense_replay_targets
 from skyrl_train.utils.flash_attention import (
     flash_pad_input,
     flash_unpad_input,
@@ -1423,13 +1424,13 @@ class HFModelWrapper(nn.Module):
         """Build per-layer forced-topk targets + a per-token replay mask.
 
         ``rollout_routed_experts`` is ``[B, response_len, L, K]`` (response axis).
-        The dense target is built off the ORIGINAL ``[B, seq_len]`` ``sequences``
-        (the response slice is only meaningful pre-pack); HF MoE blocks flatten
-        ``[B, seq_len] -> (B*seq_len)`` in batch-major (row) order. We build a
-        full-sequence target ``[B*seq_len, K]`` per layer and a ``[B*seq_len]``
-        bool mask True only on response positions (the last ``num_actions``
-        columns) AND non-sentinel rows. Prompt / pad / sentinel rows fall
-        through to natural routing.
+        The dense target is built by the shared ``dense_replay_targets`` off the
+        ORIGINAL ``[B, seq_len]`` ``sequences`` (the response slice is only
+        meaningful pre-pack); HF MoE blocks flatten ``[B, seq_len] -> (B*seq_len)``
+        in batch-major (row) order. We build a full-sequence target
+        ``[B*seq_len, K]`` per layer and a ``[B*seq_len]`` bool mask True only on
+        response positions AND non-sentinel rows. Prompt / pad / sentinel rows
+        fall through to natural routing.
 
         Stage 3a — sample packing: when ``nnz_indices`` is not None the forward
         ran ``unpad_input`` and the model sees a packed ``[1, nnz]`` sequence.
@@ -1441,39 +1442,16 @@ class HFModelWrapper(nn.Module):
         by ``nonzero`` → never in ``nnz_indices`` (automatic). The controller is
         layout-agnostic (only checks ``shape[0]``).
         """
-        from skyrl_train.models.router_replay import SENTINEL_EXPERT_ID
-
-        if isinstance(num_actions, (list, np.ndarray)):
-            raise NotImplementedError(
-                "router_replay requires a scalar num_actions (dense unpacked path); got a per-sample list/array."
-            )
         device = sequences.device
         batch_size, seq_len = sequences.shape
-        re = rollout_routed_experts.to(device=device, dtype=torch.long)
-        B, response_len, L, K = re.shape
-        assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
-        assert response_len == num_actions, f"router_replay response_len {response_len} != num_actions {num_actions}"
-
-        # Full-seq target [B, seq_len, L, K], sentinel-filled, response copied in.
-        full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
-        full[:, seq_len - response_len : seq_len, :, :] = re
-
-        # Replay mask: True on response positions whose row is non-sentinel
-        # (a row is sentinel iff all K captured experts equal SENTINEL_EXPERT_ID).
-        response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
-        response_pos[:, seq_len - response_len : seq_len] = True
-        # non-sentinel per [B, seq_len, L]; collapse over L: a position is valid
-        # for replay only where every layer carries real data. Use layer 0 as the
-        # representative (the capture rail writes the same sentinel pattern across
-        # layers for a given token), then AND with response_pos.
-        non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)  # [B, seq_len]
-        replay_mask_BS = response_pos & non_sentinel  # [B, seq_len]
+        full, replay_mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
+        L, K = full.shape[2], full.shape[3]
 
         # Flatten batch-major to match HF's [B, seq_len] -> (B*seq_len).
         replay_mask = replay_mask_BS.reshape(-1)  # [B*seq_len]
         # Per-layer targets: [B*seq_len, K] each, ordered by layer position.
         full_flat = full.permute(2, 0, 1, 3).reshape(L, batch_size * seq_len, K)  # [L, B*seq_len, K]
-        per_layer_targets = [full_flat[i] for i in range(L)]
+        per_layer_targets = [full_flat[i].to(device) for i in range(L)]
 
         # Stage 3a: under sample packing the model forward operates on the packed
         # [1, nnz] sequence. Project the dense [B*seq_len] target/mask down to the
@@ -1481,7 +1459,7 @@ class HFModelWrapper(nn.Module):
         # batch-major flattens of [B, seq_len], so this is a plain index_select.
         if nnz_indices is not None:
             nnz_indices = nnz_indices.to(device)
-            replay_mask = replay_mask.index_select(0, nnz_indices)
+            replay_mask = replay_mask.to(device).index_select(0, nnz_indices)
             per_layer_targets = [t.index_select(0, nnz_indices) for t in per_layer_targets]
 
         return per_layer_targets, replay_mask

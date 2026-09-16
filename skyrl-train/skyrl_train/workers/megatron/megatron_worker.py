@@ -28,9 +28,15 @@ from skyrl_train.distributed.megatron.optimizer import (
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl_train.distributed.megatron.megatron_utils import print_model_size
-from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
+from skyrl_train.distributed.megatron.megatron_utils import get_model_config, print_model_size
+from skyrl_train.utils.utils import (
+    moe_router_replay_requested,
+    update_model_config,
+    str_to_torch_dtype,
+    get_physical_gpu_id,
+)
 from skyrl_train.utils.hf_load_retry import load_pretrained_with_retry
+from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
 import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from skyrl_train.training_batch import (
@@ -258,6 +264,22 @@ class MegatronWorker:
                 f"exact fraction {(diff == 0).float().mean().item():.4f}"
             )
 
+    def _maybe_install_router_replay(self, role: str) -> None:
+        """Install the MoE router replay controller when the role requests it.
+
+        Called after ``self.model`` and ``self.actor_module`` exist. The knob
+        lives on ``trainer.<role>.fsdp_config.moe_router_replay``; for
+        ``strategy=megatron`` the top-level config guard admits it only once
+        the replay plumbing is complete, so tests enable it after
+        ``validate_cfg``.
+        """
+        if not moe_router_replay_requested(self.cfg, role=role):
+            return
+        self.model.router_replay = install_megatron_router_replay(
+            self.actor_module,
+            recompute_enabled=get_model_config(self.actor_module[0]).recompute_granularity is not None,
+        )
+
     def save_hf_model(self, export_dir: str, tokenizer):
         # Save model in HuggingFace safetensors format
         self.strategy.save_hf_model(
@@ -403,6 +425,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
             ),
         )
+        self._maybe_install_router_replay("policy")
 
         # Initialize weight extractor
         self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
@@ -794,6 +817,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
                 self.cfg, "trainer.ref.megatron_config.logprob_chunk_size", default=None
             ),
         )
+        self._maybe_install_router_replay("ref")
 
     def get_weight_statistics(self):
         """Compute lightweight statistics for model weights"""
