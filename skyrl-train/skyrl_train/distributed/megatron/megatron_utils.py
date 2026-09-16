@@ -518,7 +518,6 @@ def remove_left_padding(
     assert attention_mask.ndim == 2
     assert position_ids.ndim == 2
     cp_size = mpu.get_context_parallel_world_size()
-    cp_rank = mpu.get_context_parallel_rank()
     batch_size = input_ids.shape[0]
     shape = list(input_ids.shape)  # batch_size, seq_len,...
     seq_lens = attention_mask.sum(dim=1)
@@ -543,6 +542,7 @@ def remove_left_padding(
         new_attention_mask[i, : seq_lens[i]] = attention_mask[i, attention_mask[i]]
         new_position_ids[i, : seq_lens[i]] = position_ids[i, attention_mask[i]]
     if cp_size > 1:
+        cp_rank = mpu.get_context_parallel_rank()
         new_attention_mask = shard_dense_sequence_for_context_parallel(
             new_attention_mask, cp_size=cp_size, cp_rank=cp_rank
         )
