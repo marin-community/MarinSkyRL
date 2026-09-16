@@ -169,7 +169,7 @@
     "domain_weights": [2, 2, 1],
     "target_gradient_shares": [0.3333333333333333, 0.3333333333333333, 0.3333333333333333],
     "gap_following_alpha": 1.0,
-    "save_every": 50
+    "save_every": 2
   },
   "gates": {
     "one_step": 1,

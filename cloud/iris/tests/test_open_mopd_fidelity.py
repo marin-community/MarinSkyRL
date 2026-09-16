@@ -246,7 +246,7 @@ def test_training_command_has_semantic_control_settings() -> None:
         "+mt_opd.reward_scale_anchored": "True",
         "+mt_opd.conflict_policy": "none",
         "trainer.total_training_steps": "200",
-        "trainer.save_freq": "50",
+        "trainer.save_freq": "2",
         "trainer.test_freq": "-1",
         "trainer.val_before_train": "False",
         "trainer.logger": "['console']",
