@@ -16,6 +16,7 @@ from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation import (
     ChosenTokenTeacherEvidence,
     INVALID_TOPK_INDEX,
+    StudentSelectedTeacherEvidence,
     TeacherEvidenceBatch,
     TeacherScoreRequest,
     TopKTeacherEvidence,
@@ -66,7 +67,30 @@ def teacher_evidence_from_prompt_logprobs(
 ) -> TeacherEvidenceBatch:
     """Normalize prompt scores from local or remote vLLM into shared evidence."""
     if request.evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
-        raise ValueError("prompt top-K responses cannot score arbitrary student-selected token IDs")
+        assert request.student_topk_indices is not None
+        assert request.student_selected_mask is not None
+        selected_scores = torch.full(request.student_topk_indices.shape, torch.nan, dtype=torch.float32)
+        for row, prompt_length in enumerate(prompt_lengths):
+            for offset in range(int(request.response_mask[row].sum().item())):
+                if not request.student_selected_mask[row, offset]:
+                    continue
+                scores = _position_scores(prompt_logprobs, row, prompt_length + offset)
+                for candidate, token_id in enumerate(request.student_topk_indices[row, offset].tolist()):
+                    if token_id not in scores:
+                        raise ValueError(
+                            f"teacher omitted student-selected token {token_id} at row {row}, response offset {offset}"
+                        )
+                    selected_scores[row, offset, candidate] = scores[token_id]
+        return StudentSelectedTeacherEvidence(
+            trajectory_ids=request.trajectory_ids,
+            route_ids=request.route_ids,
+            teacher_id=request.teacher_id,
+            teacher_revision=teacher_revision,
+            plan_version=request.plan_version,
+            valid_mask=request.student_selected_mask.clone(),
+            student_topk_indices=request.student_topk_indices.clone(),
+            teacher_on_student_logprobs=selected_scores,
+        )
     if request.evidence is TeacherEvidenceKind.CHOSEN_TOKEN:
         chosen = torch.full(request.response_mask.shape, torch.nan, dtype=torch.float32)
         for row, prompt_length in enumerate(prompt_lengths):
@@ -148,29 +172,41 @@ class VLLMTeacherOracle:
     async def score(self, request: TeacherScoreRequest) -> TeacherEvidenceBatch:
         if self._closed:
             raise RuntimeError("vLLM teacher oracle is closed")
-        if request.evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
-            raise ValueError("vLLM prompt top-K cannot score arbitrary student-selected token IDs")
         full_sequences = [
             request.prompt_token_ids[row][request.prompt_mask[row]].tolist()
             + request.response_token_ids[row][request.response_mask[row]].tolist()
             for row in range(len(request.trajectory_ids))
         ]
         prompt_lengths = [int(mask.sum().item()) for mask in request.prompt_mask]
-        requested_top_k = request.top_k if request.evidence is TeacherEvidenceKind.TOPK_DISTRIBUTION else 1
+        requested_top_k = request.top_k if request.evidence is not TeacherEvidenceKind.CHOSEN_TOKEN else 1
         assert requested_top_k is not None
+        per_prompt_sampling = None
+        if request.evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
+            assert request.student_topk_indices is not None
+            assert request.student_selected_mask is not None
+            per_prompt_sampling = []
+            for row, sequence in enumerate(full_sequences):
+                candidate_rows = [[token_id] * requested_top_k for token_id in sequence]
+                for offset in range(int(request.response_mask[row].sum().item())):
+                    if request.student_selected_mask[row, offset]:
+                        candidate_rows[prompt_lengths[row] + offset] = request.student_topk_indices[
+                            row, offset
+                        ].tolist()
+                per_prompt_sampling.append({"prompt_logprob_token_ids": candidate_rows})
+        engine_input = {
+            "prompts": None,
+            "prompt_token_ids": full_sequences,
+            "sampling_params": {
+                "max_tokens": 1,
+                "prompt_logprobs": requested_top_k,
+                "temperature": 1.0,
+            },
+            "session_ids": None,
+        }
+        if per_prompt_sampling is not None:
+            engine_input["sampling_params_per_prompt"] = per_prompt_sampling
         try:
-            output = await self._engine.generate(
-                {
-                    "prompts": None,
-                    "prompt_token_ids": full_sequences,
-                    "sampling_params": {
-                        "max_tokens": 1,
-                        "prompt_logprobs": requested_top_k,
-                        "temperature": 1.0,
-                    },
-                    "session_ids": None,
-                }
-            )
+            output = await self._engine.generate(engine_input)
         except Exception as error:
             raise TeacherEndpointUnavailable(f"vLLM teacher {request.teacher_id!r} scoring failed") from error
         prompt_logprobs = output.get("prompt_logprobs")

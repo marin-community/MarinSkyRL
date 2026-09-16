@@ -34,7 +34,11 @@ from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
-from marinskyrl.distillation import compile_distillation_plan_from_config, validate_distillation_runtime_support
+from marinskyrl.distillation import (
+    DistillationObjectiveKind,
+    compile_distillation_plan_from_config,
+    validate_distillation_runtime_support,
+)
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
@@ -579,6 +583,20 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 def validate_cfg(cfg: DictConfig):
     distillation_plan = compile_distillation_plan_from_config(cfg)
     validate_distillation_runtime_support(distillation_plan)
+    if (
+        distillation_plan is not None
+        and distillation_plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+        and cfg.trainer.strategy in {"fsdp", "fsdp2", "deepspeed"}
+        and (
+            cfg.trainer.use_sample_packing
+            or cfg.trainer.policy.sequence_parallel_size != 1
+            or cfg.trainer.policy.fsdp_config.context_parallel_size != 1
+        )
+    ):
+        raise ValueError(
+            "student_topk_policy_surrogate on FSDP2/DeepSpeed requires trainer.use_sample_packing=false, "
+            "trainer.policy.sequence_parallel_size=1, and trainer.policy.fsdp_config.context_parallel_size=1"
+        )
     trajectory_selector = trajectory_selector_from_config(cfg)
     if trajectory_selector is not None:
         if cfg.trainer.step_wise_training:
@@ -912,9 +930,18 @@ def validate_generator_cfg(cfg: DictConfig):
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
         if cfg.generator.sampling_params.logprobs > 0:
-            raise ValueError(
-                f"`logprobs` if set should be 0 i.e only for the chosen token, got {cfg.generator.sampling_params.logprobs}"
-            )
+            plan = compile_distillation_plan_from_config(cfg)
+            widths = {teacher.top_k for teacher in plan.teachers} if plan is not None else set()
+            if (
+                plan is None
+                or plan.objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+                or widths != {cfg.generator.sampling_params.logprobs}
+                or cfg.generator.backend != "vllm"
+            ):
+                raise ValueError(
+                    "positive generator.sampling_params.logprobs requires a local vLLM "
+                    "student_topk_policy_surrogate plan with matching teacher top_k"
+                )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 

@@ -75,6 +75,7 @@ FR_DUMP_TEMP_FILE_ENV = "TORCH_FR_DUMP_TEMP_FILE"
 NCCL_DEBUG_INFO_TEMP_FILE_ENV = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
 PYTHONPATH_ENV = "PYTHONPATH"
 VLLM_USE_V1_ENV = "VLLM_USE_V1"
+VLLM_USE_V2_MODEL_RUNNER_ENV = "VLLM_USE_V2_MODEL_RUNNER"
 VLLM_USE_DEEP_GEMM_ENV = "VLLM_USE_DEEP_GEMM"
 VLLM_BATCH_INVARIANT_ENV = "VLLM_BATCH_INVARIANT"
 VLLM_ALLOW_INSECURE_SERIALIZATION_ENV = "VLLM_ALLOW_INSECURE_SERIALIZATION"
@@ -131,6 +132,13 @@ ENV_VAR_SPECS = (
     EnvVarSpec("TORCH_SYMBOLIZE_MODE", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec(PYTHONPATH_ENV, "ci.marin_nightly.grug", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.DRIVER})),
     EnvVarSpec(VLLM_USE_V1_ENV, "ci.marin_nightly.grug", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.DRIVER})),
+    EnvVarSpec(
+        VLLM_USE_V2_MODEL_RUNNER_ENV,
+        "generator.backend",
+        EnvVarSource.DERIVED,
+        frozenset({EnvVarScope.INFERENCE_WORKER}),
+        frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
+    ),
     EnvVarSpec(
         VLLM_USE_DEEP_GEMM_ENV,
         "ci.marin_nightly.grug",

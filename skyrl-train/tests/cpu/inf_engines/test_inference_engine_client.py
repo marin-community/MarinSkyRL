@@ -214,6 +214,33 @@ def test_postprocess_batched_strings_with_wrong_session_ids_length_2():
 # --------------------------------------------
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["stop", "abort"])
+async def test_generate_single_selected_scores_fail_closed_on_abort(stop_reason):
+    class ScoringEngine:
+        async def generate(self, input_batch):
+            candidate_ids = input_batch["sampling_params_per_prompt"][0]["prompt_logprob_token_ids"][1]
+            return InferenceEngineOutput(
+                responses=[""],
+                response_ids=[[]],
+                stop_reasons=[stop_reason],
+                prompt_logprobs=[[None, {token_id: float(-token_id) for token_id in candidate_ids}]],
+            )
+
+    client = InferenceEngineClient(engines=[ScoringEngine()], tokenizer=object(), full_config=_make_min_cfg())
+    request = InferenceEngineInput(
+        prompt_token_ids=[[1, 2]],
+        sampling_params={"prompt_logprobs": 2, "max_tokens": 1},
+        sampling_params_per_prompt=[{"prompt_logprob_token_ids": [[1, 1], [7, 17]]}],
+    )
+    if stop_reason == "abort":
+        with pytest.raises(RuntimeError, match="cannot continue"):
+            await client.generate(request)
+    else:
+        output = await client.generate(request)
+        assert output["prompt_logprobs"] == [[None, {7: -7.0, 17: -17.0}]]
+
+
 @pytest.mark.parametrize("num_prompts", [1, 50, 100])
 @pytest.mark.parametrize("with_session_id", [True, False])
 @pytest.mark.parametrize("num_engines", [1, 3, 4, 8, 16])
@@ -324,6 +351,71 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_ses
 # -------------------------------------------
 # tests for InferenceEngineClient.generate
 # --------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("num_engines", [1, 2])
+async def test_generate_preserves_per_prompt_selected_scores_across_engine_routing(num_engines):
+    class ScoringEngine:
+        async def generate(self, input_batch):
+            rows = input_batch["sampling_params_per_prompt"]
+            return InferenceEngineOutput(
+                responses=[""] * len(rows),
+                response_ids=[[] for _ in rows],
+                stop_reasons=["stop"] * len(rows),
+                prompt_logprobs=[
+                    [None, {token_id: float(-token_id) for token_id in row["prompt_logprob_token_ids"][1]}]
+                    for row in rows
+                ],
+            )
+
+    client = InferenceEngineClient(
+        engines=[ScoringEngine() for _ in range(num_engines)],
+        tokenizer=object(),
+        full_config=_make_min_cfg(),
+    )
+    output = await client.generate(
+        InferenceEngineInput(
+            prompt_token_ids=[[1, 2], [3, 4], [5, 6]],
+            sampling_params={"prompt_logprobs": 2, "max_tokens": 1},
+            sampling_params_per_prompt=[
+                {"prompt_logprob_token_ids": [[1, 1], [7 + row, 17 + row]]} for row in range(3)
+            ],
+        )
+    )
+
+    assert output["prompt_logprobs"] == [
+        [None, {7 + row: float(-7 - row), 17 + row: float(-17 - row)}] for row in range(3)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("num_engines", [1, 2])
+@pytest.mark.parametrize("num_prompts", [1, 3])
+async def test_generate_preserves_response_topk_across_engine_routing(num_engines, num_prompts):
+    class TopKEngine:
+        async def generate(self, input_batch):
+            bases = [row[0] for row in input_batch["prompt_token_ids"]]
+            return InferenceEngineOutput(
+                responses=[str(base) for base in bases],
+                response_ids=[[base, base + 1] for base in bases],
+                stop_reasons=["stop"] * len(bases),
+                response_logprobs=[[-0.1, -0.2] for _ in bases],
+                student_topk_indices=[[[base, base + 2], [base + 1, base + 3]] for base in bases],
+                behavior_topk_logprobs=[[[-0.1, -1.1], [-0.2, -1.2]] for _ in bases],
+            )
+
+    client = InferenceEngineClient(
+        engines=[TopKEngine() for _ in range(num_engines)],
+        tokenizer=object(),
+        full_config=_make_min_cfg(),
+    )
+    output = await client.generate(
+        InferenceEngineInput(prompt_token_ids=[[base] for base in range(num_prompts)], sampling_params={"logprobs": 2})
+    )
+
+    assert output["student_topk_indices"] == [[[base, base + 2], [base + 1, base + 3]] for base in range(num_prompts)]
+    assert output["behavior_topk_logprobs"] == [[[-0.1, -1.1], [-0.2, -1.2]] for _ in range(num_prompts)]
 
 
 @pytest.mark.parametrize("num_prompts", [1, 50, 100])
