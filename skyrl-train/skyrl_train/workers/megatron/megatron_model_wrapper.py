@@ -255,9 +255,11 @@ class MegatronModelWrapper:
         if token_ids is None:
             return None
         if self.use_sample_packing or mpu.get_context_parallel_world_size() != 1:
-            raise ValueError("sparse forward KL on Megatron does not yet support sample packing or context parallelism")
+            raise ValueError(
+                "selected-ID distillation on Megatron does not yet support sample packing or context parallelism"
+            )
         if mpu.get_tensor_model_parallel_world_size() != 1:
-            raise ValueError("sparse forward KL on Megatron requires a tensor-parallel top-K gather")
+            raise ValueError("selected-ID distillation on Megatron requires a tensor-parallel top-K gather")
         response_logits = logits[:, -data.num_actions - 1 : -1]
         return student_topk_logprobs(response_logits, token_ids)
 

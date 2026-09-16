@@ -10,6 +10,7 @@ from skyrl_train.distillation import (
     ChosenTokenTeacherEvidence,
     SparseForwardKLInput,
     SampledReverseKLInput,
+    StudentTopKReverseKLInput,
     TeacherScoreRequest,
     TopKTeacherEvidence,
     distillation_input_from_tensors,
@@ -50,6 +51,7 @@ def _policy_config(loss_reduction: str = "token_mean", reward_mode: str = "add")
             "max_seq_len": 3,
             "eps_clip_low": 0.2,
             "eps_clip_high": 0.2,
+            "clip_ratio_c": 3.0,
             "think_token_weight": 1.0,
             "use_entropy_loss": False,
             "entropy_loss_coef": 0.0,
@@ -346,6 +348,98 @@ def test_replace_mode_optimizes_only_sampled_reverse_kl():
     torch.testing.assert_close(actions.grad, expected_gradient)
 
 
+def test_student_topk_surrogate_matches_selected_policy_gradient_at_behavior_policy():
+    behavior_probs = torch.tensor([0.45, 0.35, 0.20], dtype=torch.float64)
+    teacher_probs = torch.tensor([0.55, 0.40, 0.05], dtype=torch.float64)
+    logits = behavior_probs.log().reshape(1, 1, 3).detach().requires_grad_()
+    selected_ids = torch.tensor([[[0, 1]]])
+    behavior_logprobs = behavior_probs.log()[selected_ids]
+    teacher_logprobs = teacher_probs.log()[selected_ids]
+    distillation = StudentTopKReverseKLInput(
+        student_topk_indices=selected_ids,
+        behavior_topk_logprobs=behavior_logprobs,
+        teacher_on_student_logprobs=teacher_logprobs,
+        valid_mask=torch.ones((1, 1), dtype=torch.bool),
+        loss_weights=torch.ones((1, 1), dtype=torch.float64),
+    )
+    selected_current_logprobs = student_topk_logprobs(logits, selected_ids)
+    objective = compute_policy_objective(
+        action_log_probs=torch.zeros((1, 1), dtype=torch.float64),
+        old_action_log_probs=torch.zeros((1, 1), dtype=torch.float64),
+        base_action_log_probs=None,
+        advantages=torch.zeros((1, 1), dtype=torch.float64),
+        rollout_logprobs=None,
+        response_span_tags=None,
+        token_entropy=torch.zeros((1, 1), dtype=torch.float64),
+        student_topk_logprobs=selected_current_logprobs,
+        loss_mask=torch.ones((1, 1), dtype=torch.bool),
+        config=_policy_config(reward_mode="replace"),
+        policy_loss_fn=ppo_policy_loss,
+        accumulation_steps=1,
+        scaling=LossScaling.CALLER,
+        distillation=distillation,
+    )
+    loss = objective.optimization_loss
+    loss.backward()
+
+    weighted_gaps = behavior_probs[:2] / behavior_probs[:2].sum() * (behavior_probs[:2].log() - teacher_probs[:2].log())
+    expected_gradient = torch.zeros_like(behavior_probs)
+    expected_gradient[:2] = weighted_gaps
+    expected_gradient -= weighted_gaps.sum() * behavior_probs
+    torch.testing.assert_close(loss, weighted_gaps.sum())
+    torch.testing.assert_close(logits.grad.reshape(-1), expected_gradient)
+    assert loss.item() < 0  # A selected-ID reward sum need not be a KL divergence.
+    assert objective.policy_loss.item() == 0.0
+
+
+def test_student_topk_surrogate_clips_improving_high_ratio_update():
+    logits = torch.log(torch.tensor([[[0.9, 0.1]]], dtype=torch.float64)).requires_grad_()
+    distillation = StudentTopKReverseKLInput(
+        student_topk_indices=torch.tensor([[[0]]]),
+        behavior_topk_logprobs=torch.log(torch.tensor([[[0.6]]], dtype=torch.float64)),
+        teacher_on_student_logprobs=torch.log(torch.tensor([[[0.95]]], dtype=torch.float64)),
+        valid_mask=torch.ones((1, 1), dtype=torch.bool),
+        loss_weights=torch.ones((1, 1), dtype=torch.float64),
+    )
+    loss, metrics = distillation.objective_loss(
+        action_log_probs=torch.zeros((1, 1), dtype=torch.float64),
+        old_action_log_probs=torch.zeros((1, 1), dtype=torch.float64),
+        student_selected_logprobs=student_topk_logprobs(logits, distillation.student_topk_indices),
+        loss_mask=torch.ones((1, 1), dtype=torch.bool),
+        config=_policy_config(),
+    )
+    loss.backward()
+
+    expected_advantage = -(torch.log(torch.tensor(0.9 / 0.95, dtype=torch.float64)))
+    torch.testing.assert_close(loss, -1.2 * expected_advantage)
+    torch.testing.assert_close(logits.grad, torch.zeros_like(logits))
+    assert metrics["distillation_clip_fraction"] == 1.0
+
+
+def test_student_topk_surrogate_applies_negative_advantage_dual_clip():
+    logits = torch.log(torch.tensor([[[0.95, 0.02, 0.02, 0.01]]], dtype=torch.float64)).requires_grad_()
+    distillation = StudentTopKReverseKLInput(
+        student_topk_indices=torch.tensor([[[0]]]),
+        behavior_topk_logprobs=torch.log(torch.tensor([[[0.3]]], dtype=torch.float64)),
+        teacher_on_student_logprobs=torch.log(torch.tensor([[[0.05]]], dtype=torch.float64)),
+        valid_mask=torch.ones((1, 1), dtype=torch.bool),
+        loss_weights=torch.ones((1, 1), dtype=torch.float64),
+    )
+    loss, metrics = distillation.objective_loss(
+        action_log_probs=torch.zeros((1, 1), dtype=torch.float64),
+        old_action_log_probs=torch.zeros((1, 1), dtype=torch.float64),
+        student_selected_logprobs=student_topk_logprobs(logits, distillation.student_topk_indices),
+        loss_mask=torch.ones((1, 1), dtype=torch.bool),
+        config=_policy_config(),
+    )
+    loss.backward()
+
+    expected_advantage = -torch.log(torch.tensor(0.95 / 0.05, dtype=torch.float64))
+    torch.testing.assert_close(loss, -3.0 * expected_advantage)
+    torch.testing.assert_close(logits.grad, torch.zeros_like(logits))
+    assert metrics["distillation_dual_clip_fraction"] == 1.0
+
+
 def test_replace_mode_rejects_batch_without_teacher_evidence():
     actions = torch.tensor([[-1.0]], dtype=torch.float64)
 
@@ -624,6 +718,74 @@ def test_training_batch_iterator_preserves_sparse_distillation_payload():
 
     assert isinstance(experience.distillation, SparseForwardKLInput)
     torch.testing.assert_close(experience.distillation.retained_mass, torch.tensor([[0.9, 0.8]]))
+
+
+def test_training_batch_iterator_preserves_student_selected_teacher_scores():
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2, 3]]),
+            "action_log_probs": torch.zeros(1, 2),
+            "base_action_log_probs": None,
+            "values": None,
+            "returns": torch.zeros(1, 2),
+            "advantages": torch.zeros(1, 2),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+            "loss_mask": torch.ones(1, 2, dtype=torch.long),
+            "response_mask": torch.ones(1, 2, dtype=torch.long),
+            "student_topk_indices": torch.tensor([[[1, 2], [3, 4]]]),
+            "behavior_topk_logprobs": torch.log(torch.tensor([[[0.4, 0.3], [0.5, 0.2]]])),
+            "teacher_on_student_logprobs": torch.log(torch.tensor([[[0.5, 0.2], [0.4, 0.3]]])),
+            "teacher_valid_mask": torch.ones(1, 2, dtype=torch.bool),
+            "distillation_loss_weights": torch.tensor([[0.4, 0.6]]),
+        }
+    )
+    batch.metadata = {"response_length": 2}
+
+    [experience] = list(TrainingBatchIterator(batch, sample_batch_size=1))
+
+    assert isinstance(experience.distillation, StudentTopKReverseKLInput)
+    torch.testing.assert_close(experience.distillation.student_token_ids(), torch.tensor([[[1, 2], [3, 4]]]))
+    torch.testing.assert_close(
+        experience.distillation.teacher_on_student_logprobs,
+        torch.log(torch.tensor([[[0.5, 0.2], [0.4, 0.3]]])),
+    )
+
+
+def test_student_topk_payload_rejects_mixed_or_partial_evidence():
+    base = dict(
+        teacher_action_log_probs=None,
+        teacher_topk_indices=None,
+        teacher_topk_logprobs=None,
+        teacher_retained_mass=None,
+        valid_mask=torch.ones(1, 1, dtype=torch.bool),
+        loss_weights=torch.ones(1, 1),
+        student_topk_indices=torch.tensor([[[1, 2]]]),
+        behavior_topk_logprobs=torch.tensor([[[-0.5, -0.8]]]),
+        teacher_on_student_logprobs=torch.tensor([[[-0.4, -0.9]]]),
+    )
+    with pytest.raises(ValueError, match="cannot mix objective evidence variants"):
+        distillation_input_from_tensors(**(base | {"teacher_action_log_probs": torch.tensor([[-0.5]])}))
+    with pytest.raises(ValueError, match="selected IDs, behavior logprobs, and teacher scores together"):
+        distillation_input_from_tensors(**(base | {"teacher_on_student_logprobs": None}))
+
+
+def test_student_topk_surrogate_rejects_plausible_invalid_teacher_scores():
+    distillation = StudentTopKReverseKLInput(
+        student_topk_indices=torch.tensor([[[1, 2], [-1, -1]]]),
+        behavior_topk_logprobs=torch.tensor([[[-0.5, -0.8], [float("nan"), float("nan")]]]),
+        teacher_on_student_logprobs=torch.tensor([[[-0.4, -0.9], [-0.3, -0.7]]]),
+        valid_mask=torch.tensor([[True, False]]),
+        loss_weights=torch.tensor([[1.0, 0.0]]),
+    )
+
+    with pytest.raises(ValueError, match="invalid teacher_on_student_logprobs must be NaN"):
+        distillation.objective_loss(
+            action_log_probs=torch.zeros(1, 2),
+            old_action_log_probs=torch.zeros(1, 2),
+            student_selected_logprobs=torch.tensor([[[-0.5, -0.8], [float("nan"), float("nan")]]]),
+            loss_mask=torch.tensor([[True, False]]),
+            config=_policy_config(),
+        )
 
 
 def test_partial_distillation_payload_fails_closed():
