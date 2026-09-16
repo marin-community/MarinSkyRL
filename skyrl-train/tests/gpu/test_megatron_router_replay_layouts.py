@@ -64,7 +64,7 @@ def _layout_config(tmp_path, layout) -> tuple:
     _, world_size, tp, pp, ep, cp, packing = layout
     model_path = tmp_path / "model"
     model_path.mkdir(parents=True)
-    _write_tiny_checkpoint(model_path)
+    _write_tiny_checkpoint(model_path, vocab_size_multiple=2)
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     cfg.trainer.use_sample_packing = packing
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
