@@ -107,9 +107,7 @@ def verify_remote_checkpoint(checkpoint_uri: str) -> VerifiedCheckpoint:
     if missing_required:
         raise ValueError(f"Remote checkpoint commit record is missing required files: {sorted(missing_required)}")
     missing_remote = [
-        relative
-        for relative, size in inventory.items()
-        if remote_sizes.get(posixpath.join(target, relative)) != size
+        relative for relative, size in inventory.items() if remote_sizes.get(posixpath.join(target, relative)) != size
     ]
     if missing_remote:
         raise ValueError(f"Remote checkpoint is missing or has changed files: {sorted(missing_remote)}")
