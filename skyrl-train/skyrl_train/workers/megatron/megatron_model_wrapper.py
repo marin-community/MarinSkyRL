@@ -2,26 +2,16 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, List, Optional
 
+import megatron.core.parallel_state as mpu
 import torch
 import torch.nn as nn
-from omegaconf import OmegaConf
-
-from megatron.core.pipeline_parallel import get_forward_backward_func
-import megatron.core.parallel_state as mpu
 from megatron.core.distributed import finalize_model_grads
-
-from skyrl_train.distributed.megatron.model_utils import (
-    from_parallel_logits_to_logprobs,
-    from_parallel_logits_to_logprobs_packed_sequences,
-    vocab_parallel_entropy,
-)
-from skyrl_train.distributed.megatron.megatron_utils import get_model_config
+from megatron.core.pipeline_parallel import get_forward_backward_func
+from omegaconf import OmegaConf
 from skyrl_train.distillation import DistillationInput, student_topk_logprobs
-from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
-from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
-
 from skyrl_train.distributed.megatron.megatron_utils import (
     compact_left_padded_tokens,
+    get_model_config,
     make_batch_generator,
     pack_padded_tokens,
     preprocess_packed_seqs,
@@ -29,7 +19,14 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     scatter_token_values,
     unpack_packed_token_values,
 )
-
+from skyrl_train.distributed.megatron.model_utils import (
+    allgather_cp_sharded_tensor,
+    from_parallel_logits_to_logprobs,
+    from_parallel_logits_to_logprobs_packed_sequences,
+    vocab_parallel_entropy,
+)
+from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
+from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
 
 # Sentinel: distinguishes "caller did not pass logprob_chunk_size" (=> fall back to
 # the policy config key, preserving prior behavior) from an explicit None (=> chunking
@@ -145,6 +142,9 @@ class MegatronModelWrapper:
             if packed_seq_params is None:
                 raise ValueError("Packed sequence parameters are required when sample packing is enabled.")
             return unpack_packed_token_values(token_entropies, packed_seq_params, attention_mask)
+        cp_size = mpu.get_context_parallel_world_size()
+        if cp_size > 1:
+            token_entropies = allgather_cp_sharded_tensor(token_entropies, mpu.get_context_parallel_group(), seq_dim=1)
         return scatter_token_values(token_entropies, attention_mask, drop_last=False)
 
     def _forward_micro_batch(self, model, sequences, attention_mask, position_ids):

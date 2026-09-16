@@ -1,43 +1,42 @@
 import importlib
 import ipaddress
-import os
-import time
-import sys
 import logging
 import math
+import os
 import socket
+import sys
+import time
 
 import ray
 import torch
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import (
-    placement_group,
-    PlacementGroupSchedulingStrategy,
     PlacementGroup,
+    PlacementGroupSchedulingStrategy,
+    placement_group,
     placement_group_table,
 )
 
-from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
-from skyrl_train.config.query_bias import resolve_grug_query_bias_update
-from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
+from marinskyrl.distillation import compile_distillation_plan_from_config, validate_distillation_runtime_support
+from marinskyrl.process_diagnostics import initialize_process_diagnostics
+from marinskyrl.runtime_options import GDNBackend, R3Transport
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
 )
+from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
+from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
+from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.debug_mode import apply_debug_mode
-from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
-from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
-from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, DEBUG_MODE_ENV, EnvVarManager, EnvVarScope
 from skyrl_train.group_admission import resolve_group_advantage_invariant
+from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
+from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
-from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
-from marinskyrl.process_diagnostics import initialize_process_diagnostics
-from marinskyrl.distillation import compile_distillation_plan_from_config, validate_distillation_runtime_support
-from marinskyrl.runtime_options import GDNBackend, R3Transport
 
-from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .algorithm_registry import (
     AdvantageEstimatorRegistry,
     NoGroupAdvantage,
@@ -46,6 +45,7 @@ from .algorithm_registry import (
     rollout_logprobs_enabled,
     sync_registries,
 )
+from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .logging_utils import format_exception_text
 from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTIONS
 from .nccl_environment import worker_nccl_environment
@@ -472,9 +472,6 @@ def validate_megatron_cfg(cfg: DictConfig):
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
-        # context, expert, and expert tensor parallel are not yet supported for megatron
-        if config.megatron_config.context_parallel_size > 1:
-            assert cfg.trainer.use_sample_packing, "context parallel is only supported with sample packing"
         # check that sequence parallel is not configured outside of megatron
         assert config.sequence_parallel_size == 1, (
             f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"
