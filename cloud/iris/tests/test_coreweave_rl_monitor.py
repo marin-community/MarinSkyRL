@@ -523,6 +523,56 @@ def test_rl_status_only_refreshes_current_state_from_log_tail(monkeypatch, tmp_p
     assert row[4] == "0.91"
 
 
+def test_rl_report_row_uses_fresh_pod_metrics_when_finelog_omits_step(tmp_path):
+    pod_dir = tmp_path / "pod_logs"
+    pod_dir.mkdir()
+    pod_log = pod_dir / "current-pod.log"
+    pod_log.write_text(
+        "Training Batches Processed: 3/128\n"
+        'WANDB_MIRROR kind=train step=1 metrics={"reward/avg_raw_reward": 0.7712, '
+        '"policy/policy_loss": 1.05}\n'
+    )
+    (tmp_path / "finelog.log").write_text("Training Batches Processed: 3/128\n")
+    artifacts = watch_coreweave_rl.ArtifactResult(
+        "synced", "synced", "synced", "synced", None, None, (), pod_log_files=(pod_log,)
+    )
+
+    row = _rl_report_row(tmp_path, artifacts=artifacts)
+
+    assert row[3] == "1/128"
+    assert row[4] == "0.7712"
+    assert row[5] == "1.05"
+
+
+def test_rl_report_row_uses_newer_finelog_step_over_pod_metrics(tmp_path):
+    pod_log = tmp_path / "pod_logs" / "current-pod.log"
+    pod_log.parent.mkdir()
+    pod_log.write_text('WANDB_MIRROR kind=train step=1 metrics={"reward/avg_raw_reward": 0.7}\n')
+    artifacts = watch_coreweave_rl.ArtifactResult(
+        "synced", "synced", "synced", "synced", None, None, (), pod_log_files=(pod_log,)
+    )
+
+    row = _rl_report_row(
+        tmp_path,
+        'Training Step Progress: 2 / 128\nWANDB_MIRROR kind=train step=2 metrics={"reward/avg_raw_reward": 0.8}\n',
+        artifacts=artifacts,
+    )
+
+    assert row[3] == "2/128"
+    assert row[4] == "0.8"
+
+
+def test_rl_status_only_does_not_reuse_old_pod_metrics(tmp_path):
+    pod_log = tmp_path / "pod_logs" / "old-pod.log"
+    pod_log.parent.mkdir()
+    pod_log.write_text('WANDB_MIRROR kind=train step=7 metrics={"reward/avg_raw_reward": 0.9}\n')
+
+    row = _rl_report_row(tmp_path, "Training Step Progress: 1 / 128\n")
+
+    assert row[3] == "1/128"
+    assert row[4] == "—"
+
+
 def test_rl_report_row_keeps_artifact_exceptions_out_of_trend(tmp_path):
     artifacts = watch_coreweave_rl.ArtifactResult(
         "unavailable",

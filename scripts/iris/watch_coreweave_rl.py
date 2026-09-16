@@ -135,6 +135,7 @@ TRAIN_DATA_PATTERN = re.compile(
     r"--train[_-]data(?:=|\s+)(?:'(?P<single>\[[^']+\])'|\"(?P<double>\[[^\"]+\])\"|(?P<bare>\[[^\s]+\]))"
 )
 PROGRESS_PATTERN = re.compile(r"Training Step Progress:\s*(\d+)\s*/\s*(\d+)")
+BATCH_TOTAL_PATTERN = re.compile(r"Training Batches Processed:\s*\d+\s*/\s*(\d+)")
 ERROR_PATTERNS = (
     re.compile(r"CUDA out of memory", re.IGNORECASE),
     re.compile(r"(?:RayTaskError|ActorDiedError|WorkerCrashedError)"),
@@ -292,6 +293,7 @@ class ArtifactResult:
     errors: tuple[str, ...]
     slurm_logs: str = "not applicable"
     trace_selected: int | None = None
+    pod_log_files: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -758,19 +760,19 @@ def sync_pod_and_ray_logs(
     destination: Path,
     *,
     progress: ProgressReporter | None = None,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], tuple[Path, ...]]:
     """Capture all current pod stdout plus all Ray/vLLM logs without a size cap."""
     errors: list[str] = []
     try:
         pods = job_pods(job)
     except (RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-        return "unavailable", "unavailable", [f"pod discovery: {error}"]
+        return "unavailable", "unavailable", [f"pod discovery: {error}"], ()
     if not pods:
-        return "no pod yet", "no pod yet", []
+        return "no pod yet", "no pod yet", [], ()
     running_pods = [pod for pod, phase in pods if phase == "Running"]
     if not running_pods:
         phases = ", ".join(sorted(phase for _, phase in pods))
-        return f"{len(pods)} pod(s): {phases}", "awaiting host", []
+        return f"{len(pods)} pod(s): {phases}", "awaiting host", [], ()
 
     base = kubectl_base(COREWEAVE_CLUSTERS[job.cluster.name], SimpleNamespace(kubeconfig=None, kube_context=None))
     pod_dir = destination / "pod_logs"
@@ -778,11 +780,14 @@ def sync_pod_and_ray_logs(
     pod_dir.mkdir(exist_ok=True)
     ray_dir.mkdir(exist_ok=True)
     ray_files = 0
+    pod_log_files: list[Path] = []
     for index, pod in enumerate(running_pods, start=1):
         try:
             if progress:
                 progress.phase(f"pod stdout {index}/{len(running_pods)} {job.short_name}/{pod}")
-            fetch_complete_pod_log(base, pod, pod_dir / f"{pod}.log")
+            pod_log = pod_dir / f"{pod}.log"
+            fetch_complete_pod_log(base, pod, pod_log)
+            pod_log_files.append(pod_log)
         except (RuntimeError, subprocess.SubprocessError) as error:
             errors.append(f"{pod} stdout: {error}")
         try:
@@ -793,7 +798,7 @@ def sync_pod_and_ray_logs(
             ray_files += fetch_complete_ray_logs(base, pod, pod_ray_dir)
         except (RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as error:
             errors.append(f"{pod} Ray/vLLM: {error}")
-    return f"{len(pods)} pod(s), {len(running_pods)} Running", f"{ray_files:,} files", errors
+    return f"{len(pods)} pod(s), {len(running_pods)} Running", f"{ray_files:,} files", errors, tuple(pod_log_files)
 
 
 def trials_uri_from_entrypoint(entrypoint: str) -> str | None:
@@ -1023,30 +1028,41 @@ class ParsedMetrics:
     error: str | None
 
 
-def parse_metrics(finelog: Path) -> ParsedMetrics:
-    if not finelog.exists():
-        return ParsedMetrics(None, None, {}, None, None)
-    try:
-        text = finelog.read_text(errors="replace")
-    except OSError as error:
-        return ParsedMetrics(None, None, {}, None, f"could not read finelog: {error}")
-    progress = PROGRESS_PATTERN.findall(text)
-    step = int(progress[-1][0]) if progress else None
-    total = int(progress[-1][1]) if progress else None
-    tis_enabled = parse_tis_enabled(text)
-    result = parse_training_metrics_result(text)
-    if result.records:
-        latest = result.records[-1]
-        return ParsedMetrics(
-            latest.step,
-            total,
-            latest.metrics,
-            tis_enabled,
-            training_metrics_parse_error(result.malformed_lines),
-        )
-    if result.malformed_lines:
-        return ParsedMetrics(step, total, {}, tis_enabled, training_metrics_parse_error(result.malformed_lines))
-    return ParsedMetrics(step, total, {}, tis_enabled, None)
+def parse_metrics(finelog: Path, pod_log_files: tuple[Path, ...] = ()) -> ParsedMetrics:
+    """Use the newest training step in this sync's Finelog and pod stdout."""
+    progress_step = total = metric_step = None
+    metrics: dict[str, Any] = {}
+    tis_enabled = None
+    errors: list[str] = []
+    for source in (finelog, *pod_log_files):
+        if not source.exists():
+            if source != finelog:
+                errors.append(f"synchronized pod log missing: {source.name}")
+            continue
+        try:
+            text = source.read_text(errors="replace")
+        except OSError as error:
+            errors.append(f"could not read {source.name}: {error}")
+            continue
+        progress = PROGRESS_PATTERN.findall(text)
+        if progress:
+            latest_progress_step, latest_total = map(int, progress[-1])
+            if progress_step is None or latest_progress_step > progress_step:
+                progress_step, total = latest_progress_step, latest_total
+        elif total is None and (batch_totals := BATCH_TOTAL_PATTERN.findall(text)):
+            # Refill attempts increment this counter, so only its configured total is reliable.
+            total = int(batch_totals[-1])
+        if tis_enabled is None:
+            tis_enabled = parse_tis_enabled(text)
+        result = parse_training_metrics_result(text)
+        if result.malformed_lines:
+            errors.append(f"{source.name}: {training_metrics_parse_error(result.malformed_lines)}")
+        if result.records:
+            latest = result.records[-1]
+            if metric_step is None or latest.step > metric_step:
+                metric_step, metrics = latest.step, latest.metrics
+    step = metric_step if metric_step is not None else progress_step
+    return ParsedMetrics(step, total, metrics, tis_enabled, "; ".join(errors) or None)
 
 
 def display_metric(value: Any | None, precision: int = 4) -> str:
@@ -1194,7 +1210,7 @@ def job_filter_values(job: MonitoredJob, *, now_ms: int) -> dict[str, str]:
 
 def report_row(job: MonitoredJob, artifacts: ArtifactResult, directory: Path) -> list[object]:
     """Build one status row; monitor failures belong in the separate error report."""
-    parsed = parse_metrics(directory / "finelog.log")
+    parsed = parse_metrics(directory / "finelog.log", artifacts.pod_log_files)
     step, total, metrics = parsed.step, parsed.total, parsed.metrics
     step_display = "—" if step is None else f"{step}/{total if total is not None else '—'}"
     reward = metric_value(metrics, *REWARD_KEYS)
@@ -1309,9 +1325,11 @@ def sync_iris_job(
         ), directory
     if progress:
         progress.phase(f"pod + Ray/vLLM log sync {job.cluster.name}/{job.short_name}")
-    pod_logs, ray_logs, pod_errors = sync_pod_and_ray_logs(job, directory, progress=progress)
+    pod_logs, ray_logs, pod_errors, pod_log_files = sync_pod_and_ray_logs(job, directory, progress=progress)
     errors.extend(pod_errors)
-    return ArtifactResult(finelog, pod_logs, ray_logs, "pending fleet selection", None, None, tuple(errors)), directory
+    return ArtifactResult(
+        finelog, pod_logs, ray_logs, "pending fleet selection", None, None, tuple(errors), pod_log_files=pod_log_files
+    ), directory
 
 
 def sync_fleet_trace_jobs(
@@ -1545,9 +1563,9 @@ def build_job_report_entry(settings: MonitorSettings, synced: SyncedJob) -> JobR
     job, artifacts, directory = synced.job, synced.artifacts, synced.directory
     scope = f"{job.cluster.name}/{job.job_id}"
     errors = [_monitor_error(scope, "artifact sync", error) for error in artifacts.errors]
-    parsed_metrics = parse_metrics(directory / "finelog.log")
+    parsed_metrics = parse_metrics(directory / "finelog.log", artifacts.pod_log_files)
     if parsed_metrics.error:
-        errors.append(_monitor_error(scope, "Finelog parse", parsed_metrics.error))
+        errors.append(_monitor_error(scope, "training metrics parse", parsed_metrics.error))
     signal = terminal_signal(directory / "finelog.log")
     if signal:
         errors.append(_monitor_error(scope, "workload signal", signal))

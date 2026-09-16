@@ -125,6 +125,11 @@ The watcher reports:
   shift;
 - per-cluster Iris budget and a separate monitor-error count.
 
+For a full sync of an active Iris job, the metric row uses the newest training step
+in the current Finelog and freshly synchronized pod stdout. Finelog can omit an
+earlier step after its tail advances. A `--status-only` sweep does not fetch pod
+stdout and never reuses pod logs from a previous sweep.
+
 The table is a survey, not a health verdict. `running` does not prove progress, a missing
 `trace_jobs/` directory is normal for standard RL, and an unavailable metric can mean bring-up,
 buffering, disabled instrumentation, or a parse failure. Interpret the synchronized evidence with
