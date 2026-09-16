@@ -154,6 +154,15 @@ class MegatronWorker:
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
+        # R3 RESIDENT-SET per-rank marker (mirrors Worker.forward): lets us SEE
+        # the resident routed-experts chunk land on EVERY rank. nbytes==0 when R3
+        # is off, so the marker is a strict no-op signal there.
+        if "rollout_routed_experts" in data.keys() and data["rollout_routed_experts"] is not None:
+            routes = data["rollout_routed_experts"]
+            logger.info(
+                f"R3_RESIDENT_SET rank={self._rank} nbytes={int(routes.nbytes)} dtype={routes.dtype} "
+                f"shape={tuple(routes.shape)}"
+            )
         # Run in micro batches grouped into a single mini-batch
         micro_bsz = self.cfg.trainer.micro_forward_batch_size_per_gpu
         micro_batches = data.chunk(micro_bsz)
@@ -473,6 +482,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     # are shared with the ordinary worker through backend-neutral utilities.
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
+        self._drain_r3_decentral_stagger(train_data)
         if self.model.router_replay is not None and (
             "rollout_routed_experts" not in train_data.keys() or train_data["rollout_routed_experts"] is None
         ):

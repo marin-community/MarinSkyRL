@@ -997,50 +997,51 @@ class PolicyWorkerBase(Worker):
         causal_lm = getattr(self.model, "model", self.model)
         return causal_lm if isinstance(causal_lm, GrugMoeForCausalLM) else None
 
-    def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
-        # ── Co-arrival drain before the first training FSDP unshard (80B gs1 SIGABRT #1-6) ──
-        # Under fully_async + SKYRL_R3_DECENTRAL, `ppo_train` is dispatched STAGGERED
-        # per-dp-group: MeshDispatch relocates each dp-group's multi-GB `rollout_routed_experts`
-        # (R3) chunk to its consumer node sequentially (dispatch.py `_relocate_chunk_to_node`
-        # under `decentral`), so the 8 members of a `mesh_fsdp` shard group — one per dp-group,
-        # since the FSDP shard dim is ORTHOGONAL to the dp/dispatch dim — begin `ppo_train` at
-        # up to ~12 min apart (observed dp=0 vs dp=1 ≈ 12 min). Each actor method only starts
-        # once its R3 arg ObjectRef resolves, so the fastest member enters, runs the first
-        # micro-batch forward, and issues the first training FSDP unshard (`mesh_fsdp
-        # _ALLGATHER_BASE`, SeqNum=6936) while its peers are still transferring their R3 chunk.
-        # The unshard blocks for them; the arrival spread exceeds the 600 s `mesh_fsdp` submesh
-        # PG timeout -> NCCL-watchdog SIGABRT. This is the SAME non-co-arrival that killed every
-        # 80B gs1 attempt (#1-6); fix 68ea066e only removed the OTHER collective it surfaced at
-        # (the seq_mean_token_sum_norm_global all_reduce), exposing this unshard as the next one.
-        #
-        # The `forward` phase was already hardened against exactly this desync (async entry +
-        # `asyncio.to_thread` + the pre-forward `barrier_all` drain: fsdp_worker.py:908 /
-        # worker.py:560); backward/optimizer in `ppo_train` were deliberately left synchronous &
-        # untouched (fsdp_worker.py docstring). Mirror the drain's PRIMITIVE here, at the one
-        # placement that actually collapses THIS stagger — the top of `ppo_train`, BEFORE any
-        # compute (hence before unshard #6936) but AFTER each rank's R3 chunk has materialized
-        # (guaranteed: the arg ObjectRef is already resolved for the actor method to be running).
-        # Each rank waits on a `torch.distributed.barrier()` over the DEFAULT/WORLD PG, whose
-        # timeout is SKYRL_WORKER_NCCL_TIMEOUT_IN_S (worker.py:156; 3600 s in the 80B config) —
-        # LONGER than the 600 s `mesh_fsdp` submesh timeout. So this barrier ABSORBS the multi-
-        # minute R3 arrival spread and RE-SYNCHRONIZES every rank; all `mesh_fsdp` members then
-        # co-arrive at unshard #6936 within the barrier's release (sub-second) instead of ~12 min
-        # apart, so the 600 s submesh timeout is never approached. A barrier changes only timing,
-        # never a tensor -> value-neutral (loss/grad bit-identical). `torch.cuda.synchronize()`
-        # first (mirrors `barrier_all`) so the post-backload H2D copies are quiesced before the
-        # collective. Gated to the R3-decentral MoE path (the ONLY path with the staggered
-        # relocation) so the non-decentral / 8B (no `rollout_routed_experts`) path is
-        # byte-identical; does NOT raise the 600 s unshard timeout (operator rejected that).
-        _r3_decentral_stagger = (
+    def _drain_r3_decentral_stagger(self, train_data: TrainingInputBatch) -> None:
+        """Co-arrival drain before the first training collective (80B gs1 SIGABRT #1-6).
+
+        Under fully_async + SKYRL_R3_DECENTRAL, `ppo_train` is dispatched STAGGERED
+        per-dp-group: MeshDispatch relocates each dp-group's multi-GB `rollout_routed_experts`
+        (R3) chunk to its consumer node sequentially (dispatch.py `_relocate_chunk_to_node`
+        under `decentral`), so the 8 members of a `mesh_fsdp` shard group — one per dp-group,
+        since the FSDP shard dim is ORTHOGONAL to the dp/dispatch dim — begin `ppo_train` at
+        up to ~12 min apart (observed dp=0 vs dp=1 ≈ 12 min). Each actor method only starts
+        once its R3 arg ObjectRef resolves, so the fastest member enters, runs the first
+        micro-batch forward, and issues the first training unshard (`mesh_fsdp
+        _ALLGATHER_BASE`, SeqNum=6936) while its peers are still transferring their R3 chunk.
+        The unshard blocks for them; the arrival spread exceeds the 600 s `mesh_fsdp` submesh
+        PG timeout -> NCCL-watchdog SIGABRT.
+
+        The `forward` phase was already hardened against exactly this desync (async entry +
+        `asyncio.to_thread` + the pre-forward `barrier_all` drain: fsdp_worker.py:908 /
+        worker.py:560). Mirror the drain's PRIMITIVE here, at the one placement that actually
+        collapses THIS stagger — the top of `ppo_train`, BEFORE any compute (hence before
+        unshard #6936) but AFTER each rank's R3 chunk has materialized (guaranteed: the arg
+        ObjectRef is already resolved for the actor method to be running). Each rank waits on
+        a `torch.distributed.barrier()` over the DEFAULT/WORLD PG, whose timeout is
+        SKYRL_WORKER_NCCL_TIMEOUT_IN_S (worker.py:156; 3600 s in the 80B config) — LONGER
+        than the 600 s `mesh_fsdp` submesh timeout. So this barrier ABSORBS the multi-minute
+        R3 arrival spread and RE-SYNCHRONIZES every rank; all shard-group members then
+        co-arrive at the first unshard within the barrier's release (sub-second) instead of
+        ~12 min apart, so the submesh timeout is never approached. A barrier changes only
+        timing, never a tensor -> value-neutral (loss/grad bit-identical).
+        `torch.cuda.synchronize()` first (mirrors `barrier_all`) so the post-backload H2D
+        copies are quiesced before the collective. Gated to the R3-decentral MoE path (the
+        ONLY path with the staggered relocation) so the non-decentral / no-routes path is
+        byte-identical; does NOT raise the submesh unshard timeout.
+        """
+        staggered = (
             self.cfg.generator.r3_transport == R3Transport.DECENTRAL and "rollout_routed_experts" in train_data.keys()
         )
-        if _r3_decentral_stagger and self._world_size > 1 and torch.distributed.is_initialized():
-            # UNGATED per-rank marker: on the next 80B run all `mesh_fsdp` members must log this
-            # (staggered entry), then RELEASE together — the timestamp CLUSTER at release proves
-            # co-arrival; unshard #6936 must NOT time out afterward.
+        if staggered and self._world_size > 1 and torch.distributed.is_initialized():
+            # UNGATED per-rank marker: the timestamp CLUSTER at release proves co-arrival;
+            # the first unshard must NOT time out afterward.
             logger.info(f"WORKER_PPO_TRAIN_DRAIN_BARRIER rank={self._rank}")
             torch.cuda.synchronize()
             torch.distributed.barrier()
+
+    def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
+        self._drain_r3_decentral_stagger(train_data)
 
         global_step = train_data.metadata["global_step"]
 
