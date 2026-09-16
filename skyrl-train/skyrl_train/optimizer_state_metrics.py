@@ -20,7 +20,7 @@ overhead or a GPU kernel duration.
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field, replace
 import json
 import time
 
@@ -41,6 +41,36 @@ class OptimizerStatePart:
     settings: Mapping[str, str | bool]
 
 
+@dataclass
+class StorageRow:
+    """One category/dtype/device group of observed tensors."""
+
+    category: str
+    dtype: str
+    device: str
+    tensor_count: int = 0
+    elements: int = 0
+    logical_bytes: int = 0
+    unique_retained_storage_bytes: int = 0
+
+
+@dataclass(frozen=True)
+class OptimizerInventory:
+    """One worker's optimizer-state inventory: per-category rows and storage totals.
+
+    Category byte totals overlap through aliases; only the storage union is additive.
+    """
+
+    rows: list[StorageRow]
+    logical_bytes_including_role_aliases: int
+    unique_retained_storage_bytes: int
+    unique_cuda_storage_bytes: int
+    unique_cpu_storage_bytes: int
+    unique_storage_count: int
+    coverage: dict[str, int] = field(default_factory=dict)
+    complete: bool = False
+
+
 class StorageInventory:
     """Aggregate actual tensors without retaining them or publishing parameter IDs."""
 
@@ -58,38 +88,37 @@ class StorageInventory:
         storage_key = (str(tensor.device), storage.data_ptr())
         self.storages[storage_key] = storage.nbytes()
         key = (category, str(tensor.dtype), str(tensor.device))
-        row = self.rows.setdefault(key, {"tensor_count": 0, "elements": 0, "logical_bytes": 0})
-        row["tensor_count"] += 1
-        row["elements"] += tensor.numel()
-        row["logical_bytes"] += tensor.numel() * tensor.element_size()
+        row = self.rows.setdefault(key, StorageRow(*key))
+        row.tensor_count += 1
+        row.elements += tensor.numel()
+        row.logical_bytes += tensor.numel() * tensor.element_size()
         self.category_storages[key].add(storage_key)
 
-    def summary(self) -> dict:
+    def summary(self) -> OptimizerInventory:
         rows = [
-            {
-                "category": key[0],
-                "dtype": key[1],
-                "device": key[2],
-                **row,
-                "unique_retained_storage_bytes": sum(self.storages[item] for item in self.category_storages[key]),
-            }
+            replace(
+                row,
+                unique_retained_storage_bytes=sum(self.storages[item] for item in self.category_storages[key]),
+            )
             for key, row in sorted(self.rows.items())
         ]
         if len(rows) > 64:
             raise ValueError("Optimizer inventory exceeds 64 category/dtype/device rows")
-        return {
-            "rows": rows,
-            "logical_bytes_including_role_aliases": sum(row["logical_bytes"] for row in rows),
-            "unique_retained_storage_bytes": sum(self.storages.values()),
-            "unique_cuda_storage_bytes": sum(
+        return OptimizerInventory(
+            rows=rows,
+            logical_bytes_including_role_aliases=sum(row.logical_bytes for row in rows),
+            unique_retained_storage_bytes=sum(self.storages.values()),
+            unique_cuda_storage_bytes=sum(
                 size for (device, _), size in self.storages.items() if device.startswith("cuda:")
             ),
-            "unique_cpu_storage_bytes": sum(size for (device, _), size in self.storages.items() if device == "cpu"),
-            "unique_storage_count": len(self.storages),
-        }
+            unique_cpu_storage_bytes=sum(size for (device, _), size in self.storages.items() if device == "cpu"),
+            unique_storage_count=len(self.storages),
+        )
 
 
-def collect_optimizer_inventory(model_parameters: Sequence[torch.Tensor], parts: Sequence[OptimizerStatePart]) -> dict:
+def collect_optimizer_inventory(
+    model_parameters: Sequence[torch.Tensor], parts: Sequence[OptimizerStatePart]
+) -> OptimizerInventory:
     """Inspect raw persistent states; coverage failures remain explicit in output."""
     inventory = StorageInventory()
     coverage = defaultdict(int)
@@ -138,10 +167,10 @@ def collect_optimizer_inventory(model_parameters: Sequence[torch.Tensor], parts:
         for suffix in ("_dtype_mismatch", "_shape_mismatch")
     )
     complete &= coverage["empty_optimizer_components"] == coverage["empty_optimizer_parameters"] == 0
-    return {**inventory.summary(), "coverage": dict(coverage), "complete": complete}
+    return replace(inventory.summary(), coverage=dict(coverage), complete=complete)
 
 
-def megatron_inventory(model_chunks, optimizer) -> tuple[dict, list[dict]]:
+def megatron_inventory(model_chunks, optimizer) -> tuple[OptimizerInventory, list[dict]]:
     """Adapter for the pinned ordinary-DDP MCore ChainedOptimizer/TE path."""
     parameters = list(dict.fromkeys(parameter for chunk in model_chunks for parameter in chunk.module.parameters()))
     parts, settings = [], []
@@ -215,23 +244,24 @@ class OptimizerStateObserver:
             attributes["gpu_uuid"] = str(torch.cuda.get_device_properties(device).uuid)
             memory = torch.cuda.memory_stats(device)
             fields = {
-                **inventory["coverage"],
-                "complete": inventory["complete"],
-                "logical_bytes_including_role_aliases": inventory["logical_bytes_including_role_aliases"],
-                "unique_retained_storage_bytes": inventory["unique_retained_storage_bytes"],
-                "unique_cuda_storage_bytes": inventory["unique_cuda_storage_bytes"],
-                "unique_cpu_storage_bytes": inventory["unique_cpu_storage_bytes"],
-                "unique_storage_count": inventory["unique_storage_count"],
-                "storage_row_count": len(inventory["rows"]),
+                **inventory.coverage,
+                "complete": inventory.complete,
+                "logical_bytes_including_role_aliases": inventory.logical_bytes_including_role_aliases,
+                "unique_retained_storage_bytes": inventory.unique_retained_storage_bytes,
+                "unique_cuda_storage_bytes": inventory.unique_cuda_storage_bytes,
+                "unique_cpu_storage_bytes": inventory.unique_cpu_storage_bytes,
+                "unique_storage_count": inventory.unique_storage_count,
+                "storage_row_count": len(inventory.rows),
                 "allocated_bytes": memory["allocated_bytes.all.current"],
                 "reserved_bytes": memory["reserved_bytes.all.current"],
                 "optimizer_minibatch_in_target_update": minibatch,
                 "skipped_update_attempts_before_inventory": self.skipped_update_attempts,
                 "host_collection_seconds": time.perf_counter() - started,
             }
-            for row in inventory["rows"]:
-                record_event("optimizer_state_storage", row, attributes=attributes)
-                logger.info("OPTIMIZER_STATE_STORAGE {}", json.dumps({**attributes, **row}, sort_keys=True))
+            for row in inventory.rows:
+                fields_row = asdict(row)
+                record_event("optimizer_state_storage", fields_row, attributes=attributes)
+                logger.info("OPTIMIZER_STATE_STORAGE {}", json.dumps({**attributes, **fields_row}, sort_keys=True))
             for component in settings:
                 record_event("optimizer_state_settings", component, attributes=attributes)
                 logger.info("OPTIMIZER_STATE_SETTINGS {}", json.dumps({**attributes, **component}, sort_keys=True))

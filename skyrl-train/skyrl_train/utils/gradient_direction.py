@@ -1,6 +1,7 @@
 """Consecutive gradient directions over explicitly disjoint optimizer shards."""
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
 
@@ -12,6 +13,26 @@ CHUNK_ELEMENTS = 1 << 20
 
 # What a worker reports before, or without, a gradient observation.
 NO_GRADIENT_METRICS: Mapping[str, float] = MappingProxyType({})
+
+GradientStore = Literal["gpu_fp32", "cpu_bf16", "off"]
+DEFAULT_GRADIENT_STORE: GradientStore = "gpu_fp32"
+
+
+@dataclass(frozen=True)
+class GradCosineSettings:
+    """Resolved trainer.algorithm.grad_cosine knobs."""
+
+    enabled: bool
+    store: GradientStore
+
+
+def grad_cosine_settings(algorithm_cfg) -> GradCosineSettings:
+    """Read the grad-cosine section; the single fallback for an absent one."""
+    section = algorithm_cfg.get("grad_cosine") or {}
+    return GradCosineSettings(
+        enabled=bool(section.get("enabled", False)),
+        store=section.get("store", DEFAULT_GRADIENT_STORE),
+    )
 
 
 class GradientDirectionTracker:
@@ -32,7 +53,7 @@ class GradientDirectionTracker:
 
     def __init__(
         self,
-        store: Literal["gpu_fp32", "cpu_bf16", "off"],
+        store: GradientStore,
         device: torch.device,
         world_group: dist.ProcessGroup | None = None,
         reduce_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
@@ -122,9 +143,13 @@ class GradientDirectionTracker:
         }
 
 
-def gradient_direction_summary(updates: list[dict[str, float]]) -> dict[str, float]:
-    """Summarize valid consecutive comparisons without treating the first as zero."""
+def gradient_direction_summary(updates: Sequence[Mapping[str, float]]) -> dict[str, float]:
+    """Range of the valid consecutive comparisons in one policy update call.
+
+    The first comparison of a tracker has no predecessor and is excluded, so a call
+    with a single update reports nothing rather than a range of one point.
+    """
     measured = [row["grad_cosine"] for row in updates if row.get("grad_cosine_valid") == 1.0]
-    if not any("grad_cosine_valid" in row for row in updates):
+    if not measured:
         return {}
-    return {"grad_cosine_min": min(measured, default=0.0), "grad_cosine_max": max(measured, default=0.0)}
+    return {"grad_cosine_min": min(measured), "grad_cosine_max": max(measured)}
