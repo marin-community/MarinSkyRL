@@ -368,6 +368,7 @@ def run(
                     output_root / "checkpoints",
                     join_resource_path(output_uri, "checkpoints"),
                     policy_ranks=POLICY_GPUS,
+                    retain_local_checkpoints=2,
                 ),
                 complete_manifest=lambda current, returncode: replace(
                     current,

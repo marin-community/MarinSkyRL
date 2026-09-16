@@ -7,12 +7,15 @@ import hashlib
 import json
 from pathlib import Path
 import posixpath
+import shutil
 
 from cloud.iris.artifacts import FileEntry, fs_and_path
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from marinskyrl.resource_locator import join_resource_path
+from skyrl_train.hf_export import protected_hf_export_steps
 
 COMMIT_FILENAME = "commit.json"
+PRUNING_PREFIX = ".pruning-"
 
 
 @dataclass(frozen=True)
@@ -112,8 +115,12 @@ def verify_remote_checkpoint(checkpoint_uri: str) -> VerifiedCheckpoint:
     )
 
 
-def publish_committed_checkpoints(checkpoint_root: Path, output_uri: str, policy_ranks: int) -> tuple[int, ...]:
-    """Publish committed local steps, verify remote sizes, and advance the remote pointer last."""
+def publish_committed_checkpoints(
+    checkpoint_root: Path, output_uri: str, policy_ranks: int, retain_local_checkpoints: int
+) -> tuple[int, ...]:
+    """Publish every committed step, then prune only verified older local copies."""
+    if retain_local_checkpoints < 1:
+        raise ValueError("retain_local_checkpoints must be positive")
     marker = checkpoint_root / LATEST_CHECKPOINT_FILE
     if not marker.is_file():
         return ()
@@ -183,4 +190,20 @@ def publish_committed_checkpoints(checkpoint_root: Path, output_uri: str, policy
     if selected_commit not in remote_sizes and committed_step not in published:
         raise ValueError(f"Native checkpoint step {committed_step} has no committed artifact at {output_uri}")
     filesystem.pipe_file(remote_marker, marker_payload)
+
+    # Rename before removing so an interrupted local deletion cannot leave a
+    # partial global_step_N directory that blocks the next publication pass.
+    for staged in checkpoint_root.glob(f"{PRUNING_PREFIX}{GLOBAL_STEP_PREFIX}*"):
+        suffix = staged.name.removeprefix(f"{PRUNING_PREFIX}{GLOBAL_STEP_PREFIX}")
+        if staged.is_dir() and suffix.isdigit():
+            verify_remote_checkpoint(join_resource_path(output_uri, f"{GLOBAL_STEP_PREFIX}{suffix}"))
+            shutil.rmtree(staged)
+    protected_steps = protected_hf_export_steps(str(checkpoint_root))
+    for step, step_root in step_roots[:-retain_local_checkpoints]:
+        if step in protected_steps:
+            continue
+        verify_remote_checkpoint(join_resource_path(output_uri, step_root.name))
+        staged = step_root.with_name(f"{PRUNING_PREFIX}{step_root.name}")
+        step_root.rename(staged)
+        shutil.rmtree(staged)
     return tuple(published)
