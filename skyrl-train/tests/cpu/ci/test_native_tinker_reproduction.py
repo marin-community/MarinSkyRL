@@ -11,8 +11,10 @@ from types import SimpleNamespace
 from hydra import compose, initialize_config_dir
 import pyarrow as pa
 import pytest
+from safetensors.torch import save_file
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.entrypoints.main_generate import load_initial_policy_adapter
+import torch
 
 
 SCRIPT_ROOT = Path(__file__).parents[3] / "ci" / "opd" / "tinker_repro"
@@ -46,6 +48,30 @@ assert PUBLICATION_SPEC is not None and PUBLICATION_SPEC.loader is not None
 PUBLICATION = module_from_spec(PUBLICATION_SPEC)
 sys.modules["native_checkpoint_publication"] = PUBLICATION
 PUBLICATION_SPEC.loader.exec_module(PUBLICATION)
+
+
+def write_fused_adapter(path: Path) -> None:
+    path.mkdir(exist_ok=True)
+    (path / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "base_model_name_or_path": OPD.STUDENT_MODEL,
+                "r": 128,
+                "lora_alpha": 1,
+                "lora_dropout": 0.0,
+                "rank_pattern": {"in_proj_qkv": 384},
+                "alpha_pattern": {"in_proj_qkv": 3},
+                "target_modules": list(OPD.LORA_TARGETS),
+            }
+        )
+    )
+    save_file(
+        {
+            "base_model.model.model.language_model.layers.0.linear_attn.in_proj_qkv.lora_A.weight": torch.ones(3, 1),
+            "base_model.model.model.language_model.layers.0.linear_attn.in_proj_qkv.lora_B.weight": torch.ones(3, 3),
+        },
+        path / "adapter_model.safetensors",
+    )
 
 
 def test_deepmath_rows_become_prompt_only_training_examples():
@@ -103,9 +129,7 @@ def test_native_opd_fidelity_step_matches_the_published_batch_and_objective():
         "gate_proj",
         "up_proj",
         "down_proj",
-        "in_proj_q",
-        "in_proj_k",
-        "in_proj_v",
+        "in_proj_qkv",
         "linear_attn.in_proj_z",
         "linear_attn.out_proj",
         "lm_head",
@@ -129,33 +153,9 @@ def test_native_opd_plumbing_batch_covers_every_policy_rank():
 
 
 def test_native_opd_rejects_changed_or_incompatible_sft_adapter(tmp_path: Path):
+    write_fused_adapter(tmp_path)
     adapter_config = tmp_path / "adapter_config.json"
     adapter_model = tmp_path / "adapter_model.safetensors"
-    adapter_config.write_text(
-        json.dumps(
-            {
-                "base_model_name_or_path": OPD.STUDENT_MODEL,
-                "r": 128,
-                "lora_alpha": 1,
-                "target_modules": [
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "gate_proj",
-                    "up_proj",
-                    "down_proj",
-                    "in_proj_q",
-                    "in_proj_k",
-                    "in_proj_v",
-                    "linear_attn.in_proj_z",
-                    "linear_attn.out_proj",
-                    "lm_head",
-                ],
-            }
-        )
-    )
-    adapter_model.write_bytes(b"weights")
     config_sha256 = hashlib.sha256(adapter_config.read_bytes()).hexdigest()
     model_sha256 = hashlib.sha256(adapter_model.read_bytes()).hexdigest()
 
@@ -163,16 +163,28 @@ def test_native_opd_rejects_changed_or_incompatible_sft_adapter(tmp_path: Path):
     adapter_model.write_bytes(b"changed")
     with pytest.raises(ValueError, match="digest"):
         OPD.verify_sft_adapter(tmp_path, config_sha256=config_sha256, model_sha256=model_sha256)
-    adapter_model.write_bytes(b"weights")
+    write_fused_adapter(tmp_path)
     incompatible = json.loads(adapter_config.read_text())
-    incompatible["target_modules"] = ["linear_attn.in_proj_qkv"]
+    incompatible["target_modules"] = ["in_proj_q", "in_proj_k", "in_proj_v"]
     adapter_config.write_text(json.dumps(incompatible))
-    with pytest.raises(ValueError, match="target_modules"):
+    with pytest.raises(ValueError, match="fused in_proj_qkv"):
         OPD.verify_sft_adapter(
             tmp_path,
             config_sha256=hashlib.sha256(adapter_config.read_bytes()).hexdigest(),
-            model_sha256=model_sha256,
+            model_sha256=hashlib.sha256(adapter_model.read_bytes()).hexdigest(),
         )
+
+
+def test_native_aime_rejects_split_qkv_weights_before_loading_model(tmp_path: Path):
+    adapter_path = tmp_path / "adapter"
+    write_fused_adapter(adapter_path)
+    save_file(
+        {"base_model.model.model.language_model.layers.0.linear_attn.in_proj_q.lora_A.weight": torch.ones(1, 1)},
+        adapter_path / "adapter_model.safetensors",
+    )
+
+    with pytest.raises(ValueError, match="split Q/K/V"):
+        AIME.merge_adapter_for_vllm(adapter_path, tmp_path / "merged")
 
 
 def test_native_opd_full_run_validates_pinned_aime_every_two_steps():
@@ -311,6 +323,7 @@ def test_native_aime_base_control_does_not_enable_lora(tmp_path: Path):
 
 
 def test_native_aime_merge_preserves_qwen35_shell_for_vllm(tmp_path: Path, monkeypatch):
+    write_fused_adapter(tmp_path / "source-adapter")
     config = SimpleNamespace(
         model_type="qwen3_5",
         architectures=["Qwen3_5ForConditionalGeneration"],

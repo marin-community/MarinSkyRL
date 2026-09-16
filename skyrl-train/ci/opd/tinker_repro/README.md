@@ -136,7 +136,8 @@ The runner refuses a symlinked vLLM source tree rather than modifying Iris's
 shared uv cache. `--no-sync` is required because Iris's managed setup currently
 hardcodes symlink mode before applying job environment overrides. Use a unique
 output URI for every attempt. Obtain the two SHA-256 digests from the completed
-SFT manifest; the runner checks the downloaded files and the adapter's base
+split-to-fused conversion manifest, which records the original SFT hashes as
+well. The runner checks the downloaded files, fused-QKV rank pattern, base
 model, rank, alpha, and target modules before loading the student.
 
 `native_aime24.py` evaluates an SFT or OPD LoRA adapter with MarinSkyRL's AIME
@@ -149,8 +150,13 @@ true only for a full 30-problem evaluation with no sampling errors or truncated
 responses. Incomplete evaluations retain their metrics and trajectories for
 diagnosis and backfill. For adapter evaluations, the evaluator merges the pinned
 PEFT adapter into a temporary full Qwen3.5 model before vLLM starts: vLLM's
-Qwen3.5 LoRA loader expects fused Gated DeltaNet QKV projections and cannot
-load the split-QKV adapter used by the SFT and native OPD trainers. The pinned
+Qwen3.5 LoRA loader expects fused Gated DeltaNet QKV projections. The Axolotl SFT
+stage saves separate Q/K/V LoRA factors; convert them with the Axolotl fork's
+`qwen35_split_qkv.adapter` converter before passing the resulting adapter to
+native AIME or OPD. The converter uses rank-384 fused QKV factors and alpha 3
+to preserve the original rank-128, alpha-1 split updates exactly. Both native
+paths reject raw split-QKV adapters, whose QKV weights PEFT can otherwise drop
+without failing the load. The pinned
 vLLM wheel also does not register a text-only Qwen3.5 serving class, so the
 merged model retains its multimodal shell and config. The source adapter and
 committed checkpoint remain unchanged.
@@ -173,8 +179,9 @@ Use a new output URI and change `--stage smoke` to `--stage full` after the
 single-problem smoke run completes. Evaluation-only LoRA runs reject remote
 engines, non-vLLM backends, and missing local adapter directories. These checks
 prevent `main_generate` from silently evaluating the base model.
-For the Axolotl SFT initialization, pass its exact exported adapter directory
-with `--adapter-uri`; omit both adapter options for the base-model control.
+For the Axolotl SFT initialization, pass the immutable converted adapter directory
+and its recorded SHA-256 digests. Do not pass the raw Axolotl export. Omit both
+adapter options for the base-model control.
 
 ## AIME 2024 evaluation
 

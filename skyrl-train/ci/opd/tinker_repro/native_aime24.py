@@ -35,6 +35,7 @@ from native_opd import (
     STUDENT_REVISION,
     TOKENIZER_FINGERPRINT,
 )
+from qwen35_adapter_contract import verify_fused_qkv_adapter
 from reproduction_artifacts import validate_output_uri
 from skyrl_train.evaluate import evaluation_dump_dir
 from skyrl_train.io.io import local_read_dir, upload_directory
@@ -121,7 +122,8 @@ def hydra_arguments(model_path: str, data_path: Path, output_root: Path, dataset
 
 
 def merge_adapter_for_vllm(adapter_path: Path, destination: Path) -> None:
-    """Merge split-QKV LoRA while retaining the vLLM-supported Qwen3.5 shell."""
+    """Merge a verified fused-QKV LoRA while retaining the vLLM-supported Qwen3.5 shell."""
+    verify_fused_qkv_adapter(adapter_path)
     model = Qwen3_5ForConditionalGeneration.from_pretrained(
         STUDENT_MODEL,
         revision=STUDENT_REVISION,

@@ -29,6 +29,7 @@ from aime24_protocol import (
 from deepmath_dataset import PROMPT_ONLY_ENV, materialize_dataset
 from native_artifact_run import run_artifact_command
 from native_checkpoint_publication import publish_committed_checkpoints
+from qwen35_adapter_contract import verify_fused_qkv_adapter
 from reproduction_artifacts import validate_output_uri
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.io.io import local_read_dir
@@ -53,9 +54,7 @@ LORA_TARGETS = (
     "gate_proj",
     "up_proj",
     "down_proj",
-    "in_proj_q",
-    "in_proj_k",
-    "in_proj_v",
+    "in_proj_qkv",
     "linear_attn.in_proj_z",
     "linear_attn.out_proj",
     "lm_head",
@@ -307,7 +306,7 @@ def verify_sft_adapter(adapter_path: Path, *, config_sha256: str, model_sha256: 
             actual = hashlib.file_digest(source, "sha256").hexdigest()
         if actual != expected:
             raise ValueError(f"SFT adapter digest mismatch for {filename}: expected {expected}, found {actual}")
-    config = json.loads((adapter_path / "adapter_config.json").read_text())
+    config = verify_fused_qkv_adapter(adapter_path)
     if (
         config.get("base_model_name_or_path") != STUDENT_MODEL
         or config.get("r") != 128
