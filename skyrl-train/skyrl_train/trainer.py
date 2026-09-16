@@ -129,6 +129,12 @@ from skyrl_train.telemetry import (
     record_policy_step,
     record_training_metrics,
 )
+from skyrl_train.rollout_observability import consumed_stop_metrics, observe_rollout_call
+from skyrl_train.utils.importance_ratio_diagnostics import (
+    ratio_diagnostics_settings,
+    behavior_drift_metrics,
+    mismatch_ratio_metrics,
+)
 from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
@@ -1006,6 +1012,7 @@ class RayPPOTrainer:
         duration_seconds: float,
     ) -> None:
         if self._training_metrics_enabled:
+            self.all_metrics.update(training_input.metadata.get("consumed_stop_metrics", {}))
             real_rows = training_input.batch_size - training_input.metadata.get("pad_size", 0)
             record_consumed_work(
                 sequences=real_rows,
@@ -1660,11 +1667,21 @@ class RayPPOTrainer:
         self._num_experts_cache: Optional[int] = num_experts
         return num_experts
 
-    def convert_to_training_input(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrainingInputBatch:
+    def convert_to_training_input(
+        self,
+        trajectory_batch: TrajectoryBatch,
+        uids: List[str],
+        *,
+        rollout_age: List[int] | None = None,
+    ) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
         assert_training_groups_eligible(trajectory_batch, uids, self.group_advantage_invariant)
         prompt_ids: List[List[int]] = trajectory_batch["prompt_token_ids"]
         response_ids: List[List[int]] = trajectory_batch["response_ids"]
+        if rollout_age is not None and (
+            len(rollout_age) != len(response_ids) or any(type(age) is not int or age < 0 for age in rollout_age)
+        ):
+            raise ValueError("rollout_age must contain one nonnegative integer per response row")
         rewards: List[List[float]] = trajectory_batch["rewards"]
         loss_masks: List[List[int]] = trajectory_batch["loss_masks"]
 
@@ -1763,6 +1780,9 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
+                "rollout_age": torch.tensor(
+                    rollout_age if rollout_age is not None else [0] * len(response_ids), dtype=torch.int32
+                ),
                 "is_last_step": (
                     torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
                     if trajectory_batch.get("is_last_step", None) is not None
@@ -1797,7 +1817,22 @@ class RayPPOTrainer:
                 trajectory_batch["exclude_from_baseline"], dtype=bool
             )
         # padded response length
+        if self._training_metrics_enabled:
+            training_input.metadata["consumed_stop_metrics"] = consumed_stop_metrics(
+                trajectory_batch.get("stop_reasons"), len(response_ids)
+            )
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
+        if self._training_metrics_enabled and rollout_age is not None:
+            # One event per consumed group: its admitted age and the tokens it contributed.
+            counts = {}
+            for uid, age, mask in zip(uids, rollout_age, response_masks_tensor, strict=True):
+                body = counts.setdefault(uid, {"age": age, "groups": 1, "sequences": 0, "response_tokens": 0})
+                if body["age"] != age:
+                    raise ValueError("Consumed group rows must share the admitted age")
+                body["sequences"] += 1
+                body["response_tokens"] += int(mask.sum().item())
+            for body in counts.values():
+                record_event("consumed_age", body, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)})
         if self.cfg.trainer.step_wise_training:
             assert "trajectory_ids" in trajectory_batch, (
                 "Expected `trajectory_ids` in trajectory batch for step wise training"
@@ -1841,7 +1876,10 @@ class RayPPOTrainer:
             self.global_step,
             len(input_batch["prompts"]),
         )
-        trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
+        with observe_rollout_call(
+            step=self.global_step, mode="sync", enabled=self.cfg.trainer.get("generate_spans", False)
+        ):
+            trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
         # add rollout metrics to self.all_metrics
         if trajectory_batch["rollout_metrics"] is not None:
             self.all_metrics.update(trajectory_batch["rollout_metrics"])
@@ -2291,6 +2329,28 @@ class RayPPOTrainer:
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
+
+        if self._training_metrics_enabled and training_input.get("rollout_logprobs") is not None:
+            self.all_metrics.update(
+                behavior_drift_metrics(
+                    action_log_probs,
+                    training_input["rollout_logprobs"],
+                    training_input["loss_mask"],
+                    eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                    eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
+                )
+            )
+            self.all_metrics.update(
+                mismatch_ratio_metrics(
+                    action_log_probs,
+                    training_input["rollout_logprobs"],
+                    training_input["loss_mask"],
+                    training_input.get("rollout_age"),
+                    eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                    eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
+                    position_window=ratio_diagnostics_settings(self.cfg.trainer.algorithm).position_window,
+                )
+            )
 
         if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
             # calculates the difference in probs between inference and trainer components

@@ -2108,6 +2108,49 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     validate_batch_sizes(cfg)
 
 
+def test_consumed_age_events_roll_up_each_consumed_group_once(monkeypatch, dummy_config, dummy_tokenizer):
+    events = []
+    monkeypatch.setattr(
+        trainer_module,
+        "record_event",
+        lambda name, body, *, attributes: events.append((name, dict(body), dict(attributes))),
+    )
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = dummy_tokenizer
+    trainer.pad_batch = lambda batch: batch
+    trainer.global_step = 7
+    trainer._training_metrics_enabled = True
+
+    def batch():
+        return {
+            "prompt_token_ids": [[1, 2], [3], [4, 5], [6]],
+            "response_ids": [[7, 8, 9], [10], [11, 12], [13, 14, 15, 16]],
+            "rewards": [[0.0] * 3, [0.0], [0.0] * 2, [0.0] * 4],
+            "loss_masks": [[1] * 3, [1], [1] * 2, [1] * 4],
+            "rollout_logprobs": None,
+        }
+
+    trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_age=[2, 2, 0, 0])
+    consumed = {body["age"]: body for name, body, _ in events if name == "consumed_age"}
+    # One event per group; response_tokens counts the group's unpadded response tokens.
+    assert consumed == {
+        2: {"age": 2, "groups": 1, "sequences": 2, "response_tokens": 4},
+        0: {"age": 0, "groups": 1, "sequences": 2, "response_tokens": 6},
+    }
+    assert all(attributes == {"role": "trainer", "step": "7"} for name, _, attributes in events)
+
+    events.clear()
+    trainer._training_metrics_enabled = False
+    trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_age=[2, 2, 0, 0])
+    assert events == []
+
+    trainer._training_metrics_enabled = True
+    with pytest.raises(ValueError, match="share the admitted age"):
+        trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_age=[2, 1, 0, 0])
+
+
 def test_informative_group_fraction_counts_groups_whose_rewards_differ(dummy_config):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = dummy_config
