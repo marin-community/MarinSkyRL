@@ -48,8 +48,6 @@ jobs:
           push: true
           build-args: GITSHA=${{ github.sha }}
           tags: ghcr.io/marin-community/marinskyrl-opd-repro:opd-repro-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - uses: ./.github/actions/setup-iris
         if: inputs.target_cluster == 'cw-rno2a'
