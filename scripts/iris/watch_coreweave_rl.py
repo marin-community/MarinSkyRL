@@ -517,7 +517,14 @@ def csv_rows(output: str) -> list[dict[str, str]]:
     header_index = next((index for index, line in enumerate(lines) if line.startswith("job_id,")), None)
     if header_index is None:
         raise ValueError("Iris query returned no CSV job_id header")
-    return list(csv.DictReader(lines[header_index:]))
+    # Iris entrypoint_json can exceed csv's 128 KiB default. The output is already
+    # resident in memory, so its length is a safe upper bound for one field.
+    previous_limit = csv.field_size_limit()
+    try:
+        csv.field_size_limit(max(previous_limit, len(output)))
+        return list(csv.DictReader(lines[header_index:]))
+    finally:
+        csv.field_size_limit(previous_limit)
 
 
 def discover_rl_jobs(
@@ -557,7 +564,7 @@ def discover_rl_jobs(
     jobs: list[IrisRlJob] = []
     try:
         rows = csv_rows(result.stdout)
-    except ValueError as error:
+    except (ValueError, csv.Error) as error:
         return [], [f"{cluster.name}: discovery failed: {error}"]
     for row in rows:
         entrypoint = entrypoint_text(row.get("entrypoint_json", ""))
