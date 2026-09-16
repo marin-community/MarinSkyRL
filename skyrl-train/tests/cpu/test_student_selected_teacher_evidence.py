@@ -45,6 +45,7 @@ def _request(trajectory_id: str = "sample-0", teacher_id: str = "math") -> Teach
         top_k=2,
         student_topk_indices=torch.tensor([[[21, 23], [22, 24]]]),
         behavior_topk_logprobs=torch.log(torch.tensor([[[0.6, 0.3], [0.5, 0.4]]])),
+        student_selected_mask=torch.tensor([[True, True]]),
     )
 
 
@@ -55,7 +56,7 @@ def _evidence(request: TeacherScoreRequest, scores: torch.Tensor) -> StudentSele
         teacher_id=request.teacher_id,
         teacher_revision=f"{request.teacher_id}-revision",
         plan_version=request.plan_version,
-        valid_mask=request.response_mask,
+        valid_mask=request.student_selected_mask,
         student_topk_indices=request.student_topk_indices,
         teacher_on_student_logprobs=scores,
     )
@@ -75,6 +76,8 @@ def test_student_selected_request_and_teacher_scores_require_exact_coordinates()
         validate_teacher_evidence(request, replace(evidence, student_topk_indices=torch.tensor([[[23, 21], [22, 24]]])))
     with pytest.raises(ValueError, match="student-selected behavior logprobs must match"):
         validate_teacher_score_request(replace(request, behavior_topk_logprobs=torch.zeros(1, 2, 1)))
+    with pytest.raises(ValueError, match="selected-score request mask"):
+        validate_teacher_evidence(request, replace(evidence, valid_mask=torch.tensor([[True, False]])))
 
     prepared = prepare_student_topk_policy_surrogate(request, evidence, coefficient=0.5, route_weights=torch.ones(1, 2))
     validate_distillation_attachment(
@@ -179,6 +182,7 @@ def test_build_scoring_work_preserves_admitted_student_selected_tokens():
         "trajectory_ids": [TrajectoryID("first", 0), TrajectoryID("second", 0)],
         "prompt_token_ids": [[11, 12], [13]],
         "response_ids": [[21, 22], [31]],
+        "loss_masks": [[1, 1], [1]],
         "student_topk_indices": [[[21, 23], [22, 24]], [[31, 32]]],
         "behavior_topk_logprobs": [[[-0.2, -2.0], [-0.3, -1.7]], [[-0.4, -1.4]]],
     }
@@ -198,6 +202,44 @@ def test_build_scoring_work_preserves_admitted_student_selected_tokens():
     assert work.request.student_topk_indices.tolist() == [[[21, 23], [22, 24]], [[31, 32], [-1, -1]]]
     assert torch.isnan(work.request.behavior_topk_logprobs[1, 1]).all()
     torch.testing.assert_close(work.route_weights, torch.tensor([[1.0, 1.0], [0.25, 0.0]]))
+
+
+def test_build_scoring_work_masks_nontraining_response_tokens():
+    batch = {
+        "trajectory_ids": [TrajectoryID("tool-step", 0)],
+        "prompt_token_ids": [[11]],
+        "response_ids": [[21, 99, 22]],
+        "loss_masks": [[1, 0, 1]],
+        "student_topk_indices": [[[21, 23], [99, 98], [22, 24]]],
+        "behavior_topk_logprobs": [[[-0.2, -2.0], [-0.1, -2.5], [-0.3, -1.7]]],
+    }
+    work = build_teacher_scoring_work(
+        batch,
+        route_ids=("math",),
+        teacher_id="math",
+        tokenizer_fingerprint="sha256:shared-tokenizer",
+        plan_version="routing-1",
+        coefficient=0.5,
+        route_weights=(1.0,),
+        evidence=TeacherEvidenceKind.STUDENT_SELECTED_TOPK,
+        top_k=2,
+    )
+
+    validate_teacher_score_request(work.request)
+    assert work.request.student_selected_mask.tolist() == [[True, False, True]]
+    assert work.request.student_topk_indices.tolist() == [[[21, 23], [-1, -1], [22, 24]]]
+    assert torch.isnan(work.request.behavior_topk_logprobs[0, 1]).all()
+    evidence = _evidence(
+        work.request,
+        torch.tensor([[[-0.1, -2.0], [torch.nan, torch.nan], [-0.2, -1.7]]]),
+    )
+    validate_teacher_evidence(work.request, evidence)
+    prepared = prepare_student_topk_policy_surrogate(
+        work.request, evidence, coefficient=0.5, route_weights=work.route_weights
+    )
+    validate_distillation_attachment(
+        evidence, prepared, trajectory_ids=work.request.trajectory_ids, response_mask=work.request.response_mask
+    )
 
 
 def test_student_selected_rollout_scores_survive_group_accumulation_without_sentinel_fallback():

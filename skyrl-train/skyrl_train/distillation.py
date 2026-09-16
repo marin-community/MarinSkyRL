@@ -35,6 +35,7 @@ class TeacherScoreRequest:
     top_k: Optional[int] = None
     student_topk_indices: Optional[torch.Tensor] = None
     behavior_topk_logprobs: Optional[torch.Tensor] = None
+    student_selected_mask: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -438,8 +439,20 @@ def validate_teacher_score_request(request: TeacherScoreRequest) -> None:
     if request.prompt_token_ids.shape[0] != batch_size or request.response_token_ids.shape[0] != batch_size:
         raise ValueError("teacher score request tensors must align with trajectory_ids")
     if request.evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
-        if request.student_topk_indices is None or request.behavior_topk_logprobs is None:
-            raise ValueError("student-selected teacher requests require indices and behavior logprobs")
+        if (
+            request.student_topk_indices is None
+            or request.behavior_topk_logprobs is None
+            or request.student_selected_mask is None
+        ):
+            raise ValueError("student-selected teacher requests require indices, behavior logprobs, and a valid mask")
+        if request.student_selected_mask.shape != request.response_mask.shape:
+            raise ValueError("student-selected valid mask must match response coordinates")
+        if request.student_selected_mask.dtype is not torch.bool:
+            raise ValueError("student-selected valid mask must have bool dtype")
+        if torch.any(request.student_selected_mask & ~request.response_mask):
+            raise ValueError("student-selected valid mask cannot include padded response positions")
+        if not torch.any(request.student_selected_mask):
+            raise ValueError("student-selected requests require at least one valid training token")
         if (
             request.student_topk_indices.ndim != 3
             or request.student_topk_indices.shape[:2] != request.response_mask.shape
@@ -453,9 +466,14 @@ def validate_teacher_score_request(request: TeacherScoreRequest) -> None:
             raise ValueError("student-selected top_k must match selected indices")
         if request.student_topk_indices.dtype not in (torch.int32, torch.int64):
             raise ValueError("student-selected indices must have integer dtype")
-        _validate_selected_token_ids(request.student_topk_indices, request.response_mask, "student-selected")
-        _validate_masked_logprobs(request.behavior_topk_logprobs, request.response_mask, "behavior top-K logprobs")
-    elif request.student_topk_indices is not None or request.behavior_topk_logprobs is not None:
+        _validate_selected_token_ids(request.student_topk_indices, request.student_selected_mask, "student-selected")
+        _validate_masked_logprobs(
+            request.behavior_topk_logprobs, request.student_selected_mask, "behavior top-K logprobs"
+        )
+    elif any(
+        value is not None
+        for value in (request.student_topk_indices, request.behavior_topk_logprobs, request.student_selected_mask)
+    ):
         raise ValueError("student-selected fields require student-selected teacher evidence")
     if request.evidence is TeacherEvidenceKind.TOPK_DISTRIBUTION:
         if isinstance(request.top_k, bool) or not isinstance(request.top_k, int) or request.top_k <= 0:
@@ -492,6 +510,9 @@ def validate_teacher_evidence(request: TeacherScoreRequest, evidence: TeacherEvi
 
     if isinstance(evidence, StudentSelectedTeacherEvidence):
         assert request.student_topk_indices is not None
+        assert request.student_selected_mask is not None
+        if not torch.equal(evidence.valid_mask, request.student_selected_mask):
+            raise ValueError("teacher evidence valid mask must match the selected-score request mask")
         if not torch.equal(evidence.student_topk_indices, request.student_topk_indices):
             raise ValueError("teacher evidence must identify the exact student-selected token IDs")
         if evidence.teacher_on_student_logprobs.shape != request.student_topk_indices.shape:
