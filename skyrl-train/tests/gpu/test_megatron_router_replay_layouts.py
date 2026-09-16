@@ -134,6 +134,8 @@ def test_router_replay_is_token_exact_across_layouts(tmp_path):
     baseline = replayed_by_layout["tp1"]
     for layout_id, replayed in replayed_by_layout.items():
         diff = (replayed - baseline).abs()
-        print(f"{layout_id} vs tp1 replayed log-probs: max abs {diff.max().item():.4f}, mean abs {diff.mean().item():.4f}")
+        print(
+            f"{layout_id} vs tp1 replayed log-probs: max abs {diff.max().item():.4f}, mean abs {diff.mean().item():.4f}"
+        )
         assert diff.max().item() < LOGPROB_MAX_ABS_TOLERANCE, (layout_id, diff.max())
         assert diff.mean().item() < LOGPROB_MEAN_ABS_TOLERANCE, (layout_id, diff.mean())
