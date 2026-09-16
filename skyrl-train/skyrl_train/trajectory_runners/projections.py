@@ -5,6 +5,7 @@ from typing import Generic, Protocol, Sequence, TypeVar
 
 from omegaconf import DictConfig
 
+from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
 from skyrl_gym.verification import RewardResult, TrainingDisposition
 from skyrl_train.trajectory_runners.types import (
@@ -89,6 +90,7 @@ class WholeTrajectoryProjection:
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
             actual_global_step=minimum_captured_global_step(outputs),
         )
+        attach_student_topk(batch, outputs, responses, loss_masks)
         attach_terminal_classifications(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
         return batch
@@ -149,6 +151,7 @@ class StepWiseTrajectoryProjection:
             exclude_from_baseline=[not step.disposition.baseline_eligible for step in steps],
             actual_global_step=minimum_captured_global_step(steps),
         )
+        attach_student_topk(batch, steps, responses, loss_masks)
         attach_terminal_classifications(batch, steps)
         _attach_reward_channels(batch, steps, responses)
         return batch
@@ -162,6 +165,37 @@ def attach_terminal_classifications(batch: TrajectoryBatch, outputs: Sequence[Tr
         batch["exception_types"] = exception_types
     if any(error_treatment is not None for error_treatment in error_treatments):
         batch["error_treatments"] = error_treatments
+
+
+def attach_student_topk(
+    batch: TrajectoryBatch,
+    outputs: Sequence[AgentLoopOutput],
+    responses: Sequence[Sequence[int]],
+    loss_masks: Sequence[Sequence[int]],
+) -> None:
+    """Project exact candidates, allowing missing evidence only on fully masked rows."""
+    captured = [output.evidence.student_topk_indices for output in outputs]
+    if not any(rows is not None for rows in captured):
+        return
+    width = next((len(row) for rows in captured if rows is not None for row in rows if row), 0)
+    if width <= 0:
+        raise ValueError("student top-K evidence has no candidate width")
+    indices = []
+    scores = []
+    for output, response, mask in zip(outputs, responses, loss_masks, strict=True):
+        evidence = output.evidence
+        if evidence.student_topk_indices is None:
+            if any(mask):
+                raise ValueError("student top-K evidence is missing for a trainable trajectory")
+            indices.append([[INVALID_TOPK_INDEX] * width for _ in response])
+            scores.append([[0.0] * width for _ in response])
+            continue
+        if any(len(row) != width for row in evidence.student_topk_indices):
+            raise ValueError("student top-K evidence widths must agree across trajectories")
+        indices.append([list(row) for row in evidence.student_topk_indices])
+        scores.append([list(row) for row in evidence.behavior_topk_logprobs])
+    batch["student_topk_indices"] = indices
+    batch["behavior_topk_logprobs"] = scores
 
 
 def _logprobs_requested(request: TrajectoryRequestBatch, runner_cfg: DictConfig) -> bool:

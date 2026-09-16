@@ -119,6 +119,51 @@ def test_direct_model_client_omits_empty_tools_from_vllm_request():
 
 
 @pytest.mark.asyncio
+async def test_direct_chat_client_captures_exact_student_topk_ids():
+    engine = AsyncMock()
+    engine.model_name = "teacher"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "answer"
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+    engine.chat_completion.return_value = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "answer"},
+                "finish_reason": "stop",
+                "token_ids": [9],
+                "logprobs": {
+                    "content": [
+                        {
+                            "logprob": -7.0,
+                            "top_logprobs": [
+                                {"token": "token_id:9", "logprob": -7.0},
+                                {"token": "token_id:3", "logprob": -0.2},
+                                {"token": "token_id:2", "logprob": -0.1},
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+
+    output = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "question"}]],
+            "session_ids": ["test"],
+            "sampling_params": {"logprobs": 2},
+            "chat_completion_params": [{}],
+        }
+    )
+
+    body = engine.chat_completion.await_args.args[0]["json"]
+    assert body["top_logprobs"] == 3
+    assert body["return_tokens_as_token_ids"] is True
+    assert output["student_topk_indices"] == [[[2, 3]]]
+    assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2]]]
+
+
+@pytest.mark.asyncio
 async def test_http_model_client_normalizes_chat_completion():
     requests = []
 

@@ -8,6 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 from omegaconf import DictConfig
 
+from marinskyrl.distillation import TeacherEvidenceKind
+from skyrl_train.distillation_adapters import build_teacher_scoring_work
+
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
 from skyrl_train.trajectory_runners.base import ConversationType, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -135,6 +138,8 @@ async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator
             prompt_token_ids=(11,),
             response_token_ids=(12,),
             behavior_logprobs=(-0.5,),
+            student_topk_indices=((12, 13),),
+            behavior_topk_logprobs=((-0.5, -1.5),),
         ),
         verification=VerificationResult.verified(1.0, passed=True),
         reward=RewardResult(unshaped_reward=1.0, optimization_reward=1.0, token_rewards=(1.0,)),
@@ -167,6 +172,8 @@ async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator
     assert batch["rewards"] == [[1.0], [0.0]]
     assert batch["loss_masks"] == [[1], [0]]
     assert batch["rollout_logprobs"] == [[-0.5], [0.0]]
+    assert batch["student_topk_indices"] == [[[12, 13]], [[-1, -1]]]
+    assert batch["behavior_topk_logprobs"][1] == [[0.0, 0.0]]
     assert batch["exclude_from_baseline"] == [False, True]
     assert batch["exception_types"] == [None, "TimeoutError"]
     assert batch["error_treatments"] == [None, "mask"]
@@ -771,7 +778,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
 ):
     generator_cfg.batched = False
-    generator_cfg.sampling_params.logprobs = 0
+    generator_cfg.sampling_params.logprobs = 2
     generator_cfg.use_conversation_multi_turn = True
     generator_cfg.max_turns = 2
     mock_make.return_value = mock_env
@@ -788,12 +795,16 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "stop_reasons": ["stop"],
             "response_ids": [[10, 4]],
             "response_logprobs": [[-0.1, -0.2]],
+            "student_topk_indices": [[[11, 12], [13, 14]]],
+            "behavior_topk_logprobs": [[[-0.1, -2.0], [-0.2, -1.9]]],
         },
         {
             "responses": ["second"],
             "stop_reasons": ["stop"],
             "response_ids": [[20, 4]],
             "response_logprobs": [[-0.3, -0.4]],
+            "student_topk_indices": [[[21, 22], [23, 24]]],
+            "behavior_topk_logprobs": [[[-0.3, -1.8], [-0.4, -1.7]]],
         },
     ]
 
@@ -815,6 +826,27 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     assert output["response_ids"] == [[10, 4, *MOCK_TOKENIZER_ENCODED_IDS, 20, 4]]
     assert output["loss_masks"] == [[1, 1, 0, 0, 0, 0, 1, 1]]
     assert output["rollout_logprobs"] == [[-0.1, -0.2, 0.0, 0.0, 0.0, 0.0, -0.3, -0.4]]
+    assert output["student_topk_indices"] == [
+        [[11, 12], [13, 14], [-1, -1], [-1, -1], [-1, -1], [-1, -1], [21, 22], [23, 24]]
+    ]
+    assert output["behavior_topk_logprobs"][0][:2] == [[-0.1, -2.0], [-0.2, -1.9]]
+    assert output["behavior_topk_logprobs"][0][-2:] == [[-0.3, -1.8], [-0.4, -1.7]]
+    assert output["behavior_topk_logprobs"][0][2:6] == [[0.0, 0.0]] * 4
+    output["trajectory_ids"] = [TrajectoryID("tool-trajectory", 0)]
+    work = build_teacher_scoring_work(
+        output,
+        route_ids=("math",),
+        teacher_id="math-teacher",
+        tokenizer_fingerprint="same-tokenizer",
+        plan_version="test-plan",
+        coefficient=1.0,
+        route_weights=(1.0,),
+        evidence=TeacherEvidenceKind.STUDENT_SELECTED_TOPK,
+        top_k=2,
+    )
+    assert work.request.student_selected_mask.tolist() == [[True, True, False, False, False, False, True, True]]
+    assert work.request.student_topk_indices[0, 2:6].tolist() == [[-1, -1]] * 4
+    assert np.isnan(work.request.behavior_topk_logprobs[0, 2:6].numpy()).all()
 
 
 @pytest.mark.asyncio
@@ -1017,6 +1049,40 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
     assert trajectory_batch["rollout_metrics"]["generate/tis/exact_match_fraction"] == 1.0
     assert trajectory_batch["rollout_metrics"]["generate/tis/lcs_fallback_fraction"] == 0.0
     assert trajectory_batch["rollout_metrics"]["generate/tis/lcs_fallback_alert"] == 0.0
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_batched_rollout_preserves_student_topk_for_teacher_scoring(
+    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
+):
+    generator_cfg.sampling_params.logprobs = 2
+    mock_make.return_value = mock_env
+    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+    selected_ids = [[7, 8], [8, 7], [7, 8], [8, 7]]
+    selected_scores = [[-0.2, -1.8], [-0.3, -1.5], [-0.2, -1.8], [-0.3, -1.5]]
+    mock_llm.generate = AsyncMock(
+        return_value={
+            "responses": ["mocked output"],
+            "stop_reasons": ["stop"],
+            "response_ids": [MOCK_LLM_OUTPUT_IDS.copy()],
+            "response_logprobs": [[-0.4] * len(MOCK_LLM_OUTPUT_IDS)],
+            "student_topk_indices": [selected_ids],
+            "behavior_topk_logprobs": [selected_scores],
+        }
+    )
+    runner = SkyRLGymTrajectoryRunner(generator_cfg, mock_env_cfg, mock_llm, mock_tokenizer)
+
+    batch = await runner.run(
+        {
+            "prompts": [[{"role": "user", "content": "What is 3 + 5?"}]],
+            "env_extras": [{"answer": "8"}],
+            "env_classes": [mock_env_cfg.env_class],
+        }
+    )
+
+    assert batch["student_topk_indices"] == [selected_ids]
+    assert batch["behavior_topk_logprobs"] == [selected_scores]
 
 
 @pytest.mark.asyncio
