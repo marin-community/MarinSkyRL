@@ -97,6 +97,31 @@ def test_compile_distillation_plan_accepts_sparse_forward_kl_with_topk_teachers(
     assert {teacher.evidence for teacher in plan.teachers} == {TeacherEvidenceKind.TOPK_DISTRIBUTION}
 
 
+def test_compile_distillation_plan_accepts_student_topk_policy_surrogate():
+    config = _mopd_config()
+    del config["teachers"]["math"]
+    del config["teacher_routing"]["mopd_v1"]["routes"]["math"]
+    config["trainer"]["algorithm"]["distillation"]["objective"] = "student_topk_policy_surrogate"
+    config["teachers"]["swe"]["evidence"] = "student_selected_topk"
+    config["teachers"]["swe"]["top_k"] = 16
+
+    plan = compile_distillation_plan(config)
+
+    assert plan is not None
+    assert plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+    assert plan.teachers[0].evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK
+    assert plan.teachers[0].top_k == 16
+
+
+def test_compile_distillation_plan_requires_top_k_for_student_selected_evidence():
+    config = _mopd_config()
+    config["trainer"]["algorithm"]["distillation"]["objective"] = "student_topk_policy_surrogate"
+    config["teachers"]["swe"]["evidence"] = "student_selected_topk"
+
+    with pytest.raises(ValueError, match="teachers.swe.top_k.*required"):
+        compile_distillation_plan(config)
+
+
 def test_compile_distillation_plan_requires_top_k_for_topk_evidence():
     config = _mopd_config()
     config["trainer"]["algorithm"]["distillation"]["objective"] = "sparse_forward_kl"
