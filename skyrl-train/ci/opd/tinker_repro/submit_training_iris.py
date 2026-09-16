@@ -14,6 +14,8 @@ from iris_settings import (
     MAX_RETRIES,
     OPD_RESOURCES,
     PREEMPTIBLE,
+    PRIORITY_BAND,
+    PRIORITY_NAME,
     REPLICAS,
     REPOSITORY_ROOT,
     SFT_RESOURCES,
@@ -22,14 +24,12 @@ from iris_settings import (
 from iris.cli.connect import open_iris_client
 from iris.cluster.constraints import Constraint, preemptible_constraint
 from iris.cluster.types import Entrypoint, EnvironmentSpec, ResourceSpec
-from iris.rpc import job_pb2
 from training_plan import Recipe, Stage, TrainingPlan, build_training_plan, validate_cost_acknowledgement
 
 WORKER_PATH = "skyrl-train/ci/opd/tinker_repro/run_training.py"
 TINKER_API_KEY_ENV = "TINKER_API_KEY"
 WANDB_API_KEY_ENV = "WANDB_API_KEY"
 HF_TOKEN_ENV = "HF_TOKEN"
-PRIORITY_BAND = job_pb2.PRIORITY_BAND_INTERACTIVE
 
 
 @dataclass(frozen=True)
@@ -114,7 +114,7 @@ def public_plan(config: SubmissionConfig) -> PublicSubmissionPlan:
         memory=resources.memory,
         disk=resources.disk,
         non_preemptible=not PREEMPTIBLE,
-        priority=job_pb2.PriorityBand.Name(PRIORITY_BAND).removeprefix("PRIORITY_BAND_").lower(),
+        priority=PRIORITY_NAME,
         replicas=REPLICAS,
         max_retries=MAX_RETRIES,
         required_cost_acknowledgement_usd=plan.cost_acknowledgement_usd,

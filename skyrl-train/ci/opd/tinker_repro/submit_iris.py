@@ -8,16 +8,22 @@ import os
 from dataclasses import asdict, dataclass, field
 
 from cloud.iris.secrets_env import default_secrets_env, load_secrets_env_into_os_environ
-from iris_settings import CLUSTER, EVALUATION_RESOURCES, MAX_RETRIES, PREEMPTIBLE, REPLICAS, REPOSITORY_ROOT
+from iris_settings import (
+    CLUSTER,
+    EVALUATION_RESOURCES,
+    MAX_RETRIES,
+    PREEMPTIBLE,
+    PRIORITY_BAND,
+    PRIORITY_NAME,
+    REPLICAS,
+    REPOSITORY_ROOT,
+)
 from iris.cli.connect import open_iris_client
 from iris.cluster.constraints import Constraint, preemptible_constraint
 from iris.cluster.types import Entrypoint, EnvironmentSpec, ResourceSpec
-from iris.rpc import job_pb2
 from reproduction_artifacts import validate_output_uri
 
 JOB_NAME = "tinker-opd-aime24"
-PRIORITY_BAND = job_pb2.PRIORITY_BAND_INTERACTIVE
-PRIORITY_NAME = job_pb2.PriorityBand.Name(PRIORITY_BAND).removeprefix("PRIORITY_BAND_").lower()
 TINKER_API_KEY_ENV = "TINKER_API_KEY"
 EVALUATOR_PATH = "skyrl-train/ci/opd/tinker_repro/evaluate_aime24.py"
 
