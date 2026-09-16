@@ -94,7 +94,7 @@ def test_student_selected_request_and_teacher_scores_require_exact_coordinates()
 
 def test_teacher_topk_prompt_scores_fail_when_student_selected_ids_are_missing():
     request = _request()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="teacher omitted student-selected token"):
         teacher_evidence_from_prompt_logprobs(
             request,
             teacher_revision="math-revision",

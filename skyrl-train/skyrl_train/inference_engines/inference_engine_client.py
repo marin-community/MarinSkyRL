@@ -3,6 +3,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
+    PromptSamplingOverride,
 )
 from skyrl_train.inference_engines.vllm.stats import (
     HTTPBridgeStatsAccumulator,
@@ -378,15 +379,15 @@ class InferenceEngineClient(InferenceEngineInterface):
         engine_idx: int,
         original_prompt_ids: List[int],
         sampling_params: Optional[Dict[str, Any]],
-        per_prompt_sampling_params: Optional[Dict[str, Any]] = None,
+        per_prompt_sampling_params: Optional[PromptSamplingOverride] = None,
     ) -> InferenceEngineOutput:
         """
         Generate a single response with retry mechanism.
 
         This method is equivalent to `_chat_completion_with_retry()` but for the `generate()` codepath.
         We keep sending `generate` requests (with previous responses accumulated) until the finish_reason
-        is not "abort". It is intended to be used in combination with `pause_generation()` and `resume_generation()` for
-        in-flight weight updates and partial rollouts.
+        is not "abort". Per-prompt teacher scoring instead fails on an abort because replaying selected-ID
+        overrides against an extended prompt would misalign the scored positions.
 
         This method is equivalent to a single `generate()` call if we do not use `pause_generation()`.
 

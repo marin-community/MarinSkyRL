@@ -138,8 +138,9 @@ def _qwen3_5_vlm_engine_kwargs(pretrain: str, *, revision: str | None = None) ->
 def _build_inference_engine_runtime_env(*, require_v1_model_runner: bool = False) -> Dict[str, Any] | None:
     """Forward managed inference settings into each vLLM engine actor.
 
-    This covers NCCL diagnostics and batch invariance. Returns ``None`` when no
-    managed variables are set.
+    This covers NCCL diagnostics and batch invariance. Selected-ID scoring also
+    forces the V1 model runner. Returns ``None`` only when neither managed
+    variables nor a V1 runner requirement are set.
     """
     passthrough = set(_NCCL_FR_ENV_PASSTHROUGH) | set(managed_environment_names(EnvVarScope.INFERENCE_WORKER))
     env_vars = {key: os.environ[key] for key in passthrough if key in os.environ}
