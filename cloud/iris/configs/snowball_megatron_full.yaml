@@ -1,9 +1,9 @@
 # Snowball 67B-A2B on the Megatron trainer at the long-generation benchmark geometry:
 # 1024-token prompts, 8192-token generations, 64 prompts x 8 samples per step,
 # four PP2 x EP8 policy nodes (reference model colocated) and four expert-parallel
-# vLLM nodes. Checkpoints are off (ckpt_interval past max_steps): the Megatron
-# checkpoint writer stages about 146GB of host RAM per rank before writing and
-# leaves 46GB per rank on disk during the upload; see the smoke config.
+# vLLM nodes. Checkpoints are off (ckpt_interval past max_steps). The fixed
+# geometry selects DP-local optimizer shards if checkpointing is enabled; see the
+# smoke config for the checkpoint path.
 entrypoint: standard
 
 context_budget:
@@ -47,6 +47,7 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
+      optimizer_checkpoint_sharding_type: dp_reshardable
       ddp_config:
         overlap_grad_reduce: true
         overlap_param_gather: true

@@ -293,14 +293,18 @@ class MegatronStrategy(DistributedStrategy):
         assert "model" in state_dict, (
             f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
         )
-        model[0].load_state_dict(state_dict["model"], strict=load_module_strict)
+        model[0].load_state_dict(state_dict.pop("model"), strict=load_module_strict)
         self.log("Loaded model state dict.")
 
         if optimizer and load_training_state:
             assert "optimizer" in state_dict, (
                 f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             )
-            optimizer.load_state_dict(state_dict["optimizer"])
+            # Gradients are not checkpointed. Free their GPU buffers while FusedAdam
+            # reconstructs the checkpointed moments, then restore empty buffers for training.
+            offload_megatron_grads_to_cpu(model)
+            optimizer.load_state_dict(state_dict.pop("optimizer"))
+            load_megatron_grads_to_gpu(model)
             self.log("Loaded optimizer state dict.")
 
         if scheduler and load_training_state:

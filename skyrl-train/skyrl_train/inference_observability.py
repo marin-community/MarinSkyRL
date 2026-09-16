@@ -60,6 +60,10 @@ def _engine_trainer_metrics(engines: tuple[VLLMEngineStatsSnapshot, ...]) -> dic
     intervals = [engine.interval for engine in engines]
     count = len(intervals)
     finished = sum(item.finished_requests for item in intervals)
+    cumulative = [engine.cumulative for engine in engines]
+    spec_drafts = sum(item.spec_decode_drafts for item in cumulative)
+    spec_draft_tokens = sum(item.spec_decode_draft_tokens for item in cumulative)
+    spec_accepted_tokens = sum(item.spec_decode_accepted_tokens for item in cumulative)
 
     def average(name: str) -> float:
         return sum(float(getattr(item, name)) for item in intervals) / count
@@ -97,6 +101,15 @@ def _engine_trainer_metrics(engines: tuple[VLLMEngineStatsSnapshot, ...]) -> dic
         "vllm/total_preempted_reqs": float(sum(item.preempted_reqs for item in intervals)),
         "vllm/total_samples": float(sum(item.samples for item in intervals)),
         "vllm/total_active_samples": float(sum(item.active_samples for item in intervals)),
+        "vllm/spec_decode_drafts_total": float(spec_drafts),
+        "vllm/spec_decode_draft_tokens_total": float(spec_draft_tokens),
+        "vllm/spec_decode_accepted_tokens_total": float(spec_accepted_tokens),
+        "vllm/spec_decode_acceptance_rate": (
+            float(spec_accepted_tokens) / spec_draft_tokens if spec_draft_tokens else 0.0
+        ),
+        "vllm/spec_decode_mean_acceptance_length": (
+            1.0 + float(spec_accepted_tokens) / spec_drafts if spec_drafts else 1.0
+        ),
     }
 
 
@@ -178,6 +191,19 @@ class FinelogInferenceMetricsSink:
                 ("prefix_cache_queries_total", cumulative.prefix_cache_queries, "{token}", {}),
                 ("generation_tokens_total", cumulative.generation_tokens, "{token}", {}),
                 ("prompt_tokens_total", cumulative.prompt_tokens, "{token}", {}),
+                ("spec_decode_num_drafts_total", cumulative.spec_decode_drafts, "{draft}", {}),
+                (
+                    "spec_decode_num_draft_tokens_total",
+                    cumulative.spec_decode_draft_tokens,
+                    "{token}",
+                    {},
+                ),
+                (
+                    "spec_decode_num_accepted_tokens_total",
+                    cumulative.spec_decode_accepted_tokens,
+                    "{token}",
+                    {},
+                ),
                 *(
                     ("request_success_total", value, "{request}", {"finished_reason": reason})
                     for reason, value in cumulative.finished_by_reason.items()

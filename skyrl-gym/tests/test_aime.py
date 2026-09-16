@@ -56,6 +56,18 @@ def test_aime_verifier_reports_failed_response_over_evaluation_budget():
     assert step_output["reward_result"] == RewardResult(unshaped_reward=-1.0, optimization_reward=-1.0)
 
 
+def test_aime_explicit_boxed_protocol_scores_answer_without_minerva_prefix():
+    response = "The final answer is \\boxed{42}.<|im_end|><|endoftext|>"
+    extras = {"reward_model": {"ground_truth": "42"}}
+    legacy = skyrl_gym.make("aime", env_config=DictConfig({}), extras=extras)
+    boxed = skyrl_gym.make("aime", env_config=DictConfig({"strict_box_verify": True}), extras=extras)
+
+    assert legacy.step(response)["reward"] == -1.0
+    result = boxed.step(response)
+    assert result["reward"] == 1.0
+    assert result["verification"].diagnostics["prediction"] == "42"
+
+
 def test_aime_aggregates_evaluation_budget_diagnostics_by_outcome():
     metrics = AIMEEnv.aggregate_metrics(
         [
