@@ -7,6 +7,7 @@ import time
 import fsspec
 from fsspec.exceptions import FSTimeoutError
 from loguru import logger
+from rigging.filesystem.s3_compat import s3_python_config_kwargs
 
 # Optional AWS deps (present when s3fs is installed)
 try:
@@ -24,9 +25,11 @@ except Exception:
 
 
 _S3_FS = None  # type: ignore
-_S3_CONNECT_TIMEOUT_SECONDS = 60
-_S3_READ_TIMEOUT_SECONDS = 300
-_S3_SDK_MAX_ATTEMPTS = 10
+# Retry a failed request once inside botocore, where UploadPart can stay in its
+# current multipart upload. A second s3fs layer would multiply the shared
+# whole-request deadline before the caller can report the failed shard.
+_S3_FILESYSTEM_RETRIES = 1
+_S3_REQUEST_TOTAL_ATTEMPTS = 2
 _S3_TRANSFER_MAX_ATTEMPTS = 5
 _S3_RETRY_BASE_SECONDS = 1.0
 _S3_ADDRESSING_STYLE_ENV = "OT_AGENT_S3_ADDRESSING_STYLE"
@@ -53,15 +56,15 @@ def get_s3_fs():
     global _S3_FS
     if _S3_FS is None:
         addressing_style = os.environ.get(_S3_ADDRESSING_STYLE_ENV, "virtual")
-        _S3_FS = fsspec.filesystem(
+        config_kwargs = s3_python_config_kwargs()
+        config_kwargs["retries"] = {"total_max_attempts": _S3_REQUEST_TOTAL_ATTEMPTS, "mode": "standard"}
+        config_kwargs["s3"] = {"addressing_style": addressing_style}
+        filesystem = fsspec.filesystem(
             "s3",
-            config_kwargs={
-                "connect_timeout": _S3_CONNECT_TIMEOUT_SECONDS,
-                "read_timeout": _S3_READ_TIMEOUT_SECONDS,
-                "retries": {"max_attempts": _S3_SDK_MAX_ATTEMPTS, "mode": "adaptive"},
-                "s3": {"addressing_style": addressing_style},
-            },
+            config_kwargs=config_kwargs,
         )
+        filesystem.retries = _S3_FILESYSTEM_RETRIES
+        _S3_FS = filesystem
     return _S3_FS
 
 
@@ -122,9 +125,11 @@ def _refresh_s3_credentials(fs) -> None:
         logger.opt(exception=True).warning("Failed to refresh S3 credentials before retry")
 
 
-def call_with_s3_retry(fs, fn, *args, **kwargs):
+def call_with_s3_retry(fs, fn, *args, max_attempts: int = _S3_TRANSFER_MAX_ATTEMPTS, **kwargs):
     """Call an S3 operation with bounded retries for credentials and transient transport failures."""
-    for attempt in range(1, _S3_TRANSFER_MAX_ATTEMPTS + 1):
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
+    for attempt in range(1, max_attempts + 1):
         try:
             return fn(*args, **kwargs)
         except (ClientError, *_TRANSIENT_S3_ERRORS, OSError) as error:
@@ -135,14 +140,14 @@ def call_with_s3_retry(fs, fn, *args, **kwargs):
                 _refresh_s3_credentials(fs)
             retry_error = error
 
-        if attempt == _S3_TRANSFER_MAX_ATTEMPTS:
+        if attempt == max_attempts:
             raise retry_error
         delay = _S3_RETRY_BASE_SECONDS * (2 ** (attempt - 1)) * random.uniform(0.8, 1.2)
         logger.warning(
             "S3 operation failed with {}; retrying attempt {}/{} in {:.1f}s",
             type(retry_error).__name__,
             attempt + 1,
-            _S3_TRANSFER_MAX_ATTEMPTS,
+            max_attempts,
             delay,
         )
         time.sleep(delay)

@@ -79,6 +79,7 @@ trainer:
       context_parallel_size: 8
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
+      optimizer_checkpoint_sharding_type: dp_reshardable
       ddp_config:
         overlap_grad_reduce: true
         overlap_param_gather: true
