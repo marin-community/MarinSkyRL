@@ -194,12 +194,16 @@ class GrugSelfAttention(SelfAttention):
     def _apply_xsa(self, core_attn_out: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         """Remove each head's component along its (GQA-expanded) value vector."""
 
-        heads = core_attn_out.view(
-            *value.shape[:-2], self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
-        )
-        expanded_value = value.repeat_interleave(
-            self.num_attention_heads_per_partition // self.num_query_groups_per_partition, dim=-2
-        )
+        # CoreAttention returns TP-local heads. Derive that count from its
+        # output: the inherited head-count field can still be global here.
+        local_heads = core_attn_out.shape[-1] // self.hidden_size_per_attention_head
+        local_query_groups = value.shape[-2]
+        if local_heads * self.hidden_size_per_attention_head != core_attn_out.shape[-1]:
+            raise ValueError("Grug XSA received a partial attention head")
+        if local_heads % local_query_groups:
+            raise ValueError("Grug XSA local heads are not divisible by local query groups")
+        heads = core_attn_out.view(*value.shape[:-2], local_heads, self.hidden_size_per_attention_head)
+        expanded_value = value.repeat_interleave(local_heads // local_query_groups, dim=-2)
         out = heads.float()
         v = expanded_value.float()
         dot = (out * v).sum(dim=-1, keepdim=True)
