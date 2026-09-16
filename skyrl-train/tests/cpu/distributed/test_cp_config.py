@@ -60,6 +60,10 @@ DEBUG_MODE_TRAINER_FIELDS = {
 RUNTIME_CONFIG_TRAINER_FIELDS = {
     "collective_phase_diagnostics": None,
     "training_metrics": False,
+    "policy_train_spans": False,
+    "generate_spans": False,
+    "async_spans": False,
+    "optimizer_state_metrics": False,
     "distillation_token_budget": None,
     "offload_optimizer_during_rollouts": False,
     "reset_distillation_token_count_on_resume": False,
@@ -85,6 +89,8 @@ RUNTIME_CONFIG_TRAINER_FIELDS = {
 }
 ADDITIVE_ALGORITHM_FIELDS = {
     "batch_invariant": False,
+    "ratio_diagnostics": {"position_window": 256, "pooled": False, "exact_quantiles": False},
+    "grad_cosine": {"enabled": False, "store": "gpu_fp32"},
 }
 ADDITIVE_DYNAMIC_SAMPLING_FIELDS = {
     "informative_on": "shaped",
