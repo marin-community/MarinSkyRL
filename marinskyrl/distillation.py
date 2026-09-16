@@ -17,6 +17,7 @@ from rigging.secrets import is_secret_reference
 class DistillationObjectiveKind(StrEnum):
     SAMPLED_REVERSE_KL = "sampled_reverse_kl"
     SPARSE_FORWARD_KL = "sparse_forward_kl"
+    STUDENT_TOPK_POLICY_SURROGATE = "student_topk_policy_surrogate"
 
 
 class DistillationRewardMode(StrEnum):
@@ -215,6 +216,7 @@ def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None
 _OBJECTIVE_EVIDENCE = {
     DistillationObjectiveKind.SAMPLED_REVERSE_KL: TeacherEvidenceKind.CHOSEN_TOKEN,
     DistillationObjectiveKind.SPARSE_FORWARD_KL: TeacherEvidenceKind.TOPK_DISTRIBUTION,
+    DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE: TeacherEvidenceKind.STUDENT_SELECTED_TOPK,
 }
 _TOKENIZER_FINGERPRINT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GCP_SECRET_REFERENCE_PATTERN = re.compile(
@@ -469,10 +471,10 @@ def _teacher_spec(teacher_id: str, raw: object) -> TeacherSpec:
         raise ValueError(f"{path}.placement must be pinned for frozen_worker teachers")
     if placement is TeacherPlacement.EXTERNAL and resources is not None:
         raise ValueError(f"{path}.resources cannot reserve Iris capacity for an external teacher")
-    if evidence is TeacherEvidenceKind.TOPK_DISTRIBUTION and top_k is None:
-        raise ValueError(f"{path}.top_k is required for topk_distribution evidence")
+    if evidence in {TeacherEvidenceKind.TOPK_DISTRIBUTION, TeacherEvidenceKind.STUDENT_SELECTED_TOPK} and top_k is None:
+        raise ValueError(f"{path}.top_k is required for {evidence.value} evidence")
     if evidence is TeacherEvidenceKind.CHOSEN_TOKEN and top_k is not None:
-        raise ValueError(f"{path}.top_k is only valid for topk_distribution evidence")
+        raise ValueError(f"{path}.top_k is only valid for top-K evidence")
 
     common = {
         "id": teacher_id,

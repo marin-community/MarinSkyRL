@@ -13,6 +13,7 @@ from marinskyrl.distillation import (
     DistillationPlan,
     LocalInferenceTeacherSpec,
     OpenAICompatibleTeacherSpec,
+    TeacherEvidenceKind,
     TeacherPlacement,
     compile_distillation_plan_from_config,
     validate_distillation_runtime_support,
@@ -201,6 +202,8 @@ async def _start_local_teacher_pool(
         engine_kwargs["max_num_batched_tokens"] = resources.max_num_batched_tokens
     if resources.gpu_memory_utilization is not None:
         engine_kwargs["gpu_memory_utilization"] = resources.gpu_memory_utilization
+    if teacher.evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
+        engine_kwargs["require_v1_model_runner"] = True
     engines = create_ray_wrapped_inference_engines(**engine_kwargs)
     try:
         endpoints = tuple(

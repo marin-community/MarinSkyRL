@@ -3,6 +3,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
+    PromptSamplingOverride,
 )
 from skyrl_train.inference_engines.vllm.stats import (
     HTTPBridgeStatsAccumulator,
@@ -226,6 +227,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         prompt_token_ids = input_batch.get("prompt_token_ids")
         session_ids = input_batch.get("session_ids")
         sampling_params = input_batch.get("sampling_params")
+        per_prompt_sampling_params = input_batch.get("sampling_params_per_prompt")
 
         if (prompts is None and prompt_token_ids is None) or (prompts is not None and prompt_token_ids is not None):
             raise ValueError("Either `prompts` or `prompt_token_ids` must be provided, but not both.")
@@ -239,6 +241,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             )["input_ids"]
 
         num_prompts = len(prompt_token_ids)
+        if per_prompt_sampling_params is not None and len(per_prompt_sampling_params) != num_prompts:
+            raise ValueError("per-prompt sampling parameters must align with prompt token rows")
         num_inference_engines = len(self.engines)
 
         # 1. Route prompts to engines
@@ -261,6 +265,9 @@ class InferenceEngineClient(InferenceEngineInterface):
                 engine_idx=engine_idx,
                 original_prompt_ids=original_prompt_ids,
                 sampling_params=sampling_params,
+                per_prompt_sampling_params=(
+                    per_prompt_sampling_params[0] if per_prompt_sampling_params is not None else None
+                ),
             )
 
         # For batched generate(), pause/continue cannot be supported.
@@ -284,6 +291,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 prompt_token_ids=cur_prompt_token_ids,
                 sampling_params=sampling_params,
             )
+            if per_prompt_sampling_params is not None:
+                engine_input["sampling_params_per_prompt"] = [per_prompt_sampling_params[i] for i in prompt_ids]
             tasks.append(asyncio.create_task(self.engines[engine_idx].generate(engine_input)))
             indices_list.append(prompt_ids)
             task_engine_idxs.append(engine_idx)
@@ -302,6 +311,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                     prompt_token_ids=cur_prompt_token_ids,
                     sampling_params=sampling_params,
                 )
+                if per_prompt_sampling_params is not None:
+                    engine_input["sampling_params_per_prompt"] = [
+                        per_prompt_sampling_params[j] for j in indices_list[i]
+                    ]
                 results[i] = await self.engines[fallback].generate(engine_input)
             elif isinstance(result, BaseException):
                 raise result
@@ -313,11 +326,22 @@ class InferenceEngineClient(InferenceEngineInterface):
         response_logprobs: List[Optional[List[float]]] = [None for _ in range(n)]
         response_ids: List[List[int]] = [[] for _ in range(n)]
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
+        student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
+        behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
         add_prompt_logprobs = False
+        add_student_topk = False
 
         for indices, result in zip(indices_list, results):
+            selected_ids = result.get("student_topk_indices")
+            selected_scores = result.get("behavior_topk_logprobs")
+            if (selected_ids is None) != (selected_scores is None):
+                raise ValueError("Inference engine must return student top-K IDs and behavior scores together")
+            if selected_ids is not None:
+                if len(selected_ids) != len(indices) or len(selected_scores) != len(indices):
+                    raise ValueError("Inference engine student top-K rows must align with responses")
+                add_student_topk = True
             for local_idx, original_idx in enumerate(indices):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
@@ -328,25 +352,42 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if result.get("prompt_logprobs") is not None:
                     add_prompt_logprobs = True
                     prompt_logprobs[original_idx] = result["prompt_logprobs"][local_idx]
+                if selected_ids is not None:
+                    if len(selected_ids[local_idx]) != len(response_ids[original_idx]) or len(
+                        selected_scores[local_idx]
+                    ) != len(response_ids[original_idx]):
+                        raise ValueError("Inference engine student top-K tokens must align with response tokens")
+                    student_topk_indices[original_idx] = selected_ids[local_idx]
+                    behavior_topk_logprobs[original_idx] = selected_scores[local_idx]
 
-        return InferenceEngineOutput(
+        output = InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
         )
+        if add_student_topk:
+            if any(row is None for row in student_topk_indices) or any(row is None for row in behavior_topk_logprobs):
+                raise ValueError("Inference engine omitted student top-K evidence for part of the batch")
+            output["student_topk_indices"] = student_topk_indices
+            output["behavior_topk_logprobs"] = behavior_topk_logprobs
+        return output
 
     async def _generate_single_with_retry(
-        self, engine_idx: int, original_prompt_ids: List[int], sampling_params: Optional[Dict[str, Any]]
+        self,
+        engine_idx: int,
+        original_prompt_ids: List[int],
+        sampling_params: Optional[Dict[str, Any]],
+        per_prompt_sampling_params: Optional[PromptSamplingOverride] = None,
     ) -> InferenceEngineOutput:
         """
         Generate a single response with retry mechanism.
 
         This method is equivalent to `_chat_completion_with_retry()` but for the `generate()` codepath.
         We keep sending `generate` requests (with previous responses accumulated) until the finish_reason
-        is not "abort". It is intended to be used in combination with `pause_generation()` and `resume_generation()` for
-        in-flight weight updates and partial rollouts.
+        is not "abort". Per-prompt teacher scoring instead fails on an abort because replaying selected-ID
+        overrides against an extended prompt would misalign the scored positions.
 
         This method is equivalent to a single `generate()` call if we do not use `pause_generation()`.
 
@@ -378,6 +419,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 2. Initialize fields we want to accumulate or update in each loop iteration
         accum_response_ids: List[int] = []
         accum_response_logprobs: List[float] = []
+        accum_student_topk_indices: List[List[int]] = []
+        accum_behavior_topk_logprobs: List[List[float]] = []
+        saw_student_topk: Optional[bool] = None
         stop_reason: str = ABORT_FINISH_REASON
 
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
@@ -399,6 +443,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 prompt_token_ids=[new_prompt_ids],
                 sampling_params=cur_sampling_params,
             )
+            if per_prompt_sampling_params is not None:
+                engine_input["sampling_params_per_prompt"] = [per_prompt_sampling_params]
 
             # 3.2. Send the request.
             logger.debug(f"generate() request sent (including potential retries): {engine_input}")
@@ -413,6 +459,9 @@ class InferenceEngineClient(InferenceEngineInterface):
                 # Reset accumulation — new engine has no prior context
                 accum_response_ids = []
                 accum_response_logprobs = []
+                accum_student_topk_indices = []
+                accum_behavior_topk_logprobs = []
+                saw_student_topk = None
                 num_turns = 0
                 stop_reason = ABORT_FINISH_REASON
                 continue
@@ -422,6 +471,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             new_response_ids: List[int] = partial_response["response_ids"][0]
             text_response = partial_response["responses"][0]
             stop_reason = partial_response["stop_reasons"][0]
+            if per_prompt_sampling_params is not None and stop_reason == ABORT_FINISH_REASON:
+                raise RuntimeError("per-prompt teacher scoring cannot continue after an aborted generation")
             new_response_logprobs: Optional[List[float]] = None
             new_response_logprobs_list: Optional[List[List[float]]] = partial_response.get("response_logprobs", None)
             if new_response_logprobs_list is not None and len(new_response_logprobs_list) > 0:
@@ -430,6 +481,25 @@ class InferenceEngineClient(InferenceEngineInterface):
             # 3.4 Aborted without generating tokens, so partial_response is useless.
             if stop_reason == ABORT_FINISH_REASON and len(new_response_ids) == 0:
                 continue
+
+            selected_ids = partial_response.get("student_topk_indices")
+            selected_scores = partial_response.get("behavior_topk_logprobs")
+            if (selected_ids is None) != (selected_scores is None):
+                raise ValueError("Inference engine must return student top-K IDs and behavior scores together")
+            has_student_topk = selected_ids is not None
+            if saw_student_topk is not None and saw_student_topk != has_student_topk:
+                raise ValueError("Inference engine omitted student top-K evidence for part of a response")
+            saw_student_topk = has_student_topk
+            if has_student_topk:
+                if (
+                    len(selected_ids) != 1
+                    or len(selected_scores) != 1
+                    or len(selected_ids[0]) != len(new_response_ids)
+                    or len(selected_scores[0]) != len(new_response_ids)
+                ):
+                    raise ValueError("Inference engine student top-K tokens must align with response tokens")
+                accum_student_topk_indices.extend(selected_ids[0])
+                accum_behavior_topk_logprobs.extend(selected_scores[0])
 
             # 3.5 Accumulate outputs
             accum_response_ids.extend(new_response_ids)
@@ -447,13 +517,17 @@ class InferenceEngineClient(InferenceEngineInterface):
         # for teacher scoring where max_tokens=1 and num_turns=1).
         final_prompt_logprobs = partial_response.get("prompt_logprobs") if partial_response else None
 
-        return InferenceEngineOutput(
+        output = InferenceEngineOutput(
             responses=[final_text_response],
             stop_reasons=[stop_reason],
             response_ids=[accum_response_ids],
             response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
             prompt_logprobs=final_prompt_logprobs,
         )
+        if saw_student_topk:
+            output["student_topk_indices"] = [accum_student_topk_indices]
+            output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
+        return output
 
     async def _chat_completion_with_retry(
         self, engine_idx: int, original_request_payload: Dict[str, Any]

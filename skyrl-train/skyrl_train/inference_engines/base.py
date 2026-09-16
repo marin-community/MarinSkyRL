@@ -5,11 +5,18 @@ MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 
 
+class PromptSamplingOverride(TypedDict):
+    prompt_logprob_token_ids: List[List[int]]
+
+
 class InferenceEngineInput(TypedDict):
     # Either prompts or prompt_token_ids must be provided, but not both.
     prompts: Optional[List[ConversationType]]
     prompt_token_ids: Optional[List[List[int]]]
     sampling_params: Optional[Dict[str, Any]]
+    # Per-prompt selected-ID scoring overrides for a teacher batch. Rollout
+    # sampling remains shared; each override contains only prompt_logprob_token_ids.
+    sampling_params_per_prompt: NotRequired[List[PromptSamplingOverride]]
     session_ids: Optional[List[Hashable]]
     # Per-sample Responses-API options (tools, parallel_tool_calls, etc.) that
     # require the serving backend's resolved chat renderer.

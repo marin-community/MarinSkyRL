@@ -54,3 +54,16 @@ def test_inference_engine_forwards_only_supported_nccl_diagnostics(monkeypatch):
     runtime_env = _build_inference_engine_runtime_env()
 
     assert runtime_env == {"env_vars": {"TORCH_NCCL_ENABLE_MONITORING": "1"}}
+
+
+def test_selected_id_teacher_forces_v1_runner_without_changing_default(monkeypatch):
+    for variable in _NCCL_FR_ENV_PASSTHROUGH:
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+
+    default_env = _build_inference_engine_runtime_env()
+    selected_env = _build_inference_engine_runtime_env(require_v1_model_runner=True)
+
+    assert default_env is None or "VLLM_USE_V2_MODEL_RUNNER" not in default_env["env_vars"]
+    assert selected_env is not None
+    assert selected_env["env_vars"]["VLLM_USE_V2_MODEL_RUNNER"] == "0"

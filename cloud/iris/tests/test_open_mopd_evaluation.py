@@ -18,6 +18,7 @@ from cloud.iris.open_mopd_evaluation_task import (
     run_logged_command,
     rollout_commands,
     stage_checkpoint_model,
+    stage_native_model,
     verify_benchmark_file,
 )
 from cloud.iris.open_mopd_fidelity import load_config
@@ -178,6 +179,76 @@ def test_benchmark_verification_returns_auditable_observation(tmp_path: Path) ->
 
     assert observed.expected_size == observed.observed_size == len(content)
     assert observed.expected_sha256 == observed.observed_sha256 == benchmark.sha256
+
+
+def test_native_model_stage_records_downloaded_file_hashes(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    files = {
+        "config.json": b"{}",
+        "tokenizer.json": b"{}",
+        "model.safetensors": b"fixture weights",
+    }
+    for name, content in files.items():
+        (source / name).write_bytes(content)
+
+    model, verification = stage_native_model(source.as_uri(), "checkpoint-step-2", tmp_path / "model")
+
+    assert {item.path: item.sha256 for item in verification.files} == {
+        name: hashlib.sha256(content).hexdigest() for name, content in files.items()
+    }
+    assert {name: (model / name).read_bytes() for name in files} == files
+    assert verification.source_uri == source.as_uri()
+    assert verification.source_identity == "checkpoint-step-2"
+
+
+def test_native_model_stage_rejects_incomplete_weight_index(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    (source / "tokenizer.json").write_text("{}")
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"layer.weight": "missing.safetensors"}})
+    )
+    (source / "other.safetensors").write_bytes(b"unreferenced shard")
+
+    with pytest.raises(RuntimeError, match="missing 1 referenced safetensors shard"):
+        stage_native_model(source.as_uri(), "checkpoint-step-2", tmp_path / "model")
+
+
+def test_native_model_evaluation_plan_selects_export_without_reference_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    root = evaluation.DEFAULT_CONFIG.parents[3]
+    monkeypatch.setattr(evaluation, "resolve_launcher_source", lambda: SimpleNamespace(root=root, commit="abc123"))
+    export_uri = "s3://bucket/native/exports/step-2"
+
+    plan = evaluation.build_plan(
+        evaluation.load_evaluation_config(evaluation.DEFAULT_CONFIG),
+        config_path=evaluation.DEFAULT_CONFIG,
+        gate="smoke",
+        cluster_config=Path("/tmp/iris.yaml"),
+        output_uri=OUTPUT_URI,
+        task_image=TASK_IMAGE,
+        model_export_uri=export_uri,
+        model_export_identity="run-abc-step-2",
+    )
+
+    assert plan.model_repository is None
+    assert plan.model_export_uri == export_uri
+    assert plan.model_export_identity == "run-abc-step-2"
+    assert plan.iris_command[plan.iris_command.index("--model-export-uri") + 1] == export_uri
+    assert plan.iris_command[plan.iris_command.index("--model-export-identity") + 1] == "run-abc-step-2"
+    assert plan.iris_command[plan.iris_command.index("--priority") + 1] == "interactive"
+
+
+def test_native_model_evaluation_rejects_ambiguous_or_partial_source() -> None:
+    with pytest.raises(ValueError, match="specified together"):
+        evaluation.validate_model_source(None, "s3://bucket/native/exports/step-2", None)
+    with pytest.raises(ValueError, match="cannot be selected together"):
+        evaluation.validate_model_source(
+            "s3://bucket/run/checkpoints/global_step_2/actor",
+            "s3://bucket/native/exports/step-2",
+            "run-abc-step-2",
+        )
 
 
 def test_failed_evaluation_command_persists_combined_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

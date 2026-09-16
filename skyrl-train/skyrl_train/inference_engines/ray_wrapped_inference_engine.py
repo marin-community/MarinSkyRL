@@ -19,7 +19,7 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
 from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
-from skyrl_train.env_vars import EnvVarScope, managed_environment_names
+from skyrl_train.env_vars import EnvVarScope, VLLM_USE_V2_MODEL_RUNNER_ENV, managed_environment_names
 from skyrl_train.utils import (
     get_all_env_variables,
     get_ray_pg_ready_with_timeout,
@@ -135,14 +135,19 @@ def _qwen3_5_vlm_engine_kwargs(pretrain: str, *, revision: str | None = None) ->
     return {}
 
 
-def _build_inference_engine_runtime_env() -> Dict[str, Any] | None:
+def _build_inference_engine_runtime_env(*, require_v1_model_runner: bool = False) -> Dict[str, Any] | None:
     """Forward managed inference settings into each vLLM engine actor.
 
-    This covers NCCL diagnostics and batch invariance. Returns ``None`` when no
-    managed variables are set.
+    This covers NCCL diagnostics and batch invariance. Selected-ID scoring also
+    forces the V1 model runner. Returns ``None`` only when neither managed
+    variables nor a V1 runner requirement are set.
     """
     passthrough = set(_NCCL_FR_ENV_PASSTHROUGH) | set(managed_environment_names(EnvVarScope.INFERENCE_WORKER))
     env_vars = {key: os.environ[key] for key in passthrough if key in os.environ}
+    if require_v1_model_runner:
+        # Selected-ID prompt scoring is implemented in vLLM's V1 GPU runner.
+        # Set this before actor import so the EngineCore and TP workers agree.
+        env_vars[VLLM_USE_V2_MODEL_RUNNER_ENV] = "0"
     if not env_vars:
         return None
     logger.info(f"Forwarding managed environment to vLLM engine actors via runtime_env: {sorted(env_vars)}")
@@ -304,6 +309,7 @@ def create_ray_wrapped_inference_engines(
     rope_scaling: Dict[str, Any] = {},
     rope_theta: float | None = None,
     max_logprobs: int = 1,
+    require_v1_model_runner: bool = False,
     mp_backend: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
 ) -> List[InferenceEngineInterface]:
@@ -349,7 +355,7 @@ def create_ray_wrapped_inference_engines(
     # #232 FIX B: NCCL flight-recorder env to forward into the engine actor (and,
     # via placement_group_capture_child_tasks, its ray-backend TP worker actors).
     # None for every run that does not set the TORCH_NCCL_* FR vars -> no change.
-    inference_engine_runtime_env = _build_inference_engine_runtime_env()
+    inference_engine_runtime_env = _build_inference_engine_runtime_env(require_v1_model_runner=require_v1_model_runner)
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
     use_hybrid_engine = shared_pg is not None
     tp_pp_size = tensor_parallel_size * pipeline_parallel_size

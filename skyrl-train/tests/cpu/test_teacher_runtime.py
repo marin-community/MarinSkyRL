@@ -279,6 +279,33 @@ async def test_local_teacher_runtime_scores_exact_rollout_tokens_and_owns_engine
 
 
 @pytest.mark.asyncio
+async def test_selected_id_local_teacher_requests_v1_model_runner(monkeypatch):
+    engine = _Engine()
+    engine_kwargs = {}
+    tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})
+
+    def create_engine(**kwargs):
+        engine_kwargs.update(kwargs)
+        return [engine]
+
+    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engine)
+    cfg = _config()
+    cfg.trainer.algorithm.distillation.objective = "student_topk_policy_surrogate"
+    cfg.teachers.primary.evidence = "student_selected_topk"
+    cfg.teachers.primary.top_k = 2
+
+    prepared = prepare_distillation_runtime(cfg, tokenizer)
+    runtime = await start_sync_distillation_runtime(cfg, prepared)
+    assert runtime is not None
+    await runtime.close()
+
+    assert engine_kwargs["require_v1_model_runner"] is True
+    assert engine_kwargs["max_logprobs"] == 2
+    assert engine.teardown_count == 1
+
+
+@pytest.mark.asyncio
 async def test_local_teacher_runtime_feeds_fully_async_admitted_groups(monkeypatch):
     engine = _Engine()
     tokenizer = _Tokenizer({"a": 0, "b": 1, "c": 2})

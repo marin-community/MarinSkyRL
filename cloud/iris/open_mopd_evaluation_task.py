@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fsspec.spec import AbstractFileSystem
 
-from cloud.iris.artifacts import FileEntry, copy_file_inventory, fs_and_path, relative_object_key
+from cloud.iris.artifacts import FileEntry, copy_file_inventory, copy_tree, fs_and_path, relative_object_key
 from cloud.iris.open_mopd_evaluation import (
     GATES,
     SMOKE_MAX_TOKENS,
@@ -25,6 +25,7 @@ from cloud.iris.open_mopd_evaluation import (
     evaluation_scale,
     load_evaluation_config,
     validate_checkpoint_source,
+    validate_model_source,
 )
 from cloud.iris.open_mopd_fidelity import DatasetArtifact, FidelityConfig, gpu_count, load_config, validate_output_uri
 from cloud.iris.open_mopd_fidelity_task import (
@@ -40,6 +41,8 @@ from cloud.iris.open_mopd_fidelity_task import (
     validate_runtime,
 )
 from cloud.iris.open_mopd_vllm_rollout import evaluation_port_seed
+from marinskyrl.hf_model import validate_portable_hf_model_files
+from skyrl_train.hf_model_io import verify_hf_model_export
 
 ROLLOUT_WRAPPER = Path(__file__).with_name("open_mopd_vllm_rollout.py")
 FSDP_CONFIG_NAME = "fsdp_config.json"
@@ -70,11 +73,18 @@ class CheckpointVerification:
 
 
 @dataclass(frozen=True)
+class NativeModelVerification:
+    source_uri: str
+    source_identity: str
+    files: tuple[CheckpointFile, ...]
+
+
+@dataclass(frozen=True)
 class EvaluationInputs:
     source: Path
     model: Path
     benchmarks: tuple[StagedBenchmark, ...]
-    model_verification: ArtifactVerification | CheckpointVerification
+    model_verification: ArtifactVerification | CheckpointVerification | NativeModelVerification
 
 
 @dataclass(frozen=True)
@@ -279,6 +289,15 @@ def stage_checkpoint_model(
     return model_dir, verification
 
 
+def stage_native_model(source_uri: str, source_identity: str, model_dir: Path) -> tuple[Path, NativeModelVerification]:
+    """Stage an exported native HF model and record exact downloaded file hashes."""
+    copied = copy_tree(source_uri, model_dir)
+    validate_portable_hf_model_files({item.path for item in copied}, source_uri)
+    verify_hf_model_export(str(model_dir))
+    downloaded = tuple(_checkpoint_file(model_dir / item.path, item.path) for item in copied)
+    return model_dir, NativeModelVerification(source_uri=source_uri, source_identity=source_identity, files=downloaded)
+
+
 def stage_evaluation_inputs(
     evaluation: EvaluationConfig,
     fidelity: FidelityConfig,
@@ -286,10 +305,15 @@ def stage_evaluation_inputs(
     *,
     checkpoint_uri: str | None = None,
     checkpoint_step: int | None = None,
+    model_export_uri: str | None = None,
+    model_export_identity: str | None = None,
 ) -> EvaluationInputs:
     source = checkout_source(fidelity, root / "source")
     validate_checkpoint_source(checkpoint_uri, checkpoint_step)
-    if checkpoint_uri is None or checkpoint_step is None:
+    validate_model_source(checkpoint_uri, model_export_uri, model_export_identity)
+    if model_export_uri is not None and model_export_identity is not None:
+        model, model_verification = stage_native_model(model_export_uri, model_export_identity, root / "model")
+    elif checkpoint_uri is None or checkpoint_step is None:
         model, model_verification = snapshot_model(
             fidelity.evaluation_reference.repository,
             fidelity.evaluation_reference.revision,
@@ -419,6 +443,8 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--launcher-commit", required=True)
     parser.add_argument("--checkpoint-uri")
     parser.add_argument("--checkpoint-step", type=int)
+    parser.add_argument("--model-export-uri")
+    parser.add_argument("--model-export-identity")
     parser.add_argument("--work-root", type=Path, default=Path("/tmp/open-mopd-final-eval"))
     parser.add_argument("--sync-interval", type=int, default=300)
     return parser
@@ -434,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
     fidelity = load_config(args.fidelity_config)
     validate_output_uri(args.output_uri)
     validate_checkpoint_source(args.checkpoint_uri, args.checkpoint_step)
+    validate_model_source(args.checkpoint_uri, args.model_export_uri, args.model_export_identity)
     validate_runtime(fidelity)
     world_size = gpu_count(args.gpu_slice)
     reject_existing_output(args.output_uri, "evaluation-manifest.json")
@@ -458,6 +485,8 @@ def main(argv: list[str] | None = None) -> int:
         "vllm_port_seed": vllm_port_seed,
         "checkpoint_uri": args.checkpoint_uri,
         "checkpoint_step": args.checkpoint_step,
+        "model_export_uri": args.model_export_uri,
+        "model_export_identity": args.model_export_identity,
     }
     _write_manifest(manifest_path, manifest)
     sync_tree(output, args.output_uri)
@@ -476,6 +505,8 @@ def main(argv: list[str] | None = None) -> int:
             args.work_root,
             checkpoint_uri=args.checkpoint_uri,
             checkpoint_step=args.checkpoint_step,
+            model_export_uri=args.model_export_uri,
+            model_export_identity=args.model_export_identity,
         )
         commands = rollout_commands(
             evaluation,
