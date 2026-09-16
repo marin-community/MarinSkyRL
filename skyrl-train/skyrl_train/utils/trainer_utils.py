@@ -395,12 +395,9 @@ def handle_replace_sampling(
             trajectory_batch["rewards"][bad_idx] = (
                 replacement_reward.copy() if isinstance(replacement_reward, list) else replacement_reward
             )
-            if trajectory_batch.get("unshaped_rewards") is not None:
-                trajectory_batch["unshaped_rewards"][bad_idx] = trajectory_batch["unshaped_rewards"][replacement_idx]
-            if trajectory_batch.get("unshaped_reward_available") is not None:
-                trajectory_batch["unshaped_reward_available"][bad_idx] = trajectory_batch["unshaped_reward_available"][
-                    replacement_idx
-                ]
+            for key in ("unshaped_rewards", "unshaped_reward_available"):
+                if trajectory_batch.get(key) is not None:
+                    trajectory_batch[key][bad_idx] = trajectory_batch[key][replacement_idx]
             trajectory_batch["loss_masks"][bad_idx] = trajectory_batch["loss_masks"][replacement_idx].copy()
             if trajectory_batch["stop_reasons"]:
                 trajectory_batch["stop_reasons"][bad_idx] = trajectory_batch["stop_reasons"][replacement_idx]

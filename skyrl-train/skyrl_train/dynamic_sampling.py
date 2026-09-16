@@ -77,7 +77,7 @@ def group_is_informative_for_dynamic_sampling(
     *,
     criteria: DynamicSamplingCriteria,
 ) -> bool:
-    """Return whether a group's configured final rewards have sufficient spread."""
+    """Return whether a group has available outcomes with sufficient final-reward spread."""
     response_ids = trajectory_batch.get("response_ids")
     if not isinstance(response_ids, Sequence) or isinstance(response_ids, (str, bytes)):
         raise ValueError("response_ids must be a sequence")
