@@ -108,7 +108,16 @@ def test_resume_requires_the_same_run_and_a_durable_checkpoint(monkeypatch, tmp_
     validation_file = tmp_path / "aime24.parquet"
     pq.write_table(pa.table({"prompt": ["first", "second"]}), schedule_file, row_group_size=1)
     pq.write_table(
-        pa.table({"prompt": ["example"] * 30, "env_class": ["aime"] * 30, "reward_model": ["0"] * 30}),
+        pa.Table.from_pylist(
+            [
+                {
+                    "prompt": [{"role": "user", "content": "What is 1 + 0?"}],
+                    "env_class": "aime",
+                    "reward_model": {"ground_truth": "1"},
+                }
+            ]
+            * 30
+        ),
         validation_file,
     )
     monkeypatch.setattr(MODULE, "SCHEDULE_SHA256", hashlib.sha256(schedule_file.read_bytes()).hexdigest())
