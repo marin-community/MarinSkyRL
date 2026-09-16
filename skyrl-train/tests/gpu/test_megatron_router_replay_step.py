@@ -48,11 +48,9 @@ PARAMETER_NAMES = [
 def _replay_config(tmp_path, *, packing: bool):
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path)
+    _write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK)
     cfg = _config(str(model_path), world_size=1, pp=1, ep=1)
     cfg.trainer.use_sample_packing = packing
-    # The strategy guard still rejects megatron + replay at validate_cfg; the
-    # flag is enabled after validation, exactly as the guard-flip plan requires.
     cfg.trainer.policy.fsdp_config.moe_router_replay = True
     return cfg, model_path
 

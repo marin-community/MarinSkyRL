@@ -14,6 +14,7 @@ Requires 1 GPU; run on an otherwise idle node (not part of the CPU PR gate).
 from __future__ import annotations
 
 import functools
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,7 @@ def _build_megatron_model(model_path: str) -> list[torch.nn.Module]:
     provider.variable_seq_lengths = True
     provider.masked_softmax_fusion = True
     provider.moe_token_dispatcher_type = "alltoall"
+    provider.gradient_accumulation_fusion = importlib.util.find_spec("fused_weight_gradient_mlp_cuda") is not None
     # No activation recompute: exactly one router entry per forward, so the
     # recompute FIFO stays out of the picture (covered by the training-step tests).
     provider.recompute_granularity = None
