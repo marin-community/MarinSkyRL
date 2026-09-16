@@ -32,6 +32,9 @@ from cloud.iris.open_mopd_fidelity_task import (
     sync_tree,
     validate_runtime,
 )
+from cloud.iris.open_mopd_vllm_rollout import evaluation_port_seed
+
+ROLLOUT_WRAPPER = Path(__file__).with_name("open_mopd_vllm_rollout.py")
 
 
 @dataclass(frozen=True)
@@ -49,8 +52,48 @@ class EvaluationInputs:
     model_verification: ArtifactVerification
 
 
+@dataclass(frozen=True)
+class RolloutCommand:
+    domain: str
+    argv: tuple[str, ...]
+    log_path: Path
+
+
+class EvaluationCommandError(RuntimeError):
+    """A child evaluation command failed after writing its durable log."""
+
+    def __init__(self, command: list[str], returncode: int, log_path: Path):
+        self.command = tuple(command)
+        self.returncode = returncode
+        self.log_path = log_path
+        super().__init__(f"Evaluation command exited with code {returncode}; see {log_path}")
+
+
 def _run(command: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(command, cwd=cwd, check=True)
+
+
+def run_logged_command(command: list[str], *, cwd: Path, log_path: Path) -> None:
+    """Run a child process while preserving its merged stdout and stderr."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w") as log:
+        with subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        ) as process:
+            if process.stdout is None:
+                raise RuntimeError("Failed to capture evaluation command output")
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                print(line, end="", flush=True)
+            returncode = process.wait()
+    if returncode:
+        raise EvaluationCommandError(command, returncode, log_path)
 
 
 def verify_benchmark_file(benchmark: EvaluationBenchmark, path: Path) -> FileVerification:
@@ -127,7 +170,8 @@ def rollout_commands(
     output: Path,
     *,
     world_size: int,
-) -> tuple[tuple[str, ...], ...]:
+    vllm_port_seed: int,
+) -> tuple[RolloutCommand, ...]:
     if gate not in GATES:
         raise ValueError(f"Unknown evaluation gate: {gate}")
     commands = []
@@ -138,14 +182,15 @@ def rollout_commands(
         max_tokens = min(protocol.max_tokens, SMOKE_MAX_TOKENS) if gate == "smoke" else protocol.max_tokens
         command = [
             sys.executable,
-            "-m",
-            "evals.rollout_engine.vllm_rollout",
+            str(ROLLOUT_WRAPPER),
             "--model",
             str(inputs.model),
             "--input",
             *(str(item.path) for item in selected),
             "--output-dir",
             str(output / "rollouts"),
+            "--vllm-port-seed",
+            str(vllm_port_seed),
             "--tensor-parallel-size",
             "1",
             "--data-parallel-size",
@@ -176,7 +221,13 @@ def rollout_commands(
             command.extend(["--enable-thinking", str(protocol.enable_thinking).lower()])
         if gate == "smoke":
             command.extend(["--base", "0", "--offset", "1"])
-        commands.append(tuple(command))
+        commands.append(
+            RolloutCommand(
+                domain=domain,
+                argv=tuple(command),
+                log_path=output / "logs" / f"rollout-{domain}.log",
+            )
+        )
     return tuple(commands)
 
 
@@ -200,7 +251,11 @@ def score_released_benchmarks(config: EvaluationConfig, inputs: EvaluationInputs
             "--data-dir",
             str(data_dir),
         ]
-        _run(command, cwd=inputs.source)
+        run_logged_command(command, cwd=inputs.source, log_path=scorer_log_path(output, benchmark.name))
+
+
+def scorer_log_path(output: Path, benchmark_name: str) -> Path:
+    return output / "logs" / f"score-{benchmark_name}.log"
 
 
 def argument_parser() -> argparse.ArgumentParser:
@@ -235,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     output.mkdir(parents=True)
     manifest_path = output / "evaluation-manifest.json"
     planned_completions, maximum_output_tokens = evaluation_scale(evaluation, args.gate)
+    vllm_port_seed = evaluation_port_seed(args.output_uri)
     manifest: dict[str, object] = {
         "status": "staging",
         "gate": args.gate,
@@ -246,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         "task_image": args.task_image,
         "launcher_commit": args.launcher_commit,
         "gpu_slice": args.gpu_slice,
+        "vllm_port_seed": vllm_port_seed,
     }
     _write_manifest(manifest_path, manifest)
     sync_tree(output, args.output_uri)
@@ -259,20 +316,39 @@ def main(argv: list[str] | None = None) -> int:
     uploader.start()
     try:
         inputs = stage_evaluation_inputs(evaluation, fidelity, args.work_root)
-        commands = rollout_commands(evaluation, inputs, args.gate, output, world_size=world_size)
+        commands = rollout_commands(
+            evaluation,
+            inputs,
+            args.gate,
+            output,
+            world_size=world_size,
+            vllm_port_seed=vllm_port_seed,
+        )
         manifest.update(
             {
                 "status": "running",
                 "runtime": runtime_inventory(inputs.source),
                 "model_verification": asdict(inputs.model_verification),
                 "data_verifications": [asdict(item.verification) for item in inputs.benchmarks],
-                "rollout_commands": commands,
+                "rollout_commands": [command.argv for command in commands],
+                "command_logs": {
+                    "rollouts": {command.domain: str(command.log_path.relative_to(output)) for command in commands},
+                    "scorers": {
+                        benchmark.name: str(scorer_log_path(output, benchmark.name).relative_to(output))
+                        for benchmark in evaluation.benchmarks
+                        if benchmark.score_mode == "released"
+                    },
+                },
             }
         )
         _write_manifest(manifest_path, manifest)
         sync_tree(output, args.output_uri)
         for command in commands:
-            _run(list(command), cwd=inputs.source)
+            run_logged_command(
+                list(command.argv),
+                cwd=inputs.source,
+                log_path=command.log_path,
+            )
         score_released_benchmarks(evaluation, inputs, output)
         manifest["status"] = "complete"
         _write_manifest(manifest_path, manifest)

@@ -19,6 +19,18 @@ from cloud.iris.open_mopd_fidelity_task import (
 
 TASK_IMAGE = "registry.example/open-mopd@sha256:" + "1" * 64
 OUTPUT_URI = "s3://bucket/open-mopd/one-step"
+RELEASED_SCORER_PACKAGES = {
+    "absl-py",
+    "appdirs",
+    "emoji",
+    "immutabledict",
+    "jsonlines",
+    "langdetect",
+    "nltk",
+    "syllapy",
+    "tempdir",
+    "wget",
+}
 
 
 def test_runtime_accepts_cuda_local_version_for_public_release(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -27,6 +39,12 @@ def test_runtime_accepts_cuda_local_version_for_public_release(monkeypatch: pyte
     monkeypatch.setattr(fidelity_task.importlib.metadata, "version", versions.__getitem__)
 
     validate_runtime(config)
+
+
+def test_runtime_manifest_includes_released_scorer_dependencies() -> None:
+    config = fidelity.load_config(fidelity.DEFAULT_CONFIG)
+
+    assert RELEASED_SCORER_PACKAGES <= config.environment.packages.keys()
 
 
 def test_release_source_compatibility_patches_preserve_training_contracts(tmp_path: Path) -> None:

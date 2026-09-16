@@ -1,6 +1,7 @@
 import hashlib
 import json
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,13 +10,16 @@ import pytest
 
 import cloud.iris.open_mopd_evaluation as evaluation
 from cloud.iris.open_mopd_evaluation_task import (
+    EvaluationCommandError,
     EvaluationInputs,
     StagedBenchmark,
+    run_logged_command,
     rollout_commands,
     verify_benchmark_file,
 )
 from cloud.iris.open_mopd_fidelity import load_config
 from cloud.iris.open_mopd_fidelity_task import ArtifactVerification
+from cloud.iris.open_mopd_vllm_rollout import evaluation_port_seed, worker_port
 
 TASK_IMAGE = "registry.example/open-mopd-eval@sha256:" + "1" * 64
 OUTPUT_URI = "s3://bucket/open-mopd/final-eval"
@@ -63,9 +67,17 @@ def test_full_gate_reports_scored_and_rollout_only_coverage() -> None:
 
 def test_rollout_commands_preserve_released_domain_protocols() -> None:
     config = evaluation.load_evaluation_config(evaluation.DEFAULT_CONFIG)
+    port_seed = evaluation_port_seed(OUTPUT_URI)
 
-    commands = rollout_commands(config, _inputs(config), "full", Path("/work/output"), world_size=8)
-    math, code, instruction = (_options(command) for command in commands)
+    commands = rollout_commands(
+        config,
+        _inputs(config),
+        "full",
+        Path("/work/output"),
+        world_size=8,
+        vllm_port_seed=port_seed,
+    )
+    math, code, instruction = (_options(command.argv) for command in commands)
 
     assert math["--temperature"] == "0.6"
     assert math["--n"] == "64"
@@ -88,18 +100,38 @@ def test_rollout_commands_preserve_released_domain_protocols() -> None:
         assert options["--top-p"] == "0.95"
         assert options["--top-k"] == "-1"
         assert options["--stop-token-ids"] == "128012"
+        assert options["--vllm-port-seed"] == str(port_seed)
         assert options["--trust-remote-code"] is True
+    assert all(Path(command.argv[1]).name == "open_mopd_vllm_rollout.py" for command in commands)
+    assert all(Path(command.argv[1]).is_file() for command in commands)
+
+
+def test_rollout_workers_get_distinct_vllm_port_ranges() -> None:
+    port_seed = evaluation_port_seed(OUTPUT_URI)
+
+    ports = [worker_port(port_seed, rank) for rank in range(8)]
+
+    assert len(set(ports)) == 8
+    assert all(20_000 <= port <= 59_999 for port in ports)
+    assert min(abs(left - right) for index, left in enumerate(ports) for right in ports[index + 1 :]) > 1
 
 
 def test_smoke_gate_bounds_every_domain_without_claiming_comparability() -> None:
     config = evaluation.load_evaluation_config(evaluation.DEFAULT_CONFIG)
 
-    commands = rollout_commands(config, _inputs(config), "smoke", Path("/work/output"), world_size=8)
+    commands = rollout_commands(
+        config,
+        _inputs(config),
+        "smoke",
+        Path("/work/output"),
+        world_size=8,
+        vllm_port_seed=evaluation_port_seed(OUTPUT_URI),
+    )
     coverage = evaluation.benchmark_coverage(config, "smoke")
 
     assert all(item.rollout_rows == 1 and not item.comparable_to_paper for item in coverage)
     for command in commands:
-        options = _options(command)
+        options = _options(command.argv)
         assert options["--n"] == "1"
         assert options["--max-tokens"] == "512"
         assert options["--offset"] == "1"
@@ -145,6 +177,23 @@ def test_benchmark_verification_returns_auditable_observation(tmp_path: Path) ->
     assert observed.expected_sha256 == observed.observed_sha256 == benchmark.sha256
 
 
+def test_failed_evaluation_command_persists_combined_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    log_path = tmp_path / "logs" / "rollout-code.log"
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; print('rank stdout'); print('rank stderr', file=sys.stderr); raise SystemExit(7)",
+    ]
+
+    with pytest.raises(EvaluationCommandError) as caught:
+        run_logged_command(command, cwd=tmp_path, log_path=log_path)
+
+    assert caught.value.returncode == 7
+    assert caught.value.log_path == log_path
+    assert set(log_path.read_text().splitlines()) == {"rank stdout", "rank stderr"}
+    assert set(capsys.readouterr().out.splitlines()) == {"rank stdout", "rank stderr"}
+
+
 def test_dry_run_exposes_immutable_inputs_without_submitting(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -176,6 +225,8 @@ def test_dry_run_exposes_immutable_inputs_without_submitting(
     assert plan["data_revision"] == "9e897efe3257599d4300e2d5ee865a1cc714af87"
     assert plan["planned_completions"] == 6
     assert plan["maximum_output_tokens"] == 3_072
+    assert plan["job_name"].startswith("open-mopd-final-eval-smoke-")
+    assert plan["job_name"] == plan["iris_command"][plan["iris_command"].index("--job-name") + 1]
     assert "--no-sync" in plan["iris_command"]
     assert "--no-preemptible" in plan["iris_command"]
     assert "--max-retries" in plan["iris_command"]
@@ -201,6 +252,23 @@ def test_submission_requires_omission_acknowledgement(
             ]
         )
     capsys.readouterr()
+
+
+def test_distinct_output_prefixes_produce_distinct_job_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    root = evaluation.DEFAULT_CONFIG.parents[3]
+    monkeypatch.setattr(evaluation, "resolve_launcher_source", lambda: SimpleNamespace(root=root, commit="abc123"))
+    config = evaluation.load_evaluation_config(evaluation.DEFAULT_CONFIG)
+    common = {
+        "config_path": evaluation.DEFAULT_CONFIG,
+        "gate": "smoke",
+        "cluster_config": Path("/tmp/iris.yaml"),
+        "task_image": TASK_IMAGE,
+    }
+
+    first = evaluation.build_plan(config, output_uri=f"{OUTPUT_URI}-first", **common)
+    second = evaluation.build_plan(config, output_uri=f"{OUTPUT_URI}-second", **common)
+
+    assert first.job_name != second.job_name
 
 
 @pytest.mark.parametrize("output_uri", ["/tmp/results", "file:///tmp/results", "s3://bucket"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -85,6 +86,7 @@ class BenchmarkCoverage:
 @dataclass(frozen=True)
 class EvaluationLaunchPlan:
     gate: str
+    job_name: str
     gpu_slice: str
     launcher_commit: str
     source_commit: str
@@ -298,6 +300,11 @@ def evaluation_scale(config: EvaluationConfig, gate: str) -> tuple[int, int]:
     return completions, maximum_tokens
 
 
+def evaluation_job_name(gate: str, output_uri: str) -> str:
+    output_id = hashlib.sha256(output_uri.encode()).hexdigest()[:8]
+    return f"open-mopd-final-eval-{gate}-{output_id}"
+
+
 def build_plan(
     config: EvaluationConfig,
     *,
@@ -321,6 +328,7 @@ def build_plan(
         raise ValueError("Evaluation and fidelity configs must be inside the checkout bundled by Iris") from error
     fidelity = load_config(source.root / fidelity_path)
     planned_completions, maximum_output_tokens = evaluation_scale(config, gate)
+    job_name = evaluation_job_name(gate, output_uri)
     omissions = list(config.known_omissions)
     if selected_slice != config.hardware.gpu:
         omissions.append(f"Hardware override uses {selected_slice}; the authors report {config.hardware.gpu}.")
@@ -352,7 +360,7 @@ def build_plan(
         "--no-sync",
         "--no-wait",
         "--job-name",
-        f"open-mopd-final-eval-{gate}",
+        job_name,
         "--",
         "python",
         "-m",
@@ -374,6 +382,7 @@ def build_plan(
     )
     return EvaluationLaunchPlan(
         gate=gate,
+        job_name=job_name,
         gpu_slice=selected_slice,
         launcher_commit=source.commit,
         source_commit=fidelity.source.commit,
