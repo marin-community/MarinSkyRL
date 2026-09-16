@@ -194,12 +194,16 @@ class GrugSelfAttention(SelfAttention):
     def _apply_xsa(self, core_attn_out: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         """Remove each head's component along its (GQA-expanded) value vector."""
 
-        heads = core_attn_out.view(
-            *value.shape[:-2], self.num_attention_heads_per_partition, self.hidden_size_per_attention_head
-        )
-        expanded_value = value.repeat_interleave(
-            self.num_attention_heads_per_partition // self.num_query_groups_per_partition, dim=-2
-        )
+        # CoreAttention returns TP-local heads. Derive that count from its
+        # output: the inherited head-count field can still be global here.
+        local_heads = core_attn_out.shape[-1] // self.hidden_size_per_attention_head
+        local_query_groups = value.shape[-2]
+        if local_heads * self.hidden_size_per_attention_head != core_attn_out.shape[-1]:
+            raise ValueError("Grug XSA received a partial attention head")
+        if local_heads % local_query_groups:
+            raise ValueError("Grug XSA local heads are not divisible by local query groups")
+        heads = core_attn_out.view(*value.shape[:-2], local_heads, self.hidden_size_per_attention_head)
+        expanded_value = value.repeat_interleave(local_heads // local_query_groups, dim=-2)
         out = heads.float()
         v = expanded_value.float()
         dot = (out * v).sum(dim=-1, keepdim=True)
@@ -213,6 +217,12 @@ class GrugSelfAttention(SelfAttention):
         heads = core_attn_out.view(*gate.shape, self.hidden_size_per_attention_head)
         gated = heads * (GRUG_ATTN_GATE_SCALE * torch.sigmoid(gate.float())).unsqueeze(-1).to(heads.dtype)
         return gated.reshape(core_attn_out.shape)
+
+
+def _grug_topk_indices(biased_logits: torch.Tensor, topk: int) -> torch.Tensor:
+    """Return the first K indices from Grug's biased top-(K+1) selection."""
+    _, indices = jax_top_k(biased_logits, topk + 1)
+    return indices[:, :topk]
 
 
 class GrugTopKRouter(TopKRouter):
@@ -230,8 +240,19 @@ class GrugTopKRouter(TopKRouter):
     def routing(self, logits: torch.Tensor, padding_mask: torch.Tensor | None = None):
         logits = logits.view(-1, self.config.num_moe_experts).float()
         biased_logits = logits + self.expert_bias
-        _, topk_indices = jax_top_k(biased_logits, self.topk + 1)
-        selected = topk_indices[:, : self.topk]
+        if self.router_replay is None:
+            selected = _grug_topk_indices(biased_logits, self.topk)
+        else:
+            # Grug overrides MCore's routing method, so its replay hook must be
+            # called here. Selection uses biased logits; combine weights below
+            # still use the original, unbiased logits.
+            def native_topk(scores, topk, num_groups=None, group_topk=None):
+                if num_groups is not None or group_topk is not None:
+                    raise ValueError("Grug router replay does not support grouped top-k")
+                indices = _grug_topk_indices(scores, topk)
+                return scores.gather(1, indices), indices
+
+            _, selected = self.router_replay.get_replay_topk(biased_logits, self.topk, None, None, native_topk)
         combine = torch.sigmoid(torch.gather(logits, dim=-1, index=selected))
         combine = combine * (GRUG_ROUTING_RENORM_SUM / (combine.sum(dim=-1, keepdim=True) + GRUG_ROUTER_RENORM_EPS))
         probs = torch.zeros_like(logits).scatter(1, selected, combine)

@@ -2,9 +2,9 @@
 
 Each layout attacks one layout assumption: TP2 exercises the
 sequence-parallel slice, PP2 the 1F1B recompute FIFO and the layer-number
-mapping across pipeline stages, EP2 the alltoall dispatch, CP2+packing the
-two-chunk-per-rank split applied to routes, and packing on/off the two
-target transforms. The oracle is behavioral and needs no in-actor hooks: a
+mapping across pipeline stages, EP2 the alltoall dispatch, and packing on/off
+the two target transforms. CP2 needs the separate dense-CP runtime and is
+excluded from this mainline matrix. The oracle is behavioral and needs no in-actor hooks: a
 completed training step proves token-exact replay on every rank (the
 per-rank hit-fraction check and the FIFO drain assert turn a wrong layout
 into a loud failure), an empty capture must reproduce native log-probs
@@ -32,6 +32,7 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
+from tests.gpu.router_replay_fixtures import random_unique_routes
 from tests.gpu.test_grug_megatron import (
     NUM_EXPERTS,
     NUM_LAYERS,
@@ -54,7 +55,6 @@ LAYOUTS = [
     ("tp2", 2, 2, 1, 1, 1, False),
     ("pp2", 2, 1, 2, 1, 1, False),
     ("ep2", 2, 1, 1, 2, 1, False),
-    ("cp2_packed", 2, 1, 1, 1, 2, True),
     ("tp2_pp2", 4, 2, 2, 1, 1, False),
 ]
 
@@ -62,8 +62,8 @@ LAYOUTS = [
 def _layout_config(tmp_path, layout) -> tuple:
     _, world_size, tp, pp, ep, cp, packing = layout
     model_path = tmp_path / "model"
-    model_path.mkdir()
-    _write_tiny_checkpoint(model_path)
+    model_path.mkdir(parents=True)
+    _write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK, vocab_size_multiple=2)
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     cfg.trainer.use_sample_packing = packing
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
@@ -79,7 +79,7 @@ def _routed_batch(pad_token_id: int, *, captured: bool) -> TrainingInputBatch:
     if not captured:
         routes = torch.zeros(shape, dtype=torch.long)  # empty capture: everything routes natively
     else:
-        routes = torch.randint(0, NUM_EXPERTS, shape, generator=generator)
+        routes = random_unique_routes(shape, NUM_EXPERTS, generator=generator)
         routes[1] = 0  # one sample with fully-lost capture routes natively
     batch["rollout_routed_experts"] = routes.to(torch.int32)
     return batch

@@ -25,6 +25,7 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_serving import rank0_validation_snapshot
+from tests.gpu.router_replay_fixtures import random_unique_routes
 from tests.gpu.test_grug_megatron import (
     NUM_EXPERTS,
     NUM_LAYERS,
@@ -48,11 +49,9 @@ PARAMETER_NAMES = [
 def _replay_config(tmp_path, *, packing: bool):
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path)
+    _write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK)
     cfg = _config(str(model_path), world_size=1, pp=1, ep=1)
     cfg.trainer.use_sample_packing = packing
-    # The strategy guard still rejects megatron + replay at validate_cfg; the
-    # flag is enabled after validation, exactly as the guard-flip plan requires.
     cfg.trainer.policy.fsdp_config.moe_router_replay = True
     return cfg, model_path
 
@@ -61,17 +60,18 @@ def _routed_batch(pad_token_id: int, *, routes: str = "random", seed: int = 29) 
     batch = _padded_batch(pad_token_id)
     generator = torch.Generator().manual_seed(seed)
     shape = (batch["sequences"].shape[0], RESPONSE_LENGTH, NUM_LAYERS, TOPK)
+
     if routes == "random":
-        rollout_routed_experts = torch.randint(0, NUM_EXPERTS, shape, generator=generator)
+        rollout_routed_experts = random_unique_routes(shape, NUM_EXPERTS, generator=generator)
         rollout_routed_experts[1] = 0  # one sample with fully-lost capture routes natively
     elif routes == "sentinel":
         rollout_routed_experts = torch.zeros(shape, dtype=torch.long)
     elif routes == "wrong_layers":
-        rollout_routed_experts = torch.randint(0, NUM_EXPERTS, (*shape[:2], NUM_LAYERS - 1, TOPK), generator=generator)
+        rollout_routed_experts = random_unique_routes(
+            (*shape[:2], NUM_LAYERS - 1, TOPK), NUM_EXPERTS, generator=generator
+        )
     elif routes == "wrong_response":
-        rollout_routed_experts = torch.randint(0, NUM_EXPERTS, (*shape[:2], NUM_LAYERS, TOPK), generator=generator)[
-            :, :-1
-        ]
+        rollout_routed_experts = random_unique_routes(shape, NUM_EXPERTS, generator=generator)[:, :-1]
     else:
         raise ValueError(routes)
     batch["rollout_routed_experts"] = rollout_routed_experts.to(torch.int32)

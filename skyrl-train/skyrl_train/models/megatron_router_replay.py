@@ -155,6 +155,7 @@ class MegatronRouterReplay:
         self._expected: tuple[int, ...] = ()
         self._consumed: set[int] = set()
         self._response_mask: Optional[torch.Tensor] = None
+        self._record_recompute = False
         self._fifo: dict[int, deque] = {idx: deque() for idx in self.local_layer_indices}
         self._masked_rows = 0
         self._hit_rows = 0
@@ -168,6 +169,8 @@ class MegatronRouterReplay:
         per_layer_targets: Mapping[int, torch.Tensor],
         mask: torch.Tensor,
         response_mask: Optional[torch.Tensor] = None,
+        *,
+        record_recompute: bool = True,
     ) -> None:
         """Arm the controller for one forward over the model's local layers.
 
@@ -175,6 +178,8 @@ class MegatronRouterReplay:
         the router's token order; ``mask`` is the ``[N]`` replay gate.
         ``response_mask`` (optional, ``[N]``) marks response-window rows before
         sentinel exclusion and feeds the ``sentinel_fraction`` metric.
+        ``record_recompute`` is true for training forwards whose backward will
+        replay activation-checkpointed layers, even when forward runs under no_grad.
         """
         if self._phase is not _Phase.IDLE:
             raise RuntimeError("router replay: begin_forward while a forward is already armed (phase must be IDLE)")
@@ -182,6 +187,7 @@ class MegatronRouterReplay:
         self._expected = tuple(sorted(per_layer_targets))
         self._consumed = set()
         self._response_mask = response_mask
+        self._record_recompute = record_recompute
         self._phase = _Phase.FORWARD
 
     def end_forward(self) -> None:
@@ -197,6 +203,7 @@ class MegatronRouterReplay:
         self._current = {}
         self._expected = ()
         self._response_mask = None
+        self._record_recompute = False
         self._phase = _Phase.IDLE
 
     def abort_forward(self) -> None:
@@ -209,6 +216,7 @@ class MegatronRouterReplay:
         self._expected = ()
         self._consumed = set()
         self._response_mask = None
+        self._record_recompute = False
         self._phase = _Phase.IDLE
         for fifo in self._fifo.values():
             fifo.clear()
@@ -305,10 +313,9 @@ class MegatronRouterReplay:
                 raise ValueError(f"router replay: layer {layer_idx} consumed twice in one forward")
             self._consumed.add(layer_idx)
             targets, mask = self._current[layer_idx]
-            # Record for backward recompute only on grad-enabled forwards: a
-            # forward-only pass (old-logprob / reference) never recomputes, so
-            # recording there would leave the FIFO undrained forever.
-            if self._recompute_enabled and torch.is_grad_enabled():
+            # Activation-checkpointed training forwards run under no_grad;
+            # the caller, not grad mode, identifies whether backward follows.
+            if self._recompute_enabled and self._record_recompute:
                 if layer_idx not in self._fifo:
                     raise ValueError(f"router replay: layer {layer_idx} has no FIFO; not a local layer")
                 self._fifo[layer_idx].append((targets, mask))
