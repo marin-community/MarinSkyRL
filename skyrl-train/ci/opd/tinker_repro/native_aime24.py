@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -11,25 +10,21 @@ import json
 from pathlib import Path
 import sys
 import tempfile
-from typing import Any
 
-import datasets
-import pyarrow as pa
+from aime24_dataset import materialize_dataset
 
 from aime24_protocol import (
     AIME24_DATASET,
     AIME24_REVISION,
-    AIME24_SIZE,
     CONTEXT_WINDOW,
     MAX_TOKENS,
     NUM_SAMPLES,
-    SYSTEM_PROMPT,
     TEMPERATURE,
     TOP_K,
     TOP_P,
-    USER_INSTRUCTION,
 )
 from native_artifact_run import run_artifact_command
+from native_checkpoint_publication import verify_remote_checkpoint
 from native_opd import (
     STUDENT_MODEL,
     STUDENT_REVISION,
@@ -63,6 +58,8 @@ class EvaluationManifest:
     student_revision: str
     tokenizer_fingerprint: str
     adapter_uri: str | None
+    checkpoint_uri: str | None
+    checkpoint_commit_sha256: str | None
     sampling: SamplingContract
     runtime_patches: tuple[str, ...]
     command: tuple[str, ...]
@@ -79,47 +76,6 @@ class SamplingContract:
     temperature: float
     top_k: int
     top_p: float
-
-
-def convert_rows(rows: Iterable[Mapping[str, Any]]) -> pa.Table:
-    """Return AIME examples in MarinSkyRL's scored prompt schema."""
-    converted = []
-    for index, row in enumerate(rows):
-        problem = row.get("problem")
-        answer = row.get("answer")
-        if not isinstance(problem, str) or not problem.strip():
-            raise ValueError(f"AIME 2024 row {index} has no non-empty problem")
-        try:
-            normalized_answer = str(int(str(answer).strip()))
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"AIME 2024 row {index} has an invalid answer") from error
-        if not 0 <= int(normalized_answer) <= 999:
-            raise ValueError(f"AIME 2024 row {index} has an answer outside [0, 999]")
-        converted.append(
-            {
-                "data_source": "aime_2024",
-                "prompt": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"{problem.strip()}\n\n{USER_INSTRUCTION}"},
-                ],
-                "env_class": "aime",
-                "reward_model": {"ground_truth": normalized_answer},
-                "extra_info": {"source_id": str(row.get("id", index))},
-            }
-        )
-    return pa.Table.from_pylist(converted)
-
-
-def materialize_dataset(path: Path, stage: Stage) -> int:
-    """Write the immutable AIME split and return the selected row count."""
-    source = datasets.load_dataset(AIME24_DATASET, split="train", revision=AIME24_REVISION)
-    if len(source) != AIME24_SIZE:
-        raise RuntimeError(f"Expected {AIME24_SIZE} AIME 2024 rows, found {len(source)}")
-    if stage is Stage.SMOKE:
-        source = source.select([0])
-    table = convert_rows(source[index] for index in range(len(source)))
-    datasets.Dataset(table).to_parquet(path)
-    return table.num_rows
 
 
 def hydra_arguments(
@@ -199,15 +155,23 @@ def read_evaluation_metrics(output_root: Path, expected_rows: int, stage: Stage)
     return metrics
 
 
-def run(stage: Stage, adapter_uri: str | None, output_uri: str) -> int:
+def run(stage: Stage, adapter_uri: str | None, output_uri: str, checkpoint_uri: str | None = None) -> int:
     validate_output_uri(output_uri)
+    if checkpoint_uri is not None:
+        if adapter_uri is not None:
+            raise ValueError("Specify a committed checkpoint or a direct adapter, not both")
+        verified = verify_remote_checkpoint(checkpoint_uri)
+        adapter_uri = verified.adapter_uri
+        commit_sha256 = verified.commit_sha256
+    else:
+        commit_sha256 = None
     runtime_patches = (patch_qwen35_embedding_lora(installed_qwen35_source()),) if adapter_uri is not None else ()
     with tempfile.TemporaryDirectory(prefix="tinker-native-aime24-") as temporary:
         root = Path(temporary)
         output_root = root / "output"
         output_root.mkdir()
         data_path = root / "aime24.parquet"
-        rows = materialize_dataset(data_path, stage)
+        rows = materialize_dataset(data_path, row_limit=1 if stage is Stage.SMOKE else None)
         adapter_context = local_read_dir(adapter_uri) if adapter_uri is not None else nullcontext(None)
         with adapter_context as adapter_path:
             command = (
@@ -229,6 +193,8 @@ def run(stage: Stage, adapter_uri: str | None, output_uri: str) -> int:
                 student_revision=STUDENT_REVISION,
                 tokenizer_fingerprint=TOKENIZER_FINGERPRINT,
                 adapter_uri=adapter_uri,
+                checkpoint_uri=checkpoint_uri,
+                checkpoint_commit_sha256=commit_sha256,
                 sampling=SamplingContract(
                     context_window=CONTEXT_WINDOW,
                     max_tokens=MAX_TOKENS,
@@ -259,13 +225,15 @@ def run(stage: Stage, adapter_uri: str | None, output_uri: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", choices=tuple(Stage), required=True)
-    parser.add_argument(
+    adapter_group = parser.add_mutually_exclusive_group()
+    adapter_group.add_argument(
         "--adapter-uri",
         help="PEFT adapter directory to evaluate. Omit it to evaluate the immutable base model control.",
     )
+    adapter_group.add_argument("--checkpoint-uri", help="Committed native OPD global_step_N checkpoint to evaluate.")
     parser.add_argument("--output-uri", required=True)
     args = parser.parse_args()
-    return run(Stage(args.stage), args.adapter_uri, args.output_uri)
+    return run(Stage(args.stage), args.adapter_uri, args.output_uri, checkpoint_uri=args.checkpoint_uri)
 
 
 if __name__ == "__main__":

@@ -5,16 +5,32 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 
+from aime24_dataset import materialize_dataset as materialize_aime24_dataset
+from aime24_protocol import (
+    AIME24_DATASET,
+    AIME24_REVISION,
+    AIME24_SIZE,
+    CONTEXT_WINDOW,
+    MAX_TOKENS,
+    NUM_SAMPLES,
+    TEMPERATURE,
+    TOP_K,
+    TOP_P,
+)
 from deepmath_dataset import PROMPT_ONLY_ENV, materialize_dataset
 from native_artifact_run import run_artifact_command
+from native_checkpoint_publication import publish_committed_checkpoints
 from reproduction_artifacts import validate_output_uri
+from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.io.io import local_read_dir
 from training_plan import (
     OPD_DATASET,
@@ -37,7 +53,9 @@ LORA_TARGETS = (
     "gate_proj",
     "up_proj",
     "down_proj",
-    "linear_attn.in_proj_qkv",
+    "linear_attn.in_proj_q",
+    "linear_attn.in_proj_k",
+    "linear_attn.in_proj_v",
     "linear_attn.in_proj_z",
     "linear_attn.out_proj",
     "lm_head",
@@ -102,22 +120,35 @@ class RunManifest:
     tokenizer_fingerprint: str
     dataset: str
     dataset_revision: str
+    validation_dataset: str | None
+    validation_revision: str | None
+    validation_rows: int
     adapter_uri: str
+    adapter_config_sha256: str
+    adapter_model_sha256: str
     runtime_patches: tuple[str, ...]
     command: tuple[str, ...]
     returncode: int | None = None
     failure: str | None = None
 
 
-def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, output_root: Path) -> tuple[str, ...]:
+def hydra_arguments(
+    shape: StageShape,
+    data_path: Path,
+    adapter_path: Path,
+    output_root: Path,
+    aime_data_path: Path | None = None,
+) -> tuple[str, ...]:
     # MarinSkyRL sizes trainer batches in prompt groups. The generator expands each
     # group into ``n_samples_per_prompt`` trajectories before the learner update.
     prompt_batch_size = shape.groups_per_batch
     mini_batch_size = min(prompt_batch_size, 256)
     targets = ",".join(LORA_TARGETS)
-    return (
+    if shape.steps > 1 and aime_data_path is None:
+        raise ValueError("Full native OPD requires the pinned AIME 2024 validation dataset")
+    arguments = (
         f"data.train_data=['{data_path}']",
-        "data.val_data=[]",
+        f"data.val_data=['{aime_data_path}']" if aime_data_path is not None else "data.val_data=[]",
         "data.shuffle=true",
         "trainer.algorithm.advantage_estimator=uniform",
         "trainer.algorithm.use_kl_loss=false",
@@ -167,11 +198,11 @@ def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, outp
         "trainer.update_epochs_per_batch=1",
         "trainer.max_prompt_length=1024",
         "trainer.eval_before_train=false",
-        "trainer.eval_interval=-1",
-        "trainer.ckpt_interval=1",
-        "trainer.hf_save_interval=1",
+        f"trainer.eval_interval={2 if aime_data_path is not None else -1}",
+        f"trainer.ckpt_interval={2 if shape.steps > 1 else 1}",
+        f"trainer.hf_save_interval={2 if shape.steps > 1 else 1}",
         "trainer.resume_mode=null",
-        "trainer.dump_eval_results=false",
+        f"trainer.dump_eval_results={'true' if aime_data_path is not None else 'false'}",
         "trainer.logger=console",
         "trainer.project_name=tinker_native_repro",
         f"trainer.run_name=tinker_native_{shape.steps}_{prompt_batch_size}x{shape.group_size}",
@@ -194,6 +225,19 @@ def hydra_arguments(shape: StageShape, data_path: Path, adapter_path: Path, outp
         f"environment.env_class={PROMPT_ONLY_ENV}",
         "trajectory_runner.process_pool.num_coordinators=1",
         "trajectory_runner.process_pool.cpus_per_coordinator=4",
+    )
+    if aime_data_path is None:
+        return arguments
+    return arguments + (
+        "trainer.eval_batch_size=1",
+        f"generator.eval_n_samples_per_prompt={NUM_SAMPLES}",
+        f"++generator.engine_init_kwargs.max_model_len={CONTEXT_WINDOW}",
+        f"generator.eval_sampling_params.max_generate_length={MAX_TOKENS}",
+        f"generator.eval_sampling_params.temperature={TEMPERATURE}",
+        f"generator.eval_sampling_params.top_p={TOP_P}",
+        f"generator.eval_sampling_params.top_k={TOP_K}",
+        f"environment.skyrl_gym.aime.evaluation_token_budget={MAX_TOKENS}",
+        f"environment.skyrl_gym.aime.max_gen_length={MAX_TOKENS}",
     )
 
 
@@ -250,7 +294,38 @@ def installed_qwen35_source() -> Path:
     return package_root / "model_executor" / "models" / "qwen3_5.py"
 
 
-def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
+def verify_sft_adapter(adapter_path: Path, *, config_sha256: str, model_sha256: str) -> None:
+    """Verify the pinned SFT weights and LoRA shape before native OPD loads them."""
+    for filename, expected in (
+        ("adapter_config.json", config_sha256),
+        ("adapter_model.safetensors", model_sha256),
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+            raise ValueError(f"Invalid SHA-256 digest for {filename}")
+        path = adapter_path / filename
+        with path.open("rb") as source:
+            actual = hashlib.file_digest(source, "sha256").hexdigest()
+        if actual != expected:
+            raise ValueError(f"SFT adapter digest mismatch for {filename}: expected {expected}, found {actual}")
+    config = json.loads((adapter_path / "adapter_config.json").read_text())
+    if (
+        config.get("base_model_name_or_path") != STUDENT_MODEL
+        or config.get("r") != 128
+        or config.get("lora_alpha") != 1
+    ):
+        raise ValueError("SFT adapter model, rank, or alpha differs from the native OPD contract")
+    if set(config.get("target_modules", [])) != set(LORA_TARGETS):
+        raise ValueError("SFT adapter target_modules differ from the native OPD contract")
+
+
+def run(
+    stage: Stage,
+    adapter_uri: str,
+    output_uri: str,
+    *,
+    adapter_config_sha256: str,
+    adapter_model_sha256: str,
+) -> int:
     validate_output_uri(output_uri)
     runtime_patches = (patch_qwen35_embedding_lora(installed_qwen35_source()),)
     shape = stage_shape(stage)
@@ -259,12 +334,19 @@ def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
         output_root = root / "output"
         output_root.mkdir()
         data_path = root / "deepmath.parquet"
+        aime_data_path = root / "aime24.parquet" if stage is Stage.FULL else None
         with local_read_dir(adapter_uri) as adapter_path:
+            verify_sft_adapter(
+                Path(adapter_path), config_sha256=adapter_config_sha256, model_sha256=adapter_model_sha256
+            )
+            validation_rows = materialize_aime24_dataset(aime_data_path) if aime_data_path is not None else 0
+            if aime_data_path is not None and validation_rows != AIME24_SIZE:
+                raise RuntimeError(f"AIME 2024 yielded {validation_rows} rows; expected {AIME24_SIZE}")
             command = (
                 sys.executable,
                 "-m",
                 "skyrl_train.entrypoints.main_base",
-                *hydra_arguments(shape, data_path, Path(adapter_path), output_root),
+                *hydra_arguments(shape, data_path, Path(adapter_path), output_root, aime_data_path),
             )
             manifest = RunManifest(
                 schema_version=1,
@@ -278,7 +360,12 @@ def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
                 tokenizer_fingerprint=TOKENIZER_FINGERPRINT,
                 dataset=OPD_DATASET,
                 dataset_revision=OPD_DATASET_REVISION,
+                validation_dataset=AIME24_DATASET if aime_data_path is not None else None,
+                validation_revision=AIME24_REVISION if aime_data_path is not None else None,
+                validation_rows=validation_rows,
                 adapter_uri=adapter_uri,
+                adapter_config_sha256=adapter_config_sha256,
+                adapter_model_sha256=adapter_model_sha256,
                 runtime_patches=runtime_patches,
                 command=command,
             )
@@ -294,6 +381,11 @@ def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
                 output_root=output_root,
                 output_uri=output_uri,
                 environment=environment,
+                publish_checkpoints=lambda: publish_committed_checkpoints(
+                    output_root / "checkpoints",
+                    join_resource_path(output_uri, "checkpoints"),
+                    policy_ranks=POLICY_GPUS,
+                ),
                 complete_manifest=lambda current, returncode: replace(
                     current,
                     status="complete" if returncode == 0 else "failed",
@@ -307,17 +399,31 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", choices=tuple(Stage), required=True)
     parser.add_argument("--adapter-uri", required=True)
+    parser.add_argument("--adapter-config-sha256")
+    parser.add_argument("--adapter-model-sha256")
     parser.add_argument("--output-uri", required=True)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     stage = Stage(args.stage)
     if args.dry_run:
         command = hydra_arguments(
-            stage_shape(stage), Path("/data/deepmath.parquet"), Path("/model/adapter"), Path("/output")
+            stage_shape(stage),
+            Path("/data/deepmath.parquet"),
+            Path("/model/adapter"),
+            Path("/output"),
+            Path("/data/aime24.parquet") if stage is Stage.FULL else None,
         )
         print(json.dumps({"stage": stage, "shape": asdict(stage_shape(stage)), "hydra_arguments": command}, indent=2))
         return 0
-    return run(stage, args.adapter_uri, args.output_uri)
+    if args.adapter_config_sha256 is None or args.adapter_model_sha256 is None:
+        parser.error("A native OPD run requires both pinned SFT adapter SHA-256 digests")
+    return run(
+        stage,
+        args.adapter_uri,
+        args.output_uri,
+        adapter_config_sha256=args.adapter_config_sha256,
+        adapter_model_sha256=args.adapter_model_sha256,
+    )
 
 
 if __name__ == "__main__":

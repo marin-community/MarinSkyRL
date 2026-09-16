@@ -99,9 +99,19 @@ temperature as a fidelity review, not an automatic dependency update.
 ## Native MarinSkyRL OPD
 
 `native_opd.py` runs the same published Qwen3.5 student, teacher, LoRA shape,
-and reverse-KL objective on eight local GPUs. Its exact vLLM compatibility
-backport edits the installed Python source, so Iris jobs must use a task-private
-uv cache and copy-mode installation:
+and reverse-KL objective on eight local GPUs. Full runs materialize the pinned
+30-problem AIME 2024 validation set and evaluate it every two optimizer steps.
+The trainer saves FSDP2 checkpoints every two steps; the runner publishes them
+in the background. A checkpoint is available to external evaluators only after
+`checkpoints/global_step_N/commit.json` lists the verified remote files. The
+remote `checkpoints/latest_ckpt_global_step.txt` pointer advances last. The
+publisher requires the four-rank model, optimizer, extra state, trainer and
+dataloader state, Hugging Face config, and LoRA adapter files. In-line AIME
+validation does not replace a separately launched evaluation from each durable
+adapter checkpoint.
+
+The exact vLLM compatibility backport edits the installed Python source, so
+Iris jobs must use a task-private uv cache and copy-mode installation:
 
 The rollout engine reserves 90% of each assigned GPU for weights and KV cache
 and admits at most 512 concurrent sequences. The bound reduces repeated
@@ -112,17 +122,22 @@ memory headroom.
 
 ```bash
 uv run iris --cluster cw-rno2a job run \
-  --enable-extra-resources --gpu H100x8 --no-sync \
+  --enable-extra-resources --gpu H100x8 --priority interactive --no-sync \
   -- env UV_CACHE_DIR=/tmp/tinker-native-uv-cache UV_LINK_MODE=copy \
   uv run --frozen --extra fsdp --extra vllm python \
   skyrl-train/ci/opd/tinker_repro/native_opd.py \
-  --stage plumbing --adapter-uri "$ADAPTER_URI" --output-uri "$OUTPUT_URI"
+  --stage plumbing --adapter-uri "$ADAPTER_URI" \
+  --adapter-config-sha256 "$ADAPTER_CONFIG_SHA256" \
+  --adapter-model-sha256 "$ADAPTER_MODEL_SHA256" \
+  --output-uri "$OUTPUT_URI"
 ```
 
 The runner refuses a symlinked vLLM source tree rather than modifying Iris's
 shared uv cache. `--no-sync` is required because Iris's managed setup currently
 hardcodes symlink mode before applying job environment overrides. Use a unique
-output URI for every attempt.
+output URI for every attempt. Obtain the two SHA-256 digests from the completed
+SFT manifest; the runner checks the downloaded files and the adapter's base
+model, rank, alpha, and target modules before loading the student.
 
 `native_aime24.py` evaluates an SFT or OPD LoRA adapter with MarinSkyRL's AIME
 environment. It uses the same pinned 30-problem dataset, system prompt,
@@ -131,22 +146,26 @@ generated-token limit as the Tinker evaluator. The manifest reports accuracy in
 addition to MarinSkyRL's centered `+1/-1` reward mean. A full run fails if any
 response reaches the generation limit.
 
-Pass the exact `lora_adapter` checkpoint prefix, not the parent checkpoint or
-experiment prefix:
+For a native OPD checkpoint, pass its exact `global_step_N` prefix with
+`--checkpoint-uri`. The evaluator requires that step's `commit.json`, verifies
+the remote file inventory, and loads its `policy/lora_adapter` directory. Do
+not pass the parent `checkpoints` or experiment prefix:
 
 ```bash
 uv run iris --cluster cw-rno2a job run \
-  --enable-extra-resources --gpu H100x8 --no-sync \
+  --enable-extra-resources --gpu H100x8 --priority interactive --no-sync \
   -- env UV_CACHE_DIR=/tmp/tinker-native-aime-uv-cache UV_LINK_MODE=copy \
   uv run --frozen --extra fsdp --extra vllm python \
   skyrl-train/ci/opd/tinker_repro/native_aime24.py \
-  --stage smoke --adapter-uri "$ADAPTER_URI" --output-uri "$OUTPUT_URI"
+  --stage smoke --checkpoint-uri "$CHECKPOINT_URI" --output-uri "$OUTPUT_URI"
 ```
 
 Use a new output URI and change `--stage smoke` to `--stage full` after the
 single-problem smoke run completes. Evaluation-only LoRA runs reject remote
 engines, non-vLLM backends, and missing local adapter directories. These checks
 prevent `main_generate` from silently evaluating the base model.
+For the Axolotl SFT initialization, pass its exact exported adapter directory
+with `--adapter-uri`; omit both adapter options for the base-model control.
 
 ## AIME 2024 evaluation
 
