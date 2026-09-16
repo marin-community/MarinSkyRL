@@ -1206,13 +1206,13 @@ class PolicyWorkerBase(Worker):
             or int(fsdp_config.get("context_parallel_size", 1)) != 1
         ):
             raise ValueError(
-                "sparse forward KL on FSDP2/DeepSpeed does not yet support sample packing, "
+                "selected-ID distillation on FSDP2/DeepSpeed does not yet support sample packing, "
                 "sequence parallelism, or context parallelism"
             )
         response_logits = output["logits"][:, -num_actions - 1 : -1]
         if response_logits.shape[:2] != experience.distillation.valid_mask.shape:
             raise ValueError(
-                "sparse forward KL requires response-aligned full-vocabulary logits; "
+                "selected-ID distillation requires response-aligned full-vocabulary logits; "
                 f"got {tuple(response_logits.shape[:2])} for "
                 f"{tuple(experience.distillation.valid_mask.shape)} response coordinates"
             )

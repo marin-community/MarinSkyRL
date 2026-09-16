@@ -6,6 +6,7 @@ import torch
 
 
 LOG_PROB_DELTA_CLIP = 20.0
+TOKEN_MEAN_LOSS_REDUCTION = "token_mean"
 
 
 def safe_exp_delta(delta: torch.Tensor, clip: float = LOG_PROB_DELTA_CLIP, out_dtype=None) -> torch.Tensor:
