@@ -144,6 +144,10 @@ class MegatronRouterReplay:
         # builder validates every batch against them before arming.
         self.num_moe_layers_total: Optional[int] = None
         self.topk: Optional[int] = None
+        # id(model chunk) -> capture indices owned by that chunk. Empty for a
+        # single chunk; with virtual pipelining each forward bracket arms only
+        # the layers of the chunk mcore is about to call.
+        self.local_indices_for_module: dict[int, tuple[int, ...]] = {}
         self._recompute_enabled = recompute_enabled
         self._phase = _Phase.IDLE
         # layer capture idx -> (targets [N, K], replay mask [N]) for the current forward

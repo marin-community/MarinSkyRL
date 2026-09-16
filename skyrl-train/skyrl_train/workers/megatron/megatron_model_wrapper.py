@@ -176,6 +176,7 @@ class MegatronModelWrapper:
         attention_mask: torch.Tensor,
         rollout_routed_experts: torch.Tensor,
         num_actions: int,
+        layer_indices: tuple[int, ...],
     ):
         """Build per-layer router targets in the exact token order the routers see.
 
@@ -185,7 +186,7 @@ class MegatronModelWrapper:
         sequence-major (``s*B + b``, mirroring the router view), and slices to
         this TP rank's contiguous sequence chunk under sequence parallelism.
         Returns ``(per_layer, mask, response_mask)`` keyed by capture index for
-        the layers this rank owns.
+        the layers the model chunk about to run owns.
         """
         controller = self.router_replay
         assert controller is not None
@@ -239,7 +240,7 @@ class MegatronModelWrapper:
             flat = slice_sequence_parallel(flat, **slice_kwargs)
             mask = slice_sequence_parallel(mask, **slice_kwargs)
             response_mask = slice_sequence_parallel(response_mask, **slice_kwargs)
-        per_layer = {idx: flat[:, idx, :].to(device) for idx in controller.local_layer_indices}
+        per_layer = {idx: flat[:, idx, :].to(device) for idx in layer_indices}
         return per_layer, mask.to(device), response_mask.to(device)
 
     def _forward_micro_batch(
@@ -263,8 +264,13 @@ class MegatronModelWrapper:
         if self.router_replay is not None:
             if rollout_routed_experts is None:
                 raise ValueError("moe_router_replay is on but the micro-batch carries no rollout_routed_experts")
+            # With virtual pipelining each chunk fires a disjoint layer set
+            # inside its own bracket; single-chunk models arm every local layer.
+            layer_indices = self.router_replay.local_indices_for_module.get(
+                id(model), self.router_replay.local_layer_indices
+            )
             per_layer, mask, response_mask = self._build_router_replay_targets(
-                sequences, attention_mask, rollout_routed_experts, num_actions
+                sequences, attention_mask, rollout_routed_experts, num_actions, layer_indices
             )
             self.router_replay.begin_forward(per_layer, mask, response_mask)
             armed = True

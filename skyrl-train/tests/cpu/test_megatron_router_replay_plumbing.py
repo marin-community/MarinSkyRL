@@ -189,3 +189,41 @@ def test_forward_micro_batch_closes_the_bracket_when_the_model_raises(monkeypatc
             num_actions=NUM_ACTIONS,
         )
     controller.assert_drained()
+
+
+def test_each_model_chunk_replays_only_its_own_layers(monkeypatch):
+    """Virtual pipeline chunks fire disjoint layer sets inside separate brackets."""
+
+    class _Chunk:
+        def __init__(self, fires):
+            self.fires = fires
+
+        def __call__(self, *args, **kwargs):
+            scores = torch.randn(TOKENS, NUM_EXPERTS)
+            for idx in self.fires:
+                LayerReplayHandle(controller, idx).get_replay_topk(scores, TOPK, None, None, _fake_compute_topk)
+            return torch.zeros(1)
+
+    controller = _controller()
+    chunk_a, chunk_b = _Chunk((0,)), _Chunk((1, 2))
+    controller.local_indices_for_module = {id(chunk_a): (0,), id(chunk_b): (1, 2)}
+    wrapper = _make_wrapper(monkeypatch, packing=False, controller=controller)
+    micro = _micro(_routes())
+
+    wrapper._forward_micro_batch(
+        chunk_a,
+        micro["sequences"],
+        micro["attention_mask"],
+        micro["position_ids"],
+        rollout_routed_experts=micro["rollout_routed_experts"],
+        num_actions=NUM_ACTIONS,
+    )
+    wrapper._forward_micro_batch(
+        chunk_b,
+        micro["sequences"],
+        micro["attention_mask"],
+        micro["position_ids"],
+        rollout_routed_experts=micro["rollout_routed_experts"],
+        num_actions=NUM_ACTIONS,
+    )
+    controller.assert_drained()
