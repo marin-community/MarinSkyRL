@@ -40,6 +40,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     apply_overlong_filtering,
     get_rollout_metrics,
     normalize_token_ids,
+    _sentinel_routed_experts_row,
 )
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient
 from skyrl_train.trajectory_runners.selected_topk import align_student_topk
@@ -409,6 +410,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
         loss_mask = []  # this excludes the prompt
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
+        rollout_routes: Optional[List[List[List[int]]]] = None
+        route_sentinel: Optional[List[List[int]]] = None
         requested_logprobs = current_sampling_params.get("logprobs")
         collect_topk = isinstance(requested_logprobs, int) and requested_logprobs > 0
         selected_capture_possible = collect_topk and not retokenize_chat_history
@@ -480,6 +483,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             assistant_message = assistant_messages[0] if assistant_messages is not None else None
             response_logprobs_batch = engine_output.get("response_logprobs")
             response_logprobs = response_logprobs_batch[0] if response_logprobs_batch is not None else None
+            routes_batch = engine_output.get("routed_experts")
+            response_routes = routes_batch[0] if routes_batch is not None else None
+            if response_routes is not None and len(response_routes) != len(output_ids):
+                raise ValueError("Inference engine returned routed_experts that do not align with response token IDs")
             if response_logprobs is not None and len(response_logprobs) != len(output_ids):
                 raise ValueError(
                     "Inference engine returned response logprobs that do not align with response token IDs: "
@@ -509,11 +516,15 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         per_step_rewards = canonical_prefix.per_step_rewards
                         token_provenance = TokenProvenance.RECONSTRUCTED
                         selected_capture_possible = False
+                        rollout_routes = None
+                        route_sentinel = None
                     else:
                         observation_token_count = len(rendered_prompt_ids[0]) - len(input_ids)
                         loss_mask += [0] * observation_token_count
                         if rollout_logprobs is not None:
                             rollout_logprobs += [0.0] * observation_token_count
+                        if rollout_routes is not None:
+                            rollout_routes.extend([route_sentinel] * observation_token_count)
                 input_ids = rendered_prompt_ids[0]
 
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
@@ -529,6 +540,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     output_ids.append(self.tokenizer.eos_token_id)
                     if response_logprobs is not None:
                         response_logprobs.append(0.0)
+                    if response_routes is not None:
+                        if route_sentinel is None:
+                            route_sentinel = _sentinel_routed_experts_row(response_routes[0])
+                        response_routes.append(route_sentinel)
                     added_eos = True
 
             # 2. Environment step
@@ -563,6 +578,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 initial_prompt_length = 0
                 loss_mask = []
                 rollout_logprobs = [] if collect_logprobs else None
+                rollout_routes = None
+                route_sentinel = None
                 per_step_rewards = []
                 verification_results = []
                 generated_ids.clear()
@@ -587,6 +604,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     rollout_logprobs = None
                 if postprocessed_output_ids != output_ids:
                     selected_capture_possible = False
+                    rollout_routes = None
+                    route_sentinel = None
+                    response_routes = None
                 output_ids = postprocessed_output_ids
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
@@ -600,6 +620,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         rollout_logprobs = None
                     else:
                         rollout_logprobs += response_logprobs
+                if response_routes:
+                    if route_sentinel is None:
+                        route_sentinel = _sentinel_routed_experts_row(response_routes[0])
+                    if rollout_routes is None:
+                        rollout_routes = [route_sentinel] * (len(loss_mask) - len(output_ids))
+                    rollout_routes.extend(response_routes)
+                elif rollout_routes is not None:
+                    rollout_routes.extend([route_sentinel] * len(output_ids))
                 per_step_rewards.append((step_reward, response_end_idx))
                 chat_history.append(dict(assistant_message))
                 if not done:
@@ -667,6 +695,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             response_ids = input_ids[initial_prompt_length : response_end_idx + 1]
             if rollout_logprobs is not None:
                 rollout_logprobs = rollout_logprobs[: len(response_ids)]
+            if rollout_routes is not None:
+                rollout_routes = rollout_routes[: len(response_ids)]
             per_step_rewards = [
                 (reward, None if idx is None else idx - initial_prompt_length) for reward, idx in per_step_rewards
             ]
@@ -681,6 +711,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 loss_mask.append(0)
                 if rollout_logprobs is not None:
                     rollout_logprobs.append(0.0)
+                if rollout_routes is not None:
+                    rollout_routes.append(route_sentinel)
 
         assert rollout_logprobs is None or len(rollout_logprobs) == len(response_ids), (
             "rollout_logprobs and response_ids should have the same length"
@@ -716,6 +748,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
             student_topk_indices=None if selected is None else selected.indices,
             behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
+            routed_experts=(
+                None
+                if rollout_routes is None
+                else tuple(tuple(tuple(layer) for layer in token) for token in rollout_routes)
+            ),
         )
         reward_result = RewardResult(
             unshaped_reward=unshaped_reward,

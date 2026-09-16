@@ -234,6 +234,7 @@ async def test_http_model_client_preserves_exact_chat_tokens_and_logprobs():
                         "finish_reason": "stop",
                         "token_ids": [21, 22],
                         "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+                        "provider_specific_fields": {"routed_experts": [[[1, 2]], [[3, 4]]]},
                     }
                 ]
             }
@@ -286,6 +287,7 @@ async def test_http_model_client_preserves_exact_chat_tokens_and_logprobs():
     assert output["prompt_ids"] == [[11, 12]]
     assert output["response_ids"] == [[21, 22]]
     assert output["response_logprobs"] == [[-0.1, -0.2]]
+    assert output["routed_experts"] == [[[[1, 2]], [[3, 4]]]]
     assert output["token_provenance"] == "engine"
 
 

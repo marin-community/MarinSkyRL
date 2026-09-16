@@ -878,6 +878,7 @@ async def test_custom_template_multiturn_preserves_backend_tokens_for_behavior_l
             "prompt_ids": [[11, 12]],
             "stop_reasons": ["stop"],
             "response_logprobs": [[-0.1, -0.2]],
+            "routed_experts": [[[[1, 2]], [[3, 4]]]],
             "assistant_messages": [{"role": "assistant", "content": "first"}],
             "token_provenance": "engine",
         },
@@ -887,6 +888,7 @@ async def test_custom_template_multiturn_preserves_backend_tokens_for_behavior_l
             "prompt_ids": [second_prompt_ids],
             "stop_reasons": ["stop"],
             "response_logprobs": [[-0.3]],
+            "routed_experts": [[[[5, 6]]]],
             "assistant_messages": [{"role": "assistant", "content": "second"}],
             "token_provenance": "engine",
         },
@@ -912,6 +914,7 @@ async def test_custom_template_multiturn_preserves_backend_tokens_for_behavior_l
     assert output.evidence.response_token_ids == (21, 22, 31, 32, 41)
     assert output.loss_mask == [1, 1, 0, 0, 1]
     assert output.evidence.behavior_logprobs == pytest.approx((-0.1, -0.2, 0.0, 0.0, -0.3))
+    assert output.evidence.routed_experts == (((1, 2),), ((3, 4),), ((0, 0),), ((0, 0),), ((5, 6),))
     assert output.token_provenance == TokenProvenance.ENGINE
 
 
