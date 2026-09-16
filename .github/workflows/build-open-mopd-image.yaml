@@ -2,6 +2,16 @@ name: Build Open-MOPD image
 
 on:
   workflow_dispatch:
+    inputs:
+      target_cluster:
+        description: Iris cluster used for the CPU image builder
+        required: true
+        default: cw-rno2a
+        type: choice
+        options:
+          - cw-rno2a
+          - cw-us-east-02a
+          - cw-us-east-08a
 
 permissions:
   contents: read
@@ -23,7 +33,7 @@ jobs:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           "$(uv tool dir)/marin-core/bin/iris" --cluster marin job run \
-            --target-cluster cw-rno2a \
+            --target-cluster "${{ inputs.target_cluster }}" \
             --job-name "$JOB_NAME" \
             --task-image docker.io/library/ubuntu:22.04 \
             --cpu 8 --memory 32GB --disk 100GB \
