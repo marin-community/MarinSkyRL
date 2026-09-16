@@ -1,4 +1,4 @@
-# Open-MOPD released-checkpoint evaluation
+# Open-MOPD target evaluation
 
 This harness evaluates the released Open-MOPD final checkpoint with the authors' pinned source, model revision,
 published evaluation Parquets, and documented sampling protocol. It defaults to a local dry-run that prints the entire
@@ -71,3 +71,27 @@ The authors report A100x8. Using H100x8 is recorded as a hardware deviation. The
 complete locked evaluation environment or digest-addressed image, so an image must be validated against the package
 contract in `open_mopd_fidelity.json` before any submission. `--no-sync` is intentional: Iris still bundles the current
 workspace, while skipping dependency setup that would replace the image's pinned GPU environment.
+
+## Native checkpoint exports
+
+Pass a completed native Hugging Face export to the same evaluation launcher with `--model-export-uri` and
+`--model-export-identity`. The export must contain model weights, `config.json`, and tokenizer files. The task downloads
+it from the durable prefix, checks that all safetensors shards named in the index are present, and records a SHA-256
+digest for every downloaded file in `evaluation-manifest.json`. Give each training step its own export prefix and an
+identity that names the training run and step. The identity is a provenance label, not a cryptographic pin; the
+manifest's observed file hashes establish exactly which bytes that evaluation used.
+
+```bash
+uv run --frozen python -m cloud.iris.open_mopd_evaluation \
+  --gate smoke \
+  --cluster-config /path/to/cw-rno2a.yaml \
+  --gpu-slice H100x8 \
+  --task-image registry.example/open-mopd-eval@sha256:<64-hex-digest> \
+  --model-export-uri s3://bucket/native-run/exports/step-2 \
+  --model-export-identity native-run-step-2 \
+  --output-uri s3://bucket/unique/native-step-2-eval-smoke
+```
+
+The native export selector cannot be combined with the authors-code FSDP checkpoint selector
+(`--checkpoint-uri`/`--checkpoint-step`). Both use the benchmark data, sampling protocol, and released scorers above;
+LiveCodeBench and IFBench remain rollout-only in this harness. The launch plan and Iris task use interactive priority.

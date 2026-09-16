@@ -101,6 +101,8 @@ class EvaluationLaunchPlan:
     model_revision: str | None
     checkpoint_uri: str | None
     checkpoint_step: int | None
+    model_export_uri: str | None
+    model_export_identity: str | None
     data_repository: str
     data_revision: str
     output_uri: str
@@ -327,6 +329,20 @@ def validate_checkpoint_source(checkpoint_uri: str | None, checkpoint_step: int 
         raise ValueError(f"--checkpoint-uri must end with {expected_suffix}")
 
 
+def validate_model_source(
+    checkpoint_uri: str | None, model_export_uri: str | None, model_export_identity: str | None
+) -> None:
+    """Require one complete, durable model source selector."""
+    if (model_export_uri is None) != (model_export_identity is None):
+        raise ValueError("--model-export-uri and --model-export-identity must be specified together")
+    if model_export_uri is not None:
+        validate_output_uri(model_export_uri)
+        if not model_export_identity:
+            raise ValueError("--model-export-identity must be nonempty")
+        if checkpoint_uri is not None:
+            raise ValueError("A reference checkpoint and a native model export cannot be selected together")
+
+
 def build_plan(
     config: EvaluationConfig,
     *,
@@ -338,10 +354,14 @@ def build_plan(
     gpu_slice: str | None = None,
     checkpoint_uri: str | None = None,
     checkpoint_step: int | None = None,
+    model_export_uri: str | None = None,
+    model_export_identity: str | None = None,
 ) -> EvaluationLaunchPlan:
     validate_output_uri(output_uri)
     validate_checkpoint_source(checkpoint_uri, checkpoint_step)
+    validate_model_source(checkpoint_uri, model_export_uri, model_export_identity)
     normalized_checkpoint_uri = checkpoint_uri.rstrip("/") if checkpoint_uri is not None else None
+    normalized_model_export_uri = model_export_uri.rstrip("/") if model_export_uri is not None else None
     source = resolve_launcher_source()
     if not re.fullmatch(r"[^@]+@sha256:[0-9a-f]{64}", task_image):
         raise ValueError("--task-image must be a digest-addressed image reference")
@@ -376,6 +396,13 @@ def build_plan(
     )
     if normalized_checkpoint_uri is not None and checkpoint_step is not None:
         task_args += ("--checkpoint-uri", normalized_checkpoint_uri, "--checkpoint-step", str(checkpoint_step))
+    if normalized_model_export_uri is not None and model_export_identity is not None:
+        task_args += (
+            "--model-export-uri",
+            normalized_model_export_uri,
+            "--model-export-identity",
+            model_export_identity,
+        )
     command = (
         "uv",
         "run",
@@ -418,10 +445,20 @@ def build_plan(
         launcher_commit=source.commit,
         source_commit=fidelity.source.commit,
         protocol_source_commit=config.protocol.source_commit,
-        model_repository=fidelity.evaluation_reference.repository if normalized_checkpoint_uri is None else None,
-        model_revision=fidelity.evaluation_reference.revision if normalized_checkpoint_uri is None else None,
+        model_repository=(
+            fidelity.evaluation_reference.repository
+            if normalized_checkpoint_uri is None and normalized_model_export_uri is None
+            else None
+        ),
+        model_revision=(
+            fidelity.evaluation_reference.revision
+            if normalized_checkpoint_uri is None and normalized_model_export_uri is None
+            else None
+        ),
         checkpoint_uri=normalized_checkpoint_uri,
         checkpoint_step=checkpoint_step,
+        model_export_uri=normalized_model_export_uri,
+        model_export_identity=model_export_identity,
         data_repository=config.data.repository,
         data_revision=config.data.revision,
         output_uri=output_uri,
@@ -444,6 +481,8 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpu-slice")
     parser.add_argument("--checkpoint-uri")
     parser.add_argument("--checkpoint-step", type=int)
+    parser.add_argument("--model-export-uri")
+    parser.add_argument("--model-export-identity")
     parser.add_argument("--allow-known-omissions", action="store_true")
     parser.add_argument("--submit", action="store_true")
     return parser
@@ -462,6 +501,8 @@ def main(argv: list[str] | None = None) -> int:
         gpu_slice=args.gpu_slice,
         checkpoint_uri=args.checkpoint_uri,
         checkpoint_step=args.checkpoint_step,
+        model_export_uri=args.model_export_uri,
+        model_export_identity=args.model_export_identity,
     )
     print(plan.json())
     print(shlex.join(plan.iris_command))
