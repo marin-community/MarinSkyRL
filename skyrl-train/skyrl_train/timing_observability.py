@@ -10,6 +10,23 @@ from skyrl_train.telemetry import TRAINER_ROLE, phase_duration
 
 
 TIMING_PARENTS: dict[str, str | None] = {
+    "policy_pre_train_drain": "run_training",
+    "policy_pre_sync_drain": "sync_weights",
+    "policy_post_sync_drain": "sync_weights",
+    "policy_startup_drain": None,
+    "weight_pause": "sync_weights",
+    "weight_broadcast": "sync_weights",
+    "weight_broadcast/export": "weight_broadcast",
+    "weight_broadcast/pack": "weight_broadcast",
+    "weight_broadcast/rpc_wait": "weight_broadcast",
+    "weight_broadcast/nccl_send": "weight_broadcast",
+    "weight_broadcast/barrier": "weight_broadcast",
+    "weight_broadcast/reload_finalize": "weight_broadcast",
+    "weight_broadcast/recv": "weight_broadcast",
+    "weight_broadcast/unpack": "weight_broadcast",
+    "weight_broadcast/load": "weight_broadcast",
+    "weight_broadcast/finalize": "weight_broadcast",
+    "weight_resume": "sync_weights",
     "step": None,
     "generate": "step",
     "wait_for_generation_buffer": "step",
@@ -83,7 +100,7 @@ class FinelogTimingSink:
                 attributes={
                     "phase": observation.name,
                     "root": observation.root,
-                    "parent": observation.parent or "",
+                    **({"parent": observation.parent} if observation.parent is not None else {}),
                     "clock_domain": "inclusive_wall",
                     "role": TRAINER_ROLE,
                     "step": str(step),

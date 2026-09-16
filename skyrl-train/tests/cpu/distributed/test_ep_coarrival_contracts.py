@@ -94,6 +94,8 @@ async def test_fully_async_step_finishes_policy_drain_before_forward():
             )
             self.all_timings = {}
             self.global_step = 7
+            # The training-interval event is off, as it is by default on the real trainer.
+            self._async_observations_enabled = False
 
         async def _drain_policy_event_loops(self):
             events.append("drain-start")

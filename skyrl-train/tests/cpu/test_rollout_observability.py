@@ -12,6 +12,7 @@ import pytest
 import zstandard
 from rigging.telemetry import serialization
 
+from skyrl_train import fully_async_trainer as fully_async
 from skyrl_train import rollout_observability as rollout
 from skyrl_train import telemetry as training_telemetry
 from skyrl_train.timing_observability import publish_step_timings
@@ -552,3 +553,44 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
     terminal = next(row for row in delivered if row["name"] == "terminal")
     assert terminal["body"]["status"] == "completed"
     assert terminal["body"]["export_lost_records"] == 0
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_policy_training_interval_brackets_the_update_even_when_it_fails(records, monkeypatch, failure):
+    clock = ManualClock(100.0)
+    monkeypatch.setattr(fully_async.time, "perf_counter", clock)
+    trainer = object.__new__(fully_async.FullyAsyncRayPPOTrainer)
+    trainer.cfg = SimpleNamespace(
+        trainer=SimpleNamespace(algorithm=SimpleNamespace(use_kl_in_reward=False), dump_data_batch=False)
+    )
+    trainer.all_timings = {}
+    trainer.global_step = 5
+    trainer._async_observations_enabled = True
+
+    async def drained():
+        return None
+
+    def train(training_input):
+        clock.advance(3.0)
+        if failure:
+            raise RuntimeError("update failed")
+        return {"policy_loss": 0.0}
+
+    trainer._drain_policy_event_loops = drained
+    trainer.fwd_logprobs_values_reward = lambda batch: batch
+    trainer.compute_advantages_and_returns = lambda batch: batch
+    trainer.finalize_advantages_for_training = lambda batch: batch
+    trainer.train_critic_and_policy = train
+
+    if failure:
+        with pytest.raises(RuntimeError, match="update failed"):
+            asyncio.run(trainer._run_training(object()))
+    else:
+        assert asyncio.run(trainer._run_training(object())) == {"policy_loss": 0.0}
+    [event] = [row for row in records.events if row["name"] == "policy_training_interval"]
+    assert event["body"] == {"started": 100.0, "finished": 103.0}
+    assert event["attributes"] == {
+        "role": training_telemetry.TRAINER_ROLE,
+        "step": "5",
+        "outcome": "failure" if failure else "success",
+    }
