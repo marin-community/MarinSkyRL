@@ -149,7 +149,21 @@ def _upload(local_path: str, cloud_path: str, *, recursive: bool) -> None:
     is_s3_path = cloud_path.startswith("s3://")
     destination = filesystem._strip_protocol(cloud_path) if is_s3_path else cloud_path
     if is_s3_path:
-        call_with_s3_retry(filesystem, filesystem.put, local_path, destination, recursive=recursive)
+        try:
+            # Botocore retries a request within its current multipart upload. Retrying
+            # the whole directory here would restart completed shard uploads and
+            # multiply the whole-request deadline.
+            call_with_s3_retry(
+                filesystem,
+                filesystem.put,
+                local_path,
+                destination,
+                recursive=recursive,
+                retry_attempts=1,
+            )
+        except Exception as error:
+            error.add_note(f"S3 upload failed from {local_path} to {cloud_path}")
+            raise
     else:
         filesystem.put(local_path, destination, recursive=recursive)
 

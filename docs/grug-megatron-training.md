@@ -64,14 +64,17 @@ expert-parallel co-batching does not leak between ranks.
 
 ## Memory
 
-Policy nodes for the 67B-A2B snowball checkpoint need 1800GB of host memory
-and 1000GB of disk to save a Megatron checkpoint: the writer stages about 146GB
-per rank in host RAM, then leaves a 46GB shard per rank in `/tmp` beside the
-staged HF checkpoint until the upload finishes. On the GPU, the last pipeline
-stage holds the vocab-sized logits; the loss computes entropy under no_grad
-unless an entropy loss is configured, which avoids saving two vocab-sized
-copies for backward. The snowball configs also set
-`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+Policy nodes for the 67B-A2B Snowball checkpoint use 1800GB of host memory and
+1000GB of disk. The Snowball configs select Megatron's `dp_reshardable`
+optimizer format, which writes data-parallel-local shards without gathering the
+optimizer state onto data-parallel rank zero. Resume must keep the tensor,
+pipeline, context, and expert geometry fixed. The writer still stages each
+torch-dist shard in `/tmp` until its S3 upload finishes.
+
+On the GPU, the last pipeline stage holds the vocab-sized logits; the loss
+computes entropy under no_grad unless an entropy loss is configured, which
+avoids saving two vocab-sized copies for backward. The Snowball configs also
+set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
 
 ## Throughput
 
