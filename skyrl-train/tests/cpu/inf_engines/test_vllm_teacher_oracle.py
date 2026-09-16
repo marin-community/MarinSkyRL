@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 import torch
 
 from marinskyrl.distillation import TeacherEvidenceKind
-from skyrl_train.distillation import ChosenTokenTeacherEvidence, TeacherScoreRequest, TopKTeacherEvidence
+from skyrl_train.distillation import (
+    ChosenTokenTeacherEvidence,
+    StudentSelectedTeacherEvidence,
+    TeacherScoreRequest,
+    TopKTeacherEvidence,
+)
 from skyrl_train.inference_engines.vllm_teacher_oracle import VLLMTeacherOracle, tokenizer_vocabulary_fingerprint
 
 
@@ -122,6 +127,47 @@ async def test_vllm_teacher_oracle_returns_sorted_sparse_distribution_and_retain
     )
     torch.testing.assert_close(evidence.retained_mass[0, :2], torch.tensor([0.85, 0.75]))
     assert torch.isnan(evidence.retained_mass[0, 2])
+
+
+@pytest.mark.asyncio
+async def test_vllm_teacher_oracle_scores_exact_student_ids_and_masks_other_response_tokens():
+    engine = _Engine([[None, {1: -0.1}, {2: -0.2, 0: -1.2}, {1: -0.3}, {0: -0.4}]])
+    oracle = _oracle(engine, TeacherEvidenceKind.STUDENT_SELECTED_TOPK)
+    request = replace(
+        _request(TeacherEvidenceKind.STUDENT_SELECTED_TOPK, top_k=2),
+        student_topk_indices=torch.tensor([[[2, 0], [-1, -1], [-1, -1]]]),
+        behavior_topk_logprobs=torch.tensor([[[-0.2, -1.2], [torch.nan, torch.nan], [torch.nan, torch.nan]]]),
+        student_selected_mask=torch.tensor([[True, False, False]]),
+    )
+
+    evidence = await oracle.score(request)
+
+    assert isinstance(evidence, StudentSelectedTeacherEvidence)
+    assert torch.equal(evidence.valid_mask, request.student_selected_mask)
+    assert torch.equal(evidence.student_topk_indices, request.student_topk_indices)
+    torch.testing.assert_close(
+        evidence.teacher_on_student_logprobs,
+        torch.tensor([[[-0.2, -1.2], [torch.nan, torch.nan], [torch.nan, torch.nan]]]),
+        equal_nan=True,
+    )
+    assert engine.requests[0]["sampling_params_per_prompt"] == [
+        {"prompt_logprob_token_ids": [[0, 0], [1, 1], [2, 0], [1, 1]]}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vllm_teacher_oracle_rejects_missing_student_selected_score():
+    engine = _Engine([[None, {1: -0.1}, {2: -0.2}, {1: -0.3}, {0: -0.4}]])
+    oracle = _oracle(engine, TeacherEvidenceKind.STUDENT_SELECTED_TOPK)
+    request = replace(
+        _request(TeacherEvidenceKind.STUDENT_SELECTED_TOPK, top_k=2),
+        student_topk_indices=torch.tensor([[[2, 0], [-1, -1], [-1, -1]]]),
+        behavior_topk_logprobs=torch.tensor([[[-0.2, -1.2], [torch.nan, torch.nan], [torch.nan, torch.nan]]]),
+        student_selected_mask=torch.tensor([[True, False, False]]),
+    )
+
+    with pytest.raises(ValueError, match="omitted student-selected token 0"):
+        await oracle.score(request)
 
 
 @pytest.mark.asyncio

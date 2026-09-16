@@ -226,6 +226,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         prompt_token_ids = input_batch.get("prompt_token_ids")
         session_ids = input_batch.get("session_ids")
         sampling_params = input_batch.get("sampling_params")
+        per_prompt_sampling_params = input_batch.get("sampling_params_per_prompt")
 
         if (prompts is None and prompt_token_ids is None) or (prompts is not None and prompt_token_ids is not None):
             raise ValueError("Either `prompts` or `prompt_token_ids` must be provided, but not both.")
@@ -239,6 +240,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             )["input_ids"]
 
         num_prompts = len(prompt_token_ids)
+        if per_prompt_sampling_params is not None and len(per_prompt_sampling_params) != num_prompts:
+            raise ValueError("per-prompt sampling parameters must align with prompt token rows")
         num_inference_engines = len(self.engines)
 
         # 1. Route prompts to engines
@@ -261,6 +264,9 @@ class InferenceEngineClient(InferenceEngineInterface):
                 engine_idx=engine_idx,
                 original_prompt_ids=original_prompt_ids,
                 sampling_params=sampling_params,
+                per_prompt_sampling_params=(
+                    per_prompt_sampling_params[0] if per_prompt_sampling_params is not None else None
+                ),
             )
 
         # For batched generate(), pause/continue cannot be supported.
@@ -284,6 +290,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 prompt_token_ids=cur_prompt_token_ids,
                 sampling_params=sampling_params,
             )
+            if per_prompt_sampling_params is not None:
+                engine_input["sampling_params_per_prompt"] = [per_prompt_sampling_params[i] for i in prompt_ids]
             tasks.append(asyncio.create_task(self.engines[engine_idx].generate(engine_input)))
             indices_list.append(prompt_ids)
             task_engine_idxs.append(engine_idx)
@@ -302,6 +310,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                     prompt_token_ids=cur_prompt_token_ids,
                     sampling_params=sampling_params,
                 )
+                if per_prompt_sampling_params is not None:
+                    engine_input["sampling_params_per_prompt"] = [
+                        per_prompt_sampling_params[j] for j in indices_list[i]
+                    ]
                 results[i] = await self.engines[fallback].generate(engine_input)
             elif isinstance(result, BaseException):
                 raise result
@@ -338,7 +350,11 @@ class InferenceEngineClient(InferenceEngineInterface):
         )
 
     async def _generate_single_with_retry(
-        self, engine_idx: int, original_prompt_ids: List[int], sampling_params: Optional[Dict[str, Any]]
+        self,
+        engine_idx: int,
+        original_prompt_ids: List[int],
+        sampling_params: Optional[Dict[str, Any]],
+        per_prompt_sampling_params: Optional[Dict[str, Any]] = None,
     ) -> InferenceEngineOutput:
         """
         Generate a single response with retry mechanism.
@@ -399,6 +415,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 prompt_token_ids=[new_prompt_ids],
                 sampling_params=cur_sampling_params,
             )
+            if per_prompt_sampling_params is not None:
+                engine_input["sampling_params_per_prompt"] = [per_prompt_sampling_params]
 
             # 3.2. Send the request.
             logger.debug(f"generate() request sent (including potential retries): {engine_input}")
@@ -422,6 +440,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             new_response_ids: List[int] = partial_response["response_ids"][0]
             text_response = partial_response["responses"][0]
             stop_reason = partial_response["stop_reasons"][0]
+            if per_prompt_sampling_params is not None and stop_reason == ABORT_FINISH_REASON:
+                raise RuntimeError("per-prompt teacher scoring cannot continue after an aborted generation")
             new_response_logprobs: Optional[List[float]] = None
             new_response_logprobs_list: Optional[List[List[float]]] = partial_response.get("response_logprobs", None)
             if new_response_logprobs_list is not None and len(new_response_logprobs_list) > 0:

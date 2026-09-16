@@ -1009,6 +1009,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
+        per_prompt_sampling_params = input_batch.get("sampling_params_per_prompt")
         if self._validate_rollout_logprob_sampling and request_sampling_params is not None:
             if request_sampling_params.get("logprobs") is not None:
                 validate_behavior_logprob_sampling(request_sampling_params)
@@ -1017,11 +1018,22 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             "VLLMInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
         )
 
-        sampling_params = (
-            SamplingParams(**request_sampling_params) if request_sampling_params is not None else SamplingParams()
-        )
+        base_params = request_sampling_params or {}
+        if per_prompt_sampling_params is None:
+            sampling_params = SamplingParams(**base_params)
+        else:
+            if len(per_prompt_sampling_params) != len(prompt_token_ids):
+                raise ValueError("per-prompt sampling parameters must align with prompt token rows")
+            if any(set(override) != {"prompt_logprob_token_ids"} for override in per_prompt_sampling_params):
+                raise ValueError("per-prompt sampling parameters only support prompt_logprob_token_ids")
+            sampling_params = [SamplingParams(**{**base_params, **override}) for override in per_prompt_sampling_params]
 
         return prompt_token_ids, sampling_params
+
+    @staticmethod
+    def _response_top_k(sampling_params: SamplingParams | list[SamplingParams]) -> int | None:
+        first = sampling_params[0] if isinstance(sampling_params, list) else sampling_params
+        return first.logprobs
 
     def _postprocess_outputs(self, outputs, response_top_k: int | None = None):
         """Common output processing logic."""
@@ -1175,7 +1187,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             lora_request=lora_requests,
         )
 
-        return self._postprocess_outputs(outputs, sampling_params.logprobs)
+        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
@@ -1889,12 +1901,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         tasks = []
         request_ids: list[str] = []
-        for prompt in prompt_token_ids:
+        per_prompt = sampling_params if isinstance(sampling_params, list) else [sampling_params] * len(prompt_token_ids)
+        for prompt, row_sampling_params in zip(prompt_token_ids, per_prompt, strict=True):
             # Schedule the collection of outputs for each prompt.
             # Avoid duplicate request_ids
             request_id = str(uuid4().hex)
             request_ids.append(request_id)
-            task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params))
+            task = asyncio.create_task(self._collect_outputs(prompt, request_id, row_sampling_params))
             tasks.append(task)
         try:
             outputs = await asyncio.gather(*tasks)
@@ -1920,7 +1933,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
             raise
 
-        return self._postprocess_outputs(outputs, sampling_params.logprobs)
+        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
