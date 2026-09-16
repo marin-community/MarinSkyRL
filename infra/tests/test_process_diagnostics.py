@@ -5,6 +5,7 @@ from marinskyrl.process_diagnostics import (
     ProcessOutcome,
     enable_fatal_stack_capture,
     install_live_stack_capture,
+    write_exception_receipt,
     write_process_outcome,
 )
 from marinskyrl.environment_contract import (
@@ -42,6 +43,24 @@ def test_process_outcome_writes_atomic_secret_free_receipt(tmp_path) -> None:
     assert receipt["metadata"] == {"entrypoint": "skyrl_train.entrypoints.main_base"}
     assert "do-not-record" not in path.read_text()
     assert not list(path.parent.glob("*.tmp"))
+
+
+def test_exception_receipt_preserves_original_traceback(tmp_path) -> None:
+    try:
+        raise RuntimeError("remote actor failed first")
+    except RuntimeError as error:
+        path = write_exception_receipt(
+            "skyrl entrypoint driver",
+            error,
+            environment={DEBUG_ARTIFACT_DIR_ENV: str(tmp_path)},
+        )
+
+    assert path is not None
+    receipt = json.loads(path.read_text())
+    assert receipt["kind"] == "exception"
+    assert receipt["exception_type"] == "builtins.RuntimeError"
+    assert receipt["message"] == "remote actor failed first"
+    assert 'raise RuntimeError("remote actor failed first")' in receipt["traceback"]
 
 
 def test_process_manifest_does_not_capture_managed_secrets(tmp_path) -> None:

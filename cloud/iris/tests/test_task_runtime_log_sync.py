@@ -36,6 +36,27 @@ class _BlockingFilesystem:
         self.release.wait()
 
 
+class _FirstUploadBlockingFilesystem:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self._lock = threading.Lock()
+        self.uploads = []
+        self._calls = 0
+
+    def put(self, local_path, remote_path):
+        with self._lock:
+            self._calls += 1
+            call = self._calls
+        if call == 1:
+            self.started.set()
+            self.release.wait()
+        with open(local_path, "rb") as source:
+            payload = source.read()
+        with self._lock:
+            self.uploads.append((remote_path, payload))
+
+
 def _ray_log_tree(tmp_path, monkeypatch, *payloads: bytes):
     log_dir = tmp_path / "session_test" / "logs"
     log_dir.mkdir(parents=True)
@@ -108,3 +129,46 @@ def test_final_ray_log_sync_timeout_does_not_block_teardown(tmp_path, monkeypatc
 
     assert status == task_runtime.RayLogSyncWaitStatus.TIMED_OUT
     assert sync_session.sync("cleanup").unchanged_files == 1
+
+
+def test_final_ray_log_sync_preempts_a_stuck_periodic_pass(tmp_path, monkeypatch):
+    (ordinary_log,) = _ray_log_tree(tmp_path, monkeypatch, b"periodic upload")
+    filesystem = _FirstUploadBlockingFilesystem()
+    monkeypatch.setattr(task_runtime, "fs_and_path", lambda _uri: (filesystem, "bucket/logs"))
+    sync_session = task_runtime.RayLogSyncSession("s3://logs", "node-0")
+    periodic = threading.Thread(target=sync_session.sync, args=("periodic",), daemon=True)
+    periodic.start()
+    assert filesystem.started.wait(timeout=1)
+    fatal_log = ordinary_log.parent / "worker-fatal.err"
+    fatal_log.write_bytes(b"the original actor traceback")
+
+    status = sync_session.sync_bounded("driver failure")
+
+    filesystem.release.set()
+    periodic.join(timeout=1)
+    assert status == task_runtime.RayLogSyncWaitStatus.COMPLETED
+    assert any(
+        path.endswith("worker-fatal.err") and payload == fatal_log.read_bytes() for path, payload in filesystem.uploads
+    )
+
+
+def test_ray_log_sync_prioritizes_diagnostics_within_each_pass_budget(tmp_path, monkeypatch):
+    ordinary_log, _ = _ray_log_tree(tmp_path, monkeypatch, b"ordinary-1", b"ordinary-2")
+    fatal_log = ordinary_log.parent / "worker-fatal.err"
+    fatal_log.write_bytes(b"fatal")
+    filesystem = _RecordingFilesystem()
+    uploaded_paths = []
+
+    def record_put(local_path, remote_path):
+        uploaded_paths.append(remote_path)
+        _RecordingFilesystem.put(filesystem, local_path, remote_path)
+
+    filesystem.put = record_put
+    monkeypatch.setattr(task_runtime, "fs_and_path", lambda _uri: (filesystem, "bucket/logs"))
+    monkeypatch.setattr(task_runtime, "RAY_LOG_SYNC_MAX_FILES_PER_PASS", 1)
+
+    result = task_runtime.RayLogSyncSession("s3://logs", "node-0").sync("periodic")
+
+    assert result.uploaded_files == 1
+    assert result.deferred_files == 2
+    assert uploaded_paths[0].endswith("worker-fatal.err")
