@@ -2,9 +2,9 @@
 
 Each layout attacks one layout assumption: TP2 exercises the
 sequence-parallel slice, PP2 the 1F1B recompute FIFO and the layer-number
-mapping across pipeline stages, EP2 the alltoall dispatch, and packing on/off
-the two target transforms. CP2 needs the separate dense-CP runtime and is
-excluded from this mainline matrix. The oracle is behavioral and needs no in-actor hooks: a
+mapping across pipeline stages, EP2 the alltoall dispatch, CP2 the dense
+context-parallel token split, and packing on/off the two target transforms.
+The oracle is behavioral and needs no in-actor hooks: a
 completed training step proves token-exact replay on every rank (the
 per-rank hit-fraction check and the FIFO drain assert turn a wrong layout
 into a loud failure), an empty capture must reproduce native log-probs
@@ -26,6 +26,7 @@ import math
 import pytest
 import ray
 import torch
+from omegaconf import open_dict
 from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
@@ -55,6 +56,7 @@ LAYOUTS = [
     ("tp2", 2, 2, 1, 1, 1, False),
     ("pp2", 2, 1, 2, 1, 1, False),
     ("ep2", 2, 1, 1, 2, 1, False),
+    ("cp2", 2, 1, 1, 1, 2, False),
     ("tp2_pp2", 4, 2, 2, 1, 1, False),
 ]
 
@@ -68,6 +70,9 @@ def _layout_config(tmp_path, layout) -> tuple:
     cfg.trainer.use_sample_packing = packing
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    if cp > 1:
+        with open_dict(cfg.trainer.policy.megatron_config.transformer_config_kwargs):
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs.cp_comm_type = "all_gather"
     cfg.trainer.policy.fsdp_config.moe_router_replay = True
     return cfg, model_path
 
