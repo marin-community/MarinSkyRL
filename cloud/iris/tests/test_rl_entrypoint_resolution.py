@@ -43,6 +43,23 @@ context_budget:
     assert parsed.entrypoint == "skyrl_train.entrypoints.terminal_bench"
 
 
+def test_rl_config_resolves_taskcompendium_entrypoint(tmp_path):
+    config = tmp_path / "rl.yaml"
+    config.write_text(
+        """\
+entrypoint: taskcompendium
+context_budget:
+  request_window_tokens: 2
+  max_new_tokens_per_turn: 1
+  max_turns: 1
+"""
+    )
+
+    parsed = parse_rl_config(str(config))
+
+    assert parsed.entrypoint == "skyrl_train.entrypoints.taskcompendium"
+
+
 def test_rl_config_rejects_removed_opd_entrypoint(tmp_path):
     config = tmp_path / "rl.yaml"
     config.write_text(
