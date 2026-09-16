@@ -511,6 +511,17 @@ def validate_teacher_evidence(request: TeacherScoreRequest, evidence: TeacherEvi
         raise ValueError(f"teacher evidence top-K width must match requested top_k={request.top_k}")
 
 
+def _weighted_route_weights(
+    *, coefficient: float, route_weights: torch.Tensor, valid_mask: torch.Tensor
+) -> torch.Tensor:
+    if not math.isfinite(coefficient) or coefficient <= 0:
+        raise ValueError("distillation coefficient must be a positive finite number")
+    if route_weights.shape != valid_mask.shape:
+        raise ValueError("distillation route_weights must match teacher response coordinates")
+    _validate_loss_weights(route_weights, "distillation route_weights")
+    return route_weights * coefficient
+
+
 def prepare_sampled_reverse_kl(
     request: TeacherScoreRequest,
     evidence: ChosenTokenTeacherEvidence,
@@ -520,15 +531,12 @@ def prepare_sampled_reverse_kl(
 ) -> SampledReverseKLInput:
     """Validate chosen-token evidence and compile its minimal learner payload."""
     validate_teacher_evidence(request, evidence)
-    if not math.isfinite(coefficient) or coefficient <= 0:
-        raise ValueError("distillation coefficient must be a positive finite number")
-    if route_weights.shape != evidence.valid_mask.shape:
-        raise ValueError("distillation route_weights must match teacher response coordinates")
-    _validate_loss_weights(route_weights, "distillation route_weights")
     return SampledReverseKLInput(
         teacher_action_log_probs=evidence.chosen_logprobs,
         valid_mask=evidence.valid_mask,
-        loss_weights=route_weights * coefficient,
+        loss_weights=_weighted_route_weights(
+            coefficient=coefficient, route_weights=route_weights, valid_mask=evidence.valid_mask
+        ),
     )
 
 
@@ -541,17 +549,14 @@ def prepare_sparse_forward_kl(
 ) -> SparseForwardKLInput:
     """Validate top-K evidence and compile its sparse learner payload."""
     validate_teacher_evidence(request, evidence)
-    if not math.isfinite(coefficient) or coefficient <= 0:
-        raise ValueError("distillation coefficient must be a positive finite number")
-    if route_weights.shape != evidence.valid_mask.shape:
-        raise ValueError("distillation route_weights must match teacher response coordinates")
-    _validate_loss_weights(route_weights, "distillation route_weights")
     return SparseForwardKLInput(
         teacher_topk_indices=evidence.topk_indices,
         teacher_topk_logprobs=evidence.topk_logprobs,
         retained_mass=evidence.retained_mass,
         valid_mask=evidence.valid_mask,
-        loss_weights=route_weights * coefficient,
+        loss_weights=_weighted_route_weights(
+            coefficient=coefficient, route_weights=route_weights, valid_mask=evidence.valid_mask
+        ),
     )
 
 
@@ -564,11 +569,6 @@ def prepare_student_topk_policy_surrogate(
 ) -> StudentTopKPolicySurrogateInput:
     """Compile exact student-selected evidence into the shared learner payload."""
     validate_teacher_evidence(request, evidence)
-    if not math.isfinite(coefficient) or coefficient <= 0:
-        raise ValueError("distillation coefficient must be a positive finite number")
-    if route_weights.shape != evidence.valid_mask.shape:
-        raise ValueError("distillation route_weights must match teacher response coordinates")
-    _validate_loss_weights(route_weights, "distillation route_weights")
     assert request.student_topk_indices is not None
     assert request.behavior_topk_logprobs is not None
     return StudentTopKPolicySurrogateInput(
@@ -576,8 +576,26 @@ def prepare_student_topk_policy_surrogate(
         behavior_topk_logprobs=request.behavior_topk_logprobs,
         teacher_on_student_logprobs=evidence.teacher_on_student_logprobs,
         valid_mask=evidence.valid_mask,
-        loss_weights=route_weights * coefficient,
+        loss_weights=_weighted_route_weights(
+            coefficient=coefficient, route_weights=route_weights, valid_mask=evidence.valid_mask
+        ),
     )
+
+
+def _validate_attachment_common(
+    evidence: TeacherEvidenceBatch,
+    *,
+    valid_mask: torch.Tensor,
+    loss_weights: torch.Tensor,
+    trajectory_ids: tuple[str, ...],
+    response_mask: torch.Tensor,
+) -> None:
+    _validate_evidence_coordinates(evidence, trajectory_ids=trajectory_ids, response_mask=response_mask)
+    if not torch.equal(valid_mask, evidence.valid_mask):
+        raise ValueError("prepared distillation valid_mask does not match teacher evidence")
+    if loss_weights.shape != response_mask.shape:
+        raise ValueError("prepared distillation loss_weights must match trajectory response coordinates")
+    _validate_loss_weights(loss_weights, "prepared distillation loss_weights")
 
 
 def validate_sampled_reverse_kl_attachment(
@@ -588,13 +606,13 @@ def validate_sampled_reverse_kl_attachment(
     response_mask: torch.Tensor,
 ) -> None:
     """Validate prepared evidence at the trajectory-to-learner boundary."""
-    _validate_evidence_coordinates(
+    _validate_attachment_common(
         evidence,
+        valid_mask=distillation.valid_mask,
+        loss_weights=distillation.loss_weights,
         trajectory_ids=trajectory_ids,
         response_mask=response_mask,
     )
-    if not torch.equal(distillation.valid_mask, evidence.valid_mask):
-        raise ValueError("prepared distillation valid_mask does not match teacher evidence")
     if not torch.allclose(
         distillation.teacher_action_log_probs,
         evidence.chosen_logprobs,
@@ -603,9 +621,41 @@ def validate_sampled_reverse_kl_attachment(
         equal_nan=True,
     ):
         raise ValueError("prepared distillation logprobs do not match teacher evidence")
-    if distillation.loss_weights.shape != response_mask.shape:
-        raise ValueError("prepared distillation loss_weights must match trajectory response coordinates")
-    _validate_loss_weights(distillation.loss_weights, "prepared distillation loss_weights")
+
+
+def validate_student_selected_attachment(
+    evidence: StudentSelectedTeacherEvidence,
+    distillation: StudentTopKPolicySurrogateInput,
+    *,
+    trajectory_ids: tuple[str, ...],
+    response_mask: torch.Tensor,
+) -> None:
+    """Require exact selected-ID and score provenance at learner admission."""
+    _validate_attachment_common(
+        evidence,
+        valid_mask=distillation.valid_mask,
+        loss_weights=distillation.loss_weights,
+        trajectory_ids=trajectory_ids,
+        response_mask=response_mask,
+    )
+    if not torch.equal(distillation.student_topk_indices, evidence.student_topk_indices):
+        raise ValueError("prepared student-selected token IDs do not match teacher evidence")
+    if distillation.student_topk_indices.shape[:2] != response_mask.shape:
+        raise ValueError("prepared student-selected token IDs do not match response coordinates")
+    _validate_selected_token_ids(distillation.student_topk_indices, distillation.valid_mask, "student-selected")
+    if distillation.behavior_topk_logprobs.shape != distillation.student_topk_indices.shape:
+        raise ValueError("prepared student-selected behavior scores do not match selected token IDs")
+    _validate_masked_logprobs(
+        distillation.behavior_topk_logprobs, distillation.valid_mask, "prepared behavior top-K logprobs"
+    )
+    if not torch.allclose(
+        distillation.teacher_on_student_logprobs,
+        evidence.teacher_on_student_logprobs,
+        rtol=0,
+        atol=0,
+        equal_nan=True,
+    ):
+        raise ValueError("prepared student-selected teacher scores do not match teacher evidence")
 
 
 def validate_distillation_attachment(
@@ -627,35 +677,16 @@ def validate_distillation_attachment(
     if isinstance(evidence, StudentSelectedTeacherEvidence) and isinstance(
         distillation, StudentTopKPolicySurrogateInput
     ):
-        _validate_evidence_coordinates(evidence, trajectory_ids=trajectory_ids, response_mask=response_mask)
-        if not torch.equal(distillation.student_topk_indices, evidence.student_topk_indices):
-            raise ValueError("prepared student-selected token IDs do not match teacher evidence")
-        if distillation.student_topk_indices.shape[:2] != response_mask.shape:
-            raise ValueError("prepared student-selected token IDs do not match response coordinates")
-        if not torch.equal(distillation.valid_mask, evidence.valid_mask):
-            raise ValueError("prepared student-selected valid_mask does not match teacher evidence")
-        _validate_selected_token_ids(distillation.student_topk_indices, distillation.valid_mask, "student-selected")
-        if distillation.behavior_topk_logprobs.shape != distillation.student_topk_indices.shape:
-            raise ValueError("prepared student-selected behavior scores do not match selected token IDs")
-        _validate_masked_logprobs(
-            distillation.behavior_topk_logprobs, distillation.valid_mask, "prepared behavior top-K logprobs"
+        validate_student_selected_attachment(
+            evidence, distillation, trajectory_ids=trajectory_ids, response_mask=response_mask
         )
-        if not torch.allclose(
-            distillation.teacher_on_student_logprobs,
-            evidence.teacher_on_student_logprobs,
-            rtol=0,
-            atol=0,
-            equal_nan=True,
-        ):
-            raise ValueError("prepared student-selected teacher scores do not match teacher evidence")
-        if distillation.loss_weights.shape != response_mask.shape:
-            raise ValueError("prepared distillation loss_weights must match trajectory response coordinates")
-        _validate_loss_weights(distillation.loss_weights, "prepared distillation loss_weights")
         return
     if not isinstance(evidence, TopKTeacherEvidence) or not isinstance(distillation, SparseForwardKLInput):
         raise ValueError("teacher evidence and prepared distillation objective kinds must match")
-    _validate_evidence_coordinates(
+    _validate_attachment_common(
         evidence,
+        valid_mask=distillation.valid_mask,
+        loss_weights=distillation.loss_weights,
         trajectory_ids=trajectory_ids,
         response_mask=response_mask,
     )
@@ -663,14 +694,10 @@ def validate_distillation_attachment(
         ("indices", distillation.teacher_topk_indices, evidence.topk_indices),
         ("logprobs", distillation.teacher_topk_logprobs, evidence.topk_logprobs),
         ("retained_mass", distillation.retained_mass, evidence.retained_mass),
-        ("valid_mask", distillation.valid_mask, evidence.valid_mask),
     )
     for label, actual, expected in payload_pairs:
         if not torch.allclose(actual, expected, rtol=0, atol=0, equal_nan=True):
             raise ValueError(f"prepared distillation {label} does not match teacher evidence")
-    if distillation.loss_weights.shape != response_mask.shape:
-        raise ValueError("prepared distillation loss_weights must match trajectory response coordinates")
-    _validate_loss_weights(distillation.loss_weights, "prepared distillation loss_weights")
 
 
 def sampled_reverse_kl_loss(

@@ -125,6 +125,31 @@ def _routed_assembly_shape(
     return row_count, max(work.response_lengths)
 
 
+def _assemble_student_selected_inputs(
+    indexed_inputs: Sequence[tuple[tuple[int, ...], DistillationInput]],
+    shape: tuple[int, int],
+    valid_mask: torch.Tensor,
+    loss_weights: torch.Tensor,
+) -> StudentTopKPolicySurrogateInput:
+    if not all(isinstance(distillation, StudentTopKPolicySurrogateInput) for _, distillation in indexed_inputs):
+        raise ValueError("routed teacher partitions must return one distillation objective kind")
+    payloads = tuple(cast(StudentTopKPolicySurrogateInput, distillation) for _, distillation in indexed_inputs)
+    widths = {payload.student_topk_indices.shape[-1] for payload in payloads}
+    if len(widths) != 1:
+        raise ValueError("routed student-selected partitions must use one top-K width")
+    topk = widths.pop()
+    indices = torch.full((*shape, topk), INVALID_TOPK_INDEX, dtype=torch.long)
+    behavior = torch.full((*shape, topk), torch.nan, dtype=torch.float32)
+    teacher = torch.full((*shape, topk), torch.nan, dtype=torch.float32)
+    for (original_indices, _), payload in zip(indexed_inputs, payloads, strict=True):
+        rows = torch.tensor(original_indices, dtype=torch.long)
+        width = payload.valid_mask.shape[1]
+        indices[rows, :width] = payload.student_topk_indices
+        behavior[rows, :width] = payload.behavior_topk_logprobs
+        teacher[rows, :width] = payload.teacher_on_student_logprobs
+    return StudentTopKPolicySurrogateInput(indices, behavior, teacher, valid_mask, loss_weights)
+
+
 def assemble_distillation_inputs(
     indexed_inputs: Sequence[tuple[tuple[int, ...], DistillationInput]],
     shape: tuple[int, int],
@@ -156,23 +181,7 @@ def assemble_distillation_inputs(
         return SampledReverseKLInput(teacher_logprobs, valid_mask, loss_weights)
 
     if isinstance(first, StudentTopKPolicySurrogateInput):
-        if not all(isinstance(distillation, StudentTopKPolicySurrogateInput) for _, distillation in indexed_inputs):
-            raise ValueError("routed teacher partitions must return one distillation objective kind")
-        payloads = tuple(cast(StudentTopKPolicySurrogateInput, distillation) for _, distillation in indexed_inputs)
-        widths = {payload.student_topk_indices.shape[-1] for payload in payloads}
-        if len(widths) != 1:
-            raise ValueError("routed student-selected partitions must use one top-K width")
-        topk = widths.pop()
-        indices = torch.full((*shape, topk), INVALID_TOPK_INDEX, dtype=torch.long)
-        behavior = torch.full((*shape, topk), torch.nan, dtype=torch.float32)
-        teacher = torch.full((*shape, topk), torch.nan, dtype=torch.float32)
-        for (original_indices, _), payload in zip(indexed_inputs, payloads, strict=True):
-            rows = torch.tensor(original_indices, dtype=torch.long)
-            width = payload.valid_mask.shape[1]
-            indices[rows, :width] = payload.student_topk_indices
-            behavior[rows, :width] = payload.behavior_topk_logprobs
-            teacher[rows, :width] = payload.teacher_on_student_logprobs
-        return StudentTopKPolicySurrogateInput(indices, behavior, teacher, valid_mask, loss_weights)
+        return _assemble_student_selected_inputs(indexed_inputs, shape, valid_mask, loss_weights)
 
     if not isinstance(first, SparseForwardKLInput) or not all(
         isinstance(distillation, SparseForwardKLInput) for _, distillation in indexed_inputs

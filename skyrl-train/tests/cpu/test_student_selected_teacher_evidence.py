@@ -76,9 +76,7 @@ def test_student_selected_request_and_teacher_scores_require_exact_coordinates()
     with pytest.raises(ValueError, match="student-selected behavior logprobs must match"):
         validate_teacher_score_request(replace(request, behavior_topk_logprobs=torch.zeros(1, 2, 1)))
 
-    prepared = prepare_student_topk_policy_surrogate(
-        request, evidence, coefficient=0.5, route_weights=torch.ones(1, 2)
-    )
+    prepared = prepare_student_topk_policy_surrogate(request, evidence, coefficient=0.5, route_weights=torch.ones(1, 2))
     validate_distillation_attachment(
         evidence, prepared, trajectory_ids=request.trajectory_ids, response_mask=request.response_mask
     )
