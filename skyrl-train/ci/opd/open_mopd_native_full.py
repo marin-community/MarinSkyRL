@@ -150,7 +150,7 @@ def stage_schedule(source_uri: str, destination: Path) -> None:
 
 def stage_validation(source_uri: str, destination: Path, expected_sha256: str) -> None:
     metadata = _verified_parquet(source_uri, destination, expected_sha256)
-    columns = set(metadata.schema.names)
+    columns = set(metadata.schema.to_arrow_schema().names)
     if metadata.num_rows != 30 or not {"prompt", "env_class", "reward_model"} <= columns:
         raise ValueError(f"AIME validation dataset has {metadata.num_rows} rows and columns {sorted(columns)}")
 
