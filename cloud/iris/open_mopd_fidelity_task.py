@@ -341,6 +341,13 @@ def sync_tree(local: Path, output_uri: str) -> None:
         filesystem.put_file(str(source), destination)
 
 
+def reject_existing_output(output_uri: str, manifest_name: str = CONTROL_MANIFEST_NAME) -> None:
+    """Reject an output prefix that already contains the named terminal artifact."""
+    filesystem, target = fs_and_path(output_uri)
+    if filesystem.exists(posixpath.join(target, manifest_name)):
+        raise ValueError(f"Durable output already contains {manifest_name}: {output_uri}")
+
+
 def validate_resume_manifest(existing: dict[str, object], expected: dict[str, object], output_uri: str) -> None:
     if existing.get("returncode") == 0:
         raise ValueError(f"Durable output already contains a completed control: {output_uri}")
