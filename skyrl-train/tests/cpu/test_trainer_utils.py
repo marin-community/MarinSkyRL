@@ -28,8 +28,11 @@ import tempfile
 import pytest
 import re
 
-from unittest.mock import Mock, patch, mock_open
+from unittest.mock import Mock, patch
 import json
+import fsspec
+from skyrl_train.evaluate import evaluation_dump_dir
+from skyrl_train.io import io
 from tests.cpu.util import example_dummy_config
 
 BasicType = Union[int, float, str, bool, type(None)]
@@ -279,18 +282,9 @@ def test_calculate_per_dataset_metrics_multiple_sources():
     assert result["eval/unknown/pass_at_2"] == 1.0
 
 
-@patch("builtins.open", new_callable=mock_open)
-def test_dump_per_dataset_eval_results_comprehensive(mock_file):
-    """Test dump_per_dataset_eval_results comprehensive functionality."""
-    # Mock dump directory path
-    mock_dump_dir = Mock()
-    mock_dump_dir.__truediv__ = Mock(side_effect=lambda x: f"mock_path/{x}")
-
-    # Mock tokenizer
+def test_dump_per_dataset_eval_results_preserves_dataset_and_metrics(tmp_path):
     mock_tokenizer = Mock()
     mock_tokenizer.decode.side_effect = lambda x: f"decoded_{x}"
-
-    # Create test data
     trajectory_batches = {
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6]],
         "response_ids": [[10, 11], [12, 13], [14, 15]],
@@ -302,40 +296,31 @@ def test_dump_per_dataset_eval_results_comprehensive(mock_file):
     env_extras = [{"extra1": "val1"}, {"extra2": "val2"}, {"extra3": "val3"}]
     eval_metrics = {"eval/dataset1/avg_score": 0.8, "eval/unknown/avg_score": 0.6}
 
-    # Call the function
     dump_per_dataset_eval_results(
-        mock_dump_dir, mock_tokenizer, trajectory_batches, data_sources, all_envs, env_extras, eval_metrics
+        str(tmp_path), mock_tokenizer, trajectory_batches, data_sources, all_envs, env_extras, eval_metrics
     )
+    dataset_rows = [json.loads(line) for line in (tmp_path / "dataset1.jsonl").read_text().splitlines()]
+    unknown_rows = [json.loads(line) for line in (tmp_path / "unknown.jsonl").read_text().splitlines()]
+    assert [row["output_response"] for row in dataset_rows] == ["decoded_[10, 11]", "decoded_[14, 15]"]
+    assert unknown_rows[0]["data_source"] == "unknown"
+    assert json.loads((tmp_path / "aggregated_results.jsonl").read_text()) == eval_metrics
 
-    # Verify tokenizer was called for decoding
-    assert mock_tokenizer.decode.call_count == 6  # 3 prompts + 3 responses
 
-    # Verify files were opened (2 per-dataset files + 1 aggregated file)
-    assert mock_file.call_count == 3
+def test_eval_dump_writes_to_cloud_uri_without_corrupting_scheme(monkeypatch):
+    directory = evaluation_dump_dir("s3://bucket/users/exports", 2)
+    filesystem = fsspec.filesystem("memory")
+    monkeypatch.setattr(io, "open_file", lambda path, mode: filesystem.open(path.removeprefix("s3://"), mode))
+    tokenizer = Mock()
+    tokenizer.decode.side_effect = lambda tokens: str(tokens)
+    batch = {"prompt_token_ids": [[1]], "response_ids": [[2]], "rewards": [1.0]}
 
-    # Verify file writes occurred
-    handle = mock_file.return_value
-    assert handle.write.call_count > 0
+    dump_per_dataset_eval_results(directory, tokenizer, batch, ["aime_2024"], ["aime"], [{}], {"accuracy": 1.0})
 
-    # Verify JSON structure by checking some write calls contain expected data
-    write_calls = [call[0][0] for call in handle.write.call_args_list]
-    json_writes = [call for call in write_calls if call.strip() and not call.startswith("Dumped")]
-
-    # At least one JSON line should contain our test data
-    assert len(json_writes) > 0
-
-    # Parse one of the JSON writes to verify structure
-    for write_call in json_writes:
-        try:
-            data = json.loads(write_call.strip())
-            if "input_prompt" in data:
-                # This is a per-dataset entry
-                assert "output_response" in data
-                assert "score" in data
-                assert "data_source" in data
-                break
-        except json.JSONDecodeError:
-            continue
+    expected = "s3://bucket/users/exports/dumped_evals/global_step_2_evals"
+    assert directory == expected
+    saved = json.loads(filesystem.cat(f"{expected.removeprefix('s3://')}/aime_2024.jsonl"))
+    assert saved["output_response"] == "[2]"
+    assert json.loads(filesystem.cat(f"{expected.removeprefix('s3://')}/aggregated_results.jsonl")) == {"accuracy": 1.0}
 
 
 def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
@@ -350,7 +335,7 @@ def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
         "error_treatments": [None, "mask"],
     }
 
-    dump_per_dataset_eval_results(tmp_path, tokenizer, batch, ["aime_2024"] * 2, ["aime"] * 2, [{}, {}], {})
+    dump_per_dataset_eval_results(str(tmp_path), tokenizer, batch, ["aime_2024"] * 2, ["aime"] * 2, [{}, {}], {})
 
     rows = [json.loads(line) for line in (tmp_path / "aime_2024.jsonl").read_text().splitlines()]
     assert [(row["exception_type"], row["error_treatment"]) for row in rows] == [

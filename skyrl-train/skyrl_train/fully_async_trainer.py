@@ -563,6 +563,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self._sync_distillation_runtime is not None:
             raise RuntimeError("cannot combine synchronous and fully-async distillation runtimes")
         self._async_distillation_runtime = runtime
+        self._domain_balancer = runtime.domain_balancer
 
     def _configure_training_schedule(self):
         """
@@ -843,9 +844,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             cur_generation_group_mini_batch,
                         )
                     if scored_distillation is not None:
-                        self._async_distillation_runtime.attach_to_training_input(
-                            training_input,
-                            scored_distillation,
+                        self.all_metrics.update(
+                            self._async_distillation_runtime.attach_to_training_input(
+                                training_input,
+                                scored_distillation,
+                            )
                         )
                         self.all_metrics.update(
                             {

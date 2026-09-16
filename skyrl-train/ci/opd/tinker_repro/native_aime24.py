@@ -138,7 +138,7 @@ def merge_adapter_for_vllm(adapter_path: Path, destination: Path) -> None:
 def read_evaluation_metrics(
     output_root: Path, expected_rows: int, stage: Stage
 ) -> dict[str, float | int | bool | None]:
-    eval_root = evaluation_dump_dir(output_root / EVALUATION_EXPORT_DIR, global_step=None)
+    eval_root = Path(evaluation_dump_dir(str(output_root / EVALUATION_EXPORT_DIR), global_step=None))
     path = eval_root / "aggregated_results.jsonl"
     rows = path.read_text().splitlines()
     if len(rows) != 1:

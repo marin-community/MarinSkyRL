@@ -27,8 +27,8 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     refresh_trajectory_reward_shaping_metrics,
 )
 from transformers import AutoTokenizer
-from pathlib import Path
 from skyrl_train.io import io
+from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.checkpoint_listing import extract_step_from_path, list_checkpoint_dirs
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
 from skyrl_train.curriculum import CurriculumConfig, CurriculumSampler, SamplingKind
@@ -214,7 +214,7 @@ def calculate_per_dataset_metrics(
 
 
 def dump_per_dataset_eval_results(
-    dump_dir_path: Path,
+    dump_dir_path: str,
     tokenizer: AutoTokenizer,
     trajectory_batch: TrajectoryBatch,
     concat_data_sources: List[str],
@@ -240,9 +240,9 @@ def dump_per_dataset_eval_results(
     # Dump per-dataset files
     for data_source, indices in data_source_indices.items():
         sanitized_data_source = sanitize_data_source(data_source)
-        filename = dump_dir_path / f"{sanitized_data_source}.jsonl"
+        filename = join_resource_path(dump_dir_path, f"{sanitized_data_source}.jsonl")
 
-        with open(filename, "w") as f:
+        with io.open_file(filename, "w") as f:
             for i in indices:
                 entry = {
                     "input_prompt": input_prompts[i],
@@ -260,8 +260,8 @@ def dump_per_dataset_eval_results(
         logger.info(f"Dumped eval data for {data_source} to {filename}")
 
     # Dump aggregated results file
-    aggregated_filename = dump_dir_path / "aggregated_results.jsonl"
-    with open(aggregated_filename, "w") as f:
+    aggregated_filename = join_resource_path(dump_dir_path, "aggregated_results.jsonl")
+    with io.open_file(aggregated_filename, "w") as f:
         f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
 
     logger.info(f"Dumped aggregated eval metrics to {aggregated_filename}")

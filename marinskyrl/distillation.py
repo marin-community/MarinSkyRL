@@ -157,6 +157,14 @@ class TeacherResidencySpec:
 
 
 @dataclass(frozen=True)
+class DomainGradientBalanceSpec:
+    """Per-batch target domain shares with first-observed-gap anchoring."""
+
+    target_shares: tuple[tuple[str, float], ...]
+    gap_scale_alpha: float
+
+
+@dataclass(frozen=True)
 class DistillationPlan:
     objective: DistillationObjectiveKind
     coefficient: float
@@ -164,6 +172,7 @@ class DistillationPlan:
     teachers: tuple[TeacherSpec, ...]
     routing: TeacherRoutingPlan
     residency: TeacherResidencySpec = TeacherResidencySpec()
+    domain_gradient_balance: DomainGradientBalanceSpec | None = None
 
 
 def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None:
@@ -530,6 +539,23 @@ def _routing_plan(name: str, raw: object, teacher_ids: frozenset[str]) -> Teache
     return TeacherRoutingPlan(name=name, revision=revision, routes=tuple(routes))
 
 
+def _domain_gradient_balance(raw: object, routing: TeacherRoutingPlan) -> DomainGradientBalanceSpec:
+    path = "trainer.algorithm.distillation.domain_gradient_balance"
+    config = _mapping(raw, path)
+    _reject_unknown(config, frozenset({"target_shares", "gap_scale_alpha"}), path)
+    shares = _mapping(config.get("target_shares"), f"{path}.target_shares")
+    expected = {route.key for route in routing.routes}
+    if set(shares) != expected:
+        raise ValueError(f"{path}.target_shares must name exactly the routed domains {sorted(expected)}")
+    target_shares = tuple(
+        (route, _positive_float(shares, route, f"{path}.target_shares")) for route in sorted(expected)
+    )
+    alpha = _nonnegative_float(config, "gap_scale_alpha", path)
+    if alpha > 2:
+        raise ValueError(f"{path}.gap_scale_alpha must be at most 2")
+    return DomainGradientBalanceSpec(target_shares=target_shares, gap_scale_alpha=alpha)
+
+
 def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan | None:
     """Compile an immutable plan, or return ``None`` when distillation is absent."""
     if "teacher" in config:
@@ -554,7 +580,7 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
     distillation = _mapping(raw_distillation, "trainer.algorithm.distillation")
     _reject_unknown(
         distillation,
-        frozenset({"objective", "routing_plan", "coefficient", "reward_mode", "residency"}),
+        frozenset({"objective", "routing_plan", "coefficient", "reward_mode", "residency", "domain_gradient_balance"}),
         "trainer.algorithm.distillation",
     )
     objective = _enum_value(
@@ -584,6 +610,11 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
             f"trainer.algorithm.distillation.routing_plan references unknown teacher_routing plan {routing_name!r}"
         )
     routing = _routing_plan(routing_name, raw_routing[routing_name], frozenset(teachers_by_id))
+    balance = None
+    if "domain_gradient_balance" in distillation:
+        if objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE:
+            raise ValueError("domain_gradient_balance requires student_topk_policy_surrogate")
+        balance = _domain_gradient_balance(distillation["domain_gradient_balance"], routing)
 
     expected_evidence = _OBJECTIVE_EVIDENCE[objective]
     for teacher in teachers:
@@ -605,6 +636,7 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
         teachers=teachers,
         routing=routing,
         residency=residency,
+        domain_gradient_balance=balance,
     )
 
 
