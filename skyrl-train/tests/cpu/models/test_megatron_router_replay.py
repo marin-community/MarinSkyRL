@@ -224,10 +224,9 @@ class TestControllerRecomputeFifo:
         controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=True)
         handle = LayerReplayHandle(controller, layer_idx=0)
         targets, mask = _masked_target_rows(4, 2, 8, 4)
-        with torch.no_grad():
-            controller.begin_forward({0: targets}, mask, record_recompute=False)
-            handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
-            controller.end_forward()
+        controller.begin_forward({0: targets}, mask, record_recompute=False)
+        handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
+        controller.end_forward()
         controller.assert_drained()
 
 

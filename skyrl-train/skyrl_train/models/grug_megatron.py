@@ -220,7 +220,7 @@ class GrugSelfAttention(SelfAttention):
 
 
 def _grug_topk_indices(biased_logits: torch.Tensor, topk: int) -> torch.Tensor:
-    """Preserve Grug's biased top-(K+1) selection in both native and replay paths."""
+    """Return the first K indices from Grug's biased top-(K+1) selection."""
     _, indices = jax_top_k(biased_logits, topk + 1)
     return indices[:, :topk]
 
