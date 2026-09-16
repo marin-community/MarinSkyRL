@@ -51,7 +51,11 @@ from skyrl_train.workers.worker import (
     RefWorkerBase,
     CriticWorkerBase,
 )
-from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper, MegatronPolicyMicroBatch
+from skyrl_train.workers.megatron.megatron_model_wrapper import (
+    MegatronForwardMicroBatch,
+    MegatronModelWrapper,
+    MegatronPolicyMicroBatch,
+)
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
 from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, MegatronWeightExtractor
@@ -154,8 +158,8 @@ class MegatronWorker:
         micro_bsz = self.cfg.trainer.micro_forward_batch_size_per_gpu
         micro_batches = data.chunk(micro_bsz)
 
-        # Build micro-batch dicts expected by policy.forward_mini_batch
-        micro_dicts = []
+        # Build typed micro-batches expected by MegatronModelWrapper.forward
+        micro_payloads = []
         device = torch.cuda.current_device()
         for micro in micro_batches:
             micro.to(device)
@@ -164,30 +168,33 @@ class MegatronWorker:
             num_actions = micro.metadata["response_length"]
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
-            micro_dicts.append(
-                {
-                    "sequences": sequences,
-                    "attention_mask": attention_mask,
-                    "position_ids": position_ids,
-                    "num_actions": num_actions,
-                }
+            micro_payloads.append(
+                MegatronForwardMicroBatch(
+                    sequences=sequences,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    num_actions=num_actions,
+                    rollout_routed_experts=micro["rollout_routed_experts"]
+                    if "rollout_routed_experts" in micro.keys()
+                    else None,
+                )
             )
 
         self.model.eval()
-        seq_len = micro_dicts[0]["sequences"].shape[1]
-        mbs = micro_dicts[0]["sequences"].shape[0]
+        seq_len = micro_payloads[0].sequences.shape[1]
+        mbs = micro_payloads[0].sequences.shape[0]
         with torch.no_grad():
             log_probs = self.model.forward(
-                micro_batches=micro_dicts,
+                micro_batches=micro_payloads,
                 seq_len=seq_len,
                 micro_batch_size=mbs,
                 temperature=self.cfg.generator.sampling_params.temperature,
             )
         if self.cfg.trainer.policy.megatron_config.check_train_eval_parity:
-            self._log_forward_fingerprint("forward", micro_dicts)
+            self._log_forward_fingerprint("forward", micro_payloads)
             with torch.no_grad():
                 repeated = self.model.forward(
-                    micro_batches=micro_dicts,
+                    micro_batches=micro_payloads,
                     seq_len=seq_len,
                     micro_batch_size=mbs,
                     temperature=self.cfg.generator.sampling_params.temperature,
@@ -204,12 +211,12 @@ class MegatronWorker:
         output.metadata = data.metadata
         return output
 
-    def _log_forward_fingerprint(self, call: str, micro_dicts: List[dict]) -> None:
+    def _log_forward_fingerprint(self, call: str, micro_payloads: List[MegatronForwardMicroBatch]) -> None:
         """Log checksums of this rank's inputs and parameters so two calls can be compared."""
-        token_sum = sum(int(micro["sequences"].long().sum().item()) for micro in micro_dicts)
-        mask_sum = sum(int(micro["attention_mask"].long().sum().item()) for micro in micro_dicts)
-        position_sum = sum(int(micro["position_ids"].long().sum().item()) for micro in micro_dicts)
-        shapes = [tuple(micro["sequences"].shape) for micro in micro_dicts[:3]]
+        token_sum = sum(int(micro.sequences.long().sum().item()) for micro in micro_payloads)
+        mask_sum = sum(int(micro.attention_mask.long().sum().item()) for micro in micro_payloads)
+        position_sum = sum(int(micro.position_ids.long().sum().item()) for micro in micro_payloads)
+        shapes = [tuple(micro.sequences.shape) for micro in micro_payloads[:3]]
         with torch.no_grad():
             param_sum = 0.0
             param_count = 0
@@ -220,8 +227,8 @@ class MegatronWorker:
         logger.info(
             f"parity probe {call} fingerprint rank={torch.distributed.get_rank()} "
             f"dp_rank={mpu.get_data_parallel_rank()} pp_rank={mpu.get_pipeline_model_parallel_rank()} "
-            f"micros={len(micro_dicts)} shapes={shapes} tokens={token_sum} mask={mask_sum} "
-            f"positions={position_sum} num_actions={micro_dicts[0]['num_actions']} "
+            f"micros={len(micro_payloads)} shapes={shapes} tokens={token_sum} mask={mask_sum} "
+            f"positions={position_sum} num_actions={micro_payloads[0].num_actions} "
             f"params={param_count} param_sum={param_sum:.6f}"
         )
 
@@ -232,16 +239,17 @@ class MegatronWorker:
         train-mode pass isolates module train/eval behaviour from the backward pass. The
         training metrics then report the remaining forward-backward drift.
         """
-        micro_dicts = [
-            {
-                "sequences": micro.sequences,
-                "attention_mask": micro.attention_mask,
-                "position_ids": micro.position_ids,
-                "num_actions": micro.num_actions,
-            }
+        micro_payloads = [
+            MegatronForwardMicroBatch(
+                sequences=micro.sequences,
+                attention_mask=micro.attention_mask,
+                position_ids=micro.position_ids,
+                num_actions=micro.num_actions,
+                rollout_routed_experts=micro.rollout_routed_experts,
+            )
             for micro in micro_buffer
         ]
-        self._log_forward_fingerprint("ppo_train", micro_dicts)
+        self._log_forward_fingerprint("ppo_train", micro_payloads)
         seq_len = micro_buffer[0].sequences.shape[1]
         micro_bsz = micro_buffer[0].sequences.shape[0]
         old = torch.cat([micro.old_action_log_probs for micro in micro_buffer]).float()
@@ -250,7 +258,7 @@ class MegatronWorker:
             self.model.eval() if mode == "eval" else self.model.train()
             with torch.no_grad():
                 repeated = self.model.forward(
-                    micro_batches=micro_dicts,
+                    micro_batches=micro_payloads,
                     seq_len=seq_len,
                     micro_batch_size=micro_bsz,
                     temperature=self.cfg.generator.sampling_params.temperature,
@@ -465,6 +473,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     # are shared with the ordinary worker through backend-neutral utilities.
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
+        if self.model.router_replay is not None and (
+            "rollout_routed_experts" not in train_data.keys() or train_data["rollout_routed_experts"] is None
+        ):
+            raise ValueError("moe_router_replay is on but the batch carries no rollout_routed_experts")
         dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
 
         micro_batches_per_mini_batch = gradient_accumulation_steps(
@@ -509,6 +521,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         response_span_tags=experience.response_span_tags,
                         distillation=experience.distillation,
                         global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
+                        rollout_routed_experts=experience.rollout_routed_experts,
                     )
                 )
 
