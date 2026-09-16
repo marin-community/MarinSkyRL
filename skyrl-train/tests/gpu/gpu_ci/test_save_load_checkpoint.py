@@ -46,13 +46,15 @@ def run_one_training_step(
         )
 
 
-def get_test_actor_config(strategy: str) -> DictConfig:
+def get_test_actor_config(strategy: str, optimizer_checkpoint_sharding_type: str | None = None) -> DictConfig:
     with hydra.initialize_config_dir(config_dir=config_dir):
         cfg = hydra.compose(config_name="ppo_base_config")
 
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
     cfg.trainer.strategy = strategy
+    if strategy == "megatron":
+        cfg.trainer.policy.megatron_config.optimizer_checkpoint_sharding_type = optimizer_checkpoint_sharding_type
 
     cfg.trainer.ckpt_path = CKPT_PATH
     cfg.trainer.export_path = CKPT_PATH
@@ -64,15 +66,16 @@ def get_test_actor_config(strategy: str) -> DictConfig:
 
 
 @pytest.mark.parametrize(
-    "strategy",
+    ("strategy, optimizer_checkpoint_sharding_type"),
     [
-        "deepspeed",
-        "fsdp",
-        "fsdp2",
-        pytest.param("megatron", marks=pytest.mark.megatron),
+        ("deepspeed", None),
+        ("fsdp", None),
+        ("fsdp2", None),
+        pytest.param("megatron", "fully_reshardable", marks=pytest.mark.megatron),
+        pytest.param("megatron", "dp_reshardable", marks=pytest.mark.megatron),
     ],
 )
-def test_save_load_checkpoint(ray_init_fixture, strategy):
+def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_sharding_type):
     """
     Test checkpointing logic by:
     1. Creating model and doing one training step
@@ -81,7 +84,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
     4. Loading checkpoint
     5. Repeating second training step and comparing logits
     """
-    cfg = get_test_actor_config(strategy)
+    cfg = get_test_actor_config(strategy, optimizer_checkpoint_sharding_type)
 
     try:
         actor_group = init_worker_with_type(
@@ -135,6 +138,16 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
                 "pass_through", "save_checkpoint", ckpt_dir=checkpoint_path, tokenizer=tokenizer
             )
         )
+        if strategy == "megatron":
+            # This persisted format controls how the next process constructs its load template.
+            from megatron.core import dist_checkpointing
+
+            optimizer_state = dist_checkpointing.load_common_state_dict(checkpoint_path)["optimizer"]
+            if "param_state_sharding_type" in optimizer_state:
+                saved_formats = {optimizer_state["param_state_sharding_type"]}
+            else:
+                saved_formats = {state["param_state_sharding_type"] for state in optimizer_state.values()}
+            assert saved_formats == {optimizer_checkpoint_sharding_type}
 
         # Step 2.1: Make sure that offloading still works after saving checkpoint
         memory_after_saving = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
