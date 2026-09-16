@@ -20,7 +20,7 @@ DISTILLATION_TOPK_METRIC = "distillation_topk"
 
 @dataclass(frozen=True)
 class TeacherScoreRequest:
-    """Exact student actions submitted to one logical teacher."""
+    """Exact rollout tokens and requested evidence coordinates for one teacher."""
 
     trajectory_ids: tuple[str, ...]
     route_ids: tuple[str, ...]
