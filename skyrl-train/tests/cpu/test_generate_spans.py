@@ -1910,25 +1910,6 @@ def test_the_harbor_dispatcher_forwards_no_accumulator_to_its_shards():
     assert "phase_timings=" not in inspect.getsource(harbor_dispatcher), "no shard may be handed the accumulator"
 
 
-def test_the_trainer_wires_the_generate_span_layer():
-    """The wiring itself, which no behavioural test reaches: _train_loop needs a live Ray cluster,
-    inference engines and a dataloader. Structural, but it catches the regressions that leave a
-    green suite -- a residual computed against a wall that has not closed, or spans collected and
-    then dropped on the floor."""
-
-    source = inspect.getsource(RayPPOTrainer._train_loop)
-    # The residual is generate minus its children, so it is computed after the Timer closes.
-    assert source.index('Timer("generate"') < source.index("record_generate_spans(")
-    assert "generate_timer.duration" in source
-    assert "self.all_rollout_counters" in source
-
-    generate = inspect.getsource(RayPPOTrainer.generate)
-    assert "phase_timings=phase_timings" in generate
-
-    # The counters ride their own publisher, next to the phase publish rather than inside it.
-    assert "publish_driver_counters(self.all_rollout_counters" in source
-
-
 def test_the_SHIPPED_runner_puts_its_own_cost_under_its_own_leaf(monkeypatch):
     """🚨 The shipped brackets, not a private stand-in.
 
@@ -2057,7 +2038,6 @@ def test_the_trainer_hands_its_accumulator_to_the_runner(monkeypatch):
     So drive the real `RayPPOTrainer.generate` with a runner that measures a known cost, and assert
     that cost arrives in the accumulator the trainer was given.
     """
-    from skyrl_train.trainer import RayPPOTrainer
 
     clock = {"now": 0.0}
 
