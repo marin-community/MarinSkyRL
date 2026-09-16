@@ -115,10 +115,33 @@ def verify_remote_checkpoint(checkpoint_uri: str) -> VerifiedCheckpoint:
     )
 
 
+def prune_verified_local_checkpoints(
+    checkpoint_root: Path, output_uri: str, step_roots: list[tuple[int, Path]], retain_local_checkpoints: int
+) -> None:
+    """Keep recent and pending-export steps after verifying remote copies."""
+    if retain_local_checkpoints < 1:
+        raise ValueError("retain_local_checkpoints must be positive")
+    # Rename before removing so an interrupted local deletion cannot leave a
+    # partial global_step_N directory that blocks the next publication pass.
+    for staged in checkpoint_root.glob(f"{PRUNING_PREFIX}{GLOBAL_STEP_PREFIX}*"):
+        suffix = staged.name.removeprefix(f"{PRUNING_PREFIX}{GLOBAL_STEP_PREFIX}")
+        if staged.is_dir() and suffix.isdigit():
+            verify_remote_checkpoint(join_resource_path(output_uri, f"{GLOBAL_STEP_PREFIX}{suffix}"))
+            shutil.rmtree(staged)
+    protected_steps = protected_hf_export_steps(str(checkpoint_root))
+    for step, step_root in step_roots[:-retain_local_checkpoints]:
+        if step in protected_steps:
+            continue
+        verify_remote_checkpoint(join_resource_path(output_uri, step_root.name))
+        staged = step_root.with_name(f"{PRUNING_PREFIX}{step_root.name}")
+        step_root.rename(staged)
+        shutil.rmtree(staged)
+
+
 def publish_committed_checkpoints(
     checkpoint_root: Path, output_uri: str, policy_ranks: int, retain_local_checkpoints: int
 ) -> tuple[int, ...]:
-    """Publish every committed step, then prune only verified older local copies."""
+    """Publish committed steps and advance the pointer before local retention."""
     if retain_local_checkpoints < 1:
         raise ValueError("retain_local_checkpoints must be positive")
     marker = checkpoint_root / LATEST_CHECKPOINT_FILE
@@ -191,19 +214,5 @@ def publish_committed_checkpoints(
         raise ValueError(f"Native checkpoint step {committed_step} has no committed artifact at {output_uri}")
     filesystem.pipe_file(remote_marker, marker_payload)
 
-    # Rename before removing so an interrupted local deletion cannot leave a
-    # partial global_step_N directory that blocks the next publication pass.
-    for staged in checkpoint_root.glob(f"{PRUNING_PREFIX}{GLOBAL_STEP_PREFIX}*"):
-        suffix = staged.name.removeprefix(f"{PRUNING_PREFIX}{GLOBAL_STEP_PREFIX}")
-        if staged.is_dir() and suffix.isdigit():
-            verify_remote_checkpoint(join_resource_path(output_uri, f"{GLOBAL_STEP_PREFIX}{suffix}"))
-            shutil.rmtree(staged)
-    protected_steps = protected_hf_export_steps(str(checkpoint_root))
-    for step, step_root in step_roots[:-retain_local_checkpoints]:
-        if step in protected_steps:
-            continue
-        verify_remote_checkpoint(join_resource_path(output_uri, step_root.name))
-        staged = step_root.with_name(f"{PRUNING_PREFIX}{step_root.name}")
-        step_root.rename(staged)
-        shutil.rmtree(staged)
+    prune_verified_local_checkpoints(checkpoint_root, output_uri, step_roots, retain_local_checkpoints)
     return tuple(published)

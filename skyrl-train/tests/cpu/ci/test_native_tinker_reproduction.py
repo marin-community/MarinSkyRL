@@ -429,12 +429,17 @@ def test_native_checkpoint_publication_commits_only_complete_verified_steps(tmp_
 
 def test_native_checkpoint_publication_prunes_only_remotely_verified_old_steps(tmp_path: Path, monkeypatch):
     checkpoint_root = tmp_path / "checkpoints"
-    for step in (2, 4, 6):
+
+    def write_step(step: int) -> Path:
         step_root = checkpoint_root / f"global_step_{step}"
         for relative in PUBLICATION.required_checkpoint_files(policy_ranks=2):
             path = step_root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(f"step-{step}:{relative}".encode())
+        return step_root
+
+    for step in (2, 4, 6):
+        write_step(step)
     (checkpoint_root / "latest_ckpt_global_step.txt").write_text("6")
     filesystem = MemoryFileSystem()
     output_uri = f"s3://bucket/{tmp_path.name}/checkpoints"
@@ -477,11 +482,7 @@ def test_native_checkpoint_publication_prunes_only_remotely_verified_old_steps(t
     for step in (2, 4, 6):
         assert PUBLICATION.verify_remote_checkpoint(f"{output_uri}/global_step_{step}").step == step
 
-    step_eight = checkpoint_root / "global_step_8"
-    for relative in PUBLICATION.required_checkpoint_files(policy_ranks=2):
-        path = step_eight / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(f"step-8:{relative}".encode())
+    step_eight = write_step(8)
     (checkpoint_root / "latest_ckpt_global_step.txt").write_text("8")
     original_rmtree = PUBLICATION.shutil.rmtree
 
