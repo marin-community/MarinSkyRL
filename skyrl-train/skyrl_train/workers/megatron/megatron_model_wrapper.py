@@ -130,7 +130,7 @@ class MegatronModelWrapper:
             vocab_end_index=(tp_rank + 1) * logits.shape[-1],
             tp_group=tp_group,
             inference_only=not self.actor_module[0].training,
-            cp_group=None,
+            cp_group=mpu.get_context_parallel_group(),
             chunk_size=self._logprob_chunk_size,
         )
         return scatter_token_values(compact_logprobs, attention_mask, drop_last=True)
