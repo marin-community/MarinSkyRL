@@ -79,7 +79,8 @@ def _routed_batch(pad_token_id: int, *, captured: bool) -> TrainingInputBatch:
     if not captured:
         routes = torch.zeros(shape, dtype=torch.long)  # empty capture: everything routes natively
     else:
-        routes = torch.randint(0, NUM_EXPERTS, shape, generator=generator)
+        scores = torch.rand((*shape[:-1], NUM_EXPERTS), generator=generator)
+        routes = scores.argsort(dim=-1)[..., :TOPK]
         routes[1] = 0  # one sample with fully-lost capture routes natively
     batch["rollout_routed_experts"] = routes.to(torch.int32)
     return batch

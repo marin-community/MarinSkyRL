@@ -151,7 +151,7 @@ def _captured_routing_maps(model: list[torch.nn.Module], input_ids: torch.Tensor
 
 def _replay_targets(n: int, num_experts: int, topk: int, n_masked: int, device: str):
     generator = torch.Generator().manual_seed(23)
-    targets = torch.randint(0, num_experts, (n, topk), generator=generator).to(device)
+    targets = torch.rand((n, num_experts), generator=generator).argsort(dim=-1)[:, :topk].to(device)
     mask = torch.zeros(n, dtype=torch.bool, device=device)
     mask[:n_masked] = True
     return targets, mask

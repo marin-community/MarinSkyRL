@@ -59,17 +59,20 @@ def _routed_batch(pad_token_id: int, *, routes: str = "random", seed: int = 29) 
     batch = _padded_batch(pad_token_id)
     generator = torch.Generator().manual_seed(seed)
     shape = (batch["sequences"].shape[0], RESPONSE_LENGTH, NUM_LAYERS, TOPK)
+
+    def unique_routes(route_shape):
+        scores = torch.rand((*route_shape[:-1], NUM_EXPERTS), generator=generator)
+        return scores.argsort(dim=-1)[..., : route_shape[-1]]
+
     if routes == "random":
-        rollout_routed_experts = torch.randint(0, NUM_EXPERTS, shape, generator=generator)
+        rollout_routed_experts = unique_routes(shape)
         rollout_routed_experts[1] = 0  # one sample with fully-lost capture routes natively
     elif routes == "sentinel":
         rollout_routed_experts = torch.zeros(shape, dtype=torch.long)
     elif routes == "wrong_layers":
-        rollout_routed_experts = torch.randint(0, NUM_EXPERTS, (*shape[:2], NUM_LAYERS - 1, TOPK), generator=generator)
+        rollout_routed_experts = unique_routes((*shape[:2], NUM_LAYERS - 1, TOPK))
     elif routes == "wrong_response":
-        rollout_routed_experts = torch.randint(0, NUM_EXPERTS, (*shape[:2], NUM_LAYERS, TOPK), generator=generator)[
-            :, :-1
-        ]
+        rollout_routed_experts = unique_routes((*shape[:2], NUM_LAYERS, TOPK))[:, :-1]
     else:
         raise ValueError(routes)
     batch["rollout_routed_experts"] = rollout_routed_experts.to(torch.int32)
