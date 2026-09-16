@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import subprocess
 from pathlib import Path
@@ -12,8 +13,11 @@ from cloud.iris.open_mopd_fidelity_task import (
     FileVerification,
     StagedInputs,
     patch_source_compatibility,
+    restore_latest_checkpoint,
+    sync_tree,
     training_command,
     validate_runtime,
+    validate_resume_manifest,
     verify_lfs_files,
 )
 
@@ -243,11 +247,11 @@ def test_training_command_has_semantic_control_settings() -> None:
         "+mt_opd.reward_scale_anchored": "True",
         "+mt_opd.conflict_policy": "none",
         "trainer.total_training_steps": "200",
-        "trainer.save_freq": "50",
+        "trainer.save_freq": "2",
         "trainer.test_freq": "-1",
         "trainer.val_before_train": "False",
         "trainer.logger": "['console']",
-        "trainer.resume_mode": "disable",
+        "trainer.resume_mode": "auto",
     }
     assert command[command.index("--gpus") + 1] == "8"
     assert config.training.train_batch_size // config.training.mini_batch_size * config.training.ppo_epochs == 4
@@ -262,6 +266,143 @@ def test_all_acceptance_gates_resolve_steps_and_checkpoints() -> None:
         command = training_command(config, inputs, gate, Path("/output"), world_size=8)
         assert f"trainer.total_training_steps={steps}" in command
         assert f"trainer.save_freq={min(steps, config.training.save_every)}" in command
+
+
+def test_restore_latest_checkpoint_downloads_only_committed_step(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class MemoryFilesystem:
+        files = {
+            "bucket/run/checkpoints/global_step_2/actor/model.pt": b"old",
+            "bucket/run/checkpoints/global_step_4/actor/model.pt": b"weights",
+            "bucket/run/checkpoints/global_step_4/data.pt": b"dataloader",
+            "bucket/run/checkpoints/latest_checkpointed_iteration.txt": b"4",
+        }
+
+        def find(self, target: str) -> list[str]:
+            assert target == "bucket/run"
+            return list(self.files)
+
+        def open(self, path: str, encoding: str):
+            return io.StringIO(self.files[path].decode(encoding))
+
+        def get_file(self, remote: str, local: str) -> None:
+            Path(local).write_bytes(self.files[remote])
+
+    filesystem = MemoryFilesystem()
+    monkeypatch.setattr(fidelity_task, "fs_and_path", lambda _: (filesystem, "bucket/run"))
+
+    step = restore_latest_checkpoint(OUTPUT_URI, tmp_path)
+
+    assert step == 4
+    assert (tmp_path / "checkpoints/global_step_4/actor/model.pt").read_bytes() == b"weights"
+    assert (tmp_path / "checkpoints/global_step_4/data.pt").read_bytes() == b"dataloader"
+    assert (tmp_path / "checkpoints/latest_checkpointed_iteration.txt").read_text() == "4"
+    assert not (tmp_path / "checkpoints/global_step_2").exists()
+
+
+def test_sync_tree_skips_published_checkpoint_files_and_commits_pointer_last(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class MemoryFilesystem:
+        files = {
+            "bucket/run/checkpoints/global_step_2/actor/model.pt": b"old-local",
+            "bucket/run/checkpoints/latest_checkpointed_iteration.txt": b"2",
+            "bucket/run/control-manifest.json": b"old-manifest",
+        }
+        uploads: list[str] = []
+
+        def find(self, target: str, *, detail: bool, withdirs: bool) -> dict[str, dict[str, int]]:
+            assert target == "bucket/run"
+            assert detail
+            assert not withdirs
+            return {path: {"size": len(payload)} for path, payload in self.files.items()}
+
+        def makedirs(self, _path: str, *, exist_ok: bool) -> None:
+            assert exist_ok
+
+        def put_file(self, local: str, remote: str) -> None:
+            self.files[remote] = Path(local).read_bytes()
+            self.uploads.append(remote)
+            if remote == "bucket/run/control-manifest.json":
+                pointer.write_text("6")
+
+        def pipe_file(self, remote: str, payload: bytes) -> None:
+            self.files[remote] = payload
+            self.uploads.append(remote)
+
+    checkpoint_root = tmp_path / "checkpoints"
+    step_2 = checkpoint_root / "global_step_2" / "actor" / "model.pt"
+    step_2.parent.mkdir(parents=True)
+    step_2.write_bytes(b"old-local")
+    step_4 = checkpoint_root / "global_step_4" / "actor" / "model.pt"
+    step_4.parent.mkdir(parents=True)
+    step_4.write_bytes(b"new-weights")
+    step_6 = checkpoint_root / "global_step_6" / "actor" / "model.pt"
+    step_6.parent.mkdir(parents=True)
+    step_6.write_bytes(b"still-writing")
+    pointer = checkpoint_root / fidelity_task.LATEST_CHECKPOINT_NAME
+    pointer.write_text("4")
+    (tmp_path / fidelity_task.CONTROL_MANIFEST_NAME).write_bytes(b"new-manifest")
+    filesystem = MemoryFilesystem()
+    monkeypatch.setattr(fidelity_task, "fs_and_path", lambda _: (filesystem, "bucket/run"))
+
+    sync_tree(tmp_path, OUTPUT_URI)
+
+    assert "bucket/run/checkpoints/global_step_2/actor/model.pt" not in filesystem.uploads
+    assert filesystem.files["bucket/run/checkpoints/global_step_4/actor/model.pt"] == b"new-weights"
+    assert "bucket/run/checkpoints/global_step_6/actor/model.pt" not in filesystem.files
+    assert filesystem.files["bucket/run/control-manifest.json"] == b"new-manifest"
+    assert pointer.read_text() == "6"
+    assert filesystem.files["bucket/run/checkpoints/latest_checkpointed_iteration.txt"] == b"4"
+    assert filesystem.uploads[-1] == "bucket/run/checkpoints/latest_checkpointed_iteration.txt"
+    pointer.unlink()
+    original_rglob = Path.rglob
+
+    def rglob_after_checkpoint(tmp_path_: Path, pattern: str):
+        pointer.write_text("2")
+        return original_rglob(tmp_path_, pattern)
+
+    filesystem.uploads.clear()
+    monkeypatch.setattr(Path, "rglob", rglob_after_checkpoint)
+
+    sync_tree(tmp_path, OUTPUT_URI)
+
+    assert "bucket/run/checkpoints/latest_checkpointed_iteration.txt" not in filesystem.uploads
+    assert filesystem.files["bucket/run/checkpoints/latest_checkpointed_iteration.txt"] == b"4"
+
+
+def test_resume_manifest_rejects_mismatched_run_identity() -> None:
+    identity = {"gate": "paper_checkpoint", "steps": 200}
+
+    validate_resume_manifest(identity, identity, OUTPUT_URI)
+    with pytest.raises(ValueError, match="steps"):
+        validate_resume_manifest(identity, identity | {"steps": 201}, OUTPUT_URI)
+    with pytest.raises(ValueError, match="completed control"):
+        validate_resume_manifest(identity | {"returncode": 0}, identity, OUTPUT_URI)
+
+
+def test_periodic_sync_retries_after_upload_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class StopAfterTwoAttempts:
+        waits = 0
+
+        def wait(self, _interval: int) -> bool:
+            self.waits += 1
+            return self.waits > 2
+
+    attempts = 0
+
+    def sync_tree(_local: Path, _output_uri: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("transient failure")
+
+    monkeypatch.setattr(fidelity_task, "sync_tree", sync_tree)
+
+    fidelity_task.periodic_sync(tmp_path, OUTPUT_URI, StopAfterTwoAttempts(), interval=1)
+
+    assert attempts == 2
 
 
 def test_gpu_override_records_deviation_and_enforces_authors_world_size() -> None:
@@ -279,6 +420,7 @@ def test_gpu_override_records_deviation_and_enforces_authors_world_size() -> Non
     assert plan.gpu_slice == "H100x8"
     assert any("H100x8" in deviation for deviation in plan.known_deviations)
     assert "--no-sync" in plan.iris_command
+    assert plan.iris_command[plan.iris_command.index("--priority") + 1] == "interactive"
     assert plan.iris_command[plan.iris_command.index("--gpu-slice") + 1] == "H100x8"
     with pytest.raises(ValueError, match="8-GPU"):
         fidelity.gpu_count("H100x4")

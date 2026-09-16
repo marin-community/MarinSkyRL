@@ -47,6 +47,7 @@ from skyrl_train import hf_model_io
 # fully_reshardable format gathers optimizer state onto DP rank zero's CPU; dp_reshardable
 # writes DP-local optimizer shards without a gather but cannot change non-DP geometry on load.
 _OPTIMIZER_CHECKPOINT_SHARDING_TYPES = {"fully_reshardable", "dp_reshardable"}
+_PARAM_STATE_SHARDING_TYPE_KEY = "param_state_sharding_type"
 
 
 def _optimizer_checkpoint_metadata(sharding_type: str) -> dict:
@@ -60,10 +61,10 @@ def _optimizer_checkpoint_metadata(sharding_type: str) -> dict:
 
 def _saved_optimizer_sharding_type(common_state: dict) -> str:
     optimizer_state = common_state["optimizer"]
-    if "param_state_sharding_type" in optimizer_state:
-        saved_types = {optimizer_state["param_state_sharding_type"]}
+    if _PARAM_STATE_SHARDING_TYPE_KEY in optimizer_state:
+        saved_types = {optimizer_state[_PARAM_STATE_SHARDING_TYPE_KEY]}
     else:
-        saved_types = {state["param_state_sharding_type"] for state in optimizer_state.values()}
+        saved_types = {state[_PARAM_STATE_SHARDING_TYPE_KEY] for state in optimizer_state.values()}
     if len(saved_types) != 1:
         raise ValueError(f"Checkpoint contains mixed optimizer sharding types: {saved_types}")
     sharding_type = saved_types.pop()
@@ -292,14 +293,18 @@ class MegatronStrategy(DistributedStrategy):
         assert "model" in state_dict, (
             f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
         )
-        model[0].load_state_dict(state_dict["model"], strict=load_module_strict)
+        model[0].load_state_dict(state_dict.pop("model"), strict=load_module_strict)
         self.log("Loaded model state dict.")
 
         if optimizer and load_training_state:
             assert "optimizer" in state_dict, (
                 f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             )
-            optimizer.load_state_dict(state_dict["optimizer"])
+            # Gradients are not checkpointed. Free their GPU buffers while FusedAdam
+            # reconstructs the checkpointed moments, then restore empty buffers for training.
+            offload_megatron_grads_to_cpu(model)
+            optimizer.load_state_dict(state_dict.pop("optimizer"))
+            load_megatron_grads_to_gpu(model)
             self.log("Loaded optimizer state dict.")
 
         if scheduler and load_training_state:

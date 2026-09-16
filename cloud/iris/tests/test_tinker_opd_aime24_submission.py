@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from iris.rpc import job_pb2
 
 SUBMITTER_PATH = Path(__file__).parents[3] / "skyrl-train" / "ci" / "opd" / "tinker_repro" / "submit_iris.py"
 sys.path.insert(0, str(SUBMITTER_PATH.parent))
@@ -61,7 +62,7 @@ def test_submit_sends_secret_only_in_environment_and_requests_cpu_worker(monkeyp
     constraint = request["constraints"][0].to_proto()
     assert constraint.key == "preemptible"
     assert constraint.value.string_value == "false"
-    assert submitter.job_pb2.PriorityBand.Name(request["priority_band"]) == "PRIORITY_BAND_INTERACTIVE"
+    assert job_pb2.PriorityBand.Name(request["priority_band"]) == "PRIORITY_BAND_INTERACTIVE"
     assert request["replicas"] == 1
     assert request["max_retries_failure"] == 0
     assert request["max_task_failures"] == 0

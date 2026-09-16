@@ -107,6 +107,8 @@ class TrajectoryBatch(TypedDict):
     error_treatments: Optional[List[Optional[str]]]
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
+    student_topk_indices: Optional[List[List[List[int]]]]
+    behavior_topk_logprobs: Optional[List[List[List[float]]]]
     rollout_routed_experts: Optional[List[List[List[List[int]]]]]
     teacher_evidence: Optional[TeacherEvidenceBatch]
     distillation: Optional[DistillationInput]

@@ -72,6 +72,7 @@ from skyrl_train.inference_engines.base import (
     LORA_DISK_LOAD_NAME,
     LORA_DISK_PATH_KEY,
 )
+from skyrl_train.inference_engines.response_topk import select_response_topk
 from skyrl_train.inference_engines.opencode_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync import WeightLoader
@@ -1008,6 +1009,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
+        per_prompt_sampling_params = input_batch.get("sampling_params_per_prompt")
         if self._validate_rollout_logprob_sampling and request_sampling_params is not None:
             if request_sampling_params.get("logprobs") is not None:
                 validate_behavior_logprob_sampling(request_sampling_params)
@@ -1016,18 +1018,31 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             "VLLMInferenceEngine only accepts `prompt_token_ids`, not `prompts`."
         )
 
-        sampling_params = (
-            SamplingParams(**request_sampling_params) if request_sampling_params is not None else SamplingParams()
-        )
+        base_params = request_sampling_params or {}
+        if per_prompt_sampling_params is None:
+            sampling_params = SamplingParams(**base_params)
+        else:
+            if len(per_prompt_sampling_params) != len(prompt_token_ids):
+                raise ValueError("per-prompt sampling parameters must align with prompt token rows")
+            if any(set(override) != {"prompt_logprob_token_ids"} for override in per_prompt_sampling_params):
+                raise ValueError("per-prompt sampling parameters only support prompt_logprob_token_ids")
+            sampling_params = [SamplingParams(**{**base_params, **override}) for override in per_prompt_sampling_params]
 
         return prompt_token_ids, sampling_params
 
-    def _postprocess_outputs(self, outputs):
+    @staticmethod
+    def _response_top_k(sampling_params: SamplingParams | list[SamplingParams]) -> int | None:
+        first = sampling_params[0] if isinstance(sampling_params, list) else sampling_params
+        return first.logprobs
+
+    def _postprocess_outputs(self, outputs, response_top_k: int | None = None):
         """Common output processing logic."""
         responses: List[str] = []
         stop_reasons: List[str] = []
         response_ids: List[List[int]] = []
         response_logprobs: Optional[List[List[float]]] = []
+        student_topk_indices: List[List[List[int]]] = []
+        behavior_topk_logprobs: List[List[List[float]]] = []
         all_prompt_logprobs: Optional[List] = None
 
         for output in outputs:
@@ -1040,6 +1055,8 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             stop_reasons.append(resp.finish_reason)
             response_ids.append(resp.token_ids)
             _logprobs = None
+            selected_ids = []
+            selected_scores = []
             if resp.logprobs:
                 _logprobs = []
                 for i, token_logprobs in enumerate(resp.logprobs):
@@ -1047,8 +1064,19 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                     token_id = resp.token_ids[i]
                     logprob = token_logprobs[token_id].logprob
                     _logprobs.append(logprob)
+                    if response_top_k is not None and response_top_k > 0:
+                        ids, scores = select_response_topk(
+                            {token_id: value.logprob for token_id, value in token_logprobs.items()}, response_top_k
+                        )
+                        selected_ids.append(ids)
+                        selected_scores.append(scores)
                     del token_logprobs
             response_logprobs.append(_logprobs)
+            if response_top_k is not None and response_top_k > 0:
+                if len(selected_ids) != len(resp.token_ids):
+                    raise ValueError("vLLM omitted response top-K logprobs for generated tokens")
+                student_topk_indices.append(selected_ids)
+                behavior_topk_logprobs.append(selected_scores)
 
             # Extract prompt_logprobs if available (used for teacher scoring)
             if hasattr(output, "prompt_logprobs") and output.prompt_logprobs is not None:
@@ -1072,13 +1100,17 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         if len(response_logprobs) and response_logprobs[0] is None:
             response_logprobs = None  # hack: assume uniform sampling params
 
-        return InferenceEngineOutput(
+        result = InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs,
             prompt_logprobs=all_prompt_logprobs,
         )
+        if response_top_k is not None and response_top_k > 0:
+            result["student_topk_indices"] = student_topk_indices
+            result["behavior_topk_logprobs"] = behavior_topk_logprobs
+        return result
 
     def _get_engine(self):
         """Get the underlying engine for RPC calls."""
@@ -1133,6 +1165,10 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Apply affinity on every synchronous vLLM worker."""
         return await set_sync_worker_numa_affinity(self.llm.collective_rpc)
 
+    async def report_engine_hosts(self):
+        """Wait for the synchronous engine's workers to load before weight sync."""
+        return await asyncio.to_thread(self.llm.collective_rpc, "report_host")
+
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         prompt_token_ids, sampling_params = self._preprocess_prompts(input_batch)
 
@@ -1155,7 +1191,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             lora_request=lora_requests,
         )
 
-        return self._postprocess_outputs(outputs)
+        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
@@ -1869,12 +1905,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         tasks = []
         request_ids: list[str] = []
-        for prompt in prompt_token_ids:
+        per_prompt = sampling_params if isinstance(sampling_params, list) else [sampling_params] * len(prompt_token_ids)
+        for prompt, row_sampling_params in zip(prompt_token_ids, per_prompt, strict=True):
             # Schedule the collection of outputs for each prompt.
             # Avoid duplicate request_ids
             request_id = str(uuid4().hex)
             request_ids.append(request_id)
-            task = asyncio.create_task(self._collect_outputs(prompt, request_id, sampling_params))
+            task = asyncio.create_task(self._collect_outputs(prompt, request_id, row_sampling_params))
             tasks.append(task)
         try:
             outputs = await asyncio.gather(*tasks)
@@ -1900,7 +1937,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
             raise
 
-        return self._postprocess_outputs(outputs)
+        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))

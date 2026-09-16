@@ -18,7 +18,11 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
-from marinskyrl.distillation import compile_distillation_plan_from_config, validate_distillation_runtime_support
+from marinskyrl.distillation import (
+    DistillationObjectiveKind,
+    compile_distillation_plan_from_config,
+    validate_distillation_runtime_support,
+)
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 from skyrl_train.callbacks.types import (
@@ -36,7 +40,6 @@ from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
 from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
-
 from .algorithm_registry import (
     AdvantageEstimatorRegistry,
     NoGroupAdvantage,
@@ -51,11 +54,11 @@ from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTI
 from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
-MOE_ROUTER_REPLAY_STRATEGIES = frozenset({"fsdp", "fsdp2"})
+MOE_ROUTER_REPLAY_STRATEGIES = frozenset({"fsdp", "fsdp2", "megatron"})
 
 
-def moe_router_replay_requested(cfg: DictConfig) -> bool:
-    return bool(cfg.trainer.policy.fsdp_config.get("moe_router_replay", False))
+def moe_router_replay_requested(cfg: DictConfig, role: str = "policy") -> bool:
+    return bool(cfg.trainer[role].fsdp_config.get("moe_router_replay", False))
 
 
 def moe_router_replay_enabled(cfg: DictConfig) -> bool:
@@ -63,7 +66,7 @@ def moe_router_replay_enabled(cfg: DictConfig) -> bool:
 
 
 def validate_moe_router_replay_config(cfg: DictConfig) -> None:
-    """Reject router replay on strategies that silently ignore captured routes."""
+    """Reject router replay on strategies whose workers never consume captured routes."""
     if moe_router_replay_requested(cfg) and cfg.trainer.strategy not in MOE_ROUTER_REPLAY_STRATEGIES:
         supported = ", ".join(sorted(MOE_ROUTER_REPLAY_STRATEGIES))
         raise ValueError(
@@ -476,6 +479,28 @@ def validate_megatron_cfg(cfg: DictConfig):
         assert config.sequence_parallel_size == 1, (
             f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"
         )
+        # The fused router bypasses the replay hook entirely; catch it at config
+        # validation on the launcher CPU instead of at model build on the GPUs.
+        if config.fsdp_config.get("moe_router_replay", False):
+            for kwargs_name in ("transformer_config_kwargs", "model_config_kwargs"):
+                for key_path, value in _iter_config_kwargs(config.megatron_config.get(kwargs_name, {})):
+                    if key_path[-1] == "moe_router_fusion" and value:
+                        raise ValueError(
+                            f"trainer.{worker_type}.megatron_config.{kwargs_name}.{'.'.join(key_path)} "
+                            "must stay false with moe_router_replay: the fused router bypasses the replay hook"
+                        )
+
+
+def _iter_config_kwargs(node):
+    """Yield ``(key_path, value)`` for every leaf in a (possibly nested) kwargs mapping."""
+    if not node:
+        return
+    for key, value in node.items():
+        if isinstance(value, dict):
+            for path, leaf in _iter_config_kwargs(value):
+                yield (key, *path), leaf
+        else:
+            yield (key,), value
 
 
 def _validate_cp_cfg(cfg: DictConfig):
@@ -576,6 +601,20 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 def validate_cfg(cfg: DictConfig):
     distillation_plan = compile_distillation_plan_from_config(cfg)
     validate_distillation_runtime_support(distillation_plan)
+    if (
+        distillation_plan is not None
+        and distillation_plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+        and cfg.trainer.strategy in {"fsdp", "fsdp2", "deepspeed"}
+        and (
+            cfg.trainer.use_sample_packing
+            or cfg.trainer.policy.sequence_parallel_size != 1
+            or cfg.trainer.policy.fsdp_config.context_parallel_size != 1
+        )
+    ):
+        raise ValueError(
+            "student_topk_policy_surrogate on FSDP2/DeepSpeed requires trainer.use_sample_packing=false, "
+            "trainer.policy.sequence_parallel_size=1, and trainer.policy.fsdp_config.context_parallel_size=1"
+        )
     trajectory_selector = trajectory_selector_from_config(cfg)
     if trajectory_selector is not None:
         if cfg.trainer.step_wise_training:
@@ -909,9 +948,18 @@ def validate_generator_cfg(cfg: DictConfig):
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
         if cfg.generator.sampling_params.logprobs > 0:
-            raise ValueError(
-                f"`logprobs` if set should be 0 i.e only for the chosen token, got {cfg.generator.sampling_params.logprobs}"
-            )
+            plan = compile_distillation_plan_from_config(cfg)
+            widths = {teacher.top_k for teacher in plan.teachers} if plan is not None else set()
+            if (
+                plan is None
+                or plan.objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+                or widths != {cfg.generator.sampling_params.logprobs}
+                or cfg.generator.backend != "vllm"
+            ):
+                raise ValueError(
+                    "positive generator.sampling_params.logprobs requires a local vLLM "
+                    "student_topk_policy_surrogate plan with matching teacher top_k"
+                )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 

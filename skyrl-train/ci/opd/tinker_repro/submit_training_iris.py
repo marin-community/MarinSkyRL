@@ -14,6 +14,8 @@ from iris_settings import (
     MAX_RETRIES,
     OPD_RESOURCES,
     PREEMPTIBLE,
+    PRIORITY_BAND,
+    PRIORITY_NAME,
     REPLICAS,
     REPOSITORY_ROOT,
     SFT_RESOURCES,
@@ -22,7 +24,6 @@ from iris_settings import (
 from iris.cli.connect import open_iris_client
 from iris.cluster.constraints import Constraint, preemptible_constraint
 from iris.cluster.types import Entrypoint, EnvironmentSpec, ResourceSpec
-from iris.rpc import job_pb2
 from training_plan import Recipe, Stage, TrainingPlan, build_training_plan, validate_cost_acknowledgement
 
 WORKER_PATH = "skyrl-train/ci/opd/tinker_repro/run_training.py"
@@ -80,12 +81,6 @@ def _resources(plan: TrainingPlan) -> ResourceShape:
     return OPD_RESOURCES
 
 
-def _priority(plan: TrainingPlan) -> int:
-    if plan.cost_acknowledgement_usd is not None:
-        return job_pb2.PRIORITY_BAND_BATCH
-    return job_pb2.PRIORITY_BAND_INTERACTIVE
-
-
 def worker_command(config: SubmissionConfig) -> tuple[str, ...]:
     plan = config.plan
     command = [
@@ -111,7 +106,6 @@ def worker_command(config: SubmissionConfig) -> tuple[str, ...]:
 def public_plan(config: SubmissionConfig) -> PublicSubmissionPlan:
     plan = config.plan
     resources = _resources(plan)
-    priority = _priority(plan)
     return PublicSubmissionPlan(
         training=plan,
         cluster=CLUSTER,
@@ -120,7 +114,7 @@ def public_plan(config: SubmissionConfig) -> PublicSubmissionPlan:
         memory=resources.memory,
         disk=resources.disk,
         non_preemptible=not PREEMPTIBLE,
-        priority=job_pb2.PriorityBand.Name(priority).removeprefix("PRIORITY_BAND_").lower(),
+        priority=PRIORITY_NAME,
         replicas=REPLICAS,
         max_retries=MAX_RETRIES,
         required_cost_acknowledgement_usd=plan.cost_acknowledgement_usd,
@@ -145,7 +139,7 @@ def build_submission(config: SubmissionConfig, *, credentials: Credentials) -> I
         resources=ResourceSpec(cpu=resources.cpu, memory=resources.memory, disk=resources.disk),
         environment=EnvironmentSpec(env_vars=environment, setup_scripts=[]),
         constraints=(preemptible_constraint(PREEMPTIBLE),),
-        priority_band=_priority(plan),
+        priority_band=PRIORITY_BAND,
         job_name=f"tinker-{plan.stage.value.replace('_', '-')}-{plan.run_id}",
     )
 

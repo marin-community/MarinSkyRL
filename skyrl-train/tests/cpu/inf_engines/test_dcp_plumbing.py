@@ -91,6 +91,23 @@ def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):
     assert captured["engine_init_kwargs"]["revision"] == revision
 
 
+def test_from_config_reserves_enough_rollout_logprobs(monkeypatch):
+    pytest.importorskip("hydra")
+    pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")
+    from skyrl_train.entrypoints import main_base
+    import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
+
+    captured = {}
+    monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
+    cfg = get_default_config()
+    cfg.generator.sampling_params.logprobs = 16
+    cfg.generator.eval_sampling_params.logprobs = 24
+
+    main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
+
+    assert captured["max_logprobs"] == 24
+
+
 def test_policy_tokenizer_uses_configured_revision(monkeypatch):
     pytest.importorskip("hydra")
     pytest.importorskip("torchdata", reason="torchdata absent (Mac dev-env artifact)")

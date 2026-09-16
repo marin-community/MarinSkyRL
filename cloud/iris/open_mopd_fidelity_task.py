@@ -13,10 +13,12 @@ import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from cloud.iris.artifacts import fs_and_path
+from cloud.iris.artifacts import fs_and_path, read_json, relative_object_key
 from cloud.iris.open_mopd_fidelity import (
+    CHECKPOINT_DIRECTORY_NAME,
     DOMAINS,
     GATES,
+    GLOBAL_STEP_PREFIX,
     FidelityConfig,
     LfsFile,
     gpu_count,
@@ -24,8 +26,13 @@ from cloud.iris.open_mopd_fidelity import (
     validate_output_uri,
 )
 from open_mopd_versions import versions_match
+from marinskyrl.resource_locator import join_resource_path
 
 CONTROL_MANIFEST_NAME = "control-manifest.json"
+LATEST_CHECKPOINT_NAME = "latest_checkpointed_iteration.txt"
+STATUS_RUNNING = "running"
+STATUS_COMPLETE = "complete"
+STATUS_FAILED = "failed"
 HYDRA_REWARD_MODE_PATCH = "scripts/local/mt_opd.sh: declare the release-only rollout.reward_mode key"
 RAW_PROMPT_RETENTION_PATCH = "verl/trainer/ppo/ray_trainer.py: retain raw_prompt for teacher retokenization"
 
@@ -287,7 +294,7 @@ def training_command(
         "trainer.test_freq=-1",
         "trainer.val_before_train=False",
         "trainer.logger=['console']",
-        "trainer.resume_mode=disable",
+        "trainer.resume_mode=auto",
     ]
     command = [
         "bash",
@@ -310,7 +317,7 @@ def training_command(
         "--output",
         str(output),
         "--checkpoint",
-        str(output / "checkpoints"),
+        str(output / CHECKPOINT_DIRECTORY_NAME),
         "--gpus",
         str(world_size),
     ]
@@ -326,25 +333,108 @@ def training_command(
     return ["env", *(f"{key}={value}" for key, value in training_env.items()), *command]
 
 
+def _checkpoint_step(relative: Path) -> int | None:
+    """Return the checkpoint step encoded by a payload path, if present."""
+    if len(relative.parts) < 3 or relative.parts[0] != CHECKPOINT_DIRECTORY_NAME:
+        return None
+    step_directory = relative.parts[1]
+    if not step_directory.startswith(GLOBAL_STEP_PREFIX):
+        return None
+    step = step_directory[len(GLOBAL_STEP_PREFIX) :]
+    return int(step) if step.isdigit() else None
+
+
 def sync_tree(local: Path, output_uri: str) -> None:
     filesystem, target = fs_and_path(output_uri)
-    for source in local.rglob("*"):
-        if not source.is_file():
+    pointer = local / CHECKPOINT_DIRECTORY_NAME / LATEST_CHECKPOINT_NAME
+    pointer_payload = None
+    committed_step = None
+    if pointer.is_file():
+        pointer_payload = pointer.read_bytes()
+        pointer_value = pointer_payload.decode().strip()
+        if not pointer_value.isdigit():
+            raise ValueError(f"Invalid local checkpoint iteration {pointer_value!r}")
+        committed_step = int(pointer_value)
+    sources = sorted((source for source in local.rglob("*") if source.is_file()), key=lambda path: path.as_posix())
+    sources.sort(key=lambda path: path.name == LATEST_CHECKPOINT_NAME)
+    source_entries = [
+        (source, source.relative_to(local), _checkpoint_step(source.relative_to(local))) for source in sources
+    ]
+    upload_entries = [
+        (source, relative, step)
+        for source, relative, step in source_entries
+        if (source != pointer or pointer_payload is not None)
+        and (step is None or (committed_step is not None and step <= committed_step))
+    ]
+    checkpoint_sources = {source for source, _relative, step in upload_entries if step is not None}
+    remote_sizes: dict[str, int] = {}
+    if checkpoint_sources:
+        remote_details = filesystem.find(target, detail=True, withdirs=False)
+        remote_sizes = {
+            relative_object_key(target, remote_path): int(details["size"])
+            for remote_path, details in remote_details.items()
+        }
+    for source, relative, _step in upload_entries:
+        destination = posixpath.join(target, relative.as_posix())
+        if source in checkpoint_sources and remote_sizes.get(relative.as_posix()) == source.stat().st_size:
             continue
-        destination = posixpath.join(target, source.relative_to(local).as_posix())
         filesystem.makedirs(posixpath.dirname(destination), exist_ok=True)
-        filesystem.put_file(str(source), destination)
+        if source == pointer:
+            assert pointer_payload is not None
+            filesystem.pipe_file(destination, pointer_payload)
+        else:
+            filesystem.put_file(str(source), destination)
 
 
 def reject_existing_output(output_uri: str, manifest_name: str = CONTROL_MANIFEST_NAME) -> None:
+    """Reject an output prefix that already contains the named terminal artifact."""
     filesystem, target = fs_and_path(output_uri)
     if filesystem.exists(posixpath.join(target, manifest_name)):
         raise ValueError(f"Durable output already contains {manifest_name}: {output_uri}")
 
 
+def validate_resume_manifest(existing: dict[str, object], expected: dict[str, object], output_uri: str) -> None:
+    if existing.get("returncode") == 0:
+        raise ValueError(f"Durable output already contains a completed control: {output_uri}")
+    mismatches = [key for key, value in expected.items() if existing.get(key) != value]
+    if mismatches:
+        raise ValueError(f"Durable output is incompatible with this retry ({', '.join(mismatches)}): {output_uri}")
+
+
+def restore_latest_checkpoint(output_uri: str, output: Path) -> int | None:
+    """Restore the newest remotely committed checkpoint and return its step, or ``None`` when none exists."""
+    filesystem, target = fs_and_path(output_uri)
+    remote_files = tuple(filesystem.find(target))
+    pointers = [path for path in remote_files if posixpath.basename(path) == LATEST_CHECKPOINT_NAME]
+    if not pointers:
+        return None
+    if len(pointers) != 1:
+        raise ValueError(f"Expected one {LATEST_CHECKPOINT_NAME} under {output_uri}, found {len(pointers)}")
+    pointer = pointers[0]
+    with filesystem.open(pointer, encoding="utf-8") as source:
+        value = source.read().strip()
+    if not value.isdigit():
+        raise ValueError(f"Invalid checkpoint iteration {value!r} under {output_uri}")
+    step = int(value)
+    checkpoint_root = posixpath.dirname(pointer)
+    step_root = posixpath.join(checkpoint_root, f"{GLOBAL_STEP_PREFIX}{step}")
+    checkpoint_files = [path for path in remote_files if path.startswith(f"{step_root}/")]
+    if not checkpoint_files:
+        raise ValueError(f"Checkpoint pointer selects missing {GLOBAL_STEP_PREFIX}{step} under {output_uri}")
+    for remote_path in [*sorted(checkpoint_files), pointer]:
+        relative = relative_object_key(target, remote_path)
+        destination = output / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        filesystem.get_file(remote_path, str(destination))
+    return step
+
+
 def periodic_sync(local: Path, output_uri: str, stop: threading.Event, interval: int) -> None:
     while not stop.wait(interval):
-        sync_tree(local, output_uri)
+        try:
+            sync_tree(local, output_uri)
+        except Exception as error:
+            print(f"Periodic output sync failed; retrying in {interval} seconds: {error}", file=sys.stderr)
 
 
 def runtime_inventory(source: Path) -> dict[str, object]:
@@ -375,26 +465,35 @@ def main(argv: list[str] | None = None) -> int:
     validate_output_uri(args.output_uri)
     validate_runtime(config)
     world_size = gpu_count(args.gpu_slice)
-    reject_existing_output(args.output_uri)
+    identity = {
+        "config": json.loads(json.dumps(asdict(config))),
+        "gate": args.gate,
+        "steps": GATES[args.gate],
+        "task_image": args.task_image,
+        "launcher_commit": args.launcher_commit,
+        "gpu_slice": args.gpu_slice,
+    }
+    existing_manifest = read_json(join_resource_path(args.output_uri, CONTROL_MANIFEST_NAME))
+    if existing_manifest is not None:
+        validate_resume_manifest(existing_manifest, identity, args.output_uri)
     if args.work_root.exists():
         raise ValueError(f"Work root already exists: {args.work_root}")
     args.work_root.mkdir(parents=True)
     output = args.work_root / "output"
     output.mkdir()
+    resumed_from_step = restore_latest_checkpoint(args.output_uri, output) if existing_manifest is not None else None
     inputs = stage_inputs(config, args.work_root)
     source_compatibility_patches = patch_source_compatibility(inputs.source)
     command = training_command(config, inputs, args.gate, output, world_size=world_size)
     manifest = {
-        "config": asdict(config),
-        "gate": args.gate,
-        "steps": GATES[args.gate],
+        **identity,
         "command": command,
         "runtime": runtime_inventory(inputs.source),
         "source_compatibility_patches": source_compatibility_patches,
         "artifact_verifications": [asdict(verification) for verification in inputs.artifact_verifications],
-        "task_image": args.task_image,
-        "launcher_commit": args.launcher_commit,
-        "gpu_slice": args.gpu_slice,
+        "attempt": int(existing_manifest.get("attempt", 1)) + 1 if existing_manifest is not None else 1,
+        "resumed_from_step": resumed_from_step,
+        "status": STATUS_RUNNING,
     }
     manifest_path = output / CONTROL_MANIFEST_NAME
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -410,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = subprocess.run(command, cwd=inputs.source, check=False)
         manifest["returncode"] = result.returncode
+        manifest["status"] = STATUS_COMPLETE if result.returncode == 0 else STATUS_FAILED
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     finally:
         stop.set()

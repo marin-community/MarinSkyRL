@@ -17,11 +17,14 @@ from skyrl_train.distillation import (
     INVALID_TOPK_INDEX,
     SampledReverseKLInput,
     SparseForwardKLInput,
+    StudentSelectedTeacherEvidence,
+    StudentTopKPolicySurrogateInput,
     TeacherEvidenceBatch,
     TeacherScoreRequest,
     TopKTeacherEvidence,
     prepare_sampled_reverse_kl,
     prepare_sparse_forward_kl,
+    prepare_student_topk_policy_surrogate,
 )
 from skyrl_train.teacher_oracle import TeacherOracleCollection
 from skyrl_train.teacher_routing import RoutedTrajectoryBatch, TeacherRoute
@@ -122,6 +125,31 @@ def _routed_assembly_shape(
     return row_count, max(work.response_lengths)
 
 
+def _assemble_student_selected_inputs(
+    indexed_inputs: Sequence[tuple[tuple[int, ...], DistillationInput]],
+    shape: tuple[int, int],
+    valid_mask: torch.Tensor,
+    loss_weights: torch.Tensor,
+) -> StudentTopKPolicySurrogateInput:
+    if not all(isinstance(distillation, StudentTopKPolicySurrogateInput) for _, distillation in indexed_inputs):
+        raise ValueError("routed teacher partitions must return one distillation objective kind")
+    payloads = tuple(cast(StudentTopKPolicySurrogateInput, distillation) for _, distillation in indexed_inputs)
+    widths = {payload.student_topk_indices.shape[-1] for payload in payloads}
+    if len(widths) != 1:
+        raise ValueError("routed student-selected partitions must use one top-K width")
+    topk = widths.pop()
+    indices = torch.full((*shape, topk), INVALID_TOPK_INDEX, dtype=torch.long)
+    behavior = torch.full((*shape, topk), torch.nan, dtype=torch.float32)
+    teacher = torch.full((*shape, topk), torch.nan, dtype=torch.float32)
+    for (original_indices, _), payload in zip(indexed_inputs, payloads, strict=True):
+        rows = torch.tensor(original_indices, dtype=torch.long)
+        width = payload.valid_mask.shape[1]
+        indices[rows, :width] = payload.student_topk_indices
+        behavior[rows, :width] = payload.behavior_topk_logprobs
+        teacher[rows, :width] = payload.teacher_on_student_logprobs
+    return StudentTopKPolicySurrogateInput(indices, behavior, teacher, valid_mask, loss_weights)
+
+
 def assemble_distillation_inputs(
     indexed_inputs: Sequence[tuple[tuple[int, ...], DistillationInput]],
     shape: tuple[int, int],
@@ -152,6 +180,9 @@ def assemble_distillation_inputs(
             teacher_logprobs[indices, : payload.valid_mask.shape[1]] = payload.teacher_action_log_probs
         return SampledReverseKLInput(teacher_logprobs, valid_mask, loss_weights)
 
+    if isinstance(first, StudentTopKPolicySurrogateInput):
+        return _assemble_student_selected_inputs(indexed_inputs, shape, valid_mask, loss_weights)
+
     if not isinstance(first, SparseForwardKLInput) or not all(
         isinstance(distillation, SparseForwardKLInput) for _, distillation in indexed_inputs
     ):
@@ -180,6 +211,42 @@ def _pad_token_rows(token_rows: list[list[int]]) -> tuple[torch.Tensor, torch.Te
         1
     )
     return padded, mask
+
+
+def _collate_student_selected_rollout(
+    trajectory_batch: TrajectoryBatch,
+    response_token_ids: list[list[int]],
+    response_mask: torch.Tensor,
+    top_k: int | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    index_rows = trajectory_batch.get("student_topk_indices")
+    behavior_rows = trajectory_batch.get("behavior_topk_logprobs")
+    loss_masks = trajectory_batch.get("loss_masks")
+    if index_rows is None or behavior_rows is None or loss_masks is None:
+        raise ValueError("student-selected scoring requires rollout top-K indices, behavior logprobs, and loss masks")
+    batch_size = len(response_token_ids)
+    if len(index_rows) != batch_size or len(behavior_rows) != batch_size or len(loss_masks) != batch_size:
+        raise ValueError("student-selected rollout fields must align with trajectories")
+    if any(len(mask) != len(response) for mask, response in zip(loss_masks, response_token_ids, strict=True)):
+        raise ValueError("student-selected loss masks must align with response tokens")
+    if any(value not in (0, 1) for mask in loss_masks for value in mask):
+        raise ValueError("student-selected loss masks must contain only 0 or 1")
+    if top_k is None or top_k <= 0:
+        raise ValueError("student-selected scoring requires a positive top_k")
+    padded_loss_masks, _ = _pad_token_rows(loss_masks)
+    if padded_loss_masks.shape != response_mask.shape:
+        raise ValueError("student-selected loss masks must align with response tokens")
+    selected_mask = padded_loss_masks.to(torch.bool)
+    indices = torch.full((*response_mask.shape, top_k), INVALID_TOPK_INDEX, dtype=torch.long)
+    behavior = torch.full((*response_mask.shape, top_k), torch.nan, dtype=torch.float32)
+    for row, (selected, scores, response) in enumerate(zip(index_rows, behavior_rows, response_token_ids, strict=True)):
+        if len(selected) != len(response) or len(scores) != len(response):
+            raise ValueError("student-selected rollout fields must align with response tokens")
+        indices[row, : len(response)] = torch.tensor(selected, dtype=torch.long)
+        behavior[row, : len(response)] = torch.tensor(scores, dtype=torch.float32)
+    indices.masked_fill_(~selected_mask.unsqueeze(-1), INVALID_TOPK_INDEX)
+    behavior.masked_fill_(~selected_mask.unsqueeze(-1), torch.nan)
+    return indices, behavior, selected_mask
 
 
 def build_teacher_scoring_work(
@@ -217,6 +284,14 @@ def build_teacher_scoring_work(
     per_trajectory_weights = torch.tensor(route_weights, dtype=torch.float32).unsqueeze(1)
     loss_weights = per_trajectory_weights.expand_as(padded_responses).masked_fill(~response_mask, 0)
 
+    selected_indices = None
+    behavior_logprobs = None
+    selected_mask = None
+    if evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
+        selected_indices, behavior_logprobs, selected_mask = _collate_student_selected_rollout(
+            trajectory_batch, response_token_ids, response_mask, top_k
+        )
+
     request = TeacherScoreRequest(
         trajectory_ids=tuple(trajectory_id.to_string() for trajectory_id in trajectory_ids),
         route_ids=route_ids,
@@ -229,6 +304,9 @@ def build_teacher_scoring_work(
         response_mask=response_mask,
         evidence=evidence,
         top_k=top_k,
+        student_topk_indices=selected_indices,
+        behavior_topk_logprobs=behavior_logprobs,
+        student_selected_mask=selected_mask,
     )
     return TeacherScoringWork(request=request, coefficient=coefficient, route_weights=loss_weights)
 
@@ -246,7 +324,7 @@ def build_routed_teacher_scoring_work(
     if missing_fingerprints:
         raise ValueError(f"missing tokenizer fingerprints for teachers: {', '.join(missing_fingerprints)}")
     top_k_by_teacher = top_k_by_teacher or {}
-    if routed_batch.evidence is TeacherEvidenceKind.TOPK_DISTRIBUTION:
+    if routed_batch.evidence in {TeacherEvidenceKind.TOPK_DISTRIBUTION, TeacherEvidenceKind.STUDENT_SELECTED_TOPK}:
         missing_top_k = sorted(
             {partition.teacher_id for partition in routed_batch.partitions} - top_k_by_teacher.keys()
         )
@@ -296,6 +374,13 @@ class TeacherEvidenceCoordinator:
             )
         elif isinstance(evidence, TopKTeacherEvidence):
             distillation = prepare_sparse_forward_kl(
+                work.request,
+                evidence,
+                coefficient=work.coefficient,
+                route_weights=work.route_weights,
+            )
+        elif isinstance(evidence, StudentSelectedTeacherEvidence):
+            distillation = prepare_student_topk_policy_surrogate(
                 work.request,
                 evidence,
                 coefficient=work.coefficient,

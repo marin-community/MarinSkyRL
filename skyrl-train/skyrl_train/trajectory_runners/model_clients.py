@@ -9,6 +9,7 @@ from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 from skyrl_train.trajectory_runners.types import TokenProvenance
 
 
@@ -29,6 +30,8 @@ class _ChatResult:
     prompt_ids: list[int]
     response_ids: list[int]
     response_logprobs: list[float] | None
+    student_topk_indices: list[list[int]] | None
+    behavior_topk_logprobs: list[list[float]] | None
     text: str
     stop_reason: str
     assistant_message: dict[str, Any]
@@ -83,6 +86,8 @@ class DirectModelClient:
         if len(session_ids) != len(prompts):
             raise ValueError("session_ids and prompts must have the same batch size")
         sampling_params = dict(request.get("sampling_params") or {})
+        requested_top_k = sampling_params.get("logprobs")
+        requested_top_k = requested_top_k if isinstance(requested_top_k, int) and requested_top_k > 0 else None
 
         async def generate_one(messages, row_options, session_id):
             chat_options = self._chat_options(row_options, sampling_params)
@@ -118,6 +123,10 @@ class DirectModelClient:
                 body["stop"] = sampling_params["stop"]
             if sampling_params.get("logprobs") is not None:
                 body["logprobs"] = True
+            if requested_top_k is not None:
+                # vLLM may include the sampled token outside the natural top K.
+                body["top_logprobs"] = requested_top_k + 1
+                body["return_tokens_as_token_ids"] = True
             response = await self._client.chat_completion({"json": body, "headers": {}})
             if "choices" not in response:
                 raise RuntimeError(f"vLLM chat completion failed: {response}")
@@ -131,7 +140,23 @@ class DirectModelClient:
             response_logprobs = (
                 [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
             )
-            return _ChatResult(prompt_ids, response_ids, response_logprobs, text, choice["finish_reason"], message)
+            selected = None
+            if requested_top_k is not None and logprob_items is not None:
+                if len(logprob_items) != len(response_ids):
+                    raise ValueError("chat response top-K rows must align with exact token IDs")
+                selected = [
+                    select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k) for item in logprob_items
+                ]
+            return _ChatResult(
+                prompt_ids,
+                response_ids,
+                response_logprobs,
+                None if selected is None else [ids for ids, _ in selected],
+                None if selected is None else [scores for _, scores in selected],
+                text,
+                choice["finish_reason"],
+                message,
+            )
 
         results = await asyncio.gather(
             *(
@@ -140,7 +165,9 @@ class DirectModelClient:
             )
         )
         logprobs = [result.response_logprobs for result in results]
-        return ModelClientOutput(
+        selected_indices = [result.student_topk_indices for result in results]
+        selected_scores = [result.behavior_topk_logprobs for result in results]
+        output = ModelClientOutput(
             prompt_ids=[result.prompt_ids for result in results],
             response_ids=[result.response_ids for result in results],
             response_logprobs=logprobs if all(value is not None for value in logprobs) else None,
@@ -150,6 +177,10 @@ class DirectModelClient:
             assistant_messages=[result.assistant_message for result in results],
             token_provenance=TokenProvenance.ENGINE,
         )
+        if all(rows is not None for rows in selected_indices):
+            output["student_topk_indices"] = selected_indices
+            output["behavior_topk_logprobs"] = selected_scores
+        return output
 
 
 class OpenAIHTTPModelClient:
@@ -168,10 +199,43 @@ class OpenAIHTTPModelClient:
         session_ids = request.get("session_ids") or [None] * len(prompts)
         if len(session_ids) != len(prompts):
             raise ValueError("session_ids and prompts must have the same batch size")
+        chat_options = request.get("chat_completion_params")
+        if chat_options is not None and len(chat_options) != len(prompts):
+            raise ValueError("chat_completion_params and prompts must have the same batch size")
 
         timeout = aiohttp.ClientTimeout(total=None)
         connector = aiohttp.TCPConnector(limit=0, limit_per_host=0)
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            if chat_options is not None:
+                results = await asyncio.gather(
+                    *(
+                        self._generate_exact_one(
+                            session,
+                            messages=messages,
+                            session_id=session_id,
+                            sampling_params=request.get("sampling_params") or {},
+                            chat_options=options,
+                        )
+                        for messages, session_id, options in zip(prompts, session_ids, chat_options, strict=True)
+                    )
+                )
+                logprobs = [result.response_logprobs for result in results]
+                selected_indices = [result.student_topk_indices for result in results]
+                selected_scores = [result.behavior_topk_logprobs for result in results]
+                output = ModelClientOutput(
+                    prompt_ids=[result.prompt_ids for result in results],
+                    response_ids=[result.response_ids for result in results],
+                    response_logprobs=logprobs if all(value is not None for value in logprobs) else None,
+                    responses=[result.text for result in results],
+                    stop_reasons=[result.stop_reason for result in results],
+                    prompt_logprobs=None,
+                    assistant_messages=[result.assistant_message for result in results],
+                    token_provenance=TokenProvenance.ENGINE,
+                )
+                if all(rows is not None for rows in selected_indices):
+                    output["student_topk_indices"] = selected_indices
+                    output["behavior_topk_logprobs"] = selected_scores
+                return output
             responses = await asyncio.gather(
                 *(
                     self._generate_one(
@@ -192,6 +256,77 @@ class OpenAIHTTPModelClient:
             response_logprobs=None,
             prompt_logprobs=None,
             token_provenance=TokenProvenance.RECONSTRUCTED,
+        )
+
+    async def _generate_exact_one(
+        self,
+        session: aiohttp.ClientSession,
+        *,
+        messages: list[dict[str, str]],
+        session_id,
+        sampling_params: dict,
+        chat_options: dict,
+    ) -> _ChatResult:
+        options = DirectModelClient._chat_options(chat_options, sampling_params)
+        tokenize_options = {key: options[key] for key in ("tools", "tool_choice") if key in options}
+        async with session.post(
+            f"{self._base_url}/tokenize",
+            json={"model": self._model_name, "messages": messages, **tokenize_options, "add_generation_prompt": True},
+        ) as response:
+            tokenization = await response.json()
+            if response.status >= 400:
+                raise RuntimeError(f"OpenAI chat tokenization returned HTTP {response.status}: {tokenization}")
+        prompt_ids = tokenization.get("tokens")
+        if not isinstance(prompt_ids, list) or not all(isinstance(token, int) for token in prompt_ids):
+            raise RuntimeError(f"OpenAI chat tokenization did not return exact prompt token IDs: {tokenization}")
+
+        payload = {
+            "model": self._model_name,
+            "messages": messages,
+            "session_id": session_id,
+            **{
+                key: value
+                for key, value in sampling_params.items()
+                if key not in {"max_generate_length", "logprobs", "stop"}
+            },
+            **options,
+            "return_token_ids": True,
+        }
+        if sampling_params.get("stop") is not None:
+            payload["stop"] = sampling_params["stop"]
+        if sampling_params.get("logprobs") is not None:
+            payload["logprobs"] = True
+        requested_top_k = sampling_params.get("logprobs")
+        requested_top_k = requested_top_k if isinstance(requested_top_k, int) and requested_top_k > 0 else None
+        if requested_top_k is not None:
+            payload["top_logprobs"] = requested_top_k + 1
+            payload["return_tokens_as_token_ids"] = True
+        async with session.post(f"{self._base_url}/v1/chat/completions", json=payload) as response:
+            body = await response.json()
+            if response.status >= 400:
+                raise RuntimeError(f"OpenAI chat completion returned HTTP {response.status}: {body}")
+        choice = body["choices"][0]
+        response_ids = choice.get("token_ids")
+        if not isinstance(response_ids, list) or not all(isinstance(token, int) for token in response_ids):
+            raise RuntimeError("OpenAI chat completion did not return exact response token IDs")
+        logprob_items = (choice.get("logprobs") or {}).get("content")
+        response_logprobs = [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
+        if response_logprobs is not None and len(response_logprobs) != len(response_ids):
+            raise RuntimeError("OpenAI chat completion logprobs do not align with exact response token IDs")
+        selected = None
+        if requested_top_k is not None and logprob_items is not None:
+            selected = [
+                select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k) for item in logprob_items
+            ]
+        return _ChatResult(
+            prompt_ids=prompt_ids,
+            response_ids=response_ids,
+            response_logprobs=response_logprobs,
+            student_topk_indices=None if selected is None else [ids for ids, _ in selected],
+            behavior_topk_logprobs=None if selected is None else [scores for _, scores in selected],
+            text=self._tokenizer.decode(response_ids, skip_special_tokens=True),
+            stop_reason=choice["finish_reason"],
+            assistant_message=choice["message"],
         )
 
     async def _generate_one(

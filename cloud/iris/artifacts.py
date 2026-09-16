@@ -106,11 +106,12 @@ def _source_inventory(uri: str) -> tuple[AbstractFileSystem, tuple[tuple[str, Fi
     return filesystem, inventory
 
 
-def _copy_inventory(
+def copy_file_inventory(
     filesystem: AbstractFileSystem,
     inventory: tuple[tuple[str, FileEntry], ...],
     destination: Path,
 ) -> tuple[FileEntry, ...]:
+    """Copy a selected remote file inventory and verify each recorded size."""
     destination.mkdir(parents=True, exist_ok=False)
     for source_path, entry in inventory:
         local_path = destination / entry.path
@@ -125,7 +126,7 @@ def _copy_inventory(
 def copy_tree(source_uri: str, destination: Path) -> tuple[FileEntry, ...]:
     """Copy an object-store tree to an empty local directory and verify file sizes."""
     filesystem, inventory = _source_inventory(source_uri)
-    return _copy_inventory(filesystem, inventory, destination)
+    return copy_file_inventory(filesystem, inventory, destination)
 
 
 def _materialization_matches(target: Path, source: ArtifactSource, inventory: tuple[FileEntry, ...]) -> bool:

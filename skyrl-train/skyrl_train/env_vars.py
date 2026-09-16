@@ -14,6 +14,7 @@ from marinskyrl.environment_contract import (
     RAY_USE_UVLOOP_ENV as RAY_USE_UVLOOP_ENV,
     UV_USE_IO_URING_ENV as UV_USE_IO_URING_ENV,
     VLLM_BATCH_INVARIANT_ENV as VLLM_BATCH_INVARIANT_ENV,
+    VLLM_USE_V2_MODEL_RUNNER_ENV as VLLM_USE_V2_MODEL_RUNNER_ENV,
     DebugMode as DebugMode,
     EnvVarManager as EnvVarManager,
     EnvVarScope as EnvVarScope,

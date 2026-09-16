@@ -19,8 +19,18 @@ DEFAULT_CONFIG = Path(__file__).with_name("configs") / "open_mopd_fidelity.json"
 TASK_MODULE = "cloud.iris.open_mopd_fidelity_task"
 DOMAINS = ("math", "code", "if")
 GATES = {"one_step": 1, "paper_checkpoint": 200, "paper_schedule": 600}
+CHECKPOINT_DIRECTORY_NAME = "checkpoints"
+GLOBAL_STEP_PREFIX = "global_step_"
+ACTOR_DIRECTORY_NAME = "actor"
 _SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 _GPU_SLICE_PATTERN = re.compile(r"[A-Za-z0-9_-]+x([1-9][0-9]*)")
+
+
+def actor_checkpoint_relative_path(step: int) -> str:
+    """Return the released trainer's actor-checkpoint path for one positive step."""
+    if step <= 0:
+        raise ValueError("Checkpoint step must be positive")
+    return f"{CHECKPOINT_DIRECTORY_NAME}/{GLOBAL_STEP_PREFIX}{step}/{ACTOR_DIRECTORY_NAME}"
 
 
 @dataclass(frozen=True)
@@ -391,7 +401,7 @@ def _iris_command(
         "--disk",
         config.hardware.disk,
         "--priority",
-        "batch",
+        "interactive",
         "--no-preemptible",
         "--max-retries",
         "0",

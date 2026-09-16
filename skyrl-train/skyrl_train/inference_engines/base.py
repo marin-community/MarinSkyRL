@@ -5,11 +5,18 @@ MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 
 
+class PromptSamplingOverride(TypedDict):
+    prompt_logprob_token_ids: List[List[int]]
+
+
 class InferenceEngineInput(TypedDict):
     # Either prompts or prompt_token_ids must be provided, but not both.
     prompts: Optional[List[ConversationType]]
     prompt_token_ids: Optional[List[List[int]]]
     sampling_params: Optional[Dict[str, Any]]
+    # Per-prompt selected-ID scoring overrides for a teacher batch. Rollout
+    # sampling remains shared; each override contains only prompt_logprob_token_ids.
+    sampling_params_per_prompt: NotRequired[List[PromptSamplingOverride]]
     session_ids: Optional[List[Hashable]]
     # Per-sample Responses-API options (tools, parallel_tool_calls, etc.) that
     # require the serving backend's resolved chat renderer.
@@ -28,6 +35,11 @@ class InferenceEngineOutput(TypedDict):
     response_ids: List[List[int]]
     stop_reasons: List[str]
     response_logprobs: Optional[List[List[float]]]
+    # Exact student-policy candidates at each generated token, when generation
+    # requested a positive number of response logprobs. The selected token may
+    # also be returned by vLLM, but is not forced into these top-K rows.
+    student_topk_indices: NotRequired[List[List[List[int]]]]
+    behavior_topk_logprobs: NotRequired[List[List[List[float]]]]
     # prompt_logprobs: per-prompt-token top-K logprobs from vLLM (for teacher scoring).
     # Format: List[List[Optional[Dict[int, float]]]] — outer list is batch,
     # inner list is prompt positions, dict maps token_id → logprob.

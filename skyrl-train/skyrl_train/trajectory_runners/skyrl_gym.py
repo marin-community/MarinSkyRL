@@ -42,6 +42,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     normalize_token_ids,
 )
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient
+from skyrl_train.trajectory_runners.selected_topk import align_student_topk
 from skyrl_train.trajectory_runners.collectors import RolloutCollector, collect_agent_loops
 from skyrl_train.trajectory_runners.projections import (
     attach_unshaped_rewards,
@@ -82,12 +83,16 @@ class BatchedTrajectoryCollector:
     async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False):
         del disable_tqdm
         runner = self._runner
+        sampling_params = request.get("sampling_params")
+        max_tokens = runner.trajectory_runner_cfg.sampling_params.max_generate_length
+        if sampling_params is not None:
+            max_tokens = sampling_params.get("max_tokens", sampling_params.get("max_new_tokens", max_tokens))
         batch = await runner.collect_batched(
             request["prompts"],
             request["env_classes"],
             request["env_extras"],
-            runner.trajectory_runner_cfg.sampling_params.max_generate_length,
-            request.get("sampling_params"),
+            max_tokens,
+            sampling_params,
         )
         return batch
 
@@ -126,6 +131,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         tokenizer,
         model_client: ModelClient | None = None,
         pipeline: SkyRLGymPipeline | None = None,
+        require_full_token_continuation: bool = False,
     ):
         """
         Args:
@@ -135,11 +141,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             tokenizer: tokenizer object for encoding and decoding text
             model_client: optional transport-neutral model client
             pipeline: optional type-coupled harness collector and projection
+            require_full_token_continuation: reject a later chat render that changes any previously served token
         """
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.model_client = model_client or DirectModelClient(inference_engine_client)
         self.tokenizer = tokenizer
+        self.require_full_token_continuation = require_full_token_continuation
         if pipeline is None:
             pipeline = (
                 TrajectoryPipeline(BatchedTrajectoryCollector, IdentityTrajectoryProjection())
@@ -328,8 +336,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             prompt_token_ids: List[int]
             rollout_logprobs: Optional[List[float]]
         """
-        retokenize_chat_history = self.use_conversation_multi_turn and self.custom_chat_template
-
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
@@ -344,6 +350,17 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         chat_completion_params = init_metadata.get("chat_completion_params")
         if chat_completion_params is not None and not isinstance(chat_completion_params, dict):
             raise TypeError("environment chat_completion_params metadata must be a mapping")
+        current_sampling_params = (
+            sampling_params if sampling_params is not None else self.trajectory_runner_cfg.sampling_params
+        )
+        collect_logprobs = current_sampling_params.get("logprobs", None) is not None
+        if collect_logprobs and self.use_conversation_multi_turn and self.custom_chat_template:
+            # Retokenizing an entire conversation loses the exact sampled-token/logprob alignment.
+            # Route behavior-referenced requests through the backend-rendered chat path instead.
+            chat_completion_params = chat_completion_params or {}
+        retokenize_chat_history = (
+            self.use_conversation_multi_turn and self.custom_chat_template and chat_completion_params is None
+        )
         initial_chat_history_length = len(chat_history)
         chat_end_index = len(chat_history)
         input_ids = normalize_token_ids(
@@ -391,11 +408,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             )
 
         loss_mask = []  # this excludes the prompt
-        current_sampling_params = (
-            sampling_params if sampling_params is not None else self.trajectory_runner_cfg.sampling_params
-        )
-        collect_logprobs = current_sampling_params.get("logprobs", None) is not None
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
+        requested_logprobs = current_sampling_params.get("logprobs")
+        collect_topk = isinstance(requested_logprobs, int) and requested_logprobs > 0
+        selected_capture_possible = collect_topk and not retokenize_chat_history
+        generated_ids: list[int] = []
+        generated_topk_ids: list[list[int]] = []
+        generated_topk_scores: list[list[float]] = []
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
         verification_results: List[VerificationResult] = []
@@ -434,6 +453,21 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
+            topk_ids_batch = engine_output.get("student_topk_indices")
+            topk_scores_batch = engine_output.get("behavior_topk_logprobs")
+            if (topk_ids_batch is None) != (topk_scores_batch is None):
+                raise ValueError("Inference engine must return student top-K IDs and behavior scores together")
+            if selected_capture_possible:
+                if topk_ids_batch is None:
+                    selected_capture_possible = False
+                else:
+                    topk_ids = topk_ids_batch[0]
+                    topk_scores = topk_scores_batch[0]
+                    if len(topk_ids) != len(output_ids) or len(topk_scores) != len(output_ids):
+                        raise ValueError("student top-K candidates must align with generated token IDs")
+                    generated_ids.extend(output_ids)
+                    generated_topk_ids.extend(topk_ids)
+                    generated_topk_scores.extend(topk_scores)
             if chat_completion_params is not None:
                 rendered_prompt_ids = engine_output.get("prompt_ids")
                 if rendered_prompt_ids is None:
@@ -459,6 +493,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     raise RuntimeError("chat generation must return the structured assistant message")
                 if per_step_rewards:
                     if input_ids != rendered_prompt_ids[0][: len(input_ids)]:
+                        if self.require_full_token_continuation:
+                            raise RuntimeError(
+                                "full TITO requires each rendered prompt to preserve the prior served token prefix"
+                            )
                         canonical_prefix = self._mask_canonicalized_chat_prefix(
                             input_ids,
                             rendered_prompt_ids[0],
@@ -470,6 +508,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         rollout_logprobs = canonical_prefix.rollout_logprobs
                         per_step_rewards = canonical_prefix.per_step_rewards
                         token_provenance = TokenProvenance.RECONSTRUCTED
+                        selected_capture_possible = False
                     else:
                         observation_token_count = len(rendered_prompt_ids[0]) - len(input_ids)
                         loss_mask += [0] * observation_token_count
@@ -526,6 +565,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 rollout_logprobs = [] if collect_logprobs else None
                 per_step_rewards = []
                 verification_results = []
+                generated_ids.clear()
+                generated_topk_ids.clear()
+                generated_topk_scores.clear()
                 continue
 
             if env_step_output.get("postprocessed_action", None) is not None:
@@ -543,6 +585,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     )
                     response_logprobs = None
                     rollout_logprobs = None
+                if postprocessed_output_ids != output_ids:
+                    selected_capture_possible = False
                 output_ids = postprocessed_output_ids
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
@@ -642,6 +686,12 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             "rollout_logprobs and response_ids should have the same length"
         )
 
+        selected = (
+            align_student_topk(response_ids, loss_mask, generated_ids, generated_topk_ids, generated_topk_scores)
+            if selected_capture_possible
+            else None
+        )
+
         # Build reward output
         if retokenize_chat_history:
             # TODO(Charlie): Currently, the possible response truncation will not affect the reward
@@ -664,6 +714,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             prompt_token_ids=tuple(prompt_ids),
             response_token_ids=tuple(response_ids),
             behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
+            student_topk_indices=None if selected is None else selected.indices,
+            behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
         )
         reward_result = RewardResult(
             unshaped_reward=unshaped_reward,
@@ -719,6 +771,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         responses = engine_output["response_ids"]
         stop_reasons = engine_output["stop_reasons"]
         logprobs = engine_output.get("response_logprobs", None)
+        selected_indices = engine_output.get("student_topk_indices")
+        selected_logprobs = engine_output.get("behavior_topk_logprobs")
+        if (selected_indices is None) != (selected_logprobs is None):
+            raise ValueError("Inference engine must return student top-K IDs and behavior scores together")
+        if selected_indices is not None and (
+            len(selected_indices) != len(responses) or len(selected_logprobs) != len(responses)
+        ):
+            raise ValueError("Inference engine student top-K rows must align with responses")
 
         truncated_responses = []
         rewards = []
@@ -728,6 +788,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         loss_masks = []
         env_metrics = []
         truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
+        truncated_selected_indices: list[list[list[int]]] = []
+        truncated_selected_logprobs: list[list[list[float]]] = []
 
         for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
             publish_rollout_evidence(
@@ -747,6 +809,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 response = response[:max_tokens]
             loss_masks.append([1] * len(response))
             truncated_responses.append(response)
+            if selected_indices is not None:
+                if len(selected_indices[i]) < len(response) or len(selected_logprobs[i]) < len(response):
+                    raise ValueError("Inference engine student top-K tokens must align with response tokens")
+                truncated_selected_indices.append(selected_indices[i][: len(response)])
+                truncated_selected_logprobs.append(selected_logprobs[i][: len(response)])
             if logprobs is not None:
                 sample_logprobs = logprobs[i][: len(response)]
                 truncated_logprobs.append(sample_logprobs)
@@ -809,6 +876,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             "rollout_logprobs": truncated_logprobs,
             "exclude_from_baseline": exclude_from_baseline,
         }
+        if selected_indices is not None:
+            trajectory_batch["student_topk_indices"] = truncated_selected_indices
+            trajectory_batch["behavior_topk_logprobs"] = truncated_selected_logprobs
         attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
 
         return trajectory_batch

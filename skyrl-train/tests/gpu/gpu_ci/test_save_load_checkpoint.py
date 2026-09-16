@@ -141,13 +141,10 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, optimizer_checkpoint_s
         if strategy == "megatron":
             # This persisted format controls how the next process constructs its load template.
             from megatron.core import dist_checkpointing
+            from skyrl_train.distributed.megatron.megatron_strategy import _saved_optimizer_sharding_type
 
-            optimizer_state = dist_checkpointing.load_common_state_dict(checkpoint_path)["optimizer"]
-            if "param_state_sharding_type" in optimizer_state:
-                saved_formats = {optimizer_state["param_state_sharding_type"]}
-            else:
-                saved_formats = {state["param_state_sharding_type"] for state in optimizer_state.values()}
-            assert saved_formats == {optimizer_checkpoint_sharding_type}
+            common_state = dist_checkpointing.load_common_state_dict(checkpoint_path)
+            assert _saved_optimizer_sharding_type(common_state) == optimizer_checkpoint_sharding_type
 
         # Step 2.1: Make sure that offloading still works after saving checkpoint
         memory_after_saving = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]

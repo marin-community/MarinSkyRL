@@ -17,3 +17,17 @@ TEMPERATURE = 1.0
 TOP_P = 1.0
 TOP_K = -1
 NUM_SAMPLES = 1
+
+
+def evaluation_hydra_arguments() -> tuple[str, ...]:
+    """Use one AIME generation contract for inline and independent evaluation."""
+    return (
+        f"++generator.engine_init_kwargs.max_model_len={CONTEXT_WINDOW}",
+        f"generator.eval_sampling_params.max_generate_length={MAX_TOKENS}",
+        f"generator.eval_sampling_params.temperature={TEMPERATURE}",
+        f"generator.eval_sampling_params.top_p={TOP_P}",
+        f"generator.eval_sampling_params.top_k={TOP_K}",
+        f"generator.eval_n_samples_per_prompt={NUM_SAMPLES}",
+        f"environment.skyrl_gym.aime.evaluation_token_budget={MAX_TOKENS}",
+        f"environment.skyrl_gym.aime.max_gen_length={MAX_TOKENS}",
+    )

@@ -361,6 +361,9 @@ class TrainingInput(TypedDict, total=False):
     teacher_topk_indices: Optional[Integer[torch.Tensor, "batch_size seq_len top_k"]]
     teacher_topk_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]
     teacher_retained_mass: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    student_topk_indices: Optional[Integer[torch.Tensor, "batch_size seq_len top_k"]]
+    behavior_topk_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]
+    teacher_on_student_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]
     teacher_valid_mask: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
     distillation_loss_weights: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     # MoE router-replay capture rail (Stage 1): per-token expert-selection indices
@@ -435,6 +438,9 @@ class TrainingBatchIterator(Iterator[Experience]):
                 teacher_retained_mass=batch.get("teacher_retained_mass"),
                 valid_mask=batch.get("teacher_valid_mask"),
                 loss_weights=batch.get("distillation_loss_weights"),
+                student_topk_indices=batch.get("student_topk_indices"),
+                behavior_topk_logprobs=batch.get("behavior_topk_logprobs"),
+                teacher_on_student_logprobs=batch.get("teacher_on_student_logprobs"),
             ),
             rollout_routed_experts=batch.get("rollout_routed_experts"),
             response_span_tags=batch.get("response_span_tags"),

@@ -61,8 +61,8 @@ to `$OT_AGENT_SECRETS_ENV` when set, otherwise to `~/Documents/secrets.env` when
 that file exists. The parser accepts `KEY=VALUE` and `export KEY=VALUE` lines
 without executing the file. Secret values are placed in Iris `EnvironmentSpec`,
 not the process arguments. Jobs run directly on `cw-rno2a`, request no accelerator,
-are non-preemptible, and have zero automatic retries. Smoke stages use
-interactive priority. Full stages use batch priority. SFT requests 4 CPU cores,
+are non-preemptible, and have zero automatic retries. Training and AIME 2024
+evaluation use interactive priority. SFT requests 4 CPU cores,
 32 GB memory, and 50 GB disk because its 384,000-row streaming shuffle buffer
 has not yet been measured on Iris; OPD requests 2 CPU cores, 8 GB memory, and
 20 GB disk.
@@ -99,9 +99,19 @@ temperature as a fidelity review, not an automatic dependency update.
 ## Native MarinSkyRL OPD
 
 `native_opd.py` runs the same published Qwen3.5 student, teacher, LoRA shape,
-and reverse-KL objective on eight local GPUs. Its exact vLLM compatibility
-backport edits the installed Python source, so Iris jobs must use a task-private
-uv cache and copy-mode installation:
+and reverse-KL objective on eight local GPUs. Full runs materialize the pinned
+30-problem AIME 2024 validation set and evaluate it every two optimizer steps.
+The trainer saves FSDP2 checkpoints every two steps; the runner publishes them
+in the background. A checkpoint is available to external evaluators only after
+`checkpoints/global_step_N/commit.json` lists the verified remote files. The
+remote `checkpoints/latest_ckpt_global_step.txt` pointer advances last. The
+publisher requires the four-rank model, optimizer, extra state, trainer and
+dataloader state, Hugging Face config, and LoRA adapter files. In-line AIME
+validation does not replace a separately launched evaluation from each durable
+adapter checkpoint.
+
+The exact vLLM compatibility backport edits the installed Python source, so
+Iris jobs must use a task-private uv cache and copy-mode installation:
 
 The rollout engine reserves 90% of each assigned GPU for weights and KV cache
 and admits at most 512 concurrent sequences. The bound reduces repeated
@@ -112,41 +122,66 @@ memory headroom.
 
 ```bash
 uv run iris --cluster cw-rno2a job run \
-  --enable-extra-resources --gpu H100x8 --no-sync \
+  --enable-extra-resources --gpu H100x8 --priority interactive --no-sync \
   -- env UV_CACHE_DIR=/tmp/tinker-native-uv-cache UV_LINK_MODE=copy \
   uv run --frozen --extra fsdp --extra vllm python \
   skyrl-train/ci/opd/tinker_repro/native_opd.py \
-  --stage plumbing --adapter-uri "$ADAPTER_URI" --output-uri "$OUTPUT_URI"
+  --stage plumbing --adapter-uri "$ADAPTER_URI" \
+  --adapter-config-sha256 "$ADAPTER_CONFIG_SHA256" \
+  --adapter-model-sha256 "$ADAPTER_MODEL_SHA256" \
+  --output-uri "$OUTPUT_URI"
 ```
 
 The runner refuses a symlinked vLLM source tree rather than modifying Iris's
 shared uv cache. `--no-sync` is required because Iris's managed setup currently
 hardcodes symlink mode before applying job environment overrides. Use a unique
-output URI for every attempt.
+output URI for every attempt. Obtain the two SHA-256 digests from the completed
+split-to-fused conversion manifest, which records the original SFT hashes as
+well. The runner checks the downloaded files, fused-QKV rank pattern, base
+model, rank, alpha, and target modules before loading the student.
 
 `native_aime24.py` evaluates an SFT or OPD LoRA adapter with MarinSkyRL's AIME
 environment. It uses the same pinned 30-problem dataset, system prompt,
 temperature 1.0, top-p 1.0, disabled top-k, one sample per problem, and 64,000
-generated-token limit as the Tinker evaluator. The manifest reports accuracy in
-addition to MarinSkyRL's centered `+1/-1` reward mean. A full run fails if any
-response reaches the generation limit.
+generated-token limit as the Tinker evaluator. The manifest reports raw and
+completed-only accuracy, sampling errors, and truncated responses in addition
+to MarinSkyRL's centered `+1/-1` reward mean. The `aime24_comparable` flag is
+true only for a full 30-problem evaluation with no sampling errors or truncated
+responses. Incomplete evaluations retain their metrics and trajectories for
+diagnosis and backfill. For adapter evaluations, the evaluator merges the pinned
+PEFT adapter into a temporary full Qwen3.5 model before vLLM starts: vLLM's
+Qwen3.5 LoRA loader expects fused Gated DeltaNet QKV projections. The Axolotl SFT
+stage saves separate Q/K/V LoRA factors; convert them with the Axolotl fork's
+`qwen35_split_qkv.adapter` converter before passing the resulting adapter to
+native AIME or OPD. The converter uses rank-384 fused QKV factors and alpha 3
+to preserve the original rank-128, alpha-1 split updates exactly. Both native
+paths reject raw split-QKV adapters, whose QKV weights PEFT can otherwise drop
+without failing the load. The pinned
+vLLM wheel also does not register a text-only Qwen3.5 serving class, so the
+merged model retains its multimodal shell and config. The source adapter and
+committed checkpoint remain unchanged.
 
-Pass the exact `lora_adapter` checkpoint prefix, not the parent checkpoint or
-experiment prefix:
+For a native OPD checkpoint, pass its exact `global_step_N` prefix with
+`--checkpoint-uri`. The evaluator requires that step's `commit.json`, verifies
+the remote file inventory, and loads its `policy/lora_adapter` directory. Do
+not pass the parent `checkpoints` or experiment prefix:
 
 ```bash
 uv run iris --cluster cw-rno2a job run \
-  --enable-extra-resources --gpu H100x8 --no-sync \
+  --enable-extra-resources --gpu H100x8 --priority interactive --no-sync \
   -- env UV_CACHE_DIR=/tmp/tinker-native-aime-uv-cache UV_LINK_MODE=copy \
   uv run --frozen --extra fsdp --extra vllm python \
   skyrl-train/ci/opd/tinker_repro/native_aime24.py \
-  --stage smoke --adapter-uri "$ADAPTER_URI" --output-uri "$OUTPUT_URI"
+  --stage smoke --checkpoint-uri "$CHECKPOINT_URI" --output-uri "$OUTPUT_URI"
 ```
 
 Use a new output URI and change `--stage smoke` to `--stage full` after the
-single-problem smoke run completes. Evaluation-only LoRA runs reject remote
-engines, non-vLLM backends, and missing local adapter directories. These checks
-prevent `main_generate` from silently evaluating the base model.
+single-problem smoke run completes. The evaluator verifies the checkpoint or
+converted adapter, merges it into the full Qwen3.5 shell, then evaluates that
+merged model with local vLLM engines. For the Axolotl SFT initialization, pass
+the immutable converted adapter directory with `--adapter-uri`; its conversion
+manifest records the SHA-256 digests. Do not pass the raw Axolotl export. Omit
+both adapter options for the base-model control.
 
 ## AIME 2024 evaluation
 
