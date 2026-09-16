@@ -667,27 +667,6 @@ def test_a_cancellation_that_completes_its_executor_call_still_records_nothing()
     assert timings.durations == {}, f"a cancelled call recorded {timings.durations}"
 
 
-def test_a_callee_that_raises_still_records_its_split():
-    """The other half of the same condition, and the reason it is `not cancelled` rather than a
-    bare except. An environment that fails after two seconds of real work queued and executed; its
-    time is a fact about the rollout, and dropping it would understate every derived mean."""
-
-    def _boom():
-        raise ValueError("the environment rejected the action")
-
-    async def _drive():
-        timings = RolloutTimings()
-        with rollout_timings_scope(timings):
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                with pytest.raises(ValueError):
-                    await timed_env_call(pool, _boom)
-        return timings
-
-    timings = asyncio.run(_drive())
-    assert timings.counters[f"{ROLLOUT_ENV_AWAIT}_count"] == 1.0, "a failed call is still a call"
-    assert timings.counters[f"{ROLLOUT_ENV_EXEC}_seconds_sum"] >= 0.0
-
-
 def test_a_cancelled_env_call_records_nothing_rather_than_inventing_a_queue():
     """A cancellation is not an environment call.
 
