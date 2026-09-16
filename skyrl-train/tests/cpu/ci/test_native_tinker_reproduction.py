@@ -310,14 +310,22 @@ def test_native_aime_base_control_does_not_enable_lora(tmp_path: Path):
     assert config.trainer.policy.model.lora.adapter_path is None
 
 
-def test_native_aime_merge_accepts_pre_unwrapped_qwen35_text_model(tmp_path: Path, monkeypatch):
-    model = SimpleNamespace(config=SimpleNamespace(model_type="qwen3_5_text", linear_conv_kernel_dim=4))
+def test_native_aime_merge_preserves_qwen35_shell_for_vllm(tmp_path: Path, monkeypatch):
+    config = SimpleNamespace(
+        model_type="qwen3_5",
+        architectures=["Qwen3_5ForConditionalGeneration"],
+        text_config=SimpleNamespace(linear_conv_kernel_dim=4),
+    )
+    model = SimpleNamespace(config=config)
 
     class MergedModel:
         def save_pretrained(self, destination, *, safe_serialization):
             assert safe_serialization
             destination.mkdir()
             (destination / "model.safetensors").write_bytes(b"merged-model")
+            (destination / "config.json").write_text(
+                json.dumps({"model_type": config.model_type, "architectures": config.architectures})
+            )
 
     class AdaptedModel:
         def merge_and_unload(self, *, safe_merge):
@@ -328,13 +336,17 @@ def test_native_aime_merge_accepts_pre_unwrapped_qwen35_text_model(tmp_path: Pat
         def save_pretrained(self, destination):
             (destination / "tokenizer.json").write_text("{}")
 
-    monkeypatch.setattr(AIME.AutoModelForCausalLM, "from_pretrained", lambda *args, **kwargs: model)
+    monkeypatch.setattr(AIME.Qwen3_5ForConditionalGeneration, "from_pretrained", lambda *args, **kwargs: model)
     monkeypatch.setattr(AIME.PeftModel, "from_pretrained", lambda *args, **kwargs: AdaptedModel())
     monkeypatch.setattr(AIME.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: Tokenizer())
 
     AIME.merge_adapter_for_vllm(tmp_path / "source-adapter", tmp_path / "merged-model")
 
     assert (tmp_path / "merged-model" / "model.safetensors").read_bytes() == b"merged-model"
+    assert json.loads((tmp_path / "merged-model" / "config.json").read_text()) == {
+        "model_type": "qwen3_5",
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+    }
     assert (tmp_path / "merged-model" / "tokenizer.json").read_text() == "{}"
 
 

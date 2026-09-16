@@ -13,7 +13,7 @@ import tempfile
 
 from peft import PeftModel
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
 
 from aime24_dataset import materialize_dataset
 
@@ -38,12 +38,7 @@ from native_opd import (
 from reproduction_artifacts import validate_output_uri
 from skyrl_train.evaluate import evaluation_dump_dir
 from skyrl_train.io.io import local_read_dir, upload_directory
-from skyrl_train.models.qwen3_5_vlm import (
-    QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING,
-    is_qwen3_5_text_tower,
-    is_qwen3_5_vlm_shell,
-    unwrap_to_text_causal_lm,
-)
+from skyrl_train.models.qwen3_5_vlm import is_qwen3_5_vlm_shell
 
 NUM_INFERENCE_ENGINES = 8
 EVALUATION_EXPORT_DIR = "evaluation"
@@ -126,23 +121,20 @@ def hydra_arguments(model_path: str, data_path: Path, output_root: Path, dataset
 
 
 def merge_adapter_for_vllm(adapter_path: Path, destination: Path) -> None:
-    """Materialize a text-only model because vLLM cannot load split-QKV Qwen3.5 LoRA."""
-    model = AutoModelForCausalLM.from_pretrained(
+    """Merge split-QKV LoRA while retaining the vLLM-supported Qwen3.5 shell."""
+    model = Qwen3_5ForConditionalGeneration.from_pretrained(
         STUDENT_MODEL,
         revision=STUDENT_REVISION,
         dtype=torch.bfloat16,
         device_map="cpu",
         trust_remote_code=False,
     )
-    if is_qwen3_5_vlm_shell(model.config):
-        model = unwrap_to_text_causal_lm(model)
-    elif not is_qwen3_5_text_tower(model.config):
-        raise ValueError("Pinned Qwen3.5 base model is not a supported text tower or multimodal shell")
+    if not is_qwen3_5_vlm_shell(model.config):
+        raise ValueError("Pinned Qwen3.5 base model is not the expected multimodal shell")
     adapted = PeftModel.from_pretrained(
         model,
         adapter_path,
         is_trainable=False,
-        key_mapping=QWEN3_5_VLM_TO_TEXT_ADAPTER_KEY_MAPPING,
     )
     adapted.merge_and_unload(safe_merge=True).save_pretrained(destination, safe_serialization=True)
     AutoTokenizer.from_pretrained(STUDENT_MODEL, revision=STUDENT_REVISION).save_pretrained(destination)

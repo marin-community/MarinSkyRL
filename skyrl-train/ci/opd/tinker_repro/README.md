@@ -148,10 +148,12 @@ to MarinSkyRL's centered `+1/-1` reward mean. The `aime24_comparable` flag is
 true only for a full 30-problem evaluation with no sampling errors or truncated
 responses. Incomplete evaluations retain their metrics and trajectories for
 diagnosis and backfill. For adapter evaluations, the evaluator merges the pinned
-PEFT adapter into a temporary text-only Qwen3.5 model before vLLM starts: vLLM's
+PEFT adapter into a temporary full Qwen3.5 model before vLLM starts: vLLM's
 Qwen3.5 LoRA loader expects fused Gated DeltaNet QKV projections and cannot
-load the split-QKV adapter used by the SFT and native OPD trainers. The source
-adapter and committed checkpoint remain unchanged.
+load the split-QKV adapter used by the SFT and native OPD trainers. The pinned
+vLLM wheel also does not register a text-only Qwen3.5 serving class, so the
+merged model retains its multimodal shell and config. The source adapter and
+committed checkpoint remain unchanged.
 
 For a native OPD checkpoint, pass its exact `global_step_N` prefix with
 `--checkpoint-uri`. The evaluator requires that step's `commit.json`, verifies
