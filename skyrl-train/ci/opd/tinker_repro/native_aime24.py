@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from enum import StrEnum
 import json
@@ -61,7 +62,7 @@ class EvaluationManifest:
     student: str
     student_revision: str
     tokenizer_fingerprint: str
-    adapter_uri: str
+    adapter_uri: str | None
     sampling: SamplingContract
     runtime_patches: tuple[str, ...]
     command: tuple[str, ...]
@@ -121,16 +122,15 @@ def materialize_dataset(path: Path, stage: Stage) -> int:
     return table.num_rows
 
 
-def hydra_arguments(adapter_path: Path, data_path: Path, output_root: Path, dataset_rows: int) -> tuple[str, ...]:
+def hydra_arguments(
+    adapter_path: Path | None, data_path: Path, output_root: Path, dataset_rows: int
+) -> tuple[str, ...]:
     """Return the native evaluation configuration for the pinned protocol."""
-    return (
+    arguments = (
         "data.train_data=[]",
         f"data.val_data=['{data_path}']",
         f"trainer.policy.model.path={STUDENT_MODEL}",
         f"trainer.policy.model.revision={STUDENT_REVISION}",
-        f"trainer.policy.model.lora.rank={LORA_RANK}",
-        "trainer.policy.model.lora.alpha=1",
-        f"trainer.policy.model.lora.adapter_path={adapter_path}",
         "trainer.placement.colocate_all=false",
         "trainer.eval_interval=1",
         f"trainer.eval_batch_size={dataset_rows}",
@@ -159,6 +159,13 @@ def hydra_arguments(adapter_path: Path, data_path: Path, output_root: Path, data
         "environment.env_class=aime",
         f"environment.skyrl_gym.aime.evaluation_token_budget={MAX_TOKENS}",
         f"environment.skyrl_gym.aime.max_gen_length={MAX_TOKENS}",
+    )
+    if adapter_path is None:
+        return arguments
+    return arguments + (
+        f"trainer.policy.model.lora.rank={LORA_RANK}",
+        "trainer.policy.model.lora.alpha=1",
+        f"trainer.policy.model.lora.adapter_path={adapter_path}",
     )
 
 
@@ -192,21 +199,24 @@ def read_evaluation_metrics(output_root: Path, expected_rows: int, stage: Stage)
     return metrics
 
 
-def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
+def run(stage: Stage, adapter_uri: str | None, output_uri: str) -> int:
     validate_output_uri(output_uri)
-    runtime_patches = (patch_qwen35_embedding_lora(installed_qwen35_source()),)
+    runtime_patches = (patch_qwen35_embedding_lora(installed_qwen35_source()),) if adapter_uri is not None else ()
     with tempfile.TemporaryDirectory(prefix="tinker-native-aime24-") as temporary:
         root = Path(temporary)
         output_root = root / "output"
         output_root.mkdir()
         data_path = root / "aime24.parquet"
         rows = materialize_dataset(data_path, stage)
-        with local_read_dir(adapter_uri) as adapter_path:
+        adapter_context = local_read_dir(adapter_uri) if adapter_uri is not None else nullcontext(None)
+        with adapter_context as adapter_path:
             command = (
                 sys.executable,
                 "-m",
                 "skyrl_train.entrypoints.main_generate",
-                *hydra_arguments(Path(adapter_path), data_path, output_root, rows),
+                *hydra_arguments(
+                    Path(adapter_path) if adapter_path is not None else None, data_path, output_root, rows
+                ),
             )
             manifest = EvaluationManifest(
                 schema_version=1,
@@ -249,7 +259,10 @@ def run(stage: Stage, adapter_uri: str, output_uri: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", choices=tuple(Stage), required=True)
-    parser.add_argument("--adapter-uri", required=True)
+    parser.add_argument(
+        "--adapter-uri",
+        help="PEFT adapter directory to evaluate. Omit it to evaluate the immutable base model control.",
+    )
     parser.add_argument("--output-uri", required=True)
     args = parser.parse_args()
     return run(Stage(args.stage), args.adapter_uri, args.output_uri)

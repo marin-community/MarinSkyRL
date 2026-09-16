@@ -191,6 +191,19 @@ def test_native_aime_config_uses_the_published_sampling_contract(tmp_path: Path)
     assert config.generator.eval_sampling_params.top_k == -1
 
 
+def test_native_aime_base_control_does_not_enable_lora(tmp_path: Path):
+    arguments = AIME.hydra_arguments(None, tmp_path / "aime.parquet", tmp_path / "output", 1)
+
+    with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
+        config = compose(config_name="ppo_base_config", overrides=list(arguments))
+    validate_cfg(config)
+
+    assert config.trainer.policy.model.path == OPD.STUDENT_MODEL
+    assert config.trainer.policy.model.revision == OPD.STUDENT_REVISION
+    assert config.trainer.policy.model.lora.rank == 0
+    assert config.trainer.policy.model.lora.adapter_path is None
+
+
 def test_eval_only_loads_the_exact_local_lora_before_sampling(tmp_path: Path):
     class RecordingClient:
         def __init__(self):
