@@ -51,21 +51,56 @@ _RETRYABLE_TRANSLATED_ERROR_MARKERS = (
 )
 
 
+def s3_filesystem_kwargs() -> dict:
+    """Return the shared request bounds for a new s3fs filesystem."""
+    addressing_style = os.environ.get(_S3_ADDRESSING_STYLE_ENV, "virtual")
+    config_kwargs = s3_python_config_kwargs()
+    config_kwargs["retries"] = {"total_max_attempts": _S3_REQUEST_TOTAL_ATTEMPTS, "mode": "standard"}
+    config_kwargs["s3"] = {"addressing_style": addressing_style}
+    return {"config_kwargs": config_kwargs}
+
+
 def get_s3_fs():
     """Return a cached S3 filesystem instance, creating it once."""
     global _S3_FS
     if _S3_FS is None:
-        addressing_style = os.environ.get(_S3_ADDRESSING_STYLE_ENV, "virtual")
-        config_kwargs = s3_python_config_kwargs()
-        config_kwargs["retries"] = {"total_max_attempts": _S3_REQUEST_TOTAL_ATTEMPTS, "mode": "standard"}
-        config_kwargs["s3"] = {"addressing_style": addressing_style}
-        filesystem = fsspec.filesystem(
-            "s3",
-            config_kwargs=config_kwargs,
-        )
+        filesystem = fsspec.filesystem("s3", **s3_filesystem_kwargs())
         filesystem.retries = _S3_FILESYSTEM_RETRIES
         _S3_FS = filesystem
     return _S3_FS
+
+
+def abort_multipart_uploads(path: str) -> int:
+    """Abort incomplete multipart uploads below one S3 checkpoint prefix."""
+    if not path.startswith("s3://"):
+        raise ValueError(f"Expected an S3 path, got: {path}")
+
+    filesystem = get_s3_fs()
+    s3_refresh_if_expiring(filesystem)
+    bucket, key, _ = filesystem.split_path(path)
+    prefix = key.rstrip("/") + "/"
+    response = call_with_s3_retry(
+        filesystem,
+        filesystem.call_s3,
+        "list_multipart_uploads",
+        max_attempts=1,
+        Bucket=bucket,
+        Prefix=prefix,
+    )
+    uploads = response.get("Uploads", [])
+    for upload in uploads:
+        call_with_s3_retry(
+            filesystem,
+            filesystem.call_s3,
+            "abort_multipart_upload",
+            max_attempts=1,
+            Bucket=bucket,
+            Key=upload["Key"],
+            UploadId=upload["UploadId"],
+        )
+    if uploads:
+        logger.warning("Aborted {} stale multipart uploads below {}", len(uploads), path)
+    return len(uploads)
 
 
 def s3_expiry_time():

@@ -64,18 +64,24 @@ expert-parallel co-batching does not leak between ranks.
 
 ## Memory
 
-Policy nodes for the 67B-A2B Snowball checkpoint use 1800GB of host memory and
-1000GB of disk. The Snowball configs select Megatron's `dp_reshardable`
-optimizer format, which writes data-parallel-local shards without gathering the
-optimizer state onto data-parallel rank zero. Resume must keep the tensor,
-pipeline, context, and expert geometry fixed.
+The Snowball configs select Megatron's `dp_reshardable` optimizer format, which
+writes data-parallel-local shards without gathering optimizer state onto
+data-parallel rank zero. Resume must keep the tensor, pipeline, context, and
+expert geometry fixed.
 
-SkyRL currently gives Megatron a local work directory, then uploads the completed
-torch-dist files to S3. This is a SkyRL storage-adapter limitation, not a Megatron
-checkpoint-format requirement. Megatron Core 0.18's Multi-Storage Client path is
-not enabled because its object writer buffers each complete remote file in
-`BytesIO` before uploading it; for Snowball's tens-of-GB rank files, that would
-move staging from disk to host memory instead of removing it.
+S3 checkpoints write each torch-dist item directly through fsspec with one writer
+thread per rank. Tensor copy-ahead targets 1GiB per rank; an individual item can
+exceed that target and is reported with its key and size. s3fs adds a 50MiB
+multipart buffer. Only small control files such as `common.pt`, `metadata.json`,
+and the Hugging Face configuration use a local temporary directory. Local-path
+checkpoints retain Megatron Core's standard writer.
+
+Megatron Core 0.18's Multi-Storage Client path remains disabled because its
+object writer buffers each complete remote file in `BytesIO` before uploading
+it. PyTorch 2.11's one-file-per-rank fsspec mode also retains all staged tensor
+references until that file closes, so SkyRL currently writes one object per DCP
+item. Save-plan logs report the item count and sizes needed to evaluate later
+packing.
 
 On the GPU, the last pipeline stage holds the vocab-sized logits; the loss
 computes entropy under no_grad unless an entropy loss is configured, which
