@@ -22,7 +22,9 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
 )
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
+from skyrl_train.rollout_observability import consumed_stop_metrics
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
+    DEFAULT_ACCEPTED_STOP_REASONS,
     REWARD_SHAPING_ROW_KEYS,
     refresh_trajectory_reward_shaping_metrics,
 )
@@ -176,11 +178,45 @@ def sanitize_data_source(data_source: str) -> str:
     return data_source.replace("/", "_")
 
 
+def evaluation_response_metrics(trajectory_batch: TrajectoryBatch) -> Dict[str, float]:
+    """Describe evaluation work and score contributions without changing its reward.
+
+    Contributions divide by all responses, not only the selected stop class.
+    A completed stop does not certify final-answer structure or correctness.
+    Finalized response lengths may include runner-added tokens. Missing stop
+    reasons suppress fractions and contributions rather than implying completion.
+    """
+    lengths = [len(tokens) for tokens in trajectory_batch["response_ids"]]
+    count = len(lengths)
+    if not count:
+        raise ValueError("Evaluation response metrics require a nonempty batch")
+    stops = trajectory_batch.get("stop_reasons")
+    metrics = {key.removeprefix("consumed/"): value for key, value in consumed_stop_metrics(stops, count).items()}
+    metrics.update(
+        response_tokens=float(sum(lengths)),
+        response_tokens_mean=sum(lengths) / count,
+        response_tokens_max=float(max(lengths)),
+    )
+    if stops is None or metrics["stop_reason_coverage"] != 1:
+        return metrics
+    scores = [sum(reward) if isinstance(reward, list) else reward for reward in trajectory_batch["rewards"]]
+    pairs = list(zip(scores, stops, strict=True))
+    metrics.update(
+        completed_stop_fraction=sum(stop in DEFAULT_ACCEPTED_STOP_REASONS for _, stop in pairs) / count,
+        completed_stop_score_contribution=sum(score for score, stop in pairs if stop in DEFAULT_ACCEPTED_STOP_REASONS)
+        / count,
+        length_stop_score_contribution=sum(score for score, stop in pairs if stop == "length") / count,
+    )
+    return metrics
+
+
 def calculate_per_dataset_metrics(
     trajectory_batch: TrajectoryBatch,
     concat_uids: List[str],
     concat_data_sources: List[str],
     n_samples_per_prompt: int,
+    *,
+    telemetry_enabled: bool,
 ) -> Dict[str, float]:
     """Calculate metrics per data source."""
     eval_metrics = {}
@@ -209,6 +245,13 @@ def calculate_per_dataset_metrics(
         sanitized_data_source = sanitize_data_source(data_source)
         eval_metrics[f"eval/{sanitized_data_source}/avg_score"] = avg_score
         eval_metrics[f"eval/{sanitized_data_source}/pass_at_{n_samples_per_prompt}"] = pass_at_n
+        if telemetry_enabled:
+            eval_metrics.update(
+                {
+                    f"eval/{sanitized_data_source}/{key}": value
+                    for key, value in evaluation_response_metrics(subset_trajectory_batch).items()
+                }
+            )
 
     return eval_metrics
 
