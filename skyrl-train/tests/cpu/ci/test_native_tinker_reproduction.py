@@ -212,6 +212,7 @@ def test_native_opd_full_run_validates_pinned_aime_every_two_steps():
     assert config.generator.eval_sampling_params.top_k == AIME.TOP_K
     assert config.generator.engine_init_kwargs.max_model_len == AIME.CONTEXT_WINDOW
     assert config.environment.skyrl_gym.aime.evaluation_token_budget == AIME.MAX_TOKENS
+    assert config.environment.skyrl_gym.aime.strict_box_verify is True
 
 
 def test_qwen35_runtime_patch_enables_embedding_and_lm_head_lora(tmp_path: Path):
@@ -307,6 +308,7 @@ def test_native_aime_config_uses_the_published_sampling_contract(tmp_path: Path)
     assert config.generator.eval_sampling_params.temperature == 1.0
     assert config.generator.eval_sampling_params.top_p == 1.0
     assert config.generator.eval_sampling_params.top_k == -1
+    assert config.environment.skyrl_gym.aime.strict_box_verify is True
 
 
 def test_native_aime_base_control_does_not_enable_lora(tmp_path: Path):

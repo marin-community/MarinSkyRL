@@ -42,6 +42,7 @@ from skyrl_train.dataset.preprocess import (
 )
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC, validate_distillation_attachment
 from skyrl_train.distillation_runtime import SyncDistillationRuntime
+from skyrl_train.domain_gradient_balance import DomainGradientBalancer
 from skyrl_train.utils import trainer_utils
 from skyrl_train.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
@@ -209,6 +210,7 @@ class RayPPOTrainer:
         self._group_admission_watchdog: AdmissionProgressWatchdog | None = None
         self._step_time_history: deque[float] = deque(maxlen=5)
         self._sync_distillation_runtime: Optional[SyncDistillationRuntime] = None
+        self._domain_balancer: DomainGradientBalancer | None = None
         self.distillation_scored_tokens_total = 0
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
@@ -229,6 +231,7 @@ class RayPPOTrainer:
         if self._sync_distillation_runtime is not None:
             raise RuntimeError("synchronous distillation runtime is already configured")
         self._sync_distillation_runtime = runtime
+        self._domain_balancer = runtime.domain_balancer
 
     async def _close_distillation_runtime(self, runtime: _ClosableDistillationRuntime) -> None:
         await self._guarded_async(
@@ -249,6 +252,7 @@ class RayPPOTrainer:
             lambda: self.fwd_logprobs_values_reward(training_input),
         )
         forwarded.update(scored.distillation.training_tensors())
+        self.all_metrics.update(self._sync_distillation_runtime.domain_balance_metrics)
         self.all_metrics.update(
             {
                 "distillation/teacher_count": float(len({route.teacher_id for route in scored.routes})),
@@ -2277,6 +2281,7 @@ class RayPPOTrainer:
             "config": self.cfg,
             "pending_sync_prompts": self._pending_sync_prompts,
             "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
+            "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
         }
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
         with io.open_file(trainer_state_path, "wb") as f:
@@ -2408,6 +2413,11 @@ class RayPPOTrainer:
             self.distillation_scored_tokens_total = 0
         else:
             self.distillation_scored_tokens_total = int(trainer_state.get("distillation_scored_tokens_total", 0))
+        if self._domain_balancer is not None:
+            balance_state = trainer_state.get("domain_gradient_balance_state")
+            if balance_state is None:
+                raise ValueError("Cannot resume domain-gradient-balanced OPD without its saved anchor state")
+            self._domain_balancer.load_state_dict(balance_state)
         logger.info("Successfully loaded trainer state")
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")

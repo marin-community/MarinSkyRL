@@ -806,11 +806,9 @@ def _role_gpus_per_node(
     placement: Dict[str, Any],
     key: str,
     launch_gpus_per_node: int,
-    *,
-    preserve_smaller_value: bool,
 ) -> int:
     configured = placement.get(key)
-    if preserve_smaller_value and configured is not None and int(configured) <= launch_gpus_per_node:
+    if configured is not None and int(configured) <= launch_gpus_per_node:
         return int(configured)
     return launch_gpus_per_node
 
@@ -831,7 +829,6 @@ def build_checkpoint_export_hydra_args(
         placement,
         "policy_num_gpus_per_node",
         gpus_per_node,
-        preserve_smaller_value=False,
     )
     _apply_policy_model_source(trainer, exp_args)
 
@@ -911,7 +908,6 @@ def build_skyrl_hydra_args(
             placement,
             key,
             gpus_per_node,
-            preserve_smaller_value=True,
         )
 
     placement["policy_num_gpus_per_node"] = _resolve_gpus_per_node("policy_num_gpus_per_node")

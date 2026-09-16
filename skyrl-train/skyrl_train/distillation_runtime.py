@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from typing import TypeVar
 
 from marinskyrl.distillation import DistillationPlan
+from skyrl_train.distillation import StudentTopKPolicySurrogateInput
 from skyrl_train.distillation_adapters import (
     AsyncRoutedTeacherScoreTicket,
     AsyncTeacherQueueLimits,
@@ -19,6 +21,7 @@ from skyrl_train.distillation_adapters import (
 )
 from skyrl_train.teacher_oracle import TeacherOracleCollection
 from skyrl_train.teacher_routing import PlanTeacherRouter, route_trajectory_batch
+from skyrl_train.domain_gradient_balance import DomainGradientBalancer
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
 
@@ -65,6 +68,10 @@ class SyncDistillationRuntime:
     ) -> None:
         self._planner = _RoutedDistillationPlanner(plan, tokenizer_fingerprints=tokenizer_fingerprints)
         self._adapter = RayPPOTrainerDistillationAdapter.from_oracles(oracles)
+        self.domain_balancer = (
+            DomainGradientBalancer(plan.domain_gradient_balance) if plan.domain_gradient_balance is not None else None
+        )
+        self.domain_balance_metrics: dict[str, float] = {}
 
     async def score_while_model_forwarding(
         self,
@@ -72,7 +79,16 @@ class SyncDistillationRuntime:
         model_forward: Callable[[], _ForwardResult],
     ) -> tuple[_ForwardResult, RoutedScoredDistillationBatch]:
         work = self._planner.build_work(trajectory_batch)
-        return await self._adapter.score_routed_while_model_forwarding(work, model_forward)
+        forwarded, scored = await self._adapter.score_routed_while_model_forwarding(work, model_forward)
+        self.domain_balance_metrics = {}
+        if self.domain_balancer is not None:
+            if not isinstance(scored.distillation, StudentTopKPolicySurrogateInput):
+                raise ValueError("domain gradient balance requires student-selected top-K evidence")
+            balanced, self.domain_balance_metrics = self.domain_balancer.apply(
+                scored.distillation, tuple(route.route_id for route in scored.routes)
+            )
+            scored = replace(scored, distillation=balanced)
+        return forwarded, scored
 
     async def close(self) -> None:
         await self._adapter.close()
@@ -94,6 +110,9 @@ class AsyncDistillationRuntime:
             coordinator=TeacherEvidenceCoordinator(oracles),
             teacher_limits=teacher_limits,
         )
+        self.domain_balancer = (
+            DomainGradientBalancer(plan.domain_gradient_balance) if plan.domain_gradient_balance is not None else None
+        )
 
     async def start(self) -> None:
         await self._adapter.start()
@@ -110,7 +129,7 @@ class AsyncDistillationRuntime:
         self,
         training_input: TrainingInputBatch,
         scored_groups: Sequence[RoutedScoredDistillationBatch],
-    ) -> None:
+    ) -> dict[str, float]:
         """Attach scored groups in admission order, including safe learner padding rows."""
         if not scored_groups:
             raise ValueError("fully-async distillation requires at least one scored group")
@@ -131,8 +150,15 @@ class AsyncDistillationRuntime:
             indexed_inputs.append((tuple(range(offset, next_offset)), scored.distillation))
             offset = next_offset
         assembled = assemble_distillation_inputs(indexed_inputs, tuple(response_shape))
+        balance_metrics: dict[str, float] = {}
+        if self.domain_balancer is not None:
+            if not isinstance(assembled, StudentTopKPolicySurrogateInput):
+                raise ValueError("domain gradient balance requires student-selected top-K evidence")
+            route_ids = tuple(route.route_id for scored in scored_groups for route in scored.routes)
+            assembled, balance_metrics = self.domain_balancer.apply(assembled, route_ids)
         training_input.update(assembled.training_tensors())
         training_input.metadata.update(_distillation_provenance(scored_groups))
+        return balance_metrics
 
     async def close(self) -> None:
         await self._adapter.close()

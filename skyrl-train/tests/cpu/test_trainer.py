@@ -675,6 +675,7 @@ def test_load_checkpoints_restores_refill_state_only_with_dataloader_cursor(
     trainer.policy_model = MagicMock()
     trainer.policy_model.async_run_ray_method.return_value = []
     trainer.critic_model = None
+    trainer._domain_balancer = None
 
     with patch("skyrl_train.trainer.ray.get", return_value=None):
         global_step, loaded_path = trainer.load_checkpoints()
@@ -713,6 +714,7 @@ def test_load_checkpoints_can_start_a_new_stage_with_continued_model_training_st
     trainer.policy_model = MagicMock()
     trainer.policy_model.async_run_ray_method.return_value = []
     trainer.critic_model = None
+    trainer._domain_balancer = None
 
     with patch("skyrl_train.trainer.ray.get", return_value=None):
         global_step, _ = trainer.load_checkpoints()
