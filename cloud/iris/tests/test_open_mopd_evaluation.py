@@ -202,6 +202,31 @@ def test_native_model_stage_records_downloaded_file_hashes(tmp_path: Path) -> No
     assert verification.source_identity == "checkpoint-step-2"
 
 
+def test_native_model_stage_normalizes_transformers_5_fast_tokenizer_metadata(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    tokenizer_config = {"tokenizer_class": "TokenizersBackend", "eos_token": "</s>"}
+    (source / "config.json").write_text("{}")
+    (source / "model.safetensors").write_bytes(b"weights")
+    (source / "tokenizer.json").write_text("{}")
+    (source / "tokenizer_config.json").write_text(json.dumps(tokenizer_config))
+
+    model, verification = stage_native_model(source.as_uri(), "checkpoint-step-2", tmp_path / "model")
+
+    assert json.loads((model / "tokenizer_config.json").read_text()) == {
+        "tokenizer_class": "PreTrainedTokenizerFast",
+        "eos_token": "</s>",
+    }
+    assert json.loads((source / "tokenizer_config.json").read_text()) == tokenizer_config
+    original = next(item for item in verification.files if item.path == "tokenizer_config.json")
+    assert original.sha256 == hashlib.sha256((source / "tokenizer_config.json").read_bytes()).hexdigest()
+    assert verification.staged_tokenizer_config is not None
+    assert (
+        verification.staged_tokenizer_config.sha256
+        == hashlib.sha256((model / "tokenizer_config.json").read_bytes()).hexdigest()
+    )
+
+
 def test_native_model_stage_rejects_incomplete_weight_index(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()

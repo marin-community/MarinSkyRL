@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source": {
     "repository": "https://github.com/BytedTsinghua-SIA/Open-MOPD.git",
     "commit": "4809a96cf85a869106ff0ff3f37d0a51e12010ae"
@@ -116,6 +116,13 @@
       "path": "rl_prompt_mix/train.parquet",
       "size": 935454839,
       "sha256": "5243f3e61e7c0841a102389e509bd0822405c27f949e4d04cb7dd1615d4e5b2e"
+    },
+    "validation_dataset": {
+      "repository": "BytedTsinghua-SIA/Open-MOPD-Data",
+      "revision": "9e897efe3257599d4300e2d5ee865a1cc714af87",
+      "path": "eval/math/aime24.parquet",
+      "size": 101589,
+      "sha256": "8a72185376a9aba48c7434216fc955f6b4d12e534839cf6eacc4cff5669dcaef"
     }
   },
   "hardware": {
@@ -169,7 +176,11 @@
     "domain_weights": [2, 2, 1],
     "target_gradient_shares": [0.3333333333333333, 0.3333333333333333, 0.3333333333333333],
     "gap_following_alpha": 1.0,
-    "save_every": 2
+    "save_every": 2,
+    "eval_every": 2,
+    "eval_temperature": 0.6,
+    "eval_nucleus_p": 0.95,
+    "eval_samples": 1
   },
   "gates": {
     "one_step": 1,

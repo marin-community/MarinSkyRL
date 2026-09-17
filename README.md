@@ -23,7 +23,7 @@
 
 This is a fork of SkyRL maintained for the [Marin project](https://github.com/marin-community/marin) (`marin-community`), where it powers agentic RL training (SkyRL + Harbor). It was originally developed for the [OpenThoughts-Agent project](https://github.com/open-thoughts/OpenThoughts-Agent); that line of work now continues here under Marin.
 
-We aim to upstream these changes to the main SkyRL branch.
+MarinSkyRL is maintained as a hard snapshot; no upstream sync or merge-back is planned.
 
 ## MarinSkyRL packaging
 
@@ -34,6 +34,9 @@ The repository root builds one `marinskyrl` wheel containing the typed Iris laun
 uv sync --frozen
 uv run --frozen marinskyrl --help
 ```
+
+The [native Tinker reasoning reproduction](skyrl-train/ci/opd/tinker_repro/README.md#step-400-sft-and-one-step-opd-result)
+records the step-400 SFT adapter, the one-step OPD gate, AIME 2024 evidence, and replay commands.
 
 Python extras cannot replace a base CPU Torch wheel with a CUDA wheel, so `cpu` and `cuda` are mutually
 exclusive wheel profiles. GPU-only component extras imply `cuda`: ordinary training commands select only

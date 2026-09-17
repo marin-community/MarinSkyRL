@@ -14,12 +14,14 @@ import os
 import shutil
 import sys
 import types
+from pathlib import Path
 
 import torch
 import torch._tensor as _tt
 import torch._utils as _tu
 import s3fs
 from huggingface_hub import HfApi
+from marinskyrl.hf_model import normalize_fast_tokenizer_metadata
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 
@@ -239,16 +241,10 @@ def main():
     shutil.copy2(os.path.join(hf_src, "config.json"), os.path.join(args.out_dir, "config.json"))
 
     # ---- verify + (if needed) patch the two Stage-B/C invariants ----
-    tokenizer_config_path = os.path.join(args.out_dir, "tokenizer_config.json")
-    with open(tokenizer_config_path) as tokenizer_config_file:
-        tc = json.load(tokenizer_config_file)
-    if tc.get("tokenizer_class") != "PreTrainedTokenizerFast":
-        tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-        with open(tokenizer_config_path, "w") as tokenizer_config_file:
-            json.dump(tc, tokenizer_config_file, ensure_ascii=False, indent=2)
+    if normalize_fast_tokenizer_metadata(Path(args.out_dir)):
         print("[reshard] PATCHED tokenizer_class -> PreTrainedTokenizerFast", flush=True)
     else:
-        print("[reshard] tokenizer_class already PreTrainedTokenizerFast (ok)", flush=True)
+        print("[reshard] tokenizer_class requires no normalization", flush=True)
 
     with open(os.path.join(args.out_dir, "config.json")) as output_config_file:
         outcfg = json.load(output_config_file)

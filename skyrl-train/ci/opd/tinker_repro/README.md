@@ -98,6 +98,87 @@ temperature as a fidelity review, not an automatic dependency update.
 
 ## Native MarinSkyRL OPD
 
+### Step-400 SFT and one-step OPD result
+
+The intermediate Qwen3.5-9B-Base SFT adapter at step 400 is preserved at
+[open-athena/tinker-qwen3.5-9b-native-sft-step-400](https://huggingface.co/open-athena/tinker-qwen3.5-9b-native-sft-step-400/tree/6fc957b70b96abeea8f5500323df9d0b27fc6bfb)
+at revision `6fc957b70b96abeea8f5500323df9d0b27fc6bfb`.
+It is a fused-QKV PEFT adapter, not a standalone model; load it on
+`Qwen/Qwen3.5-9B-Base` revision `68c46c4b3498877f3ef123c856ecfde50c39f404`.
+The same immutable bytes are at
+`s3://marin-us-east-02a/iris/cw-rno2a/experiments/tinker-native-repro/20260916t/sft-full/fused/step-400/`.
+The SHA-256 digests are `ab604790f400d65bc8f53a221de417c5c559d68031184a82f49e380d5362b131`
+for `adapter_config.json` and `50a4510256c71a1cd0f49ba1866903660a38ce6e06a8d8d0cb7daaa3a8d945b0`
+for `adapter_model.safetensors`. Verify both before use. The SFT input is the
+seed-0, 384,000-row OpenThoughts3 stream described in
+[the Axolotl SFT runbook](../../../../docs/axolotl-tinker-sft-control.md).
+The Hugging Face repository also contains `sft-training-checkpoint-400/`, the
+original 20-file Axolotl checkpoint with optimizer, scheduler, RNG, and
+trainer state. Use that folder to resume SFT; the root fused adapter only
+loads model weights for OPD or evaluation.
+
+The native AIME 2024 evaluator scored this SFT adapter **19/30** with no
+truncations. One full-shape native OPD update from it used 512 DeepMath prompts,
+four student rollouts per prompt, a 16,384-token generation limit, and frozen
+`Qwen/Qwen3.5-9B` as teacher. Its committed step-1 checkpoint is under
+`s3://marin-us-east-02a/iris/cw-rno2a/experiments/tinker-native-repro/20260916t/opd/fidelity-step400-20260916a/checkpoints/global_step_1/`.
+Independent AIME 2024 evaluation scored **26/30 raw**, or 26/28 among completed
+responses, with two length truncations and no errors. Both truncated problems
+were already wrong at SFT step 400. The 30 matched prompts had eight
+wrong-to-correct and one correct-to-wrong change. This is one stochastic
+evaluation of an intermediate checkpoint; its manifest marks it
+`aime24_comparable=false`. It is not the published 3,000-step SFT plus
+200-step OPD result.
+
+To replay the update, use the original clean MarinSkyRL source revision
+`4ce9717817772edd8645db79d1978cd72c59bb33` and the recorded image
+`ghcr.io/marin-community/marinskyrl-opd-repro@sha256:7c4f1275c8a6c53b94218524c6f7601808662cb7f429e2ece6d05854ad804540`.
+Launch the native runner on an H100×8 Iris node with the frozen root GPU profile
+and a task-private uv cache. Check node capacity, queue reservations, and the
+interactive budget first; verify the admitted pod's effective priority after
+submission. Use a new output prefix and the archived adapter URI (or download the
+Hugging Face adapter onto the worker first). The runner checks both adapter
+digests, the fused-QKV shape, the pinned student and teacher revisions, and the
+DeepMath revision before training:
+
+```bash
+ADAPTER_URI='s3://marin-us-east-02a/iris/cw-rno2a/experiments/tinker-native-repro/20260916t/sft-full/fused/step-400'
+OUTPUT_URI='s3://<regional-bucket>/<unique-prefix>/tinker-opd-step400-replay'
+
+uv run iris --cluster cw-rno2a job run \
+  --enable-extra-resources --gpu H100x8 --cpu 64 --memory 512GB --disk 750GB \
+  --priority interactive --no-preemptible --max-retries 0 --no-sync \
+  --task-image ghcr.io/marin-community/marinskyrl-opd-repro@sha256:7c4f1275c8a6c53b94218524c6f7601808662cb7f429e2ece6d05854ad804540 \
+  -- env UV_CACHE_DIR=/tmp/tinker-native-uv-cache UV_LINK_MODE=copy \
+  uv run --frozen --extra fsdp --extra vllm python \
+  skyrl-train/ci/opd/tinker_repro/native_opd.py \
+  --stage fidelity_step --adapter-uri "$ADAPTER_URI" \
+  --adapter-config-sha256 ab604790f400d65bc8f53a221de417c5c559d68031184a82f49e380d5362b131 \
+  --adapter-model-sha256 50a4510256c71a1cd0f49ba1866903660a38ce6e06a8d8d0cb7daaa3a8d945b0 \
+  --output-uri "$OUTPUT_URI"
+```
+
+Evaluate its committed `checkpoints/global_step_1` prefix with a new evaluation
+output prefix:
+
+```bash
+uv run iris --cluster cw-rno2a job run \
+  --enable-extra-resources --gpu H100x8 --cpu 64 --memory 512GB --disk 750GB \
+  --priority interactive --no-preemptible --max-retries 0 --no-sync \
+  --task-image ghcr.io/marin-community/marinskyrl-opd-repro@sha256:7c4f1275c8a6c53b94218524c6f7601808662cb7f429e2ece6d05854ad804540 \
+  -- env UV_CACHE_DIR=/tmp/tinker-native-aime-uv-cache UV_LINK_MODE=copy \
+  uv run --frozen --extra fsdp --extra vllm python \
+  skyrl-train/ci/opd/tinker_repro/native_aime24.py \
+  --stage full --checkpoint-uri "$OUTPUT_URI/checkpoints/global_step_1" \
+  --output-uri 's3://<regional-bucket>/<unique-prefix>/tinker-aime-step1-replay'
+```
+
+The evaluator uses the pinned 30-problem AIME 2024
+dataset, one sample per problem, temperature 1, top-p 1, no top-k, a 64,000-token
+generation limit, and strict boxed-integer grading. Save the manifest and all
+30 trajectories; report raw score, completed-only score, errors, and
+truncations together. A one-sample replay need not reproduce 26/30 exactly.
+
 `native_opd.py` runs the same published Qwen3.5 student, teacher, LoRA shape,
 and reverse-KL objective on eight local GPUs. Full runs materialize the pinned
 30-problem AIME 2024 validation set and evaluate it every two optimizer steps.

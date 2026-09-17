@@ -4,6 +4,7 @@ import tempfile
 from datetime import timedelta
 from typing import List, Union, Optional
 from jaxtyping import Float
+from loguru import logger
 
 import numpy as np
 import torch
@@ -24,6 +25,8 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_grads_to_cpu,
     load_megatron_grads_to_gpu,
 )
+from skyrl_train.distributed.megatron.direct_checkpoint import DirectS3TorchDistSaveShardedStrategy
+from skyrl_train.io.s3fs import abort_multipart_uploads
 
 from megatron.core.dist_checkpointing.strategies import base as ckpt_base
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
@@ -211,8 +214,23 @@ class MegatronStrategy(DistributedStrategy):
         # Save RNG state.
         sharded_state_dict["rng"] = self.get_rng_state()
 
-        # Save the checkpoint across ranks in parallel.
-        save_strategy = get_default_save_sharded_strategy("torch_dist")
+        # Save the checkpoint across ranks in parallel. Each S3 rank shard is one
+        # multipart object; the local work directory contains only small control files.
+        if ckpt_dir.startswith("s3://"):
+            if self.is_rank_0():
+                try:
+                    abort_multipart_uploads(ckpt_dir)
+                except ValueError:
+                    raise
+                except Exception:
+                    logger.opt(exception=True).warning(
+                        "Could not remove stale multipart uploads below {}; relying on bucket lifecycle cleanup",
+                        ckpt_dir,
+                    )
+            dist.barrier()
+            save_strategy = DirectS3TorchDistSaveShardedStrategy(ckpt_dir)
+        else:
+            save_strategy = get_default_save_sharded_strategy("torch_dist")
         save_strategy = FullyParallelSaveStrategyWrapper(
             save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
         )

@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from loguru import logger
+from marinskyrl.hf_model import normalize_fast_tokenizer_metadata
 from marinskyrl.resource_locator import join_resource_path
 
 from skyrl_train.io import io
@@ -106,6 +107,7 @@ def local_hf_model_dir(output_path: str):
     try:
         with io.local_output_dir(output_path, _upload_hf_model_directory) as work_dir:
             yield work_dir
+            normalize_fast_tokenizer_metadata(Path(work_dir))
     except BaseException as export_error:
         try:
             _remove_weight_index_if_present(index_path)

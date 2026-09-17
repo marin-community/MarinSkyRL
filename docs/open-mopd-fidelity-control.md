@@ -11,6 +11,16 @@ SHA-256. The Iris task records the resolved training command, `pip freeze`, `nvi
 complete config in `control-manifest.json`. It uploads that manifest before training, periodically copies the output
 tree to durable storage, and performs a final copy when the training process exits.
 
+Future launches stage the pinned 30-row AIME 2024 evaluation parquet separately
+from the training mix. The authors' trainer samples one AIME response at
+temperature 0.6 after each two-step checkpoint (after step 1 for the one-step
+gate). Console metrics and `validation/<step>.jsonl` are copied with the output
+tree. This inline check uses the training engine's 16,384-token response cap
+and its rule-based math scorer. It is an early quality signal, not the released
+64-sample, 31,000-token AIME evaluation; continue to run the separate formal
+checkpoint suite for that comparison. The setting applies when launching from
+this configuration; it does not retroactively change existing jobs.
+
 ## Dry run
 
 The task image must contain Python 3.12, PyTorch 2.8.0, vLLM 0.11.0, Ray 2.55.1, Transformers 4.57.6,
