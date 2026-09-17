@@ -1,7 +1,7 @@
 import torch
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol
+from typing import List, Tuple, Union, Optional, Dict, Any, Iterable, Protocol, Sequence
 from collections import defaultdict
 from enum import StrEnum
 import numpy as np
@@ -712,6 +712,17 @@ def _rollout_logprob_presence(trajectory_batches: List[TrajectoryBatch], *, requ
     return presence
 
 
+def scalar_reward_token_credit(reward: float, response_ids: Sequence[int]) -> List[float]:
+    """Convert a response-level reward to token-level credit on the last response token.
+
+    A zero-token response has nowhere to place the reward, so it stays empty.
+    """
+    token_rewards = [0.0] * len(response_ids)
+    if token_rewards:
+        token_rewards[-1] = float(reward)
+    return token_rewards
+
+
 def _concatenate_rewards(trajectory_batches: List[TrajectoryBatch]) -> Union[List[float], List[List[float]]]:
     """Concatenate rewards while preserving token-level credit from any child batch."""
     has_token_level_rewards = any(
@@ -726,10 +737,7 @@ def _concatenate_rewards(trajectory_batches: List[TrajectoryBatch]) -> Union[Lis
             if isinstance(reward, list):
                 rewards.append(reward)
                 continue
-            token_rewards = [0.0] * len(response_ids)
-            if token_rewards:
-                token_rewards[-1] = float(reward)
-            rewards.append(token_rewards)
+            rewards.append(scalar_reward_token_credit(reward, response_ids))
     return rewards
 
 
