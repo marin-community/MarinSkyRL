@@ -18,6 +18,7 @@ from cloud.iris.runtime_bundle import LauncherSource, resolve_launcher_source
 DEFAULT_CONFIG = Path(__file__).with_name("configs") / "open_mopd_fidelity.json"
 TASK_MODULE = "cloud.iris.open_mopd_fidelity_task"
 DOMAINS = ("math", "code", "if")
+PAPER_DOMAIN_RESPONSE_LIMITS = (16384, 16384, 2048)
 GATES = {"one_step": 1, "paper_checkpoint": 200, "paper_schedule": 600}
 CHECKPOINT_DIRECTORY_NAME = "checkpoints"
 GLOBAL_STEP_PREFIX = "global_step_"
@@ -95,8 +96,8 @@ class Training:
     entropy_coefficient: float
     loss_aggregation: str
     prompt_limit: int
-    paper_prompt_limits: tuple[int, int, int]
     response_limit: int
+    domain_response_limits: tuple[int, int, int]
     top_k: int
     nucleus_p: float
     temperature: float
@@ -139,7 +140,6 @@ class FidelityLaunchPlan:
     output_uri: str
     evaluation_reference: ModelArtifact
     prompt_limit: int
-    paper_prompt_limits: tuple[int, int, int]
     iris_command: tuple[str, ...]
     known_deviations: tuple[str, ...]
 
@@ -247,8 +247,8 @@ def load_config(path: Path) -> FidelityConfig:
         "config",
         {"schema_version", "source", "artifacts", "hardware", "environment", "training", "gates", "known_deviations"},
     )
-    if _integer(root["schema_version"], "schema_version") != 3:
-        raise ValueError("Open-MOPD fidelity config schema_version must be 3")
+    if _integer(root["schema_version"], "schema_version") != 4:
+        raise ValueError("Open-MOPD fidelity config schema_version must be 4")
     source_value = _object(root["source"], "source", {"repository", "commit"})
     source = Source(
         _string(source_value["repository"], "source.repository"),
@@ -298,8 +298,10 @@ def load_config(path: Path) -> FidelityConfig:
         entropy_coefficient=_number(training_value["entropy_coefficient"], "training.entropy_coefficient"),
         loss_aggregation=_string(training_value["loss_aggregation"], "training.loss_aggregation"),
         prompt_limit=_integer(training_value["prompt_limit"], "training.prompt_limit"),
-        paper_prompt_limits=_triple(training_value["paper_prompt_limits"], "training.paper_prompt_limits", _integer),
         response_limit=_integer(training_value["response_limit"], "training.response_limit"),
+        domain_response_limits=_triple(
+            training_value["domain_response_limits"], "training.domain_response_limits", _integer
+        ),
         top_k=_integer(training_value["top_k"], "training.top_k"),
         nucleus_p=_number(training_value["nucleus_p"], "training.nucleus_p"),
         temperature=_number(training_value["temperature"], "training.temperature"),
@@ -319,6 +321,11 @@ def load_config(path: Path) -> FidelityConfig:
     )
     if training.train_batch_size % training.mini_batch_size:
         raise ValueError("train_batch_size must be divisible by mini_batch_size")
+    if (
+        training.response_limit != max(PAPER_DOMAIN_RESPONSE_LIMITS)
+        or training.domain_response_limits != PAPER_DOMAIN_RESPONSE_LIMITS
+    ):
+        raise ValueError("Open-MOPD paper response limits must be 16K for math/code and 2K for IF")
     if training.eval_every <= 0:
         raise ValueError("training.eval_every must be positive")
     if training.eval_temperature <= 0 or not 0 < training.eval_nucleus_p <= 1 or training.eval_samples <= 0:
@@ -327,7 +334,7 @@ def load_config(path: Path) -> FidelityConfig:
     if not isinstance(deviations, list) or not deviations or not all(isinstance(value, str) for value in deviations):
         raise ValueError("known_deviations must be a non-empty list of strings")
     return FidelityConfig(
-        schema_version=3,
+        schema_version=4,
         source=source,
         student=_model_artifact(artifacts["student"], "artifacts.student"),
         teachers=teachers,
@@ -370,14 +377,6 @@ def _provenance(task_image: str, source: LauncherSource) -> tuple[str, str]:
 
 def _deviations(config: FidelityConfig, gpu_slice: str) -> tuple[str, ...]:
     deviations = list(config.known_deviations)
-    if any(limit != config.training.prompt_limit for limit in config.training.paper_prompt_limits):
-        paper_limits = ", ".join(
-            f"{domain}={limit:,}" for domain, limit in zip(DOMAINS, config.training.paper_prompt_limits, strict=True)
-        )
-        deviations.append(
-            f"The released launcher uses one {config.training.prompt_limit:,}-token prompt limit; "
-            f"paper limits are {paper_limits}."
-        )
     if gpu_slice != config.hardware.gpu:
         deviations.append(f"Hardware override uses {gpu_slice}; the authors report {config.hardware.gpu}.")
     return tuple(deviations)
@@ -485,7 +484,6 @@ def build_plan(
         output_uri=output_uri,
         evaluation_reference=config.evaluation_reference,
         prompt_limit=config.training.prompt_limit,
-        paper_prompt_limits=config.training.paper_prompt_limits,
         iris_command=command,
         known_deviations=_deviations(config, gpu_slice),
     )

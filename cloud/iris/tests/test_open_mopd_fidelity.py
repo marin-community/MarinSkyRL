@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ import cloud.iris.open_mopd_fidelity_task as fidelity_task
 from cloud.iris.open_mopd_fidelity_task import (
     FileVerification,
     StagedInputs,
-    patch_source_compatibility,
+    patch_source_for_reference,
     restore_latest_checkpoint,
     sync_tree,
     training_command,
@@ -67,7 +68,7 @@ def test_inline_aime_uses_released_validation_artifact() -> None:
     )
 
 
-def test_release_source_compatibility_patches_preserve_training_contracts(tmp_path: Path) -> None:
+def test_reference_source_patches_route_domain_response_limits(tmp_path: Path) -> None:
     launcher = tmp_path / "scripts" / "local" / "mt_opd.sh"
     launcher.parent.mkdir(parents=True)
     launcher.write_text('cmd+=("actor_rollout_ref.rollout.reward_mode=mt_opd")\n')
@@ -76,13 +77,49 @@ def test_release_source_compatibility_patches_preserve_training_contracts(tmp_pa
     trainer.write_text(
         'reward_model_keys = ({"data_source", "reward_model", "extra_info", "uid", "domain"} '
         "& batch.non_tensor_batch.keys())\n"
+        "        if self.async_rollout_mode:\n"
+        "            gen_batch.non_tensor_batch.update(batch.non_tensor_batch)\n"
+    )
+    rollout = tmp_path / "training" / "verl" / "verl" / "workers" / "rollout" / "vllm_rollout" / "vllm_rollout_spmd.py"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text(
+        "class PatchedRollout:\n"
+        "    def generate(self, kwargs, is_validate, non_tensor_batch, batch_size, vllm_inputs):\n"
+        "        with self.update_sampling_params(**kwargs):\n"
+        "            outputs = self.inference_engine.generate(\n"
+        "                prompts=vllm_inputs,\n"
+        "                sampling_params=self.sampling_params,\n"
+        "            )\n"
+        "        return outputs\n"
     )
 
-    patches = patch_source_compatibility(tmp_path)
+    patch_source_for_reference(tmp_path)
 
-    assert patches == (fidelity_task.HYDRA_REWARD_MODE_PATCH, fidelity_task.RAW_PROMPT_RETENTION_PATCH)
     assert launcher.read_text() == 'cmd+=("+actor_rollout_ref.rollout.reward_mode=mt_opd")\n'
     assert '"domain", "raw_prompt"' in trainer.read_text()
+    assert 'gen_batch.non_tensor_batch["domain"]' in trainer.read_text()
+
+    class FakeSamplingParams:
+        def __init__(self, max_tokens: int):
+            self.max_tokens = max_tokens
+
+        def clone(self) -> "FakeSamplingParams":
+            return FakeSamplingParams(self.max_tokens)
+
+    namespace: dict[str, object] = {}
+    exec(compile(rollout.read_text(), str(rollout), "exec"), namespace)
+    patched = namespace["PatchedRollout"]()
+    patched.config = SimpleNamespace(domain_response_limits={"math": 16384, "code": 16384, "if": 2048})
+    patched.sampling_params = FakeSamplingParams(16384)
+    patched.update_sampling_params = lambda **kwargs: nullcontext()
+    patched.inference_engine = SimpleNamespace(generate=lambda **kwargs: kwargs["sampling_params"])
+
+    routed = patched.generate({}, False, {"domain": ["math", "code", "if"]}, 3, [1, 2, 3])
+    assert [params.max_tokens for params in routed] == [16384, 16384, 2048]
+    assert patched.sampling_params.max_tokens == 16384
+    assert patched.generate({}, True, {}, 1, [1]) is patched.sampling_params
+    with pytest.raises(ValueError, match="one domain per training request"):
+        patched.generate({}, False, {"domain": ["math"]}, 2, [1, 2])
 
 
 def test_config_parser_rejects_unknown_nested_fields(tmp_path: Path) -> None:
@@ -92,6 +129,16 @@ def test_config_parser_rejects_unknown_nested_fields(tmp_path: Path) -> None:
     config_path.write_text(json.dumps(raw))
 
     with pytest.raises(ValueError, match="training keys"):
+        fidelity.load_config(config_path)
+
+
+def test_config_parser_rejects_non_paper_domain_response_limits(tmp_path: Path) -> None:
+    raw = json.loads(fidelity.DEFAULT_CONFIG.read_text())
+    raw["training"]["domain_response_limits"] = [16384, 16384, 16384]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(raw))
+
+    with pytest.raises(ValueError, match="paper response limits"):
         fidelity.load_config(config_path)
 
 
@@ -242,6 +289,8 @@ def test_training_command_has_semantic_control_settings() -> None:
         "+actor_rollout_ref.rollout.log_prob_top_k": "16",
         "+actor_rollout_ref.rollout.top_k_strategy": "only_stu",
         "+actor_rollout_ref.rollout.reward_weight_mode": "student_p",
+        "+actor_rollout_ref.rollout.domain_response_limits": "{math:16384,code:16384,if:2048}",
+        "actor_rollout_ref.rollout.mode": "sync",
         "data.return_raw_chat": "True",
         "actor_rollout_ref.rollout.max_num_batched_tokens": "18432",
         "actor_rollout_ref.rollout.temperature": "1.0",
@@ -461,7 +510,7 @@ def test_gpu_override_records_deviation_and_enforces_authors_world_size() -> Non
         fidelity.gpu_count("H100")
 
 
-def test_plan_exposes_control_and_paper_prompt_limits() -> None:
+def test_multi_teacher_prompt_limit_does_not_add_a_paper_deviation() -> None:
     config = fidelity.load_config(fidelity.DEFAULT_CONFIG)
     plan = fidelity.build_plan(
         config,
@@ -473,8 +522,7 @@ def test_plan_exposes_control_and_paper_prompt_limits() -> None:
     )
 
     assert plan.prompt_limit == 2048
-    assert plan.paper_prompt_limits == (1024, 2048, 2048)
-    assert plan.prompt_limit != plan.paper_prompt_limits[0]
+    assert plan.known_deviations == config.known_deviations
     assert plan.evaluation_reference.repository == "BytedTsinghua-SIA/Open-MOPD-SmolLM3-3B-Final"
     assert plan.evaluation_reference.revision == "228a146a5d95f00136057347ac4810e6635061b6"
 
