@@ -71,16 +71,24 @@ def teacher_evidence_from_prompt_logprobs(
         assert request.student_selected_mask is not None
         selected_scores = torch.full(request.student_topk_indices.shape, torch.nan, dtype=torch.float32)
         for row, prompt_length in enumerate(prompt_lengths):
-            for offset in range(int(request.response_mask[row].sum().item())):
-                if not request.student_selected_mask[row, offset]:
+            response_length = int(request.response_mask[row].sum().item())
+            selected_mask = request.student_selected_mask[row, :response_length].tolist()
+            selected_indices = request.student_topk_indices[row, :response_length].tolist()
+            selected_offsets = []
+            row_scores = []
+            for offset, (is_selected, token_ids) in enumerate(zip(selected_mask, selected_indices, strict=True)):
+                if not is_selected:
                     continue
                 scores = _position_scores(prompt_logprobs, row, prompt_length + offset)
-                for candidate, token_id in enumerate(request.student_topk_indices[row, offset].tolist()):
-                    if token_id not in scores:
-                        raise ValueError(
-                            f"teacher omitted student-selected token {token_id} at row {row}, response offset {offset}"
-                        )
-                    selected_scores[row, offset, candidate] = scores[token_id]
+                try:
+                    row_scores.append([scores[token_id] for token_id in token_ids])
+                except KeyError as error:
+                    raise ValueError(
+                        f"teacher omitted student-selected token {error.args[0]} at row {row}, response offset {offset}"
+                    ) from error
+                selected_offsets.append(offset)
+            if selected_offsets:
+                selected_scores[row, selected_offsets] = torch.tensor(row_scores, dtype=torch.float32)
         return StudentSelectedTeacherEvidence(
             trajectory_ids=request.trajectory_ids,
             route_ids=request.route_ids,
