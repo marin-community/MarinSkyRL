@@ -1,17 +1,15 @@
 from collections.abc import Generator
 from contextlib import contextmanager
 import io
-import math
 import os
 
 from fsspec import AbstractFileSystem
 from loguru import logger
-import torch
-from torch.distributed.checkpoint import FileSystemWriter, SavePlan, WriteItem
+from torch.distributed.checkpoint import FileSystemWriter, SavePlan
 from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
 
 
-DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
+DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**31
 
 
 class _AbortableFsspecFileSystem(FsspecFileSystem):
@@ -42,15 +40,8 @@ class _AbortableFsspecFileSystem(FsspecFileSystem):
             raise
 
 
-def _tensor_write_item_bytes(item: WriteItem) -> int | None:
-    """Return the tensor payload size, or None for a non-tensor item."""
-    if item.tensor_data is None:
-        return None
-    return math.prod(item.tensor_data.size) * torch._utils._element_size(item.tensor_data.properties.dtype)
-
-
 class StreamingFsspecWriter(FileSystemWriter):
-    """Write one DCP item per remote object with bounded tensor copy-ahead."""
+    """Stream one aggregated DCP object per rank with bounded tensor copy-ahead."""
 
     def __init__(
         self,
@@ -63,7 +54,7 @@ class StreamingFsspecWriter(FileSystemWriter):
             raise ValueError("tensor_copy_ahead_bytes must be positive")
         super().__init__(
             path,
-            single_file_per_rank=False,
+            single_file_per_rank=True,
             sync_files=False,
             thread_count=1,
             per_thread_copy_ahead=tensor_copy_ahead_bytes,
@@ -74,29 +65,10 @@ class StreamingFsspecWriter(FileSystemWriter):
 
     def prepare_local_plan(self, plan: SavePlan) -> SavePlan:
         plan = super().prepare_local_plan(plan)
-        tensor_items: list[tuple[WriteItem, int]] = []
-        for item in plan.items:
-            size = _tensor_write_item_bytes(item)
-            if size is not None:
-                tensor_items.append((item, size))
-
-        total_bytes = sum(size for _, size in tensor_items)
-        largest_bytes = max((size for _, size in tensor_items), default=0)
         logger.info(
-            "DCP direct-write plan rank={} items={} tensor_bytes={} largest_tensor_bytes={} copy_ahead_bytes={}",
+            "DCP direct-write plan rank={} items={} files=1 copy_ahead_bytes={}",
             self.rank,
             len(plan.items),
-            total_bytes,
-            largest_bytes,
             self.tensor_copy_ahead_bytes,
         )
-        for item, size in tensor_items:
-            if size > self.tensor_copy_ahead_bytes:
-                logger.warning(
-                    "DCP item exceeds copy-ahead target rank={} key={} tensor_bytes={} copy_ahead_bytes={}",
-                    self.rank,
-                    item.index.fqn,
-                    size,
-                    self.tensor_copy_ahead_bytes,
-                )
         return plan

@@ -10,7 +10,7 @@ from torch.distributed.checkpoint.api import CheckpointException
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 
 
-def test_streaming_fsspec_writer_round_trips_one_object_per_item():
+def test_streaming_fsspec_writer_round_trips_one_aggregated_object_per_rank():
     checkpoint_uri = "memory://streaming-checkpoint/step"
     filesystem = fsspec.filesystem("memory")
     if filesystem.exists("/streaming-checkpoint"):
@@ -25,7 +25,7 @@ def test_streaming_fsspec_writer_round_trips_one_object_per_item():
         checkpoint.save(state, storage_writer=StreamingFsspecWriter(checkpoint_uri, filesystem=filesystem))
 
     files = filesystem.find("/streaming-checkpoint/step")
-    assert len([path for path in files if path.endswith(".distcp")]) == len(state)
+    assert len([path for path in files if path.endswith(".distcp")]) == 1
     assert "/streaming-checkpoint/step/.metadata" in files
 
     restored = {

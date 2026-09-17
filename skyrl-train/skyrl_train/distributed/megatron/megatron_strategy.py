@@ -213,8 +213,8 @@ class MegatronStrategy(DistributedStrategy):
         # Save RNG state.
         sharded_state_dict["rng"] = self.get_rng_state()
 
-        # Save the checkpoint across ranks in parallel. S3 saves stream each DCP
-        # item directly; the local work directory contains only small control files.
+        # Save the checkpoint across ranks in parallel. Each S3 rank shard is one
+        # multipart object; the local work directory contains only small control files.
         if ckpt_dir.startswith("s3://"):
             if self.is_rank_0():
                 try:
