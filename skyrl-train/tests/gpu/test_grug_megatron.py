@@ -106,11 +106,12 @@ def _write_tiny_checkpoint(
     max_position_embeddings: int = 128,
     num_experts_per_tok: int = 2,
     shape: dict | None = None,
+    vocab_size_multiple: int = 1,
 ) -> None:
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     shape = TOY_SHAPE if shape is None else shape
     config = GrugMoeConfig(
-        vocab_size=len(tokenizer),
+        vocab_size=((len(tokenizer) + vocab_size_multiple - 1) // vocab_size_multiple) * vocab_size_multiple,
         num_experts_per_tok=num_experts_per_tok,
         max_position_embeddings=max_position_embeddings,
         initializer_range=0.02,

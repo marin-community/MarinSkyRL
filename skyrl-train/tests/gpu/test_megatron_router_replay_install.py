@@ -14,6 +14,7 @@ Requires 1 GPU; run on an otherwise idle node (not part of the CPU PR gate).
 from __future__ import annotations
 
 import functools
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ from skyrl_train.models.megatron_router_replay import (
     expand_moe_layer_freq,
 )
 from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
+from tests.gpu.router_replay_fixtures import random_unique_routes
 
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 NUM_LAYERS = 8
@@ -87,6 +89,7 @@ def _build_megatron_model(model_path: str) -> list[torch.nn.Module]:
     provider.variable_seq_lengths = True
     provider.masked_softmax_fusion = True
     provider.moe_token_dispatcher_type = "alltoall"
+    provider.gradient_accumulation_fusion = importlib.util.find_spec("fused_weight_gradient_mlp_cuda") is not None
     # No activation recompute: exactly one router entry per forward, so the
     # recompute FIFO stays out of the picture (covered by the training-step tests).
     provider.recompute_granularity = None
@@ -118,7 +121,7 @@ def _capture_mapping(model: list[torch.nn.Module]) -> dict[int, int]:
 
 
 def _model_input(device: str) -> torch.Tensor:
-    generator = torch.Generator().manual_seed(11)
+    generator = torch.Generator(device="cuda").manual_seed(11)
     return torch.randint(10, 500, (1, SEQ_LEN), dtype=torch.long, device=device, generator=generator)
 
 
@@ -149,7 +152,7 @@ def _captured_routing_maps(model: list[torch.nn.Module], input_ids: torch.Tensor
 
 def _replay_targets(n: int, num_experts: int, topk: int, n_masked: int, device: str):
     generator = torch.Generator().manual_seed(23)
-    targets = torch.randint(0, num_experts, (n, topk), generator=generator).to(device)
+    targets = random_unique_routes((n, topk), num_experts, generator=generator).to(device)
     mask = torch.zeros(n, dtype=torch.bool, device=device)
     mask[:n_masked] = True
     return targets, mask
@@ -240,7 +243,9 @@ def test_replay_keeps_gradients_flowing_through_the_gate(tiny_model):
     controller.assert_drained()
 
     for router in _routers(tiny_model):
-        grad = router.weight.main_grad if router.weight.main_grad is not None else router.weight.grad
+        grad = getattr(router.weight, "main_grad", None)
+        if grad is None:
+            grad = router.weight.grad
         assert grad is not None and torch.isfinite(grad).all(), router.layer_number
 
 
@@ -254,11 +259,10 @@ def test_install_rejects_incompatible_router_configs(tiny_model):
         ("moe_enable_routing_replay", True, "moe_enable_routing_replay"),
     ]
     original = {name: getattr(config, name) for name, _, _ in overrides}
-    try:
-        for name, value, message in overrides:
-            setattr(config, name, value)
+    for name, value, message in overrides:
+        setattr(config, name, value)
+        try:
             with pytest.raises(ValueError, match=message):
                 install_megatron_router_replay(tiny_model, recompute_enabled=True)
-    finally:
-        for name, value in original.items():
-            setattr(config, name, value)
+        finally:
+            setattr(config, name, original[name])
