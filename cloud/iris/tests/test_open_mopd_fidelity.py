@@ -20,6 +20,7 @@ from cloud.iris.open_mopd_fidelity_task import (
     validate_runtime,
     validate_resume_manifest,
     verify_lfs_files,
+    verify_shared_tokenizer,
 )
 
 TASK_IMAGE = "registry.example/open-mopd@sha256:" + "1" * 64
@@ -197,6 +198,24 @@ def test_model_verification_reports_observed_integrity(tmp_path: Path) -> None:
     )
 
 
+def test_reference_requires_identical_student_and_teacher_tokenizers(tmp_path: Path) -> None:
+    models = [tmp_path / name for name in ("student", "math", "code", "if")]
+    for model in models:
+        model.mkdir()
+        (model / "tokenizer.json").write_bytes(b"vocabulary")
+        (model / "tokenizer_config.json").write_bytes(b"template")
+
+    verify_shared_tokenizer(models[0], tuple(models[1:]))
+
+    (models[1] / "tokenizer_config.json").write_bytes(b"different template")
+    with pytest.raises(ValueError, match="tokenizer mismatch"):
+        verify_shared_tokenizer(models[0], tuple(models[1:]))
+
+    (models[1] / "tokenizer_config.json").unlink()
+    with pytest.raises(ValueError, match="missing tokenizer"):
+        verify_shared_tokenizer(models[0], tuple(models[1:]))
+
+
 @pytest.mark.parametrize("failure", ["missing", "size", "digest", "internal_symlink", "external_symlink"])
 def test_model_verification_rejects_untrusted_files(tmp_path: Path, failure: str) -> None:
     content = b"weights"
@@ -304,6 +323,7 @@ def test_training_command_has_semantic_control_settings() -> None:
         "actor_rollout_ref.rollout.temperature": "1.0",
         "actor_rollout_ref.rollout.top_p": "0.99",
         "reward_model.micro_batch_size_per_gpu": "1",
+        "reward_model.model.input_tokenizer": "null",
         "+reward_model.teacher_temperature": "1.0",
         "+reward_model.reward_kwargs.compute_true_reward": "False",
         "+data.sampler.class_path": "pkg://verl.utils.dataset.domain_weighted_sampler",
