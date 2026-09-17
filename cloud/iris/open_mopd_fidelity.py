@@ -107,6 +107,10 @@ class Training:
     target_gradient_shares: tuple[float, float, float]
     gap_following_alpha: float
     save_every: int
+    eval_every: int
+    eval_temperature: float
+    eval_nucleus_p: float
+    eval_samples: int
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,7 @@ class FidelityConfig:
     teachers: tuple[Teacher, Teacher, Teacher]
     evaluation_reference: ModelArtifact
     dataset: DatasetArtifact
+    validation_dataset: DatasetArtifact
     hardware: Hardware
     environment: Environment
     training: Training
@@ -222,8 +227,7 @@ def _model_artifact(value: Any, name: str) -> ModelArtifact:
     )
 
 
-def _dataset_artifact(value: Any) -> DatasetArtifact:
-    name = "artifacts.dataset"
+def _dataset_artifact(value: Any, name: str) -> DatasetArtifact:
     item = _object(value, name, {"repository", "revision", "path", "size", "sha256"})
     size = _integer(item["size"], f"{name}.size")
     if size <= 0:
@@ -243,14 +247,18 @@ def load_config(path: Path) -> FidelityConfig:
         "config",
         {"schema_version", "source", "artifacts", "hardware", "environment", "training", "gates", "known_deviations"},
     )
-    if _integer(root["schema_version"], "schema_version") != 2:
-        raise ValueError("Open-MOPD fidelity config schema_version must be 2")
+    if _integer(root["schema_version"], "schema_version") != 3:
+        raise ValueError("Open-MOPD fidelity config schema_version must be 3")
     source_value = _object(root["source"], "source", {"repository", "commit"})
     source = Source(
         _string(source_value["repository"], "source.repository"),
         _revision(source_value["commit"], "source.commit"),
     )
-    artifacts = _object(root["artifacts"], "artifacts", {"student", "teachers", "evaluation_reference", "dataset"})
+    artifacts = _object(
+        root["artifacts"],
+        "artifacts",
+        {"student", "teachers", "evaluation_reference", "dataset", "validation_dataset"},
+    )
     teacher_values = artifacts["teachers"]
     if not isinstance(teacher_values, list) or len(teacher_values) != len(DOMAINS):
         raise ValueError("artifacts.teachers must contain exactly math, code, and if")
@@ -304,19 +312,28 @@ def load_config(path: Path) -> FidelityConfig:
         ),
         gap_following_alpha=_number(training_value["gap_following_alpha"], "training.gap_following_alpha"),
         save_every=_integer(training_value["save_every"], "training.save_every"),
+        eval_every=_integer(training_value["eval_every"], "training.eval_every"),
+        eval_temperature=_number(training_value["eval_temperature"], "training.eval_temperature"),
+        eval_nucleus_p=_number(training_value["eval_nucleus_p"], "training.eval_nucleus_p"),
+        eval_samples=_integer(training_value["eval_samples"], "training.eval_samples"),
     )
     if training.train_batch_size % training.mini_batch_size:
         raise ValueError("train_batch_size must be divisible by mini_batch_size")
+    if training.eval_every <= 0:
+        raise ValueError("training.eval_every must be positive")
+    if training.eval_temperature <= 0 or not 0 < training.eval_nucleus_p <= 1 or training.eval_samples <= 0:
+        raise ValueError("training inline validation sampling values must be positive and top-p at most 1")
     deviations = root["known_deviations"]
     if not isinstance(deviations, list) or not deviations or not all(isinstance(value, str) for value in deviations):
         raise ValueError("known_deviations must be a non-empty list of strings")
     return FidelityConfig(
-        schema_version=2,
+        schema_version=3,
         source=source,
         student=_model_artifact(artifacts["student"], "artifacts.student"),
         teachers=teachers,
         evaluation_reference=_model_artifact(artifacts["evaluation_reference"], "artifacts.evaluation_reference"),
-        dataset=_dataset_artifact(artifacts["dataset"]),
+        dataset=_dataset_artifact(artifacts["dataset"], "artifacts.dataset"),
+        validation_dataset=_dataset_artifact(artifacts["validation_dataset"], "artifacts.validation_dataset"),
         hardware=Hardware(
             gpu=_string(hardware_value["gpu"], "hardware.gpu"),
             cpu=_integer(hardware_value["cpu"], "hardware.cpu"),

@@ -51,6 +51,22 @@ def test_runtime_manifest_includes_released_scorer_dependencies() -> None:
     assert RELEASED_SCORER_PACKAGES <= config.environment.packages.keys()
 
 
+def test_inline_aime_uses_released_validation_artifact() -> None:
+    config = fidelity.load_config(fidelity.DEFAULT_CONFIG)
+    evaluation = json.loads(fidelity.DEFAULT_CONFIG.with_name("open_mopd_evaluation.json").read_text())
+    aime = next(benchmark for benchmark in evaluation["benchmarks"] if benchmark["name"] == "aime24")
+
+    assert (config.validation_dataset.repository, config.validation_dataset.revision) == (
+        evaluation["data"]["repository"],
+        evaluation["data"]["revision"],
+    )
+    assert (config.validation_dataset.path, config.validation_dataset.size, config.validation_dataset.sha256) == (
+        aime["path"],
+        aime["size"],
+        aime["sha256"],
+    )
+
+
 def test_release_source_compatibility_patches_preserve_training_contracts(tmp_path: Path) -> None:
     launcher = tmp_path / "scripts" / "local" / "mt_opd.sh"
     launcher.parent.mkdir(parents=True)
@@ -165,7 +181,7 @@ def test_dataset_verification_is_recorded(monkeypatch: pytest.MonkeyPatch, tmp_p
     )
     monkeypatch.setattr(fidelity_task, "_run", lambda *args, **kwargs: None)
 
-    path, verification = fidelity_task._dataset(SimpleNamespace(dataset=artifact), tmp_path)
+    path, verification = fidelity_task._dataset(artifact, tmp_path)
 
     assert path == dataset
     assert verification.repository == artifact.repository
@@ -188,6 +204,7 @@ def test_training_command_has_semantic_control_settings() -> None:
         student=Path("/work/student"),
         teachers=(Path("/work/math"), Path("/work/code"), Path("/work/if")),
         dataset=Path("/work/train.parquet"),
+        validation_dataset=Path("/work/aime24.parquet"),
     )
     command = training_command(config, inputs, "paper_checkpoint", Path("/work/output"), world_size=8)
     bash_index = command.index("bash")
@@ -248,24 +265,40 @@ def test_training_command_has_semantic_control_settings() -> None:
         "+mt_opd.conflict_policy": "none",
         "trainer.total_training_steps": "200",
         "trainer.save_freq": "2",
-        "trainer.test_freq": "-1",
+        "trainer.test_freq": "2",
         "trainer.val_before_train": "False",
+        "trainer.validation_data_dir": "/work/output/validation",
+        "actor_rollout_ref.rollout.val_kwargs.temperature": "0.6",
+        "actor_rollout_ref.rollout.val_kwargs.top_p": "0.95",
+        "actor_rollout_ref.rollout.val_kwargs.do_sample": "True",
+        "actor_rollout_ref.rollout.val_kwargs.n": "1",
         "trainer.logger": "['console']",
         "trainer.resume_mode": "auto",
     }
     assert command[command.index("--gpus") + 1] == "8"
+    assert command[command.index("--train") + 1] == "/work/train.parquet"
+    assert command[command.index("--val") + 1] == "/work/aime24.parquet"
     assert config.training.train_batch_size // config.training.mini_batch_size * config.training.ppo_epochs == 4
 
 
 def test_all_acceptance_gates_resolve_steps_and_checkpoints() -> None:
     config = fidelity.load_config(fidelity.DEFAULT_CONFIG)
     inputs = StagedInputs(
-        Path("/source"), Path("/student"), tuple(Path(f"/{d}") for d in fidelity.DOMAINS), Path("/data")
+        Path("/source"),
+        Path("/student"),
+        tuple(Path(f"/{d}") for d in fidelity.DOMAINS),
+        Path("/data"),
+        Path("/aime24"),
     )
-    for gate, steps in fidelity.GATES.items():
+    for gate, steps, expected_eval_frequency in (
+        ("one_step", 1, 1),
+        ("paper_checkpoint", 200, 2),
+        ("paper_schedule", 600, 2),
+    ):
         command = training_command(config, inputs, gate, Path("/output"), world_size=8)
         assert f"trainer.total_training_steps={steps}" in command
         assert f"trainer.save_freq={min(steps, config.training.save_every)}" in command
+        assert f"trainer.test_freq={expected_eval_frequency}" in command
 
 
 def test_restore_latest_checkpoint_downloads_only_committed_step(
