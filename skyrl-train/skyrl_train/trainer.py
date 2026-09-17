@@ -959,15 +959,15 @@ class RayPPOTrainer:
                 finally:
                     await self._sync_weights_and_restore_rollout_residency()
             else:
-                self._offload_policy_optimizer_for_rollouts(self.all_timings)
+                self._offload_policy_optimizer(self.all_timings, timer_label="offload_policy_optimizer_to_cpu")
                 with Timer("sync_weights", self.all_timings):
                     ray.get(self.sync_policy_weights_to_inference_engines())
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
 
-    def _offload_policy_optimizer_for_rollouts(self, timings: dict) -> None:
-        """Match the optimizer residency expected by the next training step."""
+    def _offload_policy_optimizer(self, timings: dict, *, timer_label: str) -> None:
+        """Move optimizer state off GPU before rollout generation or restore."""
         if not self.colocate_all and self.cfg.trainer.offload_optimizer_during_rollouts:
-            with Timer("offload_policy_optimizer_to_cpu", timings):
+            with Timer(timer_label, timings):
                 self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
 
     def _log_weight_update_completed(self, *, reason: str, duration_seconds: float) -> None:
@@ -2804,9 +2804,9 @@ class RayPPOTrainer:
         # saved. Megatron initializes restore buffers before reading checkpoint
         # tensors; leaving the optimizer and gradient buffers on GPU can double
         # their peak allocation and OOM before the first rollout.
-        if not self.colocate_all and self.cfg.trainer.offload_optimizer_during_rollouts:
-            with Timer("offload_policy_optimizer_before_checkpoint_load", self.all_startup_timings):
-                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+        self._offload_policy_optimizer(
+            getattr(self, "all_startup_timings", {}), timer_label="offload_policy_optimizer_before_checkpoint_load"
+        )
 
         # 3. Load policy checkpoint
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")
