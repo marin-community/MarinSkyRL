@@ -50,6 +50,8 @@ def test_full_schedule_preserves_released_objective_and_every_checkpoint():
     assert config.trainer.export_path == "s3://bucket/users/operator/exports"
     assert config.data.shuffle is False
     assert config.trainer.algorithm.distillation.objective == "student_topk_policy_surrogate"
+    assert config.trainer.placement.colocate_all is True
+    assert config.generator.num_inference_engines == config.trainer.placement.policy_num_gpus_per_node == 4
     assert config.trainer.algorithm.distillation.domain_gradient_balance.gap_scale_alpha == 1.0
     assert dict(config.trainer.algorithm.distillation.domain_gradient_balance.target_shares) == {
         "math": 1 / 3,
