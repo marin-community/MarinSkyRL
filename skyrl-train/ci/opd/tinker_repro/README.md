@@ -191,6 +191,13 @@ dataloader state, Hugging Face config, and LoRA adapter files. In-line AIME
 validation does not replace a separately launched evaluation from each durable
 adapter checkpoint.
 
+To continue an interrupted full OPD run, submit a new Iris job with the same
+`--stage full`, adapter URI and digests, and `--output-uri`, adding `--resume`.
+The runner verifies the existing run identity and latest committed checkpoint,
+then stages that checkpoint for trainer resume. It refuses a completed run, an
+identity mismatch, or a missing or incomplete checkpoint. One-step gates
+cannot be resumed.
+
 The exact vLLM compatibility backport edits the installed Python source, so
 Iris jobs must use a task-private uv cache and copy-mode installation:
 
@@ -216,7 +223,8 @@ uv run iris --cluster cw-rno2a job run \
 The runner refuses a symlinked vLLM source tree rather than modifying Iris's
 shared uv cache. `--no-sync` is required because Iris's managed setup currently
 hardcodes symlink mode before applying job environment overrides. Use a unique
-output URI for every attempt. Obtain the two SHA-256 digests from the completed
+output URI for each new run; an interrupted run must reuse its URI with
+`--resume`. Obtain the two SHA-256 digests from the completed
 split-to-fused conversion manifest, which records the original SFT hashes as
 well. The runner checks the downloaded files, fused-QKV rank pattern, base
 model, rank, alpha, and target modules before loading the student.
