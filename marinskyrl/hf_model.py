@@ -3,17 +3,20 @@
 import json
 from pathlib import Path
 
+TOKENIZER_CONFIG_NAME = "tokenizer_config.json"
+TOKENIZER_JSON_NAME = "tokenizer.json"
+
 
 def normalize_fast_tokenizer_metadata(model_dir: Path) -> bool:
-    """Make a Transformers 5 fast-tokenizer export loadable by Transformers 4."""
-    config_path = model_dir / "tokenizer_config.json"
+    """Rewrite Transformers 5 fast-tokenizer metadata for Transformers 4; return whether it changed."""
+    config_path = model_dir / TOKENIZER_CONFIG_NAME
     if not config_path.is_file():
         return False
     config = json.loads(config_path.read_text())
     if config.get("tokenizer_class") != "TokenizersBackend":
         return False
-    if not (model_dir / "tokenizer.json").is_file():
-        raise ValueError(f"TokenizersBackend export is missing tokenizer.json: {model_dir}")
+    if not (model_dir / TOKENIZER_JSON_NAME).is_file():
+        raise ValueError(f"TokenizersBackend export is missing {TOKENIZER_JSON_NAME}: {model_dir}")
     config["tokenizer_class"] = "PreTrainedTokenizerFast"
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
     return True
