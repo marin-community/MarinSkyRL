@@ -736,11 +736,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # sync weights to inference engines
         with Timer("sync_weights_to_inference_engines", self.all_startup_timings) as weight_update_timer:
-            await self.async_sync_policy_weights_to_inference_engines()
-            # Drain the policy workers' event loops to a hard sync point so every FSDP
-            # shard rank is free before the step-1 forward is dispatched (the MoE-RL
-            # async-dispatch wedge fix). See _drain_policy_event_loops.
-            await self._drain_policy_event_loops()
+            await self._sync_policy_weights_and_offload_optimizer(pause_generation=False)
         self._log_weight_update_completed(
             reason="initial",
             duration_seconds=weight_update_timer.duration,
@@ -923,14 +919,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     #    fully_async, which never drains trial orchestration. This
                     #    block is now byte-identical for fan-out ON and OFF.
                     with Timer("sync_weights", self.all_timings) as weight_update_timer:
-                        await self.inference_engine_client.pause_generation()
-                        await self.async_sync_policy_weights_to_inference_engines()
-                        # Drain the policy workers' event loops to a hard sync point so
-                        # every FSDP shard rank is free before the NEXT step's forward is
-                        # dispatched (the MoE-RL async-dispatch wedge fix). See
-                        # _drain_policy_event_loops.
-                        await self._drain_policy_event_loops()
-                        await self.inference_engine_client.resume_generation()
+                        await self._sync_policy_weights_and_offload_optimizer(pause_generation=True)
                     self._log_weight_update_completed(
                         reason="training_step",
                         duration_seconds=weight_update_timer.duration,
@@ -1058,6 +1047,21 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             epoch=self.cfg.trainer.epochs - 1,
         )
         logger.info("Training done!")
+
+    async def _sync_policy_weights_and_offload_optimizer(self, *, pause_generation: bool) -> None:
+        if pause_generation:
+            await self.inference_engine_client.pause_generation()
+        # The shared training path backloads optimizer state before every step when
+        # offload_optimizer_during_rollouts is enabled. Offload after each update,
+        # including the initial sync, so Megatron gradient buffers are not resized
+        # while still resident on the GPU.
+        timings = self.all_timings if pause_generation else self.all_startup_timings
+        await asyncio.to_thread(self._offload_policy_optimizer_for_rollouts, timings)
+        await self.async_sync_policy_weights_to_inference_engines()
+        # A hard sync point leaves every policy rank free before the next forward.
+        await self._drain_policy_event_loops()
+        if pause_generation:
+            await self.inference_engine_client.resume_generation()
 
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
