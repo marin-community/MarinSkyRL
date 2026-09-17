@@ -33,8 +33,21 @@ POLICY_GPUS = 4
 CHECKPOINT_INTERVAL = load_config(FIDELITY_CONFIG).training.save_every
 
 
+def target_steps(max_steps: int | None) -> int:
+    steps = SCHEDULE_STEPS if max_steps is None else max_steps
+    if not 1 <= steps <= SCHEDULE_STEPS:
+        raise ValueError(f"Target steps must be between 1 and {SCHEDULE_STEPS}; got {steps}")
+    return steps
+
+
 def hydra_arguments(
-    data_path: Path, validation_path: Path, checkpoint_uri: str, export_uri: str, *, resume: bool = False
+    data_path: Path,
+    validation_path: Path,
+    checkpoint_uri: str,
+    export_uri: str,
+    *,
+    resume: bool = False,
+    max_steps: int | None = None,
 ) -> tuple[str, ...]:
     config = load_config(FIDELITY_CONFIG)
     training = config.training
@@ -63,7 +76,7 @@ def hydra_arguments(
         "trainer.placement.colocate_all=true",
         f"trainer.placement.policy_num_gpus_per_node={POLICY_GPUS}",
         "trainer.epochs=1",
-        f"trainer.max_steps={SCHEDULE_STEPS}",
+        f"trainer.max_steps={target_steps(max_steps)}",
         f"trainer.train_batch_size={training.train_batch_size}",
         f"trainer.policy_mini_batch_size={training.mini_batch_size}",
         f"trainer.micro_train_batch_size_per_gpu={training.micro_batch_size_per_gpu}",
@@ -174,6 +187,7 @@ def run(
     source_commit: str,
     *,
     resume: bool = False,
+    max_steps: int | None = None,
 ) -> int:
     if any(not uri.startswith("s3://") or "/users/" not in uri for uri in (checkpoint_uri, export_uri, manifest_uri)):
         raise ValueError("Native artifacts require durable user-owned s3:// paths")
@@ -188,6 +202,7 @@ def run(
         "export_uri": export_uri,
         "checkpoint_interval": CHECKPOINT_INTERVAL,
         "target_eval_interval": CHECKPOINT_INTERVAL,
+        "target_steps": target_steps(max_steps),
     }
     existing = filesystem.exists(manifest_path)
     if existing != resume:
@@ -212,7 +227,7 @@ def run(
             sys.executable,
             "-m",
             "skyrl_train.entrypoints.main_base",
-            *hydra_arguments(schedule, validation, checkpoint_uri, export_uri, resume=resume),
+            *hydra_arguments(schedule, validation, checkpoint_uri, export_uri, resume=resume, max_steps=max_steps),
         ]
         manifest = {
             "schema_version": 1,
@@ -238,6 +253,7 @@ def main() -> int:
     parser.add_argument("--manifest-uri", required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--max-steps", type=int)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.dry_run:
@@ -250,6 +266,7 @@ def main() -> int:
                         args.checkpoint_uri,
                         args.export_uri,
                         resume=args.resume,
+                        max_steps=args.max_steps,
                     )
                 },
                 indent=2,
@@ -265,6 +282,7 @@ def main() -> int:
         args.manifest_uri,
         args.source_commit,
         resume=args.resume,
+        max_steps=args.max_steps,
     )
 
 
