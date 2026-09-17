@@ -41,7 +41,7 @@ from cloud.iris.open_mopd_fidelity_task import (
     validate_runtime,
 )
 from cloud.iris.open_mopd_vllm_rollout import evaluation_port_seed
-from marinskyrl.hf_model import validate_portable_hf_model_files
+from marinskyrl.hf_model import normalize_fast_tokenizer_metadata, validate_portable_hf_model_files
 from skyrl_train.hf_model_io import verify_hf_model_export
 
 ROLLOUT_WRAPPER = Path(__file__).with_name("open_mopd_vllm_rollout.py")
@@ -77,6 +77,7 @@ class NativeModelVerification:
     source_uri: str
     source_identity: str
     files: tuple[CheckpointFile, ...]
+    staged_tokenizer_config: CheckpointFile | None = None
 
 
 @dataclass(frozen=True)
@@ -295,7 +296,16 @@ def stage_native_model(source_uri: str, source_identity: str, model_dir: Path) -
     validate_portable_hf_model_files({item.path for item in copied}, source_uri)
     verify_hf_model_export(str(model_dir))
     downloaded = tuple(_checkpoint_file(model_dir / item.path, item.path) for item in copied)
-    return model_dir, NativeModelVerification(source_uri=source_uri, source_identity=source_identity, files=downloaded)
+    normalized = normalize_fast_tokenizer_metadata(model_dir)
+    staged_tokenizer_config = (
+        _checkpoint_file(model_dir / "tokenizer_config.json", "tokenizer_config.json") if normalized else None
+    )
+    return model_dir, NativeModelVerification(
+        source_uri=source_uri,
+        source_identity=source_identity,
+        files=downloaded,
+        staged_tokenizer_config=staged_tokenizer_config,
+    )
 
 
 def stage_evaluation_inputs(

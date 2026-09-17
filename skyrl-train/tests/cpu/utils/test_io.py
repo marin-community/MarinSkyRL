@@ -512,6 +512,22 @@ def test_non_s3_hf_model_publication_preserves_destination_scheme(monkeypatch):
     assert filesystem.uploads == ["gs://bucket/export/policy/model.safetensors"]
 
 
+def test_local_hf_model_dir_exports_portable_fast_tokenizer_metadata(tmp_path):
+    export_path = tmp_path / "policy"
+
+    with local_hf_model_dir(str(export_path)) as work_dir:
+        Path(work_dir, "model.safetensors").write_bytes(b"weights")
+        Path(work_dir, "tokenizer.json").write_text("{}")
+        Path(work_dir, "tokenizer_config.json").write_text(
+            json.dumps({"tokenizer_class": "TokenizersBackend", "eos_token": "</s>"})
+        )
+
+    assert json.loads((export_path / "tokenizer_config.json").read_text()) == {
+        "tokenizer_class": "PreTrainedTokenizerFast",
+        "eos_token": "</s>",
+    }
+
+
 def test_interrupted_cloud_hf_model_publication_removes_stale_index(monkeypatch):
     index_key = "bucket/export/policy/model.safetensors.index.json"
     filesystem = FakeHFCloudFilesystem(
