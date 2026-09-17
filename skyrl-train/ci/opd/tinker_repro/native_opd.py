@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import StrEnum
 import hashlib
 import importlib.util
@@ -14,6 +14,7 @@ import re
 import sys
 import tempfile
 
+from cloud.iris.artifacts import read_json
 from aime24_dataset import materialize_dataset as materialize_aime24_dataset
 from aime24_protocol import (
     AIME24_DATASET,
@@ -23,7 +24,7 @@ from aime24_protocol import (
 )
 from deepmath_dataset import PROMPT_ONLY_ENV, materialize_dataset
 from native_artifact_run import run_artifact_command
-from native_checkpoint_publication import publish_committed_checkpoints
+from native_checkpoint_publication import publish_committed_checkpoints, restore_latest_committed_checkpoint
 from qwen35_adapter_contract import verify_fused_qkv_adapter
 from reproduction_artifacts import validate_output_uri
 from marinskyrl.resource_locator import join_resource_path
@@ -79,6 +80,8 @@ PLAN_STAGES = {
 POLICY_GPUS = 4
 OPD_CHECKPOINT_EVAL_INTERVAL = 2
 LOCAL_CHECKPOINT_RETENTION = 2
+RUN_MANIFEST_FILENAME = "native-opd-manifest.json"
+CHECKPOINT_DIRNAME = "checkpoints"
 LORA_RANK = 128
 LORA_ALPHA = 1
 ROLLOUT_GPU_MEMORY_UTILIZATION = 0.9
@@ -108,7 +111,7 @@ def stage_shape(stage: Stage) -> StageShape:
 @dataclass(frozen=True)
 class RunManifest:
     schema_version: int
-    status: str
+    status: str = field(metadata={"identity": False})
     stage: str
     shape: StageShape
     student: str
@@ -125,9 +128,38 @@ class RunManifest:
     adapter_config_sha256: str
     adapter_model_sha256: str
     runtime_patches: tuple[str, ...]
-    command: tuple[str, ...]
-    returncode: int | None = None
-    failure: str | None = None
+    command: tuple[str, ...] = field(metadata={"identity": False})
+    resumed_from_step: int | None = field(default=None, metadata={"identity": False})
+    resumed_from_commit_sha256: str | None = field(default=None, metadata={"identity": False})
+    returncode: int | None = field(default=None, metadata={"identity": False})
+    failure: str | None = field(default=None, metadata={"identity": False})
+
+
+def ensure_fresh_output(manifest_uri: str) -> None:
+    """Refuse to overwrite an existing native OPD run."""
+    if read_json(manifest_uri) is not None:
+        raise FileExistsError(f"Native OPD output already has a run manifest: {manifest_uri}")
+
+
+def verify_resume_identity(manifest_uri: str, expected: RunManifest) -> None:
+    """Require the same training inputs before restoring a prior run."""
+    previous = read_json(manifest_uri)
+    if previous is None:
+        raise FileNotFoundError(f"Native OPD resume has no run manifest: {manifest_uri}")
+    if previous.get("status") == "complete":
+        raise ValueError("Cannot resume a completed native OPD run")
+    if previous.get("status") not in {"running", "failed"}:
+        raise ValueError(f"Native OPD run has an invalid resume status: {previous.get('status')!r}")
+    manifest_fields = fields(RunManifest)
+    field_names = {item.name for item in manifest_fields}
+    identity_names = {item.name for item in manifest_fields if item.metadata.get("identity", True)}
+    if set(previous) - field_names or identity_names - set(previous):
+        raise ValueError(f"Native OPD resume identity has unknown or missing fields: {manifest_uri}")
+    observed = {name: previous[name] for name in identity_names}
+    expected_json = json.loads(json.dumps(asdict(expected)))
+    required = {name: expected_json[name] for name in identity_names}
+    if observed != required:
+        raise ValueError(f"Native OPD resume identity differs from the existing run: {manifest_uri}")
 
 
 def hydra_arguments(
@@ -136,6 +168,8 @@ def hydra_arguments(
     adapter_path: Path,
     output_root: Path,
     aime_data_path: Path | None = None,
+    *,
+    resume: bool = False,
 ) -> tuple[str, ...]:
     # MarinSkyRL sizes trainer batches in prompt groups. The generator expands each
     # group into ``n_samples_per_prompt`` trajectories before the learner update.
@@ -144,6 +178,8 @@ def hydra_arguments(
     targets = ",".join(LORA_TARGETS)
     if shape.steps > 1 and aime_data_path is None:
         raise ValueError("Full native OPD requires the pinned AIME 2024 validation dataset")
+    if resume and shape.steps <= 1:
+        raise ValueError("Native OPD resume requires a multi-step training stage")
     arguments = (
         f"data.train_data=['{data_path}']",
         f"data.val_data=['{aime_data_path}']" if aime_data_path is not None else "data.val_data=[]",
@@ -199,12 +235,12 @@ def hydra_arguments(
         f"trainer.eval_interval={OPD_CHECKPOINT_EVAL_INTERVAL if aime_data_path is not None else -1}",
         f"trainer.ckpt_interval={OPD_CHECKPOINT_EVAL_INTERVAL if shape.steps > 1 else 1}",
         f"trainer.hf_save_interval={OPD_CHECKPOINT_EVAL_INTERVAL if shape.steps > 1 else 1}",
-        "trainer.resume_mode=null",
+        f"trainer.resume_mode={'latest' if resume else 'null'}",
         f"trainer.dump_eval_results={'true' if aime_data_path is not None else 'false'}",
         "trainer.logger=console",
         "trainer.project_name=tinker_native_repro",
         f"trainer.run_name=tinker_native_{shape.steps}_{prompt_batch_size}x{shape.group_size}",
-        f"trainer.ckpt_path={output_root / 'checkpoints'}",
+        f"trainer.ckpt_path={output_root / CHECKPOINT_DIRNAME}",
         f"trainer.export_path={output_root / 'exports'}",
         "generator.backend=vllm",
         "generator.num_inference_engines=1",
@@ -309,10 +345,11 @@ def run(
     *,
     adapter_config_sha256: str,
     adapter_model_sha256: str,
+    resume: bool = False,
 ) -> int:
     validate_output_uri(output_uri)
-    runtime_patches = (patch_qwen35_embedding_lora(installed_qwen35_source()),)
     shape = stage_shape(stage)
+    runtime_patches = (patch_qwen35_embedding_lora(installed_qwen35_source()),)
     with tempfile.TemporaryDirectory(prefix="tinker-native-opd-") as temporary:
         root = Path(temporary)
         output_root = root / "output"
@@ -330,7 +367,7 @@ def run(
                 sys.executable,
                 "-m",
                 "skyrl_train.entrypoints.main_base",
-                *hydra_arguments(shape, data_path, Path(adapter_path), output_root, aime_data_path),
+                *hydra_arguments(shape, data_path, Path(adapter_path), output_root, aime_data_path, resume=resume),
             )
             manifest = RunManifest(
                 schema_version=1,
@@ -353,6 +390,24 @@ def run(
                 runtime_patches=runtime_patches,
                 command=command,
             )
+            manifest_uri = join_resource_path(output_uri, RUN_MANIFEST_FILENAME)
+            if resume:
+                verify_resume_identity(manifest_uri, manifest)
+            else:
+                ensure_fresh_output(manifest_uri)
+            if resume:
+                checkpoint = restore_latest_committed_checkpoint(
+                    join_resource_path(output_uri, CHECKPOINT_DIRNAME),
+                    output_root / CHECKPOINT_DIRNAME,
+                    policy_ranks=POLICY_GPUS,
+                )
+                if checkpoint.step >= shape.steps:
+                    raise ValueError(f"Native OPD checkpoint step {checkpoint.step} is at or beyond the target")
+                manifest = replace(
+                    manifest,
+                    resumed_from_step=checkpoint.step,
+                    resumed_from_commit_sha256=checkpoint.commit_sha256,
+                )
             rows = materialize_dataset(data_path, shape.dataset_rows)
             if rows != shape.dataset_rows and shape.dataset_rows is not None:
                 raise RuntimeError(f"DeepMath yielded {rows} rows; expected {shape.dataset_rows}")
@@ -361,13 +416,13 @@ def run(
             return run_artifact_command(
                 command=command,
                 initial_manifest=manifest,
-                manifest_path=output_root / "native-opd-manifest.json",
+                manifest_path=output_root / RUN_MANIFEST_FILENAME,
                 output_root=output_root,
                 output_uri=output_uri,
                 environment=environment,
                 publish_checkpoints=lambda: publish_committed_checkpoints(
-                    output_root / "checkpoints",
-                    join_resource_path(output_uri, "checkpoints"),
+                    output_root / CHECKPOINT_DIRNAME,
+                    join_resource_path(output_uri, CHECKPOINT_DIRNAME),
                     policy_ranks=POLICY_GPUS,
                     retain_local_checkpoints=LOCAL_CHECKPOINT_RETENTION,
                 ),
@@ -387,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--adapter-config-sha256")
     parser.add_argument("--adapter-model-sha256")
     parser.add_argument("--output-uri", required=True)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     stage = Stage(args.stage)
@@ -397,6 +453,7 @@ def main(argv: list[str] | None = None) -> int:
             Path("/model/adapter"),
             Path("/output"),
             Path("/data/aime24.parquet") if stage is Stage.FULL else None,
+            resume=args.resume,
         )
         print(json.dumps({"stage": stage, "shape": asdict(stage_shape(stage)), "hydra_arguments": command}, indent=2))
         return 0
@@ -408,6 +465,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output_uri,
         adapter_config_sha256=args.adapter_config_sha256,
         adapter_model_sha256=args.adapter_model_sha256,
+        resume=args.resume,
     )
 
 

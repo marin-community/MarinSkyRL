@@ -1,5 +1,5 @@
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import hashlib
 from importlib.util import module_from_spec, spec_from_file_location
 import json
@@ -51,6 +51,15 @@ assert PUBLICATION_SPEC is not None and PUBLICATION_SPEC.loader is not None
 PUBLICATION = module_from_spec(PUBLICATION_SPEC)
 sys.modules["native_checkpoint_publication"] = PUBLICATION
 PUBLICATION_SPEC.loader.exec_module(PUBLICATION)
+
+
+def write_native_checkpoint_step(checkpoint_root: Path, step: int, policy_ranks: int = 2) -> Path:
+    step_root = checkpoint_root / f"global_step_{step}"
+    for relative in PUBLICATION.required_checkpoint_files(policy_ranks):
+        path = step_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"step-{step}:{relative}".encode())
+    return step_root
 
 
 def write_fused_adapter(path: Path) -> None:
@@ -153,6 +162,66 @@ def test_native_opd_plumbing_batch_covers_every_policy_rank():
     validate_cfg(config)
 
     assert config.trainer.train_batch_size == config.trainer.placement.policy_num_gpus_per_node == 4
+
+
+def test_native_opd_full_resume_loads_the_committed_checkpoint():
+    arguments = OPD.hydra_arguments(
+        OPD.stage_shape(OPD.Stage.FULL),
+        Path("/data/deepmath.parquet"),
+        Path("/model/adapter"),
+        Path("/output"),
+        Path("/data/aime24.parquet"),
+        resume=True,
+    )
+    with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
+        config = compose(config_name="ppo_base_config", overrides=list(arguments))
+
+    validate_cfg(config)
+    assert config.trainer.resume_mode == "latest"
+    assert config.trainer.max_steps == 200
+    assert config.trainer.ckpt_path == "/output/checkpoints"
+    assert config.trainer.ckpt_interval == 2
+    assert config.trainer.eval_interval == 2
+
+
+def test_native_opd_resume_rejects_mismatched_adapter_or_complete_run(tmp_path: Path):
+    manifest = OPD.RunManifest(
+        schema_version=1,
+        status="preparing",
+        stage="full",
+        shape=OPD.stage_shape(OPD.Stage.FULL),
+        student=OPD.STUDENT_MODEL,
+        student_revision=OPD.STUDENT_REVISION,
+        teacher=OPD.TEACHER_MODEL,
+        teacher_revision=OPD.TEACHER_REVISION,
+        tokenizer_fingerprint=OPD.TOKENIZER_FINGERPRINT,
+        dataset=OPD.OPD_DATASET,
+        dataset_revision=OPD.OPD_DATASET_REVISION,
+        validation_dataset=OPD.AIME24_DATASET,
+        validation_revision=OPD.AIME24_REVISION,
+        validation_rows=30,
+        adapter_uri="s3://bucket/sft/step-3000",
+        adapter_config_sha256="a" * 64,
+        adapter_model_sha256="b" * 64,
+        runtime_patches=(OPD.VLLM_QWEN35_LORA_PATCH,),
+        command=("python", "trainer"),
+    )
+    remote_manifest = tmp_path / "native-opd-manifest.json"
+    with pytest.raises(FileNotFoundError):
+        OPD.verify_resume_identity(remote_manifest.as_uri(), manifest)
+    remote_manifest.write_text(json.dumps(asdict(replace(manifest, status="failed"))))
+
+    OPD.verify_resume_identity(remote_manifest.as_uri(), manifest)
+    with pytest.raises(ValueError, match="identity"):
+        OPD.verify_resume_identity(remote_manifest.as_uri(), replace(manifest, adapter_model_sha256="c" * 64))
+    with pytest.raises(FileExistsError):
+        OPD.ensure_fresh_output(remote_manifest.as_uri())
+    remote_manifest.write_text(json.dumps(asdict(replace(manifest, status="complete"))))
+    with pytest.raises(ValueError, match="completed"):
+        OPD.verify_resume_identity(remote_manifest.as_uri(), manifest)
+    remote_manifest.write_text(json.dumps(asdict(replace(manifest, status="unknown"))))
+    with pytest.raises(ValueError, match="status"):
+        OPD.verify_resume_identity(remote_manifest.as_uri(), manifest)
 
 
 def test_native_opd_rejects_changed_or_incompatible_sft_adapter(tmp_path: Path):
@@ -355,22 +424,7 @@ def test_native_checkpoint_publication_commits_only_complete_verified_steps(tmp_
             return {"size": len(self.files[remote])}
 
     checkpoint_root = tmp_path / "checkpoints"
-    step_root = checkpoint_root / "global_step_2"
-    for rank in range(2):
-        for kind in ("model", "optim", "extra_state"):
-            path = step_root / "policy" / f"{kind}_world_size_2_rank_{rank}.pt"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"checkpoint-data")
-    for relative in (
-        "data.pt",
-        "trainer_state.pt",
-        "policy/huggingface/config.json",
-        "policy/lora_adapter/adapter_model.safetensors",
-        "policy/lora_adapter/adapter_config.json",
-    ):
-        path = step_root / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"checkpoint-data")
+    step_root = write_native_checkpoint_step(checkpoint_root, 2)
     incomplete_future = checkpoint_root / "global_step_4" / "policy" / "model_world_size_2_rank_0.pt"
     incomplete_future.parent.mkdir(parents=True)
     incomplete_future.write_bytes(b"uncommitted")
@@ -427,19 +481,39 @@ def test_native_checkpoint_publication_commits_only_complete_verified_steps(tmp_
         )
 
 
+def test_native_checkpoint_restore_uses_only_committed_latest_step(tmp_path: Path):
+    checkpoint_root = tmp_path / "produced"
+    write_native_checkpoint_step(checkpoint_root, 2)
+    (checkpoint_root / "latest_ckpt_global_step.txt").write_text("2")
+    remote_root = tmp_path / "remote"
+    remote_uri = remote_root.as_uri()
+    PUBLICATION.publish_committed_checkpoints(checkpoint_root, remote_uri, policy_ranks=2, retain_local_checkpoints=2)
+
+    restored_root = tmp_path / "restored"
+    restored = PUBLICATION.restore_latest_committed_checkpoint(remote_uri, restored_root, policy_ranks=2)
+
+    assert restored.step == 2
+    assert (restored_root / "latest_ckpt_global_step.txt").read_text() == "2"
+    assert (restored_root / "global_step_2/policy/model_world_size_2_rank_1.pt").read_bytes() == (
+        b"step-2:policy/model_world_size_2_rank_1.pt"
+    )
+    assert not (restored_root / "global_step_4").exists()
+
+    with pytest.raises(ValueError, match="policy ranks"):
+        PUBLICATION.restore_latest_committed_checkpoint(remote_uri, tmp_path / "wrong-ranks", policy_ranks=4)
+    assert not (tmp_path / "wrong-ranks").exists()
+
+    (remote_root / "latest_ckpt_global_step.txt").write_text("4")
+    with pytest.raises(ValueError, match="commit"):
+        PUBLICATION.restore_latest_committed_checkpoint(remote_uri, tmp_path / "uncommitted", policy_ranks=2)
+    assert not (tmp_path / "uncommitted/latest_ckpt_global_step.txt").exists()
+
+
 def test_native_checkpoint_publication_prunes_only_remotely_verified_old_steps(tmp_path: Path, monkeypatch):
     checkpoint_root = tmp_path / "checkpoints"
 
-    def write_step(step: int) -> Path:
-        step_root = checkpoint_root / f"global_step_{step}"
-        for relative in PUBLICATION.required_checkpoint_files(policy_ranks=2):
-            path = step_root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(f"step-{step}:{relative}".encode())
-        return step_root
-
     for step in (2, 4, 6):
-        write_step(step)
+        write_native_checkpoint_step(checkpoint_root, step)
     (checkpoint_root / "latest_ckpt_global_step.txt").write_text("6")
     filesystem = MemoryFileSystem()
     output_uri = f"s3://bucket/{tmp_path.name}/checkpoints"
@@ -482,7 +556,7 @@ def test_native_checkpoint_publication_prunes_only_remotely_verified_old_steps(t
     for step in (2, 4, 6):
         assert PUBLICATION.verify_remote_checkpoint(f"{output_uri}/global_step_{step}").step == step
 
-    step_eight = write_step(8)
+    step_eight = write_native_checkpoint_step(checkpoint_root, 8)
     (checkpoint_root / "latest_ckpt_global_step.txt").write_text("8")
     original_rmtree = PUBLICATION.shutil.rmtree
 
