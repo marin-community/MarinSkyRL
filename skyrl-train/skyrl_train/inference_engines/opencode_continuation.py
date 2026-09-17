@@ -9,26 +9,18 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from skyrl_train.inference_engines.chat_continuation import (
+    CHAT_TOKENIZE_FIELDS,
+    EXACT_PROMPT_TOKEN_IDS_KEY,
+    render_exact_chat_continuation,
+)
 from skyrl_train.inference_engines.inference_http_backend import InferenceHTTPBackend
 
 
 logger = logging.getLogger(__name__)
 
 TRIAL_ID_HEADER = "x-ot-trial-id"
-EXACT_PROMPT_TOKEN_IDS_KEY = "_skyrl_exact_prompt_token_ids"
-_TOKENIZE_FIELDS = {
-    "model",
-    "messages",
-    "add_generation_prompt",
-    "continue_final_message",
-    "add_special_tokens",
-    "chat_template",
-    "chat_template_kwargs",
-    "media_io_kwargs",
-    "mm_processor_kwargs",
-    "tools",
-}
-_RENDER_SIGNATURE_FIELDS = _TOKENIZE_FIELDS - {"messages", "add_generation_prompt", "continue_final_message"}
+_RENDER_SIGNATURE_FIELDS = CHAT_TOKENIZE_FIELDS - {"messages", "add_generation_prompt", "continue_final_message"}
 
 
 @dataclass(frozen=True)
@@ -57,12 +49,6 @@ def _extract_chunk_token_ids(chunk: dict[str, Any]) -> tuple[list[int] | None, l
                 completion.extend(ids)
                 break
     return prompt, completion
-
-
-def _tokenize_body(body: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
-    request = {key: deepcopy(value) for key, value in body.items() if key in _TOKENIZE_FIELDS}
-    request["messages"] = deepcopy(messages)
-    return request
 
 
 def _render_signature(body: dict[str, Any]) -> dict[str, Any]:
@@ -208,49 +194,15 @@ class OpenCodeContinuationManager:
             )
             return None
 
-        history_messages = messages[:prior_count]
-        prefix_messages = messages[: prior_count + 1]
-        full_request = _tokenize_body(body, messages)
-        prefix_request = _tokenize_body(body, prefix_messages)
-        prefix_request["add_generation_prompt"] = False
-        prefix_request["continue_final_message"] = False
-
-        open_assistant_request = _tokenize_body(body, history_messages)
-        open_assistant_request["add_generation_prompt"] = True
-        open_assistant_request["continue_final_message"] = False
-        empty_assistant_request = _tokenize_body(
-            body,
-            [*history_messages, {"role": "assistant", "content": ""}],
+        exact_prompt = await render_exact_chat_continuation(
+            self._backend.tokenize,
+            request_payload,
+            assistant_message_index=prior_count,
+            served_prefix_token_ids=[*state.prompt_token_ids, *state.completion_token_ids],
         )
-        empty_assistant_request["add_generation_prompt"] = False
-        empty_assistant_request["continue_final_message"] = False
-
-        headers = request_payload.get("headers", {})
-        full = await self._backend.tokenize({"json": full_request, "headers": headers})
-        prefix = await self._backend.tokenize({"json": prefix_request, "headers": headers})
-        open_assistant = await self._backend.tokenize({"json": open_assistant_request, "headers": headers})
-        empty_assistant = await self._backend.tokenize({"json": empty_assistant_request, "headers": headers})
-        full_ids = full.get("tokens") if isinstance(full, dict) else None
-        prefix_ids = prefix.get("tokens") if isinstance(prefix, dict) else None
-        open_assistant_ids = open_assistant.get("tokens") if isinstance(open_assistant, dict) else None
-        empty_assistant_ids = empty_assistant.get("tokens") if isinstance(empty_assistant, dict) else None
-        if (
-            not isinstance(full_ids, list)
-            or not isinstance(prefix_ids, list)
-            or not isinstance(open_assistant_ids, list)
-            or not isinstance(empty_assistant_ids, list)
-            or full_ids[: len(prefix_ids)] != prefix_ids
-            or empty_assistant_ids[: len(open_assistant_ids)] != open_assistant_ids
-        ):
+        if exact_prompt is None:
             logger.warning("OpenCode continuation reset because the rendered assistant boundary is not prefix-stable")
-            return None
-
-        # vLLM excludes the EOS/stop token from streamed completion token IDs.
-        # Recover only the renderer's structural assistant-closing boundary from
-        # an empty message; never reuse its re-tokenized assistant content.
-        assistant_boundary = empty_assistant_ids[len(open_assistant_ids) :]
-        suffix = full_ids[len(prefix_ids) :]
-        return [*state.prompt_token_ids, *state.completion_token_ids, *assistant_boundary, *suffix]
+        return exact_prompt
 
     def commit(
         self,

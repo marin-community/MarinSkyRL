@@ -21,6 +21,7 @@
 # limitations under the License.
 
 import gc
+import threading
 
 import torch
 import torch.nn as nn
@@ -129,7 +130,22 @@ def offload_megatron_grads_to_cpu(models):
 
 
 @torch.no_grad()
-def load_megatron_grads_to_gpu(models):
+def load_megatron_grads_to_gpu(models, diagnostic_expected_device=None):
+    # Campaign diagnostic: the setup method pins LOCAL_RANK in its thread, while
+    # CUDA's current device is thread-local. Record the actual backload thread.
+    if diagnostic_expected_device is not None and diagnostic_expected_device >= 0:
+        current_device = torch.cuda.current_device()
+        logger.info(
+            "SNOWBALL_GRAD_BACKLOAD_DEVICE rank={} thread={} expected_device={} current_device={}",
+            torch.distributed.get_rank(),
+            threading.get_ident(),
+            diagnostic_expected_device,
+            current_device,
+        )
+        if current_device != diagnostic_expected_device:
+            raise RuntimeError(
+                f"Megatron grad backload runs on CUDA device {current_device}, expected {diagnostic_expected_device}"
+            )
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
@@ -137,13 +153,17 @@ def load_megatron_grads_to_gpu(models):
                 for buffer in buffers:
                     buffer.grad_data.storage().resize_(buffer.grad_data_size)
                     buffer.grad_data.zero_()
+                    if diagnostic_expected_device is not None and diagnostic_expected_device >= 0:
+                        torch.cuda.synchronize(diagnostic_expected_device)
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
                 if param.grad is not None:
                     param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
     gc.collect()
+    logger.info("SNOWBALL_GRAD_BACKLOAD_ZEROED rank={}", torch.distributed.get_rank())
     torch.cuda.empty_cache()
+    logger.info("SNOWBALL_GRAD_BACKLOAD_CACHE_CLEARED rank={}", torch.distributed.get_rank())
 
 
 @torch.no_grad()

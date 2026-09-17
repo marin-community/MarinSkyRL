@@ -425,6 +425,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # Capture global_step at first inference for accurate staleness tracking
         captured_global_step: Optional[int] = None
         token_provenance = TokenProvenance.ENGINE
+        continuation_assistant_index: int | None = None
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -433,6 +434,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
             # 1. Generate output
             if retokenize_chat_history or chat_completion_params is not None:
+                chat_continuation = (
+                    {
+                        "served_prefix_token_ids": input_ids,
+                        "assistant_message_index": continuation_assistant_index,
+                    }
+                    if chat_completion_params is not None and continuation_assistant_index is not None
+                    else None
+                )
                 engine_input = InferenceEngineInput(
                     prompts=[copy.deepcopy(chat_history)],
                     session_ids=[session_id],
@@ -442,6 +451,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         if chat_completion_params is not None
                         else {}
                     ),
+                    **({"chat_continuations": [chat_continuation]} if chat_continuation is not None else {}),
                 )
             else:
                 # Token-in-token-out.
@@ -583,6 +593,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 route_sentinel = None
                 per_step_rewards = []
                 verification_results = []
+                continuation_assistant_index = None
                 generated_ids.clear()
                 generated_topk_ids.clear()
                 generated_topk_scores.clear()
@@ -630,6 +641,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 elif rollout_routes is not None:
                     rollout_routes.extend([route_sentinel] * len(output_ids))
                 per_step_rewards.append((step_reward, response_end_idx))
+                continuation_assistant_index = len(chat_history)
                 chat_history.append(dict(assistant_message))
                 if not done:
                     chat_history.extend(new_obs)

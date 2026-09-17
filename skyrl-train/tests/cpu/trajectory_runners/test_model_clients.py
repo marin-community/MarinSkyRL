@@ -112,6 +112,70 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
     assert output["token_provenance"] == "engine"
 
 
+@pytest.mark.asyncio
+async def test_direct_chat_continuation_preserves_sampled_tool_call_tokens():
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "answer"
+
+    async def tokenize(request):
+        messages = request["json"]["messages"]
+        if len(messages) == 1:
+            return {"tokens": [11, 12]}
+        if len(messages) == 2 and messages[1]["content"] == "":
+            return {"tokens": [11, 12, 30]}
+        if len(messages) == 2:
+            return {"tokens": [11, 12, 99, 22, 30]}
+        return {"tokens": [11, 12, 99, 22, 30, 40, 41]}
+
+    engine.tokenize.side_effect = tokenize
+    engine.chat_completion.return_value = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "answer"},
+                "finish_reason": "stop",
+                "token_ids": [50],
+            }
+        ]
+    }
+    messages = [
+        {"role": "user", "content": "run this"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "execute_python", "arguments": '{"code":"print(1)"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "1"},
+    ]
+
+    output = await DirectModelClient(engine).generate(
+        {
+            "prompts": [messages],
+            "session_ids": ["trajectory-1"],
+            "chat_completion_params": [{"tools": []}],
+            "chat_continuations": [{"served_prefix_token_ids": [11, 12, 21, 22], "assistant_message_index": 1}],
+        }
+    )
+
+    assert output["prompt_ids"] == [[11, 12, 21, 22, 30, 40, 41]]
+    assert engine.chat_completion.await_args.args[0]["json"]["_skyrl_exact_prompt_token_ids"] == [
+        11,
+        12,
+        21,
+        22,
+        30,
+        40,
+        41,
+    ]
+
+
 def test_direct_model_client_omits_empty_tools_from_vllm_request():
     options = DirectModelClient._chat_options({"tools": [], "temperature": 0.4}, {})
 
@@ -322,6 +386,103 @@ async def test_http_model_client_rejects_exact_chat_response_without_token_ids()
             )
     finally:
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_http_structured_chat_continues_from_sampled_tool_call_tokens():
+    served_requests = []
+
+    async def tokenize(request):
+        messages = (await request.json())["messages"]
+        if len(messages) == 1:
+            tokens = [11, 12]
+        elif len(messages) == 2 and messages[1]["content"] == "":
+            tokens = [11, 12, 30]
+        elif len(messages) == 2:
+            tokens = [11, 12, 99, 22, 30]
+        else:
+            tokens = [11, 12, 99, 22, 30, 40, 41]
+        return web.json_response({"tokens": tokens})
+
+    tool_call = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "execute_python", "arguments": '{"code":"print(1)"}'},
+            }
+        ],
+    }
+
+    async def complete(request):
+        body = await request.json()
+        served_requests.append(body)
+        message = tool_call if len(body["messages"]) == 1 else {"role": "assistant", "content": "done"}
+        tokens = [21, 22] if len(body["messages"]) == 1 else [50]
+        return web.json_response(
+            {
+                "choices": [
+                    {
+                        "message": message,
+                        "finish_reason": "tool_calls" if message is tool_call else "stop",
+                        "token_ids": tokens,
+                        "logprobs": {"content": [{"logprob": -0.1}] * len(tokens)},
+                    }
+                ]
+            }
+        )
+
+    app = web.Application()
+    app.router.add_post("/tokenize", tokenize)
+    app.router.add_post("/v1/chat/completions", complete)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    tokenizer = MagicMock()
+    tokenizer.decode.side_effect = lambda ids, **_: "tool call" if ids == [21, 22] else "done"
+    client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=tokenizer)
+
+    try:
+        first = await client.generate(
+            {
+                "prompts": [[{"role": "user", "content": "run this"}]],
+                "session_ids": ["trajectory-1"],
+                "chat_completion_params": [{"tools": []}],
+                "sampling_params": {"logprobs": 0},
+            }
+        )
+        second = await client.generate(
+            {
+                "prompts": [
+                    [
+                        {"role": "user", "content": "run this"},
+                        first["assistant_messages"][0],
+                        {"role": "tool", "tool_call_id": "call-1", "content": "1"},
+                    ]
+                ],
+                "session_ids": ["trajectory-1"],
+                "chat_completion_params": [{"tools": []}],
+                "chat_continuations": [
+                    {
+                        "served_prefix_token_ids": first["prompt_ids"][0] + first["response_ids"][0],
+                        "assistant_message_index": 1,
+                    }
+                ],
+                "sampling_params": {"logprobs": 0},
+            }
+        )
+    finally:
+        await runner.cleanup()
+
+    assert first["prompt_ids"] == [[11, 12]]
+    assert first["response_ids"] == [[21, 22]]
+    assert second["prompt_ids"] == [[11, 12, 21, 22, 30, 40, 41]]
+    assert second["response_logprobs"] == [[-0.1]]
+    assert served_requests[1]["_skyrl_exact_prompt_token_ids"] == second["prompt_ids"][0]
 
 
 @pytest.mark.asyncio

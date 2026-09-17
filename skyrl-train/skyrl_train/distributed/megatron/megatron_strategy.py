@@ -110,6 +110,7 @@ class MegatronStrategy(DistributedStrategy):
 
     def setup_distributed(self, timeout=timedelta(minutes=30)) -> None:
         local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
+        self.local_rank = local_rank
         if local_rank != -1:
             torch.cuda.set_device(local_rank)
 
@@ -144,7 +145,7 @@ class MegatronStrategy(DistributedStrategy):
         if backload_model:
             load_megatron_model_to_gpu(model)
         if optimizer and backload_optimizer:
-            load_megatron_grads_to_gpu(model)
+            load_megatron_grads_to_gpu(model, diagnostic_expected_device=self.local_rank)
             load_megatron_optimizer(optimizer)
         torch.cuda.synchronize()
 
@@ -304,7 +305,7 @@ class MegatronStrategy(DistributedStrategy):
             # reconstructs the checkpointed moments, then restore empty buffers for training.
             offload_megatron_grads_to_cpu(model)
             optimizer.load_state_dict(state_dict.pop("optimizer"))
-            load_megatron_grads_to_gpu(model)
+            load_megatron_grads_to_gpu(model, diagnostic_expected_device=self.local_rank)
             self.log("Loaded optimizer state dict.")
 
         if scheduler and load_training_state:
