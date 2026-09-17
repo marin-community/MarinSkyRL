@@ -1,0 +1,78 @@
+"""Exact sampled-token continuation for chat templates that rewrite assistant history."""
+
+from copy import deepcopy
+from typing import Any, Awaitable, Callable
+
+EXACT_PROMPT_TOKEN_IDS_KEY = "_skyrl_exact_prompt_token_ids"
+CHAT_TOKENIZE_FIELDS = {
+    "model",
+    "messages",
+    "add_generation_prompt",
+    "continue_final_message",
+    "add_special_tokens",
+    "chat_template",
+    "chat_template_kwargs",
+    "media_io_kwargs",
+    "mm_processor_kwargs",
+    "tools",
+    "tool_choice",
+}
+
+
+def _tokenize_body(body: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
+    request = {key: deepcopy(value) for key, value in body.items() if key in CHAT_TOKENIZE_FIELDS}
+    request["messages"] = deepcopy(messages)
+    return request
+
+
+async def render_exact_chat_continuation(
+    tokenize: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    request_payload: dict[str, Any],
+    *,
+    assistant_message_index: int,
+    served_prefix_token_ids: list[int],
+) -> list[int] | None:
+    """Append the renderer's structural boundary without re-tokenizing sampled content."""
+    body = request_payload["json"]
+    messages = body["messages"]
+    if not 0 <= assistant_message_index < len(messages):
+        raise ValueError("continuation assistant index is outside the message history")
+    if messages[assistant_message_index].get("role") != "assistant":
+        raise ValueError("continuation message must be an assistant turn")
+
+    history_messages = messages[:assistant_message_index]
+    prefix_messages = messages[: assistant_message_index + 1]
+    full_request = _tokenize_body(body, messages)
+    prefix_request = _tokenize_body(body, prefix_messages)
+    prefix_request["add_generation_prompt"] = False
+    prefix_request["continue_final_message"] = False
+    open_assistant_request = _tokenize_body(body, history_messages)
+    open_assistant_request["add_generation_prompt"] = True
+    open_assistant_request["continue_final_message"] = False
+    empty_assistant_request = _tokenize_body(body, [*history_messages, {"role": "assistant", "content": ""}])
+    empty_assistant_request["add_generation_prompt"] = False
+    empty_assistant_request["continue_final_message"] = False
+
+    headers = request_payload.get("headers", {})
+    renders = []
+    for tokenize_request in (full_request, prefix_request, open_assistant_request, empty_assistant_request):
+        result = await tokenize({"json": tokenize_request, "headers": headers})
+        renders.append(result.get("tokens") if isinstance(result, dict) else None)
+    full_ids, prefix_ids, open_assistant_ids, empty_assistant_ids = renders
+    if (
+        not all(isinstance(ids, list) and all(isinstance(token, int) for token in ids) for ids in renders)
+        or full_ids[: len(prefix_ids)] != prefix_ids
+        or empty_assistant_ids[: len(open_assistant_ids)] != open_assistant_ids
+    ):
+        return None
+
+    assistant_boundary = empty_assistant_ids[len(open_assistant_ids) :]
+    overlap = max(
+        (
+            count
+            for count in range(1, min(len(served_prefix_token_ids), len(assistant_boundary)) + 1)
+            if served_prefix_token_ids[-count:] == assistant_boundary[:count]
+        ),
+        default=0,
+    )
+    return [*served_prefix_token_ids, *assistant_boundary[overlap:], *full_ids[len(prefix_ids) :]]
