@@ -25,9 +25,9 @@ from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 
 
-@pytest.mark.parametrize("pause_generation", [False, True])
+@pytest.mark.parametrize("sync_phase", ["initial", "training_step"])
 @pytest.mark.parametrize("offload_enabled", [False, True])
-def test_async_weight_sync_respects_optimizer_offload_policy(pause_generation, offload_enabled):
+def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload_enabled):
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(offload_optimizer_during_rollouts=offload_enabled))
     trainer.colocate_all = False
@@ -62,13 +62,13 @@ def test_async_weight_sync_respects_optimizer_offload_policy(pause_generation, o
     trainer.async_sync_policy_weights_to_inference_engines = sync_weights
     trainer._drain_policy_event_loops = drain
 
-    asyncio.run(trainer._sync_policy_weights_and_offload_optimizer(pause_generation=pause_generation))
+    asyncio.run(trainer._sync_policy_weights_and_offload_optimizer(sync_phase=sync_phase))
 
     assert trainer.policy_model.optimizer_on_gpu != offload_enabled
-    assert events == (["pause"] if pause_generation else []) + (["offload"] if offload_enabled else []) + [
+    assert events == (["pause"] if sync_phase == "training_step" else []) + (["offload"] if offload_enabled else []) + [
         "sync",
         "drain",
-    ] + (["resume"] if pause_generation else [])
+    ] + (["resume"] if sync_phase == "training_step" else [])
 
 
 def _generated_group(
