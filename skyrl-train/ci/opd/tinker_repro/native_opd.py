@@ -14,6 +14,7 @@ import re
 import sys
 import tempfile
 
+from cloud.iris.artifacts import read_json
 from aime24_dataset import materialize_dataset as materialize_aime24_dataset
 from aime24_protocol import (
     AIME24_DATASET,
@@ -23,7 +24,7 @@ from aime24_protocol import (
 )
 from deepmath_dataset import PROMPT_ONLY_ENV, materialize_dataset
 from native_artifact_run import run_artifact_command
-from native_checkpoint_publication import publish_committed_checkpoints
+from native_checkpoint_publication import publish_committed_checkpoints, restore_latest_committed_checkpoint
 from qwen35_adapter_contract import verify_fused_qkv_adapter
 from reproduction_artifacts import validate_output_uri
 from marinskyrl.resource_locator import join_resource_path
@@ -126,8 +127,30 @@ class RunManifest:
     adapter_model_sha256: str
     runtime_patches: tuple[str, ...]
     command: tuple[str, ...]
+    resumed_from_step: int | None = None
+    resumed_from_commit_sha256: str | None = None
     returncode: int | None = None
     failure: str | None = None
+
+
+def verify_run_identity(manifest_uri: str, expected: RunManifest, *, resume: bool) -> None:
+    """Refuse accidental overwrite or a resume with different training inputs."""
+    previous = read_json(manifest_uri)
+    if not resume:
+        if previous is not None:
+            raise FileExistsError(f"Native OPD output already has a run manifest: {manifest_uri}")
+        return
+    if previous is None:
+        raise FileNotFoundError(f"Native OPD resume has no run manifest: {manifest_uri}")
+    if previous.get("status") == "complete":
+        raise ValueError("Cannot resume a completed native OPD run")
+    if previous.get("status") not in {"running", "failed"}:
+        raise ValueError(f"Native OPD run has an invalid resume status: {previous.get('status')!r}")
+    mutable = {"status", "command", "resumed_from_step", "resumed_from_commit_sha256", "returncode", "failure"}
+    observed = {key: value for key, value in previous.items() if key not in mutable}
+    required = {key: value for key, value in json.loads(json.dumps(asdict(expected))).items() if key not in mutable}
+    if observed != required:
+        raise ValueError(f"Native OPD resume identity differs from the existing run: {manifest_uri}")
 
 
 def hydra_arguments(
@@ -136,6 +159,8 @@ def hydra_arguments(
     adapter_path: Path,
     output_root: Path,
     aime_data_path: Path | None = None,
+    *,
+    resume: bool = False,
 ) -> tuple[str, ...]:
     # MarinSkyRL sizes trainer batches in prompt groups. The generator expands each
     # group into ``n_samples_per_prompt`` trajectories before the learner update.
@@ -144,6 +169,8 @@ def hydra_arguments(
     targets = ",".join(LORA_TARGETS)
     if shape.steps > 1 and aime_data_path is None:
         raise ValueError("Full native OPD requires the pinned AIME 2024 validation dataset")
+    if resume and shape.steps <= 1:
+        raise ValueError("Native OPD resume requires a multi-step training stage")
     arguments = (
         f"data.train_data=['{data_path}']",
         f"data.val_data=['{aime_data_path}']" if aime_data_path is not None else "data.val_data=[]",
@@ -199,7 +226,7 @@ def hydra_arguments(
         f"trainer.eval_interval={OPD_CHECKPOINT_EVAL_INTERVAL if aime_data_path is not None else -1}",
         f"trainer.ckpt_interval={OPD_CHECKPOINT_EVAL_INTERVAL if shape.steps > 1 else 1}",
         f"trainer.hf_save_interval={OPD_CHECKPOINT_EVAL_INTERVAL if shape.steps > 1 else 1}",
-        "trainer.resume_mode=null",
+        f"trainer.resume_mode={'latest' if resume else 'null'}",
         f"trainer.dump_eval_results={'true' if aime_data_path is not None else 'false'}",
         "trainer.logger=console",
         "trainer.project_name=tinker_native_repro",
@@ -309,10 +336,13 @@ def run(
     *,
     adapter_config_sha256: str,
     adapter_model_sha256: str,
+    resume: bool = False,
 ) -> int:
     validate_output_uri(output_uri)
-    runtime_patches = (patch_qwen35_embedding_lora(installed_qwen35_source()),)
     shape = stage_shape(stage)
+    if resume and shape.steps <= 1:
+        raise ValueError("Native OPD resume requires a multi-step training stage")
+    runtime_patches = (patch_qwen35_embedding_lora(installed_qwen35_source()),)
     with tempfile.TemporaryDirectory(prefix="tinker-native-opd-") as temporary:
         root = Path(temporary)
         output_root = root / "output"
@@ -330,7 +360,7 @@ def run(
                 sys.executable,
                 "-m",
                 "skyrl_train.entrypoints.main_base",
-                *hydra_arguments(shape, data_path, Path(adapter_path), output_root, aime_data_path),
+                *hydra_arguments(shape, data_path, Path(adapter_path), output_root, aime_data_path, resume=resume),
             )
             manifest = RunManifest(
                 schema_version=1,
@@ -353,6 +383,20 @@ def run(
                 runtime_patches=runtime_patches,
                 command=command,
             )
+            verify_run_identity(join_resource_path(output_uri, "native-opd-manifest.json"), manifest, resume=resume)
+            if resume:
+                checkpoint = restore_latest_committed_checkpoint(
+                    join_resource_path(output_uri, "checkpoints"),
+                    output_root / "checkpoints",
+                    policy_ranks=POLICY_GPUS,
+                )
+                if checkpoint.step >= shape.steps:
+                    raise ValueError(f"Native OPD checkpoint step {checkpoint.step} is at or beyond the target")
+                manifest = replace(
+                    manifest,
+                    resumed_from_step=checkpoint.step,
+                    resumed_from_commit_sha256=checkpoint.commit_sha256,
+                )
             rows = materialize_dataset(data_path, shape.dataset_rows)
             if rows != shape.dataset_rows and shape.dataset_rows is not None:
                 raise RuntimeError(f"DeepMath yielded {rows} rows; expected {shape.dataset_rows}")
@@ -387,6 +431,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--adapter-config-sha256")
     parser.add_argument("--adapter-model-sha256")
     parser.add_argument("--output-uri", required=True)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     stage = Stage(args.stage)
@@ -397,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
             Path("/model/adapter"),
             Path("/output"),
             Path("/data/aime24.parquet") if stage is Stage.FULL else None,
+            resume=args.resume,
         )
         print(json.dumps({"stage": stage, "shape": asdict(stage_shape(stage)), "hydra_arguments": command}, indent=2))
         return 0
@@ -408,6 +454,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output_uri,
         adapter_config_sha256=args.adapter_config_sha256,
         adapter_model_sha256=args.adapter_model_sha256,
+        resume=args.resume,
     )
 
 

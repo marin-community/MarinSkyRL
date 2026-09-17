@@ -9,7 +9,7 @@ from pathlib import Path
 import posixpath
 import shutil
 
-from cloud.iris.artifacts import FileEntry, fs_and_path
+from cloud.iris.artifacts import FileEntry, copy_tree, fs_and_path
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.hf_export import protected_hf_export_steps
@@ -23,6 +23,7 @@ class VerifiedCheckpoint:
     step: int
     adapter_uri: str
     commit_sha256: str
+    policy_ranks: int
 
 
 def required_checkpoint_files(policy_ranks: int) -> set[str]:
@@ -112,7 +113,41 @@ def verify_remote_checkpoint(checkpoint_uri: str) -> VerifiedCheckpoint:
         step=step,
         adapter_uri=join_resource_path(checkpoint_uri, "policy/lora_adapter"),
         commit_sha256=hashlib.sha256(commit_payload).hexdigest(),
+        policy_ranks=policy_ranks,
     )
+
+
+def restore_latest_committed_checkpoint(
+    checkpoint_uri: str, checkpoint_root: Path, policy_ranks: int
+) -> VerifiedCheckpoint:
+    """Stage the selected remote checkpoint and its pointer for trainer resume."""
+    marker_uri = join_resource_path(checkpoint_uri, LATEST_CHECKPOINT_FILE)
+    filesystem, marker_path = fs_and_path(marker_uri)
+    marker_payload = filesystem.cat_file(marker_path)
+    marker_value = marker_payload.decode().strip()
+    if not marker_value.isdigit() or int(marker_value) <= 0:
+        raise ValueError(f"Invalid native checkpoint pointer {marker_value!r}")
+    step = int(marker_value)
+    step_uri = join_resource_path(checkpoint_uri, f"{GLOBAL_STEP_PREFIX}{step}")
+    verified = verify_remote_checkpoint(step_uri)
+    if verified.policy_ranks != policy_ranks:
+        raise ValueError(f"Native checkpoint has {verified.policy_ranks} policy ranks; expected {policy_ranks}")
+
+    checkpoint_root.mkdir(parents=True, exist_ok=False)
+    step_root = checkpoint_root / f"{GLOBAL_STEP_PREFIX}{step}"
+    copy_tree(step_uri, step_root)
+    commit_payload = (step_root / COMMIT_FILENAME).read_bytes()
+    if hashlib.sha256(commit_payload).hexdigest() != verified.commit_sha256:
+        raise ValueError("Staged native checkpoint commit differs from the verified remote commit")
+    commit = json.loads(commit_payload)
+    staged_files = {entry.path: entry.size for entry in checkpoint_inventory(step_root, policy_ranks)}
+    committed_files = {entry["path"]: entry["size"] for entry in commit["files"]}
+    if staged_files != committed_files:
+        raise ValueError("Staged native checkpoint files differ from the remote commit inventory")
+    if filesystem.cat_file(marker_path) != marker_payload:
+        raise ValueError("Native checkpoint pointer changed during staging")
+    (checkpoint_root / LATEST_CHECKPOINT_FILE).write_bytes(marker_payload)
+    return verified
 
 
 def prune_verified_local_checkpoints(
