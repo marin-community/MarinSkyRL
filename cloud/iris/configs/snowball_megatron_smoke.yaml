@@ -2,7 +2,7 @@
 # expert-parallel vLLM node. Sized as a two-step smoke of rollout, update, and sync.
 # Launch policy nodes with 1800GB of host memory and 1000GB of disk. The Megatron
 # checkpoint writer keeps optimizer state sharded across data-parallel ranks and
-# stages each torch-dist shard in /tmp until its S3 upload finishes. Resume with
+# streams one bounded multipart rank shard directly to S3. Resume with
 # the same tensor, pipeline, context, and expert geometry.
 entrypoint: standard
 
