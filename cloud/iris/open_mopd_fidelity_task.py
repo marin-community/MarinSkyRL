@@ -213,6 +213,20 @@ def snapshot_model(
     return destination, ArtifactVerification(repository=repository, revision=revision, files=files)
 
 
+def verify_shared_tokenizer(student: Path, teachers: tuple[Path, ...]) -> None:
+    """Fail closed before using student token IDs to query a teacher model."""
+    for filename in ("tokenizer.json", "tokenizer_config.json"):
+        fingerprints = []
+        for model in (student, *teachers):
+            path = model / filename
+            if not path.is_file():
+                raise ValueError(f"missing tokenizer file: {path}")
+            with path.open("rb") as source:
+                fingerprints.append(hashlib.file_digest(source, "sha256").hexdigest())
+        if len(set(fingerprints)) != 1:
+            raise ValueError(f"student/teacher tokenizer mismatch in {filename}: {fingerprints}")
+
+
 def _dataset(artifact: DatasetArtifact, destination: Path) -> tuple[Path, ArtifactVerification]:
     code = (
         "from huggingface_hub import hf_hub_download; import sys; "
@@ -269,6 +283,7 @@ def stage_inputs(config: FidelityConfig, root: Path) -> StagedInputs:
         )
         for teacher in config.teachers
     )
+    verify_shared_tokenizer(student, tuple(snapshot for snapshot, _ in teacher_snapshots))
     dataset, dataset_verification = _dataset(config.dataset, root / "data")
     validation_dataset, validation_verification = _dataset(config.validation_dataset, root / "validation")
     return StagedInputs(
@@ -324,6 +339,7 @@ def training_command(
         f"actor_rollout_ref.rollout.temperature={training.temperature}",
         f"actor_rollout_ref.rollout.top_p={training.nucleus_p}",
         f"reward_model.micro_batch_size_per_gpu={training.micro_batch_size_per_gpu}",
+        "reward_model.model.input_tokenizer=null",
         f"+reward_model.teacher_temperature={training.teacher_temperature}",
         "+reward_model.reward_kwargs.compute_true_reward=False",
         "+data.sampler.class_path=pkg://verl.utils.dataset.domain_weighted_sampler",
@@ -346,6 +362,7 @@ def training_command(
         f"trainer.validation_data_dir={output / 'validation'}",
         f"actor_rollout_ref.rollout.val_kwargs.temperature={training.eval_temperature}",
         f"actor_rollout_ref.rollout.val_kwargs.top_p={training.eval_nucleus_p}",
+        f"+actor_rollout_ref.rollout.val_kwargs.max_tokens={training.response_limit}",
         "actor_rollout_ref.rollout.val_kwargs.do_sample=True",
         f"actor_rollout_ref.rollout.val_kwargs.n={training.eval_samples}",
         "trainer.logger=['console']",
