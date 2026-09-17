@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import StrEnum
 import hashlib
 import importlib.util
@@ -80,6 +80,8 @@ PLAN_STAGES = {
 POLICY_GPUS = 4
 OPD_CHECKPOINT_EVAL_INTERVAL = 2
 LOCAL_CHECKPOINT_RETENTION = 2
+RUN_MANIFEST_FILENAME = "native-opd-manifest.json"
+CHECKPOINT_DIRNAME = "checkpoints"
 LORA_RANK = 128
 LORA_ALPHA = 1
 ROLLOUT_GPU_MEMORY_UTILIZATION = 0.9
@@ -109,7 +111,7 @@ def stage_shape(stage: Stage) -> StageShape:
 @dataclass(frozen=True)
 class RunManifest:
     schema_version: int
-    status: str
+    status: str = field(metadata={"identity": False})
     stage: str
     shape: StageShape
     student: str
@@ -126,29 +128,36 @@ class RunManifest:
     adapter_config_sha256: str
     adapter_model_sha256: str
     runtime_patches: tuple[str, ...]
-    command: tuple[str, ...]
-    resumed_from_step: int | None = None
-    resumed_from_commit_sha256: str | None = None
-    returncode: int | None = None
-    failure: str | None = None
+    command: tuple[str, ...] = field(metadata={"identity": False})
+    resumed_from_step: int | None = field(default=None, metadata={"identity": False})
+    resumed_from_commit_sha256: str | None = field(default=None, metadata={"identity": False})
+    returncode: int | None = field(default=None, metadata={"identity": False})
+    failure: str | None = field(default=None, metadata={"identity": False})
 
 
-def verify_run_identity(manifest_uri: str, expected: RunManifest, *, resume: bool) -> None:
-    """Refuse accidental overwrite or a resume with different training inputs."""
+def ensure_fresh_output(manifest_uri: str) -> None:
+    """Refuse to overwrite an existing native OPD run."""
+    if read_json(manifest_uri) is not None:
+        raise FileExistsError(f"Native OPD output already has a run manifest: {manifest_uri}")
+
+
+def verify_resume_identity(manifest_uri: str, expected: RunManifest) -> None:
+    """Require the same training inputs before restoring a prior run."""
     previous = read_json(manifest_uri)
-    if not resume:
-        if previous is not None:
-            raise FileExistsError(f"Native OPD output already has a run manifest: {manifest_uri}")
-        return
     if previous is None:
         raise FileNotFoundError(f"Native OPD resume has no run manifest: {manifest_uri}")
     if previous.get("status") == "complete":
         raise ValueError("Cannot resume a completed native OPD run")
     if previous.get("status") not in {"running", "failed"}:
         raise ValueError(f"Native OPD run has an invalid resume status: {previous.get('status')!r}")
-    mutable = {"status", "command", "resumed_from_step", "resumed_from_commit_sha256", "returncode", "failure"}
-    observed = {key: value for key, value in previous.items() if key not in mutable}
-    required = {key: value for key, value in json.loads(json.dumps(asdict(expected))).items() if key not in mutable}
+    manifest_fields = fields(RunManifest)
+    field_names = {item.name for item in manifest_fields}
+    identity_names = {item.name for item in manifest_fields if item.metadata.get("identity", True)}
+    if set(previous) - field_names or identity_names - set(previous):
+        raise ValueError(f"Native OPD resume identity has unknown or missing fields: {manifest_uri}")
+    observed = {name: previous[name] for name in identity_names}
+    expected_json = json.loads(json.dumps(asdict(expected)))
+    required = {name: expected_json[name] for name in identity_names}
     if observed != required:
         raise ValueError(f"Native OPD resume identity differs from the existing run: {manifest_uri}")
 
@@ -231,7 +240,7 @@ def hydra_arguments(
         "trainer.logger=console",
         "trainer.project_name=tinker_native_repro",
         f"trainer.run_name=tinker_native_{shape.steps}_{prompt_batch_size}x{shape.group_size}",
-        f"trainer.ckpt_path={output_root / 'checkpoints'}",
+        f"trainer.ckpt_path={output_root / CHECKPOINT_DIRNAME}",
         f"trainer.export_path={output_root / 'exports'}",
         "generator.backend=vllm",
         "generator.num_inference_engines=1",
@@ -340,8 +349,6 @@ def run(
 ) -> int:
     validate_output_uri(output_uri)
     shape = stage_shape(stage)
-    if resume and shape.steps <= 1:
-        raise ValueError("Native OPD resume requires a multi-step training stage")
     runtime_patches = (patch_qwen35_embedding_lora(installed_qwen35_source()),)
     with tempfile.TemporaryDirectory(prefix="tinker-native-opd-") as temporary:
         root = Path(temporary)
@@ -383,11 +390,15 @@ def run(
                 runtime_patches=runtime_patches,
                 command=command,
             )
-            verify_run_identity(join_resource_path(output_uri, "native-opd-manifest.json"), manifest, resume=resume)
+            manifest_uri = join_resource_path(output_uri, RUN_MANIFEST_FILENAME)
+            if resume:
+                verify_resume_identity(manifest_uri, manifest)
+            else:
+                ensure_fresh_output(manifest_uri)
             if resume:
                 checkpoint = restore_latest_committed_checkpoint(
-                    join_resource_path(output_uri, "checkpoints"),
-                    output_root / "checkpoints",
+                    join_resource_path(output_uri, CHECKPOINT_DIRNAME),
+                    output_root / CHECKPOINT_DIRNAME,
                     policy_ranks=POLICY_GPUS,
                 )
                 if checkpoint.step >= shape.steps:
@@ -405,13 +416,13 @@ def run(
             return run_artifact_command(
                 command=command,
                 initial_manifest=manifest,
-                manifest_path=output_root / "native-opd-manifest.json",
+                manifest_path=output_root / RUN_MANIFEST_FILENAME,
                 output_root=output_root,
                 output_uri=output_uri,
                 environment=environment,
                 publish_checkpoints=lambda: publish_committed_checkpoints(
-                    output_root / "checkpoints",
-                    join_resource_path(output_uri, "checkpoints"),
+                    output_root / CHECKPOINT_DIRNAME,
+                    join_resource_path(output_uri, CHECKPOINT_DIRNAME),
                     policy_ranks=POLICY_GPUS,
                     retain_local_checkpoints=LOCAL_CHECKPOINT_RETENTION,
                 ),

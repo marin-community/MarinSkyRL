@@ -1,4 +1,4 @@
-"""Publish complete native FSDP2 LoRA checkpoints for independent evaluation."""
+"""Publish and restore committed native FSDP2 LoRA checkpoints."""
 
 from __future__ import annotations
 
