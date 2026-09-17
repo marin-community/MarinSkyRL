@@ -103,6 +103,63 @@ def test_teacher_topk_prompt_scores_fail_when_student_selected_ids_are_missing()
         )
 
 
+def test_teacher_selected_prompt_scores_preserve_candidate_order_and_sparse_mask():
+    request = replace(
+        _request(),
+        response_token_ids=torch.tensor([[21, 22, 25]]),
+        response_mask=torch.tensor([[True, True, True]]),
+        student_topk_indices=torch.tensor([[[21, 23], [-1, -1], [25, 26]]]),
+        behavior_topk_logprobs=torch.tensor([[[-0.1, -0.2], [torch.nan, torch.nan], [-0.3, -0.4]]]),
+        student_selected_mask=torch.tensor([[True, False, True]]),
+    )
+    validate_teacher_score_request(request)
+
+    evidence = teacher_evidence_from_prompt_logprobs(
+        request,
+        teacher_revision="math-revision",
+        prompt_lengths=(2,),
+        prompt_logprobs=((None, {11: -1.0}, {23: -0.7, 21: -0.2}, None, {26: -0.8, 25: -0.4}),),
+    )
+
+    validate_teacher_evidence(request, evidence)
+    torch.testing.assert_close(evidence.teacher_on_student_logprobs[0, 0], torch.tensor([-0.2, -0.7]))
+    assert torch.isnan(evidence.teacher_on_student_logprobs[0, 1]).all()
+    torch.testing.assert_close(evidence.teacher_on_student_logprobs[0, 2], torch.tensor([-0.4, -0.8]))
+
+
+def test_teacher_selected_prompt_scores_keep_rows_separate_with_padding():
+    request = replace(
+        _request(),
+        trajectory_ids=("sample-0", "sample-1"),
+        route_ids=("math", "math"),
+        prompt_token_ids=torch.tensor([[11, 12], [13, 0]]),
+        prompt_mask=torch.tensor([[True, True], [True, False]]),
+        response_token_ids=torch.tensor([[21, 22, 0], [31, 32, 33]]),
+        response_mask=torch.tensor([[True, True, False], [True, True, True]]),
+        student_topk_indices=torch.tensor([[[21, 23], [22, 24], [-1, -1]], [[31, 34], [32, 35], [33, 36]]]),
+        behavior_topk_logprobs=torch.tensor(
+            [[[-0.1, -0.2], [-0.3, -0.4], [torch.nan, torch.nan]], [[-0.5, -0.6], [-0.7, -0.8], [-0.9, -1.0]]]
+        ),
+        student_selected_mask=torch.tensor([[True, True, False], [True, True, True]]),
+    )
+    validate_teacher_score_request(request)
+
+    evidence = teacher_evidence_from_prompt_logprobs(
+        request,
+        teacher_revision="math-revision",
+        prompt_lengths=(2, 1),
+        prompt_logprobs=(
+            (None, {11: -1.0}, {21: -0.1, 23: -0.2}, {22: -0.3, 24: -0.4}),
+            (None, {31: -0.5, 34: -0.6}, {32: -0.7, 35: -0.8}, {33: -0.9, 36: -1.0}),
+        ),
+    )
+
+    validate_teacher_evidence(request, evidence)
+    torch.testing.assert_close(evidence.teacher_on_student_logprobs[0, 0], torch.tensor([-0.1, -0.2]))
+    assert torch.isnan(evidence.teacher_on_student_logprobs[0, 2]).all()
+    torch.testing.assert_close(evidence.teacher_on_student_logprobs[1, 2], torch.tensor([-0.9, -1.0]))
+
+
 @pytest.mark.asyncio
 async def test_shared_coordinator_prepares_student_selected_input_from_oracle():
     request = _request()
