@@ -10,6 +10,11 @@ class PromptSamplingOverride(TypedDict):
     prompt_logprob_token_ids: List[List[int]]
 
 
+class ChatContinuation(TypedDict):
+    served_prefix_token_ids: List[int]
+    assistant_message_index: int
+
+
 class InferenceEngineInput(TypedDict):
     # Either prompts or prompt_token_ids must be provided, but not both.
     prompts: Optional[List[ConversationType]]
@@ -22,6 +27,8 @@ class InferenceEngineInput(TypedDict):
     # Per-sample Responses-API options (tools, parallel_tool_calls, etc.) that
     # require the serving backend's resolved chat renderer.
     chat_completion_params: NotRequired[List[Dict[str, Any]]]
+    # Preserve sampled tokens when the backend re-renders a structured assistant turn.
+    chat_continuations: NotRequired[List[ChatContinuation | None]]
 
 
 class InferenceEngineOutput(TypedDict):

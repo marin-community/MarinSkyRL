@@ -658,6 +658,9 @@ async def test_agent_loop_handles_backend_rendered_prefix_across_structured_tool
             observation,
         ]
     ]
+    assert second_request["chat_continuations"] == [
+        {"served_prefix_token_ids": [11, 12, 21, 22], "assistant_message_index": 1}
+    ]
     assert output.evidence.prompt_token_ids == (11, 12)
     assert output.evidence.response_token_ids == (*expected_response_ids, mock_tokenizer.eos_token_id)
     assert output.loss_mask == expected_mask
