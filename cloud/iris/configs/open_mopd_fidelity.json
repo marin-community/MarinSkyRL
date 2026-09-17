@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "source": {
     "repository": "https://github.com/BytedTsinghua-SIA/Open-MOPD.git",
     "commit": "4809a96cf85a869106ff0ff3f37d0a51e12010ae"
@@ -165,8 +165,8 @@
     "entropy_coefficient": 0.0,
     "loss_aggregation": "token-mean",
     "prompt_limit": 2048,
-    "paper_prompt_limits": [1024, 2048, 2048],
     "response_limit": 16384,
+    "domain_response_limits": [16384, 16384, 2048],
     "top_k": 16,
     "nucleus_p": 0.99,
     "temperature": 1.0,
@@ -188,7 +188,7 @@
     "paper_schedule": 600
   },
   "known_deviations": [
-    "The released patched verl tree exposes one global response length. The paper uses 16K for math/code and 2K for IF.",
+    "The released patched verl tree exposes one global response length; this launcher patches per-request generation to cap IF at 2K while retaining 16K for math/code.",
     "The release does not pin a digest-addressed CUDA task image or a complete Python lockfile.",
     "The model card identifies the released final model as step 200 while paper Table 8 specifies 600 total steps."
   ]

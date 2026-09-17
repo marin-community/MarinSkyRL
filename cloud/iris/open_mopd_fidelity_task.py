@@ -36,6 +36,7 @@ STATUS_COMPLETE = "complete"
 STATUS_FAILED = "failed"
 HYDRA_REWARD_MODE_PATCH = "scripts/local/mt_opd.sh: declare the release-only rollout.reward_mode key"
 RAW_PROMPT_RETENTION_PATCH = "verl/trainer/ppo/ray_trainer.py: retain raw_prompt for teacher retokenization"
+DOMAIN_RESPONSE_LIMIT_PATCH = "verl rollout: apply paper per-domain response limits to each training request"
 
 
 @dataclass(frozen=True)
@@ -105,7 +106,7 @@ def replace_source_contract(path: Path, old: str, new: str, description: str) ->
 
 
 def patch_source_compatibility(source: Path) -> tuple[str, ...]:
-    """Apply narrow, fail-closed compatibility fixes to the pinned authors' checkout."""
+    """Apply fail-closed compatibility and paper-protocol fixes to the pinned source."""
     replace_source_contract(
         source / "scripts" / "local" / "mt_opd.sh",
         '"actor_rollout_ref.rollout.reward_mode=mt_opd"',
@@ -119,7 +120,42 @@ def patch_source_compatibility(source: Path) -> tuple[str, ...]:
         "            & batch.non_tensor_batch.keys()",
         "reward-model metadata retention set",
     )
-    return HYDRA_REWARD_MODE_PATCH, RAW_PROMPT_RETENTION_PATCH
+    replace_source_contract(
+        source / "training" / "verl" / "verl" / "trainer" / "ppo" / "ray_trainer.py",
+        "        if self.async_rollout_mode:\n            gen_batch.non_tensor_batch.update(batch.non_tensor_batch)",
+        "        if self.async_rollout_mode:\n"
+        "            gen_batch.non_tensor_batch.update(batch.non_tensor_batch)\n"
+        '        elif "domain" in batch.non_tensor_batch:\n'
+        '            gen_batch.non_tensor_batch["domain"] = batch.non_tensor_batch["domain"].copy()',
+        "synchronous rollout domain metadata",
+    )
+    replace_source_contract(
+        source / "training" / "verl" / "verl" / "workers" / "rollout" / "vllm_rollout" / "vllm_rollout_spmd.py",
+        "        with self.update_sampling_params(**kwargs):\n            outputs = self.inference_engine.generate(",
+        "        with self.update_sampling_params(**kwargs):\n"
+        "            sampling_params = self.sampling_params\n"
+        "            if not is_validate:\n"
+        '                domains = non_tensor_batch.get("domain")\n'
+        "                if domains is None or len(domains) != batch_size:\n"
+        '                    raise ValueError("Per-domain response limits require one domain per training request")\n'
+        "                limits = self.config.domain_response_limits\n"
+        "                sampling_params = []\n"
+        "                for domain in domains:\n"
+        "                    if domain not in limits:\n"
+        '                        raise ValueError(f"Unknown domain for response limit: {domain}")\n'
+        "                    params = self.sampling_params.clone()\n"
+        "                    params.max_tokens = int(limits[domain])\n"
+        "                    sampling_params.append(params)\n"
+        "            outputs = self.inference_engine.generate(",
+        "training rollout per-request sampling parameters",
+    )
+    replace_source_contract(
+        source / "training" / "verl" / "verl" / "workers" / "rollout" / "vllm_rollout" / "vllm_rollout_spmd.py",
+        "                sampling_params=self.sampling_params,",
+        "                sampling_params=sampling_params,",
+        "training rollout sampling parameters",
+    )
+    return HYDRA_REWARD_MODE_PATCH, RAW_PROMPT_RETENTION_PATCH, DOMAIN_RESPONSE_LIMIT_PATCH
 
 
 def verify_lfs_files(destination: Path, expected_files: tuple[LfsFile, ...]) -> tuple[FileVerification, ...]:
@@ -274,6 +310,10 @@ def training_command(
         f"+actor_rollout_ref.rollout.log_prob_top_k={training.top_k}",
         "+actor_rollout_ref.rollout.top_k_strategy=only_stu",
         "+actor_rollout_ref.rollout.reward_weight_mode=student_p",
+        "+actor_rollout_ref.rollout.domain_response_limits={"
+        + ",".join(f"{domain}:{limit}" for domain, limit in zip(DOMAINS, training.domain_response_limits, strict=True))
+        + "}",
+        "actor_rollout_ref.rollout.mode=sync",
         f"actor_rollout_ref.rollout.max_num_batched_tokens={training.prompt_limit + training.response_limit}",
         f"actor_rollout_ref.rollout.temperature={training.temperature}",
         f"actor_rollout_ref.rollout.top_p={training.nucleus_p}",
