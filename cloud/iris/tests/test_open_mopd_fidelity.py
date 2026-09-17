@@ -327,6 +327,7 @@ def test_training_command_has_semantic_control_settings() -> None:
         "trainer.validation_data_dir": "/work/output/validation",
         "actor_rollout_ref.rollout.val_kwargs.temperature": "0.6",
         "actor_rollout_ref.rollout.val_kwargs.top_p": "0.95",
+        "actor_rollout_ref.rollout.val_kwargs.max_tokens": "16384",
         "actor_rollout_ref.rollout.val_kwargs.do_sample": "True",
         "actor_rollout_ref.rollout.val_kwargs.n": "1",
         "trainer.logger": "['console']",
