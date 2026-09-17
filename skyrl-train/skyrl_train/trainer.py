@@ -959,12 +959,16 @@ class RayPPOTrainer:
                 finally:
                     await self._sync_weights_and_restore_rollout_residency()
             else:
-                if self.cfg.trainer.offload_optimizer_during_rollouts:
-                    with Timer("offload_policy_optimizer_to_cpu", self.all_timings):
-                        self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+                self._offload_policy_optimizer_for_rollouts(self.all_timings)
                 with Timer("sync_weights", self.all_timings):
                     ray.get(self.sync_policy_weights_to_inference_engines())
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
+
+    def _offload_policy_optimizer_for_rollouts(self, timings: dict) -> None:
+        """Match the optimizer residency expected by the next training step."""
+        if not self.colocate_all and self.cfg.trainer.offload_optimizer_during_rollouts:
+            with Timer("offload_policy_optimizer_to_cpu", timings):
+                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
 
     def _log_weight_update_completed(self, *, reason: str, duration_seconds: float) -> None:
         logger.info(

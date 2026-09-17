@@ -1,5 +1,6 @@
 import asyncio
 import collections
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -22,6 +23,52 @@ from skyrl_train.group_admission import (
 from skyrl_train.trajectory_selection import BestOfNTrajectorySelector
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
+
+
+@pytest.mark.parametrize("pause_generation", [False, True])
+@pytest.mark.parametrize("offload_enabled", [False, True])
+def test_async_weight_sync_respects_optimizer_offload_policy(pause_generation, offload_enabled):
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(offload_optimizer_during_rollouts=offload_enabled))
+    trainer.colocate_all = False
+    trainer.all_startup_timings = {}
+    trainer.all_timings = {}
+    events = []
+
+    class Policy:
+        optimizer_on_gpu = True
+
+        def offload_to_cpu(self, *, offload_optimizer, offload_model):
+            assert offload_optimizer and not offload_model
+            self.optimizer_on_gpu = False
+            events.append("offload")
+
+    class Engine:
+        async def pause_generation(self):
+            events.append("pause")
+
+        async def resume_generation(self):
+            assert trainer.policy_model.optimizer_on_gpu != offload_enabled
+            events.append("resume")
+
+    async def sync_weights():
+        events.append("sync")
+
+    async def drain():
+        events.append("drain")
+
+    trainer.policy_model = Policy()
+    trainer.inference_engine_client = Engine()
+    trainer.async_sync_policy_weights_to_inference_engines = sync_weights
+    trainer._drain_policy_event_loops = drain
+
+    asyncio.run(trainer._sync_policy_weights_and_offload_optimizer(pause_generation=pause_generation))
+
+    assert trainer.policy_model.optimizer_on_gpu != offload_enabled
+    assert events == (["pause"] if pause_generation else []) + (["offload"] if offload_enabled else []) + [
+        "sync",
+        "drain",
+    ] + (["resume"] if pause_generation else [])
 
 
 def _generated_group(
