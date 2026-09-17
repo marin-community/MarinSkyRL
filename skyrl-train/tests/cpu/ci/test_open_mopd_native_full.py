@@ -66,6 +66,23 @@ def test_full_schedule_preserves_released_objective_and_every_checkpoint():
     assert config.trainer.resume_mode is None
 
 
+def test_colocated_continuation_gate_stops_after_one_update():
+    arguments = MODULE.hydra_arguments(
+        Path("/data/schedule.parquet"),
+        Path("/data/aime24.parquet"),
+        "s3://bucket/users/operator/checkpoints",
+        "s3://bucket/users/operator/exports",
+        resume=True,
+        max_steps=3,
+    )
+    with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
+        config = compose(config_name="ppo_base_config", overrides=list(arguments))
+    validate_cfg(config)
+    assert config.trainer.max_steps == 3
+    assert config.trainer.resume_mode == "latest"
+    assert config.trainer.eval_interval == config.trainer.ckpt_interval == 2
+
+
 def test_schedule_rejects_changed_bytes_before_training(monkeypatch, tmp_path):
     destination = tmp_path / "schedule.parquet"
 
