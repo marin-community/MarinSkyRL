@@ -121,17 +121,8 @@ def generator_cfg():
     return cfg
 
 
-@pytest.mark.asyncio
-async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator_cfg, mock_tokenizer):
-    generator_cfg.batched = False
-    generator_cfg.sampling_params.logprobs = 1
-    runner = SkyRLGymTrajectoryRunner(
-        generator_cfg,
-        DictConfig({"max_env_workers": 0}),
-        MagicMock(),
-        mock_tokenizer,
-    )
-    successful = AgentLoopOutput(
+def _successful_trajectory_output() -> AgentLoopOutput:
+    return AgentLoopOutput(
         evidence=RolloutEvidence(
             response="ok",
             stop_reason="stop",
@@ -149,13 +140,18 @@ async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator
         env_metrics={},
     )
 
+
+def _masking_agent_loop(error: Exception):
     async def agent_loop(prompt, *_args, **_kwargs):
         if prompt[0]["content"] == "fail":
-            raise TimeoutError("judge request timed out")
-        return successful
+            raise error
+        return _successful_trajectory_output()
 
-    runner.agent_loop = agent_loop
-    request = TrajectoryRequestBatch(
+    return agent_loop
+
+
+def _two_row_request(training_phase: str) -> TrajectoryRequestBatch:
+    return TrajectoryRequestBatch(
         prompts=[
             [{"role": "user", "content": "ok"}],
             [{"role": "user", "content": "fail"}],
@@ -164,10 +160,23 @@ async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator
         env_extras=[{}, {}],
         sampling_params=None,
         trajectory_ids=[TrajectoryID("ok", 0), TrajectoryID("fail", 0)],
-        batch_metadata=BatchMetadata(global_step=1, training_phase="train"),
+        batch_metadata=BatchMetadata(global_step=1, training_phase=training_phase),
     )
 
-    batch = await runner._run(request, disable_tqdm=True)
+
+@pytest.mark.asyncio
+async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator_cfg, mock_tokenizer):
+    generator_cfg.batched = False
+    generator_cfg.sampling_params.logprobs = 1
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0}),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    runner.agent_loop = _masking_agent_loop(TimeoutError("judge request timed out"))
+
+    batch = await runner._run(_two_row_request("train"), disable_tqdm=True)
 
     assert batch["response_ids"] == [[12], [0]]
     assert batch["rewards"] == [[1.0], [0.0]]
@@ -184,7 +193,10 @@ async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator
 async def test_whole_trajectory_collector_adapts_masked_scalar_rewards_to_token_level_batch(
     generator_cfg, mock_tokenizer
 ):
-    """A masked agent-loop failure must not change a token-level batch's reward representation (#680)."""
+    """A masked agent-loop failure must not change a token-level batch's reward form.
+
+    https://github.com/marin-community/MarinSkyRL/issues/680
+    """
     generator_cfg.batched = False
     generator_cfg.use_conversation_multi_turn = True
     runner = SkyRLGymTrajectoryRunner(
@@ -196,43 +208,11 @@ async def test_whole_trajectory_collector_adapts_masked_scalar_rewards_to_token_
     # In retokenize mode the failed-row producer emits a scalar reward, while successful
     # chat-completions trajectories in the same batch carry token-level rewards.
     runner.custom_chat_template = "<custom>"
-    successful = AgentLoopOutput(
-        evidence=RolloutEvidence(
-            response="ok",
-            stop_reason="stop",
-            generated_token_count=1,
-            prompt_token_ids=(11,),
-            response_token_ids=(12,),
-            behavior_logprobs=(-0.5,),
-        ),
-        verification=VerificationResult.verified(1.0, passed=True),
-        reward=RewardResult(unshaped_reward=1.0, optimization_reward=1.0, token_rewards=(1.0,)),
-        disposition=TrainingDisposition.train(),
-        loss_mask=[1],
-        env_metrics={},
-    )
+    runner.agent_loop = _masking_agent_loop(ConnectionError("judge returned HTTP 503"))
 
-    async def agent_loop(prompt, *_args, **_kwargs):
-        if prompt[0]["content"] == "fail":
-            raise ConnectionError("judge returned HTTP 503")
-        return successful
+    batch = await runner._run(_two_row_request("eval"), disable_tqdm=True)
 
-    runner.agent_loop = agent_loop
-    request = TrajectoryRequestBatch(
-        prompts=[
-            [{"role": "user", "content": "ok"}],
-            [{"role": "user", "content": "fail"}],
-        ],
-        env_classes=["gsm8k", "gsm8k"],
-        env_extras=[{}, {}],
-        sampling_params=None,
-        trajectory_ids=[TrajectoryID("ok", 0), TrajectoryID("fail", 0)],
-        batch_metadata=BatchMetadata(global_step=14, training_phase="eval"),
-    )
-
-    batch = await runner._run(request, disable_tqdm=True)
-
-    assert_valid_trajectory_batch(len(request["prompts"]), batch)
+    assert_valid_trajectory_batch(2, batch)
     assert batch["rewards"] == [[1.0], [0.0]]
     assert batch["loss_masks"] == [[1], [0]]
     assert batch["exclude_from_baseline"] == [False, True]
