@@ -14,6 +14,9 @@ from skyrl_train.inference_engines.response_topk import select_chat_response_top
 from skyrl_train.trajectory_runners.types import TokenProvenance
 
 
+_CHAT_SAMPLING_EXCLUSIONS = frozenset({"max_generate_length", "logprobs", "stop"})
+
+
 class ModelClientOutput(InferenceEngineOutput):
     """Normalized model output with explicit token provenance."""
 
@@ -144,11 +147,7 @@ class DirectModelClient:
                 "model": self._client.model_name,
                 "messages": messages,
                 "session_id": session_id,
-                **{
-                    key: value
-                    for key, value in sampling_params.items()
-                    if key not in {"max_generate_length", "logprobs", "stop"}
-                },
+                **{key: value for key, value in sampling_params.items() if key not in _CHAT_SAMPLING_EXCLUSIONS},
                 **chat_options,
                 "return_token_ids": True,
             }
@@ -314,11 +313,7 @@ class OpenAIHTTPModelClient:
             "model": self._model_name,
             "messages": messages,
             "session_id": session_id,
-            **{
-                key: value
-                for key, value in sampling_params.items()
-                if key not in {"max_generate_length", "logprobs", "stop"}
-            },
+            **{key: value for key, value in sampling_params.items() if key not in _CHAT_SAMPLING_EXCLUSIONS},
             **options,
             "return_token_ids": True,
         }
