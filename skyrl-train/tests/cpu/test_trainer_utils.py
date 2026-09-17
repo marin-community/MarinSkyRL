@@ -849,6 +849,7 @@ def test_filter_trajectory_batch():
 
     assert filtered["prompt_token_ids"] == [[1, 2], [5, 6]]
     assert filtered["response_ids"] == [[7, 8], [11, 12]]
+    assert filtered["response_ids"][0] is not trajectory_batch["response_ids"][0]
     assert filtered["rewards"] == [1.0, 3.0]
     assert filtered["unshaped_rewards"] == [0.0, 0.0]
     assert filtered["loss_masks"] == [[1, 1]] * 2
