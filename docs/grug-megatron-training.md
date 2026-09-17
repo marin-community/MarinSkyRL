@@ -69,12 +69,13 @@ writes data-parallel-local shards without gathering optimizer state onto
 data-parallel rank zero. Resume must keep the tensor, pipeline, context, and
 expert geometry fixed.
 
-S3 checkpoints aggregate each rank's torch-dist items into one multipart object
-with one writer thread per rank. Tensor copy-ahead is bounded at 2GiB per rank,
-or 16GiB on an eight-GPU host, plus s3fs's multipart buffers. Only small control
-files such as `common.pt`, `metadata.json`, and the Hugging Face configuration
-use a local temporary directory. Local-path checkpoints retain Megatron Core's
-standard writer.
+S3 checkpoints aggregate each rank's torch-dist items into one multipart object.
+Each rank overlaps up to four 64MiB `UploadPart` requests while tensor copy-ahead
+is bounded at 1GiB. Including the current multipart buffer, the explicit staging
+budget is 1.3125GiB per rank, or 10.5GiB on an eight-GPU host, plus transient
+serialization and client overhead. Only small control files such as `common.pt`,
+`metadata.json`, and the Hugging Face configuration use a local temporary
+directory. Local-path checkpoints retain Megatron Core's standard writer.
 
 Megatron Core 0.18's Multi-Storage Client path remains disabled because its
 object writer buffers each complete remote file in `BytesIO` before uploading

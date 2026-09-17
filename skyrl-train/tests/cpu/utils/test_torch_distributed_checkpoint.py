@@ -1,3 +1,4 @@
+import threading
 import warnings
 
 import fsspec
@@ -7,7 +8,11 @@ import torch
 from torch.distributed import checkpoint
 from torch.distributed.checkpoint.api import CheckpointException
 
-from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
+from skyrl_train.io.torch_distributed_checkpoint import (
+    _ConcurrentS3WriteStream,
+    _MINIMUM_S3_MULTIPART_PART_BYTES,
+    StreamingFsspecWriter,
+)
 
 
 def test_streaming_fsspec_writer_round_trips_one_aggregated_object_per_rank():
@@ -93,3 +98,91 @@ def test_streaming_fsspec_writer_aborts_failed_object():
     assert filesystem.streams
     assert all(stream.discarded for stream in filesystem.streams)
     assert not any(path.endswith(".metadata") for path in filesystem.opened_paths)
+
+
+class _RecordingMultipartFilesystem:
+    protocol = "s3"
+
+    def __init__(self, fail_part: int | None = None) -> None:
+        self.fail_part = fail_part
+        self.active_uploads = 0
+        self.peak_active_uploads = 0
+        self.uploaded_parts: dict[int, bytes] = {}
+        self.completed_parts: list[dict[str, int | str]] | None = None
+        self.aborted = False
+        self._concurrent_uploads = threading.Event()
+        self._lock = threading.Lock()
+
+    def split_path(self, path: str) -> tuple[str, str, None]:
+        _protocol, location = path.split("://", maxsplit=1)
+        bucket, key = location.split("/", maxsplit=1)
+        return bucket, key, None
+
+    def call_s3(self, method: str, **kwargs):
+        if method == "create_multipart_upload":
+            return {"UploadId": "upload-1"}
+        if method == "upload_part":
+            part_number = int(kwargs["PartNumber"])
+            if part_number == self.fail_part:
+                raise OSError("injected UploadPart failure")
+            with self._lock:
+                self.active_uploads += 1
+                self.peak_active_uploads = max(self.peak_active_uploads, self.active_uploads)
+                if self.active_uploads == 2:
+                    self._concurrent_uploads.set()
+            if self.fail_part is None:
+                assert self._concurrent_uploads.wait(timeout=5)
+            self.uploaded_parts[part_number] = bytes(kwargs["Body"])
+            with self._lock:
+                self.active_uploads -= 1
+            return {"ETag": f"etag-{part_number}"}
+        if method == "complete_multipart_upload":
+            self.completed_parts = kwargs["MultipartUpload"]["Parts"]
+            return {}
+        if method == "abort_multipart_upload":
+            self.aborted = True
+            self._concurrent_uploads.set()
+            return {}
+        if method == "put_object":
+            raise AssertionError("multipart test unexpectedly used PutObject")
+        raise AssertionError(f"unexpected S3 method: {method}")
+
+
+def test_concurrent_s3_stream_bounds_and_parallelizes_parts():
+    filesystem = _RecordingMultipartFilesystem()
+    part_bytes = _MINIMUM_S3_MULTIPART_PART_BYTES
+    stream = _ConcurrentS3WriteStream(
+        filesystem,
+        "s3://bucket/checkpoint/__0_0.distcp",
+        part_bytes=part_bytes,
+        concurrency=2,
+    )
+
+    stream.write(b"a" * part_bytes + b"b" * part_bytes + b"tail")
+    stream.close()
+
+    assert filesystem.peak_active_uploads == 2
+    assert filesystem.uploaded_parts == {1: b"a" * part_bytes, 2: b"b" * part_bytes, 3: b"tail"}
+    assert filesystem.completed_parts == [
+        {"PartNumber": 1, "ETag": "etag-1"},
+        {"PartNumber": 2, "ETag": "etag-2"},
+        {"PartNumber": 3, "ETag": "etag-3"},
+    ]
+    assert not filesystem.aborted
+
+
+def test_concurrent_s3_stream_aborts_failed_part():
+    filesystem = _RecordingMultipartFilesystem(fail_part=1)
+    stream = _ConcurrentS3WriteStream(
+        filesystem,
+        "s3://bucket/checkpoint/__0_0.distcp",
+        part_bytes=_MINIMUM_S3_MULTIPART_PART_BYTES,
+        concurrency=1,
+    )
+
+    with pytest.raises(OSError, match="injected UploadPart failure"):
+        stream.write(b"a" * _MINIMUM_S3_MULTIPART_PART_BYTES)
+    stream.discard()
+
+    assert filesystem.aborted
+    assert stream.closed
