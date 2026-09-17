@@ -146,13 +146,49 @@ def load_megatron_grads_to_gpu(models, diagnostic_expected_device=None):
             raise RuntimeError(
                 f"Megatron grad backload runs on CUDA device {current_device}, expected {diagnostic_expected_device}"
             )
-    for model_chunk in models:
+    for chunk_index, model_chunk in enumerate(models):
         if isinstance(model_chunk, DDP):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
-                    buffer.grad_data.storage().resize_(buffer.grad_data_size)
-                    buffer.grad_data.zero_()
+            for buffer_kind, buffers in enumerate(model_chunk_all_buffers):
+                for buffer_index, buffer in enumerate(buffers):
+                    grad = buffer.grad_data
+                    storage = grad.storage()
+                    if diagnostic_expected_device is not None and diagnostic_expected_device >= 0:
+                        logger.info(
+                            "SNOWBALL_GRAD_BUFFER_BEFORE rank={} chunk={} kind={} index={} dtype={} shape={} "
+                            "offset={} saved_size={} storage_size={} storage_ptr={} tensor_ptr={} allocated={} reserved={}",
+                            torch.distributed.get_rank(),
+                            chunk_index,
+                            buffer_kind,
+                            buffer_index,
+                            grad.dtype,
+                            tuple(grad.shape),
+                            grad.storage_offset(),
+                            buffer.grad_data_size,
+                            storage.size(),
+                            storage.data_ptr(),
+                            grad.data_ptr(),
+                            torch.cuda.memory_allocated(),
+                            torch.cuda.memory_reserved(),
+                        )
+                    storage.resize_(buffer.grad_data_size)
+                    if diagnostic_expected_device is not None and diagnostic_expected_device >= 0:
+                        logger.info(
+                            "SNOWBALL_GRAD_BUFFER_AFTER rank={} chunk={} kind={} index={} numel={} "
+                            "offset={} storage_size={} storage_ptr={} tensor_ptr={} allocated={} reserved={}",
+                            torch.distributed.get_rank(),
+                            chunk_index,
+                            buffer_kind,
+                            buffer_index,
+                            grad.numel(),
+                            grad.storage_offset(),
+                            storage.size(),
+                            storage.data_ptr(),
+                            grad.data_ptr(),
+                            torch.cuda.memory_allocated(),
+                            torch.cuda.memory_reserved(),
+                        )
+                    grad.zero_()
                     if diagnostic_expected_device is not None and diagnostic_expected_device >= 0:
                         torch.cuda.synchronize(diagnostic_expected_device)
         else:
