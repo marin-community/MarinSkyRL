@@ -18,6 +18,7 @@ import random
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -368,7 +369,19 @@ def _write_ray_log_sync_manifest(destination: Path, inventory: list[dict[str, An
         for item in inventory
         if isinstance(item.get("inode"), int)
     }
-    write_json(destination / RAY_LOG_SYNC_MANIFEST, {"version": 1, "files": files})
+    _write_ray_log_sync_manifest_files(destination, files)
+
+
+def _write_ray_log_sync_manifest_files(destination: Path, files: dict[str, dict[str, int]]) -> None:
+    # A killed watcher must retain the last complete member, not a partial JSON rewrite.
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination, delete=False) as temporary:
+        temporary_path = Path(temporary.name)
+        json.dump({"version": 1, "files": files}, temporary, indent=2, sort_keys=True)
+        temporary.write("\n")
+    try:
+        temporary_path.replace(destination / RAY_LOG_SYNC_MANIFEST)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def plan_ray_log_delta(inventory: list[dict[str, Any]], destination: Path) -> list[dict[str, Any]]:
@@ -440,10 +453,18 @@ with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
 """
 
 
-def _extract_ray_log_delta(archive: tarfile.TarFile, destination: Path) -> None:
+def _extract_ray_log_delta(archive: tarfile.TarFile, destination: Path, transfers: list[dict[str, Any]]) -> None:
+    expected = {str(item["path"]): item for item in transfers}
+    synced = _read_ray_log_sync_manifest(destination)
+    seen: set[str] = set()
     for member in archive:
         if not member.isfile():
             raise RuntimeError(f"Refusing non-file Ray/vLLM archive member {member.name!r}")
+        item = expected.get(member.name)
+        if item is None:
+            raise RuntimeError(f"Unexpected Ray/vLLM archive member {member.name!r}")
+        if member.name in seen:
+            raise RuntimeError(f"Duplicate Ray/vLLM archive member {member.name!r}")
         offset_text = member.pax_headers.get("otagent.offset")
         if offset_text is None:
             raise RuntimeError(f"Ray/vLLM delta member {member.name!r} has no append offset")
@@ -465,6 +486,14 @@ def _extract_ray_log_delta(archive: tarfile.TarFile, destination: Path) -> None:
         with target.open(mode) as output:
             while chunk := source.read(1024 * 1024):
                 output.write(chunk)
+        if target.stat().st_size != int(item["size"]):
+            raise RuntimeError(f"Incomplete Ray/vLLM archive member {member.name!r}")
+        if isinstance(item.get("inode"), int):
+            synced[member.name] = {"inode": int(item["inode"]), "size": int(item["size"])}
+            _write_ray_log_sync_manifest_files(destination, synced)
+        seen.add(member.name)
+    if seen != expected.keys():
+        raise tarfile.ReadError(f"Incomplete Ray/vLLM archive: {len(seen)}/{len(expected)} members")
 
 
 def save_ray_logs(
@@ -517,12 +546,25 @@ def save_ray_logs(
         try:
             with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
                 if incremental:
-                    _extract_ray_log_delta(archive, destination)
+                    _extract_ray_log_delta(archive, destination, transfers)
                 else:
                     for member in archive:
                         archive.extract(member, destination, filter="data")
         except tarfile.TarError as error:
             archive_error = error
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        except BaseException:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise
+        finally:
+            process.stdout.close()
         stderr = process.stderr.read().decode() if process.stderr else ""
         return_code = process.wait()
         if not archive_error and return_code == 0:
@@ -531,6 +573,10 @@ def save_ray_logs(
             return selected, skipped
         if not is_transient_kubectl_exec_failure(stderr) or attempt == DNS_ATTEMPTS - 1:
             break
+        if incremental:
+            transfers = plan_ray_log_delta(selected, destination)
+            if not transfers:
+                return selected, skipped
         time.sleep(DNS_INITIAL_BACKOFF * 2**attempt)
 
     error_path = destination / "ray-vllm-sync-error.txt"
