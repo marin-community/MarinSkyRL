@@ -453,7 +453,10 @@ with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
 """
 
 
-def _extract_ray_log_delta(archive: tarfile.TarFile, destination: Path, transfers: list[dict[str, Any]]) -> None:
+def _extract_and_record_ray_log_delta(
+    archive: tarfile.TarFile, destination: Path, transfers: list[dict[str, Any]]
+) -> None:
+    """Persist each complete member before the next streamed member can fail."""
     expected = {str(item["path"]): item for item in transfers}
     synced = _read_ray_log_sync_manifest(destination)
     seen: set[str] = set()
@@ -496,6 +499,65 @@ def _extract_ray_log_delta(archive: tarfile.TarFile, destination: Path, transfer
         raise tarfile.ReadError(f"Incomplete Ray/vLLM archive: {len(seen)}/{len(expected)} members")
 
 
+def _kill_log_archive_process(process: subprocess.Popen[bytes]) -> None:
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+
+
+def _stream_ray_log_archive(
+    base: list[str],
+    pod: str,
+    container: str,
+    transfers: list[dict[str, Any]],
+    destination: Path,
+    *,
+    incremental: bool,
+    python_executable: str | None,
+) -> tuple[int, str, tarfile.TarError | None]:
+    remote_command = (
+        [
+            python_executable or resolve_container_python(base, pod, container),
+            "-c",
+            _delta_archive_script(transfers),
+        ]
+        if incremental
+        else ["tar", "-C", RAY_LOG_DIR, "-cf", "-", *(item["path"] for item in transfers)]
+    )
+    exec_args = ["exec", *(["-i"] if incremental else []), pod, "-c", container, "--", *remote_command]
+    process = subprocess.Popen(
+        [*base, "-n", NAMESPACE, *exec_args],
+        stdin=subprocess.PIPE if incremental else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if incremental:
+        assert process.stdin is not None
+        process.stdin.write(json.dumps(transfers).encode())
+        process.stdin.close()
+    assert process.stdout is not None
+    archive_error: tarfile.TarError | None = None
+    try:
+        with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
+            if incremental:
+                _extract_and_record_ray_log_delta(archive, destination, transfers)
+            else:
+                for member in archive:
+                    archive.extract(member, destination, filter="data")
+    except tarfile.TarError as error:
+        archive_error = error
+        _kill_log_archive_process(process)
+    except BaseException:
+        _kill_log_archive_process(process)
+        process.wait()
+        raise
+    finally:
+        process.stdout.close()
+    stderr = process.stderr.read().decode() if process.stderr else ""
+    return process.wait(), stderr, archive_error
+
+
 def save_ray_logs(
     base: list[str],
     pod: str,
@@ -517,56 +579,16 @@ def save_ray_logs(
         _write_ray_log_sync_manifest(destination, selected)
         return selected, skipped
 
-    archive_error: tarfile.TarError | None = None
-    stderr = ""
-    return_code = 0
     for attempt in range(DNS_ATTEMPTS):
-        remote_command = (
-            [
-                python_executable or resolve_container_python(base, pod, container),
-                "-c",
-                _delta_archive_script(transfers),
-            ]
-            if incremental
-            else ["tar", "-C", RAY_LOG_DIR, "-cf", "-", *(item["path"] for item in transfers)]
+        return_code, stderr, archive_error = _stream_ray_log_archive(
+            base,
+            pod,
+            container,
+            transfers,
+            destination,
+            incremental=incremental,
+            python_executable=python_executable,
         )
-        exec_args = ["exec", *(["-i"] if incremental else []), pod, "-c", container, "--", *remote_command]
-        process = subprocess.Popen(
-            [*base, "-n", NAMESPACE, *exec_args],
-            stdin=subprocess.PIPE if incremental else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if incremental:
-            assert process.stdin is not None
-            process.stdin.write(json.dumps(transfers).encode())
-            process.stdin.close()
-        assert process.stdout is not None
-        archive_error = None
-        try:
-            with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
-                if incremental:
-                    _extract_ray_log_delta(archive, destination, transfers)
-                else:
-                    for member in archive:
-                        archive.extract(member, destination, filter="data")
-        except tarfile.TarError as error:
-            archive_error = error
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-        except BaseException:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            process.wait()
-            raise
-        finally:
-            process.stdout.close()
-        stderr = process.stderr.read().decode() if process.stderr else ""
-        return_code = process.wait()
         if not archive_error and return_code == 0:
             if incremental:
                 _write_ray_log_sync_manifest(destination, selected)

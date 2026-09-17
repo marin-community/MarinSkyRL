@@ -274,6 +274,7 @@ class TarProcess:
         self.stdout = BytesIO(stdout)
         self.stderr = BytesIO(stderr)
         self.return_code = return_code
+        self.killed = False
 
     def wait(self) -> int:
         return self.return_code
@@ -462,6 +463,7 @@ def test_save_ray_logs_retries_only_unfinished_files_after_partial_stream(monkey
 
 def test_save_ray_logs_preserves_completed_files_after_local_append_conflict(monkeypatch, tmp_path):
     inputs: list[CapturingInput] = []
+    processes: list[TarProcess] = []
     archives = iter(
         [
             _ray_delta_archive([("a.log", 0, b"abc"), ("b.log", 0, b"xyz")]),
@@ -474,6 +476,7 @@ def test_save_ray_logs_preserves_completed_files_after_local_append_conflict(mon
         process = TarProcess(next(archives), capture_input=True)
         assert process.stdin is not None
         inputs.append(process.stdin)
+        processes.append(process)
         return process
 
     monkeypatch.setattr(coreweave_ops.subprocess, "Popen", fake_popen)
@@ -500,6 +503,7 @@ def test_save_ray_logs_preserves_completed_files_after_local_append_conflict(mon
     assert (tmp_path / "a.log").read_bytes() == b"abcdef"
     assert (tmp_path / "b.log").read_bytes() == b"xyzuvw"
     assert json.loads(inputs[2].getvalue()) == [{"path": "b.log", "size": 6, "inode": 42, "offset": 0}]
+    assert processes[1].killed
 
 
 @pytest.mark.parametrize(
