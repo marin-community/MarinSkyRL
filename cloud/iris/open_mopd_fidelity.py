@@ -18,6 +18,7 @@ from cloud.iris.runtime_bundle import LauncherSource, resolve_launcher_source
 DEFAULT_CONFIG = Path(__file__).with_name("configs") / "open_mopd_fidelity.json"
 TASK_MODULE = "cloud.iris.open_mopd_fidelity_task"
 DOMAINS = ("math", "code", "if")
+PAPER_DOMAIN_RESPONSE_LIMITS = (16384, 16384, 2048)
 GATES = {"one_step": 1, "paper_checkpoint": 200, "paper_schedule": 600}
 CHECKPOINT_DIRECTORY_NAME = "checkpoints"
 GLOBAL_STEP_PREFIX = "global_step_"
@@ -320,7 +321,10 @@ def load_config(path: Path) -> FidelityConfig:
     )
     if training.train_batch_size % training.mini_batch_size:
         raise ValueError("train_batch_size must be divisible by mini_batch_size")
-    if training.response_limit != 16384 or training.domain_response_limits != (16384, 16384, 2048):
+    if (
+        training.response_limit != max(PAPER_DOMAIN_RESPONSE_LIMITS)
+        or training.domain_response_limits != PAPER_DOMAIN_RESPONSE_LIMITS
+    ):
         raise ValueError("Open-MOPD paper response limits must be 16K for math/code and 2K for IF")
     if training.eval_every <= 0:
         raise ValueError("training.eval_every must be positive")

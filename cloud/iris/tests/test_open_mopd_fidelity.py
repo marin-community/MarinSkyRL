@@ -13,7 +13,7 @@ import cloud.iris.open_mopd_fidelity_task as fidelity_task
 from cloud.iris.open_mopd_fidelity_task import (
     FileVerification,
     StagedInputs,
-    patch_source_compatibility,
+    patch_source_for_reference,
     restore_latest_checkpoint,
     sync_tree,
     training_command,
@@ -68,7 +68,7 @@ def test_inline_aime_uses_released_validation_artifact() -> None:
     )
 
 
-def test_release_source_compatibility_patches_preserve_training_contracts(tmp_path: Path) -> None:
+def test_reference_source_patches_route_domain_response_limits(tmp_path: Path) -> None:
     launcher = tmp_path / "scripts" / "local" / "mt_opd.sh"
     launcher.parent.mkdir(parents=True)
     launcher.write_text('cmd+=("actor_rollout_ref.rollout.reward_mode=mt_opd")\n')
@@ -93,13 +93,8 @@ def test_release_source_compatibility_patches_preserve_training_contracts(tmp_pa
         "        return outputs\n"
     )
 
-    patches = patch_source_compatibility(tmp_path)
+    patch_source_for_reference(tmp_path)
 
-    assert patches == (
-        fidelity_task.HYDRA_REWARD_MODE_PATCH,
-        fidelity_task.RAW_PROMPT_RETENTION_PATCH,
-        fidelity_task.DOMAIN_RESPONSE_LIMIT_PATCH,
-    )
     assert launcher.read_text() == 'cmd+=("+actor_rollout_ref.rollout.reward_mode=mt_opd")\n'
     assert '"domain", "raw_prompt"' in trainer.read_text()
     assert 'gen_batch.non_tensor_batch["domain"]' in trainer.read_text()

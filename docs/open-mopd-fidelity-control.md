@@ -75,16 +75,15 @@ PPO clipping `0.2/0.28`, no KL penalty, one response per prompt, temperature 1, 
 truncation `p=0.99`. The domain sampler uses the published 2:2:1 math/code/IF ratio. The loss targets equal
 one-third domain shares and uses anchored forward gap-following with alpha 1. The 1,024/256 minibatch split and one
 PPO epoch produce four optimizer updates per rollout batch. Reward refresh remains enabled and begins after the first
-minibatch update.
+minibatch update. The multi-teacher prompt cap is 2,048 tokens for every domain. The 1,024-token math prompt cap in
+Table 8 belongs to the separate single-domain RouteOPD control.
 
-## Known fidelity blockers
+## Known fidelity constraints
 
-- The released launcher exposes one global prompt limit. The launcher therefore uses 2,048 tokens for every domain,
-  while Table 8 specifies 1,024 for math and 2,048 for code and IF. Changing this requires an authors-code patch and
-  would no longer be an unchanged-source control.
-- The released patched `verl` tree exposes one global response limit. The launcher therefore uses 16,384 tokens
-  for every domain, while Table 8 specifies 2,048 for IF. Changing this requires an authors-code patch and would no
-  longer be an unchanged-source control.
+- The released patched `verl` tree exposes one global response limit. New launches patch synchronous rollout to cap
+  each IF request at 2,048 tokens while retaining 16,384 for math/code; the 16,384-token padded batch shape is
+  unchanged. The source patch is recorded in `control-manifest.json`. Earlier reference jobs launched before this
+  change used 16,384 for every domain and remain distinct controls; they are not paper-exact on IF response length.
 - The release includes partially pinned installation scripts, not a complete lockfile or digest-addressed runtime
   image. A reviewed image digest is required before submission. Preserve its Dockerfile or build record alongside
   the experiment.

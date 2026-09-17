@@ -105,7 +105,7 @@ def replace_source_contract(path: Path, old: str, new: str, description: str) ->
     path.write_text(text.replace(old, new))
 
 
-def patch_source_compatibility(source: Path) -> tuple[str, ...]:
+def patch_source_for_reference(source: Path) -> tuple[str, ...]:
     """Apply fail-closed compatibility and paper-protocol fixes to the pinned source."""
     replace_source_contract(
         source / "scripts" / "local" / "mt_opd.sh",
@@ -532,13 +532,13 @@ def main(argv: list[str] | None = None) -> int:
     output.mkdir()
     resumed_from_step = restore_latest_checkpoint(args.output_uri, output) if existing_manifest is not None else None
     inputs = stage_inputs(config, args.work_root)
-    source_compatibility_patches = patch_source_compatibility(inputs.source)
+    source_patches = patch_source_for_reference(inputs.source)
     command = training_command(config, inputs, args.gate, output, world_size=world_size)
     manifest = {
         **identity,
         "command": command,
         "runtime": runtime_inventory(inputs.source),
-        "source_compatibility_patches": source_compatibility_patches,
+        "source_patches": source_patches,
         "artifact_verifications": [asdict(verification) for verification in inputs.artifact_verifications],
         "attempt": int(existing_manifest.get("attempt", 1)) + 1 if existing_manifest is not None else 1,
         "resumed_from_step": resumed_from_step,
