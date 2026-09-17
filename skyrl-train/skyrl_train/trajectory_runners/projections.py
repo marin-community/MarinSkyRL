@@ -60,7 +60,7 @@ class WholeTrajectoryProjection:
         request: TrajectoryRequestBatch,
     ) -> TrajectoryBatch:
         responses = [list(output.evidence.response_token_ids) for output in outputs]
-        rewards = [output.reward.to_trainer_reward() for output in outputs]
+        rewards = projected_rewards(outputs, responses)
         loss_masks = _loss_masks(outputs, responses, self._cfg, self._tokenizer)
         candidate_logprobs = [
             None if output.evidence.behavior_logprobs is None else list(output.evidence.behavior_logprobs)
@@ -196,6 +196,33 @@ def attach_student_topk(
         scores.append([list(row) for row in evidence.behavior_topk_logprobs])
     batch["student_topk_indices"] = indices
     batch["behavior_topk_logprobs"] = scores
+
+
+def projected_rewards(
+    outputs: Sequence[RewardedInteraction],
+    responses: Sequence[Sequence[int]],
+) -> list[float] | list[list[float]]:
+    """Keep one reward representation per batch so batch validation stays satisfiable.
+
+    Masked rows (for example agent-loop failures) may arrive as scalars even when the
+    rest of the batch carries token-level rewards. Follow the same convention as
+    ``_concatenate_rewards``: once any row is token-level, credit each scalar row on
+    its last response token.
+    """
+    rewards = [output.reward.to_trainer_reward() for output in outputs]
+    if not any(isinstance(reward, list) for reward in rewards):
+        return rewards
+    return [
+        reward if isinstance(reward, list) else _scalar_token_credit(reward, response)
+        for reward, response in zip(rewards, responses, strict=True)
+    ]
+
+
+def _scalar_token_credit(reward: float, response: Sequence[int]) -> list[float]:
+    token_rewards = [0.0] * len(response)
+    if token_rewards:
+        token_rewards[-1] = float(reward)
+    return token_rewards
 
 
 def _logprobs_requested(request: TrajectoryRequestBatch, runner_cfg: DictConfig) -> bool:

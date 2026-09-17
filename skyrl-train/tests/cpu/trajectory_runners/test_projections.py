@@ -4,6 +4,7 @@ from omegaconf import OmegaConf
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
+from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TrajectoryID
 
 
@@ -57,6 +58,30 @@ def test_whole_trajectory_projection_preserves_one_sample_per_trajectory():
     assert output["actual_global_step"] == 7
     assert output["rollout_metrics"]["generate/token_provenance/reconstructed_fraction"] == 0.0
     assert "trajectory_ids" not in output
+
+
+def test_whole_trajectory_projection_adapts_masked_scalar_row_to_token_level_rewards():
+    failed = _step([0], 0.0)
+    failed = replace(
+        failed,
+        verification=VerificationResult.error(
+            "SkyRL-Gym agent loop failed", diagnostics={"exception_type": "ConnectionError"}
+        ),
+        disposition=TrainingDisposition.mask("SkyRL-Gym agent loop failed", exception_type="ConnectionError"),
+    )
+    failed.error_treatment = "mask"
+
+    projection = WholeTrajectoryProjection(_config(), _Tokenizer())
+    output = projection.project(
+        [_step([3, 4], [0.0, 1.0]), failed],
+        {"env_classes": None, "sampling_params": {"logprobs": True}},
+    )
+
+    assert output["rewards"] == [[0.0, 1.0], [0.0]]
+    assert output["loss_masks"] == [[1, 1], [0]]
+    assert output["exception_types"] == [None, "ConnectionError"]
+    assert output["error_treatments"] == [None, "mask"]
+    validate_trajectory_batch(2, output)
 
 
 def test_step_wise_projection_preserves_group_identity_and_final_step():
