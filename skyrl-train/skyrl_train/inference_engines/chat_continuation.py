@@ -32,7 +32,11 @@ async def render_exact_chat_continuation(
     assistant_message_index: int,
     served_prefix_token_ids: list[int],
 ) -> list[int] | None:
-    """Append the renderer's structural boundary without re-tokenizing sampled content."""
+    """Append the renderer's boundary without re-tokenizing sampled content.
+
+    Return None when the renderer does not preserve the structural prefix needed
+    to splice the sampled tokens safely.
+    """
     body = request_payload["json"]
     messages = body["messages"]
     if not 0 <= assistant_message_index < len(messages):

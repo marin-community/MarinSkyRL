@@ -7,7 +7,7 @@ from typing import Any, Protocol
 import aiohttp
 from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
+from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInput, InferenceEngineOutput
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY, render_exact_chat_continuation
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
@@ -36,6 +36,26 @@ class _ChatResult:
     text: str
     stop_reason: str
     assistant_message: dict[str, Any]
+
+
+def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
+    logprobs = [result.response_logprobs for result in results]
+    selected_indices = [result.student_topk_indices for result in results]
+    selected_scores = [result.behavior_topk_logprobs for result in results]
+    output = ModelClientOutput(
+        prompt_ids=[result.prompt_ids for result in results],
+        response_ids=[result.response_ids for result in results],
+        response_logprobs=logprobs if all(value is not None for value in logprobs) else None,
+        responses=[result.text for result in results],
+        stop_reasons=[result.stop_reason for result in results],
+        prompt_logprobs=None,
+        assistant_messages=[result.assistant_message for result in results],
+        token_provenance=TokenProvenance.ENGINE,
+    )
+    if all(rows is not None for rows in selected_indices):
+        output["student_topk_indices"] = selected_indices
+        output["behavior_topk_logprobs"] = selected_scores
+    return output
 
 
 class DirectModelClient:
@@ -179,23 +199,7 @@ class DirectModelClient:
                 for messages, row_options, session_id, continuation in zip(prompts, options, session_ids, continuations)
             )
         )
-        logprobs = [result.response_logprobs for result in results]
-        selected_indices = [result.student_topk_indices for result in results]
-        selected_scores = [result.behavior_topk_logprobs for result in results]
-        output = ModelClientOutput(
-            prompt_ids=[result.prompt_ids for result in results],
-            response_ids=[result.response_ids for result in results],
-            response_logprobs=logprobs if all(value is not None for value in logprobs) else None,
-            responses=[result.text for result in results],
-            stop_reasons=[result.stop_reason for result in results],
-            prompt_logprobs=None,
-            assistant_messages=[result.assistant_message for result in results],
-            token_provenance=TokenProvenance.ENGINE,
-        )
-        if all(rows is not None for rows in selected_indices):
-            output["student_topk_indices"] = selected_indices
-            output["behavior_topk_logprobs"] = selected_scores
-        return output
+        return _assemble_chat_results(results)
 
 
 class OpenAIHTTPModelClient:
@@ -240,23 +244,7 @@ class OpenAIHTTPModelClient:
                         )
                     )
                 )
-                logprobs = [result.response_logprobs for result in results]
-                selected_indices = [result.student_topk_indices for result in results]
-                selected_scores = [result.behavior_topk_logprobs for result in results]
-                output = ModelClientOutput(
-                    prompt_ids=[result.prompt_ids for result in results],
-                    response_ids=[result.response_ids for result in results],
-                    response_logprobs=logprobs if all(value is not None for value in logprobs) else None,
-                    responses=[result.text for result in results],
-                    stop_reasons=[result.stop_reason for result in results],
-                    prompt_logprobs=None,
-                    assistant_messages=[result.assistant_message for result in results],
-                    token_provenance=TokenProvenance.ENGINE,
-                )
-                if all(rows is not None for rows in selected_indices):
-                    output["student_topk_indices"] = selected_indices
-                    output["behavior_topk_logprobs"] = selected_scores
-                return output
+                return _assemble_chat_results(results)
             responses = await asyncio.gather(
                 *(
                     self._generate_one(
@@ -287,7 +275,7 @@ class OpenAIHTTPModelClient:
         session_id: Any,
         sampling_params: dict[str, Any],
         chat_options: dict[str, Any],
-        continuation: dict[str, Any] | None,
+        continuation: ChatContinuation | None,
     ) -> _ChatResult:
         options = DirectModelClient._chat_options(chat_options, sampling_params)
         tokenize_options = {key: options[key] for key in ("tools", "tool_choice") if key in options}
