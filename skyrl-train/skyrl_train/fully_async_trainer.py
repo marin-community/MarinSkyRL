@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
-from typing import List, Tuple, TypeVar
+from typing import List, Literal, Tuple, TypeVar
 from enum import Enum, auto
 from omegaconf import OmegaConf
 from skyrl_train.telemetry import (
@@ -736,11 +736,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # sync weights to inference engines
         with Timer("sync_weights_to_inference_engines", self.all_startup_timings) as weight_update_timer:
-            await self.async_sync_policy_weights_to_inference_engines()
-            # Drain the policy workers' event loops to a hard sync point so every FSDP
-            # shard rank is free before the step-1 forward is dispatched (the MoE-RL
-            # async-dispatch wedge fix). See _drain_policy_event_loops.
-            await self._drain_policy_event_loops()
+            await self._sync_policy_weights_and_offload_optimizer(sync_phase="initial")
         self._log_weight_update_completed(
             reason="initial",
             duration_seconds=weight_update_timer.duration,
@@ -923,14 +919,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     #    fully_async, which never drains trial orchestration. This
                     #    block is now byte-identical for fan-out ON and OFF.
                     with Timer("sync_weights", self.all_timings) as weight_update_timer:
-                        await self.inference_engine_client.pause_generation()
-                        await self.async_sync_policy_weights_to_inference_engines()
-                        # Drain the policy workers' event loops to a hard sync point so
-                        # every FSDP shard rank is free before the NEXT step's forward is
-                        # dispatched (the MoE-RL async-dispatch wedge fix). See
-                        # _drain_policy_event_loops.
-                        await self._drain_policy_event_loops()
-                        await self.inference_engine_client.resume_generation()
+                        await self._sync_policy_weights_and_offload_optimizer(sync_phase="training_step")
                     self._log_weight_update_completed(
                         reason="training_step",
                         duration_seconds=weight_update_timer.duration,
@@ -1059,28 +1048,45 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
         logger.info("Training done!")
 
+    async def _sync_policy_weights_and_offload_optimizer(
+        self, *, sync_phase: Literal["initial", "training_step"]
+    ) -> None:
+        if sync_phase == "training_step":
+            await self.inference_engine_client.pause_generation()
+        # The shared training path backloads optimizer state before every step when
+        # offload_optimizer_during_rollouts is enabled. Offload after each update,
+        # including the initial sync, so Megatron gradient buffers are not resized
+        # while still resident on the GPU.
+        timings = self.all_timings if sync_phase == "training_step" else self.all_startup_timings
+        await asyncio.to_thread(self._offload_policy_optimizer, timings, timer_label="offload_policy_optimizer_to_cpu")
+        await self.async_sync_policy_weights_to_inference_engines()
+        # A hard sync point leaves every policy rank free before the next forward.
+        await self._drain_policy_event_loops()
+        if sync_phase == "training_step":
+            await self.inference_engine_client.resume_generation()
+
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
         # Drain the policy workers' event loops to a hard sync point IMMEDIATELY
         # before dispatching this step's forward (the MoE-RL async-dispatch wedge
         # fix, step-1 completion 2026-06-29). The existing post-weight-sync drains
-        # (_train_loop L603 after the INITIAL sync, L739 after each per-step sync)
-        # leave a hazard at STEP 1 specifically: the L603 drain fires at job start,
+        # (after the initial and per-step weight syncs) leave a hazard at STEP 1:
+        # the initial drain fires at job start,
         # then `wait_for_generation_buffer` blocks for HOURS (the fully-async rollout
         # fill — 8813s / 2.45h on rl-131k-30b-drainfix) before this first forward is
-        # dispatched. By then the L603 barrier is stale: the policy async actors'
+        # dispatched. By then the initial barrier is stale: the policy async actors'
         # single event-loop thread has serviced other dispatched coroutines in the
         # interim, so when the SYNC `forward.remote()` finally arrives only rank 0's
         # loop is free and runs it (into a lonely mesh_fsdp param-unshard all-gather
         # — FR-proven: ONLY rank 0 logged WORKER_FORWARD_ENTER at step 1, ranks
         # 8/16/24 never scheduled their `forward` task → the embed-unshard
         # `_all_gather_base` on mesh_fsdp deadlocks, NCCL watchdog aborts at 1800s,
-        # global_step never reaches 1). The L739 drain already makes this barrier
+        # global_step never reaches 1). The per-step sync drain makes this barrier
         # ADJACENT to the forward for steps 2+, which is why only step 1 wedged;
         # doing it here makes the drain adjacent for EVERY step (step 1 included)
         # regardless of how stale the preceding post-weight-sync drain is. Symmetric
         # on every rank, changes no tensor values (correctness-neutral), strict no-op
-        # for single-rank / uninitialized runs. Idempotent with the L739 drain (a
+        # for single-rank / uninitialized runs. Idempotent with the sync drain (a
         # second pass-through barrier on an already-free loop is a cheap no-op).
         await self._drain_policy_event_loops()
         # inference and calculate values, log probs, rewards, kl divergence
