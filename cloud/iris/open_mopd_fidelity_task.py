@@ -130,6 +130,12 @@ def patch_source_for_reference(source: Path) -> tuple[str, ...]:
         "synchronous rollout domain metadata",
     )
     replace_source_contract(
+        source / "training" / "verl" / "verl" / "workers" / "config" / "rollout.py",
+        "    response_length: int = 512\n",
+        "    response_length: int = 512\n    domain_response_limits: dict[str, int] = field(default_factory=dict)\n",
+        "typed rollout per-domain response limits",
+    )
+    replace_source_contract(
         source / "training" / "verl" / "verl" / "workers" / "rollout" / "vllm_rollout" / "vllm_rollout_spmd.py",
         "        with self.update_sampling_params(**kwargs):\n            outputs = self.inference_engine.generate(",
         "        with self.update_sampling_params(**kwargs):\n"

@@ -92,12 +92,21 @@ def test_reference_source_patches_route_domain_response_limits(tmp_path: Path) -
         "            )\n"
         "        return outputs\n"
     )
+    rollout_config = tmp_path / "training" / "verl" / "verl" / "workers" / "config" / "rollout.py"
+    rollout_config.parent.mkdir(parents=True)
+    rollout_config.write_text(
+        "from dataclasses import dataclass, field\n@dataclass\nclass RolloutConfig:\n    response_length: int = 512\n"
+    )
 
     patch_source_for_reference(tmp_path)
 
     assert launcher.read_text() == 'cmd+=("+actor_rollout_ref.rollout.reward_mode=mt_opd")\n'
     assert '"domain", "raw_prompt"' in trainer.read_text()
     assert 'gen_batch.non_tensor_batch["domain"]' in trainer.read_text()
+    config_namespace: dict[str, object] = {}
+    exec(compile(rollout_config.read_text(), str(rollout_config), "exec"), config_namespace)
+    typed_config = config_namespace["RolloutConfig"](domain_response_limits={"math": 16384, "code": 16384, "if": 2048})
+    assert typed_config.domain_response_limits["if"] == 2048
 
     class FakeSamplingParams:
         def __init__(self, max_tokens: int):
