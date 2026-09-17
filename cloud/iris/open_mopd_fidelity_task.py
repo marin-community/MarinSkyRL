@@ -19,6 +19,7 @@ from cloud.iris.open_mopd_fidelity import (
     DOMAINS,
     GATES,
     GLOBAL_STEP_PREFIX,
+    DatasetArtifact,
     FidelityConfig,
     LfsFile,
     gpu_count,
@@ -59,6 +60,7 @@ class StagedInputs:
     student: Path
     teachers: tuple[Path, ...]
     dataset: Path
+    validation_dataset: Path
     artifact_verifications: tuple[ArtifactVerification, ...] = ()
 
 
@@ -169,8 +171,7 @@ def snapshot_model(
     return destination, ArtifactVerification(repository=repository, revision=revision, files=files)
 
 
-def _dataset(config: FidelityConfig, destination: Path) -> tuple[Path, ArtifactVerification]:
-    artifact = config.dataset
+def _dataset(artifact: DatasetArtifact, destination: Path) -> tuple[Path, ArtifactVerification]:
     code = (
         "from huggingface_hub import hf_hub_download; import sys; "
         "print(hf_hub_download(sys.argv[1], sys.argv[3], repo_type='dataset', revision=sys.argv[2], "
@@ -226,16 +227,19 @@ def stage_inputs(config: FidelityConfig, root: Path) -> StagedInputs:
         )
         for teacher in config.teachers
     )
-    dataset, dataset_verification = _dataset(config, root / "data")
+    dataset, dataset_verification = _dataset(config.dataset, root / "data")
+    validation_dataset, validation_verification = _dataset(config.validation_dataset, root / "validation")
     return StagedInputs(
         source=source,
         student=student,
         teachers=tuple(snapshot for snapshot, _ in teacher_snapshots),
         dataset=dataset,
+        validation_dataset=validation_dataset,
         artifact_verifications=(
             student_verification,
             *(verification for _, verification in teacher_snapshots),
             dataset_verification,
+            validation_verification,
         ),
     )
 
@@ -291,8 +295,13 @@ def training_command(
         "+mt_opd.conflict_policy=none",
         f"trainer.total_training_steps={steps}",
         f"trainer.save_freq={min(training.save_every, steps)}",
-        "trainer.test_freq=-1",
+        f"trainer.test_freq={min(training.eval_every, steps)}",
         "trainer.val_before_train=False",
+        f"trainer.validation_data_dir={output / 'validation'}",
+        f"actor_rollout_ref.rollout.val_kwargs.temperature={training.eval_temperature}",
+        f"actor_rollout_ref.rollout.val_kwargs.top_p={training.eval_nucleus_p}",
+        "actor_rollout_ref.rollout.val_kwargs.do_sample=True",
+        f"actor_rollout_ref.rollout.val_kwargs.n={training.eval_samples}",
         "trainer.logger=['console']",
         "trainer.resume_mode=auto",
     ]
@@ -313,7 +322,7 @@ def training_command(
         "--train",
         str(inputs.dataset),
         "--val",
-        str(inputs.dataset),
+        str(inputs.validation_dataset),
         "--output",
         str(output),
         "--checkpoint",
