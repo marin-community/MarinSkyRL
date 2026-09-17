@@ -18,6 +18,7 @@ import random
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -368,7 +369,19 @@ def _write_ray_log_sync_manifest(destination: Path, inventory: list[dict[str, An
         for item in inventory
         if isinstance(item.get("inode"), int)
     }
-    write_json(destination / RAY_LOG_SYNC_MANIFEST, {"version": 1, "files": files})
+    _write_ray_log_sync_manifest_files(destination, files)
+
+
+def _write_ray_log_sync_manifest_files(destination: Path, files: dict[str, dict[str, int]]) -> None:
+    # A killed watcher must retain the last complete member, not a partial JSON rewrite.
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination, delete=False) as temporary:
+        temporary_path = Path(temporary.name)
+        json.dump({"version": 1, "files": files}, temporary, indent=2, sort_keys=True)
+        temporary.write("\n")
+    try:
+        temporary_path.replace(destination / RAY_LOG_SYNC_MANIFEST)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def plan_ray_log_delta(inventory: list[dict[str, Any]], destination: Path) -> list[dict[str, Any]]:
@@ -440,10 +453,21 @@ with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
 """
 
 
-def _extract_ray_log_delta(archive: tarfile.TarFile, destination: Path) -> None:
+def _extract_and_record_ray_log_delta(
+    archive: tarfile.TarFile, destination: Path, transfers: list[dict[str, Any]]
+) -> None:
+    """Persist each complete member before the next streamed member can fail."""
+    expected = {str(item["path"]): item for item in transfers}
+    synced = _read_ray_log_sync_manifest(destination)
+    seen: set[str] = set()
     for member in archive:
         if not member.isfile():
             raise RuntimeError(f"Refusing non-file Ray/vLLM archive member {member.name!r}")
+        item = expected.get(member.name)
+        if item is None:
+            raise RuntimeError(f"Unexpected Ray/vLLM archive member {member.name!r}")
+        if member.name in seen:
+            raise RuntimeError(f"Duplicate Ray/vLLM archive member {member.name!r}")
         offset_text = member.pax_headers.get("otagent.offset")
         if offset_text is None:
             raise RuntimeError(f"Ray/vLLM delta member {member.name!r} has no append offset")
@@ -465,6 +489,73 @@ def _extract_ray_log_delta(archive: tarfile.TarFile, destination: Path) -> None:
         with target.open(mode) as output:
             while chunk := source.read(1024 * 1024):
                 output.write(chunk)
+        if target.stat().st_size != int(item["size"]):
+            raise RuntimeError(f"Incomplete Ray/vLLM archive member {member.name!r}")
+        if isinstance(item.get("inode"), int):
+            synced[member.name] = {"inode": int(item["inode"]), "size": int(item["size"])}
+            _write_ray_log_sync_manifest_files(destination, synced)
+        seen.add(member.name)
+    if seen != expected.keys():
+        raise tarfile.ReadError(f"Incomplete Ray/vLLM archive: {len(seen)}/{len(expected)} members")
+
+
+def _kill_log_archive_process(process: subprocess.Popen[bytes]) -> None:
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+
+
+def _stream_ray_log_archive(
+    base: list[str],
+    pod: str,
+    container: str,
+    transfers: list[dict[str, Any]],
+    destination: Path,
+    *,
+    incremental: bool,
+    python_executable: str | None,
+) -> tuple[int, str, tarfile.TarError | None]:
+    remote_command = (
+        [
+            python_executable or resolve_container_python(base, pod, container),
+            "-c",
+            _delta_archive_script(transfers),
+        ]
+        if incremental
+        else ["tar", "-C", RAY_LOG_DIR, "-cf", "-", *(item["path"] for item in transfers)]
+    )
+    exec_args = ["exec", *(["-i"] if incremental else []), pod, "-c", container, "--", *remote_command]
+    process = subprocess.Popen(
+        [*base, "-n", NAMESPACE, *exec_args],
+        stdin=subprocess.PIPE if incremental else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if incremental:
+        assert process.stdin is not None
+        process.stdin.write(json.dumps(transfers).encode())
+        process.stdin.close()
+    assert process.stdout is not None
+    archive_error: tarfile.TarError | None = None
+    try:
+        with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
+            if incremental:
+                _extract_and_record_ray_log_delta(archive, destination, transfers)
+            else:
+                for member in archive:
+                    archive.extract(member, destination, filter="data")
+    except tarfile.TarError as error:
+        archive_error = error
+        _kill_log_archive_process(process)
+    except BaseException:
+        _kill_log_archive_process(process)
+        process.wait()
+        raise
+    finally:
+        process.stdout.close()
+    stderr = process.stderr.read().decode() if process.stderr else ""
+    return process.wait(), stderr, archive_error
 
 
 def save_ray_logs(
@@ -488,49 +579,26 @@ def save_ray_logs(
         _write_ray_log_sync_manifest(destination, selected)
         return selected, skipped
 
-    archive_error: tarfile.TarError | None = None
-    stderr = ""
-    return_code = 0
     for attempt in range(DNS_ATTEMPTS):
-        remote_command = (
-            [
-                python_executable or resolve_container_python(base, pod, container),
-                "-c",
-                _delta_archive_script(transfers),
-            ]
-            if incremental
-            else ["tar", "-C", RAY_LOG_DIR, "-cf", "-", *(item["path"] for item in transfers)]
+        return_code, stderr, archive_error = _stream_ray_log_archive(
+            base,
+            pod,
+            container,
+            transfers,
+            destination,
+            incremental=incremental,
+            python_executable=python_executable,
         )
-        exec_args = ["exec", *(["-i"] if incremental else []), pod, "-c", container, "--", *remote_command]
-        process = subprocess.Popen(
-            [*base, "-n", NAMESPACE, *exec_args],
-            stdin=subprocess.PIPE if incremental else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if incremental:
-            assert process.stdin is not None
-            process.stdin.write(json.dumps(transfers).encode())
-            process.stdin.close()
-        assert process.stdout is not None
-        archive_error = None
-        try:
-            with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
-                if incremental:
-                    _extract_ray_log_delta(archive, destination)
-                else:
-                    for member in archive:
-                        archive.extract(member, destination, filter="data")
-        except tarfile.TarError as error:
-            archive_error = error
-        stderr = process.stderr.read().decode() if process.stderr else ""
-        return_code = process.wait()
         if not archive_error and return_code == 0:
             if incremental:
                 _write_ray_log_sync_manifest(destination, selected)
             return selected, skipped
         if not is_transient_kubectl_exec_failure(stderr) or attempt == DNS_ATTEMPTS - 1:
             break
+        if incremental:
+            transfers = plan_ray_log_delta(selected, destination)
+            if not transfers:
+                return selected, skipped
         time.sleep(DNS_INITIAL_BACKOFF * 2**attempt)
 
     error_path = destination / "ray-vllm-sync-error.txt"

@@ -274,9 +274,13 @@ class TarProcess:
         self.stdout = BytesIO(stdout)
         self.stderr = BytesIO(stderr)
         self.return_code = return_code
+        self.killed = False
 
     def wait(self) -> int:
         return self.return_code
+
+    def kill(self) -> None:
+        self.killed = True
 
 
 def test_save_ray_logs_reports_empty_tar_stream_as_sync_error(monkeypatch, tmp_path):
@@ -413,6 +417,93 @@ def test_save_ray_logs_incrementally_appends_and_replaces_rotated_logs(monkeypat
     )
     assert (tmp_path / "worker-1.out").read_bytes() == b"xy"
     assert b'"offset": 0' in inputs[2].getvalue()
+
+
+def test_save_ray_logs_retries_only_unfinished_files_after_partial_stream(monkeypatch, tmp_path):
+    inputs: list[CapturingInput] = []
+    archives = iter(
+        [
+            TarProcess(_ray_delta_archive([("a.log", 0, b"abc"), ("b.log", 0, b"xyz")]), capture_input=True),
+            TarProcess(
+                _ray_delta_archive([("a.log", 3, b"def")]),
+                b"stream error",
+                1,
+                capture_input=True,
+            ),
+            TarProcess(_ray_delta_archive([("b.log", 3, b"uvw")]), capture_input=True),
+        ]
+    )
+
+    def fake_popen(_command, **_kwargs):
+        process = next(archives)
+        assert process.stdin is not None
+        inputs.append(process.stdin)
+        return process
+
+    monkeypatch.setattr(coreweave_ops.subprocess, "Popen", fake_popen)
+    initial = [
+        {"path": "a.log", "size": 3, "inode": 41},
+        {"path": "b.log", "size": 3, "inode": 42},
+    ]
+    grown = [
+        {"path": "a.log", "size": 6, "inode": 41},
+        {"path": "b.log", "size": 6, "inode": 42},
+    ]
+    coreweave_ops.save_ray_logs(
+        ["kubectl"], "pod", "task", initial, 100, tmp_path, incremental=True, python_executable="python"
+    )
+    coreweave_ops.save_ray_logs(
+        ["kubectl"], "pod", "task", grown, 100, tmp_path, incremental=True, python_executable="python"
+    )
+
+    assert (tmp_path / "a.log").read_bytes() == b"abcdef"
+    assert (tmp_path / "b.log").read_bytes() == b"xyzuvw"
+    assert json.loads(inputs[2].getvalue()) == [{"path": "b.log", "size": 6, "inode": 42, "offset": 3}]
+
+
+def test_save_ray_logs_preserves_completed_files_after_local_append_conflict(monkeypatch, tmp_path):
+    inputs: list[CapturingInput] = []
+    processes: list[TarProcess] = []
+    archives = iter(
+        [
+            _ray_delta_archive([("a.log", 0, b"abc"), ("b.log", 0, b"xyz")]),
+            _ray_delta_archive([("a.log", 3, b"def"), ("b.log", 3, b"uvw")]),
+            _ray_delta_archive([("b.log", 0, b"xyzuvw")]),
+        ]
+    )
+
+    def fake_popen(_command, **_kwargs):
+        process = TarProcess(next(archives), capture_input=True)
+        assert process.stdin is not None
+        inputs.append(process.stdin)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(coreweave_ops.subprocess, "Popen", fake_popen)
+    initial = [
+        {"path": "a.log", "size": 3, "inode": 41},
+        {"path": "b.log", "size": 3, "inode": 42},
+    ]
+    grown = [
+        {"path": "a.log", "size": 6, "inode": 41},
+        {"path": "b.log", "size": 6, "inode": 42},
+    ]
+    coreweave_ops.save_ray_logs(
+        ["kubectl"], "pod", "task", initial, 100, tmp_path, incremental=True, python_executable="python"
+    )
+    (tmp_path / "b.log").write_bytes(b"local edit")
+    with pytest.raises(RuntimeError, match="Local Ray/vLLM log changed before append"):
+        coreweave_ops.save_ray_logs(
+            ["kubectl"], "pod", "task", grown, 100, tmp_path, incremental=True, python_executable="python"
+        )
+    coreweave_ops.save_ray_logs(
+        ["kubectl"], "pod", "task", grown, 100, tmp_path, incremental=True, python_executable="python"
+    )
+
+    assert (tmp_path / "a.log").read_bytes() == b"abcdef"
+    assert (tmp_path / "b.log").read_bytes() == b"xyzuvw"
+    assert json.loads(inputs[2].getvalue()) == [{"path": "b.log", "size": 6, "inode": 42, "offset": 0}]
+    assert processes[1].killed
 
 
 @pytest.mark.parametrize(
