@@ -66,7 +66,7 @@ def test_full_schedule_preserves_released_objective_and_every_checkpoint():
     assert config.trainer.resume_mode is None
 
 
-def test_colocated_continuation_gate_stops_after_one_update():
+def test_colocated_continuation_sets_step_ceiling_and_checkpoint_cadence():
     arguments = MODULE.hydra_arguments(
         Path("/data/schedule.parquet"),
         Path("/data/aime24.parquet"),
