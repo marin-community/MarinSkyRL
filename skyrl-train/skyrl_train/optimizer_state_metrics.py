@@ -233,7 +233,7 @@ class OptimizerStateObserver:
             "worker_role": "policy",
             "rank": str(self.rank),
             "step": str(step),
-            "step_kind": "target_update",
+            "step_kind": "global_step",
             "boundary": "after_optimizer_step_before_zero_grad",
             "inventory_version": "1",
         }
@@ -254,7 +254,7 @@ class OptimizerStateObserver:
                 "storage_row_count": len(inventory.rows),
                 "allocated_bytes": memory["allocated_bytes.all.current"],
                 "reserved_bytes": memory["reserved_bytes.all.current"],
-                "optimizer_minibatch_in_target_update": minibatch,
+                "minibatch_index": minibatch,
                 "skipped_update_attempts_before_inventory": self.skipped_update_attempts,
                 "host_collection_seconds": time.perf_counter() - started,
             }

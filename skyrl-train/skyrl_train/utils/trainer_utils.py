@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from copy import deepcopy
 from typing import List, Dict, Any, Union, Callable, Optional, TypedDict
 from dataclasses import dataclass
@@ -22,7 +23,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_metrics_from_trajectory_batch,
 )
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
-from skyrl_train.rollout_observability import consumed_stop_metrics
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     DEFAULT_ACCEPTED_STOP_REASONS,
     REWARD_SHAPING_ROW_KEYS,
@@ -176,6 +176,75 @@ def sanitize_data_source(data_source: str) -> str:
     if data_source is None:
         return "unknown"
     return data_source.replace("/", "_")
+
+
+def consumed_stop_metrics(stop_reasons: Sequence[str | None] | None, sequence_count: int) -> dict[str, float]:
+    """Count length stops on admitted sequences, before padding or worker sharding.
+
+    A length stop can come from engine or runner budget exhaustion; it does not
+    establish answer incompleteness. Omit the fraction without complete coverage.
+    """
+    if sequence_count < 0 or (stop_reasons is not None and len(stop_reasons) != sequence_count):
+        raise ValueError("Stop reasons must align with the admitted response sequences")
+    reasons = [None] * sequence_count if stop_reasons is None else stop_reasons
+    known = sum(reason is not None and reason != "" for reason in reasons)
+    length_stops = sum(reason == "length" for reason in reasons)
+    metrics = {
+        "sequences": float(sequence_count),
+        "length_stop_count": float(length_stops),
+        "known_stop_count": float(known),
+        "unknown_stop_count": float(sequence_count - known),
+    }
+    if sequence_count:
+        metrics["stop_reason_coverage"] = known / sequence_count
+        if known == sequence_count:
+            metrics["length_stop_fraction"] = length_stops / sequence_count
+    return {f"consumed/{name}": value for name, value in metrics.items()}
+
+
+def async_step_metrics(
+    *,
+    core_seconds: float,
+    cycle_seconds: float,
+    buffer_wait_seconds: float,
+    training_seconds: float,
+    sync_seconds: float,
+    consumed_loss_tokens: int,
+    consumed_response_tokens: int,
+    policy_gpus: int,
+    inference_gpus: int,
+) -> dict[str, float]:
+    """Summarize driver walls and useful work; GPU denominators are configured roles.
+
+    Core excludes callbacks, checkpoint and evaluation. Cycle includes them up to
+    metric publication; neither includes startup, inter-epoch cleanup or final
+    export. These rates are not whole-job billed efficiency or GPU utilization.
+    """
+    metrics = {
+        "core_seconds": core_seconds,
+        "cycle_seconds": cycle_seconds,
+        "outside_core_seconds": cycle_seconds - core_seconds,
+        "configured_policy_gpus": float(policy_gpus),
+        "configured_inference_gpus": float(inference_gpus),
+        "consumed_loss_tokens": float(consumed_loss_tokens),
+        "consumed_response_tokens": float(consumed_response_tokens),
+    }
+    if core_seconds > 0:
+        metrics.update(
+            buffer_wait_fraction=buffer_wait_seconds / core_seconds,
+            training_fraction=training_seconds / core_seconds,
+            weight_sync_fraction=sync_seconds / core_seconds,
+            consumed_loss_tokens_per_core_second=consumed_loss_tokens / core_seconds,
+        )
+    if cycle_seconds > 0:
+        metrics["consumed_loss_tokens_per_cycle_second"] = consumed_loss_tokens / cycle_seconds
+        if policy_gpus > 0:
+            metrics["loss_tokens_per_configured_policy_gpu_second"] = consumed_loss_tokens / cycle_seconds / policy_gpus
+        if inference_gpus > 0:
+            metrics["response_tokens_per_configured_inference_gpu_second"] = (
+                consumed_response_tokens / cycle_seconds / inference_gpus
+            )
+    return {f"async/performance/{name}": value for name, value in metrics.items()}
 
 
 def evaluation_response_metrics(trajectory_batch: TrajectoryBatch) -> Dict[str, float]:

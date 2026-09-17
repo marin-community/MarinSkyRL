@@ -94,6 +94,7 @@ from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, runai_model_uri
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import (
+    consumed_stop_metrics,
     cleanup_old_checkpoints,
     run_on_each_node,
     get_node_ids,
@@ -122,6 +123,7 @@ from skyrl_train.callbacks import (
 )
 from skyrl_train.telemetry import (
     TRAINER_ROLE,
+    ConsumedWork,
     critical_phase,
     record_consumed_work,
     record_event,
@@ -129,10 +131,9 @@ from skyrl_train.telemetry import (
     record_policy_step,
     record_training_metrics,
 )
-from skyrl_train.rollout_observability import consumed_stop_metrics, observe_rollout_call
+from skyrl_train.rollout_observability import observe_rollout_call
 from skyrl_train.utils.importance_ratio_diagnostics import (
     ratio_diagnostics_settings,
-    behavior_drift_metrics,
     mismatch_ratio_metrics,
 )
 from skyrl_train.timing_observability import publish_startup_timings, publish_step_timings
@@ -192,6 +193,16 @@ def _validated_distillation_tensors(
         response_mask=response_mask.to(torch.bool),
     )
     return distillation.training_tensors()
+
+
+def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
+    """Count the rows and tokens an optimizer step consumed, excluding data-parallel padding."""
+    real_rows = training_input.batch_size - training_input.metadata.get("pad_size", 0)
+    return ConsumedWork(
+        sequences=real_rows,
+        response_tokens=int(training_input["response_mask"][:real_rows].sum().item()),
+        loss_tokens=int(training_input["loss_mask"][:real_rows].sum().item()),
+    )
 
 
 class RayPPOTrainer:
@@ -993,8 +1004,8 @@ class RayPPOTrainer:
     def _log_weight_update_completed(self, *, reason: str, duration_seconds: float) -> None:
         if self._training_metrics_enabled:
             record_event(
-                "policy_weights_published",
-                {"completed_update": self.global_step, "finished": time.perf_counter(), "duration": duration_seconds},
+                "weight_sync_completed",
+                {"model_version_step": self.global_step, "duration_seconds": duration_seconds},
                 attributes={"role": TRAINER_ROLE, "step": str(self.global_step), "reason": reason},
             )
         logger.info(
@@ -1013,13 +1024,7 @@ class RayPPOTrainer:
     ) -> None:
         if self._training_metrics_enabled:
             self.all_metrics.update(training_input.metadata.get("consumed_stop_metrics", {}))
-            real_rows = training_input.batch_size - training_input.metadata.get("pad_size", 0)
-            record_consumed_work(
-                sequences=real_rows,
-                response_tokens=int(training_input["response_mask"][:real_rows].sum().item()),
-                loss_tokens=int(training_input["loss_mask"][:real_rows].sum().item()),
-                step=self.global_step,
-            )
+            record_consumed_work(consumed_work(training_input), step=self.global_step)
         logger.info(
             "Optimizer step completed: step={} epoch={} sequences={} duration_seconds={:.3f}",
             self.global_step,
@@ -1672,16 +1677,17 @@ class RayPPOTrainer:
         trajectory_batch: TrajectoryBatch,
         uids: List[str],
         *,
-        rollout_age: List[int] | None = None,
+        rollout_staleness: List[int] | None = None,
     ) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
         assert_training_groups_eligible(trajectory_batch, uids, self.group_advantage_invariant)
         prompt_ids: List[List[int]] = trajectory_batch["prompt_token_ids"]
         response_ids: List[List[int]] = trajectory_batch["response_ids"]
-        if rollout_age is not None and (
-            len(rollout_age) != len(response_ids) or any(type(age) is not int or age < 0 for age in rollout_age)
+        if rollout_staleness is not None and (
+            len(rollout_staleness) != len(response_ids)
+            or any(type(step) is not int or step < 0 for step in rollout_staleness)
         ):
-            raise ValueError("rollout_age must contain one nonnegative integer per response row")
+            raise ValueError("rollout_staleness must contain one nonnegative integer per response row")
         rewards: List[List[float]] = trajectory_batch["rewards"]
         loss_masks: List[List[int]] = trajectory_batch["loss_masks"]
 
@@ -1780,8 +1786,9 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
-                "rollout_age": torch.tensor(
-                    rollout_age if rollout_age is not None else [0] * len(response_ids), dtype=torch.int32
+                "rollout_staleness": torch.tensor(
+                    rollout_staleness if rollout_staleness is not None else [0] * len(response_ids),
+                    dtype=torch.int32,
                 ),
                 "is_last_step": (
                     torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
@@ -1822,17 +1829,19 @@ class RayPPOTrainer:
                 trajectory_batch.get("stop_reasons"), len(response_ids)
             )
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
-        if self._training_metrics_enabled and rollout_age is not None:
-            # One event per consumed group: its admitted age and the tokens it contributed.
+        if self._training_metrics_enabled and rollout_staleness is not None:
+            # One event per consumed group: its admitted staleness and the tokens it contributed.
             counts = {}
-            for uid, age, mask in zip(uids, rollout_age, response_masks_tensor, strict=True):
-                body = counts.setdefault(uid, {"age": age, "groups": 1, "sequences": 0, "response_tokens": 0})
-                if body["age"] != age:
-                    raise ValueError("Consumed group rows must share the admitted age")
+            for uid, steps, mask in zip(uids, rollout_staleness, response_masks_tensor, strict=True):
+                body = counts.setdefault(uid, {"staleness": steps, "groups": 1, "sequences": 0, "response_tokens": 0})
+                if body["staleness"] != steps:
+                    raise ValueError("Consumed group rows must share the admitted staleness")
                 body["sequences"] += 1
                 body["response_tokens"] += int(mask.sum().item())
             for body in counts.values():
-                record_event("consumed_age", body, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)})
+                record_event(
+                    "consumed_staleness", body, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)}
+                )
         if self.cfg.trainer.step_wise_training:
             assert "trajectory_ids" in trajectory_batch, (
                 "Expected `trajectory_ids` in trajectory batch for step wise training"
@@ -2332,20 +2341,11 @@ class RayPPOTrainer:
 
         if self._training_metrics_enabled and training_input.get("rollout_logprobs") is not None:
             self.all_metrics.update(
-                behavior_drift_metrics(
-                    action_log_probs,
-                    training_input["rollout_logprobs"],
-                    training_input["loss_mask"],
-                    eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
-                    eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
-                )
-            )
-            self.all_metrics.update(
                 mismatch_ratio_metrics(
                     action_log_probs,
                     training_input["rollout_logprobs"],
                     training_input["loss_mask"],
-                    training_input.get("rollout_age"),
+                    training_input.get("rollout_staleness"),
                     eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
                     eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
                     position_window=ratio_diagnostics_settings(self.cfg.trainer.algorithm).position_window,

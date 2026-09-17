@@ -94,12 +94,12 @@ def ratio_statistics(delta: torch.Tensor, *, eps_clip_low: float = 0.2, eps_clip
     weights = (delta - delta.max()).exp()
     result.update(
         log_ratio_mean=delta.mean().item(),
-        abs_log_ratio_mean=absolute.mean().item(),
-        abs_log_ratio_p50=quantiles[0],
-        abs_log_ratio_p95=quantiles[1],
-        abs_log_ratio_p99=quantiles[2],
-        abs_log_ratio_p999=quantiles[3],
-        abs_log_ratio_max=absolute.max().item(),
+        log_ratio_abs_mean=absolute.mean().item(),
+        log_ratio_abs_p50=quantiles[0],
+        log_ratio_abs_p95=quantiles[1],
+        log_ratio_abs_p99=quantiles[2],
+        log_ratio_abs_p999=quantiles[3],
+        log_ratio_abs_max=absolute.max().item(),
         lower_clip_pressure=(delta < (math.log1p(-eps_clip_low) if eps_clip_low < 1 else -math.inf))
         .double()
         .mean()
@@ -111,10 +111,9 @@ def ratio_statistics(delta: torch.Tensor, *, eps_clip_low: float = 0.2, eps_clip
         kl_k1=(-delta).mean().item(),
         kl_k3=(delta.clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP).exp() - delta - 1).mean().item(),
         chi2=(2 * delta.clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP)).exp().mean().item() - 1,
-        mean_squared_log_ratio=delta.square().mean().item(),
+        log_ratio_mean_squared=delta.square().mean().item(),
+        log_mean_ratio=(delta.logsumexp(0) - math.log(delta.numel())).item(),
     )
-    result["frac_outside_0.5_2"] = result.pop("frac_outside_0_5_2")
-    result["frac_below_1e-5"] = result.pop("frac_below_1e_5")
     return result
 
 
@@ -122,26 +121,28 @@ def mismatch_ratio_metrics(
     learner_logprobs: torch.Tensor,
     rollout_logprobs: torch.Tensor | None,
     loss_mask: torch.Tensor,
-    rollout_age: torch.Tensor | None,
+    rollout_staleness: torch.Tensor | None,
     *,
     position_window: int = DEFAULT_POSITION_WINDOW,
     eps_clip_low: float = 0.2,
     eps_clip_high: float = 0.2,
 ) -> dict[str, float]:
-    """Condition consume-time trainer/vLLM ratios on age and token position.
+    """Condition consume-time trainer/vLLM ratios on staleness and token position.
 
-    Only age0 isolates engine mismatch. Other ages and pooled values measure
-    its product with policy drift. Position buckets overlap on short responses.
+    Only staleness0 isolates engine mismatch. Other buckets and the pooled values
+    measure its product with policy drift. Position buckets overlap on short responses.
     """
     if type(position_window) is not int or position_window <= 0:
         raise ValueError("position_window must be a positive integer")
     mask = loss_mask.detach().cpu() > 0
-    ages = torch.zeros(mask.shape[0], dtype=torch.int32) if rollout_age is None else rollout_age.detach().cpu()
-    if ages.shape != (mask.shape[0],) or (ages < 0).any() or not torch.equal(ages, ages.int()):
-        raise ValueError("rollout_age must contain one nonnegative integer per response row")
-    buckets = {"pooled": torch.ones_like(ages, dtype=torch.bool)}
-    buckets.update({f"age{age}": ages == age for age in range(4)})
-    buckets.update({"age4-7": (ages >= 4) & (ages <= 7), "age8+": ages >= 8})
+    staleness = (
+        torch.zeros(mask.shape[0], dtype=torch.int32) if rollout_staleness is None else rollout_staleness.detach().cpu()
+    )
+    if staleness.shape != (mask.shape[0],) or (staleness < 0).any() or not torch.equal(staleness, staleness.int()):
+        raise ValueError("rollout_staleness must contain one nonnegative integer per response row")
+    buckets = {"pooled": torch.ones_like(staleness, dtype=torch.bool)}
+    buckets.update({f"staleness{step}": staleness == step for step in range(4)})
+    buckets.update({"staleness4-7": (staleness >= 4) & (staleness <= 7), "staleness8+": staleness >= 8})
     delta = None
     if rollout_logprobs is not None:
         # CPU float64 and masking before subtraction avoid padded NaNs.
@@ -176,94 +177,10 @@ def mismatch_ratio_metrics(
                     "finite_tokens": 0.0,
                 }
             )
-            for key in ("selected_tokens", "finite_tokens", "abs_log_ratio_mean", "frac_outside_0.5_2"):
+            for key in ("selected_tokens", "finite_tokens", "log_ratio_abs_mean", "frac_outside_0_5_2"):
                 if key in stats:
                     result[f"{prefix}pos_{position}/{key}"] = stats[key]
     return result
-
-
-def behavior_drift_metrics(
-    learner_logprobs: torch.Tensor,
-    rollout_logprobs: torch.Tensor | None,
-    loss_mask: torch.Tensor,
-    *,
-    eps_clip_low: float,
-    eps_clip_high: float,
-) -> dict[str, float]:
-    """Measure pre-update learner minus reported behavior logprobs on the full batch.
-
-    Mask before arithmetic; pool selected tokens rather than averaging rank or
-    sequence means. Raw generator logprobs need not describe processed sampling,
-    so these are model-likelihood diagnostics, not KL or trajectory IS estimates.
-    ESS describes token-weight concentration, not independent usable samples.
-    Missing/empty populations omit undefined statistics and retain coverage counts.
-    """
-    selected = loss_mask > 0
-    count = int(selected.sum().item())
-    metrics = {
-        "selected_tokens": float(count),
-        "finite_tokens": 0.0,
-        "missing_behavior": float(rollout_logprobs is None),
-    }
-    if rollout_logprobs is not None and count:
-        learner = learner_logprobs.detach()[selected].double()
-        behavior = rollout_logprobs.detach()[selected].double()
-        finite = torch.isfinite(learner) & torch.isfinite(behavior)
-        delta = learner[finite] - behavior[finite]
-        metrics["finite_tokens"] = float(delta.numel())
-        metrics["finite_fraction"] = delta.numel() / count
-        if delta.numel():
-            absolute = delta.abs()
-            quantiles = absolute_quantiles(absolute, (0.5, 0.95, 0.99))
-            # Shift, never clamp: a severe outlier must still reduce concentration.
-            weights = (delta - delta.max()).exp()
-            lower = math.log1p(-eps_clip_low) if eps_clip_low < 1 else -math.inf
-            metrics.update(
-                log_ratio_mean=delta.mean().item(),
-                mean_squared_log_ratio=delta.square().mean().item(),
-                abs_log_ratio_mean=absolute.mean().item(),
-                abs_log_ratio_p50=quantiles[0],
-                abs_log_ratio_p95=quantiles[1],
-                abs_log_ratio_p99=quantiles[2],
-                abs_log_ratio_max=absolute.max().item(),
-                log_mean_ratio=(delta.logsumexp(0) - math.log(delta.numel())).item(),
-                lower_clip_pressure=(delta < lower).double().mean().item(),
-                upper_clip_pressure=(delta > math.log1p(eps_clip_high)).double().mean().item(),
-                token_weight_ess_fraction=(weights.sum().square() / (delta.numel() * weights.square().sum())).item(),
-            )
-    elif count:
-        metrics["finite_fraction"] = 0.0
-    return {f"policy/behavior_drift/{name}": value for name, value in metrics.items()}
-
-
-def _stale_metric_aliases(metrics: dict[str, float]) -> dict[str, float]:
-    """Name the training-forward/consume-forward ratio while keeping old panels."""
-    names = {
-        "mean": "log_ratio_mean",
-        "mean_squared": "mean_squared_log_ratio",
-        "abs_mean": "abs_log_ratio_mean",
-        "abs_max": "abs_log_ratio_max",
-        "abs_p99": "abs_log_ratio_p99",
-        "abs_p999": "abs_log_ratio_p999",
-        "frac_outside_0_5_2": "frac_outside_0.5_2",
-        "frac_below_1e_5": "frac_below_1e-5",
-        "ess_fraction": "ess_fraction",
-        "kl_k1": "kl_k1",
-        "kl_k3": "kl_k3",
-        "chi2": "chi2",
-        "statistics_valid": "statistics_valid",
-        "selected_tokens": "selected_tokens",
-        "p999_valid": "p999_valid",
-    }
-    aliases = {f"stale/{name}": metrics[f"log_ratio_{old}"] for old, name in names.items()}
-    aliases.update(
-        {
-            "stale/" + key.removeprefix("log_ratio_").replace("frac_outside_0_5_2", "frac_outside_0.5_2"): value
-            for key, value in metrics.items()
-            if key.startswith("log_ratio_pos_")
-        }
-    )
-    return aliases
 
 
 def _ratio_extra_keys(window: int = DEFAULT_POSITION_WINDOW) -> tuple[str, ...]:
@@ -284,7 +201,7 @@ def _ratio_extra_keys(window: int = DEFAULT_POSITION_WINDOW) -> tuple[str, ...]:
     return keys + tuple(
         f"log_ratio_pos_{position}/{key}"
         for position in (f"first{window}", f"last{window}", "middle")
-        for key in ("selected_tokens", "abs_log_ratio_mean", "frac_outside_0_5_2")
+        for key in ("selected_tokens", "log_ratio_abs_mean", "frac_outside_0_5_2")
     )
 
 
@@ -396,11 +313,19 @@ class LogRatioMonitor:
                 failed = True
         if failed:
             quantiles.update(p50=0.0, p95=0.0, quantiles_valid=0.0)
-        absolute = {"p50": "abs_log_ratio_p50", "p95": "abs_log_ratio_p95"}
-        metrics.update({f"stale/{absolute.get(name, name)}": value for name, value in quantiles.items()})
+        # The exact-quantile family takes the gate's own name; the buffer reports |log ratio|.
+        exact = {
+            "p50": "abs_p50",
+            "p95": "abs_p95",
+            "quantiles_valid": "valid",
+            "quantiles_overflow": "overflow",
+            "quantiles_overflow_ranks": "overflow_ranks",
+            "quantiles_nonrepresentable_tokens": "nonrepresentable_tokens",
+        }
+        metrics.update({f"log_ratio_exact_{exact.get(name, name)}": value for name, value in quantiles.items()})
         finite_count = max(1, quantiles["finite_tokens"])
-        metrics["stale/lower_clip_pressure"] = clip_counts[0].item() / finite_count
-        metrics["stale/upper_clip_pressure"] = clip_counts[1].item() / finite_count
+        metrics["log_ratio_lower_clip_pressure"] = clip_counts[0].item() / finite_count
+        metrics["log_ratio_upper_clip_pressure"] = clip_counts[1].item() / finite_count
         return metrics
 
 
@@ -518,7 +443,7 @@ def _log_ratio_diag_zero_metrics(
         + _ratio_extra_keys(position_window)
     )
     metrics = dict.fromkeys(keys, 0.0)
-    return {**metrics, **_stale_metric_aliases(metrics)}
+    return metrics
 
 
 def _empty_log_ratio_accumulator(device, n_position_buckets: int = 10) -> LogRatioAccumulator:
@@ -746,5 +671,4 @@ def finalize_log_ratio_metrics(
     ).reshape(-1)
     values = torch.cat([extra, positions]).cpu().tolist()
     metrics.update(dict(zip(_ratio_extra_keys(position_window), values, strict=True)))
-    metrics.update(_stale_metric_aliases(metrics))
     return metrics

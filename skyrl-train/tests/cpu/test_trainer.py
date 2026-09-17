@@ -2108,7 +2108,7 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     validate_batch_sizes(cfg)
 
 
-def test_consumed_age_events_roll_up_each_consumed_group_once(monkeypatch, dummy_config, dummy_tokenizer):
+def test_consumed_staleness_events_roll_up_each_consumed_group_once(monkeypatch, dummy_config, dummy_tokenizer):
     events = []
     monkeypatch.setattr(
         trainer_module,
@@ -2132,23 +2132,23 @@ def test_consumed_age_events_roll_up_each_consumed_group_once(monkeypatch, dummy
             "rollout_logprobs": None,
         }
 
-    trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_age=[2, 2, 0, 0])
-    consumed = {body["age"]: body for name, body, _ in events if name == "consumed_age"}
+    trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_staleness=[2, 2, 0, 0])
+    consumed = {body["staleness"]: body for name, body, _ in events if name == "consumed_staleness"}
     # One event per group; response_tokens counts the group's unpadded response tokens.
     assert consumed == {
-        2: {"age": 2, "groups": 1, "sequences": 2, "response_tokens": 4},
-        0: {"age": 0, "groups": 1, "sequences": 2, "response_tokens": 6},
+        2: {"staleness": 2, "groups": 1, "sequences": 2, "response_tokens": 4},
+        0: {"staleness": 0, "groups": 1, "sequences": 2, "response_tokens": 6},
     }
     assert all(attributes == {"role": "trainer", "step": "7"} for name, _, attributes in events)
 
     events.clear()
     trainer._training_metrics_enabled = False
-    trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_age=[2, 2, 0, 0])
+    trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_staleness=[2, 2, 0, 0])
     assert events == []
 
     trainer._training_metrics_enabled = True
-    with pytest.raises(ValueError, match="share the admitted age"):
-        trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_age=[2, 1, 0, 0])
+    with pytest.raises(ValueError, match="share the admitted staleness"):
+        trainer.convert_to_training_input(batch(), ["a", "a", "b", "b"], rollout_staleness=[2, 1, 0, 0])
 
 
 def test_informative_group_fraction_counts_groups_whose_rewards_differ(dummy_config):

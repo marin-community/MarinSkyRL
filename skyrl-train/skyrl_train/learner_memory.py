@@ -100,7 +100,7 @@ class LearnerMemory:
         self.enabled = False
         logger.warning("Disabling learner CUDA memory observations after phase {} failed: {}", phase, error)
 
-    def snapshot(self, phase: str, *, step: int | None = None, step_kind: str = "completed_update") -> None:
+    def snapshot(self, phase: str, *, step: int | None = None, step_kind: str = "model_version_step") -> None:
         """Sample current memory without resetting or publishing interval peaks."""
         if not self.enabled:
             return

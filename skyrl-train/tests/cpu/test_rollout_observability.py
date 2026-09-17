@@ -12,15 +12,15 @@ import pytest
 import zstandard
 from rigging.telemetry import serialization
 
-from skyrl_train import fully_async_trainer as fully_async
 from skyrl_train import rollout_observability as rollout
+from skyrl_train.utils import trainer_utils
 from skyrl_train import telemetry as training_telemetry
 from skyrl_train.timing_observability import publish_step_timings
 
 
 @pytest.mark.parametrize("reasons", [["length", "stop", None], None])
 def test_consumed_stop_fraction_is_absent_without_complete_coverage(reasons):
-    metrics = rollout.consumed_stop_metrics(reasons, 3)
+    metrics = trainer_utils.consumed_stop_metrics(reasons, 3)
     assert "consumed/length_stop_fraction" not in metrics
     assert metrics["consumed/known_stop_count"] + metrics["consumed/unknown_stop_count"] == 3
     assert metrics["consumed/stop_reason_coverage"] == (0 if reasons is None else pytest.approx(2 / 3))
@@ -28,8 +28,8 @@ def test_consumed_stop_fraction_is_absent_without_complete_coverage(reasons):
 
 def test_consumed_stop_metrics_reject_misaligned_reasons():
     with pytest.raises(ValueError, match="align"):
-        rollout.consumed_stop_metrics(["length"], 2)
-    assert "consumed/length_stop_fraction" not in rollout.consumed_stop_metrics([], 0)
+        trainer_utils.consumed_stop_metrics(["length"], 2)
+    assert "consumed/length_stop_fraction" not in trainer_utils.consumed_stop_metrics([], 0)
 
 
 @dataclass
@@ -80,15 +80,15 @@ def records(monkeypatch):
     for name in (
         "phase_duration",
         "wait_seconds",
-        "wait_count",
-        "call_count",
+        "waits",
+        "calls",
         "buffer_dwell",
-        "group_count",
+        "groups",
         "group_tokens",
         "event_loop_lag",
     ):
         monkeypatch.setattr(rollout, name, Instrument(name, sink))
-    for name in ("training_metric", "nonfinite_training_metric", "work_completed"):
+    for name in ("training_metric", "training_nonfinite_values", "work_completed"):
         monkeypatch.setattr(training_telemetry, name, Instrument(name, sink))
     monkeypatch.setattr(rollout.telemetry, "event", sink.event)
 
@@ -167,13 +167,13 @@ async def test_overlapping_rollout_calls_keep_independent_walls_and_identity(rec
 
     calls = {event["attributes"]["step"]: event for event in records.events}
     assert {key: value for key, value in calls["0"]["body"].items() if key.startswith("duration_")} == {
-        "duration_rollout_call": 5.0,
+        "duration_seconds": 5.0,
         "duration_collect": 4.0,
         "duration_assemble": 1.0,
         "duration_rollout_call_residual": 0.0,
     }
     assert {key: value for key, value in calls["1"]["body"].items() if key.startswith("duration_")} == {
-        "duration_rollout_call": 9.0,
+        "duration_seconds": 9.0,
         "duration_collect": 7.0,
         "duration_finalize": 2.0,
         "duration_rollout_call_residual": 0.0,
@@ -217,7 +217,7 @@ async def test_concurrent_wait_totals_exceed_call_wall_without_becoming_exclusiv
 
     assert records.select("wait_seconds", wait="engine_await", stat="sum") == [13.0]
     assert records.select("wait_seconds", wait="engine_await", stat="max") == [8.0]
-    assert records.select("wait_count", wait="engine_await") == [2]
+    assert records.select("waits", wait="engine_await") == [2]
     assert records.select("phase_duration", phase="rollout_call") == [8.0]
     assert records.select("phase_duration", phase="rollout_call_residual") == [0.0]
 
@@ -245,7 +245,7 @@ def test_rollout_failure_propagates_with_optional_terminal_record(records, enabl
                 clock.advance(2)
                 raise ValueError("invalid rollout")
 
-    assert records.select("call_count", outcome="failure") == ([1] if enabled else [])
+    assert records.select("calls", outcome="failure") == ([1] if enabled else [])
     assert len(records.events) == int(enabled)
 
 
@@ -267,7 +267,7 @@ async def test_cancelled_rollout_publishes_one_terminal_outcome_and_unwinds_wait
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=1)
 
-    assert records.select("call_count", outcome="cancelled") == [1]
+    assert records.select("calls", outcome="cancelled") == [1]
     assert len(records.events) == 1
     assert records.events[0]["attributes"]["outcome"] == "cancelled"
     assert records.select("wait_seconds", wait="engine_await", stat="sum") == [4.0]
@@ -312,7 +312,7 @@ async def test_environment_wait_separates_executor_queue_execution_and_driver_re
     assert await asyncio.wait_for(task, timeout=1) == {"reward": 1.0}
     for name, duration in (("env_queue", 3), ("env_exec", 5), ("env_resume", 7), ("env_await", 15)):
         assert records.select("wait_seconds", wait=name, stat="sum") == [duration]
-        assert records.select("wait_count", wait=name) == [1]
+        assert records.select("waits", wait=name) == [1]
 
 
 @pytest.mark.asyncio
@@ -348,7 +348,7 @@ async def test_cancelled_environment_thread_does_not_mutate_published_call(recor
         await asyncio.to_thread(executor.shutdown, wait=True)
 
     assert records == published
-    assert records.select("call_count", outcome="cancelled") == [1]
+    assert records.select("calls", outcome="cancelled") == [1]
     assert records.select("wait_seconds", wait="env_await", stat="sum") == [3.0]
     assert records.select("wait_seconds", wait="env_exec", stat="sum") == []
 
@@ -388,14 +388,16 @@ def test_training_metrics_preserve_selected_values_and_count_nonfinite_values(re
     assert {
         row["attributes"]["metric"]: row["value"]
         for row in records.metrics
-        if row["name"] == "nonfinite_training_metric"
+        if row["name"] == "training_nonfinite_values"
     } == {"policy/loss": 1, "policy/grad_norm": 1}
-    assert all(row["attributes"]["step"] == "8" and row["attributes"]["phase"] == "train" for row in records.metrics)
+    assert all(
+        row["attributes"]["step"] == "8" and row["attributes"]["payload_kind"] == "train" for row in records.metrics
+    )
 
 
 def test_consumed_work_records_distinct_native_deltas(records):
-    training_telemetry.record_consumed_work(sequences=4, response_tokens=100, loss_tokens=80, step=3)
-    training_telemetry.record_consumed_work(sequences=4, response_tokens=70, loss_tokens=60, step=4)
+    training_telemetry.record_consumed_work(training_telemetry.ConsumedWork(4, 100, 80), step=3)
+    training_telemetry.record_consumed_work(training_telemetry.ConsumedWork(4, 70, 60), step=4)
 
     assert records.select("work_completed", work_kind="consumed_sample") == [4, 4]
     assert records.select("work_completed", work_kind="consumed_response_token") == [100, 70]
@@ -418,7 +420,7 @@ def test_model_interval_details_stay_bounded_without_truncating_wait_totals(reco
     assert fields["truncated"] is True
     assert 0 < len(intervals) < 200
     assert records.select("wait_seconds", wait="model_client_await", stat="sum") == [25.0]
-    assert records.select("wait_count", wait="model_client_await") == [200]
+    assert records.select("waits", wait="model_client_await") == [200]
 
 
 @pytest.mark.asyncio
@@ -503,10 +505,10 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
 
         assert await asyncio.wait_for(produce_next(), timeout=1) == "next rollout completed"
         publish_step_timings({"step": 5.0, "policy_train": 2.0}, step=2)
-        rollout.record_group_outcome(outcome="consumed", tokens=20, step=2, attempt_id="group-1")
+        rollout.record_group_disposition(disposition="consumed", tokens=20, step=2, attempt_id="group-1")
         training_telemetry.record_training_metrics(
             {
-                **rollout.consumed_stop_metrics(["length", "stop", "length", "stop"], 4),
+                **trainer_utils.consumed_stop_metrics(["length", "stop", "length", "stop"], 4),
                 "tis/batch_skipped_no_logprobs": 1.0,
                 "tis/skipped_fraction": 0.25,
                 "unselected/value": 99.0,
@@ -532,7 +534,7 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
     ]
     assert len(root_spans) == 3
     assert all("parent" not in row["attributes"] for row in root_spans)
-    assert any(row["name"] == "rollout_group_outcome" and row["body"]["call_id"] == "group-1" for row in delivered)
+    assert any(row["name"] == "rollout_group_disposition" and row["body"]["call_id"] == "group-1" for row in delivered)
     metrics = [row for row in delivered if row["name"] == "training_metric_value"]
     assert {row["attributes"]["metric"]: row["value"] for row in metrics} == {
         "consumed/sequences": 4,
@@ -546,51 +548,10 @@ async def test_rollout_calls_progress_while_real_exporter_waits_for_http_ack(mon
     }
     assert all(
         row["attributes"]["step"] == "2"
-        and row["attributes"]["phase"] == "train"
+        and row["attributes"]["payload_kind"] == "train"
         and row["attributes"]["role"] == "trainer"
         for row in metrics
     )
     terminal = next(row for row in delivered if row["name"] == "terminal")
     assert terminal["body"]["status"] == "completed"
     assert terminal["body"]["export_lost_records"] == 0
-
-
-@pytest.mark.parametrize("failure", [False, True])
-def test_policy_training_interval_brackets_the_update_even_when_it_fails(records, monkeypatch, failure):
-    clock = ManualClock(100.0)
-    monkeypatch.setattr(fully_async.time, "perf_counter", clock)
-    trainer = object.__new__(fully_async.FullyAsyncRayPPOTrainer)
-    trainer.cfg = SimpleNamespace(
-        trainer=SimpleNamespace(algorithm=SimpleNamespace(use_kl_in_reward=False), dump_data_batch=False)
-    )
-    trainer.all_timings = {}
-    trainer.global_step = 5
-    trainer._async_observations_enabled = True
-
-    async def drained():
-        return None
-
-    def train(training_input):
-        clock.advance(3.0)
-        if failure:
-            raise RuntimeError("update failed")
-        return {"policy_loss": 0.0}
-
-    trainer._drain_policy_event_loops = drained
-    trainer.fwd_logprobs_values_reward = lambda batch: batch
-    trainer.compute_advantages_and_returns = lambda batch: batch
-    trainer.finalize_advantages_for_training = lambda batch: batch
-    trainer.train_critic_and_policy = train
-
-    if failure:
-        with pytest.raises(RuntimeError, match="update failed"):
-            asyncio.run(trainer._run_training(object()))
-    else:
-        assert asyncio.run(trainer._run_training(object())) == {"policy_loss": 0.0}
-    [event] = [row for row in records.events if row["name"] == "policy_training_interval"]
-    assert event["body"] == {"started": 100.0, "finished": 103.0}
-    assert event["attributes"] == {
-        "role": training_telemetry.TRAINER_ROLE,
-        "step": "5",
-        "outcome": "failure" if failure else "success",
-    }

@@ -91,10 +91,10 @@ def test_phase_peaks_reset_between_intervals_and_preserve_current_device_semanti
     cuda, events = observations
     memory = learner_memory.LearnerMemory(enabled=True, rank=11)
     memory.snapshot("model_ready")
-    with memory.span("learner_logprob_forward", step=7, step_kind="target_update"):
+    with memory.span("forward", step=7, step_kind="global_step"):
         cuda.use_memory(500, 600)
         cuda.use_memory(120, 200)
-    with memory.span("weight_publication", step=7, step_kind="completed_update"):
+    with memory.span("broadcast_to_inference_engines", step=7, step_kind="model_version_step"):
         cuda.use_memory(300, 400)
         cuda.use_memory(100, 160)
 
@@ -127,10 +127,10 @@ def test_phase_peaks_reset_between_intervals_and_preserve_current_device_semanti
         "cuda_device": "2",
         "gpu_uuid": "GPU-physical-two",
         "allocator_backend": "native",
-        "phase": "weight_publication",
+        "phase": "broadcast_to_inference_engines",
         "boundary": "exit",
         "outcome": "success",
-        "step_kind": "completed_update",
+        "step_kind": "model_version_step",
         "step": "7",
     }
     assert all(row["name"] == "cuda_memory_observation" for row in events)
@@ -141,13 +141,13 @@ def test_failed_training_preserves_exception_and_releases_peak_scope(observation
     cuda, events = observations
     memory = learner_memory.LearnerMemory(enabled=True, rank=3)
     with pytest.raises(type(error)) as caught:
-        with memory.span("ppo_forward_backward_update", step=4, step_kind="target_update"):
+        with memory.span("ppo_train", step=4, step_kind="global_step"):
             cuda.use_memory(600, 700)
             raise error
     assert caught.value is error
     assert events[-1]["attributes"]["outcome"] == "failure"
     assert events[-1]["body"]["peak_allocated_bytes"] == 600
-    with memory.span("weight_publication", step=None, step_kind="completed_update"):
+    with memory.span("broadcast_to_inference_engines", step=None, step_kind="model_version_step"):
         cuda.use_memory(700, 800)
     assert events[-1]["attributes"]["outcome"] == "success"
     assert events[-1]["attributes"]["step_kind"] == "unknown"
@@ -158,17 +158,17 @@ def test_overlapping_collectors_and_snapshots_do_not_destroy_enclosing_peak(obse
     cuda, events = observations
     outer = learner_memory.LearnerMemory(enabled=True, rank=3)
     inner = learner_memory.LearnerMemory(enabled=True, rank=3)
-    with outer.span("ppo_forward_backward_update", step=4, step_kind="target_update"):
+    with outer.span("ppo_train", step=4, step_kind="global_step"):
         cuda.use_memory(800, 850)
         cuda.use_memory(100, 160)
         inner.snapshot("model_ready")
-        with inner.span("learner_logprob_forward", step=4, step_kind="target_update"):
+        with inner.span("forward", step=4, step_kind="global_step"):
             cuda.use_memory(200, 300)
     assert "peak_allocated_bytes" not in events[-1]["body"]
     assert "peak_reserved_bytes" not in events[-1]["body"]
     assert events[-1]["attributes"]["scope_overlap"] == "true"
     assert [row["attributes"]["boundary"] for row in events] == ["enter", "snapshot", "exit"]
-    with inner.span("weight_publication", step=4, step_kind="completed_update"):
+    with inner.span("broadcast_to_inference_engines", step=4, step_kind="model_version_step"):
         cuda.use_memory(300, 350)
     assert events[-1]["body"]["peak_allocated_bytes"] == 300
 
@@ -180,19 +180,19 @@ def test_overlap_holds_reset_ownership_until_the_last_concurrent_scope_exits(obs
     entered, release = Event(), Event()
 
     def concurrent_forward():
-        with inner.span("learner_logprob_forward", step=4, step_kind="target_update"):
+        with inner.span("forward", step=4, step_kind="global_step"):
             cuda.use_memory(900, 950)
             entered.set()
             assert release.wait(timeout=10)
 
-    with outer.span("weight_publication", step=3, step_kind="completed_update"):
+    with outer.span("broadcast_to_inference_engines", step=3, step_kind="model_version_step"):
         thread = Thread(target=concurrent_forward)
         thread.start()
         assert entered.wait(timeout=10)
     try:
         # The publication owner is gone, but its competing forward still runs.
         # A third phase cannot reset that forward's allocator interval.
-        with outer.span("ppo_forward_backward_update", step=4, step_kind="target_update"):
+        with outer.span("ppo_train", step=4, step_kind="global_step"):
             cuda.use_memory(100, 160)
         assert [row["attributes"]["boundary"] for row in events] == ["enter", "exit"]
         assert events[-1]["attributes"]["scope_overlap"] == "true"
@@ -202,7 +202,7 @@ def test_overlap_holds_reset_ownership_until_the_last_concurrent_scope_exits(obs
         release.set()
         thread.join(timeout=10)
     assert not thread.is_alive()
-    with outer.span("ppo_forward_backward_update", step=5, step_kind="target_update"):
+    with outer.span("ppo_train", step=5, step_kind="global_step"):
         cuda.use_memory(300, 350)
     assert events[-1]["body"]["peak_allocated_bytes"] == 300
     assert "scope_overlap" not in events[-1]["attributes"]
@@ -232,7 +232,7 @@ def test_optional_observation_failure_does_not_replace_training_exception(observ
     if not at_exit:
         fail_observation()
     with pytest.raises(RuntimeError) as caught:
-        with memory.span("ppo_forward_backward_update", step=4, step_kind="target_update"):
+        with memory.span("ppo_train", step=4, step_kind="global_step"):
             if at_exit:
                 fail_observation()
             raise training_error
@@ -241,7 +241,7 @@ def test_optional_observation_failure_does_not_replace_training_exception(observ
     cuda.failure = None
     monkeypatch.setattr(training_telemetry.telemetry, "event", event_emitter)
     with learner_memory.LearnerMemory(enabled=True, rank=3).span(
-        "weight_publication", step=4, step_kind="completed_update"
+        "broadcast_to_inference_engines", step=4, step_kind="model_version_step"
     ):
         cuda.use_memory(400, 500)
     assert events[-1]["body"]["peak_allocated_bytes"] == 400
@@ -254,7 +254,7 @@ def test_observation_failure_keeps_successful_training_and_disables_further_coll
     trained = []
     if not at_exit:
         cuda.failure = "sample"
-    with memory.span("ppo_forward_backward_update", step=4, step_kind="target_update"):
+    with memory.span("ppo_train", step=4, step_kind="global_step"):
         trained.append(True)
         cuda.failure = "sample"
     cuda.failure = None
@@ -269,7 +269,7 @@ def test_disabled_observations_do_not_access_cuda_or_emit(observations):
     memory = learner_memory.LearnerMemory(enabled=False, rank=3)
     body = []
     memory.snapshot("model_ready")
-    with memory.span("ppo_forward_backward_update", step=4, step_kind="target_update"):
+    with memory.span("ppo_train", step=4, step_kind="global_step"):
         body.append("trained")
     assert body == ["trained"]
     assert events == []
@@ -280,7 +280,7 @@ def test_unsupported_allocator_omits_misleading_peak_statistics(observations):
     cuda.backend = "cudaMallocAsync"
     memory = learner_memory.LearnerMemory(enabled=True, rank=3)
     trained = []
-    with memory.span("ppo_forward_backward_update", step=4, step_kind="target_update"):
+    with memory.span("ppo_train", step=4, step_kind="global_step"):
         trained.append(True)
     assert trained == [True]
     assert events == []
@@ -324,7 +324,7 @@ def test_fsdp_ppo_and_publication_measure_extraction_peak_and_keep_update_identi
     )
     worker._rank = 0
     worker._is_lora = False
-    worker._completed_update = None
+    worker._model_version_step = None
     worker._memory = learner_memory.LearnerMemory(enabled=True, rank=0, backend="fsdp2")
     worker.policy_mini_batch_size_per_gpu = 2
     worker.model = SimpleNamespace(model=torch.ones(3))
@@ -391,11 +391,11 @@ def test_fsdp_ppo_and_publication_measure_extraction_peak_and_keep_update_identi
         asyncio.run(worker.broadcast_to_inference_engines(Receiver()))
     torch.testing.assert_close(sent[0], torch.full((3,), 2.0), rtol=0, atol=0)
     ppo_enter, ppo_exit, publication_enter, publication_exit = events
-    assert ppo_enter["attributes"]["step_kind"] == "target_update"
+    assert ppo_enter["attributes"]["step_kind"] == "global_step"
     assert ppo_exit["body"]["peak_allocated_bytes"] == 600
     assert ppo_exit["body"]["allocated_bytes"] == publication_enter["body"]["allocated_bytes"] == 150
-    assert publication_exit["attributes"]["phase"] == "weight_publication"
-    assert publication_exit["attributes"]["step_kind"] == "completed_update"
+    assert publication_exit["attributes"]["phase"] == "broadcast_to_inference_engines"
+    assert publication_exit["attributes"]["step_kind"] == "model_version_step"
     assert publication_exit["attributes"]["step"] == "7"
     assert publication_exit["attributes"]["outcome"] == ("failure" if fail_publication else "success")
     assert publication_exit["body"]["peak_allocated_bytes"] == 900

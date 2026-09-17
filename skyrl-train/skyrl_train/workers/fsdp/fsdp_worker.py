@@ -935,7 +935,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
     async def broadcast_to_inference_engines(self, inference_engine_client):
         # Cover full-tensor extraction and conversion, all chunks and the
         # final receiver/cache barriers; extraction can dominate the peak.
-        with self._memory.span("weight_publication", step=self._completed_update, step_kind="completed_update"):
+        with self._memory.span(
+            "broadcast_to_inference_engines", step=self._model_version_step, step_kind="model_version_step"
+        ):
             return await self._broadcast_to_inference_engines(inference_engine_client)
 
     async def _broadcast_to_inference_engines(self, inference_engine_client):
@@ -1076,9 +1078,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         OFF -> byte-identical to the old sync `forward`) or off the event-loop thread
         via `asyncio.to_thread` from the async `forward` entry (flag ON).
         """
-        with self._memory.span(
-            "learner_logprob_forward", step=data.metadata.get("global_step"), step_kind="target_update"
-        ):
+        with self._memory.span("forward", step=data.metadata.get("global_step"), step_kind="global_step"):
             _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.FORWARD_IMPL_ENTER)
             output = super().forward(data)
             # unshard the root FSDP module (https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes)

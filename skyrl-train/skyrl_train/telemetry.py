@@ -45,7 +45,7 @@ rollout_queue_depth = telemetry.gauge("rollout_queue_depth", unit="{item}")
 rollout_capacity = telemetry.gauge("rollout_capacity", unit="{item}")
 rollout_staleness = telemetry.histogram("rollout_staleness_steps", unit="{step}")
 training_metric = telemetry.histogram("training_metric_value")
-nonfinite_training_metric = telemetry.counter("training_nonfinite_values", unit="{value}")
+training_nonfinite_values = telemetry.counter("training_nonfinite_values", unit="{value}")
 
 
 def record_event(
@@ -60,13 +60,22 @@ def record_event(
     )
 
 
-def record_consumed_work(*, sequences: int, response_tokens: int, loss_tokens: int, step: int) -> None:
+@dataclass(frozen=True)
+class ConsumedWork:
+    """Rows and tokens one optimizer step consumed, excluding data-parallel padding."""
+
+    sequences: int
+    response_tokens: int
+    loss_tokens: int
+
+
+def record_consumed_work(work: ConsumedWork, *, step: int) -> None:
     """Record useful work after an optimizer step completes successfully."""
     attributes = {"role": TRAINER_ROLE, "step": str(step)}
     for kind, count in (
-        ("consumed_sample", sequences),
-        ("consumed_response_token", response_tokens),
-        ("consumed_loss_token", loss_tokens),
+        ("consumed_sample", work.sequences),
+        ("consumed_response_token", work.response_tokens),
+        ("consumed_loss_token", work.loss_tokens),
     ):
         work_completed.add(count, attributes={**attributes, "work_kind": kind})
 
@@ -92,11 +101,11 @@ def record_training_metrics(metrics: Mapping[str, object], *, step: int, kind: s
             continue
         if not isinstance(value, (int, float)):
             continue
-        attributes = {"metric": name, "step": str(step), "role": TRAINER_ROLE, "phase": kind}
+        attributes = {"metric": name, "step": str(step), "role": TRAINER_ROLE, "payload_kind": kind}
         if math.isfinite(value):
             training_metric.record(float(value), attributes=attributes)
         else:
-            nonfinite_training_metric.add(1, attributes=attributes)
+            training_nonfinite_values.add(1, attributes=attributes)
 
 
 class _BackgroundCollector(Protocol):
@@ -234,6 +243,14 @@ def _resources(config: TelemetryConfig, role: str) -> dict[str, str]:
     if config.serving_job_id:
         resources["serving_job_id"] = config.serving_job_id
     return resources
+
+
+def phase_attributes(*, phase: str, root: str, parent: str | None, clock_domain: str) -> dict[str, str]:
+    """Attributes that place one duration in a phase tree; a root carries no parent."""
+    attributes = {"phase": phase, "root": root, "clock_domain": clock_domain}
+    if parent is not None:
+        attributes["parent"] = parent
+    return attributes
 
 
 @contextlib.contextmanager

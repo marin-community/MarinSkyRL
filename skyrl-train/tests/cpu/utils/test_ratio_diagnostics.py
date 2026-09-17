@@ -27,37 +27,37 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
 def test_ratio_statistics_match_hand_values_and_clamp_only_exponentials():
     values = [0, math.log(2), -math.log(2), math.log(4), math.log(1e-6), 0]
     result = ratio_statistics(torch.tensor(values, dtype=torch.float64))
-    assert result["frac_outside_0.5_2"] == pytest.approx(2 / 6)
-    assert result["frac_below_1e-5"] == pytest.approx(1 / 6)
+    assert result["frac_outside_0_5_2"] == pytest.approx(2 / 6)
+    assert result["frac_below_1e_5"] == pytest.approx(1 / 6)
     assert result["kl_k1"] == pytest.approx(-sum(values) / 6, abs=1e-9)
     assert result["kl_k3"] == pytest.approx(sum(math.exp(x) - x - 1 for x in values) / 6, abs=1e-9)
     assert result["chi2"] == pytest.approx(sum(math.exp(2 * x) for x in values) / 6 - 1, abs=1e-9)
     extreme = ratio_statistics(torch.tensor([1000.0], dtype=torch.float64))
-    assert extreme["abs_log_ratio_mean"] == 1000
-    assert extreme["mean_squared_log_ratio"] == 1e6
+    assert extreme["log_ratio_abs_mean"] == 1000
+    assert extreme["log_ratio_mean_squared"] == 1e6
     assert extreme["ess_fraction"] == 1
     assert all(math.isfinite(value) for value in extreme.values())
 
 
-def test_mismatch_metrics_bucket_by_age_and_absolute_position():
+def test_mismatch_metrics_bucket_by_staleness_and_absolute_position():
     lengths = torch.tensor([300, 600, 100, 700])
     mask = torch.arange(700).unsqueeze(0) < lengths.unsqueeze(1)
     delta = torch.tensor([0.1, 0.2, 0.3, 0.9], dtype=torch.float64).unsqueeze(1).expand(4, 700)
     rollout = torch.zeros_like(delta)
     rollout[~mask] = math.nan
     result = mismatch_ratio_metrics(delta, rollout, mask, torch.tensor([0, 0, 3, 9]))
-    assert result["policy/mismatch/age0/abs_log_ratio_mean"] == pytest.approx((300 * 0.1 + 600 * 0.2) / 900)
-    assert result["policy/mismatch/age8+/abs_log_ratio_mean"] == pytest.approx(0.9)
-    assert result["policy/mismatch/age0/pos_last256/selected_tokens"] == 512
-    assert result["policy/mismatch/age3/pos_first256/selected_tokens"] == 100
-    assert result["policy/mismatch/age3/pos_last256/selected_tokens"] == 100
-    assert result["policy/mismatch/age1/selected_tokens"] == 0
-    assert "policy/mismatch/age1/ess_fraction" not in result
+    assert result["policy/mismatch/staleness0/log_ratio_abs_mean"] == pytest.approx((300 * 0.1 + 600 * 0.2) / 900)
+    assert result["policy/mismatch/staleness8+/log_ratio_abs_mean"] == pytest.approx(0.9)
+    assert result["policy/mismatch/staleness0/pos_last256/selected_tokens"] == 512
+    assert result["policy/mismatch/staleness3/pos_first256/selected_tokens"] == 100
+    assert result["policy/mismatch/staleness3/pos_last256/selected_tokens"] == 100
+    assert result["policy/mismatch/staleness1/selected_tokens"] == 0
+    assert "policy/mismatch/staleness1/ess_fraction" not in result
     # Put a single mismatch exactly at the 600-token row's last-window boundary.
     changed = torch.zeros_like(delta)
     changed[1, 343:345] = torch.tensor([10.0, 20.0])
     boundary = mismatch_ratio_metrics(changed, rollout, mask, torch.tensor([0, 0, 3, 9]))
-    assert boundary["policy/mismatch/age0/pos_last256/abs_log_ratio_mean"] == pytest.approx(20 / 512)
+    assert boundary["policy/mismatch/staleness0/pos_last256/log_ratio_abs_mean"] == pytest.approx(20 / 512)
 
 
 def test_worker_accumulator_matches_pooled_ess_and_tail_under_unequal_microbatches():
@@ -68,7 +68,7 @@ def test_worker_accumulator_matches_pooled_ess_and_tail_under_unequal_microbatch
         monitor.add(shard, torch.zeros_like(shard), torch.ones_like(shard))
     actual, expected = monitor.metrics(), ratio_statistics(values)
     assert actual["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], abs=1e-10)
-    assert actual["log_ratio_abs_p999"] == pytest.approx(expected["abs_log_ratio_p999"], abs=1e-5)
+    assert actual["log_ratio_abs_p999"] == pytest.approx(expected["log_ratio_abs_p999"], abs=1e-5)
     assert actual["log_ratio_kl_k1"] == pytest.approx(expected["kl_k1"], abs=1e-10)
     assert actual["log_ratio_kl_k3"] == pytest.approx(expected["kl_k3"], rel=1e-10)
     assert actual["log_ratio_p999_valid"] == 1
@@ -136,13 +136,13 @@ def test_rank_reduction_pools_unequal_token_counts_and_excludes_replicas():
         return results[0]
 
     actual = pooled_monitors()
-    assert actual["stale/abs_log_ratio_p50"] == 0
-    assert actual["stale/abs_log_ratio_p95"] == 0
-    assert actual["stale/finite_fraction"] == 1
+    assert actual["log_ratio_exact_abs_p50"] == 0
+    assert actual["log_ratio_exact_abs_p95"] == 0
+    assert actual["log_ratio_exact_finite_fraction"] == 1
     assert actual["log_ratio_selected_tokens"] == 20_000
     assert actual["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], rel=1e-10)
     assert actual["log_ratio_mean"] == pytest.approx(expected["log_ratio_mean"], abs=1e-10)
-    assert actual["log_ratio_abs_p999"] == pytest.approx(expected["abs_log_ratio_p999"], abs=1e-5)
+    assert actual["log_ratio_abs_p999"] == pytest.approx(expected["log_ratio_abs_p999"], abs=1e-5)
     assert actual["log_ratio_p999_valid"] == 1
 
     # One failing rank invalidates the family on all ranks, rather than being
@@ -177,7 +177,7 @@ def test_two_actual_gloo_ranks_emit_identical_token_pooled_statistics(tmp_path):
     expected = ratio_statistics(torch.cat([torch.arange(1, 101, dtype=torch.float64) / 10, torch.zeros(19_900)]))
     assert left["pooled"]["log_ratio_selected_tokens"] == 20_000
     assert left["pooled"]["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], rel=1e-10)
-    assert left["pooled"]["log_ratio_abs_p999"] == pytest.approx(expected["abs_log_ratio_p999"], abs=1e-5)
+    assert left["pooled"]["log_ratio_abs_p999"] == pytest.approx(expected["log_ratio_abs_p999"], abs=1e-5)
     assert left["pooled"]["log_ratio_p999_valid"] == 1
     assert left["failed"]["log_ratio_p999_valid"] == 0
     assert left["failed"]["log_ratio_diagnostics_failed"] == 1
@@ -189,24 +189,24 @@ def test_worker_full_statistic_coverage_clip_bounds_and_nonfinite_counts():
     monitor.add(values, torch.zeros_like(values), torch.ones_like(values))
     actual = monitor.metrics()
     oracle = ratio_statistics(values, eps_clip_low=0.1, eps_clip_high=0.3)
-    for key in (
-        "abs_log_ratio_p50",
-        "abs_log_ratio_p95",
-        "finite_fraction",
-        "lower_clip_pressure",
-        "upper_clip_pressure",
+    for key, published in (
+        ("log_ratio_abs_p50", "log_ratio_exact_abs_p50"),
+        ("log_ratio_abs_p95", "log_ratio_exact_abs_p95"),
+        ("finite_fraction", "log_ratio_exact_finite_fraction"),
+        ("lower_clip_pressure", "log_ratio_lower_clip_pressure"),
+        ("upper_clip_pressure", "log_ratio_upper_clip_pressure"),
     ):
-        assert actual[f"stale/{key}"] == pytest.approx(oracle[key], abs=1e-12)
-    assert actual["stale/quantiles_valid"] == 1
-    assert actual["stale/quantiles_overflow_ranks"] == 0
+        assert actual[published] == pytest.approx(oracle[key], abs=1e-12)
+    assert actual["log_ratio_exact_valid"] == 1
+    assert actual["log_ratio_exact_overflow_ranks"] == 0
     monitor.add(torch.tensor([[float("nan"), 1.0]]), torch.zeros(1, 2), torch.ones(1, 2))
     actual = monitor.metrics()
-    assert actual["stale/selected_tokens"] == 7
-    assert actual["stale/finite_tokens"] == 6
-    assert actual["stale/finite_fraction"] == 6 / 7
-    assert actual["stale/statistics_valid"] == 0
-    assert actual["stale/quantiles_valid"] == 0
-    assert actual["stale/abs_log_ratio_p50"] == 0
+    assert actual["log_ratio_exact_selected_tokens"] == 7
+    assert actual["log_ratio_exact_finite_tokens"] == 6
+    assert actual["log_ratio_exact_finite_fraction"] == 6 / 7
+    assert actual["log_ratio_statistics_valid"] == 0
+    assert actual["log_ratio_exact_valid"] == 0
+    assert actual["log_ratio_exact_abs_p50"] == 0
 
 
 def test_quantiles_stay_exact_above_the_size_torch_refuses():
@@ -235,12 +235,12 @@ def test_exact_quantiles_gate_decides_whether_tokens_are_retained():
     assert set(off) == set(on)
     # Nothing was retained with the gate off, so the family reports no population at all
     # rather than a quantile over the tokens it did not keep.
-    assert off["stale/finite_tokens"] == 0 and on["stale/finite_tokens"] == 4
-    assert off["stale/quantiles_valid"] == 0 and on["stale/quantiles_valid"] == 1
-    assert off["stale/abs_log_ratio_p50"] == 0
-    assert on["stale/abs_log_ratio_p50"] == pytest.approx(ratio_statistics(values)["abs_log_ratio_p50"])
-    assert off["stale/upper_clip_pressure"] == 0
-    assert on["stale/upper_clip_pressure"] == pytest.approx(0.5)
+    assert off["log_ratio_exact_finite_tokens"] == 0 and on["log_ratio_exact_finite_tokens"] == 4
+    assert off["log_ratio_exact_valid"] == 0 and on["log_ratio_exact_valid"] == 1
+    assert off["log_ratio_exact_abs_p50"] == 0
+    assert on["log_ratio_exact_abs_p50"] == pytest.approx(ratio_statistics(values)["log_ratio_abs_p50"])
+    assert off["log_ratio_upper_clip_pressure"] == 0
+    assert on["log_ratio_upper_clip_pressure"] == pytest.approx(0.5)
     # The ungated accumulator is unaffected by the gate.
     assert off["log_ratio_abs_mean"] == on["log_ratio_abs_mean"]
 

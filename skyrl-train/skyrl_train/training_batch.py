@@ -358,7 +358,7 @@ class TrainingInput(TypedDict, total=False):
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     # Policy versions this row is behind at consumption; one entry per row.
-    rollout_age: Optional[Integer[torch.Tensor, "batch_size"]]  # noqa: F821
+    rollout_staleness: Optional[Integer[torch.Tensor, "batch_size"]]  # noqa: F821
     teacher_action_log_probs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     teacher_topk_indices: Optional[Integer[torch.Tensor, "batch_size seq_len top_k"]]
     teacher_topk_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]

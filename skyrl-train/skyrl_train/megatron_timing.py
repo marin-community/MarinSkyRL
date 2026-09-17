@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
-from skyrl_train.telemetry import WORKER_ROLE, phase_duration
+from skyrl_train.telemetry import WORKER_ROLE, phase_attributes, phase_duration
 
 
 FORWARD_BACKWARD_SCHEDULER = "megatron_forward_backward_scheduler"
@@ -16,8 +16,8 @@ PIPELINE_METRIC_BROADCAST = "megatron_pipeline_metric_broadcast"
 OPTIMIZER_STEP = "megatron_optimizer_step"
 WORLD_METRIC_REDUCTION = "megatron_world_metric_reduction"
 FINAL_BARRIER = "megatron_final_barrier"
-TOTAL = "megatron_policy_train_total"
-RESIDUAL = "megatron_policy_train_residual"
+TOTAL = "ppo_train"
+RESIDUAL = "ppo_train_residual"
 
 EXCLUSIVE_PHASES = frozenset(
     {
@@ -107,15 +107,21 @@ def publish_megatron_train_timings(
     """Enqueue worker timings without flushing the process telemetry exporter."""
     base_attributes = {
         "backend": "megatron",
-        "clock_domain": "cpu_dispatch_wall",
         "outcome": outcome,
         "rank": str(rank),
         "role": WORKER_ROLE,
         "step": str(step),
-        "root": TOTAL,
     }
     for observation in observations:
-        attributes = {**base_attributes, "phase": observation.phase}
-        if observation.parent_phase is not None:
-            attributes["parent"] = observation.parent_phase
-        recorder.record(observation.seconds, attributes=attributes)
+        recorder.record(
+            observation.seconds,
+            attributes={
+                **base_attributes,
+                **phase_attributes(
+                    phase=observation.phase,
+                    root=TOTAL,
+                    parent=observation.parent_phase,
+                    clock_domain="cpu_dispatch_wall",
+                ),
+            },
+        )

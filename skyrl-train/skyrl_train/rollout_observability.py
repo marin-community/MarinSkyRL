@@ -10,7 +10,7 @@ import contextlib
 import json
 import math
 import time
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import Executor
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -18,7 +18,7 @@ from functools import partial
 from typing import Literal
 from uuid import uuid4
 
-from skyrl_train.telemetry import TRAINER_ROLE, phase_duration, record_event, telemetry
+from skyrl_train.telemetry import TRAINER_ROLE, phase_attributes, phase_duration, record_event, telemetry
 
 
 RolloutPhase = Literal["collect", "assemble", "finalize", "tokenize", "retain"]
@@ -30,14 +30,15 @@ _PARENTS = {
     "retain": "finalize",
 }
 _EXCLUSIVE_PHASES = ("collect", "assemble", "finalize")
-# At most 64 finite float pairs fit below the exporter's 4096-byte string limit.
+# At most 64 finite float pairs fit below the exporter's 4096-byte string limit. Each pair is
+# the start and end of one model await in seconds since the call started.
 _MAX_MODEL_INTERVALS = 64
 _CURRENT: ContextVar["RolloutObservation | None"] = ContextVar("rollout_observation", default=None)
 wait_seconds = telemetry.histogram("rollout_wait_seconds", unit="s")
-wait_count = telemetry.counter("rollout_wait_count", unit="{wait}")
-call_count = telemetry.counter("rollout_call_count", unit="{call}")
+waits = telemetry.counter("rollout_waits", unit="{wait}")
+calls = telemetry.counter("rollout_calls", unit="{call}")
 buffer_dwell = telemetry.histogram("rollout_buffer_dwell_seconds", unit="s")
-group_count = telemetry.counter("rollout_group_count", unit="{group}")
+groups = telemetry.counter("rollout_groups", unit="{group}")
 group_tokens = telemetry.counter("rollout_group_tokens", unit="{token}")
 event_loop_lag = telemetry.histogram("event_loop_lag_seconds", unit="s")
 
@@ -70,75 +71,6 @@ def async_phase_window(phase: str, *, step: int, enabled: bool) -> Iterator[None
             },
             attributes={"phase": phase, "step": str(step), "role": TRAINER_ROLE, "outcome": outcome},
         )
-
-
-def consumed_stop_metrics(stop_reasons: Sequence[str | None] | None, sequence_count: int) -> dict[str, float]:
-    """Count length stops on admitted sequences, before padding or worker sharding.
-
-    A length stop can come from engine or runner budget exhaustion; it does not
-    establish answer incompleteness. Omit the fraction without complete coverage.
-    """
-    if sequence_count < 0 or (stop_reasons is not None and len(stop_reasons) != sequence_count):
-        raise ValueError("Stop reasons must align with the admitted response sequences")
-    reasons = [None] * sequence_count if stop_reasons is None else stop_reasons
-    known = sum(reason is not None and reason != "" for reason in reasons)
-    length_stops = sum(reason == "length" for reason in reasons)
-    metrics = {
-        "sequences": float(sequence_count),
-        "length_stop_count": float(length_stops),
-        "known_stop_count": float(known),
-        "unknown_stop_count": float(sequence_count - known),
-    }
-    if sequence_count:
-        metrics["stop_reason_coverage"] = known / sequence_count
-        if known == sequence_count:
-            metrics["length_stop_fraction"] = length_stops / sequence_count
-    return {f"consumed/{name}": value for name, value in metrics.items()}
-
-
-def async_step_metrics(
-    *,
-    core_seconds: float,
-    cycle_seconds: float,
-    buffer_wait_seconds: float,
-    training_seconds: float,
-    sync_seconds: float,
-    consumed_loss_tokens: int,
-    consumed_response_tokens: int,
-    policy_gpus: int,
-    inference_gpus: int,
-) -> dict[str, float]:
-    """Summarize driver walls and useful work; GPU denominators are configured roles.
-
-    Core excludes callbacks, checkpoint and evaluation. Cycle includes them up to
-    metric publication; neither includes startup, inter-epoch cleanup or final
-    export. These rates are not whole-job billed efficiency or GPU utilization.
-    """
-    metrics = {
-        "core_seconds": core_seconds,
-        "cycle_seconds": cycle_seconds,
-        "outside_core_seconds": cycle_seconds - core_seconds,
-        "configured_policy_gpus": float(policy_gpus),
-        "configured_inference_gpus": float(inference_gpus),
-        "consumed_loss_tokens": float(consumed_loss_tokens),
-        "consumed_response_tokens": float(consumed_response_tokens),
-    }
-    if core_seconds > 0:
-        metrics.update(
-            buffer_wait_fraction=buffer_wait_seconds / core_seconds,
-            training_fraction=training_seconds / core_seconds,
-            weight_sync_fraction=sync_seconds / core_seconds,
-            consumed_loss_tokens_per_core_second=consumed_loss_tokens / core_seconds,
-        )
-    if cycle_seconds > 0:
-        metrics["consumed_loss_tokens_per_cycle_second"] = consumed_loss_tokens / cycle_seconds
-        if policy_gpus > 0:
-            metrics["loss_tokens_per_configured_policy_gpu_second"] = consumed_loss_tokens / cycle_seconds / policy_gpus
-        if inference_gpus > 0:
-            metrics["response_tokens_per_configured_inference_gpu_second"] = (
-                consumed_response_tokens / cycle_seconds / inference_gpus
-            )
-    return {f"async/performance/{name}": value for name, value in metrics.items()}
 
 
 async def monitor_event_loop_lag(
@@ -176,7 +108,7 @@ def publish_wait(name: str, wait: WaitObservation, *, step: int, mode: str) -> N
     attributes = {"wait": name, "role": TRAINER_ROLE, "step": str(step), "mode": mode}
     wait_seconds.record(wait.total, attributes={**attributes, "stat": "sum"})
     wait_seconds.record(wait.maximum, attributes={**attributes, "stat": "max"})
-    wait_count.add(wait.count, attributes=attributes)
+    waits.add(wait.count, attributes=attributes)
 
 
 @dataclass
@@ -184,6 +116,8 @@ class RolloutObservation:
     step: int
     mode: str
     clock: Callable[[], float] = time.perf_counter
+    started: float = 0.0
+    started_unix_ms: int = 0
     call_id: str = field(default_factory=lambda: uuid4().hex)
     durations: dict[str, float] = field(default_factory=dict)
     waits: dict[str, WaitObservation] = field(default_factory=dict)
@@ -194,11 +128,11 @@ class RolloutObservation:
     def record_wait(self, name: str, duration: float) -> None:
         self.waits.setdefault(name, WaitObservation()).add(duration)
 
-    def publish(self, started: float, finished: float, outcome: str) -> None:
-        total = finished - started
+    def publish(self, finished: float, outcome: str) -> None:
+        total = finished - self.started
         residual = total - sum(self.durations.get(name, 0.0) for name in _EXCLUSIVE_PHASES)
         attributes = {"role": TRAINER_ROLE, "step": str(self.step), "mode": self.mode, "outcome": outcome}
-        call_count.add(1, attributes=attributes)
+        calls.add(1, attributes=attributes)
         phases = {"rollout_call": total, **self.durations, "rollout_call_residual": residual}
         for name, duration in phases.items():
             parent = _PARENTS.get(name, "rollout_call" if name == "rollout_call_residual" else None)
@@ -206,10 +140,12 @@ class RolloutObservation:
                 duration,
                 attributes={
                     **attributes,
-                    "phase": f"rollout_{name}" if name in _PARENTS else name,
-                    "root": "rollout_call",
-                    **({"parent": f"rollout_{parent}" if parent in _PARENTS else parent} if parent is not None else {}),
-                    "clock_domain": "driver_monotonic",
+                    **phase_attributes(
+                        phase=f"rollout_{name}" if name in _PARENTS else name,
+                        root="rollout_call",
+                        parent=None if parent is None else (f"rollout_{parent}" if parent in _PARENTS else parent),
+                        clock_domain="driver_monotonic",
+                    ),
                 },
             )
         for name, wait in self.waits.items():
@@ -220,9 +156,10 @@ class RolloutObservation:
             "rollout_call",
             {
                 "call_id": self.call_id,
-                "started": started,
-                "finished": finished,
-                **{f"duration_{name}": duration for name, duration in phases.items()},
+                "started_unix_ms": self.started_unix_ms,
+                "finished_unix_ms": self.started_unix_ms + round(total * 1000),
+                "duration_seconds": total,
+                **{f"duration_{name}": duration for name, duration in phases.items() if name != "rollout_call"},
                 "model_awaits_json": json.dumps(self.model_awaits, separators=(",", ":"), allow_nan=False),
                 "interval_count": self.model_await_count,
                 "truncated": self.model_await_count > len(self.model_awaits),
@@ -239,9 +176,10 @@ def observe_rollout_call(
     if not enabled:
         yield None
         return
-    observation = RolloutObservation(step=step, mode=mode, clock=clock)
+    observation = RolloutObservation(
+        step=step, mode=mode, clock=clock, started=clock(), started_unix_ms=time.time_ns() // 1_000_000
+    )
     token = _CURRENT.set(observation)
-    started = clock()
     outcome = "success"
     try:
         yield observation
@@ -254,7 +192,7 @@ def observe_rollout_call(
     finally:
         finished = clock()
         _CURRENT.reset(token)
-        observation.publish(started, finished, outcome)
+        observation.publish(finished, outcome)
 
 
 @contextlib.contextmanager
@@ -285,7 +223,7 @@ def rollout_wait(name: str) -> Iterator[None]:
         if name == "model_client_await":
             observation.model_await_count += 1
             if len(observation.model_awaits) < _MAX_MODEL_INTERVALS:
-                observation.model_awaits.append((started, finished))
+                observation.model_awaits.append((started - observation.started, finished - observation.started))
 
 
 def time_tokenization(func: Callable, *args, **kwargs):
@@ -336,20 +274,20 @@ async def run_environment(executor: Executor | None, func: Callable, *args, **kw
             observation.record_wait("env_resume", clock() - stamps[1])
 
 
-def record_group_outcome(
+def record_group_disposition(
     *,
-    outcome: str,
+    disposition: str,
     tokens: int,
     step: int,
     completed_at: float | None = None,
     attempt_id: str | None = None,
     admitted_at: float | None = None,
 ) -> None:
-    attributes = {"role": TRAINER_ROLE, "step": str(step), "outcome": outcome}
-    group_count.add(1, attributes=attributes)
+    attributes = {"role": TRAINER_ROLE, "step": str(step), "disposition": disposition}
+    groups.add(1, attributes=attributes)
     group_tokens.add(tokens, attributes=attributes)
     if completed_at is not None:
         finished = time.perf_counter() if admitted_at is None else admitted_at
         buffer_dwell.record(finished - completed_at, attributes=attributes)
     if attempt_id is not None:
-        record_event("rollout_group_outcome", {"call_id": attempt_id, "tokens": tokens}, attributes=attributes)
+        record_event("rollout_group_disposition", {"call_id": attempt_id, "tokens": tokens}, attributes=attributes)

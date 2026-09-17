@@ -18,12 +18,12 @@ import sys
 import time
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
-from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.trainer import RayPPOTrainer, consumed_work
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
-from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
+from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader, async_step_metrics
 from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.trajectory_runners.trajectory_processing import (
     prepare_trajectory_request,
@@ -50,11 +50,10 @@ from skyrl_train.telemetry import (
 )
 from skyrl_train.rollout_observability import (
     async_phase_window,
-    async_step_metrics,
     async_wait,
     monitor_event_loop_lag,
     observe_rollout_call,
-    record_group_outcome,
+    record_group_disposition,
 )
 from skyrl_train.timing_observability import publish_step_timings
 from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState
@@ -867,7 +866,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         Timer("wait_for_generation_buffer", self.all_timings) as rollout_wait_timer,
                         critical_phase("rollout_or_inference_wait", self.global_step),
                         async_phase_window(
-                            "rollout_wait", step=self.global_step, enabled=self._training_metrics_enabled
+                            "rollout_wait", step=self.global_step, enabled=self._async_observations_enabled
                         ),
                     ):
                         cur_generation_group_mini_batch = await self._get_admitted_generation_group_mini_batch(
@@ -946,7 +945,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # 3. Run training and record consumed UIDs in the tracker.
                     with (
                         Timer("run_training", self.all_timings),
-                        async_phase_window("training", step=self.global_step, enabled=self._training_metrics_enabled),
+                        async_phase_window("training", step=self.global_step, enabled=self._async_observations_enabled),
                     ):
                         status = await self._run_training(training_input)
                     train_duration = self.all_timings["train_critic_and_policy"]
@@ -975,7 +974,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     #    max_staleness_steps accounting — exactly like stock
                     #    fully_async, which never drains trial orchestration. This
                     #    block is now byte-identical for fan-out ON and OFF.
-                    with Timer("sync_weights", self.all_timings) as weight_update_timer:
+                    with (
+                        Timer("sync_weights", self.all_timings) as weight_update_timer,
+                        async_phase_window(
+                            "weight_sync", step=self.global_step, enabled=self._async_observations_enabled
+                        ),
+                    ):
                         await self._sync_policy_weights_and_offload_optimizer(sync_phase="training_step")
                     self._log_weight_update_completed(
                         reason="training_step",
@@ -985,7 +989,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # Core ends here, before the callbacks: checkpointing and evaluation run
                     # inside the step timer but are not the loop's core cycle.
                     core_seconds = time.perf_counter() - core_started
-                    if self._training_metrics_enabled:
+                    if self._async_observations_enabled:
                         record_event(
                             "async_step_window",
                             {
@@ -1008,6 +1012,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 if self._training_metrics_enabled:
                     placement = self.cfg.trainer.placement
                     generator = self.cfg.generator
+                    consumed = consumed_work(training_input)
                     self.all_metrics.update(
                         async_step_metrics(
                             core_seconds=core_seconds,
@@ -1015,8 +1020,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             buffer_wait_seconds=self.all_timings["wait_for_generation_buffer"],
                             training_seconds=self.all_timings["run_training"],
                             sync_seconds=self.all_timings["sync_weights"],
-                            consumed_loss_tokens=int(training_input["loss_mask"].sum().item()),
-                            consumed_response_tokens=int(training_input["response_mask"].sum().item()),
+                            consumed_loss_tokens=consumed.loss_tokens,
+                            consumed_response_tokens=consumed.response_tokens,
                             policy_gpus=placement.policy_num_nodes * placement.policy_num_gpus_per_node,
                             inference_gpus=(
                                 generator.num_inference_engines
@@ -1206,20 +1211,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # train policy/critic model
         with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step", self.global_step):
-            started = time.perf_counter()
-            outcome = "failure"
-            try:
-                status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
-                outcome = "success"
-            finally:
-                if self._async_observations_enabled:
-                    # The window rollouts complete against; the dashboard joins rollout_call
-                    # events to it.
-                    record_event(
-                        "policy_training_interval",
-                        {"started": started, "finished": time.perf_counter()},
-                        attributes={"role": TRAINER_ROLE, "step": str(self.global_step), "outcome": outcome},
-                    )
+            status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
         return status
 
@@ -1367,12 +1359,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
         )
 
-    def _record_group_terminal(self, group: GeneratedOutputGroup, outcome: str) -> None:
-        """Record one terminal outcome per group, whatever ends its life."""
+    def _record_group_terminal(self, group: GeneratedOutputGroup, disposition: str) -> None:
+        """Record one terminal disposition per group, whatever ends its life."""
         if not self._async_observations_enabled or group.telemetry_finished:
             return
-        record_group_outcome(
-            outcome=outcome,
+        record_group_disposition(
+            disposition=disposition,
             tokens=sum(len(ids) for ids in group.trajectory_batch["response_ids"]),
             step=self.global_step,
             completed_at=group.completed_at,
@@ -1756,11 +1748,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         trajectory_batches = []
         uids = []
         stalenesses = []
-        age_by_uid: dict[str, int] = {}
+        staleness_by_uid: dict[str, int] = {}
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.earliest_model_step
             stalenesses.append(cur_staleness)
-            age_by_uid[cur_generated_output_group.uid] = cur_staleness
+            staleness_by_uid[cur_generated_output_group.uid] = cur_staleness
             trajectory_batches.append(cur_generated_output_group.trajectory_batch)
             group_size = len(cur_generated_output_group.trajectory_batch["response_ids"])
             uids.extend([cur_generated_output_group.uid] * group_size)
@@ -1793,13 +1785,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
         trajectory_batch, uids = self.select_trajectories(trajectory_batch, uids)
         # Rebuilt here, not before selection: select_trajectories may drop rows.
-        rollout_age = [age_by_uid[uid] for uid in uids]
+        rollout_staleness = [staleness_by_uid[uid] for uid in uids]
 
         # print example just for debugging
         vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
         logger.debug(f"Example generated: {vis}")
 
-        return self.convert_to_training_input(trajectory_batch, uids, rollout_age=rollout_age)
+        return self.convert_to_training_input(trajectory_batch, uids, rollout_staleness=rollout_staleness)
 
     def save_checkpoints(self):
         """

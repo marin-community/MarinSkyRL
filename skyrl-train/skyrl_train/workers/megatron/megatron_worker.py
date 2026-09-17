@@ -325,9 +325,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
     def forward(self, data):
-        with self._memory.span(
-            "learner_logprob_forward", step=data.metadata.get("global_step"), step_kind="target_update"
-        ):
+        with self._memory.span("forward", step=data.metadata.get("global_step"), step_kind="global_step"):
             return super().forward(data)
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
@@ -502,12 +500,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self._grad_updates = ()
         try:
             with self._memory.span(
-                "ppo_forward_backward_update",
+                "ppo_train",
                 step=int(train_data.metadata["global_step"]),
-                step_kind="target_update",
+                step_kind="global_step",
             ):
                 output = self._ppo_train_with_timings(train_data, timing)
-            self._completed_update = int(train_data.metadata["global_step"])
+            self._model_version_step = int(train_data.metadata["global_step"])
             outcome = "success"
             return output
         finally:
@@ -672,7 +670,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         return output
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
-        with self._memory.span("weight_publication", step=self._completed_update, step_kind="completed_update"):
+        with self._memory.span(
+            "broadcast_to_inference_engines", step=self._model_version_step, step_kind="model_version_step"
+        ):
             return await self._broadcast_to_inference_engines(inference_engine_client)
 
     async def _broadcast_to_inference_engines(self, inference_engine_client):
