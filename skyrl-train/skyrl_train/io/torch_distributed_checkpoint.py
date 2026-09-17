@@ -2,14 +2,33 @@ from collections.abc import Generator
 from contextlib import contextmanager
 import io
 import os
+from typing import cast, Protocol, runtime_checkable
 
 from fsspec import AbstractFileSystem
 from loguru import logger
-from torch.distributed.checkpoint import FileSystemWriter, SavePlan
+import torch
+from torch.distributed.checkpoint import FileSystemWriter, SavePlan, SavePlanner
 from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
+from torch.distributed.checkpoint.filesystem import (
+    DEFAULT_SUFFIX,
+    _item_size,
+    _OverlappingCpuLoader,
+    _SerialCpuLoader,
+    _write_item,
+)
+from torch.distributed.checkpoint.planner import WriteItem, WriteItemType
+from torch.distributed.checkpoint.storage import WriteResult
+from torch.futures import Future
 
 
 DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**31
+
+
+@runtime_checkable
+class _AbortableWriteStream(Protocol):
+    closed: bool
+
+    def discard(self) -> None: ...
 
 
 class _AbortableFsspecFileSystem(FsspecFileSystem):
@@ -30,7 +49,7 @@ class _AbortableFsspecFileSystem(FsspecFileSystem):
             yield stream
             stream.close()
         except BaseException as error:
-            if any(character in mode for character in "w+a") and hasattr(stream, "discard"):
+            if any(character in mode for character in "w+a") and isinstance(stream, _AbortableWriteStream):
                 try:
                     stream.discard()
                     stream.closed = True
@@ -72,3 +91,60 @@ class StreamingFsspecWriter(FileSystemWriter):
             self.tensor_copy_ahead_bytes,
         )
         return plan
+
+    def write_data(self, plan: SavePlan, planner: SavePlanner) -> Future[list[WriteResult]]:
+        """Write a rank shard without retaining serialized tensors until close."""
+        storage_plan = plan.storage_data
+        if storage_plan is None:
+            raise AssertionError("DCP storage plan is missing its rank prefix")
+        file_name = f"{storage_plan.prefix}0{DEFAULT_SUFFIX}"
+        path = self.fs.concat_path(self.path, file_name)
+
+        tensor_items = [item for item in plan.items if item.type != WriteItemType.BYTE_IO]
+        if torch.cuda.is_available():
+            loader = _OverlappingCpuLoader(
+                planner.resolve_data,
+                inflight_threshhold=self.tensor_copy_ahead_bytes,
+            )
+        else:
+            loader = _SerialCpuLoader(planner.resolve_data)
+        for item in tensor_items:
+            loader.add(_item_size(item), item)
+        loader.start_loading()
+
+        results: list[WriteResult] = []
+        with self.fs.create_stream(path, "wb") as stream:
+            for item in plan.items:
+                if item.type == WriteItemType.BYTE_IO:
+                    results.append(
+                        _write_item(
+                            self.transforms,
+                            stream,
+                            planner.resolve_data(item),
+                            item,
+                            file_name,
+                            self.serialization_format,
+                        )
+                    )
+
+            # PyTorch's stock one-file writer fills a safetensors dictionary even
+            # for torch.save, retaining every GPU-to-CPU copy until the rank closes.
+            # Emit each result immediately so only the loader's bounded window lives.
+            for tensor, item_object in loader.values():
+                item = cast(WriteItem, item_object)
+                if not tensor.is_cpu:
+                    raise AssertionError("DCP tensor must be on CPU before serialization")
+                results.append(
+                    _write_item(
+                        self.transforms,
+                        stream,
+                        tensor,
+                        item,
+                        file_name,
+                        self.serialization_format,
+                    )
+                )
+
+        future: Future[list[WriteResult]] = Future()
+        future.set_result(results)
+        return future

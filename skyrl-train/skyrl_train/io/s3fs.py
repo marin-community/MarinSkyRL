@@ -52,20 +52,15 @@ _RETRYABLE_TRANSLATED_ERROR_MARKERS = (
 )
 
 
-def s3_filesystem_kwargs() -> dict:
-    """Return the shared request bounds for a new s3fs filesystem."""
-    addressing_style = os.environ.get(_S3_ADDRESSING_STYLE_ENV, "virtual")
-    config_kwargs = s3_python_config_kwargs()
-    config_kwargs["retries"] = {"total_max_attempts": _S3_REQUEST_TOTAL_ATTEMPTS, "mode": "standard"}
-    config_kwargs["s3"] = {"addressing_style": addressing_style}
-    return {"config_kwargs": config_kwargs}
-
-
 def get_s3_fs():
     """Return a cached S3 filesystem instance, creating it once."""
     global _S3_FS
     if _S3_FS is None:
-        filesystem = fsspec.filesystem("s3", **s3_filesystem_kwargs())
+        addressing_style = os.environ.get(_S3_ADDRESSING_STYLE_ENV, "virtual")
+        config_kwargs = s3_python_config_kwargs()
+        config_kwargs["retries"] = {"total_max_attempts": _S3_REQUEST_TOTAL_ATTEMPTS, "mode": "standard"}
+        config_kwargs["s3"] = {"addressing_style": addressing_style}
+        filesystem = fsspec.filesystem("s3", config_kwargs=config_kwargs)
         filesystem.retries = _S3_FILESYSTEM_RETRIES
         _S3_FS = filesystem
     return _S3_FS

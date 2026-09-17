@@ -274,6 +274,7 @@ def test_streaming_dcp_upload_fails_and_aborts_when_peer_withholds_continue():
     assert endpoint.aborts_seen.is_set(), "the failed multipart upload was not aborted"
     assert result.error_type == "CheckpointException"
     assert result.failed_ranks == (0,)
+    assert any("s3://bucket/checkpoint/__0_0.distcp" in note for note in result.error_notes)
     assert 0.1 < result.elapsed < _UPLOAD_PROCESS_TIMEOUT
 
 

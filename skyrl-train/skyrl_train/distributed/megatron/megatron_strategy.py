@@ -219,6 +219,8 @@ class MegatronStrategy(DistributedStrategy):
             if self.is_rank_0():
                 try:
                     abort_multipart_uploads(ckpt_dir)
+                except ValueError:
+                    raise
                 except Exception:
                     logger.opt(exception=True).warning(
                         "Could not remove stale multipart uploads below {}; relying on bucket lifecycle cleanup",
