@@ -73,10 +73,10 @@ def teacher_evidence_from_prompt_logprobs(
         for row, prompt_length in enumerate(prompt_lengths):
             response_length = int(request.response_mask[row].sum().item())
             selected_mask = request.student_selected_mask[row, :response_length].tolist()
-            selected_indices = request.student_topk_indices[row, :response_length].tolist()
+            candidate_ids_by_offset = request.student_topk_indices[row, :response_length].tolist()
             selected_offsets = []
             row_scores = []
-            for offset, (is_selected, token_ids) in enumerate(zip(selected_mask, selected_indices, strict=True)):
+            for offset, (is_selected, token_ids) in enumerate(zip(selected_mask, candidate_ids_by_offset, strict=True)):
                 if not is_selected:
                     continue
                 scores = _position_scores(prompt_logprobs, row, prompt_length + offset)
