@@ -346,7 +346,7 @@ def training_command(
         f"trainer.validation_data_dir={output / 'validation'}",
         f"actor_rollout_ref.rollout.val_kwargs.temperature={training.eval_temperature}",
         f"actor_rollout_ref.rollout.val_kwargs.top_p={training.eval_nucleus_p}",
-        f"actor_rollout_ref.rollout.val_kwargs.max_tokens={training.response_limit}",
+        f"+actor_rollout_ref.rollout.val_kwargs.max_tokens={training.response_limit}",
         "actor_rollout_ref.rollout.val_kwargs.do_sample=True",
         f"actor_rollout_ref.rollout.val_kwargs.n={training.eval_samples}",
         "trainer.logger=['console']",
