@@ -244,6 +244,27 @@ def _find_available_rendezvous_port(excluded_ports: Collection[int] = ()) -> int
     raise RuntimeError(f"No free rendezvous port in [{_RENDEZVOUS_PORT_START}, {_RENDEZVOUS_PORT_STOP})")
 
 
+def get_pg_bundle_node_ips(placement_group, pg_indices: Collection[int]) -> List[str]:
+    """Node IP of each bundle index of ``placement_group``, resolved by zero-resource probe tasks
+    pinned to the bundles (the same mechanism as ``get_rendezvous_addr_port``)."""
+
+    @ray.remote(num_cpus=0, num_gpus=0)
+    def get_node_ip():
+        return ray.util.get_node_ip_address()
+
+    refs = [
+        get_node_ip.options(
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=placement_group,
+                placement_group_capture_child_tasks=True,
+                placement_group_bundle_index=idx,
+            )
+        ).remote()
+        for idx in pg_indices
+    ]
+    return list(ray.get(refs))
+
+
 def get_rendezvous_addr_port(placement_group, pg_index: int, excluded_ports: Collection[int] = ()) -> Tuple[str, int]:
     """
     Minimal helper to get a rendezvous addr:port in `placement_group`'s bundle at index `pg_index`.
