@@ -32,6 +32,7 @@ TIMING_PARENTS: dict[str, str | None] = {
     "save_hf_model": "step",
     "queue_hf_export": "step",
     "eval": "step",
+    "terminal_generation_quiescence": "step",
     "update_ref_with_policy": "step",
 }
 

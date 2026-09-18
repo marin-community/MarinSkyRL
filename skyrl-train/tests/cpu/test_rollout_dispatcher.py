@@ -341,6 +341,42 @@ async def test_coordinator_rpc_timeout_cancels_remote_work(ray_init, harbor_runn
 
 
 @pytest.mark.asyncio
+async def test_cancelled_dispatch_waits_for_remote_settlement_before_eval(harbor_runner_spec, monkeypatch):
+    calls: list[tuple[str, str]] = []
+    remote_result = asyncio.get_running_loop().create_future()
+    coordinator = _SessionCoordinator("eval", calls)
+    coordinator.run_shard = _RemoteMethod(lambda *_args: remote_result)
+    dispatcher = _dispatcher([coordinator], harbor_runner_spec)
+    cancel_calls = []
+
+    def capture_cancel(ref, *, force, recursive):
+        cancel_calls.append((ref, force, recursive))
+
+    monkeypatch.setattr(ray, "cancel", capture_cancel)
+
+    training = asyncio.create_task(dispatcher.run(_request([TrajectoryID("training", 0)], "train")))
+    while dispatcher._actor_pending_rpcs[0] == 0:
+        await asyncio.sleep(0)
+    training.cancel()
+    await asyncio.sleep(0)
+    evaluation = asyncio.create_task(dispatcher.start_eval_session(run_name="run", eval_step=1))
+    await asyncio.sleep(0)
+
+    assert len(cancel_calls) == 1
+    assert cancel_calls[0] == (remote_result, False, True)
+    assert not evaluation.done()
+    assert ("eval", "start_eval") not in calls
+
+    remote_result.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await training
+    await evaluation
+
+    assert calls == [("eval", "start_eval")]
+    assert dispatcher._actor_pending_rpcs == [0]
+
+
+@pytest.mark.asyncio
 async def test_coordinator_rpc_preserves_remote_timeout_error(harbor_runner_spec):
     remote_error = TimeoutError("remote post-processing timed out")
 

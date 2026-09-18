@@ -40,11 +40,18 @@ def test_unknown_spans_are_not_published():
 
 def test_post_step_work_is_published_under_the_step_root():
     observations = phase_timing_observations(
-        {"step": 10.0, "eval": 3.0, "save_checkpoints": 2.0, "cleanup_old_checkpoints": 0.5}
+        {
+            "step": 10.0,
+            "eval": 3.0,
+            "terminal_generation_quiescence": 1.0,
+            "save_checkpoints": 2.0,
+            "cleanup_old_checkpoints": 0.5,
+        }
     )
 
     by_name = {item.name: item for item in observations}
     assert by_name["eval"].parent == "step"
+    assert by_name["terminal_generation_quiescence"].parent == "step"
     assert by_name["save_checkpoints"].parent == "step"
     assert by_name["cleanup_old_checkpoints"].parent == "save_checkpoints"
     assert {item.root for item in observations} == {"step"}
