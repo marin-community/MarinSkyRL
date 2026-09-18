@@ -76,8 +76,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.http_endpoint_port = full_config.generator.http_endpoint_port
         self.enable_opencode_exact_continuation = opencode_exact_continuation_enabled(full_config)
         self.generation_paused_event = threading.Event()
-        # One wake-up event per event loop that has a request parked behind a pause: the
-        # trainer's loop and, with the HTTP endpoint, the server thread's loop.
+        # One wake-up event per event loop that has passed the pause barrier since the last
+        # release: the trainer's loop and, with the HTTP endpoint, the server thread's loop.
         self._resume_events: dict[asyncio.AbstractEventLoop, asyncio.Event] = {}
         self.weight_sync_pause_timeout = float(full_config.generator.weight_sync_pause_timeout_seconds)
         if self.weight_sync_pause_timeout <= 0:
