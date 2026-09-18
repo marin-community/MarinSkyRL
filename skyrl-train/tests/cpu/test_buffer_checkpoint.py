@@ -180,6 +180,29 @@ def test_consumed_admitted_groups_are_only_included_by_final_flush_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_completed_resume_binds_empty_buffer_before_final_save(tmp_path):
+    """A resume at max_steps can run final callbacks before an epoch starts."""
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.max_buffered_groups = 4
+    trainer._buffer_checkpoint_callback = BufferCheckpointCallback()
+    trainer.cfg = _FakeTrainer(str(tmp_path), asyncio.Queue()).cfg
+    step_dir = tmp_path / "global_step_5"
+    step_dir.mkdir()
+    artifact_path = step_dir / BufferCheckpointCallback.ARTIFACT_NAME
+    artifact_path.write_bytes(b"existing-buffer-state")
+
+    trainer._bind_empty_generation_buffer_for_completed_resume()
+    await trainer._buffer_checkpoint_callback.on_save_async(
+        _FakeState(5),
+        _FakeControl(),
+        trainer=trainer,
+    )
+
+    assert trainer._buffer_checkpoint_callback.has_bound_queues()
+    assert artifact_path.read_bytes() == b"existing-buffer-state"
+
+
+@pytest.mark.asyncio
 async def test_shutdown_flush_banks_consumed_batch_in_immediately_preceding_checkpoint(tmp_path):
     step_dir = tmp_path / "global_step_5"
     step_dir.mkdir()
