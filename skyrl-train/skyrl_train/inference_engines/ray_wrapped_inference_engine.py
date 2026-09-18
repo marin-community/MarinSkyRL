@@ -183,8 +183,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     ):
         self.inference_engine_actor = inference_engine_actor
         self.weight_sync_relative_rank_offset = weight_sync_relative_rank_offset
-        # Set only for node-local replicas, after their workers were verified at startup.
-        self.replica_placement: InferenceReplicaPlacement | None = None
+        # Set only for node-local replicas, after their workers were verified at startup: one
+        # entry per worker of this actor, in the actor's worker order.
+        self.worker_placements: list[InferenceReplicaPlacement] | None = None
 
     def tp_size(self):
         # Diagnostic: unwrap un-pickleable Ray exceptions into a plain
@@ -337,9 +338,10 @@ def create_ray_wrapped_inference_engines(
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
 
     node_local: opt-in. Place each engine's whole DP/EP replica on one node with a
-        STRICT_PACK group, then verify the workers actually started there on distinct
-        physical GPUs before returning. Requires non-colocated async vLLM with TP=PP=1
-        and EP=DP; every other placement keeps its existing contract.
+        STRICT_PACK group (with pipeline parallelism, each stage's DP group on one node),
+        then verify the workers actually started there on distinct physical GPUs before
+        returning. Requires non-colocated async vLLM with TP=1 and EP=DP; every other
+        placement keeps its existing contract.
     mp_backend: opt-in. When True (and TP>1 / PP>1 and NOT colocated), run each vLLM
         inference engine with the `mp` (multiprocessing) executor backend instead of `ray`.
         This is required for the Qwen3-Next-80B-A3B R3 router-capture path
@@ -368,6 +370,13 @@ def create_ray_wrapped_inference_engines(
         expert_parallel_size=expert_parallel_size,
         num_inference_engines=num_inference_engines,
         gpus_per_node=max(node_gpu_capacities.values(), default=0) if node_local else None,
+    )
+    # A node-local replica whose stages together exceed one node is packed softly and
+    # verified per stage after startup instead.
+    node_local_strategy = (
+        "STRICT_PACK"
+        if not node_local or data_parallel_size * pipeline_parallel_size <= max(node_gpu_capacities.values(), default=0)
+        else "PACK"
     )
     if backend == "vllm":
         import vllm
@@ -526,7 +535,7 @@ def create_ray_wrapped_inference_engines(
             for _ in range(num_inference_engines):
                 pg = placement_group(
                     [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
-                    strategy="STRICT_PACK",
+                    strategy=node_local_strategy,
                 )
                 per_engine_pgs.append(pg)
             for pg in per_engine_pgs:
@@ -544,11 +553,14 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
 
-    replica_nodes: list[str] = []
+    stage_nodes: list[list[str]] = []
     if node_local:
         try:
-            replica_nodes = node_local_bundle_nodes(
-                per_engine_pgs, data_parallel_size=data_parallel_size, node_gpu_capacities=node_gpu_capacities
+            stage_nodes = node_local_bundle_nodes(
+                per_engine_pgs,
+                data_parallel_size=data_parallel_size,
+                node_gpu_capacities=node_gpu_capacities,
+                pipeline_parallel_size=pipeline_parallel_size,
             )
         except Exception:
             for pg in per_engine_pgs:
@@ -851,11 +863,12 @@ def create_ray_wrapped_inference_engines(
             try:
                 placements = verified_inference_replica_placements(
                     startup_results,
-                    replica_nodes=replica_nodes,
+                    stage_nodes=stage_nodes,
                     node_hosts=node_hosts,
                     relative_rank_offsets=weight_sync_relative_rank_offsets,
                     data_parallel_size=data_parallel_size,
                     expert_parallel_size=expert_parallel_size,
+                    pipeline_parallel_size=pipeline_parallel_size,
                 )
             except Exception:
                 for actor in inference_engine_actors:
@@ -863,9 +876,12 @@ def create_ray_wrapped_inference_engines(
                 for pg in per_engine_pgs:
                     remove_placement_group(pg)
                 raise
-            for engine, placement in zip(engines, placements, strict=True):
-                engine.replica_placement = placement
-                logger.info("Verified inference replica placement: {}", placement)
+            for index, engine in enumerate(engines):
+                engine.worker_placements = placements[
+                    index * pipeline_parallel_size : (index + 1) * pipeline_parallel_size
+                ]
+                for placement in engine.worker_placements:
+                    logger.info("Verified inference replica placement: {}", placement)
 
     populate_engine_max_model_lens(engines, timeout_seconds=engine_init_timeout_seconds)
 

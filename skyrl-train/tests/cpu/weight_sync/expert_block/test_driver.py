@@ -119,7 +119,7 @@ class FakeRanks:
 
     def __init__(self, schedule=None):
         self.receiver_rows = receivers()
-        self.engines = [SimpleNamespace(replica_placement=placement(row)) for row in self.receiver_rows]
+        self.engines = [SimpleNamespace(worker_placements=[placement(row)]) for row in self.receiver_rows]
         self.generation_paused_event = threading.Event()
         self.generation_paused_event.set()
         self.schedule = schedule
@@ -183,23 +183,23 @@ class FakeRanks:
                 replies.append(None)
         return [self.reply(value) for value in replies]
 
-    # engine client
+    # engine client: one list per engine, one reply per worker (one worker per engine here)
     async def expert_block_rpc(self, method, *args):
         self.calls.append(("engines", method))
         replies = []
         for row in self.receiver_rows:
             if method == "inventory":
-                replies.append(receiver_inventory(row))
+                replies.append([receiver_inventory(row)])
             elif method == "init_transfer_engine":
                 replies.append(
-                    {"participant": args[0]["participants"][f"GPU-{row.replica}-{row.ep}"], "warmup_seconds": {}}
+                    [{"participant": args[0]["participants"][f"GPU-{row.replica}-{row.ep}"], "warmup_seconds": {}}]
                 )
             elif method == "receive_weights":
-                replies.append(self.report(receiver_participant(len(trainers()), row), args[0]["version"]))
+                replies.append([self.report(receiver_participant(len(trainers()), row), args[0]["version"])])
             elif method == "verify":
-                replies.append(self.replay_report(receiver_participant(len(trainers()), row), args[0]["version"]))
+                replies.append([self.replay_report(receiver_participant(len(trainers()), row), args[0]["version"])])
             else:
-                replies.append(None)
+                replies.append([None])
         return replies
 
 
@@ -269,7 +269,7 @@ def test_sync_requires_paused_generation(local_store):
 
 def test_prepare_requires_node_local_placement(local_store):
     ranks = FakeRanks()
-    ranks.engines[1].replica_placement = None
+    ranks.engines[1].worker_placements = None
     sync = ExpertBlockSync(policy_model=ranks, inference_engine_client=ranks, timeout_seconds=30)
     with pytest.raises(ValueError, match="inference_engine_node_local"):
         asyncio.run(sync.prepare())

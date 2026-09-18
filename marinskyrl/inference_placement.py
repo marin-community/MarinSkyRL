@@ -1,7 +1,8 @@
 """Node-local inference replica placement, shared by the launcher and the trainer.
 
 An opted-in replica is one vLLM data-parallel group whose ranks all sit on one
-physical node. The launcher validates the configuration before any GPU is
+physical node; with pipeline parallelism each stage's data-parallel group sits
+on one node. The launcher validates the configuration before any GPU is
 claimed; the trainer verifies the workers it actually got against the bundles
 it was allocated before training starts.
 """
@@ -30,10 +31,10 @@ def validate_node_local_inference(
         return
     if backend != "vllm" or not async_engine or colocate_all or remote:
         raise ValueError("inference_engine_node_local requires local, non-colocated async vLLM engines")
-    if tensor_parallel_size != 1 or pipeline_parallel_size != 1:
-        raise ValueError("inference_engine_node_local requires TP=PP=1")
-    if data_parallel_size <= 0 or num_inference_engines <= 0:
-        raise ValueError("inference_engine_node_local requires positive replica and DP sizes")
+    if tensor_parallel_size != 1:
+        raise ValueError("inference_engine_node_local requires TP=1")
+    if data_parallel_size <= 0 or pipeline_parallel_size <= 0 or num_inference_engines <= 0:
+        raise ValueError("inference_engine_node_local requires positive replica, PP and DP sizes")
     if expert_parallel_size != data_parallel_size:
         raise ValueError("inference_engine_node_local requires EP equal to DP")
     if gpus_per_node is not None and data_parallel_size > gpus_per_node:
@@ -74,6 +75,8 @@ class InferenceWorkerPlacement:
     ep_world_size: int
     torch_rank: int
     torch_world_size: int
+    pp_rank: int = 0
+    pp_world_size: int = 1
 
 
 @dataclass(frozen=True)
@@ -93,10 +96,16 @@ def validate_inference_replica_topology(
     num_replicas: int,
     data_parallel_size: int,
     expert_parallel_size: int,
+    pipeline_parallel_size: int = 1,
     node_hosts: Mapping[str, str],
 ) -> None:
-    """Check the observed workers match their allocated bundles, one replica per node."""
-    total = num_replicas * data_parallel_size
+    """Check the observed workers match their allocated bundles, each stage's DP group on one node.
+
+    A worker's bundle is ``dp_rank * PP + pp_rank`` within its engine, which is also its torch
+    rank in the engine's world of ``DP * PP`` ranks.
+    """
+    per_replica = data_parallel_size * pipeline_parallel_size
+    total = num_replicas * per_replica
     if len(placements) != total:
         raise ValueError(f"Expected {total} inference workers, observed {len(placements)}")
     if {row.replica for row in placements} != set(range(num_replicas)):
@@ -109,20 +118,25 @@ def validate_inference_replica_topology(
     expected_ep_size = data_parallel_size if expert_parallel_size > 1 else 1
     for replica in range(num_replicas):
         rows = [row for row in placements if row.replica == replica]
-        if len(rows) != data_parallel_size or {row.bundle_index for row in rows} != set(range(data_parallel_size)):
+        if len(rows) != per_replica or {row.bundle_index for row in rows} != set(range(per_replica)):
             raise ValueError(f"Inference replica {replica} has incomplete placement bundles")
-        if len({row.node_id for row in rows}) != 1 or len({row.worker.host for row in rows}) != 1:
-            raise ValueError(f"Inference replica {replica} spans nodes")
+        for stage in range(pipeline_parallel_size):
+            stage_rows = [row for row in rows if row.worker.pp_rank == stage]
+            if len({row.node_id for row in stage_rows}) != 1 or len({row.worker.host for row in stage_rows}) != 1:
+                raise ValueError(f"Inference replica {replica} stage {stage} spans nodes")
         for row in rows:
             worker = row.worker
             if node_hosts.get(row.node_id) != worker.host:
                 raise ValueError(f"Inference replica {replica} worker host disagrees with its placement node")
-            if worker.dp_rank != row.bundle_index or worker.torch_rank != row.bundle_index:
+            if worker.pp_world_size != pipeline_parallel_size or not 0 <= worker.pp_rank < pipeline_parallel_size:
+                raise ValueError(f"Inference replica {replica} has an unexpected PP rank or world size")
+            expected_rank = worker.dp_rank * pipeline_parallel_size + worker.pp_rank
+            if row.bundle_index != expected_rank or worker.torch_rank != expected_rank:
                 raise ValueError(f"Inference replica {replica} worker ranks disagree with its placement bundle")
-            if worker.dp_world_size != data_parallel_size or worker.torch_world_size != data_parallel_size:
+            if worker.dp_world_size != data_parallel_size or worker.torch_world_size != per_replica:
                 raise ValueError(f"Inference replica {replica} has an unexpected DP/torch world size")
-            expected_ep_rank = row.bundle_index if expert_parallel_size > 1 else 0
+            expected_ep_rank = worker.dp_rank if expert_parallel_size > 1 else 0
             if worker.ep_world_size != expected_ep_size or worker.ep_rank != expected_ep_rank:
                 raise ValueError(f"Inference replica {replica} has an unexpected EP rank or world size")
-            if row.weight_receiver_rank != 1 + replica * data_parallel_size + worker.torch_rank:
+            if row.weight_receiver_rank != 1 + replica * per_replica + worker.torch_rank:
                 raise ValueError(f"Inference replica {replica} has an incorrect weight receiver rank")

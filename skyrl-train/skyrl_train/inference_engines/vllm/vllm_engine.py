@@ -1039,13 +1039,15 @@ class WorkerWrap:
         return asdict(self._device_placement())
 
     def _device_placement(self) -> InferenceWorkerPlacement:
-        dp = get_dp_group()
+        dp, pp = get_dp_group(), get_pp_group()
         ep = get_ep_group() if self.model_config.is_moe else None
         return inference_worker_placement(
             dp_rank=dp.rank_in_group,
             dp_world_size=dp.world_size,
             ep_rank=ep.rank_in_group if ep is not None else 0,
             ep_world_size=ep.world_size if ep is not None else 1,
+            pp_rank=pp.rank_in_group,
+            pp_world_size=pp.world_size,
         )
 
     def expert_block_rpc(self, method: str, *args):
@@ -1053,15 +1055,14 @@ class WorkerWrap:
         receiver = getattr(self, "_expert_block_receiver", None)
         if receiver is None:
             placement = self._device_placement()
-            pp = get_pp_group()
             receiver = self._expert_block_receiver = ExpertBlockReceiver(
                 self.vllm_config,
                 self.device,
                 self.model_runner.model,
                 ep_rank=placement.ep_rank,
                 ep_size=placement.ep_world_size,
-                pp_rank=pp.rank_in_group,
-                pp_size=pp.world_size,
+                pp_rank=placement.pp_rank,
+                pp_size=placement.pp_world_size,
                 gpu_uuid=placement.gpu_uuid,
             )
         return getattr(receiver, method)(*args)
@@ -2155,15 +2156,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Physical GPU and communicator ranks of every engine worker, once the model is loaded."""
         return await self._get_engine().collective_rpc("report_device_placement")
 
-    async def expert_block_rpc(self, method: str, *args):
-        """Forward one expert-block sync call to this engine's single worker; installs only while paused."""
+    async def expert_block_rpc(self, method: str, *args) -> list:
+        """Forward one expert-block sync call to every worker of this engine; installs only while paused.
+
+        Returns one reply per worker, in the engine's worker order (pipeline stage order with TP=1).
+        """
         engine = self._get_engine()
         if method == "receive_weights" and not await engine.is_paused():
             raise RuntimeError("Expert-block sync installs weights only while generation is paused")
-        results = await engine.collective_rpc("expert_block_rpc", args=(method, *args))
-        if len(results) != 1:
-            raise RuntimeError(f"Expected one worker per node-local engine, got {len(results)}")
-        return results[0]
+        return list(await engine.collective_rpc("expert_block_rpc", args=(method, *args)))
 
     async def begin_weight_reload(self):
         """#1685 fix: open the layerwise-reload bracket on every engine worker so the

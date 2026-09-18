@@ -33,8 +33,8 @@ def validate_expert_block_transport(cfg: DictConfig) -> None:
         problems.append("generator.weight_sync_backend must be nccl")
     if not generator.inference_engine_node_local:
         problems.append("generator.inference_engine_node_local must be true")
-    if generator.inference_engine_tensor_parallel_size != 1 or generator.inference_engine_pipeline_parallel_size != 1:
-        problems.append("the engines must use TP=PP=1")
+    if generator.inference_engine_tensor_parallel_size != 1:
+        problems.append("the engines must use TP=1")
     if int(generator.expert_block_sync.timeout_seconds) <= 0:
         problems.append("generator.expert_block_sync.timeout_seconds must be positive")
     if problems:

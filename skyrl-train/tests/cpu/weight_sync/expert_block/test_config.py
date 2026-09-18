@@ -55,7 +55,7 @@ def test_the_default_transport_needs_nothing():
         ("trainer.placement.colocate_all", True, "not be colocated"),
         ("generator.weight_sync_backend", "gloo", "must be nccl"),
         ("generator.inference_engine_node_local", False, "inference_engine_node_local must be true"),
-        ("generator.inference_engine_tensor_parallel_size", 2, "TP=PP=1"),
+        ("generator.inference_engine_tensor_parallel_size", 2, "TP=1"),
         ("generator.expert_block_sync.timeout_seconds", 0, "must be positive"),
         ("generator.weight_sync_transport", "shard", "must be one of"),
     ],

@@ -309,7 +309,7 @@ def test_node_local_config_allocates_two_ep8_replicas_and_verifies_their_workers
     assert len(set(endpoints[:8])) == len(set(endpoints[8:])) == 1
     assert endpoints[0] != endpoints[8]
     assert all("node_local" not in actor.kwargs for actor in scheduler.actors)
-    placements = [engine.replica_placement for engine in engines]
+    placements = [placement for engine in engines for placement in engine.worker_placements]
     assert [row.weight_receiver_rank for row in placements] == list(range(1, 17))
     assert [row.replica for row in placements] == [0] * 8 + [1] * 8
     assert {row.worker.ep_world_size for row in placements} == {8}
@@ -323,7 +323,7 @@ def test_default_placement_keeps_single_gpu_packing_and_multinode_ep16(inference
     assert len(engines) == 16
     assert [pg.strategy for pg in scheduler.groups] == ["PACK"]
     assert len(scheduler.groups[0].bundle_specs) == 16
-    assert all(engine.replica_placement is None for engine in engines)
+    assert all(engine.worker_placements is None for engine in engines)
 
 
 def test_node_local_oversized_replica_fails_before_gpu_allocation(inference_scheduler):
@@ -350,7 +350,6 @@ def test_wrong_worker_topology_kills_the_replica_gang(inference_scheduler):
         {"backend": "sglang"},
         {"async_engine": False},
         {"inference_engine_tensor_parallel_size": 2},
-        {"inference_engine_pipeline_parallel_size": 2},
         {"run_engines_locally": False},
         {"inference_engine_data_parallel_size": 8, "inference_engine_expert_parallel_size": 1},
     ],
@@ -385,7 +384,7 @@ def _replica_reports():
 def _verified_replicas(reports, offsets=None):
     return verified_inference_replica_placements(
         reports,
-        replica_nodes=["node-0", "node-1"],
+        stage_nodes=[["node-0"], ["node-1"]],
         node_hosts={"node-0": "host-0", "node-1": "host-1"},
         relative_rank_offsets=offsets if offsets is not None else [0] * 8 + [8] * 8,
         data_parallel_size=8,
@@ -410,6 +409,7 @@ def test_two_ep8_replicas_have_disjoint_gpus_and_receiver_ranks():
         ({"ep_world_size": 16}, "EP rank or world size"),
         ({"dp_rank": 0}, "worker ranks"),
         ({"torch_world_size": 16}, "DP/torch world size"),
+        ({"pp_rank": 1}, "PP rank or world size|placement bundles"),
     ],
 )
 def test_replica_topology_rejects_a_worker_that_disagrees_with_its_bundle(change, error):
@@ -427,6 +427,39 @@ def test_replica_topology_rejects_reused_weight_receiver_ranks():
 def test_replica_topology_rejects_a_missing_worker():
     with pytest.raises(ValueError, match="Incomplete"):
         _verified_replicas(_replica_reports()[:-1])
+
+
+def test_two_stage_replicas_are_verified_per_stage():
+    # One replica of DP=2 x PP=2: workers (dp, pp) at bundle dp*2+pp, stage 0 on node a, stage 1 on node b.
+    reports = [
+        [
+            asdict(InferenceWorkerPlacement(f"host-{pp}", f"GPU-{dp}-{pp}", dp, 2, dp, 2, dp * 2 + pp, 4, pp, 2))
+            for pp in range(2)
+        ]
+        for dp in range(2)
+    ]
+    placements = verified_inference_replica_placements(
+        reports,
+        stage_nodes=[["node-0", "node-1"]],
+        node_hosts={"node-0": "host-0", "node-1": "host-1"},
+        relative_rank_offsets=[0, 0],
+        data_parallel_size=2,
+        expert_parallel_size=2,
+        pipeline_parallel_size=2,
+    )
+    assert [row.bundle_index for row in placements] == [0, 1, 2, 3]
+    assert [row.weight_receiver_rank for row in placements] == [1, 2, 3, 4]
+    reports[1][1]["host"] = "host-0"
+    with pytest.raises(ValueError, match="stage 1 spans nodes"):
+        verified_inference_replica_placements(
+            reports,
+            stage_nodes=[["node-0", "node-1"]],
+            node_hosts={"node-0": "host-0", "node-1": "host-1"},
+            relative_rank_offsets=[0, 0],
+            data_parallel_size=2,
+            expert_parallel_size=2,
+            pipeline_parallel_size=2,
+        )
 
 
 @pytest.mark.parametrize("nodes", [{0: "a", 1: "b"}, {0: "a"}])

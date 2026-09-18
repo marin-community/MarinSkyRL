@@ -135,29 +135,38 @@ class ExpertBlockSync:
         refs = self.policy_model.async_run_ray_method("pass_through", "expert_block_rpc", method, *args)
         return list(await asyncio.gather(*refs))
 
+    async def _receivers(self, method: str, *args) -> list:
+        """One reply per receiver worker, flattened across engines in engine and worker order."""
+        return [row for rows in await self.client.expert_block_rpc(method, *args) for row in rows]
+
     async def prepare(self) -> dict[str, float]:
         """Plan, rendezvous and bind every participant; returns the one-time cost in seconds by phase."""
         if self.schedule is not None:
             raise RuntimeError("Expert-block sync is already prepared")
         engines = self.client.engines
-        if any(engine.replica_placement is None for engine in engines):
+        if any(engine.worker_placements is None for engine in engines):
             raise ValueError("Expert-block sync requires generator.inference_engine_node_local=true")
         started = time.perf_counter()
-        policy_rows, receiver_rows = await asyncio.gather(
+        policy_rows, engine_rows = await asyncio.gather(
             self._policy("inventory"), self.client.expert_block_rpc("inventory")
         )
-        if len(receiver_rows) != len(engines):
-            raise RuntimeError(f"{len(engines) - len(receiver_rows)} inference engines did not report an inventory")
-        schedule, participants = plan_from_inventories(
-            policy_rows, list(zip(receiver_rows, (engine.replica_placement for engine in engines), strict=True))
-        )
+        if len(engine_rows) != len(engines):
+            raise RuntimeError(f"{len(engines) - len(engine_rows)} inference engines did not report an inventory")
+        receivers = []
+        for engine, rows in zip(engines, engine_rows, strict=True):
+            if len(rows) != len(engine.worker_placements):
+                raise RuntimeError(
+                    f"An engine reported {len(rows)} workers but {len(engine.worker_placements)} were placed"
+                )
+            receivers.extend(zip(rows, engine.worker_placements, strict=True))
+        schedule, participants = plan_from_inventories(policy_rows, receivers)
         planned = time.perf_counter()
         self.store = RendezvousStore(f"expert-block-{id(self):x}", timeout_seconds=self.timeout_seconds)
         init_info = {"schedule": to_wire(schedule), "rendezvous": asdict(self.store.rendezvous)}
         try:
             bound = await asyncio.gather(
                 self._policy("trainer_init", init_info),
-                self.client.expert_block_rpc("init_transfer_engine", {**init_info, "participants": participants}),
+                self._receivers("init_transfer_engine", {**init_info, "participants": participants}),
             )
         except BaseException:
             await self.close()
@@ -183,7 +192,7 @@ class ExpertBlockSync:
         started = time.perf_counter()
         update_info = {"version": version}
         policy_rows, receiver_rows = await asyncio.gather(
-            self._policy("send_weights", update_info), self.client.expert_block_rpc("receive_weights", update_info)
+            self._policy("send_weights", update_info), self._receivers("receive_weights", update_info)
         )
         policy = [InstallReport(**row) for row in policy_rows]
         receivers = [InstallReport(**row) for row in receiver_rows]
@@ -222,7 +231,7 @@ class ExpertBlockSync:
         started = time.perf_counter()
         update_info = {"version": version}
         policy_rows, receiver_rows = await asyncio.gather(
-            self._policy("verify", update_info), self.client.expert_block_rpc("verify", update_info)
+            self._policy("verify", update_info), self._receivers("verify", update_info)
         )
         expected_bytes = dict(self.schedule.receiver_bytes)
         receivers = [ReplayReport(**row) for row in receiver_rows]
@@ -253,7 +262,7 @@ class ExpertBlockSync:
 
     async def close(self) -> None:
         try:
-            await asyncio.gather(self._policy("shutdown"), self.client.expert_block_rpc("shutdown"))
+            await asyncio.gather(self._policy("shutdown"), self._receivers("shutdown"))
         finally:
             if self.store is not None:
                 self.store.close()
