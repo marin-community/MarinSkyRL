@@ -1588,3 +1588,60 @@ async def test_completion_single_prompt_is_unaffected_when_never_paused():
     assert result["choices"][0]["text"] == "done"
     assert len(engines[0].calls) == 1
     assert "session_id" not in engines[0].calls[0], "session_id must be stripped before it reaches the engine"
+
+
+# -------------------------------------------
+# policy version spans across engines and weight syncs
+# --------------------------------------------
+
+
+class _VersionedEngine:
+    """Engine that replays scripted outputs and records what each resume named."""
+
+    def __init__(self, outputs):
+        self.outputs = list(outputs)
+        self.calls = []
+        self.resumed_with = []
+
+    async def generate(self, request):
+        self.calls.append(deepcopy(request))
+        return deepcopy(self.outputs[len(self.calls) - 1])
+
+    async def pause_generation(self):
+        pass
+
+    async def resume_generation(self, policy_version=None):
+        self.resumed_with.append(policy_version)
+
+
+@pytest.mark.asyncio
+async def test_batched_generate_keeps_each_row_spans():
+    engine = _VersionedEngine(
+        [
+            InferenceEngineOutput(
+                responses=["a", ""],
+                response_ids=[[5], []],
+                stop_reasons=["stop", "stop"],
+                response_logprobs=None,
+                response_policy_version_segments=[[{"start": 0, "token_count": 1, "policy_version": 2}], []],
+            )
+        ]
+    )
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+
+    output = await client.generate(InferenceEngineInput(prompt_token_ids=[[1], [2]], sampling_params={"max_tokens": 4}))
+
+    assert output["response_policy_version_segments"] == [[{"start": 0, "token_count": 1, "policy_version": 2}], []]
+
+
+@pytest.mark.asyncio
+async def test_resume_names_the_installed_version_on_every_live_engine():
+    engines = [_VersionedEngine([]), _VersionedEngine([])]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+
+    await client.pause_generation()
+    await client.resume_generation(policy_version=7)
+    await client.pause_generation()
+    await client.resume_generation()
+
+    assert [engine.resumed_with for engine in engines] == [[7, None], [7, None]]

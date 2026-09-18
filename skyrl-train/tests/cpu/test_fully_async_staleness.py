@@ -27,12 +27,15 @@ from skyrl_train.utils.data_tracker import DataConsumptionTracker
 
 @pytest.mark.parametrize("sync_phase", ["initial", "training_step"])
 @pytest.mark.parametrize("offload_enabled", [False, True])
-def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload_enabled):
+@pytest.mark.parametrize("first_token_admission", [False, True])
+def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload_enabled, first_token_admission):
     trainer = object.__new__(FullyAsyncRayPPOTrainer)
     trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(offload_optimizer_during_rollouts=offload_enabled))
     trainer.colocate_all = False
     trainer.all_startup_timings = {}
     trainer.all_timings = {}
+    trainer.first_token_admission = first_token_admission
+    trainer.global_step = 0 if sync_phase == "initial" else 3
     events = []
 
     class Policy:
@@ -47,9 +50,9 @@ def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload
         async def pause_generation(self):
             events.append("pause")
 
-        async def resume_generation(self):
+        async def resume_generation(self, policy_version=None):
             assert trainer.policy_model.optimizer_on_gpu != offload_enabled
-            events.append("resume")
+            events.append(("resume", policy_version))
 
     async def sync_weights():
         events.append("sync")
@@ -65,10 +68,70 @@ def test_async_weight_sync_respects_optimizer_offload_policy(sync_phase, offload
     asyncio.run(trainer._sync_policy_weights_and_offload_optimizer(sync_phase=sync_phase))
 
     assert trainer.policy_model.optimizer_on_gpu != offload_enabled
-    assert events == (["pause"] if sync_phase == "training_step" else []) + (["offload"] if offload_enabled else []) + [
+    # Every sync, the initial one included, pauses before the copy and names the installed
+    # version on resume only when first-token admission is on.
+    assert events == ["pause"] + (["offload"] if offload_enabled else []) + [
         "sync",
         "drain",
-    ] + (["resume"] if sync_phase == "training_step" else [])
+        ("resume", trainer.global_step if first_token_admission else None),
+    ]
+
+
+def _trainer_at_step(global_step: int, *, first_token_admission: bool) -> FullyAsyncRayPPOTrainer:
+    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+    trainer.global_step = global_step
+    trainer.first_token_admission = first_token_admission
+    return trainer
+
+
+def _spans(*versions):
+    return [[{"start": 0, "token_count": 1, "policy_version": version}] for version in versions]
+
+
+def _completed_batch(rows, *, captured_step=4, response_ids=([1], [2])):
+    batch = {"response_ids": list(response_ids), "actual_global_step": captured_step}
+    if rows is not None:
+        batch["behavior_policy_version_segments"] = rows
+    return batch
+
+
+def test_admission_step_is_the_captured_step_unless_first_token_admission_is_on():
+    # Same completed group, same trainer state; only the flag differs. Off is the stamp the
+    # runner captured; on is the oldest version that sampled the group plus one, because
+    # version 1 is the policy after the first update and step 2 is the update that follows it.
+    batch = _completed_batch(_spans(1, 3), captured_step=4)
+    assert _trainer_at_step(4, first_token_admission=False)._admission_step(batch, fallback_step=4) == 4
+    assert _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4) == 2
+
+
+def test_admission_step_falls_back_to_the_submission_step_when_nothing_was_captured():
+    batch = _completed_batch(None, captured_step=None)
+    assert _trainer_at_step(4, first_token_admission=False)._admission_step(batch, fallback_step=3) == 3
+
+
+def test_a_response_continued_under_newer_weights_counts_from_its_oldest_span():
+    rows = [[{"start": 0, "token_count": 1, "policy_version": 1}, {"start": 1, "token_count": 2, "policy_version": 3}]]
+    batch = _completed_batch(rows, response_ids=([10, 11, 12],))
+    assert _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4) == 2
+
+
+@pytest.mark.parametrize("rows", [None, _spans(None, 3)])
+def test_first_token_admission_fails_loudly_when_a_sampled_group_carries_no_version(rows):
+    trainer = _trainer_at_step(4, first_token_admission=True)
+    with pytest.raises(RuntimeError, match="first_token_admission"):
+        trainer._admission_step(_completed_batch(rows), fallback_step=4)
+
+
+def test_first_token_admission_keeps_the_captured_step_for_a_group_that_sampled_nothing():
+    trainer = _trainer_at_step(4, first_token_admission=True)
+    batch = _completed_batch([[], []], captured_step=4, response_ids=([], []))
+    assert trainer._admission_step(batch, fallback_step=3) == 4
+
+
+def test_admission_step_rejects_a_version_newer_than_the_installed_policy():
+    trainer = _trainer_at_step(2, first_token_admission=True)
+    with pytest.raises(RuntimeError, match="newer than the installed policy"):
+        trainer._admission_step(_completed_batch(_spans(3, 1)), fallback_step=1)
 
 
 def _generated_group(

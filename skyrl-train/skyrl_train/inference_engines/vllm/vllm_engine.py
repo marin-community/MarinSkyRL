@@ -2021,6 +2021,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             raise
 
         result = self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
+        # RequestOutput.metrics is populated only while vLLM keeps request stats, which the
+        # custom interval logger keeps on even though disable_log_stats is set at engine start.
         versions = [
             self._policy_versions.at_first_token(
                 output.metrics.first_token_ts if output is not None and output.metrics is not None else None

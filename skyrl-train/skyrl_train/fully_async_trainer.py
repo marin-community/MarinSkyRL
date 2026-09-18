@@ -17,6 +17,11 @@ import os
 import sys
 from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
 from loguru import logger
+from skyrl_train.policy_version import (
+    BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
+    policy_version_bounds,
+    validate_policy_version_segments,
+)
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
@@ -67,6 +72,11 @@ from skyrl_train.group_admission import (
 )
 from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
 
+FIRST_TOKEN_VERSION_MISSING = (
+    "trainer.fully_async.first_token_admission=true needs the version that sampled each rollout's first "
+    "token, which only the direct vLLM generate() path reports; this trajectory runner or model client "
+    "carries none"
+)
 
 _QueueItem = TypeVar("_QueueItem")
 
@@ -452,6 +462,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.num_parallel_generation_workers = cfg.trainer.fully_async.num_parallel_generation_workers
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
+        self.first_token_admission = cfg.trainer.fully_async.first_token_admission
+        if type(self.first_token_admission) is not bool:
+            raise ValueError("trainer.fully_async.first_token_admission must be boolean")
         self.group_admission_stall_timeout = cfg.trainer.algorithm.group_admission.stall_timeout
         self._group_selection_policy = GroupSelectionPolicy.for_fully_async(
             cfg.trainer.algorithm.dynamic_sampling.type,
@@ -1047,8 +1060,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     async def _sync_policy_weights_and_offload_optimizer(
         self, *, sync_phase: Literal["initial", "training_step"]
     ) -> None:
-        if sync_phase == "training_step":
-            await self.inference_engine_client.pause_generation()
+        # The initial sync pauses idle engines, so every sync records its installed version the
+        # same way. A failed copy leaves the engines paused: the run ends on the error, and
+        # nothing may sample from half-installed weights before it does.
+        await self.inference_engine_client.pause_generation()
         # The shared training path backloads optimizer state before every step when
         # offload_optimizer_during_rollouts is enabled. Offload after each update,
         # including the initial sync, so Megatron gradient buffers are not resized
@@ -1058,8 +1073,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         await self.async_sync_policy_weights_to_inference_engines()
         # A hard sync point leaves every policy rank free before the next forward.
         await self._drain_policy_event_loops()
-        if sync_phase == "training_step":
-            await self.inference_engine_client.resume_generation()
+        # global_step counts the update this sync installs: 0 for the initial weights, and
+        # the step number after that step's update. The engines stamp every sampled span with it.
+        await self.inference_engine_client.resume_generation(
+            policy_version=self.global_step if self.first_token_admission else None
+        )
 
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
@@ -1110,6 +1128,32 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         return status
 
+    def _admission_step(self, trajectory_batch: TrajectoryBatch, fallback_step: int) -> int:
+        """The step a completed group is charged to for staleness.
+
+        By default that is the runner's captured step, or the step at submission when the
+        runner captured none. With first-token admission on, it is the oldest policy version
+        that sampled any of the group's tokens, plus one: versions count completed updates and
+        admission steps are one-based, so the step whose update follows version v is v + 1. A
+        group that sampled no token keeps the default.
+        """
+        actual_step = trajectory_batch.get("actual_global_step")
+        captured_step = actual_step if actual_step is not None else fallback_step
+        rows = trajectory_batch.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY)
+        bounds = policy_version_bounds(rows) if rows is not None else None
+        if bounds is not None and bounds[1] > self.global_step:
+            raise RuntimeError(f"first-token policy version {bounds[1]} is newer than the installed policy")
+        if not self.first_token_admission or not any(trajectory_batch["response_ids"]):
+            return captured_step
+        if rows is None:
+            raise RuntimeError(FIRST_TOKEN_VERSION_MISSING)
+        try:
+            for ids, segments in zip(trajectory_batch["response_ids"], rows, strict=True):
+                validate_policy_version_segments(segments, response_length=len(ids), require_known=True)
+        except ValueError as error:
+            raise RuntimeError(f"{FIRST_TOKEN_VERSION_MISSING} ({error})") from error
+        return bounds[0] + 1
+
     async def _run_generate_for_a_group_loop(self, queues: _GenerationQueues):
         """Generate dataset rows or retries and route only fresh groups to the completed queue."""
         try:
@@ -1137,8 +1181,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
                     trajectory_request, disable_tqdm=True
                 )
-                actual_step = cur_trajectory_batch.get("actual_global_step")
-                staleness_step = actual_step if actual_step is not None else global_step_at_start
+                staleness_step = self._admission_step(cur_trajectory_batch, global_step_at_start)
 
                 record_generated_work(
                     cur_trajectory_batch["response_ids"],

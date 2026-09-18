@@ -116,6 +116,13 @@ For fully async specifically, the following are the main knobs to tune:
   versions, which the recorded engine logprobs make visible to the ratio diagnostics.
 - ``trainer.fully_async.clear_kv_cache_on_weight_sync``: Drop the engines' KV/prefix cache at the pause so nothing
   computed by the old weights is reused (default ``true``); ``false`` keeps it for a faster resume.
+- ``trainer.fully_async.first_token_admission``: Where a group's staleness is counted from. ``false`` (the default)
+  counts from the trainer's step at submission, which can be earlier than the version that actually sampled the
+  group when a request waited in the engine's queue across a weight sync. ``true`` counts from the oldest policy
+  version that sampled any of the group's tokens, plus one — the engines stamp every sampled span with the version
+  they had installed, and a span sampled after a weight sync carries the newer one. Only the direct vLLM
+  ``generate()`` path carries the stamp; a run whose rollouts go through the OpenAI chat route fails at its first
+  admission with this on.
 - ``trainer.fully_async.max_buffered_groups``: How many finished groups the completed buffer holds before a
   generation worker waits with its finished group in hand. ``null`` (the default) means one slot per generation
   worker, so no worker ever waits. A finished group ages the same whether it waits in the buffer or in its worker,

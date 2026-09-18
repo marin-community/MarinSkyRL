@@ -294,6 +294,12 @@ trainer:
     # the queue or in its producer); set it to policy_mini_batch_size to keep one update's
     # cohort ready and bound the head-node backlog to that cohort.
     max_buffered_groups: null
+    # Count a group's staleness from the policy version installed when its first token was
+    # sampled (plus one, the step that version trains) instead of the trainer's step when its
+    # first generate() call returned. Needs the direct vLLM generate() path; the OpenAI chat
+    # route and other engines carry no first-token version, and a run whose rollouts sample
+    # through them fails at its first admission with this on.
+    first_token_admission: false
     # What the engines do with requests still generating at each weight sync. abort cancels
     # them and the client resubmits each prompt with the tokens it already generated, so the
     # answer continues under the new weights after one prefill; keep freezes them in the

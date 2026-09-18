@@ -174,11 +174,18 @@ def truncate_policy_version_segments(
 
 @dataclass
 class PolicyVersionHistory:
-    """Map the engine's first-token clock to the policy version installed at that instant."""
+    """Policy versions installed on one engine, each with the clock reading at which it became live.
+
+    Boundaries and first-token timestamps must come from the same clock. vLLM stamps a request's
+    ``first_token_ts`` with ``time.monotonic()`` in the engine-core process; the inference actor
+    that owns a history records each boundary with its own ``time.monotonic()``. The two agree
+    because ``AsyncLLM`` always starts its engine core as a child process on the actor's host.
+    """
 
     boundaries: list[tuple[float, int]] = field(default_factory=list)
 
     def record_resume(self, boundary: float, version: int) -> None:
+        """Record that ``version`` serves every token sampled at or after ``boundary``."""
         if not math.isfinite(boundary) or boundary <= 0 or type(version) is not int or version < 0:
             raise ValueError("policy version boundary and version must be finite and nonnegative")
         if self.boundaries and (boundary <= self.boundaries[-1][0] or version < self.boundaries[-1][1]):
@@ -186,6 +193,7 @@ class PolicyVersionHistory:
         self.boundaries.append((boundary, version))
 
     def at_first_token(self, timestamp: float | None) -> int | None:
+        """Version installed when a token was sampled at ``timestamp``; None before the first boundary."""
         if timestamp is None or not math.isfinite(timestamp) or timestamp <= 0:
             return None
         for boundary, version in reversed(self.boundaries):
