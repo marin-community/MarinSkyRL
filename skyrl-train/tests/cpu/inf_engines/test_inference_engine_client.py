@@ -302,6 +302,7 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_ses
                 "enable_http_endpoint": False,
                 "http_endpoint_host": "127.0.0.1",
                 "http_endpoint_port": 0,
+                "weight_sync_pause_timeout_seconds": 30.0,
             },
         }
     )
@@ -462,6 +463,7 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
                 "enable_http_endpoint": False,
                 "http_endpoint_host": "127.0.0.1",
                 "http_endpoint_port": 0,
+                "weight_sync_pause_timeout_seconds": 30.0,
             },
         }
     )
@@ -596,6 +598,7 @@ def _make_min_cfg():
                 "enable_http_endpoint": False,
                 "http_endpoint_host": "127.0.0.1",
                 "http_endpoint_port": 0,
+                "weight_sync_pause_timeout_seconds": 30.0,
             },
         }
     )
@@ -1274,12 +1277,9 @@ class _MockWeightSyncEngine:
 
 
 @pytest.mark.asyncio
-async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes(monkeypatch):
+async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes():
     engine = _MockWeightSyncEngine()
     client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-    monkeypatch.setattr(
-        "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
-    )
 
     await client.pause_generation()
     await client.update_named_weights(request={"names": ["model.weight"]})
@@ -1663,3 +1663,48 @@ async def test_generate_batched_still_raises_while_paused():
     with pytest.raises(RuntimeError, match="batched"):
         await client.generate(request)
     assert engine.requests == []
+
+
+class _DeadEngine(_MockGenerateEngine):
+    """Engine whose actor has died: every call fails the way a dead Ray actor does."""
+
+    async def generate(self, request):
+        raise ray.exceptions.RayActorError()
+
+    async def pause_generation(self):
+        raise ray.exceptions.RayActorError()
+
+
+@pytest.mark.asyncio
+async def test_weight_sync_pause_skips_an_engine_that_already_died():
+    """A pause must not wait on, or fail because of, an engine the client already knows is dead."""
+    dead, live = _DeadEngine(), _MockGenerateEngine()
+    client = InferenceEngineClient(engines=[dead, live], tokenizer=object(), full_config=_make_min_cfg())
+    # A session routed to the dead engine fails over to the live one and marks the dead one.
+    session_id = next(sid for sid in ("trial-0", "trial-1") if hash_with_sha256(sid) % 2 == 0)
+    await client.generate(
+        InferenceEngineInput(prompt_token_ids=[[1, 2, 3]], sampling_params={"max_tokens": 5}, session_ids=[session_id])
+    )
+    assert len(live.requests) == 1
+
+    await client.pause_generation()
+    assert live.scheduler_paused
+    await client.resume_generation()
+    assert not live.scheduler_paused
+
+
+class _NeverAnsweringEngine(_MockGenerateEngine):
+    """Engine whose pause RPC hangs, as a wedged scheduler's would."""
+
+    async def pause_generation(self):
+        await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_weight_sync_pause_fails_when_an_engine_never_acknowledges():
+    cfg = _make_min_cfg()
+    cfg.generator.weight_sync_pause_timeout_seconds = 0.01
+    client = InferenceEngineClient(engines=[_NeverAnsweringEngine()], tokenizer=object(), full_config=cfg)
+
+    with pytest.raises(TimeoutError, match="weight_sync_pause_timeout_seconds"):
+        await client.pause_generation()

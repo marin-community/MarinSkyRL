@@ -36,7 +36,6 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from skyrl_train.config.trajectory_runner_capabilities import opencode_exact_continuation_enabled
 
-ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
 ABORT_FINISH_REASON = "abort"
 
 # Cap on the session -> engine memo so it cannot grow unbounded across a long run.
@@ -77,6 +76,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.http_endpoint_port = full_config.generator.http_endpoint_port
         self.enable_opencode_exact_continuation = opencode_exact_continuation_enabled(full_config)
         self.generation_paused_event = threading.Event()
+        self.weight_sync_pause_timeout = float(full_config.generator.weight_sync_pause_timeout_seconds)
+        if self.weight_sync_pause_timeout <= 0:
+            raise ValueError("generator.weight_sync_pause_timeout_seconds must be positive")
         self._dead_engines: set[int] = set()
 
         # ---- Load-aware session routing state ----
@@ -219,6 +221,18 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in live_engines]
         return await asyncio.gather(*awaitables)
+
+    async def _run_on_all_engines_before_deadline(self, method_name: str):
+        """Fan out a weight-sync pause or resume, failing loudly if an engine never answers."""
+        try:
+            async with asyncio.timeout(self.weight_sync_pause_timeout):
+                return await self._run_on_all_engines(method_name)
+        except TimeoutError:
+            raise TimeoutError(
+                f"{method_name} did not complete on every engine within "
+                f"generator.weight_sync_pause_timeout_seconds={self.weight_sync_pause_timeout}; "
+                f"requests in flight per engine: {self._engine_inflight}"
+            ) from None
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         # 0. Extract input
@@ -762,10 +776,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         # Boundary guard (reused from the non-streaming path): block a new stream from
         # entering the engine while a weight-sync pause is in effect. Placed before
         # routing / _inc_inflight so a blocked stream holds no engine slot and does not
-        # touch the engine until resume. Together with pause_generation()'s
-        # ABORT_GENERATION_GRACE_PERIOD_SECONDS window + the blocking scheduler pause RPC,
-        # this keeps the engine request-idle across the reload, so no
-        # forward pass runs against meta-device params.
+        # touch the engine until resume. Together with the blocking scheduler pause RPC
+        # in pause_generation(), this keeps the engine request-idle across the reload,
+        # so no forward pass runs against meta-device params.
         await self._wait_for_generation_to_resume()
 
         session_id = request_payload["json"].pop("session_id", None)
@@ -1028,16 +1041,18 @@ class InferenceEngineClient(InferenceEngineInterface):
             await asyncio.sleep(0.5)
 
     async def pause_generation(self) -> None:
-        """Pause engine schedulers for an in-flight weight update.
+        """Pause every engine scheduler for an in-flight weight update.
 
-        Chat and single-prompt completion requests wait for resume. ``generate()`` and batched
-        completions do not support the pause boundary.
+        The engine call is the acknowledgement: vLLM's abort-mode pause replies only once its
+        scheduler has aborted every in-flight request and the engine core has no work, and a
+        request that arrives after that is held in the scheduler's waiting queue until resume.
+        Chat, single-prompt ``generate()`` and single-prompt completion requests wait for the
+        resume; batched ``generate()`` and batched completions are rejected while paused.
         """
         if self.generation_paused_event.is_set():
             raise RuntimeError("Generation is already paused, cannot pause again.")
         self.generation_paused_event.set()
-        await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
-        await self._run_on_all_engines("pause_generation")
+        await self._run_on_all_engines_before_deadline("pause_generation")
 
     async def resume_generation(self) -> None:
         """
@@ -1048,7 +1063,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Generation is not paused, cannot resume.")
-        await self._run_on_all_engines("resume_generation")
+        await self._run_on_all_engines_before_deadline("resume_generation")
         self.generation_paused_event.clear()
 
     # ----------------------------
