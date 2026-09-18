@@ -37,6 +37,17 @@ TIMEOUT = 60
 
 
 @dataclass(frozen=True)
+class DenseSpec:
+    """One dense HF tensor: the trainer stage that owns it, its shape and installed dtype, the receiver stages holding it, and its TP layout."""
+
+    trainer_pp: int
+    shape: tuple[int, ...]
+    dtype: str
+    holders: tuple[int, ...]
+    layout: str  # "column" (one run per shard) or "row" (a column block per shard)
+
+
+@dataclass(frozen=True)
 class Topology:
     trainer_layers: tuple[tuple[int, ...], ...]
     trainer_ep: int
@@ -47,8 +58,7 @@ class Topology:
     receiver_ep: int
     hidden: int
     intermediate: int
-    # dense HF name -> (trainer stage, shape, installed dtype, receiver stages holding it, "column" | "row")
-    dense: dict
+    dense: dict[str, DenseSpec]
 
     def trainers(self):
         coordinates = product(
@@ -72,16 +82,16 @@ QUALIFIED = Topology(
     hidden=3,
     intermediate=2,
     dense={
-        "model.layers.0.mlp.router.weight": (
+        "model.layers.0.mlp.router.weight": DenseSpec(
             0,
             (NUM_EXPERTS, 3),
             "float32",
             (0,),
             "column",
         ),  # BF16 wire, FP32 installed
-        "model.layers.1.mlp.router.weight": (1, (NUM_EXPERTS, 3), "float32", (0,), "column"),
-        "model.norm.weight": (1, (3,), "bfloat16", (0,), "column"),
-        "lm_head.weight": (1, (5, 3), "bfloat16", (0,), "column"),
+        "model.layers.1.mlp.router.weight": DenseSpec(1, (NUM_EXPERTS, 3), "float32", (0,), "column"),
+        "model.norm.weight": DenseSpec(1, (3,), "bfloat16", (0,), "column"),
+        "lm_head.weight": DenseSpec(1, (5, 3), "bfloat16", (0,), "column"),
     },
 )
 # The receiver's copy of a vocabulary tensor has more rows than the HF tensor (vLLM pads the
@@ -99,9 +109,9 @@ UNEQUAL_STAGED = Topology(
     hidden=3,
     intermediate=2,
     dense={
-        "model.layers.0.mlp.router.weight": (0, (NUM_EXPERTS, 3), "float32", (0,), "column"),
-        "model.layers.2.mlp.router.weight": (1, (NUM_EXPERTS, 3), "float32", (1,), "column"),
-        "model.norm.weight": (1, (3,), "bfloat16", (0, 1), "column"),
+        "model.layers.0.mlp.router.weight": DenseSpec(0, (NUM_EXPERTS, 3), "float32", (0,), "column"),
+        "model.layers.2.mlp.router.weight": DenseSpec(1, (NUM_EXPERTS, 3), "float32", (1,), "column"),
+        "model.norm.weight": DenseSpec(1, (3,), "bfloat16", (0, 1), "column"),
     },
 )
 # Two tensor-parallel ranks per slot: expert shards, a column-sharded norm and a row-sharded (column block) o_proj.
@@ -116,9 +126,9 @@ TENSOR_PARALLEL = Topology(
     hidden=4,
     intermediate=2,
     dense={
-        "model.layers.0.self_attn.o_proj.weight": (0, (4, 4), "bfloat16", (0,), "row"),
-        "model.layers.1.mlp.router.weight": (1, (NUM_EXPERTS, 4), "float32", (0,), "row"),
-        "model.norm.weight": (1, (4,), "bfloat16", (0,), "column"),
+        "model.layers.0.self_attn.o_proj.weight": DenseSpec(0, (4, 4), "bfloat16", (0,), "row"),
+        "model.layers.1.mlp.router.weight": DenseSpec(1, (NUM_EXPERTS, 4), "float32", (0,), "row"),
+        "model.norm.weight": DenseSpec(1, (4,), "bfloat16", (0,), "column"),
     },
 )
 
@@ -156,14 +166,14 @@ def dense_slices_for(topology, trainer):
     """The dense regions a trainer rank holds: TP column shards are one run, row shards a column block."""
     slices = []
     size = topology.trainer_tp
-    for name, (owner_pp, shape, _, _, layout) in sorted(topology.dense.items()):
-        if owner_pp != trainer.pp:
+    for name, spec in sorted(topology.dense.items()):
+        if spec.trainer_pp != trainer.pp:
             continue
-        numel = int(torch.Size(shape).numel()) // size
-        if layout == "column" or size == 1:
+        numel = int(torch.Size(spec.shape).numel()) // size
+        if spec.layout == "column" or size == 1:
             slices.append(DenseSlice(name, trainer.tp * numel, numel, "bfloat16", f"source.{name}", 0, trainer.pp))
         else:
-            rows, columns = shape
+            rows, columns = spec.shape
             slices.append(
                 DenseSlice(
                     name,
@@ -194,8 +204,8 @@ def schedule(topology):
         receiver_ep=topology.receiver_ep,
         num_experts=NUM_EXPERTS,
         receiver_layers_by_pp=topology.receiver_layers,
-        dense_holders={name: holders for name, (_, _, _, holders, _) in topology.dense.items()},
-        dense_numel={name: int(torch.Size(shape).numel()) for name, (_, shape, _, _, _) in topology.dense.items()},
+        dense_holders={name: spec.holders for name, spec in topology.dense.items()},
+        dense_numel={name: int(torch.Size(spec.shape).numel()) for name, spec in topology.dense.items()},
     )
 
 
@@ -234,14 +244,15 @@ def participant_main(rank, topology, port, directory):
                 expert - receiver.ep * per_block if expert // per_block == receiver.ep else -1
                 for expert in range(NUM_EXPERTS)
             )
-        held_dense = {name: spec for name, spec in topology.dense.items() if receiver.pp in spec[3]}
+        held_dense = {name: spec for name, spec in topology.dense.items() if receiver.pp in spec.holders}
         padded = {}
-        for name, (_, shape, dtype, _, _) in held_dense.items():
+        for name, spec in held_dense.items():
+            dtype = getattr(torch, spec.dtype)
             if name in PADDED_ROWS:
-                padded[name] = torch.zeros((PADDED_ROWS[name], *shape[1:]), dtype=getattr(torch, dtype))
-                parameters[name] = padded[name].narrow(0, 0, shape[0])
+                padded[name] = torch.zeros((PADDED_ROWS[name], *spec.shape[1:]), dtype=dtype)
+                parameters[name] = padded[name].narrow(0, 0, spec.shape[0])
             else:
-                parameters[name] = torch.zeros(shape, dtype=getattr(torch, dtype))
+                parameters[name] = torch.zeros(spec.shape, dtype=dtype)
         kwargs = dict(parameters=parameters, expert_maps=maps, hidden_size=topology.hidden)
     rendezvous = Rendezvous("127.0.0.1", port, "test", TIMEOUT)
     groups = create_groups(rank, plan.groups, rendezvous, backend="gloo")

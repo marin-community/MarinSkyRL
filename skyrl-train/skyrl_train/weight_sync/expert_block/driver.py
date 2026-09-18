@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass
 import time
 
 from skyrl_train.weight_sync.expert_block.gate import ReplayReport, ReplicaReport
+from marinskyrl.inference_placement import InferenceReplicaPlacement
 from skyrl_train.weight_sync.expert_block.groups import RendezvousStore
 from skyrl_train.weight_sync.expert_block.schedule import (
     DenseSlice,
@@ -30,7 +31,7 @@ from skyrl_train.weight_sync.expert_block.schedule import (
     receiver_participant,
     to_wire,
 )
-from skyrl_train.weight_sync.expert_block.source_views import BF16, ROUTER_WEIGHT_SUFFIX
+from skyrl_train.weight_sync.expert_block.source_views import is_widened_router
 from skyrl_train.weight_sync.expert_block.stream import InstallReport
 
 
@@ -48,7 +49,9 @@ class SyncTimings:
         return {f"expert_block_sync/{name}": value for name, value in asdict(self).items()}
 
 
-def plan_from_inventories(policy: list[dict], receivers: list[tuple[dict, object]]) -> tuple[Schedule, dict[str, int]]:
+def plan_from_inventories(
+    policy: list[dict], receivers: list[tuple[dict, InferenceReplicaPlacement]]
+) -> tuple[Schedule, dict[str, int]]:
     """Build the schedule from every trainer's and receiver's report; returns it with the GPU-to-participant map.
 
     ``receivers`` pairs each engine worker's report with its verified node-local placement.
@@ -106,8 +109,7 @@ def plan_from_inventories(policy: list[dict], receivers: list[tuple[dict, object
         for name, (shape, dtype) in receiver_stages[stage]["dense"].items():
             if name not in wire_dtypes:
                 raise ValueError(f"Dense weights differ: the receiver holds {name}, which no trainer rank exports")
-            widened = name.endswith(ROUTER_WEIGHT_SUFFIX) and wire_dtypes[name] == BF16 and dtype == "float32"
-            if wire_dtypes[name] != dtype and not widened:
+            if wire_dtypes[name] != dtype and not is_widened_router(name, wire_dtypes[name], dtype):
                 raise ValueError(f"{name} is {wire_dtypes[name]} on the trainer and {dtype} on the receiver")
             numel = 1
             for dimension in shape:

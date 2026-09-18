@@ -21,8 +21,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
-from skyrl_train.weight_sync.expert_block.source_views import dense_source_view, expert_source_view
-from skyrl_train.weight_sync.expert_block.stream import Landing, Stream
+from skyrl_train.weight_sync.expert_block.stream import Stream
 
 
 @dataclass(frozen=True)
@@ -41,65 +40,33 @@ def replay(stream: Stream, version: int) -> ReplayReport:
 
 
 def _replay(stream: Stream, version: int) -> ReplayReport:
-    schedule, me = stream.schedule, stream.participant
-    landings = {}
-    for item in schedule.experts:
-        if me in item.destinations and item.root != me:
-            landings[item.entry.name] = stream.expert_landing(item)
-    for item in schedule.dense:
-        if stream.lands(item):
-            landings[item.source.identity()] = stream.dense_landing(item)
+    landings = [(item, landing) for item, landing in stream.transfers() if landing is not None]
     scratch = torch.empty(
-        max([landing.nbytes for landing in landings.values()] + [0]), dtype=torch.uint8, device=stream.device
+        max([landing.nbytes for _, landing in landings] + [0]), dtype=torch.uint8, device=stream.device
     )
     mismatched = torch.zeros((), dtype=torch.int64, device=stream.device)
     compared = 0
-
-    def landed(landing: Landing) -> torch.Tensor:
-        return scratch.narrow(0, 0, landing.nbytes).view(landing.wire_dtype).view(landing.installed.shape)
-
-    def compare(landing: Landing, wire: torch.Tensor) -> None:
-        nonlocal compared
+    for item, landing in stream.transfers():
+        if landing is None:
+            stream.send(item)
+            continue
+        wire = scratch.narrow(0, 0, landing.nbytes).view(landing.wire_dtype).view(landing.installed.shape)
+        stream.receive(item, wire)
         # A widened parameter is compared at wire precision.
         installed = landing.installed.to(landing.wire_dtype).contiguous()
         mismatched.add_(wire.contiguous().view(torch.uint8).ne(installed.view(torch.uint8)).sum())
         compared += landing.nbytes
-
-    for item in schedule.experts:
-        if item.root == me:
-            dist.broadcast(
-                expert_source_view(stream.expert_sources[item.entry.name], stream.sources),
-                src=0,
-                group=stream.groups[item.group],
-            )
-        elif me in item.destinations:
-            landing = landings[item.entry.name]
-            wire = landed(landing)
-            dist.broadcast(wire, src=0, group=stream.groups[item.group])
-            compare(landing, wire)
-    for item in schedule.dense:
-        if item.root == me:
-            dist.broadcast(dense_source_view(item.source, stream.sources), src=0, group=stream.groups[item.group])
-        elif stream.lands(item):
-            landing = landings[item.source.identity()]
-            wire = landed(landing)
-            if me in item.landings:
-                dist.broadcast(wire, src=0, group=stream.groups[item.group])
-            local_name, members = stream.local
-            origin = next(rank for rank in item.landings if rank in members)
-            dist.broadcast(wire, src=members.index(origin), group=stream.groups[local_name])
-            compare(landing, wire)
     parameter_bytes = 0
     if not stream.trainer:
         # Coverage counts every parameter byte at wire width, so a widened parameter counts as BF16.
         parameter_bytes = sum(value.numel() * value.element_size() for value in stream.parameters.values())
-        for landing in landings.values():
+        for _, landing in landings:
             parameter_bytes -= landing.installed.numel() * (
                 landing.installed.element_size() - landing.nbytes // landing.installed.numel()
             )
     if stream.device.type == "cuda":
         torch.cuda.synchronize(stream.device)
-    return ReplayReport(me, version, compared, parameter_bytes, int(mismatched.item()))
+    return ReplayReport(stream.participant, version, compared, parameter_bytes, int(mismatched.item()))
 
 
 @dataclass(frozen=True)

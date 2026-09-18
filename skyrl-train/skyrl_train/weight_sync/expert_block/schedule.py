@@ -34,9 +34,14 @@ from dataclasses import dataclass, fields, is_dataclass
 from itertools import product
 from typing import Any, get_args, get_origin
 
+from skyrl_train.json_serialization import to_jsonable
+
 BF16 = "bfloat16"
 FP32 = "float32"
 WIRE_DTYPE_BYTES = {BF16: 2, FP32: 4}
+# Group names: one "expert-{root}-{stage}-{block}" per expert block and one fan-out group per
+# receiver replica and stage; the stream finds its fan-out group by this prefix.
+LOCAL_GROUP_PREFIX = "local-"
 
 
 @dataclass(frozen=True)
@@ -167,9 +172,6 @@ class Schedule:
     receiver_bytes: tuple[tuple[int, int], ...]
     receiver_experts: tuple[tuple[int, int], ...]
 
-    def groups_of(self, participant: int) -> tuple[Group, ...]:
-        return tuple(group for group in self.groups if participant in group.members)
-
 
 def receiver_participant(trainer_count: int, receiver: ReceiverRank) -> int:
     return trainer_count + receiver.rank
@@ -263,7 +265,7 @@ def build_schedule(
     # --- Receiver pipeline stages: a stage's receivers fan a dense tensor out among themselves ---
     local_groups = {}
     for replica, stage in product(range(replica_count), range(receiver_pp_count)):
-        name = f"local-{replica}-{stage}"
+        name = f"{LOCAL_GROUP_PREFIX}{replica}-{stage}"
         local_groups[name] = Group(name, tuple(receivers_of(stage, block)[replica] for block in range(receiver_ep)))
 
     # --- Dense transfers: every region of every dense tensor exactly once, from a holder that already roots ---
@@ -315,7 +317,7 @@ def build_schedule(
                         group_name,
                         root,
                         receivers_of(stage, block),
-                        tuple(f"local-{replica}-{stage}" for replica in range(replica_count)),
+                        tuple(f"{LOCAL_GROUP_PREFIX}{replica}-{stage}" for replica in range(replica_count)),
                     )
                 )
 
@@ -361,13 +363,7 @@ def _check_regions_cover(name: str, regions: Sequence[Region], numel: int) -> No
 
 def to_wire(value: Any) -> Any:
     """Plain JSON-compatible structure: dataclasses become dicts, tuples become lists."""
-    if is_dataclass(value):
-        return {field.name: to_wire(getattr(value, field.name)) for field in fields(value)}
-    if isinstance(value, (tuple, list)):
-        return [to_wire(item) for item in value]
-    if isinstance(value, dict):
-        return {key: to_wire(item) for key, item in value.items()}
-    return value
+    return to_jsonable(value)
 
 
 def from_wire(kind: type, value: Any) -> Any:

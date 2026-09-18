@@ -19,14 +19,32 @@ import re
 
 import torch
 
-from skyrl_train.weight_sync.expert_block.schedule import BF16, DenseSlice, ExpertEntry, Region, TrainerRank
+from skyrl_train.weight_sync.expert_block.schedule import (
+    BF16,
+    FP32,
+    WIRE_DTYPE_BYTES,
+    DenseSlice,
+    ExpertEntry,
+    Region,
+    TrainerRank,
+)
 
 EXPERT_HF_NAME = re.compile(r"model\.layers\.(\d+)\.mlp\.experts\.(gate|up|down)_proj\.weight")
 LAYER_PREFIX = re.compile(r"model\.layers\.(\d+)\.")
 ROUTED_EXPERTS = "mlp.experts.routed_experts"
 ROUTER_WEIGHT_SUFFIX = ".mlp.router.weight"
 EXPERT_MAPPINGS = ("GrugStackedExpertMapping", "GrugStackedGatedExpertMapping")
-WIRE_DTYPES = ("bfloat16", "float32")
+WIRE_DTYPES = frozenset(WIRE_DTYPE_BYTES)
+
+
+def dtype_name(dtype: torch.dtype) -> str:
+    """``torch.bfloat16`` -> ``"bfloat16"``, the form the wire records and inventories carry."""
+    return str(dtype).removeprefix("torch.")
+
+
+def is_widened_router(hf_name: str, wire_dtype: str, installed_dtype: str) -> bool:
+    """The router weight travels as BF16 and is installed into vLLM's FP32 parameter."""
+    return hf_name.endswith(ROUTER_WEIGHT_SUFFIX) and wire_dtype == BF16 and installed_dtype == FP32
 
 
 @dataclass(frozen=True)
@@ -52,9 +70,16 @@ class ExpertSource:
     shape: tuple[int, int]
 
 
-def local_source_slices(
-    tasks, config, *, pp: int
-) -> tuple[list[ExpertSlice], list[DenseSlice], dict[str, torch.Tensor]]:
+@dataclass(frozen=True)
+class LocalSources:
+    """What one trainer rank holds: its expert slices, its dense slices and the parameters behind them."""
+
+    experts: list[ExpertSlice]
+    dense: list[DenseSlice]
+    sources: dict[str, torch.Tensor]
+
+
+def local_source_slices(tasks, config, *, pp: int) -> LocalSources:
     """Split a rank's conversion tasks into expert slices, dense slices and the parameters behind them."""
     expert, dense, sources = [], [], {}
     for task in tasks:
@@ -64,7 +89,7 @@ def local_source_slices(
         if source is None:
             continue
         key = task.global_param_name
-        dtype = str(source.dtype).removeprefix("torch.")
+        dtype = dtype_name(source.dtype)
         if key in sources or not source.is_contiguous() or dtype not in WIRE_DTYPES:
             raise ValueError(f"Parameter {key} must be unique, contiguous and BF16 or FP32")
         sources[key] = source
@@ -125,7 +150,7 @@ def local_source_slices(
                     add(mapping.hf_param[part], Region(group * numel, numel), source_offset)
         else:
             raise ValueError(f"Unsupported weight mapping for expert-block sync: {kind}")
-    return expert, dense, sources
+    return LocalSources(expert, dense, sources)
 
 
 def shard_region(layout: str, shape: tuple[int, ...], rank: int, size: int) -> Region:
@@ -194,7 +219,7 @@ def local_expert_sources(
             trainer.pp,
             expert,
             projection,
-            source.numel() * 2,
+            source.numel() * WIRE_DTYPE_BYTES[BF16],
             shard,
             shards,
         )
@@ -217,7 +242,11 @@ def expert_slot_view(entry: ExpertEntry, parameters, expert_maps) -> torch.Tenso
         raise ValueError(f"This receiver does not serve expert {entry.expert} of layer {entry.layer}")
     parameter = parameters[f"{prefix}.w13_weight" if entry.projection == "fc1" else f"{prefix}.w2_weight"]
     slot = parameter.detach()[local]
-    if slot.dtype != torch.bfloat16 or not slot.is_contiguous() or slot.numel() * 2 != entry.nbytes * entry.shards:
+    if (
+        slot.dtype != torch.bfloat16
+        or not slot.is_contiguous()
+        or slot.numel() * WIRE_DTYPE_BYTES[BF16] != entry.nbytes * entry.shards
+    ):
         raise ValueError(f"Receiver slot for {entry.name} differs from the scheduled matrix")
     return slot.view(-1)
 
@@ -237,7 +266,7 @@ def expert_slot_region(entry: ExpertEntry, slot: torch.Tensor, hidden_size: int)
 
 def dense_source_view(item: DenseSlice, sources: dict[str, torch.Tensor]) -> torch.Tensor:
     source = sources[item.source_key]
-    if str(source.dtype).removeprefix("torch.") != item.wire_dtype or not source.is_contiguous():
+    if dtype_name(source.dtype) != item.wire_dtype or not source.is_contiguous():
         raise ValueError(f"Parameter {item.source_key} changed dtype or layout")
     return source.detach().view(-1).narrow(0, item.source_offset, item.numel)
 
@@ -247,10 +276,8 @@ def dense_flat_view(item: DenseSlice, parameters) -> torch.Tensor:
     parameter = parameters[item.hf_name]
     if not parameter.is_contiguous():
         raise ValueError(f"Installed parameter {item.hf_name} is not contiguous")
-    widened = (
-        item.hf_name.endswith(ROUTER_WEIGHT_SUFFIX) and item.wire_dtype == BF16 and parameter.dtype == torch.float32
-    )
-    if not widened and str(parameter.dtype).removeprefix("torch.") != item.wire_dtype:
+    installed = dtype_name(parameter.dtype)
+    if installed != item.wire_dtype and not is_widened_router(item.hf_name, item.wire_dtype, installed):
         raise ValueError(f"Installed dtype of {item.hf_name} differs from the wire dtype {item.wire_dtype}")
     return parameter.detach().view(-1)
 

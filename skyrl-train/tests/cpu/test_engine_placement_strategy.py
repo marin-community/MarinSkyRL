@@ -7,7 +7,9 @@ The placement strategy checks verify that the ray/uni backend chooses:
     bundles pack densely and leave whole nodes free for the downstream policy
     PACK PG (the lever1/swesmith multi-node starvation regression fix), and
   - never per-engine STRICT_PACK on the hybrid (colocate_all) or mp-backend
-    paths (the mp {GPU:tp_pp_size} bundle is already node-atomic).
+    paths (the mp {GPU:tp_pp_size} bundle is already node-atomic), and
+  - per-replica STRICT_PACK for node-local replicas (inference_engine_node_local),
+    whose workers are then verified against the bundles they were given.
 
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_engine_placement_strategy.py
 """
@@ -22,6 +24,7 @@ import pytest
 from marinskyrl.inference_placement import InferenceWorkerPlacement, validate_node_local_config
 from skyrl_train.entrypoints.main_base import create_ray_wrapped_inference_engines_from_config
 from skyrl_train.inference_engines.placement import node_local_bundle_nodes, verified_inference_replica_placements
+from skyrl_train.inference_engines import ray_wrapped_inference_engine as factory
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import resolve_engine_max_model_len
 from skyrl_train.utils.placement_geometry import colocated_engine_bundle_indices
 from skyrl_train.utils.utils import validate_cfg
@@ -184,8 +187,6 @@ def test_config_rejects_nonpositive_engine_startup_timeout():
 @pytest.fixture
 def inference_scheduler(monkeypatch):
     """Fake the Ray and vLLM boundary: record allocated bundles and answer each actor's placement report."""
-    import skyrl_train.inference_engines.ray_wrapped_inference_engine as factory
-
     groups, actors, killed, removed = [], [], [], []
     report_changes = {}
 

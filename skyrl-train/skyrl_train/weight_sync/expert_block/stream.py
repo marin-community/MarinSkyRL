@@ -16,7 +16,8 @@ import time
 import torch
 import torch.distributed as dist
 
-from skyrl_train.weight_sync.expert_block.schedule import DenseBroadcast, ExpertBroadcast, Schedule
+from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
+from skyrl_train.weight_sync.expert_block.schedule import LOCAL_GROUP_PREFIX, DenseBroadcast, ExpertBroadcast, Schedule
 from skyrl_train.weight_sync.expert_block.source_views import (
     ExpertSource,
     dense_flat_view,
@@ -136,43 +137,71 @@ class Stream:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
 
+    def transfers(self):
+        """This participant's part of a sync, in collective order.
+
+        Yields ``(item, landing)``: ``landing`` is None when this participant is the item's
+        root; items it neither sends nor lands are skipped. The gate replays exactly this walk,
+        so the two never drift apart.
+        """
+        for broadcast in self.schedule.experts:
+            if broadcast.root == self.participant:
+                yield broadcast, None
+            elif self.participant in broadcast.destinations:
+                yield broadcast, self.expert_landing(broadcast)
+        for item in self.schedule.dense:
+            if item.root == self.participant:
+                yield item, None
+            elif self.lands(item):
+                yield item, self.dense_landing(item)
+
+    def send(self, item) -> int:
+        """Broadcast one item this participant roots; returns the bytes put on the wire."""
+        if isinstance(item, ExpertBroadcast):
+            tensor = expert_source_view(self.expert_sources[item.entry.name], self.sources)
+            nbytes = item.entry.nbytes
+        else:
+            tensor = dense_source_view(item.source, self.sources)
+            nbytes = item.source.nbytes
+        dist.broadcast(tensor, src=0, group=self.groups[item.group])
+        return nbytes
+
+    def receive(self, item, tensor: torch.Tensor) -> int:
+        """Run the collectives that land one item into ``tensor``; returns the bytes received."""
+        if isinstance(item, ExpertBroadcast):
+            dist.broadcast(tensor, src=0, group=self.groups[item.group])
+            return item.entry.nbytes
+        # A dense slice reaches one landing worker per replica from the root, then fans out
+        # within the replica from that worker.
+        if self.participant in item.landings:
+            dist.broadcast(tensor, src=0, group=self.groups[item.group])
+        local_name, members = self.local
+        origin = next(rank for rank in item.landings if rank in members)
+        dist.broadcast(tensor, src=members.index(origin), group=self.groups[local_name])
+        return item.source.nbytes
+
     def _run(self, version: int) -> InstallReport:
         self._sync_device()
         started = time.perf_counter()
         matrices = wire_bytes = 0
-        for broadcast in self.schedule.experts:
-            if broadcast.root == self.participant:
-                tensor = expert_source_view(self.expert_sources[broadcast.entry.name], self.sources)
-                dist.broadcast(tensor, src=0, group=self.groups[broadcast.group])
-            elif self.participant in broadcast.destinations:
-                landing = self.expert_landing(broadcast)
-                tensor = self.wire_tensor(landing)
-                dist.broadcast(tensor, src=0, group=self.groups[broadcast.group])
-                if not landing.direct:
-                    landing.installed.copy_(tensor)
+        experts_done = None
+        for item, landing in self.transfers():
+            if experts_done is None and isinstance(item, DenseBroadcast):
+                self._sync_device()
+                experts_done = time.perf_counter()
+            if landing is None:
+                wire_bytes += self.send(item)
             else:
-                continue
-            matrices += 1
-            wire_bytes += broadcast.entry.nbytes
-        self._sync_device()
-        experts_done = time.perf_counter()
-        for item in self.schedule.dense:
-            if item.root == self.participant:
-                dist.broadcast(dense_source_view(item.source, self.sources), src=0, group=self.groups[item.group])
-                wire_bytes += item.source.nbytes
-            elif self.lands(item):
-                landing = self.dense_landing(item)
                 tensor = self.wire_tensor(landing)
-                if self.participant in item.landings:
-                    dist.broadcast(tensor, src=0, group=self.groups[item.group])
-                local_name, members = self.local
-                origin = next(rank for rank in item.landings if rank in members)
-                dist.broadcast(tensor, src=members.index(origin), group=self.groups[local_name])
+                wire_bytes += self.receive(item, tensor)
                 if not landing.direct:
                     landing.installed.copy_(tensor)
-                wire_bytes += item.source.nbytes
+            if isinstance(item, ExpertBroadcast):
+                matrices += 1
         self._sync_device()
         finished = time.perf_counter()
+        if experts_done is None:
+            experts_done = finished
         return InstallReport(
             self.participant,
             version,
@@ -185,6 +214,22 @@ class Stream:
 
     def local_group(self) -> tuple[str, tuple[int, ...]] | None:
         for group in self.schedule.groups:
-            if group.name.startswith("local-") and self.participant in group.members:
+            if group.name.startswith(LOCAL_GROUP_PREFIX) and self.participant in group.members:
                 return group.name, group.members
         return None
+
+
+def bind(participant: int, plan: Schedule, rendezvous: Rendezvous, device: torch.device, **tensors) -> tuple:
+    """Create and warm this participant's groups and resolve its views; returns ``(groups, stream, warm-up seconds)``.
+
+    ``tensors`` are the side's ``Stream`` keyword arguments. Groups already created are destroyed
+    if warming or view resolution fails, so a failed bind leaves no communicator behind.
+    """
+    groups = create_groups(participant, plan.groups, rendezvous)
+    try:
+        warm = warm_groups(participant, plan.groups, groups, device)
+        stream = Stream(participant, plan, groups, device=device, **tensors)
+    except BaseException:
+        destroy_groups(groups)
+        raise
+    return groups, stream, warm

@@ -1,10 +1,10 @@
 """The receiver side of an expert-block sync, held by each vLLM worker.
 
-Its constructor and methods have the shape of vLLM's ``WeightTransferEngine`` on
-the marin fork's main (``(vllm_config, device, model)``; ``init_transfer_engine``,
-``receive_weights``, ``shutdown``), so once MarinSkyRL pins a build with that
-API the class becomes a registered engine driven by vLLM's own weight-update
-RPCs; until then the trainer reaches it through one generic forward.
+Its constructor and methods have the shape of vLLM's ``WeightTransferEngine``
+(``(vllm_config, device, model)``; ``init_transfer_engine``, ``receive_weights``,
+``shutdown``) so that a vLLM build exposing that API can register the class as an
+engine driven by its own weight-update RPCs. The trainer reaches it through one
+generic worker RPC forward.
 
 The worker's fused expert parameters are written in place, so the layout the
 model runs with must be the layout the trainer exports: an unquantised Grug MoE
@@ -18,10 +18,10 @@ from dataclasses import asdict
 import torch
 
 from skyrl_train.weight_sync.expert_block.gate import replay
-from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
+from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, from_wire
-from skyrl_train.weight_sync.expert_block.source_views import LAYER_PREFIX, ROUTED_EXPERTS
-from skyrl_train.weight_sync.expert_block.stream import Stream, storage_identity
+from skyrl_train.weight_sync.expert_block.source_views import LAYER_PREFIX, ROUTED_EXPERTS, dtype_name
+from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
 
 SUPPORTED_MODEL_TYPE = "grug_moe"
 # The only backend qualified here. It keeps the trainer's [gate;up] order in w13_weight;
@@ -75,7 +75,6 @@ class ExpertBlockReceiver:
         self.expert_maps: dict[str, tuple[int, ...]] = {}
         self.groups = {}
         self.stream: Stream | None = None
-        self.last_report: dict | None = None
 
     def inventory(self) -> dict:
         """Check the model is one this transport can write into, and report what it holds.
@@ -113,7 +112,7 @@ class ExpertBlockReceiver:
         self.identity = storage_identity(dict(self.model.named_parameters()))
         self.expert_maps = maps
         dense = {
-            name: (tuple(value.shape), str(value.dtype).removeprefix("torch."))
+            name: (tuple(value.shape), dtype_name(value.dtype))
             for name, value in self.parameters.items()
             if not name.endswith((".w13_weight", ".w2_weight"))
         }
@@ -142,21 +141,15 @@ class ExpertBlockReceiver:
             raise RuntimeError(f"GPU {self.gpu_uuid} is not a receiver in the expert-block schedule")
         plan = from_wire(Schedule, init_info["schedule"])
         participant = self.participant = participants[self.gpu_uuid]
-        self.groups = create_groups(participant, plan.groups, Rendezvous(**init_info["rendezvous"]))
-        try:
-            warm = warm_groups(participant, plan.groups, self.groups, self.device)
-            self.stream = Stream(
-                participant,
-                plan,
-                self.groups,
-                parameters=self.parameters,
-                expert_maps=self.expert_maps,
-                hidden_size=self.vllm_config.model_config.hf_config.hidden_size,
-                device=self.device,
-            )
-        except BaseException:
-            destroy_groups(self.groups)
-            raise
+        self.groups, self.stream, warm = bind(
+            participant,
+            plan,
+            Rendezvous(**init_info["rendezvous"]),
+            self.device,
+            parameters=self.parameters,
+            expert_maps=self.expert_maps,
+            hidden_size=self.vllm_config.model_config.hf_config.hidden_size,
+        )
         return {"participant": participant, "warmup_seconds": warm}
 
     def receive_weights(self, update_info: dict) -> dict:
@@ -167,8 +160,7 @@ class ExpertBlockReceiver:
         # reallocated them would leave the broadcasts writing into dead buffers.
         if storage_identity(dict(self.model.named_parameters())) != self.identity:
             raise RuntimeError("Model parameter storage changed since the expert-block receiver was initialised")
-        self.last_report = asdict(self.stream.run(update_info["version"]))
-        return self.last_report
+        return asdict(self.stream.run(update_info["version"]))
 
     def verify(self, update_info: dict) -> dict:
         """The opt-in gate: replay the sync and count bytes that differ from what was installed."""

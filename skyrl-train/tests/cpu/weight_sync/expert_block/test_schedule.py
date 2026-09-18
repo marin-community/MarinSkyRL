@@ -124,7 +124,7 @@ def test_groups_hold_one_root_and_only_the_receivers_of_its_block_so_nothing_lan
     # Trainers not chosen as a root belong to no group at all.
     roots = {group.members[0] for group in expert_groups}
     idle = set(range(schedule.trainer_count)) - roots
-    assert idle and all(not schedule.groups_of(rank) for rank in idle)
+    assert idle and all(rank not in group.members for rank in idle for group in schedule.groups)
 
 
 def test_receiver_ingress_is_its_expert_share_plus_every_dense_byte():

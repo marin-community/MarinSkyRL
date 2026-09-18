@@ -297,6 +297,14 @@ def populate_engine_max_model_lens(engines: List["RayWrappedInferenceEngine"], *
         engine.max_model_len = max_model_len
 
 
+def _release_node_local_gang(actors: list, placement_groups: list) -> None:
+    """Undo a node-local startup that failed: kill the actors that came up and free their replicas' groups."""
+    for actor in actors:
+        ray.kill(actor)
+    for pg in placement_groups:
+        remove_placement_group(pg)
+
+
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
     tensor_parallel_size: int,
@@ -563,8 +571,7 @@ def create_ray_wrapped_inference_engines(
                 pipeline_parallel_size=pipeline_parallel_size,
             )
         except Exception:
-            for pg in per_engine_pgs:
-                remove_placement_group(pg)
+            _release_node_local_gang([], per_engine_pgs)
             raise
 
     allocated_rendezvous_ports: set[int] = set()
@@ -856,8 +863,7 @@ def create_ray_wrapped_inference_engines(
             )
         except Exception:
             if node_local:
-                for pg in per_engine_pgs:
-                    remove_placement_group(pg)
+                _release_node_local_gang([], per_engine_pgs)
             raise
         if node_local:
             try:
@@ -871,10 +877,7 @@ def create_ray_wrapped_inference_engines(
                     pipeline_parallel_size=pipeline_parallel_size,
                 )
             except Exception:
-                for actor in inference_engine_actors:
-                    ray.kill(actor)
-                for pg in per_engine_pgs:
-                    remove_placement_group(pg)
+                _release_node_local_gang(inference_engine_actors, per_engine_pgs)
                 raise
             for index, engine in enumerate(engines):
                 engine.worker_placements = placements[

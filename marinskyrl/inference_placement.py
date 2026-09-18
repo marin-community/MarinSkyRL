@@ -11,6 +11,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from marinskyrl.runtime_options import WeightSyncTransport
+
 
 def validate_node_local_inference(
     *,
@@ -63,22 +65,22 @@ def validate_node_local_config(config: Mapping[str, Any], *, gpus_per_node: int 
     )
 
 
-WEIGHT_SYNC_TRANSPORTS = ("broadcast", "expert_block")
-
-
+# Kept here rather than under weight_sync: the trainer's config validator imports this module
+# before any model module, and the weight_sync package imports the models.
 def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
     """Refuse the expert-block weight-sync transport unless every precondition holds.
 
     The transport pairs each Megatron expert shard with the vLLM worker that serves it, so it
-    needs the megatron strategy without tensor parallelism, local async vLLM engines at TP=1
-    placed node-locally, and the NCCL weight-sync backend. Lives beside the node-local check
-    because the trainer's config validator imports both before any model module.
+    needs the megatron strategy with expert_tensor_parallel_size 1, local async vLLM engines at
+    TP=1 placed node-locally, and the NCCL weight-sync backend. Trainer tensor parallelism is
+    allowed; its shards land as regions of the receiver's tensors.
     """
     generator = config["generator"]
     transport = generator["weight_sync_transport"]
-    if transport not in WEIGHT_SYNC_TRANSPORTS:
-        raise ValueError(f"generator.weight_sync_transport must be one of {WEIGHT_SYNC_TRANSPORTS}, not {transport!r}")
-    if transport != "expert_block":
+    choices = [item.value for item in WeightSyncTransport]
+    if transport not in choices:
+        raise ValueError(f"generator.weight_sync_transport must be one of {choices}, not {transport!r}")
+    if transport != WeightSyncTransport.EXPERT_BLOCK:
         return
     trainer = config["trainer"]
     problems = []
@@ -86,8 +88,6 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
         problems.append("the policy must train with the megatron strategy")
     else:
         megatron = trainer["policy"]["megatron_config"]
-        if megatron["tensor_model_parallel_size"] != 1:
-            problems.append("the policy must use tensor_model_parallel_size 1")
         if megatron["expert_tensor_parallel_size"] not in (None, 1):
             problems.append("the policy must use expert_tensor_parallel_size 1")
         # Unequal expert-parallel degrees are paired by the schedule; each must divide the

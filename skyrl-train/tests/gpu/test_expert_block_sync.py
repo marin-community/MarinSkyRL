@@ -7,7 +7,7 @@ to compare it, byte for byte, with the trainer's exported weights. It then flips
 one installed byte on one worker and requires the gate to name exactly that byte,
 trains a second step and syncs again.
 
-Opt-in (needs six Hopper GPUs at most). The test-only engine actor lives in this module,
+Opt-in (needs six Hopper GPUs at most; the CP2 case uses six). The test-only engine actor lives in this module,
 so Ray workers need ``skyrl-train`` on ``PYTHONPATH``; the Grug gate wrapper exports it:
 
     uv run --frozen --extra vllm --extra megatron --group dev \\
@@ -44,6 +44,7 @@ from tests.gpu.test_grug_megatron import (
     GATED_NORM_NAME,
     PARAMETER_NAMES,
     SERVING_EXPERT_INDEX_BY_NAME,
+    TOY_SHAPE,
     _config,
     _init_policy,
     _padded_batch,
@@ -64,6 +65,7 @@ class Geometry:
     engines: int
     engine_dp: int
     engine_pp: int
+    policy_cp: int = 1
 
     @property
     def gpus(self) -> int:
@@ -76,6 +78,8 @@ GEOMETRIES = {
     "unequal-ep": Geometry(2, 2, 1, 1, 1, 2, 1),
     "receiver-pp2": Geometry(2, 1, 2, 1, 1, 2, 2),
     "trainer-tp2": Geometry(2, 1, 1, 2, 1, 2, 1),
+    # Context parallelism replicates every weight across its ranks; the schedule sees more holders.
+    "trainer-cp2": Geometry(4, 1, 2, 1, 1, 2, 1, policy_cp=2),
 }
 
 
@@ -121,7 +125,7 @@ def engine_client(cfg, model_path: str, geometry: Geometry) -> InferenceEngineCl
 def test_expert_block_sync_installs_every_byte_and_the_gate_catches_a_flipped_one(tmp_path, name, monkeypatch):
     geometry = GEOMETRIES[name]
     require_hoppers(geometry.gpus)
-    from skyrl_train.inference_engines.vllm import vllm_engine
+    from skyrl_train.inference_engines.vllm import vllm_engine  # noqa: PLC0415 - vLLM is a GPU-only extra
 
     class GateEngine(vllm_engine.AsyncVLLMInferenceEngine):
         async def flip_installed_byte(self):
@@ -131,10 +135,16 @@ def test_expert_block_sync_installs_every_byte_and_the_gate_catches_a_flipped_on
     monkeypatch.setattr(vllm_engine, "AsyncVLLMRayActor", ray.remote(GateEngine))
     model_path = tmp_path / "model"
     model_path.mkdir()
-    # Megatron splits the vocabulary across tensor-parallel ranks without padding it.
-    _write_tiny_checkpoint(model_path, vocab_size_multiple=geometry.policy_tp)
+    # Megatron splits the vocabulary and the KV groups across tensor-parallel ranks without
+    # padding either; the transport refuses a QKV layout with fewer KV groups than TP ranks.
+    _write_tiny_checkpoint(
+        model_path,
+        vocab_size_multiple=geometry.policy_tp,
+        shape={**TOY_SHAPE, "num_key_value_heads": max(TOY_SHAPE["num_key_value_heads"], geometry.policy_tp)},
+    )
     cfg = _config(str(model_path), world_size=geometry.policy_gpus, pp=geometry.policy_pp, ep=geometry.policy_ep)
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = geometry.policy_tp
+    cfg.trainer.policy.megatron_config.context_parallel_size = geometry.policy_cp
     cfg.generator.num_inference_engines = geometry.engines
     cfg.generator.inference_engine_data_parallel_size = geometry.engine_dp
     cfg.generator.inference_engine_expert_parallel_size = geometry.engine_dp
@@ -199,7 +209,7 @@ def test_expert_block_sync_installs_every_byte_and_the_gate_catches_a_flipped_on
         print(
             f"EXPERT_BLOCK_GATE_PASS geometry={name} policy_gpus={geometry.policy_gpus} policy_pp={geometry.policy_pp} "
             f"policy_ep={geometry.policy_ep} policy_tp={geometry.policy_tp} engines={geometry.engines} "
-            f"engine_dp={geometry.engine_dp} engine_pp={geometry.engine_pp} syncs=2 byte_equal=true "
+            f"policy_cp={geometry.policy_cp} engine_dp={geometry.engine_dp} engine_pp={geometry.engine_pp} syncs=2 byte_equal=true "
             f"corruption_rejected=true prepare_seconds={timings['prepare']} "
             f"install_seconds={[timings[f'install_{v}'].install_seconds for v in (1, 2)]} "
             f"verify_seconds={[timings[f'verify_{v}']['verify_seconds'] for v in (1, 2)]} "

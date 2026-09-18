@@ -20,6 +20,7 @@ from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils import Timer, get_system_memory_metrics
+from marinskyrl.runtime_options import WeightSyncTransport
 from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
@@ -741,7 +742,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         # Initialize weight sync state
         with Timer("init_weight_sync_state", self.all_startup_timings):
-            if self.cfg.generator.weight_sync_transport == "expert_block":
+            if self.cfg.generator.weight_sync_transport == WeightSyncTransport.EXPERT_BLOCK:
                 self._expert_block_sync = ExpertBlockSync(
                     policy_model=self.policy_model,
                     inference_engine_client=self.inference_engine_client,

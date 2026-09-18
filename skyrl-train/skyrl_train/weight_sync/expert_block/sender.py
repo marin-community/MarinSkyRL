@@ -16,10 +16,10 @@ from dataclasses import asdict
 import torch
 
 from skyrl_train.weight_sync.expert_block.gate import compare_replicas, replay
-from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
+from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, TrainerRank, from_wire, to_wire
 from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
-from skyrl_train.weight_sync.expert_block.stream import Stream, storage_identity
+from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
 
 
 class ExpertBlockSender:
@@ -44,11 +44,12 @@ class ExpertBlockSender:
             state.get_tensor_model_parallel_rank(),
         )
         provider = self.worker.provider
-        expert_slices, dense_slices, sources = local_source_slices(
+        local = local_source_slices(
             self.worker.bridge.get_conversion_tasks(self.worker.actor_module), provider, pp=self.trainer.pp
         )
+        sources = local.sources
         experts = local_expert_sources(
-            expert_slices,
+            local.experts,
             sources,
             self.trainer,
             num_experts=provider.num_moe_experts,
@@ -69,7 +70,7 @@ class ExpertBlockSender:
                 "intermediate_size": provider.moe_ffn_hidden_size,
             },
             "experts": [to_wire(item.entry) for item in experts],
-            "dense": [to_wire(item) for item in dense_slices],
+            "dense": [to_wire(item) for item in local.dense],
         }
 
     def trainer_init(self, init_info: dict) -> dict:
@@ -78,20 +79,14 @@ class ExpertBlockSender:
             raise RuntimeError("Expert-block sender is already initialised")
         plan = from_wire(Schedule, init_info["schedule"])
         device = next(iter(self.sources.values())).device
-        self.groups = create_groups(self.trainer.rank, plan.groups, Rendezvous(**init_info["rendezvous"]))
-        try:
-            warm = warm_groups(self.trainer.rank, plan.groups, self.groups, device)
-            self.stream = Stream(
-                self.trainer.rank,
-                plan,
-                self.groups,
-                sources=self.sources,
-                expert_sources=self.expert_sources,
-                device=device,
-            )
-        except BaseException:
-            destroy_groups(self.groups)
-            raise
+        self.groups, self.stream, warm = bind(
+            self.trainer.rank,
+            plan,
+            Rendezvous(**init_info["rendezvous"]),
+            device,
+            sources=self.sources,
+            expert_sources=self.expert_sources,
+        )
         return {"participant": self.trainer.rank, "warmup_seconds": warm}
 
     def send_weights(self, update_info: dict) -> dict:
