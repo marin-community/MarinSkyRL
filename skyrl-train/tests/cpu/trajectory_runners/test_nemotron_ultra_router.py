@@ -9,9 +9,10 @@ from skyrl_train.trajectory_runners.types import TrajectoryID
 
 
 class StubRunner:
-    def __init__(self, reward: float, *, token_level_rewards: bool = False):
+    def __init__(self, reward: float, *, token_level_rewards: bool = False, include_rollout_logprobs: bool = True):
         self.reward = reward
         self.token_level_rewards = token_level_rewards
+        self.include_rollout_logprobs = include_rollout_logprobs
         self.requests = []
 
     async def startup(self):
@@ -32,16 +33,18 @@ class StubRunner:
     async def run(self, request, disable_tqdm=False):
         self.requests.append(request)
         size = len(request["prompts"])
-        return {
+        result = {
             "prompt_token_ids": [[index] for index in range(size)],
             "response_ids": [[int(self.reward)] for _ in range(size)],
             "rewards": ([[self.reward]] * size if self.token_level_rewards else [self.reward] * size),
             "loss_masks": [[1]] * size,
             "stop_reasons": ["complete"] * size,
             "rollout_metrics": {},
-            "rollout_logprobs": [[-0.1]] * size,
             "trajectory_ids": list(request["trajectory_ids"]),
         }
+        if self.include_rollout_logprobs:
+            result["rollout_logprobs"] = [[-0.1]] * size
+        return result
 
 
 def _task(root: Path, name: str) -> None:
@@ -123,6 +126,80 @@ async def test_routes_only_swe_to_terminal_bench_and_restores_order(tmp_path):
     assert result["rollout_metrics"]["nemotron_ultra/coverage/rlvr2/calendar_simple_agent"] == 1
     assert harbor.requests[0]["prompts"] == [str(tmp_path / "swe-1")]
     assert gym.requests[0]["prompts"] == [batch["prompts"][0], batch["prompts"][2]]
+
+
+@pytest.mark.asyncio
+async def test_mixed_eval_allows_harbor_output_without_rollout_logprobs(tmp_path):
+    _task(tmp_path, "swe-1")
+    router = NemotronUltraTrajectoryRouter(
+        gym_runner=StubRunner(1.0, token_level_rewards=True),
+        harbor_runner=StubRunner(2.0, include_rollout_logprobs=False),
+        terminal_bench_data=[str(tmp_path)],
+        require_rollout_logprobs=True,
+        tis_lcs_alert_threshold=0.005,
+    )
+    ids = [TrajectoryID("gym", 0), TrajectoryID("harbor", 0)]
+    batch = {
+        "prompts": [[{"role": "user", "content": "gym"}], [{"role": "user", "content": "harbor"}]],
+        "env_classes": ["nemotron_ultra"] * 2,
+        "env_extras": [
+            {"extra_info": {"nemotron_ultra": {"blend": "rlvr1", "agent": "math", "route": "gym"}}},
+            {
+                "extra_info": {
+                    "nemotron_ultra": {
+                        "blend": "rlvr1",
+                        "agent": "swe",
+                        "route": "terminal_bench",
+                        "terminal_bench_instance_id": "swe-1",
+                    }
+                }
+            },
+        ],
+        "sampling_params": None,
+        "trajectory_ids": ids,
+        "batch_metadata": SimpleNamespace(training_phase="eval"),
+    }
+
+    result = await router.run(batch)
+
+    assert result["trajectory_ids"] == ids
+    assert result["rewards"] == [[1.0], [2.0]]
+    assert result["rollout_logprobs"] == [[-0.1], [0.0]]
+
+
+@pytest.mark.asyncio
+async def test_mixed_training_still_requires_harbor_rollout_logprobs(tmp_path):
+    _task(tmp_path, "swe-1")
+    router = NemotronUltraTrajectoryRouter(
+        gym_runner=StubRunner(1.0, token_level_rewards=True),
+        harbor_runner=StubRunner(2.0, include_rollout_logprobs=False),
+        terminal_bench_data=[str(tmp_path)],
+        require_rollout_logprobs=True,
+        tis_lcs_alert_threshold=0.005,
+    )
+    batch = {
+        "prompts": [[{"role": "user", "content": "gym"}], [{"role": "user", "content": "harbor"}]],
+        "env_classes": ["nemotron_ultra"] * 2,
+        "env_extras": [
+            {"extra_info": {"nemotron_ultra": {"blend": "rlvr1", "agent": "math", "route": "gym"}}},
+            {
+                "extra_info": {
+                    "nemotron_ultra": {
+                        "blend": "rlvr1",
+                        "agent": "swe",
+                        "route": "terminal_bench",
+                        "terminal_bench_instance_id": "swe-1",
+                    }
+                }
+            },
+        ],
+        "sampling_params": None,
+        "trajectory_ids": [TrajectoryID("gym", 0), TrajectoryID("harbor", 0)],
+        "batch_metadata": SimpleNamespace(training_phase="train"),
+    }
+
+    with pytest.raises(ValueError, match="rollout_logprobs are required"):
+        await router.run(batch)
 
 
 @pytest.mark.asyncio
