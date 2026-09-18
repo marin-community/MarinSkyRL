@@ -76,6 +76,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.http_endpoint_port = full_config.generator.http_endpoint_port
         self.enable_opencode_exact_continuation = opencode_exact_continuation_enabled(full_config)
         self.generation_paused_event = threading.Event()
+        # One wake-up event per event loop that has a request parked behind a pause: the
+        # trainer's loop and, with the HTTP endpoint, the server thread's loop.
+        self._resume_events: dict[asyncio.AbstractEventLoop, asyncio.Event] = {}
         self.weight_sync_pause_timeout = float(full_config.generator.weight_sync_pause_timeout_seconds)
         if self.weight_sync_pause_timeout <= 0:
             raise ValueError("generator.weight_sync_pause_timeout_seconds must be positive")
@@ -1040,9 +1043,26 @@ class InferenceEngineClient(InferenceEngineInterface):
     # Generation pause and resume
     # ----------------------------
     async def _wait_for_generation_to_resume(self) -> None:
-        """Waits for generation to be resumed, intended for in-flight weight updates and partial rollouts."""
-        while self.generation_paused_event.is_set():
-            await asyncio.sleep(0.5)
+        """Wait, on this loop, until a weight-sync pause is released."""
+        while True:
+            # Register before checking the flag; the release clears the flag and then takes
+            # the events. A waiter that sees the flag set is therefore always among the events
+            # the release wakes. Both sides are single dict operations, so no lock is needed.
+            event = self._resume_events.setdefault(asyncio.get_running_loop(), asyncio.Event())
+            if not self.generation_paused_event.is_set():
+                return
+            await event.wait()
+
+    def _release_generation_waiters(self) -> None:
+        """Clear the pause and wake every parked request on every loop."""
+        self.generation_paused_event.clear()
+        events, self._resume_events = self._resume_events, {}
+        for loop, event in events.items():
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                # The HTTP server's loop has closed; nothing waits on it any more.
+                pass
 
     async def pause_generation(self) -> None:
         """Pause every engine scheduler for an in-flight weight update.
@@ -1068,7 +1088,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Generation is not paused, cannot resume.")
         await self._run_on_all_engines_before_deadline("resume_generation")
-        self.generation_paused_event.clear()
+        self._release_generation_waiters()
 
     # ----------------------------
     # HTTP endpoint related methods
@@ -1111,6 +1131,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         state = self.__dict__.copy()
         state["_server_thread"] = None
         state["generation_paused_event"] = None
+        state["_resume_events"] = None
         # threading.Lock is not picklable; the pickled copy is only used for weight-sync
         # RPC args and never routes, so dropping the routing lock is safe.
         state["_routing_lock"] = None
