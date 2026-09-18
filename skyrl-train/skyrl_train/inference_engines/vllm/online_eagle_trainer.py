@@ -59,6 +59,7 @@ class OnlineEagleTrainingJob:
     step: int
     capture_dir: str
     draft_model_source: str
+    draft_model_path: str | None
     initial_draft_source_identity: str
     parent_draft_revision: str
     target_revision: str
@@ -335,6 +336,7 @@ def merge_online_eagle_captures(
 
 def _prepare_model(
     draft_model_source: str,
+    draft_model_path: str | None,
     draft_revision: str,
     capture_dir: Path,
     device: torch.device,
@@ -346,8 +348,10 @@ def _prepare_model(
     from transformers import PreTrainedModel  # noqa: PLC0415
 
     hugging_face_repo = hugging_face_repo_from_source_uri(draft_model_source)
-    if hugging_face_repo is not None:
-        config = Eagle3SpeculatorConfig.from_pretrained(hugging_face_repo, revision=draft_revision)
+    pretrained_model = draft_model_path or hugging_face_repo
+    if pretrained_model is not None:
+        revision = None if draft_model_path is not None else draft_revision
+        config = Eagle3SpeculatorConfig.from_pretrained(pretrained_model, revision=revision)
     else:
         config = Eagle3SpeculatorConfig.from_dict(
             json.loads(io.read_bytes(join_resource_path(draft_model_source, "config.json")))
@@ -362,12 +366,12 @@ def _prepare_model(
     # The public embedding-free Snowball checkpoint intentionally has no verifier
     # path. Bypass Speculators' generic post-load verifier hook because the exact
     # target-owned tensors come from this sealed rollout, not a second HF model.
-    if hugging_face_repo is not None:
+    if pretrained_model is not None:
         model = PreTrainedModel.from_pretrained.__func__(
             Eagle3DraftModel,
-            hugging_face_repo,
+            pretrained_model,
             config=config,
-            revision=draft_revision,
+            revision=revision,
         )
     else:
         from vllm.model_executor.model_loader.weight_utils import (  # noqa: PLC0415
@@ -749,6 +753,7 @@ class OnlineEagleTrainerRuntime:
         self.serving_dtype = _serving_dtype(self.device)
         self.model = _prepare_model(
             job.draft_model_source,
+            job.draft_model_path,
             job.initial_draft_source_identity,
             capture_dir,
             self.device,

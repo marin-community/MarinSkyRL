@@ -43,6 +43,7 @@ import time
 import uuid
 from typing import Protocol
 from cloud.iris.artifacts import ArtifactSource, fs_and_path, materialize
+from cloud.iris.hf_model_cache import CachedHuggingFaceModel, stage_cached_hugging_face_model
 from marinskyrl.hf_model import validate_portable_hf_model_files
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
@@ -2119,6 +2120,22 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="JSON list of local teacher model paths and immutable revisions to stage before Ray starts.",
     )
     parser.add_argument(
+        "--prestage-draft-models-json",
+        default="[]",
+        help="JSON list of immutable Hugging Face draft models to cache and materialize before Ray starts.",
+    )
+    parser.add_argument(
+        "--model-cache-ttl-days",
+        type=int,
+        default=14,
+        help="Lifecycle TTL for immutable Hugging Face draft-model mirrors.",
+    )
+    parser.add_argument(
+        "--model-cache-source-prefix",
+        default="",
+        help="Output prefix used to select the draft-model cache's storage region.",
+    )
+    parser.add_argument(
         "--model-source-uri",
         default="",
         help="Object-store HF export to materialize on every node before Ray starts.",
@@ -2164,6 +2181,24 @@ def teacher_model_specs_from_json(value: str) -> tuple[TeacherModelSpec, ...]:
             models.append(TeacherModelSpec(**raw_model))
         except TypeError as error:
             raise ValueError("each pre-staged teacher model must contain only path and revision") from error
+    return tuple(models)
+
+
+def cached_hugging_face_models_from_json(value: str) -> tuple[CachedHuggingFaceModel, ...]:
+    """Decode immutable Hub models prepared by the launcher."""
+    raw_models = json.loads(value)
+    if not isinstance(raw_models, list):
+        raise ValueError("--prestage-draft-models-json must encode a JSON list")
+    models = []
+    for raw_model in raw_models:
+        if not isinstance(raw_model, dict):
+            raise ValueError("each pre-staged draft model must be a JSON object")
+        try:
+            models.append(CachedHuggingFaceModel(**raw_model))
+        except TypeError as error:
+            raise ValueError(
+                "each pre-staged draft model must contain only model_id, revision, and local_path"
+            ) from error
     return tuple(models)
 
 
@@ -2232,6 +2267,16 @@ def main() -> None:
         )
     for teacher_model in teacher_model_specs_from_json(args.prestage_teacher_models_json):
         stage_model(teacher_model.path, revision=teacher_model.revision)
+    for draft_model in cached_hugging_face_models_from_json(args.prestage_draft_models_json):
+        if args.model_cache_ttl_days <= 0:
+            raise ValueError("--model-cache-ttl-days must be positive")
+        if not args.model_cache_source_prefix:
+            raise ValueError("--model-cache-source-prefix is required when pre-staging draft models")
+        stage_cached_hugging_face_model(
+            draft_model,
+            ttl_days=args.model_cache_ttl_days,
+            source_prefix=args.model_cache_source_prefix,
+        )
     # Force the policy chat template onto the staged Hub snapshot or materialized local
     # model on every node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:

@@ -3,7 +3,12 @@ from types import SimpleNamespace
 import pytest
 
 from cloud.iris import task_runtime
-from cloud.iris.task_runtime import policy_chat_template_model, stage_model, teacher_model_specs_from_json
+from cloud.iris.task_runtime import (
+    cached_hugging_face_models_from_json,
+    policy_chat_template_model,
+    stage_model,
+    teacher_model_specs_from_json,
+)
 
 
 @pytest.fixture
@@ -53,3 +58,14 @@ def test_teacher_model_staging_boundary_returns_typed_identities() -> None:
     models = teacher_model_specs_from_json('[{"path":"Qwen/teacher","revision":"abc123"}]')
 
     assert [(model.path, model.revision) for model in models] == [("Qwen/teacher", "abc123")]
+
+
+def test_draft_model_staging_boundary_returns_local_materialization() -> None:
+    revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
+    models = cached_hugging_face_models_from_json(
+        f'[{{"model_id":"laion/draft","revision":"{revision}","local_path":"/tmp/draft"}}]'
+    )
+
+    assert [(model.model_id, model.revision, model.local_path) for model in models] == [
+        ("laion/draft", revision, "/tmp/draft")
+    ]

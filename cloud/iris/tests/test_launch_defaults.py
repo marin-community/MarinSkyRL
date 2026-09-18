@@ -818,6 +818,41 @@ def test_policy_revision_from_config_is_staged_before_ray(tmp_path):
     assert set(options["--model-revision"]) == {revision}
 
 
+def test_hugging_face_draft_model_is_cached_and_materialized_before_ray(tmp_path):
+    revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
+    args = _args(tmp_path, "opencode")
+    Path(args.rl_config).write_text(
+        f"""\
+trainer:
+  placement:
+    colocate_all: false
+generator:
+  speculative_decoding:
+    method: eagle3
+    model:
+      source_uri: hf://laion/snowball-64k-eagle3-draft-r2egym
+      source_identity: {revision}
+    num_speculative_tokens: 3
+"""
+    )
+    normalize(args)
+    resolve_launch_defaults(args)
+
+    options = _shell_options(build_task_command(args)[-1])
+    staged = json.loads(options["--prestage-draft-models-json"][0])
+
+    assert len(staged) == 1
+    assert staged[0]["model_id"] == "laion/snowball-64k-eagle3-draft-r2egym"
+    assert staged[0]["revision"] == revision
+    assert re.fullmatch(r"/tmp/marinskyrl-draft-models/[0-9a-f]{16}", staged[0]["local_path"])
+    assert set(options["--model-cache-ttl-days"]) == {"14"}
+    assert set(options["--model-cache-source-prefix"]) == {args.storage_paths.checkpoint_root}
+    assert any(
+        override == f"++generator.speculative_decoding.model.materialized_path={staged[0]['local_path']}"
+        for override in options["--skyrl_override"]
+    )
+
+
 def test_policy_revision_from_config_rejects_task_local_model(tmp_path):
     args = _args(tmp_path, "opencode", ["--model_path", "/models/preloaded-policy"])
     Path(args.rl_config).write_text("trainer:\n  policy:\n    model:\n      revision: immutable-revision\n")

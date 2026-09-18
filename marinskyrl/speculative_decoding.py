@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from enum import StrEnum
+import hashlib
 import math
+import os
 import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -14,6 +16,7 @@ from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id
 
 _HF_SOURCE_SCHEME = "hf"
 _HF_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
+_DRAFT_MODEL_ROOT = "/tmp/marinskyrl-draft-models"
 STANDARD_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
 
 
@@ -93,21 +96,27 @@ class SpeculatorModelConfig:
 
     source_uri: str
     source_identity: str
+    materialized_path: str | None = None
 
     @classmethod
     def from_mapping(cls, value: object, *, context: str) -> "SpeculatorModelConfig":
         mapping = _mapping(value, context)
-        _reject_unknown(mapping, {"source_uri", "source_identity"}, context)
+        _reject_unknown(mapping, {"source_uri", "source_identity", "materialized_path"}, context)
         missing = {field for field in ("source_uri", "source_identity") if not mapping.get(field)}
         if missing:
             raise SpeculativeDecodingConfigError(f"missing {context} fields: {', '.join(sorted(missing))}")
 
         source_uri = mapping["source_uri"]
         source_identity = mapping["source_identity"]
+        materialized_path = mapping.get("materialized_path")
         if not isinstance(source_uri, str):
             raise SpeculativeDecodingConfigError(f"{context}.source_uri must be a string")
         if not isinstance(source_identity, str) or not source_identity.strip():
             raise SpeculativeDecodingConfigError(f"{context}.source_identity must be a nonempty string")
+        if materialized_path is not None and (
+            not isinstance(materialized_path, str) or not os.path.isabs(materialized_path)
+        ):
+            raise SpeculativeDecodingConfigError(f"{context}.materialized_path must be an absolute local path")
 
         hf_repo = hugging_face_repo_from_source_uri(source_uri)
         if hf_repo is not None:
@@ -124,11 +133,21 @@ class SpeculatorModelConfig:
             if not parsed.netloc or not parsed.path.strip("/") or parsed.query or parsed.fragment:
                 raise SpeculativeDecodingConfigError(f"{context}.source_uri is not a complete object-store URI")
 
-        return cls(source_uri=source_uri, source_identity=source_identity)
+        return cls(
+            source_uri=source_uri,
+            source_identity=source_identity,
+            materialized_path=materialized_path,
+        )
 
     @property
     def hugging_face_repo_id(self) -> str | None:
         return hugging_face_repo_from_source_uri(self.source_uri)
+
+    def node_local_path(self) -> str:
+        """Return a stable path shared by the controller and rollout workers."""
+        identity = f"{self.source_uri}@{self.source_identity}"
+        digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
+        return os.path.join(_DRAFT_MODEL_ROOT, digest)
 
 
 @dataclass(frozen=True)
@@ -255,15 +274,17 @@ class SpeculativeDecodingConfig:
 
     def vllm_speculative_config(self) -> dict[str, Any]:
         """Return the serving fields understood by vLLM."""
-        model = self.model.hugging_face_repo_id or runai_model_uri(self.model.source_uri)
+        model = (
+            self.model.materialized_path or self.model.hugging_face_repo_id or runai_model_uri(self.model.source_uri)
+        )
         result: dict[str, Any] = {
             "method": self.method.value,
             "model": model,
             "num_speculative_tokens": self.num_speculative_tokens,
         }
-        if self.model.hugging_face_repo_id is not None:
+        if self.model.materialized_path is None and self.model.hugging_face_repo_id is not None:
             result["revision"] = self.model.source_identity
-        else:
+        elif self.model.materialized_path is None:
             result["draft_load_config"] = {"load_format": "runai_streamer"}
         return result
 
