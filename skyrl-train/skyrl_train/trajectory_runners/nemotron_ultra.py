@@ -165,6 +165,9 @@ class NemotronUltraTrajectoryRouter:
         if env_extras is None or len(env_extras) != len(input_batch["prompts"]):
             raise ValueError("Nemotron Ultra routing requires one env_extras mapping per request row")
 
+        batch_metadata = input_batch.get("batch_metadata")
+        is_eval = getattr(batch_metadata, "training_phase", None) == "eval"
+
         gym_indices: list[int] = []
         harbor_indices: list[int] = []
         for index, extras in enumerate(env_extras):
@@ -197,7 +200,11 @@ class NemotronUltraTrajectoryRouter:
         else:
             result = concatenate_trajectory_batches(
                 outputs,
-                require_rollout_logprobs=self.require_rollout_logprobs,
+                # Evaluation never consumes rollout logprobs. In particular,
+                # Harbor intentionally omits them in eval mode even when TIS is
+                # enabled for training, so enforcing the training invariant here
+                # would fail every mixed-route evaluation after all work finishes.
+                require_rollout_logprobs=self.require_rollout_logprobs and not is_eval,
                 tis_lcs_alert_threshold=self.tis_lcs_alert_threshold,
             )
 
