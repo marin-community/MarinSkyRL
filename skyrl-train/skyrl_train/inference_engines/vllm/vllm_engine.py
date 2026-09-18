@@ -90,6 +90,7 @@ from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync import WeightLoader
+from skyrl_train.weight_sync.expert_block.receiver import ExpertBlockReceiver
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
 from skyrl_train.weight_sync.weight_extractor import is_weight_sync_dtype_compatible
 from skyrl_train.inference_engines.vllm.utils import (
@@ -1048,6 +1049,23 @@ class WorkerWrap:
             pp_rank=pp.rank_in_group,
             pp_world_size=pp.world_size,
         )
+
+    def expert_block_rpc(self, method: str, *args):
+        """Expert-block weight sync: inventory, bind, run or close this worker's receiver."""
+        receiver = getattr(self, "_expert_block_receiver", None)
+        if receiver is None:
+            placement = self._device_placement()
+            receiver = self._expert_block_receiver = ExpertBlockReceiver(
+                self.vllm_config,
+                self.device,
+                self.model_runner.model,
+                ep_rank=placement.ep_rank,
+                ep_size=placement.ep_world_size,
+                pp_rank=placement.pp_rank,
+                pp_size=placement.pp_world_size,
+                gpu_uuid=placement.gpu_uuid,
+            )
+        return getattr(receiver, method)(*args)
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
@@ -2137,6 +2155,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def report_engine_placement(self):
         """Physical GPU and communicator ranks of every engine worker, once the model is loaded."""
         return await self._get_engine().collective_rpc("report_device_placement")
+
+    async def expert_block_rpc(self, method: str, *args) -> list:
+        """Forward one expert-block sync call to every worker of this engine; installs only while paused.
+
+        Returns one reply per worker, in the engine's worker order (pipeline stage order with TP=1).
+        """
+        engine = self._get_engine()
+        if method == "receive_weights" and not await engine.is_paused():
+            raise RuntimeError("Expert-block sync installs weights only while generation is paused")
+        return list(await engine.collective_rpc("expert_block_rpc", args=(method, *args)))
 
     async def begin_weight_reload(self):
         """#1685 fix: open the layerwise-reload bracket on every engine worker so the
