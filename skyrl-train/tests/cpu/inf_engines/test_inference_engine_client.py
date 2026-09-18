@@ -1577,3 +1577,89 @@ async def test_completion_single_prompt_is_unaffected_when_never_paused():
     assert result["choices"][0]["text"] == "done"
     assert len(engines[0].calls) == 1
     assert "session_id" not in engines[0].calls[0], "session_id must be stripped before it reaches the engine"
+
+
+# -------------------------------------------
+# generate() at the weight-sync pause boundary
+# --------------------------------------------
+
+
+class _MockGenerateEngine:
+    """Engine whose ``generate`` records every request and answers with a fixed completion."""
+
+    def __init__(self):
+        self.entered = asyncio.Event()
+        self.requests = []
+        self.scheduler_paused = False
+
+    async def generate(self, request):
+        assert not self.scheduler_paused, "request reached the engine while its scheduler was paused"
+        self.entered.set()
+        self.requests.append(deepcopy(request))
+        return InferenceEngineOutput(
+            responses=["answer"],
+            response_ids=[[21, 22, 23]],
+            stop_reasons=["stop"],
+            response_logprobs=[[-0.1, -0.2, -0.3]],
+        )
+
+    async def pause_generation(self):
+        self.scheduler_paused = True
+
+    async def resume_generation(self):
+        self.scheduler_paused = False
+
+
+@pytest.mark.asyncio
+async def test_generate_single_prompt_waits_for_resume_then_reaches_engine():
+    """A single-prompt generate() that arrives during a weight-sync pause is held, not rejected.
+
+    Before this, the call raised while the pause was on; the trajectory collector caught the
+    error per row and the row trained fully masked, so every rollout that started a turn inside
+    the pause window was silently lost.
+    """
+    engine = _MockGenerateEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    # Simulate the pause directly, as the streaming and completion tests do: the engine fan-out
+    # is not what this test exercises.
+    client.generation_paused_event.set()
+    engine.scheduler_paused = True
+
+    request = InferenceEngineInput(
+        prompt_token_ids=[[1, 2, 3]], sampling_params={"max_tokens": 5, "temperature": 0}, session_ids=["prompt-0"]
+    )
+    task = asyncio.create_task(client.generate(request))
+    # A paused waiter never runs on a bare yield; if the request were sent (or rejected) it
+    # would happen within these turns of the loop.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not task.done(), "generate() returned or raised while generation was paused"
+    assert engine.requests == []
+
+    await client.resume_generation()
+    output = await asyncio.wait_for(task, timeout=5)
+
+    assert engine.requests == [
+        {
+            "prompt_token_ids": [[1, 2, 3]],
+            "sampling_params": {"max_tokens": 5, "temperature": 0},
+            "session_ids": ["prompt-0"],
+        }
+    ]
+    assert output["response_ids"] == [[21, 22, 23]]
+    assert output["responses"] == ["answer"]
+    assert output["stop_reasons"] == ["stop"]
+    assert output["response_logprobs"] == [[-0.1, -0.2, -0.3]]
+
+
+@pytest.mark.asyncio
+async def test_generate_batched_still_raises_while_paused():
+    """Batched generate() has no per-prompt retry loop, so it keeps rejecting during a pause."""
+    engine = _MockGenerateEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    client.generation_paused_event.set()
+
+    request = InferenceEngineInput(prompt_token_ids=[[1, 2], [3, 4]], sampling_params={"max_tokens": 5})
+    with pytest.raises(RuntimeError, match="batched"):
+        await client.generate(request)
+    assert engine.requests == []

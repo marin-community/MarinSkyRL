@@ -339,6 +339,11 @@ Upon ``InferenceEngineClient.pause_generation()``, we abort all the in-flight ``
 and save the partial results, waiting to be re-fed into the underlying inference engine as a new
 ``/chat/completions`` request when ``InferenceEngineClient.resume_generation()`` is called.
 
+Single-prompt ``.generate()`` and single-prompt ``/completions`` requests follow the same retry loop, and a
+request that arrives while generation is paused waits for the resume before it is sent. Batched
+``.generate()`` and batched ``/completions`` requests do not support the pause boundary and are rejected
+while it is in effect.
+
 See the following two PRs for more details:
 - https://github.com/NovaSky-AI/SkyRL/pull/537
 - https://github.com/NovaSky-AI/SkyRL/pull/557
@@ -355,7 +360,7 @@ V. Future Work
 ----------------
 
 - Validate with correct algorithmic offset (importance weighting)
-- Support fully async training for ``.generate()`` and ``/completions`` as well.
+- Support the pause boundary for batched ``.generate()`` and batched ``/completions`` as well.
 - Validate speedup and results with DAPO.
 - How to make fully async training reproducible (at the cost of some performance degradation)?
 
