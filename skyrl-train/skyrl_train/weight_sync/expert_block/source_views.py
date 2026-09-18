@@ -38,12 +38,17 @@ def local_source_slices(
         raise ValueError("Expert-block sync requires tensor-parallel size 1 on the trainer")
     expert, dense, sources = [], [], {}
     for task in tasks:
+        # Keep the parameter itself, not a detached view: a later ``param.data``
+        # reassignment must show up when the sender re-checks storage before a send.
         source = task.param_weight
         if source is None:
             continue
-        source = source.detach()
         key = task.global_param_name
-        if key in sources or not source.is_contiguous() or str(source.dtype).removeprefix("torch.") not in ("bfloat16", "float32"):
+        if (
+            key in sources
+            or not source.is_contiguous()
+            or str(source.dtype).removeprefix("torch.") not in ("bfloat16", "float32")
+        ):
             raise ValueError(f"Parameter {key} must be unique, contiguous and BF16 or FP32")
         sources[key] = source
         mapping = task.mapping
@@ -72,13 +77,22 @@ def local_source_slices(
                 add(mapping.hf_param[part], expert_id * half, position * half, half)
         elif kind == "QKVMapping":
             heads, groups, head_dim = config.num_attention_heads, config.num_query_groups, config.kv_channels
-            if source.shape != ((heads + 2 * groups) * head_dim, config.hidden_size) or set(mapping.hf_param) != {"q", "k", "v"}:
+            if source.shape != ((heads + 2 * groups) * head_dim, config.hidden_size) or set(mapping.hf_param) != {
+                "q",
+                "k",
+                "v",
+            }:
                 raise ValueError(f"QKV parameter {key} differs from the configured interleaved layout")
             queries = heads // groups
             for group in range(groups):
                 for part, offset, count in (("q", 0, queries), ("k", queries, 1), ("v", queries + 1, 1)):
                     numel = count * head_dim * config.hidden_size
-                    add(mapping.hf_param[part], group * numel, (group * (queries + 2) + offset) * head_dim * config.hidden_size, numel)
+                    add(
+                        mapping.hf_param[part],
+                        group * numel,
+                        (group * (queries + 2) + offset) * head_dim * config.hidden_size,
+                        numel,
+                    )
         else:
             raise ValueError(f"Unsupported weight mapping for expert-block sync: {kind}")
     return expert, dense, sources
@@ -114,7 +128,9 @@ def local_expert_sources(
     for (layer, expert, projection), parts in sorted(grouped.items()):
         needed = {"down"} if projection == "fc2" else {"gate", "up"}
         if set(parts) != needed or len({item.source_key for item in parts.values()}) != 1:
-            raise ValueError(f"Expert {expert} of layer {layer} ({projection}) is incomplete or split across parameters")
+            raise ValueError(
+                f"Expert {expert} of layer {layer} ({projection}) is incomplete or split across parameters"
+            )
         first = parts["down" if projection == "fc2" else "gate"]
         if first.source_offset != 0 or (projection == "fc1" and parts["up"].source_offset != matrix_size):
             raise ValueError(f"Expert {expert} of layer {layer} has reordered or nonadjacent gate/up halves")
@@ -122,7 +138,14 @@ def local_expert_sources(
         shape = (hidden_size, intermediate_size) if projection == "fc2" else (2 * intermediate_size, hidden_size)
         if tuple(source.shape) != shape or source.dtype != torch.bfloat16:
             raise ValueError(f"Parameter {first.source_key} is not the {shape} BF16 matrix of expert {expert}")
-        entry = ExpertEntry(f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}", layer, trainer.pp, expert, projection, source.numel() * 2)
+        entry = ExpertEntry(
+            f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}",
+            layer,
+            trainer.pp,
+            expert,
+            projection,
+            source.numel() * 2,
+        )
         result.append(ExpertSource(entry, first.source_key, shape))
     return result
 
@@ -131,7 +154,7 @@ def expert_source_view(item: ExpertSource, sources: dict[str, torch.Tensor]) -> 
     source = sources[item.source_key]
     if tuple(source.shape) != item.shape or source.dtype != torch.bfloat16 or not source.is_contiguous():
         raise ValueError(f"Expert parameter {item.source_key} changed shape, dtype or layout")
-    return source.view(-1)
+    return source.detach().view(-1)
 
 
 def expert_destination_view(entry: ExpertEntry, parameters, expert_maps) -> torch.Tensor:
@@ -141,7 +164,7 @@ def expert_destination_view(entry: ExpertEntry, parameters, expert_maps) -> torc
     if local < 0:
         raise ValueError(f"This receiver does not serve expert {entry.expert} of layer {entry.layer}")
     parameter = parameters[f"{prefix}.w13_weight" if entry.projection == "fc1" else f"{prefix}.w2_weight"]
-    view = parameter[local]
+    view = parameter.detach()[local]
     if view.dtype != torch.bfloat16 or not view.is_contiguous() or view.numel() * 2 != entry.nbytes:
         raise ValueError(f"Receiver slot for {entry.name} differs from the scheduled matrix")
     return view.view(-1)
@@ -151,7 +174,7 @@ def dense_source_view(item: DenseSlice, sources: dict[str, torch.Tensor]) -> tor
     source = sources[item.source_key]
     if str(source.dtype).removeprefix("torch.") != item.wire_dtype or not source.is_contiguous():
         raise ValueError(f"Parameter {item.source_key} changed dtype or layout")
-    return source.view(-1).narrow(0, item.source_offset, item.numel)
+    return source.detach().view(-1).narrow(0, item.source_offset, item.numel)
 
 
 def dense_destination_view(item: DenseSlice, parameters) -> torch.Tensor:
@@ -159,7 +182,9 @@ def dense_destination_view(item: DenseSlice, parameters) -> torch.Tensor:
     parameter = parameters[item.hf_name]
     if not parameter.is_contiguous():
         raise ValueError(f"Installed parameter {item.hf_name} is not contiguous")
-    widened = item.hf_name.endswith(ROUTER_WEIGHT_SUFFIX) and item.wire_dtype == BF16 and parameter.dtype == torch.float32
+    widened = (
+        item.hf_name.endswith(ROUTER_WEIGHT_SUFFIX) and item.wire_dtype == BF16 and parameter.dtype == torch.float32
+    )
     if not widened and str(parameter.dtype).removeprefix("torch.") != item.wire_dtype:
         raise ValueError(f"Installed dtype of {item.hf_name} differs from the wire dtype {item.wire_dtype}")
-    return parameter.view(-1).narrow(0, item.hf_offset, item.numel)
+    return parameter.detach().view(-1).narrow(0, item.hf_offset, item.numel)

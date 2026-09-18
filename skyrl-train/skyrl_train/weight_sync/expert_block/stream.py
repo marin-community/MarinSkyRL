@@ -24,6 +24,14 @@ from skyrl_train.weight_sync.expert_block.source_views import (
 )
 
 
+def storage_identity(tensors: dict[str, torch.Tensor]) -> dict[str, tuple]:
+    """Where each live parameter's storage is; a sync must see the storage its plan was built on."""
+    return {
+        name: (value.data_ptr(), tuple(value.shape), tuple(value.stride()), str(value.dtype), str(value.device))
+        for name, value in tensors.items()
+    }
+
+
 @dataclass(frozen=True)
 class InstallReport:
     participant: int
@@ -77,6 +85,10 @@ class Stream:
                 dense_destination_view(item.source, self.parameters)
 
     def run(self, version: int) -> InstallReport:
+        with torch.no_grad():
+            return self._run(version)
+
+    def _run(self, version: int) -> InstallReport:
         started = time.perf_counter()
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)

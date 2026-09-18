@@ -6,6 +6,7 @@ from transformers import AutoTokenizer, AutoConfig
 from huggingface_hub import snapshot_download
 
 import asyncio
+import functools
 import importlib.util
 import os
 from enum import StrEnum
@@ -58,6 +59,7 @@ from skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronPolicyMicroBatch,
 )
 from skyrl_train.utils.profiler import Profiler
+from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
 from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
 from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, MegatronWeightExtractor
 from skyrl_train.workers.grug_validation import GrugValidationSnapshot
@@ -300,6 +302,18 @@ class MegatronWorker:
         )
 
 
+def _stamps_model_version(train):
+    """Record which update the policy weights hold once training it succeeds."""
+
+    @functools.wraps(train)
+    def wrapper(self, train_data):
+        output = train(self, train_data)
+        self._model_version_step = int(train_data.metadata["global_step"])
+        return output
+
+    return wrapper
+
+
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -437,6 +451,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         self._maybe_install_router_replay("policy")
 
+        # The update whose weights this rank now holds; None until the first update.
+        self._model_version_step: int | None = None
+        self._expert_block_sender = (
+            ExpertBlockSender(self, mpu) if self.cfg.generator.weight_sync_transport == "expert_block" else None
+        )
+
         # Initialize weight extractor
         self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
         # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
@@ -473,6 +493,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     # This cannot inherit PolicyWorkerBase.ppo_train: Megatron Core must own
     # pipeline scheduling and gradient accumulation, so only policy semantics
     # are shared with the ordinary worker through backend-neutral utilities.
+    @_stamps_model_version
     def ppo_train(self, train_data) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
         self._drain_r3_decentral_stagger(train_data)
@@ -596,6 +617,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
         return output
+
+    async def expert_block_rpc(self, method: str, *args):
+        """Expert-block weight sync: inventory, bind, run or close this rank's sender."""
+        return getattr(self._expert_block_sender, method)(*args)
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
         from torch.multiprocessing.reductions import reduce_tensor

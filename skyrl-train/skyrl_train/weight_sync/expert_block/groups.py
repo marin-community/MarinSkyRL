@@ -35,7 +35,12 @@ class RendezvousStore:
     def __init__(self, namespace: str, *, timeout_seconds: int):
         self.address = ray.util.get_node_ip_address()
         self.store = dist.TCPStore(
-            self.address, 0, world_size=None, is_master=True, timeout=timedelta(seconds=timeout_seconds), wait_for_workers=False
+            self.address,
+            0,
+            world_size=None,
+            is_master=True,
+            timeout=timedelta(seconds=timeout_seconds),
+            wait_for_workers=False,
         )
         self.rendezvous = Rendezvous(self.address, self.store.port, namespace, timeout_seconds)
 
@@ -74,7 +79,9 @@ def create_groups(
     return created
 
 
-def warm_groups(participant: int, groups: tuple[Group, ...], created: dict[str, dist.ProcessGroup], device) -> dict[str, float]:
+def warm_groups(
+    participant: int, groups: tuple[Group, ...], created: dict[str, dist.ProcessGroup], device
+) -> dict[str, float]:
     """Broadcast a known value on every owned group and check it arrived; returns seconds per group."""
     wire = torch.empty(1, dtype=torch.int32, device=device)
     seconds = {}

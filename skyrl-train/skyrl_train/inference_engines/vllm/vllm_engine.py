@@ -86,9 +86,11 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.inference_engines.response_topk import select_response_topk
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
+from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity, set_sync_worker_numa_affinity
 from skyrl_train.weight_sync import WeightLoader
+from skyrl_train.weight_sync.expert_block.receiver import ExpertBlockReceiver
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
 from skyrl_train.weight_sync.weight_extractor import is_weight_sync_dtype_compatible
 from skyrl_train.inference_engines.vllm.utils import (
@@ -1034,15 +1036,32 @@ class WorkerWrap:
 
     def report_device_placement(self) -> dict[str, str | int]:
         """This worker's physical GPU and communicator ranks, as plain fields for the utility RPC."""
+        return asdict(self._device_placement())
+
+    def _device_placement(self) -> InferenceWorkerPlacement:
         dp = get_dp_group()
         ep = get_ep_group() if self.model_config.is_moe else None
-        placement = inference_worker_placement(
+        return inference_worker_placement(
             dp_rank=dp.rank_in_group,
             dp_world_size=dp.world_size,
             ep_rank=ep.rank_in_group if ep is not None else 0,
             ep_world_size=ep.world_size if ep is not None else 1,
         )
-        return asdict(placement)
+
+    def expert_block_rpc(self, method: str, *args):
+        """Expert-block weight sync: inventory, bind, run or close this worker's receiver."""
+        receiver = getattr(self, "_expert_block_receiver", None)
+        if receiver is None:
+            placement = self._device_placement()
+            receiver = self._expert_block_receiver = ExpertBlockReceiver(
+                self.vllm_config,
+                self.device,
+                self.model_runner.model,
+                ep_rank=placement.ep_rank,
+                ep_size=placement.ep_world_size,
+                gpu_uuid=placement.gpu_uuid,
+            )
+        return getattr(receiver, method)(*args)
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
@@ -2132,6 +2151,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def report_engine_placement(self):
         """Physical GPU and communicator ranks of every engine worker, once the model is loaded."""
         return await self._get_engine().collective_rpc("report_device_placement")
+
+    async def expert_block_rpc(self, method: str, *args):
+        """Forward one expert-block sync call to this engine's single worker; installs only while paused."""
+        engine = self._get_engine()
+        if method == "receive_weights" and not await engine.is_paused():
+            raise RuntimeError("Expert-block sync installs weights only while generation is paused")
+        results = await engine.collective_rpc("expert_block_rpc", args=(method, *args))
+        if len(results) != 1:
+            raise RuntimeError(f"Expected one worker per node-local engine, got {len(results)}")
+        return results[0]
 
     async def begin_weight_reload(self):
         """#1685 fix: open the layerwise-reload bracket on every engine worker so the

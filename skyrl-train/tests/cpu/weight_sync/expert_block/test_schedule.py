@@ -39,7 +39,14 @@ def receivers(replicas=2):
 def entries():
     owner = {layer: pp for pp, layers in enumerate(LAYERS_BY_PP) for layer in layers}
     return tuple(
-        ExpertEntry(f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}", layer, owner[layer], expert, projection, MATRIX_BYTES)
+        ExpertEntry(
+            f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}",
+            layer,
+            owner[layer],
+            expert,
+            projection,
+            MATRIX_BYTES,
+        )
         for layer in owner
         for expert in range(NUM_EXPERTS)
         for projection in ("fc1", "fc2")

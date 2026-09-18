@@ -9,7 +9,6 @@ from datetime import timedelta
 from itertools import product
 import os
 
-import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -35,7 +34,9 @@ TIMEOUT = 60
 
 
 def trainers():
-    return tuple(TrainerRank(index, dp, pp, ep) for index, (dp, pp, ep) in enumerate(product(range(DP), range(2), range(EP))))
+    return tuple(
+        TrainerRank(index, dp, pp, ep) for index, (dp, pp, ep) in enumerate(product(range(DP), range(2), range(EP)))
+    )
 
 
 def receivers():
@@ -68,7 +69,12 @@ def expert_sources_for(trainer):
                 key = f"decoder.layers.{layer}.mlp.experts.linear_{projection}.weight{expert}"
                 sources[key] = torch.full(shape, expert_value(layer, expert, projection), dtype=torch.bfloat16)
                 entry = ExpertEntry(
-                    f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}", layer, trainer.pp, expert, projection, sources[key].numel() * 2
+                    f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}",
+                    layer,
+                    trainer.pp,
+                    expert,
+                    projection,
+                    sources[key].numel() * 2,
                 )
                 experts[entry.name] = ExpertSource(entry, key, shape)
     return sources, experts
@@ -91,12 +97,25 @@ def schedule():
             entries.extend(source.entry for source in expert_sources_for(trainer)[1].values())
     dense = dense_slices_for(0) + dense_slices_for(1)
     return build_schedule(
-        trainers(), receivers(), entries, dense, trainer_ep=EP, receiver_ep=EP, layers_by_pp=LAYERS_BY_PP, num_experts=NUM_EXPERTS
+        trainers(),
+        receivers(),
+        entries,
+        dense,
+        trainer_ep=EP,
+        receiver_ep=EP,
+        layers_by_pp=LAYERS_BY_PP,
+        num_experts=NUM_EXPERTS,
     )
 
 
 def participant_main(rank, port, directory):
-    dist.init_process_group("gloo", init_method=f"file://{directory}/default-{rank}", rank=0, world_size=1, timeout=timedelta(seconds=TIMEOUT))
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{directory}/default-{rank}",
+        rank=0,
+        world_size=1,
+        timeout=timedelta(seconds=TIMEOUT),
+    )
     plan = schedule()
     trainer_count = plan.trainer_count
     device = torch.device("cpu")
@@ -113,9 +132,14 @@ def participant_main(rank, port, directory):
         per_block = NUM_EXPERTS // EP
         for layer in range(2):
             prefix = f"model.layers.{layer}.mlp.experts.routed_experts"
-            parameters[f"{prefix}.w13_weight"] = torch.zeros((per_block, 2 * INTERMEDIATE, HIDDEN), dtype=torch.bfloat16)
+            parameters[f"{prefix}.w13_weight"] = torch.zeros(
+                (per_block, 2 * INTERMEDIATE, HIDDEN), dtype=torch.bfloat16
+            )
             parameters[f"{prefix}.w2_weight"] = torch.zeros((per_block, HIDDEN, INTERMEDIATE), dtype=torch.bfloat16)
-            maps[prefix] = tuple(expert - receiver.ep * per_block if expert // per_block == receiver.ep else -1 for expert in range(NUM_EXPERTS))
+            maps[prefix] = tuple(
+                expert - receiver.ep * per_block if expert // per_block == receiver.ep else -1
+                for expert in range(NUM_EXPERTS)
+            )
         for name, (_, shape, dtype) in DENSE.items():
             parameters[name] = torch.zeros(shape, dtype=getattr(torch, dtype))
         kwargs = dict(parameters=parameters, expert_maps=maps)
@@ -156,7 +180,9 @@ def participant_main(rank, port, directory):
 
 
 def test_every_receiver_installs_exactly_its_experts_and_all_dense_weights(tmp_path):
-    store = dist.TCPStore("127.0.0.1", 0, world_size=None, is_master=True, timeout=timedelta(seconds=TIMEOUT), wait_for_workers=False)
+    store = dist.TCPStore(
+        "127.0.0.1", 0, world_size=None, is_master=True, timeout=timedelta(seconds=TIMEOUT), wait_for_workers=False
+    )
     world = len(trainers()) + len(receivers())
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     mp.spawn(participant_main, args=(store.port, str(tmp_path)), nprocs=world, join=True)

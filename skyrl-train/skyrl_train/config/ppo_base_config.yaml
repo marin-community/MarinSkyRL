@@ -367,6 +367,13 @@ generator:
   backend: "vllm"
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
+  # How weights travel to the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
+  # "expert_block": each expert block is broadcast from the trainer rank that owns it straight into the
+  # engine worker that serves it. Requires a Grug MoE with TP=1 on both sides, equal expert-parallel
+  # degree, node-local engines (inference_engine_node_local) and the TRITON MoE backend in vLLM.
+  weight_sync_transport: "broadcast"
+  expert_block_sync:
+    timeout_seconds: 600  # Group creation at startup and each sync's collectives.
   fuse_weights: false
   r3_transport: "decentral"
   r3_dispatch_put_timeout_seconds: 600

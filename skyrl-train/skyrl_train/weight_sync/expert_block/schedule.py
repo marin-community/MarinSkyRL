@@ -140,7 +140,9 @@ def build_schedule(
     replica_count = len({row.replica for row in receivers})
     trainer_at = {(row.dp, row.pp, row.ep): row for row in trainers}
     receiver_at = {(row.replica, row.ep): row for row in receivers}
-    if len(trainer_at) != len(trainers) or set(trainer_at) != set(product(range(dp_count), range(pp_count), range(trainer_ep))):
+    if len(trainer_at) != len(trainers) or set(trainer_at) != set(
+        product(range(dp_count), range(pp_count), range(trainer_ep))
+    ):
         raise ValueError("Incomplete or duplicate trainer topology")
     if len(receiver_at) != len(receivers) or set(receiver_at) != set(product(range(replica_count), range(receiver_ep))):
         raise ValueError("Incomplete or duplicate receiver topology")
@@ -160,9 +162,16 @@ def build_schedule(
     def receivers_of(ep: int) -> tuple[int, ...]:
         return tuple(receiver_participant(trainer_count, receiver_at[replica, ep]) for replica in range(replica_count))
 
-    groups = [Group(f"expert-{pp}-{ep}", (root(pp, ep), *receivers_of(ep))) for pp in range(pp_count) for ep in range(trainer_ep)]
+    groups = [
+        Group(f"expert-{pp}-{ep}", (root(pp, ep), *receivers_of(ep)))
+        for pp in range(pp_count)
+        for ep in range(trainer_ep)
+    ]
     local_groups = [
-        Group(f"local-{replica}", tuple(receiver_participant(trainer_count, receiver_at[replica, ep]) for ep in range(receiver_ep)))
+        Group(
+            f"local-{replica}",
+            tuple(receiver_participant(trainer_count, receiver_at[replica, ep]) for ep in range(receiver_ep)),
+        )
         for replica in range(replica_count)
     ]
 
