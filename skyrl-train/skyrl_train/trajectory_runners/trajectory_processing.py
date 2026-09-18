@@ -38,6 +38,7 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 )
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
+from skyrl_train.trajectory_runners.marin_tokenizer_chat_template import MARIN_TOKENIZER_CHAT_TEMPLATE
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
@@ -412,6 +413,8 @@ def _apply_alignment_validity(
 
 
 CUSTOM_CHAT_TEMPLATES = {
+    # the Snowball policies' own template, with generation blocks for the assistant mask
+    "marin_tokenizer": MARIN_TOKENIZER_CHAT_TEMPLATE,
     # chat template for qwen3 that preserves thinking tokens
     "qwen3_with_thinking": (
         "{% for message in messages %}"
