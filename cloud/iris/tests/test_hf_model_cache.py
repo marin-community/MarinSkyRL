@@ -10,18 +10,19 @@ def test_hub_download_uses_an_online_child_process(tmp_path: Path, monkeypatch) 
 
     def run(*_args, env, **_kwargs):
         observed_environment.update(env)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=f"PRESTAGE_LOCAL_DIR={tmp_path}\n", stderr="")
 
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
     monkeypatch.setattr(hf_model_cache.subprocess, "run", run)
 
-    hf_model_cache._download_snapshot(
+    resolved = hf_model_cache.download_hugging_face_snapshot(
         "laion/draft",
-        "4bdb47c08e5b5190bea3c7a93c3e14470230e469",
-        tmp_path,
+        revision="4bdb47c08e5b5190bea3c7a93c3e14470230e469",
+        destination=tmp_path,
     )
 
+    assert resolved == tmp_path
     assert "HF_HUB_OFFLINE" not in observed_environment
     assert "TRANSFORMERS_OFFLINE" not in observed_environment
 
@@ -31,13 +32,14 @@ def test_repeated_draft_staging_uses_the_completed_region_cache(tmp_path: Path, 
     local_model = tmp_path / "node" / "draft"
     downloads = []
 
-    def download_snapshot(model_id: str, revision: str, local_dir: Path) -> None:
+    def download_snapshot(model_id: str, *, revision: str, destination: Path) -> Path:
         downloads.append((model_id, revision))
-        (local_dir / "config.json").write_text("{}")
-        (local_dir / "model.safetensors").write_bytes(b"weights")
+        (destination / "config.json").write_text("{}")
+        (destination / "model.safetensors").write_bytes(b"weights")
+        return destination
 
     monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
-    monkeypatch.setattr(hf_model_cache, "_download_snapshot", download_snapshot)
+    monkeypatch.setattr(hf_model_cache, "download_hugging_face_snapshot", download_snapshot)
     model = CachedHuggingFaceModel(
         model_id="laion/draft",
         revision="4bdb47c08e5b5190bea3c7a93c3e14470230e469",

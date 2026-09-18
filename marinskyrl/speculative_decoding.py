@@ -20,6 +20,11 @@ _DRAFT_MODEL_ROOT = "/tmp/marinskyrl-draft-models"
 STANDARD_TRAINING_ENTRYPOINT = "skyrl_train.entrypoints.main_base"
 
 
+def is_hugging_face_commit(value: str) -> bool:
+    """Return whether ``value`` is a full immutable Hugging Face commit SHA."""
+    return _HF_COMMIT_PATTERN.fullmatch(value) is not None
+
+
 class SpeculativeDecodingMethod(StrEnum):
     """Speculative methods supported by MarinSkyRL's managed lifecycle."""
 
@@ -120,7 +125,7 @@ class SpeculatorModelConfig:
 
         hf_repo = hugging_face_repo_from_source_uri(source_uri)
         if hf_repo is not None:
-            if _HF_COMMIT_PATTERN.fullmatch(source_identity) is None:
+            if not is_hugging_face_commit(source_identity):
                 raise SpeculativeDecodingConfigError(
                     f"{context}.source_identity must be a full 40-character lowercase commit SHA for {hf_repo}"
                 )
