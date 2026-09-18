@@ -13,8 +13,9 @@ from omegaconf import DictConfig
 from reasoning_gym.utils import extract_answer
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.lcb.livecodebench import DEFAULT_LIMITS, VerifierLimits
 from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
-from skyrl_gym.envs.nemotron_ultra.code_gen import grade_code
+from skyrl_gym.envs.nemotron_ultra.code_gen import DEFAULT_PER_TEST_TIMEOUT_SECONDS, grade_code
 from skyrl_gym.envs.nemotron_ultra.format_verification import grade_format
 from skyrl_gym.envs.nemotron_ultra.instruction_following import grade_instruction_following
 from skyrl_gym.envs.nemotron_ultra.jailbreak import grade_jailbreak
@@ -29,7 +30,6 @@ from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
-from skyrl_gym.envs.lcb.livecodebench import DEFAULT_MAX_MEMORY_BYTES, DEFAULT_TOTAL_TIMEOUT_SECONDS
 from skyrl_gym.verification import RolloutEvidence, VerificationResult
 
 _TOOL_COMPARISON_AGENTS = {
@@ -84,7 +84,16 @@ class NemotronUltraEnv(BaseTextEnv):
         self.sandbox_session_id = str(uuid.uuid4())
         self.genrm_config = dict(env_config.get("genrm", {}))
         code_verifier = env_config.get("code_verifier", {})
-        self.code_verifier_config = dict(code_verifier) if isinstance(code_verifier, Mapping) else {}
+        if not isinstance(code_verifier, Mapping):
+            code_verifier = {}
+        # An explicit `null` in code_verifier config disables a bound; an unset key keeps it.
+        self.code_verifier = VerifierLimits(
+            max_memory_bytes=code_verifier.get("max_memory_bytes", DEFAULT_LIMITS.max_memory_bytes),
+            total_timeout_seconds=code_verifier.get("total_timeout_seconds", DEFAULT_LIMITS.total_timeout_seconds),
+        )
+        self.code_verifier_timeout_seconds = int(
+            code_verifier.get("per_test_timeout_seconds", DEFAULT_PER_TEST_TIMEOUT_SECONDS)
+        )
         if self.agent in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:
             self.max_turns = 1
         elif self.agent == "ns_tools_simple_agent":
@@ -193,16 +202,12 @@ class NemotronUltraEnv(BaseTextEnv):
             )
             diagnostics.update(details)
         elif self.agent == "code_gen_simple_agent":
-            # An explicit `null` in code_verifier config disables a bound; an unset key keeps it.
             reward, details = grade_code(
                 action,
                 self.record,
                 assistant_message=self._assistant_message(action),
-                timeout_seconds=int(self.code_verifier_config.get("per_test_timeout_seconds", 10)),
-                max_memory_bytes=self.code_verifier_config.get("max_memory_bytes", DEFAULT_MAX_MEMORY_BYTES),
-                total_timeout_seconds=self.code_verifier_config.get(
-                    "total_timeout_seconds", DEFAULT_TOTAL_TIMEOUT_SECONDS
-                ),
+                timeout_seconds=self.code_verifier_timeout_seconds,
+                limits=self.code_verifier,
             )
             diagnostics.update(details)
         elif self.agent == "instruction_following_simple_agent":

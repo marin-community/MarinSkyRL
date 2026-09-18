@@ -7,7 +7,7 @@ import pytest
 import requests
 from omegaconf import OmegaConf
 
-from skyrl_gym.envs.lcb.livecodebench import DEFAULT_MAX_MEMORY_BYTES, DEFAULT_TOTAL_TIMEOUT_SECONDS
+from skyrl_gym.envs.lcb.livecodebench import DEFAULT_LIMITS, VerifierLimits
 from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
 from skyrl_gym.envs.nemotron_ultra.code_gen import grade_code
 from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraEnv
@@ -400,16 +400,14 @@ def test_code_gen_verifier_bounds_come_from_env_config(monkeypatch):
     bounded.step("```python\nprint(1)\n```")
 
     assert captured["timeout_seconds"] == 7
-    assert captured["total_timeout_seconds"] == 120
-    assert captured["max_memory_bytes"] == 2147483648
+    assert captured["limits"] == VerifierLimits(max_memory_bytes=2147483648, total_timeout_seconds=120)
 
     default = NemotronUltraEnv(OmegaConf.create({}), extras=extras)
 
     default.step("```python\nprint(1)\n```")
 
     assert captured["timeout_seconds"] == 10
-    assert captured["total_timeout_seconds"] == DEFAULT_TOTAL_TIMEOUT_SECONDS
-    assert captured["max_memory_bytes"] == DEFAULT_MAX_MEMORY_BYTES
+    assert captured["limits"] == DEFAULT_LIMITS
 
 
 def test_code_gen_reward_applies_nvidia_reasoning_format_penalty():
