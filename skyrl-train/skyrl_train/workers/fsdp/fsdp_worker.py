@@ -9,7 +9,7 @@ from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_th
 import ray
 import torch
 import torch.distributed
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 import io
@@ -138,6 +138,15 @@ def _build_cpu_offload_numa_diagnostics(rank: int, page_sample: _ParameterPageSa
     )
 
 
+def _omit_tied_lm_head_weight(
+    params: dict[str, torch.Tensor], config: PretrainedConfig | None
+) -> dict[str, torch.Tensor]:
+    """Omit the output alias that vLLM restores from the tied input embedding."""
+    if config is not None and config.tie_word_embeddings:
+        return type(params)((name, param) for name, param in params.items() if name != "lm_head.weight")
+    return params
+
+
 class FSDPWeightExtractor(WeightExtractor):
     """Extracts weights from FSDP-sharded models.
 
@@ -223,6 +232,7 @@ class FSDPWeightExtractor(WeightExtractor):
 
         # Get state dict (handles FSDP sharding)
         params = self.model.state_dict()
+        params = _omit_tied_lm_head_weight(params, getattr(self.model, "config", None))
 
         # Stage 7 (80B) — STREAMED grouped gather. For grouped-swapped models the old
         # path eagerly `full_tensor()`-gathered EVERY layer's grouped `experts.w1/w2/w3`

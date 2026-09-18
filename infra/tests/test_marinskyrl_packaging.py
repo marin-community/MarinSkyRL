@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from email.parser import Parser
-from itertools import combinations
 from pathlib import Path
 import re
 import subprocess
@@ -17,8 +16,6 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 PYPROJECT = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
-
-
 @dataclass(frozen=True)
 class BuiltWheel:
     names: set[str]
@@ -95,29 +92,6 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert "Extras `cpu` and `cuda` are incompatible" in conflict.stderr
 
 
-def test_megatron_extra_has_native_wheels_for_both_linux_architectures() -> None:
-    extras = PYPROJECT["project"]["optional-dependencies"]
-    sources = PYPROJECT["tool"]["uv"]["sources"]
-
-    assert extras["megatron"]
-    assert any(requirement.startswith("megatron-core") for requirement in extras["megatron"])
-    for package in ("causal-conv1d", "mamba-ssm", "transformer-engine-torch"):
-        urls = sources[package]
-        assert any("linux_x86_64.whl" in source["url"] for source in urls)
-        assert any("linux_aarch64.whl" in source["url"] for source in urls)
-
-
-@pytest.mark.parametrize("policy_extra", ["fsdp", "megatron"])
-def test_policy_extra_provides_flash_attention_for_both_linux_architectures(policy_extra: str) -> None:
-    extras = PYPROJECT["project"]["optional-dependencies"]
-    sources = PYPROJECT["tool"]["uv"]["sources"]
-
-    assert "flash-attn==2.8.3 ; sys_platform == 'linux'" in extras[policy_extra]
-    urls = sources["flash-attn"]
-    assert any("linux_x86_64.whl" in source["url"] for source in urls)
-    assert any("linux_aarch64.whl" in source["url"] for source in urls)
-
-
 def test_rollout_runtime_resolves_harbor_main_into_the_frozen_lock() -> None:
     sources = PYPROJECT["tool"]["uv"]["sources"]
     lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
@@ -139,17 +113,6 @@ def test_harbor_config_release_matches_the_locked_harbor_commit() -> None:
     assert config_release.group(1) == harbor_commit
 
 
-def _valid_extra_combinations() -> list[tuple[str, ...]]:
-    extras = tuple(PYPROJECT["project"]["optional-dependencies"])
-    conflicts = [frozenset(item["extra"] for item in conflict) for conflict in PYPROJECT["tool"]["uv"]["conflicts"]]
-    return [
-        selected
-        for size in range(len(extras) + 1)
-        for selected in combinations(extras, size)
-        if not any(conflict.issubset(selected) for conflict in conflicts)
-    ]
-
-
 def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:
     command = ["uv", "export", "--frozen", "--no-annotate", "--no-dev", "--no-hashes"]
     for extra in extras:
@@ -164,41 +127,45 @@ def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:
     return [Requirement(line) for line in exported if line and not line.startswith(("#", "-e "))]
 
 
-def test_every_valid_extra_closure_uses_one_pinned_cuda12_runtime() -> None:
-    linux_platforms = (
-        {"sys_platform": "linux", "platform_machine": "x86_64"},
-        {"sys_platform": "linux", "platform_machine": "aarch64"},
-    )
-    failures = []
-    gpu_extras = {"cuda", "deepspeed", "fsdp", "megatron", "vllm"}
-    extra_combinations = _valid_extra_combinations()
-    exported_closures = map(_exported_requirements, extra_combinations)
-    for extras, requirements in zip(extra_combinations, exported_closures, strict=True):
-        for platform in linux_platforms:
-            runtimes = {
-                (requirement.name, str(requirement.specifier))
-                for requirement in requirements
-                if requirement.name.startswith("nvidia-cuda-runtime")
-                and (requirement.marker is None or requirement.marker.evaluate(platform))
-            }
-            if len(runtimes) > 1:
-                failures.append((extras, platform["platform_machine"], sorted(runtimes)))
-            if "cpu" not in extras and gpu_extras.intersection(extras):
-                assert runtimes == {("nvidia-cuda-runtime-cu12", "==12.9.79")}, (
-                    extras,
-                    platform["platform_machine"],
-                    sorted(runtimes),
-                )
+@pytest.mark.parametrize("extras", [("cuda",), ("deepspeed",), ("fsdp", "vllm"), ("megatron", "vllm")])
+def test_gpu_profiles_use_one_cuda132_runtime(extras: tuple[str, ...]) -> None:
+    platform = {"sys_platform": "linux", "platform_machine": "x86_64"}
+    requirements = _exported_requirements(extras)
+    runtimes = {
+        (requirement.name, str(requirement.specifier))
+        for requirement in requirements
+        if requirement.name.startswith("nvidia-cuda-runtime")
+        and (requirement.marker is None or requirement.marker.evaluate(platform))
+    }
 
-    assert not failures
+    assert runtimes == {("nvidia-cuda-runtime", "==13.2.75")}
 
 
-@pytest.mark.parametrize("policy_extra", ["fsdp", "megatron"])
-def test_rollout_closure_keeps_vllm_and_flashinfer(policy_extra: str) -> None:
-    exported = _exported_requirements((policy_extra, "vllm"))
+@pytest.mark.parametrize(
+    ("extras", "architecture", "required", "forbidden"),
+    [
+        (("fsdp", "vllm"), "x86_64", {"flash-attn", "torchtitan"}, set()),
+        (("fsdp", "vllm"), "aarch64", set(), {"flash-attn", "torchtitan"}),
+        (
+            ("megatron", "vllm"),
+            "x86_64",
+            {"causal-conv1d", "flash-attn", "mamba-ssm", "megatron-core", "transformer-engine-torch"},
+            {"fast-hadamard-transform"},
+        ),
+    ],
+)
+def test_policy_closures_match_supported_architectures(
+    extras: tuple[str, ...], architecture: str, required: set[str], forbidden: set[str]
+) -> None:
+    platform = {"sys_platform": "linux", "platform_machine": architecture}
+    exported = [
+        requirement
+        for requirement in _exported_requirements(extras)
+        if requirement.marker is None or requirement.marker.evaluate(platform)
+    ]
     names = {requirement.name for requirement in exported}
 
-    assert {"vllm", "flashinfer-python", "flashinfer-cubin", "flashinfer-jit-cache"}.issubset(names)
-    assert {"humming-kernels", "cuda-tile"}.issubset(names)
-    assert "nvidia-cuda-nvcc" not in names
-    assert "nvidia-cuda-tileiras" not in names
+    assert {"vllm", "torch", "torchaudio", "flashinfer-python", "nvidia-cuda-nvcc", *required}.issubset(names)
+    assert names.isdisjoint(forbidden)
+    vllm = next(requirement for requirement in exported if requirement.name == "vllm")
+    assert vllm.url is not None and vllm.url.endswith(f"manylinux_2_28_{architecture}.whl")
