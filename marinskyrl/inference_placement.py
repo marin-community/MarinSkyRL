@@ -1,10 +1,12 @@
-"""Node-local inference replica placement, shared by the launcher and the trainer.
+"""Node-local inference replica placement: the configuration rules and the verified placement records.
 
 An opted-in replica is one vLLM data-parallel group whose ranks all sit on one
 physical node; with pipeline parallelism each stage's data-parallel group sits
-on one node. The launcher validates the configuration before any GPU is
-claimed; the trainer verifies the workers it actually got against the bundles
-it was allocated before training starts.
+on one node. The trainer's config validation and the engine factory refuse a
+configuration this cannot hold before any engine starts; the factory then
+verifies the workers it actually got against the bundles it was allocated
+before training starts. This module imports nothing from the trainer, so the
+config validator can import it before any model module.
 """
 
 from collections.abc import Mapping, Sequence
