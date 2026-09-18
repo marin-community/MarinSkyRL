@@ -302,6 +302,7 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_ses
                 "enable_http_endpoint": False,
                 "http_endpoint_host": "127.0.0.1",
                 "http_endpoint_port": 0,
+                "weight_sync_pause_timeout_seconds": 30.0,
             },
         }
     )
@@ -462,6 +463,7 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
                 "enable_http_endpoint": False,
                 "http_endpoint_host": "127.0.0.1",
                 "http_endpoint_port": 0,
+                "weight_sync_pause_timeout_seconds": 30.0,
             },
         }
     )
@@ -596,6 +598,7 @@ def _make_min_cfg():
                 "enable_http_endpoint": False,
                 "http_endpoint_host": "127.0.0.1",
                 "http_endpoint_port": 0,
+                "weight_sync_pause_timeout_seconds": 30.0,
             },
         }
     )
@@ -1248,6 +1251,12 @@ class _MockStreamEngine:
     def __init__(self):
         self.entered = asyncio.Event()
 
+    async def pause_generation(self):
+        pass
+
+    async def resume_generation(self):
+        pass
+
     async def chat_completion_stream(self, request_payload):
         self.entered.set()
         yield 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
@@ -1274,12 +1283,9 @@ class _MockWeightSyncEngine:
 
 
 @pytest.mark.asyncio
-async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes(monkeypatch):
+async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes():
     engine = _MockWeightSyncEngine()
     client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-    monkeypatch.setattr(
-        "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
-    )
 
     await client.pause_generation()
     await client.update_named_weights(request={"names": ["model.weight"]})
@@ -1322,9 +1328,7 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
     engines = [_MockStreamEngine()]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
-    # Simulate a weight-sync pause directly (bypass pause_generation()'s 5s grace +
-    # engine scheduler fan-out, which is not needed to exercise the barrier).
-    client.generation_paused_event.set()
+    await client.pause_generation()
 
     payload = {"json": {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}
 
@@ -1333,14 +1337,15 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
 
     task = asyncio.create_task(_consume())
 
-    # While paused, the stream must block before reaching the engine. Wait past the
-    # 0.5s poll interval in _wait_for_generation_to_resume to be sure.
-    await asyncio.sleep(0.6)
+    # While paused, the stream must block before reaching the engine. A parked stream never
+    # runs on a bare yield, so if it were going to reach the engine it would within these turns.
+    for _ in range(10):
+        await asyncio.sleep(0)
     assert not engines[0].entered.is_set(), "stream reached the engine while generation was paused"
     assert not task.done()
 
     # Resume -> the stream should now proceed to the engine and complete.
-    client.generation_paused_event.clear()
+    await client.resume_generation()
     chunks = await asyncio.wait_for(task, timeout=5)
     assert engines[0].entered.is_set()
     assert any("[DONE]" in c for c in chunks)
@@ -1577,3 +1582,160 @@ async def test_completion_single_prompt_is_unaffected_when_never_paused():
     assert result["choices"][0]["text"] == "done"
     assert len(engines[0].calls) == 1
     assert "session_id" not in engines[0].calls[0], "session_id must be stripped before it reaches the engine"
+
+
+# -------------------------------------------
+# generate() at the weight-sync pause boundary
+# --------------------------------------------
+
+
+class _MockGenerateEngine:
+    """Engine whose ``generate`` records every request and answers with a fixed completion."""
+
+    def __init__(self):
+        self.entered = asyncio.Event()
+        self.requests = []
+        self.scheduler_paused = False
+
+    async def generate(self, request):
+        assert not self.scheduler_paused, "request reached the engine while its scheduler was paused"
+        self.entered.set()
+        self.requests.append(deepcopy(request))
+        return InferenceEngineOutput(
+            responses=["answer"],
+            response_ids=[[21, 22, 23]],
+            stop_reasons=["stop"],
+            response_logprobs=[[-0.1, -0.2, -0.3]],
+        )
+
+    async def pause_generation(self):
+        self.scheduler_paused = True
+
+    async def resume_generation(self):
+        self.scheduler_paused = False
+
+
+@pytest.mark.asyncio
+async def test_generate_single_prompt_waits_for_resume_then_reaches_engine():
+    """A single-prompt generate() that arrives during a weight-sync pause is held, not rejected,
+    and reaches the engine unchanged once generation resumes."""
+    engine = _MockGenerateEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    # Simulate the pause directly, as the batched-completion test does: the engine fan-out is
+    # not what this test exercises.
+    client.generation_paused_event.set()
+    engine.scheduler_paused = True
+
+    request = InferenceEngineInput(
+        prompt_token_ids=[[1, 2, 3]], sampling_params={"max_tokens": 5, "temperature": 0}, session_ids=["prompt-0"]
+    )
+    task = asyncio.create_task(client.generate(request))
+    # A paused waiter never runs on a bare yield; if the request were sent (or rejected) it
+    # would happen within these turns of the loop.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not task.done(), "generate() returned or raised while generation was paused"
+    assert engine.requests == []
+
+    await client.resume_generation()
+    output = await asyncio.wait_for(task, timeout=5)
+
+    assert engine.requests == [
+        {
+            "prompt_token_ids": [[1, 2, 3]],
+            "sampling_params": {"max_tokens": 5, "temperature": 0},
+            "session_ids": ["prompt-0"],
+        }
+    ]
+    assert output["response_ids"] == [[21, 22, 23]]
+    assert output["responses"] == ["answer"]
+    assert output["stop_reasons"] == ["stop"]
+    assert output["response_logprobs"] == [[-0.1, -0.2, -0.3]]
+
+
+@pytest.mark.asyncio
+async def test_generate_batched_still_raises_while_paused():
+    """Batched generate() has no per-prompt retry loop, so it keeps rejecting during a pause."""
+    engine = _MockGenerateEngine()
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    client.generation_paused_event.set()
+
+    request = InferenceEngineInput(prompt_token_ids=[[1, 2], [3, 4]], sampling_params={"max_tokens": 5})
+    with pytest.raises(RuntimeError, match="batched"):
+        await client.generate(request)
+    assert engine.requests == []
+
+
+class _DeadEngine(_MockGenerateEngine):
+    """Engine whose actor has died: every call fails the way a dead Ray actor does."""
+
+    async def generate(self, request):
+        raise ray.exceptions.RayActorError()
+
+    async def pause_generation(self):
+        raise ray.exceptions.RayActorError()
+
+
+@pytest.mark.asyncio
+async def test_weight_sync_pause_skips_an_engine_that_already_died():
+    """A pause must not wait on, or fail because of, an engine the client already knows is dead."""
+    dead, live = _DeadEngine(), _MockGenerateEngine()
+    client = InferenceEngineClient(engines=[dead, live], tokenizer=object(), full_config=_make_min_cfg())
+    # A session routed to the dead engine fails over to the live one and marks the dead one.
+    session_id = next(sid for sid in ("trial-0", "trial-1") if hash_with_sha256(sid) % 2 == 0)
+    await client.generate(
+        InferenceEngineInput(prompt_token_ids=[[1, 2, 3]], sampling_params={"max_tokens": 5}, session_ids=[session_id])
+    )
+    assert len(live.requests) == 1
+
+    await client.pause_generation()
+    assert live.scheduler_paused
+    await client.resume_generation()
+    assert not live.scheduler_paused
+
+
+class _NeverAnsweringEngine(_MockGenerateEngine):
+    """Engine whose pause RPC hangs, as a wedged scheduler's would."""
+
+    async def pause_generation(self):
+        await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_weight_sync_pause_fails_when_an_engine_never_acknowledges():
+    cfg = _make_min_cfg()
+    cfg.generator.weight_sync_pause_timeout_seconds = 0.01
+    client = InferenceEngineClient(engines=[_NeverAnsweringEngine()], tokenizer=object(), full_config=cfg)
+
+    with pytest.raises(TimeoutError, match="weight_sync_pause_timeout_seconds"):
+        await client.pause_generation()
+
+
+def test_resume_wakes_a_request_parked_on_another_event_loop():
+    """The HTTP endpoint serves requests on its own event loop; a request parked there during a
+    pause must be released by a resume issued from the trainer's loop. Two loops are driven by
+    hand in one thread so the request is provably parked before the resume."""
+    engines = [_MockStreamEngine()]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+    payload = {"json": {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}
+    trainer_loop, server_loop = asyncio.new_event_loop(), asyncio.new_event_loop()
+    try:
+        trainer_loop.run_until_complete(client.pause_generation())
+
+        async def consume():
+            return [chunk async for chunk in client.chat_completion_stream(payload)]
+
+        request = server_loop.create_task(consume())
+        # One iteration of the server loop runs the request up to the pause barrier and no further.
+        server_loop.run_until_complete(asyncio.sleep(0))
+        assert not request.done()
+        assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
+
+        trainer_loop.run_until_complete(client.resume_generation())
+        chunks = server_loop.run_until_complete(asyncio.wait_for(request, timeout=5))
+    finally:
+        server_loop.close()
+        trainer_loop.close()
+
+    assert engines[0].entered.is_set()
+    assert any("[DONE]" in chunk for chunk in chunks)
