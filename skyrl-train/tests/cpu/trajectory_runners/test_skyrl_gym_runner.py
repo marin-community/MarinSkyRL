@@ -829,8 +829,6 @@ async def test_non_batched_terminal_assembly_masks_unsampled_tokens(
 async def test_generate_non_batched_multiturn_keeps_the_first_sampled_token_version(
     mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, mock_env_cfg
 ):
-    """The group's oldest span is the version that sampled its first token: an empty first turn
-    carries none, the next turn's version is kept, and a later turn under a newer version is not."""
     generator_cfg.batched = False
     generator_cfg.use_conversation_multi_turn = True
     generator_cfg.max_turns = 3
@@ -1868,7 +1866,8 @@ async def test_apply_overlong_filtering_batched(
         return_value={
             "responses": ["truncated response"],
             "stop_reasons": ["length"],
-            "response_ids": [[10, 11, 12, 13]],
+            "response_ids": [[10, 11, 12, 13, 14, 15]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 6, "policy_version": 2}]],
         }
     )
 
@@ -1906,15 +1905,12 @@ async def test_apply_overlong_filtering_batched(
 
     trajectory_batch = await trajectory_runner.run(input_batch)
 
-    # Verify that the loss mask is zeroed out for the response not ending with eos token
-    assert len(trajectory_batch["loss_masks"]) == 1
-    assert len(trajectory_batch["loss_masks"][0]) == 4  # Should match response length
-    assert trajectory_batch["loss_masks"][0] == [
-        0,
-        0,
-        0,
-        0,
-    ], "Loss mask should be all zeros for response not ending with eos token"
+    # The response is cut to the 5-token budget, masked out for not ending with eos, and its span cut with it.
+    assert trajectory_batch["response_ids"] == [[10, 11, 12, 13, 14]]
+    assert trajectory_batch["loss_masks"] == [[0, 0, 0, 0, 0]]
+    assert trajectory_batch["behavior_policy_version_segments"] == [
+        [{"start": 0, "token_count": 5, "policy_version": 2}]
+    ]
 
 
 @pytest.mark.asyncio
@@ -2002,6 +1998,75 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     assert out.reward.optimization_reward == sum(expected_rewards)
     assert out.reward.token_rewards == tuple(expected_rewards)
     assert (out.evidence.stop_reason or "unknown") == "stop"
+
+
+@pytest.mark.asyncio
+@patch("skyrl_gym.make")
+async def test_single_message_multi_turn_drops_the_span_of_a_trimmed_eos(
+    mock_make, mock_tokenizer, mock_llm, mock_env_cfg
+):
+    mock_tokenizer.eos_token_id = 4
+    mock_tokenizer.apply_chat_template.side_effect = lambda messages, **kwargs: (
+        [101, 102] if kwargs.get("tokenize", True) else "".join(m.get("content", "") for m in messages)
+    )
+    mock_tokenizer.encode.side_effect = lambda text, **kwargs: [77] if text else []
+    versions = iter([2, 3])
+
+    async def llm_generate_side_effect(input_batch):
+        version = next(versions)
+        return {
+            "responses": ["aaa"],
+            "stop_reasons": ["stop"],
+            "response_logprobs": None,
+            "response_ids": [[10, 11, 12, mock_tokenizer.eos_token_id]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 4, "policy_version": version}]],
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=llm_generate_side_effect)
+
+    class TwoStepEnv(BaseTextEnv):
+        def __init__(self):
+            super().__init__()
+            self.turns = 0
+
+        def init(self, prompt):
+            return prompt, {}
+
+        def step(self, action):
+            self.turns += 1
+            if self.turns == 1:
+                return BaseTextEnvStepOutput(
+                    observations=[{"role": "user", "content": "obs1"}], reward=0.0, done=False, metadata={}
+                )
+            return BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+
+    mock_make.return_value = TwoStepEnv()
+    cfg = MagicMock()
+    cfg.sampling_params.max_generate_length = 50
+    cfg.sampling_params.logprobs = None
+    cfg.apply_overlong_filtering = False
+    cfg.max_input_length = 512
+    cfg.batched = False
+    cfg.max_turns = 10
+    cfg.use_conversation_multi_turn = False
+    cfg.chat_template = {"source": "name", "name_or_path": None}
+    trajectory_runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+
+    out = await trajectory_runner.agent_loop(
+        [{"role": "user", "content": "Q?"}], mock_env_cfg.env_class, {}, max_tokens=50, max_input_length=512
+    )
+
+    # step 1 without its trimmed eos (3) + observation (1) + step 2 with its final eos (4)
+    assert list(out.evidence.response_token_ids) == [10, 11, 12, 77, 10, 11, 12, 4]
+    assert out.behavior_policy_version_segments == (
+        {"start": 0, "token_count": 3, "policy_version": 2},
+        {"start": 4, "token_count": 4, "policy_version": 3},
+    )
 
 
 @pytest.mark.asyncio

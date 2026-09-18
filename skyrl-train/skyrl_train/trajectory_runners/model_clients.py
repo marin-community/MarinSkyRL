@@ -11,7 +11,11 @@ from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngine
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY, render_exact_chat_continuation
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
-from skyrl_train.policy_version import PolicyVersionSegment, validate_policy_version_segments
+from skyrl_train.policy_version import (
+    POLICY_VERSION_SEGMENTS_KEY,
+    PolicyVersionSegment,
+    validate_policy_version_segments,
+)
 from skyrl_train.trajectory_runners.types import TokenProvenance
 
 
@@ -31,23 +35,48 @@ class ModelClient(Protocol):
 
 
 @dataclass(frozen=True)
-class _PlainChatResult:
-    """One plain chat completion with the engine's own tokens, logprobs and version spans."""
+class _ChatChoice:
+    """One chat completion choice with the engine's own tokens, logprobs and version spans."""
 
-    text: str
-    stop_reason: str
+    message: dict[str, Any]
+    finish_reason: str
     response_ids: list[int]
     response_logprobs: list[float] | None
+    logprob_items: list[dict[str, Any]] | None
     policy_version_segments: list[PolicyVersionSegment] | None
 
 
-def _assemble_plain_results(results: list[_PlainChatResult]) -> ModelClientOutput:
+def _parse_chat_choice(choice: dict[str, Any], *, logprobs_requested: bool) -> _ChatChoice:
+    """Read one OpenAI chat completion choice, rejecting one without exact tokens or requested logprobs."""
+    response_ids = choice.get("token_ids")
+    if not isinstance(response_ids, list) or not all(isinstance(token, int) for token in response_ids):
+        raise RuntimeError("OpenAI chat completion did not return exact response token IDs")
+    logprob_items = (choice.get("logprobs") or {}).get("content")
+    if logprobs_requested and logprob_items is None:
+        raise RuntimeError("OpenAI chat completion did not return the requested logprobs")
+    response_logprobs = [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
+    if response_logprobs is not None and len(response_logprobs) != len(response_ids):
+        raise RuntimeError("OpenAI chat completion logprobs do not align with exact response token IDs")
+    segments = choice.get(POLICY_VERSION_SEGMENTS_KEY)
+    if segments is not None:
+        validate_policy_version_segments(segments, response_length=len(response_ids), require_known=False)
+    return _ChatChoice(
+        message=choice["message"],
+        finish_reason=choice["finish_reason"],
+        response_ids=response_ids,
+        response_logprobs=response_logprobs,
+        logprob_items=logprob_items,
+        policy_version_segments=segments,
+    )
+
+
+def _assemble_plain_results(results: list[_ChatChoice]) -> ModelClientOutput:
     logprobs = [result.response_logprobs for result in results]
     segments = [result.policy_version_segments for result in results]
     output = ModelClientOutput(
-        responses=[result.text for result in results],
+        responses=[result.message["content"] for result in results],
         response_ids=[result.response_ids for result in results],
-        stop_reasons=[result.stop_reason for result in results],
+        stop_reasons=[result.finish_reason for result in results],
         response_logprobs=logprobs if all(value is not None for value in logprobs) else None,
         prompt_logprobs=None,
         token_provenance=TokenProvenance.ENGINE,
@@ -352,28 +381,22 @@ class OpenAIHTTPModelClient:
             body = await response.json()
             if response.status >= 400:
                 raise RuntimeError(f"OpenAI chat completion returned HTTP {response.status}: {body}")
-        choice = body["choices"][0]
-        response_ids = choice.get("token_ids")
-        if not isinstance(response_ids, list) or not all(isinstance(token, int) for token in response_ids):
-            raise RuntimeError("OpenAI chat completion did not return exact response token IDs")
-        logprob_items = (choice.get("logprobs") or {}).get("content")
-        response_logprobs = [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
-        if response_logprobs is not None and len(response_logprobs) != len(response_ids):
-            raise RuntimeError("OpenAI chat completion logprobs do not align with exact response token IDs")
+        choice = _parse_chat_choice(body["choices"][0], logprobs_requested=sampling_params.get("logprobs") is not None)
         selected = None
-        if requested_top_k is not None and logprob_items is not None:
+        if requested_top_k is not None and choice.logprob_items is not None:
             selected = [
-                select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k) for item in logprob_items
+                select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k)
+                for item in choice.logprob_items
             ]
         return _ChatResult(
             prompt_ids=prompt_ids,
-            response_ids=response_ids,
-            response_logprobs=response_logprobs,
+            response_ids=choice.response_ids,
+            response_logprobs=choice.response_logprobs,
             student_topk_indices=None if selected is None else [ids for ids, _ in selected],
             behavior_topk_logprobs=None if selected is None else [scores for _, scores in selected],
-            text=self._tokenizer.decode(response_ids, skip_special_tokens=True),
-            stop_reason=choice["finish_reason"],
-            assistant_message=choice["message"],
+            text=self._tokenizer.decode(choice.response_ids, skip_special_tokens=True),
+            stop_reason=choice.finish_reason,
+            assistant_message=choice.message,
         )
 
     async def _generate_one(
@@ -383,7 +406,7 @@ class OpenAIHTTPModelClient:
         messages: list[dict[str, str]],
         session_id,
         sampling_params: dict,
-    ) -> _PlainChatResult:
+    ) -> _ChatChoice:
         request_sampling_params = {
             key: value for key, value in sampling_params.items() if key not in _CHAT_SAMPLING_EXCLUSIONS
         }
@@ -409,21 +432,4 @@ class OpenAIHTTPModelClient:
             body = await response.json()
             if response.status >= 400:
                 raise RuntimeError(f"OpenAI chat completion returned HTTP {response.status}: {body}")
-        choice = body["choices"][0]
-        response_ids = choice.get("token_ids")
-        if not isinstance(response_ids, list) or not all(isinstance(token, int) for token in response_ids):
-            raise RuntimeError("OpenAI chat completion did not return exact response token IDs")
-        logprob_items = (choice.get("logprobs") or {}).get("content")
-        response_logprobs = [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
-        if response_logprobs is not None and len(response_logprobs) != len(response_ids):
-            raise RuntimeError("OpenAI chat completion logprobs do not align with exact response token IDs")
-        segments = choice.get("policy_version_segments")
-        if segments is not None:
-            validate_policy_version_segments(segments, response_length=len(response_ids), require_known=False)
-        return _PlainChatResult(
-            text=choice["message"]["content"],
-            stop_reason=choice["finish_reason"],
-            response_ids=response_ids,
-            response_logprobs=response_logprobs,
-            policy_version_segments=segments,
-        )
+        return _parse_chat_choice(body["choices"][0], logprobs_requested=sampling_params.get("logprobs") is not None)

@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from skyrl_train.config.trajectory_runner_capabilities import opencode_exact_continuation_enabled
 from skyrl_train.policy_version import (
+    POLICY_VERSION_SEGMENTS_KEY,
     PolicyVersionSegment,
     append_policy_version_segment,
     validate_policy_version_segments,
@@ -673,11 +674,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 1. Loop until the generation is completed.
         while finish_reason == ABORT_FINISH_REASON:
             await self._wait_for_generation_to_resume()
-            # Under abort mode an attempt that produced tokens ran entirely between two weight
-            # syncs: the pause cancels every request in flight and new attempts wait for the
-            # resume. The version installed when the attempt is sent is therefore the version
-            # that sampled every token it returns. Under keep mode a frozen request continues
-            # under the next version, so this stamp can be one version old, never too new.
+            # The attempt's tokens are stamped with the version installed when it was sent,
+            # never newer than the version that sampled them.
             attempt_version = self._installed_policy_version
 
             # 1.1. Prepare the request payload.
@@ -751,6 +749,11 @@ class InferenceEngineClient(InferenceEngineInterface):
             if aborted_without_generating:
                 continue
             if attempt_version is not None:
+                if tokens_before > 0 and not accum.policy_version_segments:
+                    # Tokens from attempts sent before any version was named carry none.
+                    append_policy_version_segment(
+                        accum.policy_version_segments, token_count=tokens_before, policy_version=None
+                    )
                 append_policy_version_segment(
                     accum.policy_version_segments,
                     token_count=accum.completion_tokens - tokens_before,
@@ -765,7 +768,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                     # If we only made one request and it is not aborted, return the partial result directly.
                     # This is the codepath that will hit when we do not use `pause_generation()` or `resume_generation()`.
                     if accum.policy_version_segments:
-                        partial_response["choices"][0]["policy_version_segments"] = accum.policy_version_segments
+                        partial_response["choices"][0][POLICY_VERSION_SEGMENTS_KEY] = accum.policy_version_segments
                     return partial_response
                 # NOTE(Charlie): not doing deepcopy here to avoid copying large logprobs, so be careful when modifying this.
                 base_response = partial_response.copy()
@@ -1389,7 +1392,7 @@ def _build_final_response(
     if final_choice.get("token_ids", None) is not None:
         final_choice["token_ids"] = accum.token_ids
     if accum.policy_version_segments:
-        final_choice["policy_version_segments"] = accum.policy_version_segments
+        final_choice[POLICY_VERSION_SEGMENTS_KEY] = accum.policy_version_segments
 
     # Set last response's finish_reason and stop_reason.
     final_choice["finish_reason"] = finish_reason

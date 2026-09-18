@@ -289,18 +289,12 @@ trainer:
 
     num_parallel_generation_workers: 768
     # Finished groups the completed buffer holds before a producer waits with its group in
-    # hand. Null means num_parallel_generation_workers, so no producer ever waits. The queue
-    # depth moves neither staleness nor throughput (a group ages the same whether it waits in
-    # the queue or in its producer); set it to policy_mini_batch_size to keep one update's
-    # cohort ready and bound the head-node backlog to that cohort.
+    # hand. Null means num_parallel_generation_workers, so no producer ever waits; a smaller
+    # value bounds the head-node backlog without changing staleness or throughput.
     max_buffered_groups: null
-    # Count a group's staleness from the policy version installed when its first token was
-    # sampled (plus one, the step that version trains) instead of the trainer's step when its
-    # first generate() call returned. The vLLM generate() path stamps from the engine's
-    # first-token clock; the OpenAI chat route stamps each attempt with the version installed
-    # when it was sent, exact under pause_mode abort and at most one version old under keep.
-    # Other engines carry no version, and a run sampling through them fails at its first
-    # admission with this on.
+    # Count a group's staleness from the oldest policy version that sampled it, plus one,
+    # instead of the trainer's step at submission. Chat attempts are stamped with the version
+    # installed when sent, never newer than the version that sampled them; default false.
     first_token_admission: false
     # What the engines do with requests still generating at each weight sync. abort cancels
     # them and the client resubmits each prompt with the tokens it already generated, so the

@@ -92,6 +92,8 @@ from skyrl_train.weight_sync import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
 from skyrl_train.weight_sync.weight_extractor import is_weight_sync_dtype_compatible
 from skyrl_train.inference_engines.vllm.utils import (
+    CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY,
+    PAUSE_MODE_KEY,
     pop_vllm_wrapper_kwargs,
     apply_openai_sampling,
     ensure_token_ids_in_sse_chunk,
@@ -1660,8 +1662,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = wrapper_kwargs.pop("openai_sampling_params", {})
         self._validate_rollout_logprob_sampling = wrapper_kwargs.pop(ROLLOUT_LOGPROB_VALIDATION_KEY, False)
-        self._pause_mode = PauseMode(wrapper_kwargs.pop("pause_mode", PauseMode.ABORT))
-        self._clear_kv_cache_on_weight_sync = bool(wrapper_kwargs.pop("clear_kv_cache_on_weight_sync", True))
+        self._pause_mode = PauseMode(wrapper_kwargs.pop(PAUSE_MODE_KEY, PauseMode.ABORT))
+        self._clear_kv_cache_on_weight_sync = bool(wrapper_kwargs.pop(CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY, True))
         if self._openai_sampling_params:
             logger.warning(
                 f"OpenAI API sampling params overridden: "

@@ -6,6 +6,10 @@ from skyrl_train.config.behavior_logprobs import (
     validate_behavior_logprob_sampling,
 )
 
+# Weight-sync serving options the engine wrapper reads and never passes to vLLM.
+PAUSE_MODE_KEY = "pause_mode"
+CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY = "clear_kv_cache_on_weight_sync"
+
 
 class PrefixCacheStatsLike(Protocol):
     """The token counters vLLM's `PrefixCacheStats` carries for one scheduler iteration."""
@@ -76,7 +80,7 @@ def pop_vllm_wrapper_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     if ROLLOUT_LOGPROB_VALIDATION_KEY in engine_kwargs:
         wrapper_kwargs[ROLLOUT_LOGPROB_VALIDATION_KEY] = engine_kwargs.pop(ROLLOUT_LOGPROB_VALIDATION_KEY)
 
-    for key in ("pause_mode", "clear_kv_cache_on_weight_sync"):
+    for key in (PAUSE_MODE_KEY, CLEAR_KV_CACHE_ON_WEIGHT_SYNC_KEY):
         if key in engine_kwargs:
             wrapper_kwargs[key] = engine_kwargs.pop(key)
 

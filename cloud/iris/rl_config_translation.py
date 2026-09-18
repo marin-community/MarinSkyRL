@@ -34,21 +34,16 @@ from marinskyrl.resource_locator import join_resource_path, model_source_for_pat
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 
-# Directory containing the bundled example RL config YAML files.
 logger = logging.getLogger(__name__)
 
-
+# Directory containing the bundled example RL config YAML files.
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
 RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
 RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
 
 
 class RLEntrypoint(StrEnum):
-    """Execution modes supported by Iris RL configurations.
-
-    ``sync`` and ``fully_async`` train on the SkyRL-Gym runner with the synchronous or the fully
-    asynchronous loop; the others select the Harbor and mini-SWE runners or rollout-only runs.
-    """
+    """Execution modes supported by Iris RL configurations."""
 
     FULLY_ASYNC = "fully_async"
     GENERATE = "generate"
@@ -70,6 +65,12 @@ RL_ENTRYPOINT_MODULES = {
     RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
     RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
 }
+
+# Modules that run a training loop; the launcher's --entrypoint may not swap one of these for another.
+TRAINING_LOOP_ENTRYPOINT_MODULES = frozenset(
+    RL_ENTRYPOINT_MODULES[entrypoint]
+    for entrypoint in (RLEntrypoint.SYNC, RLEntrypoint.FULLY_ASYNC, RLEntrypoint.TERMINAL_BENCH, RLEntrypoint.MINI_SWE)
+)
 
 
 def parse_rl_entrypoint(value: str | None, *, config_path: Path) -> RLEntrypoint:
@@ -512,8 +513,6 @@ class ParsedRLConfig:
     environment: Dict[str, Any] = field(default_factory=dict)
     trajectory_runner: Dict[str, Any] = field(default_factory=dict)
     terminal_bench: Optional[Dict[str, Any]] = None
-    # Settings the config wrote that the selected entrypoint never reads.
-    inert_settings: tuple[str, ...] = ()
     tensor_parallel_size: int = 1
     # "tasks" (default; terminal_bench task-dir extraction) or "parquet" (single-turn
     # RLVR: an HF id / .parquet is passed through to PromptDataset, NOT task-extracted).
@@ -605,9 +604,20 @@ def materialize_rl_config(
     return str(destination)
 
 
-def inert_fully_async_settings(raw: Dict[str, Any], entrypoint: str) -> tuple[str, ...]:
-    """Return the trainer.fully_async keys a config sets although its entrypoint ignores them."""
-    if entrypoint == RL_ENTRYPOINT_MODULES[RLEntrypoint.FULLY_ASYNC]:
+def runs_fully_async_trainer(raw: Dict[str, Any], entrypoint: RLEntrypoint) -> bool:
+    """Whether the config selects FullyAsyncRayPPOTrainer; terminal_bench does so when colocate_all is false."""
+    if entrypoint is RLEntrypoint.FULLY_ASYNC:
+        return True
+    if entrypoint is not RLEntrypoint.TERMINAL_BENCH:
+        return False
+    trainer = raw.get("trainer")
+    placement = trainer.get("placement", {}) if isinstance(trainer, dict) else {}
+    return placement.get("colocate_all", True) is False
+
+
+def inert_fully_async_settings(raw: Dict[str, Any], entrypoint: RLEntrypoint) -> tuple[str, ...]:
+    """Return the trainer.fully_async keys a config sets although its trainer never reads them."""
+    if runs_fully_async_trainer(raw, entrypoint):
         return ()
     trainer = raw.get("trainer")
     fully_async = trainer.get("fully_async") if isinstance(trainer, dict) else None
@@ -634,13 +644,14 @@ def parse_rl_config(
     distillation_plan = compile_distillation_plan(raw)
     context_budget = resolve_context_budget(raw, path)
 
-    entrypoint = resolve_rl_entrypoint(raw.get("entrypoint"), config_path=path)
-    inert_settings = inert_fully_async_settings(raw, entrypoint)
+    entrypoint_kind = parse_rl_entrypoint(raw.get("entrypoint"), config_path=path)
+    entrypoint = RL_ENTRYPOINT_MODULES[entrypoint_kind]
+    inert_settings = inert_fully_async_settings(raw, entrypoint_kind)
     if inert_settings:
         logger.warning(
-            "%s: entrypoint %s never reads %s; select entrypoint: fully_async or remove them",
+            "%s: entrypoint %s never runs the fully async trainer and never reads %s",
             path,
-            parse_rl_entrypoint(raw.get("entrypoint"), config_path=path).value,
+            entrypoint_kind.value,
             ", ".join(inert_settings),
         )
     config_groups = raw.get("config_groups", {})
@@ -686,7 +697,6 @@ def parse_rl_config(
     validate_tp_divides_heads(tensor_parallel_size, raw.get("model_num_attention_heads"), config_path=path)
 
     return ParsedRLConfig(
-        inert_settings=inert_settings,
         config_path=path,
         raw=materialized_raw,
         context_budget=context_budget,

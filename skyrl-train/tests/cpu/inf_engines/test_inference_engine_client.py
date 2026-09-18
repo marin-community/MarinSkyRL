@@ -1596,8 +1596,6 @@ async def test_completion_single_prompt_is_unaffected_when_never_paused():
 
 
 class _VersionedEngine:
-    """Engine that replays scripted outputs and records what each resume named."""
-
     def __init__(self, outputs):
         self.outputs = list(outputs)
         self.calls = []
@@ -1632,6 +1630,33 @@ async def test_batched_generate_keeps_each_row_spans():
     output = await client.generate(InferenceEngineInput(prompt_token_ids=[[1], [2]], sampling_params={"max_tokens": 4}))
 
     assert output["response_policy_version_segments"] == [[{"start": 0, "token_count": 1, "policy_version": 2}], []]
+
+
+@pytest.mark.asyncio
+async def test_batched_generate_synthesizes_an_unknown_span_for_an_engine_reporting_none():
+    stamping = _VersionedEngine(
+        [
+            InferenceEngineOutput(
+                responses=["a"],
+                response_ids=[[5]],
+                stop_reasons=["stop"],
+                response_logprobs=None,
+                response_policy_version_segments=[[{"start": 0, "token_count": 1, "policy_version": 2}]],
+            )
+        ]
+    )
+    silent = _VersionedEngine(
+        [InferenceEngineOutput(responses=["bc"], response_ids=[[6, 7]], stop_reasons=["stop"], response_logprobs=None)]
+    )
+    client = InferenceEngineClient(engines=[stamping, silent], tokenizer=object(), full_config=_make_min_cfg())
+
+    output = await client.generate(InferenceEngineInput(prompt_token_ids=[[1], [2]], sampling_params={"max_tokens": 4}))
+
+    assert output["response_ids"] == [[5], [6, 7]]
+    assert output["response_policy_version_segments"] == [
+        [{"start": 0, "token_count": 1, "policy_version": 2}],
+        [{"start": 0, "token_count": 2, "policy_version": None}],
+    ]
 
 
 @pytest.mark.asyncio
@@ -1670,8 +1695,6 @@ def _chat_partial(content, finish_reason, token_ids):
 
 
 class _StampedChatEngine:
-    """Engine that replays scripted chat partials and can run a weight sync during an attempt."""
-
     def __init__(self, responses, during_attempt=None):
         self.responses = list(responses)
         self.calls = []
@@ -1705,8 +1728,6 @@ def _chat_request():
 
 @pytest.mark.asyncio
 async def test_chat_attempts_are_stamped_with_the_version_installed_when_they_were_sent(monkeypatch):
-    """A weight sync aborts the first attempt after one token; the continuation is sent after the
-    resume and carries the new version, so the response records both spans in order."""
     monkeypatch.setattr(
         "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
     )
@@ -1729,6 +1750,33 @@ async def test_chat_attempts_are_stamped_with_the_version_installed_when_they_we
     assert out["choices"][0]["token_ids"] == [11, 12, 13]
     assert out["choices"][0]["policy_version_segments"] == [
         {"start": 0, "token_count": 1, "policy_version": 3},
+        {"start": 1, "token_count": 2, "policy_version": 4},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tokens_sampled_before_any_version_was_named_carry_none(monkeypatch):
+    monkeypatch.setattr(
+        "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
+    )
+    client = None
+
+    async def name_first_version_during(attempt):
+        if attempt == 0:
+            await client.pause_generation()
+            await client.resume_generation(policy_version=4)
+
+    engine = _StampedChatEngine(
+        [_chat_partial("A", "abort", [11]), _chat_partial("BC", "stop", [12, 13])],
+        during_attempt=name_first_version_during,
+    )
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+
+    out = await client.chat_completion(_chat_request())
+
+    assert out["choices"][0]["token_ids"] == [11, 12, 13]
+    assert out["choices"][0]["policy_version_segments"] == [
+        {"start": 0, "token_count": 1, "policy_version": None},
         {"start": 1, "token_count": 2, "policy_version": 4},
     ]
 

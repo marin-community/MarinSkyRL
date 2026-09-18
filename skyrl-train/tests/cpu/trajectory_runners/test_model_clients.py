@@ -1,3 +1,4 @@
+import contextlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -227,8 +228,39 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2]]]
 
 
+@pytest.fixture
+def http_client():
+    @contextlib.asynccontextmanager
+    async def serve(complete, tokenize=None, tokenizer=None):
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", complete)
+        if tokenize is not None:
+            app.router.add_post("/tokenize", tokenize)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            yield OpenAIHTTPModelClient(
+                base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=tokenizer or MagicMock()
+            )
+        finally:
+            await runner.cleanup()
+
+    return serve
+
+
+def _plain_request(**sampling_params):
+    return {
+        "prompts": [[{"role": "user", "content": "question"}]],
+        "session_ids": ["trajectory-1"],
+        "sampling_params": {"temperature": 0.7, "max_generate_length": 256, **sampling_params},
+    }
+
+
 @pytest.mark.asyncio
-async def test_http_model_client_returns_the_engines_tokens_logprobs_and_version_spans():
+async def test_http_model_client_returns_the_engines_tokens_logprobs_and_version_spans(http_client):
     requests = []
 
     async def complete(request):
@@ -247,25 +279,8 @@ async def test_http_model_client_returns_the_engines_tokens_logprobs_and_version
             }
         )
 
-    app = web.Application()
-    app.router.add_post("/v1/chat/completions", complete)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    port = site._server.sockets[0].getsockname()[1]
-
-    try:
-        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=object())
-        output = await client.generate(
-            {
-                "prompts": [[{"role": "user", "content": "question"}]],
-                "session_ids": ["trajectory-1"],
-                "sampling_params": {"temperature": 0.7, "max_generate_length": 256, "logprobs": 0},
-            }
-        )
-    finally:
-        await runner.cleanup()
+    async with http_client(complete) as client:
+        output = await client.generate(_plain_request(logprobs=0))
 
     assert requests == [
         {
@@ -290,30 +305,29 @@ async def test_http_model_client_returns_the_engines_tokens_logprobs_and_version
 
 
 @pytest.mark.asyncio
-async def test_http_model_client_refuses_a_response_without_exact_tokens():
+async def test_http_model_client_refuses_a_response_without_exact_tokens(http_client):
     async def complete(request):
         return web.json_response({"choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}]})
 
-    app = web.Application()
-    app.router.add_post("/v1/chat/completions", complete)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    port = site._server.sockets[0].getsockname()[1]
-
-    try:
-        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=object())
+    async with http_client(complete) as client:
         with pytest.raises(RuntimeError, match="exact response token IDs"):
-            await client.generate(
-                {"prompts": [[{"role": "user", "content": "question"}]], "sampling_params": {"max_generate_length": 8}}
-            )
-    finally:
-        await runner.cleanup()
+            await client.generate(_plain_request())
 
 
 @pytest.mark.asyncio
-async def test_http_structured_chat_continues_from_sampled_tool_call_tokens():
+async def test_http_model_client_refuses_a_response_missing_requested_logprobs(http_client):
+    async def complete(request):
+        return web.json_response(
+            {"choices": [{"message": {"content": "answer"}, "finish_reason": "stop", "token_ids": [7, 8]}]}
+        )
+
+    async with http_client(complete) as client:
+        with pytest.raises(RuntimeError, match="requested logprobs"):
+            await client.generate(_plain_request(logprobs=0))
+
+
+@pytest.mark.asyncio
+async def test_http_structured_chat_continues_from_sampled_tool_call_tokens(http_client):
     served_requests = []
 
     async def tokenize(request):
@@ -358,19 +372,10 @@ async def test_http_structured_chat_continues_from_sampled_tool_call_tokens():
             }
         )
 
-    app = web.Application()
-    app.router.add_post("/tokenize", tokenize)
-    app.router.add_post("/v1/chat/completions", complete)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    port = site._server.sockets[0].getsockname()[1]
     tokenizer = MagicMock()
     tokenizer.decode.side_effect = lambda ids, **_: "tool call" if ids == [21, 22] else "done"
-    client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=tokenizer)
 
-    try:
+    async with http_client(complete, tokenize=tokenize, tokenizer=tokenizer) as client:
         first = await client.generate(
             {
                 "prompts": [[{"role": "user", "content": "run this"}]],
@@ -399,8 +404,6 @@ async def test_http_structured_chat_continues_from_sampled_tool_call_tokens():
                 "sampling_params": {"logprobs": 0},
             }
         )
-    finally:
-        await runner.cleanup()
 
     assert first["prompt_ids"] == [[11, 12]]
     assert first["response_ids"] == [[21, 22]]
@@ -410,21 +413,10 @@ async def test_http_structured_chat_continues_from_sampled_tool_call_tokens():
 
 
 @pytest.mark.asyncio
-async def test_http_model_client_preserves_server_error_details():
+async def test_http_model_client_preserves_server_error_details(http_client):
     async def reject(_request):
         return web.json_response({"error": {"message": "unsupported field"}}, status=400)
 
-    app = web.Application()
-    app.router.add_post("/v1/chat/completions", reject)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    port = site._server.sockets[0].getsockname()[1]
-
-    try:
-        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=MagicMock())
+    async with http_client(reject) as client:
         with pytest.raises(RuntimeError, match="HTTP 400.*unsupported field"):
             await client.generate({"prompts": [[{"role": "user", "content": "question"}]]})
-    finally:
-        await runner.cleanup()

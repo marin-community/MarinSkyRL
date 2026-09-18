@@ -245,8 +245,7 @@ def _find_available_rendezvous_port(excluded_ports: Collection[int] = ()) -> int
 
 
 def get_pg_bundle_node_ips(placement_group, pg_indices: Collection[int]) -> List[str]:
-    """Node IP of each bundle index of ``placement_group``, resolved by zero-resource probe tasks
-    pinned to the bundles (the same mechanism as ``get_rendezvous_addr_port``)."""
+    """Return the node IP of each bundle index of ``placement_group``."""
 
     @ray.remote(num_cpus=0, num_gpus=0)
     def get_node_ip():

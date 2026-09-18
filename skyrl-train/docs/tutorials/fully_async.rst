@@ -100,9 +100,9 @@ Following ``examples/fully_async/async_run_gsm8k.sh``, select the packaged entry
     ...
 
 The RL config's ``entrypoint`` key names the training loop: ``sync`` (the synchronous loop; ``standard`` is its old
-name and still accepted) or ``fully_async``. A launcher ``--entrypoint`` that contradicts it fails, and
-``trainer.fully_async`` settings written under ``entrypoint: sync`` are reported as inert when the config is parsed,
-since the synchronous trainer never reads them.
+name and still accepted) or ``fully_async``. A launcher ``--entrypoint`` naming a different training loop fails, and
+``trainer.fully_async`` settings in a config that does not run the fully async trainer are reported as inert when the
+config is parsed.
 
 For fully async specifically, the following are the main knobs to tune:
 
@@ -126,9 +126,8 @@ For fully async specifically, the following are the main knobs to tune:
   group when a request waited in the engine's queue across a weight sync. ``true`` counts from the oldest policy
   version that sampled any of the group's tokens, plus one — the engines stamp every sampled span with the version
   they had installed, and a span sampled after a weight sync carries the newer one. On the OpenAI chat route the
-  client stamps each attempt with the version installed when it was sent, which is the sampling version under
-  ``pause_mode: abort`` and at most one version old under ``keep``; other engines carry no version, and a run
-  sampling through them fails at its first admission with this on.
+  client stamps each attempt with the version installed when it was sent, never newer than the version that sampled
+  it; other engines carry no version, and a run sampling through them fails at its first admission with this on.
 - ``trainer.fully_async.max_buffered_groups``: How many finished groups the completed buffer holds before a
   generation worker waits with its finished group in hand. ``null`` (the default) means one slot per generation
   worker, so no worker ever waits. A finished group ages the same whether it waits in the buffer or in its worker,

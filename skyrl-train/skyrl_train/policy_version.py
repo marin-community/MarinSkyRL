@@ -6,10 +6,10 @@ import math
 from dataclasses import dataclass, field
 from typing import TypedDict
 
-import numpy as np
-
 
 BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY = "behavior_policy_version_segments"
+# The per-choice key an OpenAI chat completion carries its spans under.
+POLICY_VERSION_SEGMENTS_KEY = "policy_version_segments"
 
 
 class PolicyVersionSegment(TypedDict):
@@ -109,38 +109,6 @@ def validate_policy_version_segments(
         raise ValueError("learner rollouts require a known installed policy version for every selected token")
 
 
-def expand_policy_version_segments(
-    rows: list[list[PolicyVersionSegment]],
-    response_mask,
-    *,
-    required_mask=None,
-):
-    """Expand compact row segments at the dense learner boundary only."""
-
-    if len(rows) != response_mask.shape[0]:
-        raise ValueError("policy-version segment rows must align with the learner batch")
-    dense = np.full(response_mask.shape, -1, dtype=np.int64)
-    if required_mask is not None and required_mask.shape != response_mask.shape:
-        raise ValueError("required policy-version mask must match response_mask")
-    for row_index, (segments, mask) in enumerate(zip(rows, response_mask, strict=True)):
-        response_length = int(np.sum(mask > 0))
-        row_required = (
-            [bool(value) for value in required_mask[row_index, :response_length]] if required_mask is not None else None
-        )
-        validate_policy_version_segments(
-            segments,
-            response_length=response_length,
-            require_known=True,
-            required_mask=row_required,
-        )
-        for segment in segments:
-            count = segment["token_count"]
-            start = segment["start"]
-            if segment["policy_version"] is not None:
-                dense[row_index, start : start + count] = int(segment["policy_version"])
-    return dense
-
-
 def policy_version_bounds(rows: list[list[PolicyVersionSegment]]) -> tuple[int, int] | None:
     """Return oldest/newest known versions, or None when no sampled token exists."""
 
@@ -174,13 +142,7 @@ def truncate_policy_version_segments(
 
 @dataclass
 class PolicyVersionHistory:
-    """Policy versions installed on one engine, each with the clock reading at which it became live.
-
-    Boundaries and first-token timestamps must come from the same clock. vLLM stamps a request's
-    ``first_token_ts`` with ``time.monotonic()`` in the engine-core process; the inference actor
-    that owns a history records each boundary with its own ``time.monotonic()``. The two agree
-    because ``AsyncLLM`` always starts its engine core as a child process on the actor's host.
-    """
+    """Policy versions installed on one engine, each with the ``time.monotonic()`` reading at which it became live."""
 
     boundaries: list[tuple[float, int]] = field(default_factory=list)
 

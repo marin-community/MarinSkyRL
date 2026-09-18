@@ -147,7 +147,7 @@ def test_tp_guard_noop_when_heads_unset():
 def test_parse_rejects_bad_tp_against_declared_heads(tmp_path):
     bad = tmp_path / "bad.yaml"
     bad.write_text(
-        "entrypoint: standard\n"
+        "entrypoint: sync\n"
         "model_num_attention_heads: 42\n"
         "context_budget:\n"
         "  request_window_tokens: 4096\n"

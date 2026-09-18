@@ -1,8 +1,8 @@
 """Unit tests for inference-engine placement and startup configuration.
 
 The placement strategy checks verify that the ray/uni backend chooses:
-  - per-engine STRICT_PACK ONLY for multi-GPU engines (TP*PP > 1), to keep each
-    engine's TP/PP workers on one node (#232 cross-node all-reduce fix), and
+  - per-engine STRICT_PACK ONLY for multi-GPU engines (TP*PP*DP > 1), to keep each
+    engine's TP/PP workers and DP ranks on one node (#232 cross-node all-reduce fix), and
   - the flat PACK fallback for single-GPU engines (TP==PP==1), so single-GPU
     bundles pack densely and leave whole nodes free for the downstream policy
     PACK PG (the lever1/swesmith multi-node starvation regression fix), and
@@ -14,12 +14,18 @@ uv run --isolated --group dev --extra cpu pytest tests/cpu/test_engine_placement
 
 import pytest
 
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import resolve_engine_max_model_len
-from skyrl_train.utils.placement_geometry import colocated_engine_bundle_indices
-from skyrl_train.utils.utils import validate_cfg
-from skyrl_train.utils.utils import (
-    use_per_engine_strict_pack_pg,
+from omegaconf import OmegaConf
+
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
+    assert_data_parallel_ranks_share_a_node,
+    resolve_engine_max_model_len,
 )
+from skyrl_train.utils.placement_geometry import (
+    EnginePlacementLayout,
+    colocated_engine_bundle_indices,
+    data_parallel_rank_bundle_indices,
+)
+from skyrl_train.utils.utils import use_per_engine_strict_pack_pg, validate_cfg
 from tests.cpu.util import example_dummy_config
 
 
@@ -36,39 +42,19 @@ def test_resolve_engine_max_model_len(engine_kwargs, rope_scaling, expected):
 
 
 @pytest.mark.parametrize(
-    "tp,pp,expected",
-    [
-        (1, 1, False),  # lever1 (16 TP=1 engines) / swesmith (48) -> flat PACK, dense
-        (2, 1, True),  # de-risk geometry on ray/uni -> on-node STRICT_PACK
-        (4, 1, True),  # #232 TP=4 -> on-node STRICT_PACK (this is the bug it fixed)
-        (1, 2, True),  # PP=2 single TP -> multi-GPU engine, still needs on-node
-        (2, 2, True),  # TP*PP=4
-    ],
-)
-def test_ray_uni_backend_gate(tp, pp, expected):
-    assert (
-        use_per_engine_strict_pack_pg(
-            use_hybrid_engine=False,
-            use_mp_backend=False,
-            tensor_parallel_size=tp,
-            pipeline_parallel_size=pp,
-        )
-        is expected
-    )
-
-
-@pytest.mark.parametrize(
     "tp,pp,dp,expected",
     [
-        (1, 1, 1, False),  # single-GPU engines -> flat PACK
+        (1, 1, 1, False),  # lever1 (16 TP=1 engines) / swesmith (48) -> flat PACK, dense
+        (2, 1, 1, True),  # de-risk geometry on ray/uni -> on-node STRICT_PACK
+        (4, 1, 1, True),  # #232 TP=4 on 4-GPU nodes -> on-node STRICT_PACK (this is the bug it fixed)
+        (1, 2, 1, True),  # PP=2 single TP -> multi-GPU engine, still needs on-node
+        (2, 2, 1, True),  # TP*PP=4
         (1, 1, 4, True),  # DP4xEP4 on 4-GPU nodes -> one STRICT_PACK PG per engine
         (1, 1, 8, True),  # DP8xEP8 on 8-GPU nodes -> STRICT_PACK
         (2, 1, 2, True),  # TP2 x DP2
     ],
 )
-def test_dp_engines_are_multi_gpu_engines(tp, pp, dp, expected):
-    # A DP>1 engine's ranks form one vLLM DP/EP group with a per-decode-step all-to-all;
-    # splitting them across nodes deadlocks every engine at the first forward.
+def test_ray_uni_backend_gate(tp, pp, dp, expected):
     assert (
         use_per_engine_strict_pack_pg(
             use_hybrid_engine=False,
@@ -81,30 +67,6 @@ def test_dp_engines_are_multi_gpu_engines(tp, pp, dp, expected):
     )
 
 
-def test_tp1_never_strict_pack_so_policy_pg_not_starved():
-    # The exact lever1/swesmith regression: multi-node TP=1 must NOT use
-    # per-engine STRICT_PACK (which scatters 1-GPU bundles and starves the
-    # policy PACK PG of its whole nodes).
-    assert not use_per_engine_strict_pack_pg(
-        use_hybrid_engine=False,
-        use_mp_backend=False,
-        tensor_parallel_size=1,
-        pipeline_parallel_size=1,
-    )
-
-
-def test_tp4_on_4gpu_node_still_strict_pack():
-    # Guards against the WRONG `per_engine_gpu_count > gpus_per_node` gate:
-    # TP=4 on 4-GPU nodes (4 is not > 4) must still use STRICT_PACK, else #232
-    # (cross-node TP all-reduce decode deadlock) re-breaks.
-    assert use_per_engine_strict_pack_pg(
-        use_hybrid_engine=False,
-        use_mp_backend=False,
-        tensor_parallel_size=4,
-        pipeline_parallel_size=1,
-    )
-
-
 @pytest.mark.parametrize("tp,pp", [(1, 1), (2, 1), (4, 1), (2, 2)])
 def test_mp_backend_never_per_engine_strict_pack(tp, pp):
     # The mp executor uses one node-atomic {GPU:tp_pp_size} bundle per engine,
@@ -114,6 +76,7 @@ def test_mp_backend_never_per_engine_strict_pack(tp, pp):
         use_mp_backend=True,
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
+        data_parallel_size=1,
     )
 
 
@@ -126,7 +89,42 @@ def test_hybrid_engine_never_per_engine_strict_pack(tp, pp):
         use_mp_backend=False,
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
+        data_parallel_size=1,
     )
+
+
+@pytest.mark.parametrize(
+    "layout,engine_index,expected",
+    [
+        (EnginePlacementLayout.HYBRID, 1, [4, 6]),  # engine 1's two DP replicas: bundles [4,5] and [6,7]
+        (EnginePlacementLayout.PER_ENGINE, 1, [0, 2]),  # engine-local indices, one TP*PP slice per rank
+        (EnginePlacementLayout.MP, 1, [2, 3]),  # one {GPU: tp*pp} bundle per (engine, rank)
+    ],
+)
+def test_data_parallel_rank_bundles_follow_the_placement_layout(layout, engine_index, expected):
+    colocated = [[0, 1], [2, 3], [4, 5], [6, 7]]
+
+    assert (
+        data_parallel_rank_bundle_indices(
+            layout,
+            engine_index=engine_index,
+            data_parallel_size=2,
+            tensor_pipeline_size=2,
+            colocated_engine_bundles=colocated,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("node_ips,fails", [(["10.0.0.1", "10.0.0.2"], True), (["10.0.0.1", "10.0.0.1"], False)])
+def test_data_parallel_ranks_must_resolve_to_one_node(node_ips, fails):
+    probe = lambda placement_group, bundle_indices: node_ips  # noqa: E731
+
+    if fails:
+        with pytest.raises(RuntimeError, match="must be node-local"):
+            assert_data_parallel_ranks_share_a_node(None, [0, 1], engine_index=0, node_ips_of=probe)
+    else:
+        assert_data_parallel_ranks_share_a_node(None, [0, 1], engine_index=0, node_ips_of=probe)
 
 
 @pytest.mark.parametrize(
@@ -186,12 +184,34 @@ def test_colocated_config_rejects_non_node_atomic_tp_geometry():
         validate_cfg(cfg)
 
 
-def test_config_rejects_nonpositive_engine_startup_timeout():
+def _validatable_config():
     cfg = example_dummy_config()
     cfg.trainer.train_batch_size = 4
     cfg.trainer.policy_mini_batch_size = 4
     cfg.trainer.micro_train_batch_size_per_gpu = 1
+    return cfg
+
+
+def test_config_rejects_nonpositive_engine_startup_timeout():
+    cfg = _validatable_config()
     cfg.generator.engine_init_timeout_seconds = 0
 
     with pytest.raises(ValueError, match="engine_init_timeout_seconds must be greater than zero"):
+        validate_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    "key,value,error",
+    [
+        ("pause_mode", "wait", "trainer.fully_async.pause_mode must be one of"),
+        ("clear_kv_cache_on_weight_sync", "yes", "clear_kv_cache_on_weight_sync must be boolean"),
+        ("first_token_admission", 1, "first_token_admission must be boolean"),
+        ("max_buffered_groups", 0, "max_buffered_groups must be a positive integer or null"),
+    ],
+)
+def test_config_rejects_malformed_weight_sync_and_buffer_settings(key, value, error):
+    cfg = _validatable_config()
+    OmegaConf.update(cfg, f"trainer.fully_async.{key}", value)
+
+    with pytest.raises(ValueError, match=error):
         validate_cfg(cfg)

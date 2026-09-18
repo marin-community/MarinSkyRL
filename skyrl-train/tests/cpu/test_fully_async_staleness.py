@@ -12,6 +12,7 @@ from skyrl_train.fully_async_trainer import (
     _AsyncDataloader,
     _AsyncStalenessManager,
     _GenerationQueues,
+    _GroupFreshness,
 )
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, resolve_dynamic_sampling_criteria
 from skyrl_train.group_admission import (
@@ -88,11 +89,33 @@ def _spans(*versions):
     return [[{"start": 0, "token_count": 1, "policy_version": version}] for version in versions]
 
 
-def _completed_batch(rows, *, captured_step=4, response_ids=([1], [2])):
-    batch = {"response_ids": list(response_ids), "actual_global_step": captured_step}
+def _completed_batch(rows, *, captured_step=4, response_ids=([1], [2]), loss_masks=None):
+    batch = {
+        "response_ids": list(response_ids),
+        "loss_masks": [[1] * len(ids) for ids in response_ids] if loss_masks is None else list(loss_masks),
+        "actual_global_step": captured_step,
+    }
     if rows is not None:
         batch["behavior_policy_version_segments"] = rows
     return batch
+
+
+# A runner-shaped multi-turn row: two sampled turns around three observation tokens.
+MULTI_TURN_RESPONSE = [10, 4, 1, 2, 3, 20, 4]
+MULTI_TURN_LOSS_MASK = [1, 1, 0, 0, 0, 1, 1]
+
+
+def test_first_token_admission_needs_a_version_only_for_sampled_tokens():
+    rows = [[{"start": 0, "token_count": 2, "policy_version": 2}, {"start": 5, "token_count": 2, "policy_version": 3}]]
+    batch = _completed_batch(rows, response_ids=(MULTI_TURN_RESPONSE,), loss_masks=(MULTI_TURN_LOSS_MASK,))
+    assert _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4) == 3
+
+
+def test_first_token_admission_rejects_a_sampled_token_without_a_version():
+    rows = [[{"start": 0, "token_count": 1, "policy_version": 2}, {"start": 5, "token_count": 2, "policy_version": 3}]]
+    batch = _completed_batch(rows, response_ids=(MULTI_TURN_RESPONSE,), loss_masks=(MULTI_TURN_LOSS_MASK,))
+    with pytest.raises(RuntimeError, match="first_token_admission"):
+        _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4)
 
 
 def test_admission_step_is_the_captured_step_unless_first_token_admission_is_on():
@@ -319,6 +342,26 @@ async def test_staleness_manager_blocks_work_beyond_capacity_until_training_adva
 
     await manager.on_rollout_accepted()
     await manager.on_rollout_accepted()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_token_admission", [False, True])
+async def test_a_group_sampled_by_an_old_version_is_stale_only_under_first_token_admission(first_token_admission):
+    trainer, queues = _batch_assembly_state(mini_batch_size=1, accepted=1)
+    trainer.first_token_admission = first_token_admission
+    batch = _completed_batch(_spans(5), captured_step=trainer.global_step, response_ids=([1],))
+    group = GeneratedOutputGroup(
+        trajectory_batch=batch,
+        uid="old-version",
+        earliest_model_step=trainer._admission_step(batch, fallback_step=trainer.global_step),
+        source_prompts=[{"uid": "old-version"}],
+    )
+
+    freshness = await trainer._enqueue_if_fresh(queues, group)
+
+    assert (freshness is _GroupFreshness.STALE) is first_token_admission
+    assert queues.retries.empty() is not first_token_admission
+    assert queues.completed.empty() is first_token_admission
 
 
 @pytest.mark.asyncio

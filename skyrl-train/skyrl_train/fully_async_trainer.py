@@ -463,8 +463,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
         self.first_token_admission = cfg.trainer.fully_async.first_token_admission
-        if type(self.first_token_admission) is not bool:
-            raise ValueError("trainer.fully_async.first_token_admission must be boolean")
         self.group_admission_stall_timeout = cfg.trainer.algorithm.group_admission.stall_timeout
         self._group_selection_policy = GroupSelectionPolicy.for_fully_async(
             cfg.trainer.algorithm.dynamic_sampling.type,
@@ -505,7 +503,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # cap) workers may wait on the shared queue condition while each still holds ONE
         # completed group, so to fully bound the head-node footprint you should ALSO lower
         # num_parallel_generation_workers toward the engine working set.
-        self.max_buffered_groups = cfg.trainer.fully_async.max_buffered_groups or self.num_parallel_generation_workers
+        self.max_buffered_groups = (
+            self.num_parallel_generation_workers
+            if cfg.trainer.fully_async.max_buffered_groups is None
+            else cfg.trainer.fully_async.max_buffered_groups
+        )
 
         assert (
             # otherwise wasted throughput
@@ -1129,14 +1131,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         return status
 
     def _admission_step(self, trajectory_batch: TrajectoryBatch, fallback_step: int) -> int:
-        """The step a completed group is charged to for staleness.
-
-        By default that is the runner's captured step, or the step at submission when the
-        runner captured none. With first-token admission on, it is the oldest policy version
-        that sampled any of the group's tokens, plus one: versions count completed updates and
-        admission steps are one-based, so the step whose update follows version v is v + 1. A
-        group that sampled no token keeps the default.
-        """
+        """Return the step a completed group is charged to for staleness: the captured step, or the oldest
+        sampled policy version plus one under first-token admission."""
         actual_step = trajectory_batch.get("actual_global_step")
         captured_step = actual_step if actual_step is not None else fallback_step
         rows = trajectory_batch.get(BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY)
@@ -1148,8 +1144,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if rows is None:
             raise RuntimeError(FIRST_TOKEN_VERSION_MISSING)
         try:
-            for ids, segments in zip(trajectory_batch["response_ids"], rows, strict=True):
-                validate_policy_version_segments(segments, response_length=len(ids), require_known=True)
+            for ids, loss_mask, segments in zip(
+                trajectory_batch["response_ids"], trajectory_batch["loss_masks"], rows, strict=True
+            ):
+                validate_policy_version_segments(
+                    segments,
+                    response_length=len(ids),
+                    require_known=True,
+                    # Only sampled tokens need a version; observation tokens carry none.
+                    required_mask=[bool(m) for m in loss_mask],
+                )
         except ValueError as error:
             raise RuntimeError(f"{FIRST_TOKEN_VERSION_MISSING} ({error})") from error
         return bounds[0] + 1

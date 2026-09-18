@@ -18,6 +18,7 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
 from skyrl_train.inference_engines.utils import get_pg_bundle_node_ips, get_rendezvous_addr_port
+from skyrl_train.utils.placement_geometry import EnginePlacementLayout, data_parallel_rank_bundle_indices
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, VLLM_USE_V2_MODEL_RUNNER_ENV, managed_environment_names
 from skyrl_train.utils import (
@@ -286,6 +287,19 @@ def populate_engine_max_model_lens(engines: List["RayWrappedInferenceEngine"], *
         engine.max_model_len = max_model_len
 
 
+def assert_data_parallel_ranks_share_a_node(
+    placement_group, bundle_indices: List[int], *, engine_index: int, node_ips_of=get_pg_bundle_node_ips
+) -> None:
+    """Raise when the bundles holding one engine's DP ranks resolve to more than one node."""
+    node_ips = node_ips_of(placement_group, bundle_indices)
+    logger.info(f"inference engine {engine_index}: DP rank -> node {dict(enumerate(node_ips))}")
+    if len(set(node_ips)) > 1:
+        raise RuntimeError(
+            f"inference engine {engine_index}: its {len(bundle_indices)} DP ranks were placed on "
+            f"{len(set(node_ips))} nodes ({dict(enumerate(node_ips))}); a DP/EP group must be node-local"
+        )
+
+
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,
     tensor_parallel_size: int,
@@ -489,6 +503,15 @@ def create_ray_wrapped_inference_engines(
             # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
             # guaranteed co-located on a single node (no cross-node TP all-reduce in
             # decode). #232 fix.
+            node_gpu_count = max(
+                (node["Resources"].get("GPU", 0) for node in ray.nodes() if node.get("Alive")), default=0
+            )
+            if per_engine_gpu_count > node_gpu_count:
+                raise ValueError(
+                    f"An inference engine needs tp*pp*dp = {tensor_parallel_size}*{pipeline_parallel_size}*"
+                    f"{data_parallel_size} = {per_engine_gpu_count} GPUs on one node, but the largest node "
+                    f"has {int(node_gpu_count)}"
+                )
             for _ in range(num_inference_engines):
                 pg = placement_group(
                     [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
@@ -511,32 +534,25 @@ def create_ray_wrapped_inference_engines(
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
 
     if data_parallel_size > 1:
-        # Every DP rank of an engine must sit on one node: the ranks form a single vLLM
-        # DP/EP group whose expert-parallel all-to-all runs every decode step, and a group
-        # split across nodes runs that collective over the fabric and deadlocks silently at
-        # the first forward under CUDA graphs. Fail here instead, with the layout visible.
+        # An engine's DP ranks form one vLLM DP/EP group whose all-to-all runs every decode step.
+        if use_hybrid_engine:
+            layout = EnginePlacementLayout.HYBRID
+        elif use_mp_backend:
+            layout = EnginePlacementLayout.MP
+        else:
+            layout = EnginePlacementLayout.PER_ENGINE
         for i in range(num_inference_engines):
-            if use_hybrid_engine:
-                check_pg = shared_pg
-                check_indices = [
-                    colocated_engine_bundles[i * data_parallel_size + r][0] for r in range(data_parallel_size)
-                ]
-            elif per_engine_pgs:
-                check_pg = per_engine_pgs[i]
-                check_indices = [r * tp_pp_size for r in range(data_parallel_size)]
-            elif use_mp_backend:
-                check_pg = shared_pg
-                check_indices = [i * data_parallel_size + r for r in range(data_parallel_size)]
-            else:
-                check_pg = shared_pg
-                check_indices = [i * per_engine_gpu_count + r * tp_pp_size for r in range(data_parallel_size)]
-            node_ips = get_pg_bundle_node_ips(check_pg, check_indices)
-            logger.info(f"inference engine {i}: DP rank -> node {dict(enumerate(node_ips))}")
-            if len(set(node_ips)) > 1:
-                raise RuntimeError(
-                    f"inference engine {i}: its {data_parallel_size} DP ranks were placed on "
-                    f"{len(set(node_ips))} nodes ({dict(enumerate(node_ips))}); a DP/EP group must be node-local"
-                )
+            assert_data_parallel_ranks_share_a_node(
+                per_engine_pgs[i] if layout is EnginePlacementLayout.PER_ENGINE else shared_pg,
+                data_parallel_rank_bundle_indices(
+                    layout,
+                    engine_index=i,
+                    data_parallel_size=data_parallel_size,
+                    tensor_pipeline_size=tp_pp_size,
+                    colocated_engine_bundles=colocated_engine_bundles,
+                ),
+                engine_index=i,
+            )
 
     allocated_rendezvous_ports: set[int] = set()
     for i in range(num_inference_engines):
