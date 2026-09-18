@@ -39,8 +39,7 @@ from marinskyrl.distillation import (
     compile_distillation_plan_from_config,
     validate_distillation_runtime_support,
 )
-from marinskyrl.inference_placement import validate_node_local_config
-from skyrl_train.weight_sync.expert_block.config import validate_expert_block_transport
+from marinskyrl.inference_placement import validate_expert_block_transport, validate_node_local_config
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS

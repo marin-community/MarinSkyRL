@@ -63,6 +63,53 @@ def validate_node_local_config(config: Mapping[str, Any], *, gpus_per_node: int 
     )
 
 
+WEIGHT_SYNC_TRANSPORTS = ("broadcast", "expert_block")
+
+
+def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
+    """Refuse the expert-block weight-sync transport unless every precondition holds.
+
+    The transport pairs each Megatron expert shard with the vLLM worker that serves it, so it
+    needs the megatron strategy without tensor parallelism, local async vLLM engines at TP=1
+    placed node-locally, and the NCCL weight-sync backend. Lives beside the node-local check
+    because the trainer's config validator imports both before any model module.
+    """
+    generator = config["generator"]
+    transport = generator["weight_sync_transport"]
+    if transport not in WEIGHT_SYNC_TRANSPORTS:
+        raise ValueError(f"generator.weight_sync_transport must be one of {WEIGHT_SYNC_TRANSPORTS}, not {transport!r}")
+    if transport != "expert_block":
+        return
+    trainer = config["trainer"]
+    problems = []
+    if trainer["strategy"] != "megatron":
+        problems.append("the policy must train with the megatron strategy")
+    else:
+        megatron = trainer["policy"]["megatron_config"]
+        if megatron["tensor_model_parallel_size"] != 1:
+            problems.append("the policy must use tensor_model_parallel_size 1")
+        if megatron["expert_tensor_parallel_size"] not in (None, 1):
+            problems.append("the policy must use expert_tensor_parallel_size 1")
+        # Unequal expert-parallel degrees are paired by the schedule; each must divide the
+        # expert count, which is checked against the model when the ranks report.
+        if megatron["expert_model_parallel_size"] < 1 or generator["inference_engine_expert_parallel_size"] < 1:
+            problems.append("expert-parallel sizes must be positive")
+    if generator["backend"] != "vllm" or not generator["async_engine"] or not generator["run_engines_locally"]:
+        problems.append("the engines must be local async vLLM engines")
+    if trainer["placement"]["colocate_all"]:
+        problems.append("the engines must not be colocated with the trainer")
+    if generator["weight_sync_backend"] != "nccl":
+        problems.append("generator.weight_sync_backend must be nccl")
+    if not generator["inference_engine_node_local"]:
+        problems.append("generator.inference_engine_node_local must be true")
+    if generator["inference_engine_tensor_parallel_size"] != 1:
+        problems.append("the engines must use TP=1")
+    if int(generator["expert_block_sync"]["timeout_seconds"]) <= 0:
+        problems.append("generator.expert_block_sync.timeout_seconds must be positive")
+    if problems:
+        raise ValueError("generator.weight_sync_transport=expert_block requires: " + "; ".join(problems))
+
+
 @dataclass(frozen=True)
 class InferenceWorkerPlacement:
     """What one vLLM worker observes about itself from inside its process."""

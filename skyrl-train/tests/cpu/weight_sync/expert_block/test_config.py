@@ -1,9 +1,12 @@
 """The expert-block transport is refused at configuration time unless every precondition holds."""
 
+import subprocess
+import sys
+
 import pytest
 
+from marinskyrl.inference_placement import validate_expert_block_transport
 from skyrl_train.utils.utils import validate_cfg
-from skyrl_train.weight_sync.expert_block.config import validate_expert_block_transport
 from tests.cpu.util import example_dummy_config
 
 
@@ -79,3 +82,14 @@ def test_validate_cfg_runs_the_transport_check():
     cfg.generator.weight_sync_transport = "expert_block"
     with pytest.raises(ValueError, match="weight_sync_transport=expert_block requires"):
         validate_cfg(cfg)
+
+
+def test_the_model_package_imports_before_the_trainer_utilities():
+    # The frozen-runtime bootstrap imports the Grug model first; that chain reaches
+    # skyrl_train.utils, which must not pull the weight_sync package back into the models.
+    subprocess.run(
+        [sys.executable, "-c", "from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
