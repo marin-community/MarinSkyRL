@@ -1,10 +1,36 @@
 """Shared Hugging Face model export contracts."""
 
+import contextlib
+import hashlib
 import json
+import os
 from pathlib import Path
+
+import huggingface_hub.constants
 
 TOKENIZER_CONFIG_NAME = "tokenizer_config.json"
 TOKENIZER_JSON_NAME = "tokenizer.json"
+_OFFLINE_ENVIRONMENT_VARIABLES = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+
+
+def hugging_face_model_cache_key(model_id: str, revision: str) -> str:
+    """Return a stable cache key for one immutable Hub model revision."""
+    return hashlib.sha256(f"{model_id}@{revision}".encode()).hexdigest()
+
+
+@contextlib.contextmanager
+def hugging_face_hub_online():
+    """Temporarily allow an explicit Hub operation from an offline runtime."""
+    previous_environment = {name: os.environ.pop(name) for name in _OFFLINE_ENVIRONMENT_VARIABLES if name in os.environ}
+    previous_offline = huggingface_hub.constants.HF_HUB_OFFLINE
+    huggingface_hub.constants.HF_HUB_OFFLINE = False
+    try:
+        yield
+    finally:
+        huggingface_hub.constants.HF_HUB_OFFLINE = previous_offline
+        for name in _OFFLINE_ENVIRONMENT_VARIABLES:
+            os.environ.pop(name, None)
+        os.environ.update(previous_environment)
 
 
 def normalize_fast_tokenizer_metadata(model_dir: Path) -> bool:

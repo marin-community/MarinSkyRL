@@ -372,12 +372,6 @@ def stage_model(model_path: str, warm_source: str | None = None, revision: str |
     barrier is active. With ``HF_HUB_OFFLINE=1`` set for the training ranks
     (config extra_env), all ranks on a node read the pre-populated cache.
     Idempotent: ``snapshot_download`` skips already-complete cached files.
-
-    The pod env carries ``HF_HUB_OFFLINE=1`` / ``TRANSFORMERS_OFFLINE=1`` for the
-    ranks; this download MUST reach the Hub, so it runs ``snapshot_download`` in a
-    SUBPROCESS whose env has both flags stripped (an in-process env-pop is too late —
-    huggingface_hub caches HF_HUB_OFFLINE into a module constant at import). The
-    ranks' env is untouched.
     """
     if is_cloud_uri(model_path):
         raise ValueError(unsupported_model_path_message(model_path))
@@ -1967,7 +1961,23 @@ def run_worker(args: argparse.Namespace) -> int:
     return 128 + termination_signal
 
 
-def parse_args() -> tuple[argparse.Namespace, list[str]]:
+def teacher_model_specs_from_json(value: str) -> tuple[TeacherModelSpec, ...]:
+    """Decode immutable local-teacher model identities from the launcher boundary."""
+    raw_models = json.loads(value)
+    if not isinstance(raw_models, list):
+        raise ValueError("--prestage-teacher-models-json must encode a list")
+    models = []
+    for raw_model in raw_models:
+        if not isinstance(raw_model, dict):
+            raise ValueError("each pre-staged teacher model must be a JSON object")
+        try:
+            models.append(TeacherModelSpec(**raw_model))
+        except TypeError as error:
+            raise ValueError("each pre-staged teacher model must contain only path and revision") from error
+    return tuple(models)
+
+
+def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(
         description="Bootstrap one cross-node Ray cluster on an iris GPU slice and run "
         "the MarinSkyRL training driver on rank 0. Everything after `--` is the "
@@ -2076,22 +2086,27 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--prestage-teacher-models-json",
-        default="[]",
+        dest="prestage_teacher_models",
+        type=teacher_model_specs_from_json,
+        default=(),
         help="JSON list of local teacher model paths and immutable revisions to stage before Ray starts.",
     )
     parser.add_argument(
-        "--prestage-draft-models-json",
-        default="[]",
-        help="JSON list of immutable Hugging Face draft models to cache and materialize before Ray starts.",
+        "--prestage-draft-model",
+        action="append",
+        nargs=3,
+        default=[],
+        metavar=("MODEL_ID", "REVISION", "LOCAL_PATH"),
+        help="Immutable Hugging Face draft model to cache and materialize before Ray starts.",
     )
     parser.add_argument(
-        "--model-cache-ttl-days",
+        "--draft-model-cache-ttl-days",
         type=int,
         default=None,
         help="Lifecycle TTL for immutable Hugging Face draft-model mirrors.",
     )
     parser.add_argument(
-        "--model-cache-source-prefix",
+        "--draft-model-cache-source-prefix",
         default="",
         help="Output prefix used to select the draft-model cache's storage region.",
     )
@@ -2118,7 +2133,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "before Ray (delphi single-turn RLVR: the SFT repo ships no template). Requires "
         "--prestage-model or --model-local-path. Empty disables the override.",
     )
-    args, train_argv = parser.parse_known_args()
+    args, train_argv = parser.parse_known_args(argv)
     # argparse leaves the `--` separator out of train_argv; strip a leading one
     # if the shell passed it through.
     if train_argv and train_argv[0] == "--":
@@ -2126,40 +2141,6 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     if not train_argv:
         parser.error("No training command given. Pass it after `--`.")
     return args, train_argv
-
-
-def teacher_model_specs_from_json(value: str) -> tuple[TeacherModelSpec, ...]:
-    """Decode immutable local-teacher model identities from the launcher boundary."""
-    raw_models = json.loads(value)
-    if not isinstance(raw_models, list):
-        raise ValueError("--prestage-teacher-models-json must encode a list")
-    models = []
-    for raw_model in raw_models:
-        if not isinstance(raw_model, dict):
-            raise ValueError("each pre-staged teacher model must be a JSON object")
-        try:
-            models.append(TeacherModelSpec(**raw_model))
-        except TypeError as error:
-            raise ValueError("each pre-staged teacher model must contain only path and revision") from error
-    return tuple(models)
-
-
-def cached_hugging_face_models_from_json(value: str) -> tuple[CachedHuggingFaceModel, ...]:
-    """Decode immutable Hub models prepared by the launcher."""
-    raw_models = json.loads(value)
-    if not isinstance(raw_models, list):
-        raise ValueError("--prestage-draft-models-json must encode a JSON list")
-    models = []
-    for raw_model in raw_models:
-        if not isinstance(raw_model, dict):
-            raise ValueError("each pre-staged draft model must be a JSON object")
-        try:
-            models.append(CachedHuggingFaceModel(**raw_model))
-        except TypeError as error:
-            raise ValueError(
-                "each pre-staged draft model must contain only model_id, revision, and local_path"
-            ) from error
-    return tuple(models)
 
 
 def _print_env_snapshot() -> None:
@@ -2225,17 +2206,17 @@ def main() -> None:
             warm_source=(args.model_warm_source or None),
             revision=(args.model_revision or None),
         )
-    for teacher_model in teacher_model_specs_from_json(args.prestage_teacher_models_json):
+    for teacher_model in args.prestage_teacher_models:
         stage_model(teacher_model.path, revision=teacher_model.revision)
-    for draft_model in cached_hugging_face_models_from_json(args.prestage_draft_models_json):
-        if args.model_cache_ttl_days is None or args.model_cache_ttl_days <= 0:
-            raise ValueError("--model-cache-ttl-days must be positive")
-        if not args.model_cache_source_prefix:
-            raise ValueError("--model-cache-source-prefix is required when pre-staging draft models")
+    for model_id, revision, local_path in args.prestage_draft_model:
+        if args.draft_model_cache_ttl_days is None or args.draft_model_cache_ttl_days <= 0:
+            raise ValueError("--draft-model-cache-ttl-days must be positive")
+        if not args.draft_model_cache_source_prefix:
+            raise ValueError("--draft-model-cache-source-prefix is required when pre-staging draft models")
         stage_cached_hugging_face_model(
-            draft_model,
-            ttl_days=args.model_cache_ttl_days,
-            source_prefix=args.model_cache_source_prefix,
+            CachedHuggingFaceModel(model_id=model_id, revision=revision, local_path=local_path),
+            ttl_days=args.draft_model_cache_ttl_days,
+            source_prefix=args.draft_model_cache_source_prefix,
         )
     # Force the policy chat template onto the staged Hub snapshot or materialized local
     # model on every node before Ray; the training driver's tokenizer may load anywhere.

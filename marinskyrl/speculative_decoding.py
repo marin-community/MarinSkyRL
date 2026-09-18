@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from enum import StrEnum
-import hashlib
 import math
 import os
 import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from marinskyrl.hf_model import hugging_face_model_cache_key
 from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id
 
 
@@ -150,9 +150,10 @@ class SpeculatorModelConfig:
 
     def node_local_path(self) -> str:
         """Return a stable path shared by the controller and rollout workers."""
-        identity = f"{self.source_uri}@{self.source_identity}"
-        digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
-        return os.path.join(_DRAFT_MODEL_ROOT, digest)
+        model_id = self.hugging_face_repo_id
+        if model_id is None:
+            raise SpeculativeDecodingConfigError("Only Hugging Face speculators have a node-local cache path")
+        return os.path.join(_DRAFT_MODEL_ROOT, hugging_face_model_cache_key(model_id, self.source_identity))
 
 
 @dataclass(frozen=True)
