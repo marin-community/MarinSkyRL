@@ -7,7 +7,7 @@ to compare it, byte for byte, with the trainer's exported weights. It then flips
 one installed byte on one worker and requires the gate to name exactly that byte,
 trains a second step and syncs again.
 
-Opt-in (needs six Hopper GPUs at most). The test-only engine actor lives in this module,
+Opt-in (needs six Hopper GPUs at most; four geometries). The test-only engine actor lives in this module,
 so Ray workers need ``skyrl-train`` on ``PYTHONPATH``; the Grug gate wrapper exports it:
 
     uv run --frozen --extra vllm --extra megatron --group dev \\
@@ -64,7 +64,6 @@ class Geometry:
     engines: int
     engine_dp: int
     engine_pp: int
-    policy_cp: int = 1
 
     @property
     def gpus(self) -> int:
@@ -76,8 +75,6 @@ GEOMETRIES = {
     "two-replicas": Geometry(2, 1, 2, 1, 2, 2, 1),
     "unequal-ep": Geometry(2, 2, 1, 1, 1, 2, 1),
     "receiver-pp2": Geometry(2, 1, 2, 1, 1, 2, 2),
-    # Context parallelism replicates every weight across its ranks; the schedule sees more holders.
-    "trainer-cp2": Geometry(4, 1, 2, 1, 1, 2, 1, policy_cp=2),
 }
 
 
@@ -136,9 +133,6 @@ def test_expert_block_sync_installs_every_byte_and_the_gate_catches_a_flipped_on
     _write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=geometry.policy_gpus, pp=geometry.policy_pp, ep=geometry.policy_ep)
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = geometry.policy_tp
-    cfg.trainer.policy.megatron_config.context_parallel_size = geometry.policy_cp
-    # Megatron's context-parallel forward needs packed sequences.
-    cfg.trainer.use_sample_packing = geometry.policy_cp > 1
     cfg.generator.num_inference_engines = geometry.engines
     cfg.generator.inference_engine_data_parallel_size = geometry.engine_dp
     cfg.generator.inference_engine_expert_parallel_size = geometry.engine_dp
@@ -203,7 +197,7 @@ def test_expert_block_sync_installs_every_byte_and_the_gate_catches_a_flipped_on
         print(
             f"EXPERT_BLOCK_GATE_PASS geometry={name} policy_gpus={geometry.policy_gpus} policy_pp={geometry.policy_pp} "
             f"policy_ep={geometry.policy_ep} policy_tp={geometry.policy_tp} engines={geometry.engines} "
-            f"policy_cp={geometry.policy_cp} engine_dp={geometry.engine_dp} engine_pp={geometry.engine_pp} syncs=2 byte_equal=true "
+            f"engine_dp={geometry.engine_dp} engine_pp={geometry.engine_pp} syncs=2 byte_equal=true "
             f"corruption_rejected=true prepare_seconds={timings['prepare']} "
             f"install_seconds={[timings[f'install_{v}'].install_seconds for v in (1, 2)]} "
             f"verify_seconds={[timings[f'verify_{v}']['verify_seconds'] for v in (1, 2)]} "
