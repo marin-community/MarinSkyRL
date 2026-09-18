@@ -19,14 +19,8 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
-from skyrl_train.weight_sync.expert_block.schedule import BF16
-from skyrl_train.weight_sync.expert_block.source_views import (
-    dense_destination_view,
-    dense_source_view,
-    expert_destination_view,
-    expert_source_view,
-)
-from skyrl_train.weight_sync.expert_block.stream import Stream
+from skyrl_train.weight_sync.expert_block.source_views import dense_source_view, expert_source_view
+from skyrl_train.weight_sync.expert_block.stream import Landing, Stream
 
 
 @dataclass(frozen=True)
@@ -46,50 +40,61 @@ def replay(stream: Stream, version: int) -> ReplayReport:
 
 def _replay(stream: Stream, version: int) -> ReplayReport:
     schedule, me = stream.schedule, stream.participant
-    largest = max(
-        [item.entry.nbytes for item in schedule.experts if me in item.destinations]
-        + [item.source.nbytes for item in schedule.dense if stream.lands(item)]
-        + [0]
+    landings = {}
+    for item in schedule.experts:
+        if me in item.destinations and item.root != me:
+            landings[item.entry.name] = stream.expert_landing(item)
+    for item in schedule.dense:
+        if stream.lands(item):
+            landings[item.source.identity()] = stream.dense_landing(item)
+    scratch = torch.empty(
+        max([landing.nbytes for landing in landings.values()] + [0]), dtype=torch.uint8, device=stream.device
     )
-    scratch = torch.empty(largest, dtype=torch.uint8, device=stream.device)
     mismatched = torch.zeros((), dtype=torch.int64, device=stream.device)
     compared = 0
 
-    def compare(landed: torch.Tensor, installed: torch.Tensor) -> None:
+    def landed(landing: Landing) -> torch.Tensor:
+        return scratch.narrow(0, 0, landing.nbytes).view(landing.wire_dtype).view(landing.installed.shape)
+
+    def compare(landing: Landing, wire: torch.Tensor) -> None:
         nonlocal compared
-        if installed.dtype != landed.dtype:
-            # The FP32 router weight was widened from BF16 on install; compare at wire precision.
-            installed = installed.to(landed.dtype)
-        mismatched.add_(landed.view(torch.uint8).ne(installed.contiguous().view(torch.uint8)).sum())
-        compared += landed.numel() * landed.element_size()
+        # A widened parameter is compared at wire precision.
+        installed = landing.installed.to(landing.wire_dtype).contiguous()
+        mismatched.add_(wire.contiguous().view(torch.uint8).ne(installed.view(torch.uint8)).sum())
+        compared += landing.nbytes
 
     for item in schedule.experts:
         if item.root == me:
-            dist.broadcast(expert_source_view(stream.expert_sources[item.entry.name], stream.sources), src=0, group=stream.groups[item.group])
+            dist.broadcast(
+                expert_source_view(stream.expert_sources[item.entry.name], stream.sources),
+                src=0,
+                group=stream.groups[item.group],
+            )
         elif me in item.destinations:
-            landed = scratch.narrow(0, 0, item.entry.nbytes).view(torch.bfloat16)
-            dist.broadcast(landed, src=0, group=stream.groups[item.group])
-            compare(landed, expert_destination_view(item.entry, stream.parameters, stream.expert_maps))
+            landing = landings[item.entry.name]
+            wire = landed(landing)
+            dist.broadcast(wire, src=0, group=stream.groups[item.group])
+            compare(landing, wire)
     for item in schedule.dense:
         if item.root == me:
             dist.broadcast(dense_source_view(item.source, stream.sources), src=0, group=stream.groups[item.group])
         elif stream.lands(item):
-            landed = scratch.narrow(0, 0, item.source.nbytes).view(getattr(torch, item.source.wire_dtype))
+            landing = landings[item.source.identity()]
+            wire = landed(landing)
             if me in item.landings:
-                dist.broadcast(landed, src=0, group=stream.groups[item.group])
+                dist.broadcast(wire, src=0, group=stream.groups[item.group])
             local_name, members = stream.local
             origin = next(rank for rank in item.landings if rank in members)
-            dist.broadcast(landed, src=members.index(origin), group=stream.groups[local_name])
-            compare(landed, dense_destination_view(item.source, stream.parameters))
+            dist.broadcast(wire, src=members.index(origin), group=stream.groups[local_name])
+            compare(landing, wire)
     parameter_bytes = 0
     if not stream.trainer:
+        # Coverage counts every parameter byte at wire width, so a widened parameter counts as BF16.
         parameter_bytes = sum(value.numel() * value.element_size() for value in stream.parameters.values())
-        # A widened parameter is compared at wire width; count it that way for coverage.
-        for item in schedule.dense:
-            if stream.lands(item):
-                installed = dense_destination_view(item.source, stream.parameters)
-                if installed.dtype != torch.bfloat16 and item.source.wire_dtype == BF16:
-                    parameter_bytes -= installed.numel() * (installed.element_size() - 2)
+        for landing in landings.values():
+            parameter_bytes -= landing.installed.numel() * (
+                landing.installed.element_size() - landing.nbytes // landing.installed.numel()
+            )
     if stream.device.type == "cuda":
         torch.cuda.synchronize(stream.device)
     return ReplayReport(me, version, compared, parameter_bytes, int(mismatched.item()))
@@ -103,7 +108,9 @@ class ReplicaReport:
     mismatched_bytes: int
 
 
-def compare_replicas(sources: dict[str, torch.Tensor], groups: dict[str, dist.ProcessGroup], participant: int, version: int) -> ReplicaReport:
+def compare_replicas(
+    sources: dict[str, torch.Tensor], groups: dict[str, dist.ProcessGroup], participant: int, version: int
+) -> ReplicaReport:
     """Count bytes on which this rank's parameters differ from the peers that hold the same ones.
 
     ``groups`` maps each parameter name to the process group of its replicas. Byte

@@ -47,28 +47,14 @@ def plan_from_inventories(policy: list[dict], receivers: list[tuple[dict, object
     ``receivers`` pairs each engine worker's report with its verified node-local placement.
     """
     trainers = sorted((from_wire(TrainerRank, row["trainer"]) for row in policy), key=lambda row: row.rank)
-    by_rank = {row.rank: row for row in trainers}
-    rows = {by_rank[from_wire(TrainerRank, row["trainer"]).rank]: row for row in policy}
-    eps = {row["expert_parallel_size"] for row in policy}
+    rows = {from_wire(TrainerRank, row["trainer"]).rank: row for row in policy}
     models = {tuple(sorted(row["model"].items())) for row in policy}
-    if len(eps) != 1 or len(models) != 1:
-        raise ValueError("Trainer ranks disagree on expert-parallel size or model dimensions")
-    trainer_ep = eps.pop()
+    if len(models) != 1:
+        raise ValueError("Trainer ranks disagree on model dimensions")
     model = dict(models.pop())
-    stages: dict[int, dict] = {}
-    for trainer, row in rows.items():
-        reference = stages.setdefault(trainer.pp, row)
-        if (reference["layers"], reference["dense"]) != (row["layers"], row["dense"]):
-            raise ValueError(f"Trainer ranks of stage {trainer.pp} disagree on their layers or dense weights")
-    for trainer, row in rows.items():
-        peer = next(other for other in rows if (other.pp, other.ep) == (trainer.pp, trainer.ep) and other.dp == 0)
-        if rows[peer]["experts"] != row["experts"]:
-            raise ValueError(f"Trainer rank {trainer.rank} holds different experts from its data-parallel peer")
-    layers_by_pp = tuple(tuple(stages[pp]["layers"]) for pp in sorted(stages))
-    entries = [
-        from_wire(ExpertEntry, item) for trainer, row in rows.items() if trainer.dp == 0 for item in row["experts"]
-    ]
-    dense = [from_wire(DenseSlice, item) for pp in sorted(stages) for item in stages[pp]["dense"]]
+    expert_inventories = {rank: [from_wire(ExpertEntry, item) for item in row["experts"]] for rank, row in rows.items()}
+    dense_inventories = {rank: [from_wire(DenseSlice, item) for item in row["dense"]] for rank, row in rows.items()}
+    trainer_layers = {entry.layer for entries in expert_inventories.values() for entry in entries}
 
     receiver_ranks, participants_by_gpu = [], {}
     receiver_eps, receiver_models = set(), set()
@@ -99,54 +85,41 @@ def plan_from_inventories(policy: list[dict], receivers: list[tuple[dict, object
         raise ValueError("Receivers disagree on expert-parallel size or model dimensions")
     receiver_ep = receiver_eps.pop()
     receiver_model = dict(receiver_models.pop())
-    if any(receiver_model[key] != model[key] for key in model) or receiver_model["num_hidden_layers"] != sum(
-        map(len, layers_by_pp)
+    if any(receiver_model[key] != model[key] for key in model) or receiver_model["num_hidden_layers"] != len(
+        trainer_layers
     ):
         raise ValueError(f"Receiver model {receiver_model} differs from trainer model {model}")
     if sorted(receiver_stages) != list(range(next(iter(receiver_stages.values()))["pp_size"])):
         raise ValueError("Receiver pipeline stages are incomplete")
     receiver_layers_by_pp = tuple(tuple(receiver_stages[stage]["layers"]) for stage in sorted(receiver_stages))
     dense_holders: dict[str, list[int]] = {}
+    dense_numel: dict[str, int] = {}
+    wire_dtypes = {item.hf_name: item.wire_dtype for items in dense_inventories.values() for item in items}
     for stage in sorted(receiver_stages):
-        _check_dense_coverage(dense, receiver_stages[stage]["dense"])
-        for name in receiver_stages[stage]["dense"]:
+        for name, (shape, dtype) in receiver_stages[stage]["dense"].items():
+            if name not in wire_dtypes:
+                raise ValueError(f"Dense weights differ: the receiver holds {name}, which no trainer rank exports")
+            widened = name.endswith(ROUTER_WEIGHT_SUFFIX) and wire_dtypes[name] == BF16 and dtype == "float32"
+            if wire_dtypes[name] != dtype and not widened:
+                raise ValueError(f"{name} is {wire_dtypes[name]} on the trainer and {dtype} on the receiver")
+            numel = 1
+            for dimension in shape:
+                numel *= dimension
+            if dense_numel.setdefault(name, numel) != numel:
+                raise ValueError(f"Receiver stages disagree on the shape of {name}")
             dense_holders.setdefault(name, []).append(stage)
-    exported = {item.hf_name for item in dense}
-    if set(dense_holders) != exported:
-        raise ValueError(f"Dense weights differ: no receiver stage holds {sorted(exported - set(dense_holders))}")
     schedule = build_schedule(
         trainers,
         sorted(receiver_ranks, key=lambda row: row.rank),
-        entries,
-        dense,
-        trainer_ep=trainer_ep,
+        expert_inventories,
+        dense_inventories,
         receiver_ep=receiver_ep,
-        layers_by_pp=layers_by_pp,
         num_experts=model["num_experts"],
         receiver_layers_by_pp=receiver_layers_by_pp,
         dense_holders=dense_holders,
+        dense_numel=dense_numel,
     )
     return schedule, participants_by_gpu
-
-
-def _check_dense_coverage(dense: list[DenseSlice], installed: dict[str, list]) -> None:
-    """Every dense parameter a receiver stage holds is fully covered by trainer slices of a compatible dtype."""
-    numel = Counter()
-    dtypes = {}
-    for item in dense:
-        numel[item.hf_name] += item.numel
-        dtypes.setdefault(item.hf_name, item.wire_dtype)
-    for name, (shape, dtype) in installed.items():
-        if name not in numel:
-            raise ValueError(f"Dense weights differ: the receiver holds {name}, which no trainer rank exports")
-        expected = 1
-        for dimension in shape:
-            expected *= dimension
-        if numel[name] != expected:
-            raise ValueError(f"Trainer slices cover {numel[name]} of {expected} elements of {name}")
-        widened = name.endswith(ROUTER_WEIGHT_SUFFIX) and dtypes[name] == BF16 and dtype == "float32"
-        if dtypes[name] != dtype and not widened:
-            raise ValueError(f"{name} is {dtypes[name]} on the trainer and {dtype} on the receiver")
 
 
 class ExpertBlockSync:

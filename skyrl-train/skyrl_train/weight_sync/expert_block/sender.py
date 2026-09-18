@@ -36,13 +36,12 @@ class ExpertBlockSender:
     def inventory(self) -> dict:
         """This rank's coordinates and the exact expert matrices and dense slices it owns."""
         state = self.parallel_state
-        if state.get_tensor_model_parallel_world_size() != 1:
-            raise ValueError("Expert-block sync requires tensor-parallel size 1 on the trainer")
         self.trainer = TrainerRank(
             torch.distributed.get_rank(),
             state.get_expert_data_parallel_rank(),
             state.get_pipeline_model_parallel_rank(),
             state.get_expert_model_parallel_rank(),
+            state.get_tensor_model_parallel_rank(),
         )
         provider = self.worker.provider
         expert_slices, dense_slices, sources = local_source_slices(

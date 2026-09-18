@@ -1,24 +1,29 @@
-"""The collective schedule for expert-block weight sync, as a pure function of topology.
+"""The collective schedule for expert-block weight sync, as a pure function of what every rank holds.
 
 Trainer ranks are Megatron ranks; receiver ranks are vLLM workers, one per
-expert-parallel slot per pipeline stage per inference replica. The trainer that
-owns expert block ``k_t`` of its stage holds every expert matrix in that block,
-and the receiver serving block ``k_r`` of its stage holds a live slot for each.
-One NCCL group per (trainer stage, receiver stage, trainer block, receiver
-block) joins that owner to those receivers across replicas, and every expert
-matrix is one broadcast from its owner straight into the receiver's slot. With
-one inference replica that is a point-to-point copy; with more, NCCL's tree
-carries the fan-out.
+expert-parallel slot per pipeline stage per inference replica. Every trainer
+rank reports the expert matrices (or shards of them) and the dense runs it
+holds; every transfer is then one broadcast from one of its holders straight
+into the receivers' live slots. With one inference replica that is a
+point-to-point copy; with more, NCCL's tree carries the fan-out. One NCCL group
+per (root, receiver stage, receiver block) joins a root to the receivers it
+serves.
 
-Dense (non-expert) weights are split across the owners of their trainer stage,
-sent to one receiver per replica on each receiver stage that holds the tensor,
-and fanned out to that stage's other receivers over a node-local group.
+Dense (non-expert) weights are rotated across the expert roots of their stage
+so they travel in the same groups, land on one receiver per replica on each
+stage that holds the tensor, and fan out to that stage's other receivers over
+a node-local group.
 
-Geometries beyond the qualified one (equal expert-parallel degree, one receiver
-stage) are handled by the sections marked below: unequal expert-parallel
-degrees pair every overlapping (trainer block, receiver block); receiver
-pipeline stages route each layer, and each dense tensor, to the stage that
-holds it.
+Geometries beyond the qualified one (TP=1 both sides, equal expert-parallel
+degree, one receiver stage) are handled by the sections marked below:
+
+* unequal expert-parallel degrees: an owner talks only to the receivers that
+  hold some of its experts, because groups are keyed by receiver block;
+* receiver pipeline stages: each layer, and each dense tensor, is routed to the
+  stage that holds it;
+* trainer tensor parallelism: a rank reports the shard it holds, described as
+  a region of the full tensor; column shards are one run, row shards are a
+  column block that the receiver lands through scratch.
 
 Participants are numbered in one space: trainers by their native rank, then
 receivers offset by the trainer count.
@@ -36,12 +41,13 @@ WIRE_DTYPE_BYTES = {BF16: 2, FP32: 4}
 
 @dataclass(frozen=True)
 class TrainerRank:
-    """Expert-owner coordinates; ``dp`` is Megatron's expert data-parallel rank."""
+    """Megatron coordinates, informational: what a rank holds comes from its inventory."""
 
     rank: int
     dp: int
     pp: int
     ep: int
+    tp: int = 0
 
 
 @dataclass(frozen=True)
@@ -55,8 +61,40 @@ class ReceiverRank:
 
 
 @dataclass(frozen=True)
+class Region:
+    """Where a contiguous payload lands in a flat tensor: ``runs`` runs of equal length, ``stride`` apart.
+
+    One run is a plain ``narrow`` and a broadcast can land in it directly; a
+    column block of a row-major matrix is ``rows`` runs and needs scratch.
+    """
+
+    offset: int
+    numel: int
+    runs: int = 1
+    stride: int = 0
+
+    @property
+    def run_length(self) -> int:
+        return self.numel // self.runs
+
+    @property
+    def direct(self) -> bool:
+        return self.runs == 1
+
+    def intervals(self) -> list[tuple[int, int]]:
+        return [
+            (self.offset + run * self.stride, self.offset + run * self.stride + self.run_length)
+            for run in range(self.runs)
+        ]
+
+
+@dataclass(frozen=True)
 class ExpertEntry:
-    """One expert matrix as the trainer exports it: ``fc1`` is ``[gate;up]``, ``fc2`` is ``down``."""
+    """One expert matrix, or one expert-tensor-parallel shard of it, as a trainer rank holds it.
+
+    ``fc1`` is ``[gate;up]``, ``fc2`` is ``down``. With ``shards`` > 1 the rank holds shard
+    ``shard``: rows of both halves for ``fc1``, a column block for ``fc2``.
+    """
 
     name: str
     layer: int
@@ -64,11 +102,13 @@ class ExpertEntry:
     expert: int
     projection: str
     nbytes: int
+    shard: int = 0
+    shards: int = 1
 
 
 @dataclass(frozen=True)
 class DenseSlice:
-    """A contiguous run of one dense HF tensor, backed by a contiguous run of one trainer parameter."""
+    """A region of one dense HF tensor, backed by a contiguous run of one trainer parameter."""
 
     hf_name: str
     hf_offset: int
@@ -77,10 +117,20 @@ class DenseSlice:
     source_key: str
     source_offset: int
     pp: int
+    runs: int = 1
+    stride: int = 0
 
     @property
     def nbytes(self) -> int:
         return self.numel * WIRE_DTYPE_BYTES[self.wire_dtype]
+
+    @property
+    def region(self) -> Region:
+        return Region(self.hf_offset, self.numel, self.runs, self.stride)
+
+    def identity(self) -> tuple:
+        """What identifies the transfer independently of which rank backs it."""
+        return (self.hf_name, self.hf_offset, self.numel, self.runs, self.stride, self.wire_dtype, self.pp)
 
 
 @dataclass(frozen=True)
@@ -113,7 +163,7 @@ class Schedule:
     groups: tuple[Group, ...]
     experts: tuple[ExpertBroadcast, ...]
     dense: tuple[DenseBroadcast, ...]
-    # Per receiver participant: wire bytes it must land per sync, and expert matrices it must install.
+    # Per receiver participant: wire bytes it must land per sync, and expert transfers it must install.
     receiver_bytes: tuple[tuple[int, int], ...]
     receiver_experts: tuple[tuple[int, int], ...]
 
@@ -128,125 +178,143 @@ def receiver_participant(trainer_count: int, receiver: ReceiverRank) -> int:
 def build_schedule(
     trainers: Sequence[TrainerRank],
     receivers: Sequence[ReceiverRank],
-    entries: Sequence[ExpertEntry],
-    dense: Sequence[DenseSlice],
+    expert_inventories: Mapping[int, Sequence[ExpertEntry]],
+    dense_inventories: Mapping[int, Sequence[DenseSlice]],
     *,
-    trainer_ep: int,
     receiver_ep: int,
-    layers_by_pp: Sequence[Sequence[int]],
     num_experts: int,
-    receiver_layers_by_pp: Sequence[Sequence[int]] | None = None,
-    dense_holders: Mapping[str, Sequence[int]] | None = None,
+    receiver_layers_by_pp: Sequence[Sequence[int]],
+    dense_holders: Mapping[str, Sequence[int]],
+    dense_numel: Mapping[str, int],
 ) -> Schedule:
     """Order every collective identically for every participant, without touching tensors.
 
-    ``receiver_layers_by_pp`` lists the layers each receiver stage holds (default: one
-    stage with every layer); ``dense_holders`` maps each dense HF tensor to the receiver
-    stages holding it (default: every stage).
+    ``expert_inventories`` and ``dense_inventories`` map each trainer rank to what it holds;
+    ``receiver_layers_by_pp`` lists the layers each receiver stage holds; ``dense_holders``
+    maps each dense HF tensor to the receiver stages holding it and ``dense_numel`` to its
+    element count on the receiver.
     """
-    if num_experts % trainer_ep or num_experts % receiver_ep:
-        raise ValueError(f"{num_experts} experts do not split evenly across EP {trainer_ep} and EP {receiver_ep}")
-    layer_count = sum(map(len, layers_by_pp))
-    if receiver_layers_by_pp is None:
-        receiver_layers_by_pp = (tuple(range(layer_count)),)
-    dp_count = len({row.dp for row in trainers})
-    pp_count = len(layers_by_pp)
-    replica_count = len({row.replica for row in receivers})
-    receiver_pp_count = len(receiver_layers_by_pp)
-    trainer_at = {(row.dp, row.pp, row.ep): row for row in trainers}
-    receiver_at = {(row.replica, row.pp, row.ep): row for row in receivers}
-    if len(trainer_at) != len(trainers) or set(trainer_at) != set(
-        product(range(dp_count), range(pp_count), range(trainer_ep))
-    ):
-        raise ValueError("Incomplete or duplicate trainer topology")
-    if len(receiver_at) != len(receivers) or set(receiver_at) != set(
-        product(range(replica_count), range(receiver_pp_count), range(receiver_ep))
-    ):
-        raise ValueError("Incomplete or duplicate receiver topology")
-    layer_owner = _layer_stages(layers_by_pp, "trainer")
-    receiver_stage = _layer_stages(receiver_layers_by_pp, "receiver")
-    if set(receiver_stage) != set(layer_owner):
-        raise ValueError("Receiver stages do not hold exactly the trainer's layers")
     trainer_count = len(trainers)
     if sorted(row.rank for row in trainers) != list(range(trainer_count)):
         raise ValueError("Trainer native ranks must be 0..N-1")
     if sorted(row.rank for row in receivers) != list(range(len(receivers))):
         raise ValueError("Receiver native ranks must be 0..N-1")
-    if dense_holders is None:
-        dense_holders = {item.hf_name: tuple(range(receiver_pp_count)) for item in dense}
-
-    def root(pp: int, block: int) -> int:
-        # Stages alternate their root across expert data-parallel replicas to spread egress.
-        return trainer_at[pp % dp_count, pp, block].rank
+    if set(expert_inventories) != set(range(trainer_count)) or set(dense_inventories) != set(range(trainer_count)):
+        raise ValueError("Every trainer rank must report its inventory")
+    if num_experts % receiver_ep:
+        raise ValueError(f"{num_experts} experts do not split evenly across receiver EP {receiver_ep}")
+    replica_count = len({row.replica for row in receivers})
+    receiver_pp_count = len(receiver_layers_by_pp)
+    receiver_at = {(row.replica, row.pp, row.ep): row for row in receivers}
+    if len(receiver_at) != len(receivers) or set(receiver_at) != set(
+        product(range(replica_count), range(receiver_pp_count), range(receiver_ep))
+    ):
+        raise ValueError("Incomplete or duplicate receiver topology")
+    receiver_stage = _layer_stages(receiver_layers_by_pp, "receiver")
 
     def receivers_of(stage: int, block: int) -> tuple[int, ...]:
         return tuple(
             receiver_participant(trainer_count, receiver_at[replica, stage, block]) for replica in range(replica_count)
         )
 
-    # --- Unequal expert-parallel degrees ---------------------------------------------
-    # Expert e is owned by trainer block e // per_trainer_block and served by receiver
-    # block e // per_receiver_block. With equal degrees every group pairs block k with
-    # block k; otherwise every overlapping pair of blocks gets its own group, so an
-    # owner talks only to the receivers that hold some of its experts.
-    per_trainer_block = num_experts // trainer_ep
-    per_receiver_block = num_experts // receiver_ep
     groups: dict[str, Group] = {}
 
-    def expert_group(trainer_stage: int, stage: int, trainer_block: int, receiver_block: int) -> str:
-        name = f"expert-{trainer_stage}-{stage}-{trainer_block}-{receiver_block}"
+    def group_for(root: int, stage: int, block: int) -> str:
+        name = f"expert-{root}-{stage}-{block}"
         if name not in groups:
-            groups[name] = Group(name, (root(trainer_stage, trainer_block), *receivers_of(stage, receiver_block)))
+            groups[name] = Group(name, (root, *receivers_of(stage, block)))
         return name
 
-    expected = set(product(range(layer_count), range(num_experts), ("fc1", "fc2")))
-    seen = set()
+    # --- Expert transfers: every (layer, expert, projection, shard) exactly once, from one holder ---
+    holders: dict[tuple, list[int]] = {}
+    entries: dict[tuple, ExpertEntry] = {}
+    for rank in sorted(expert_inventories):
+        for entry in expert_inventories[rank]:
+            key = (entry.layer, entry.expert, entry.projection, entry.shard)
+            if key in entries and entries[key] != entry:
+                raise ValueError(f"Trainer ranks disagree on expert transfer {entry.name}")
+            entries.setdefault(key, entry)
+            holders.setdefault(key, []).append(rank)
+    shards = {entry.shards for entry in entries.values()}
+    if len(shards) > 1:
+        raise ValueError(f"Expert entries report different shard counts {sorted(shards)}")
+    shard_count = shards.pop() if shards else 1
+    layers = {entry.layer for entry in entries.values()}
+    if layers != set(receiver_stage):
+        raise ValueError("Receiver stages do not hold exactly the trainer's layers")
+    expected = set(product(sorted(layers), range(num_experts), ("fc1", "fc2"), range(shard_count)))
+    if set(entries) != expected:
+        raise ValueError("Expert entries do not cover every layer, expert, projection and shard exactly once")
+    per_receiver_block = num_experts // receiver_ep
     experts = []
-    for entry in sorted(entries, key=lambda item: item.name):
-        key = (entry.layer, entry.expert, entry.projection)
-        if key not in expected or key in seen or entry.pp != layer_owner[entry.layer] or entry.nbytes <= 0:
-            raise ValueError(f"Unexpected or duplicate expert entry {entry.name}")
-        seen.add(key)
-        trainer_block, receiver_block = entry.expert // per_trainer_block, entry.expert // per_receiver_block
+    expert_roots: dict[tuple[int, int], set[int]] = {}
+    for key in sorted(entries, key=lambda item: entries[item].name):
+        entry = entries[key]
+        # --- Unequal expert-parallel degrees: the group is keyed by the receiver block ---
+        block = entry.expert // per_receiver_block
         stage = receiver_stage[entry.layer]
-        name = expert_group(entry.pp, stage, trainer_block, receiver_block)
-        experts.append(ExpertBroadcast(entry, name, root(entry.pp, trainer_block), receivers_of(stage, receiver_block)))
-    if seen != expected:
-        raise ValueError("Expert entries do not cover every layer, expert and projection")
+        ranks = holders[key]
+        # Holders of one matrix are its data-parallel (and, for experts, tensor-parallel) replicas;
+        # rotate the root by stage and block so a replica set shares its egress across them.
+        root = ranks[(entry.pp + block) % len(ranks)]
+        experts.append(ExpertBroadcast(entry, group_for(root, stage, block), root, receivers_of(stage, block)))
+        expert_roots.setdefault((entry.pp, stage), set()).add(root)
 
-    # --- Receiver pipeline stages -------------------------------------------------
-    # A stage's receivers fan a dense tensor out among themselves on their own local
-    # group, and a dense tensor goes to every stage that holds it (tied embeddings may
-    # live on two stages).
+    # --- Receiver pipeline stages: a stage's receivers fan a dense tensor out among themselves ---
     local_groups = {}
     for replica, stage in product(range(replica_count), range(receiver_pp_count)):
         name = f"local-{replica}-{stage}"
         local_groups[name] = Group(name, tuple(receivers_of(stage, block)[replica] for block in range(receiver_ep)))
 
-    dense_broadcasts = []
+    # --- Dense transfers: every region of every dense tensor exactly once, from a holder that already roots ---
+    dense_holder_ranks: dict[tuple, list[int]] = {}
+    slices: dict[tuple, DenseSlice] = {}
+    for rank in sorted(dense_inventories):
+        for item in dense_inventories[rank]:
+            key = item.identity()
+            slices.setdefault(key, item)
+            dense_holder_ranks.setdefault(key, []).append(rank)
     by_name: dict[str, list[DenseSlice]] = {}
-    for item in dense:
+    for item in slices.values():
         by_name.setdefault(item.hf_name, []).append(item)
+    if set(by_name) != set(dense_holders) or set(by_name) != set(dense_numel):
+        raise ValueError(
+            f"Dense weights differ: trainer only {sorted(set(by_name) - set(dense_holders))}, "
+            f"receiver only {sorted(set(dense_holders) - set(by_name))}"
+        )
+    dense_broadcasts = []
     counter = 0
     for name in sorted(by_name):
-        holders = tuple(dense_holders.get(name, ()))
-        if not holders:
-            raise ValueError(f"No receiver stage holds dense weight {name}")
-        cursor = 0
-        for item in sorted(by_name[name], key=lambda item: item.hf_offset):
-            if item.hf_offset != cursor or item.numel <= 0 or item.wire_dtype not in WIRE_DTYPE_BYTES:
-                raise ValueError(f"Dense slices of {name} have a gap, overlap or unsupported dtype")
-            cursor += item.numel
-            trainer_block = counter % trainer_ep
-            counter += 1
-            receiver_block = (trainer_block * per_trainer_block) // per_receiver_block
-            for stage in holders:
+        _check_regions_cover(name, [item.region for item in by_name[name]], dense_numel[name])
+        for item in sorted(by_name[name], key=lambda item: (item.hf_offset, item.runs)):
+            if item.wire_dtype not in WIRE_DTYPE_BYTES:
+                raise ValueError(f"Dense slice of {name} has unsupported dtype {item.wire_dtype}")
+            for stage in dense_holders[name]:
+                candidates = sorted(
+                    set(dense_holder_ranks[item.identity()]) & expert_roots.get((item.pp, stage), set())
+                )
+                if not candidates:
+                    candidates = dense_holder_ranks[item.identity()]
+                root = candidates[counter % len(candidates)]
+                counter += 1
+                # Reuse a group this root already has for the stage; otherwise it gets one for its own block.
+                existing = [
+                    group
+                    for group in groups.values()
+                    if group.members[0] == root and group.name.startswith(f"expert-{root}-{stage}-")
+                ]
+                if existing:
+                    group_name = existing[0].name
+                    block = int(group_name.rsplit("-", 1)[1])
+                else:
+                    block = root % receiver_ep
+                    group_name = group_for(root, stage, block)
                 dense_broadcasts.append(
                     DenseBroadcast(
                         item,
-                        expert_group(item.pp, stage, trainer_block, receiver_block),
-                        root(item.pp, trainer_block),
-                        receivers_of(stage, receiver_block),
+                        group_name,
+                        root,
+                        receivers_of(stage, block),
                         tuple(f"local-{replica}-{stage}" for replica in range(replica_count)),
                     )
                 )
@@ -277,6 +345,18 @@ def _layer_stages(layers_by_pp: Sequence[Sequence[int]], side: str) -> dict[int,
     if sorted(owner) != list(range(sum(map(len, layers_by_pp)))):
         raise ValueError(f"Missing, duplicate or noncontiguous {side} layer ownership")
     return owner
+
+
+def _check_regions_cover(name: str, regions: Sequence[Region], numel: int) -> None:
+    """The regions must tile ``[0, numel)`` exactly once."""
+    intervals = sorted(interval for region in regions for interval in region.intervals())
+    cursor = 0
+    for begin, end in intervals:
+        if begin != cursor or end <= begin:
+            raise ValueError(f"Dense slices of {name} have a gap or overlap at element {cursor}")
+        cursor = end
+    if cursor != numel:
+        raise ValueError(f"Trainer slices cover {cursor} of {numel} elements of {name}")
 
 
 def to_wire(value: Any) -> Any:

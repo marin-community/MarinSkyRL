@@ -133,6 +133,7 @@ class ExpertBlockReceiver:
                 self.groups,
                 parameters=self.parameters,
                 expert_maps=self.expert_maps,
+                hidden_size=self.vllm_config.model_config.hf_config.hidden_size,
                 device=self.device,
             )
         except BaseException:

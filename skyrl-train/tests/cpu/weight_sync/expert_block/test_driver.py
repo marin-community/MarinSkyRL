@@ -15,8 +15,8 @@ from tests.cpu.weight_sync.expert_block.test_schedule import (
     EP,
     LAYERS_BY_PP,
     NUM_EXPERTS,
-    dense,
-    entries,
+    dense_of,
+    entries_of,
     receivers,
     trainers,
 )
@@ -25,25 +25,17 @@ MODEL = {"num_experts": NUM_EXPERTS, "hidden_size": 3, "intermediate_size": 2}
 
 
 def policy_inventories():
-    rows = []
-    for trainer in trainers():
-        layers = list(LAYERS_BY_PP[trainer.pp])
-        per_block = NUM_EXPERTS // EP
-        rows.append(
-            {
-                "trainer": to_wire(trainer),
-                "expert_parallel_size": EP,
-                "layers": layers,
-                "model": MODEL,
-                "experts": [
-                    to_wire(item)
-                    for item in entries()
-                    if item.pp == trainer.pp and item.expert // per_block == trainer.ep
-                ],
-                "dense": [to_wire(item) for item in dense() if item.pp == trainer.pp],
-            }
-        )
-    return rows
+    return [
+        {
+            "trainer": to_wire(trainer),
+            "expert_parallel_size": EP,
+            "layers": list(LAYERS_BY_PP[trainer.pp]),
+            "model": MODEL,
+            "experts": [to_wire(item) for item in entries_of(trainer)],
+            "dense": [to_wire(item) for item in dense_of(trainer)],
+        }
+        for trainer in trainers()
+    ]
 
 
 def installed_dense():
@@ -87,8 +79,8 @@ def test_plan_pairs_each_receiver_with_its_verified_gpu():
 @pytest.mark.parametrize(
     "change,error",
     [
-        (lambda report: report.update(expert_parallel_size=3), "do not split evenly"),
-        (lambda report: report["dense"].pop("model.norm.weight"), "no receiver stage holds"),
+        (lambda report: report.update(expert_parallel_size=3), "do not split evenly|native ranks"),
+        (lambda report: report["dense"].pop("model.norm.weight"), "Dense weights differ"),
         (lambda report: report.update(pp_size=2), "stages are incomplete"),
         (lambda report: report["dense"].update({"model.norm.weight": [[9], "bfloat16"]}), "cover 8 of 9"),
         (
