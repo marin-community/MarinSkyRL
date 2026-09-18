@@ -40,8 +40,8 @@ def _fake_frozen_runtime(
         "harbor/models/trial",
         "harbor/trial",
         "harbor/utils",
-        "nvidia/cuda_runtime/lib",
-        "nvidia/cuda_nvrtc/lib",
+        "megatron/bridge",
+        "nvidia/cu13/lib",
         "quack",
         "skyrl_train/models",
         "transformer_engine/common",
@@ -57,6 +57,8 @@ def _fake_frozen_runtime(
         "harbor/models/trial",
         "harbor/trial",
         "harbor/utils",
+        "megatron",
+        "megatron/bridge",
         "quack",
         "skyrl_train",
         "skyrl_train/models",
@@ -68,12 +70,13 @@ def _fake_frozen_runtime(
 
     _write_module(site_packages, "daytona.py", "class Daytona: pass\nclass DaytonaConfig: pass\n")
     _write_module(site_packages, "quack/activation.py")
-    _write_module(site_packages, "flash_attn.py", "__version__ = '2.8.3'\n")
+    _write_module(site_packages, "flash_attn.py", "__version__ = '2.8.4'\n")
     _write_module(site_packages, "flash_attn_2_cuda.py")
     _write_module(site_packages, "memray.py")
-    _write_module(site_packages, "torch.py", "__version__ = '2.11.0+cu129'\n")
+    _write_module(site_packages, "megatron/bridge/__init__.py", "class AutoBridge: pass\n")
+    _write_module(site_packages, "torch.py", "__version__ = '2.13.0+cu132'\n")
     _write_module(site_packages, "vllm/__init__.py", "__version__ = 'test'\n")
-    _write_module(site_packages, "vllm/_C.py")
+    _write_module(site_packages, "vllm/_C_stable_libtorch.py")
     _write_module(site_packages, "vllm/cumem_allocator.py")
     _write_module(
         site_packages,
@@ -199,6 +202,24 @@ def test_export_bootstrap_does_not_require_rollout_or_telemetry_packages(tmp_pat
     assert result.returncode == 0, result.stderr
 
 
+def test_arm_fsdp_bootstrap_does_not_require_flash_attention_extension(tmp_path: Path) -> None:
+    environment, process_environment = _fake_frozen_runtime(tmp_path)
+    site_packages = next((environment / "lib").glob("python*/site-packages"))
+    (site_packages / "flash_attn_2_cuda.py").unlink()
+    architecture_override = tmp_path / "architecture-override"
+    architecture_override.mkdir()
+    _write_module(
+        architecture_override,
+        "sitecustomize.py",
+        "import platform\nplatform.machine = lambda: 'aarch64'\n",
+    )
+    process_environment["PYTHONPATH"] = str(architecture_override)
+
+    result = _run_bootstrap(environment, process_environment, "fsdp")
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_bootstrap_uses_system_python_when_managed_pin_is_unresolvable(tmp_path: Path) -> None:
     environment, process_environment = _fake_frozen_runtime(tmp_path, managed_python_pin_is_unresolvable=True)
 
@@ -207,12 +228,32 @@ def test_bootstrap_uses_system_python_when_managed_pin_is_unresolvable(tmp_path:
     assert result.returncode == 0, result.stderr
 
 
+def test_bootstrap_activation_exposes_runtime_commands(tmp_path: Path) -> None:
+    environment, process_environment = _fake_frozen_runtime(tmp_path)
+    ninja = environment / "bin" / "ninja"
+    ninja.write_text("#!/bin/sh\nexit 0\n")
+    ninja.chmod(0o755)
+
+    result = _run_bootstrap(environment, process_environment, "fsdp")
+    activation = subprocess.run(
+        ["bash", "-c", 'source "$1"; command -v ninja', "bash", environment / "runtime.sh"],
+        env=process_environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert activation.stdout.strip() == str(ninja)
+
+
 @pytest.mark.parametrize(
     ("missing_module", "expected_error"),
     [
         ("daytona.py", "No module named 'daytona'"),
         ("harbor/utils/traces_utils.py", "harbor.utils.traces_utils"),
         ("memray.py", "No module named 'memray'"),
+        ("megatron/bridge", "megatron.bridge"),
         ("transformer_engine/common", "transformer_engine.common"),
     ],
 )
