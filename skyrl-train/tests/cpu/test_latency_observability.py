@@ -40,6 +40,24 @@ def test_tracker_forwards_only_finite_numeric_metrics_with_step(monkeypatch):
     ]
 
 
+def test_generation_input_coverage_deduplicates_expanded_samples(monkeypatch):
+    recorder = _Recorder()
+    health = []
+    monkeypatch.setattr(trainer_telemetry, "generation_input_coverage", recorder)
+    monkeypatch.setattr(trainer_telemetry, "record_telemetry_health", lambda: health.append(True))
+    gym = {"extra_info": {"nemotron_ultra": {"blend": "rlvr1", "agent": "math", "route": "gym"}}}
+    harbor = {"extra_info": {"nemotron_ultra": {"blend": "rlvr2", "agent": "swe", "route": "terminal_bench"}}}
+
+    emitted = trainer_telemetry.record_generation_input_coverage([gym, gym, harbor, harbor, {}])
+
+    assert emitted == 2
+    assert sorted(recorder.calls, key=lambda call: call[1]["route"]) == [
+        (1, {"blend": "rlvr1", "agent": "math", "route": "gym"}),
+        (1, {"blend": "rlvr2", "agent": "swe", "route": "harbor"}),
+    ]
+    assert health == [True]
+
+
 def test_process_lifecycle_uses_bounded_event_bodies(monkeypatch):
     class EventBody:
         def __init__(self, fields):

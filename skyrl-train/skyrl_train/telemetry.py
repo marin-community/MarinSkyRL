@@ -52,6 +52,7 @@ tracker_metric = telemetry.gauge("tracker_metric", unit="1")
 generation_group_duration = telemetry.histogram("generation_group_duration_seconds", unit="s")
 generation_groups = telemetry.counter("generation_groups", unit="{group}")
 generation_active_groups = telemetry.gauge("generation_active_groups", unit="{group}")
+generation_input_coverage = telemetry.counter("generation_input_coverage", unit="{group}")
 admission_groups = telemetry.counter("admission_groups", unit="{group}")
 executor_queue_delay = telemetry.histogram("executor_queue_delay_seconds", unit="s")
 executor_duration = telemetry.histogram("executor_duration_seconds", unit="s")
@@ -314,6 +315,27 @@ def generation_route(env_extras: Sequence[Mapping[str, object]] | None) -> str:
     if not routes:
         return "unknown"
     return next(iter(routes)) if len(routes) == 1 else "mixed"
+
+
+def record_generation_input_coverage(env_extras: Sequence[Mapping[str, object]] | None) -> int:
+    """Count logical input coverage before admission can discard a completed group."""
+    coverage: set[tuple[str, str, str]] = set()
+    for extras in env_extras or ():
+        extra_info = extras.get("extra_info")
+        ultra = extra_info.get("nemotron_ultra") if isinstance(extra_info, Mapping) else None
+        if not isinstance(ultra, Mapping):
+            continue
+        blend = ultra.get("blend")
+        agent = ultra.get("agent")
+        if not isinstance(blend, str) or not blend or not isinstance(agent, str) or not agent:
+            continue
+        route = "harbor" if ultra.get("route") == "terminal_bench" else "gym"
+        coverage.add((blend, agent, route))
+    for blend, agent, route in coverage:
+        generation_input_coverage.add(1, attributes={"blend": blend, "agent": agent, "route": route})
+    if coverage:
+        record_telemetry_health()
+    return len(coverage)
 
 
 @contextlib.contextmanager

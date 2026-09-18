@@ -43,6 +43,7 @@ from skyrl_train.telemetry import (
     generation_group,
     generation_route,
     record_admission,
+    record_generation_input_coverage,
     record_generated_work,
     record_policy_step,
     record_rollout_buffer,
@@ -1146,6 +1147,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     cur_trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(
                         trajectory_request, disable_tqdm=True
                     )
+                record_generation_input_coverage(trajectory_request.get("env_extras"))
                 actual_step = cur_trajectory_batch.get("actual_global_step")
                 staleness_step = actual_step if actual_step is not None else global_step_at_start
 
