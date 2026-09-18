@@ -23,11 +23,12 @@ import os
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Protocol
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
 
 import yaml
 
 from cloud.iris.paths import resolve_paths_in_dict
+from marinskyrl.environment_contract import TrainingLoop
 from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, validate_distillation_runtime_support
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
@@ -78,13 +79,31 @@ def resolve_rl_entrypoint(value: str | None, *, config_path: Path) -> str:
     return RL_ENTRYPOINT_MODULES[parse_rl_entrypoint(value, config_path=config_path)]
 
 
-def uses_fully_async_trainer(entrypoint: RLEntrypoint, raw: Mapping[str, Any]) -> bool:
-    """Return whether ``entrypoint`` runs the fully asynchronous trainer for this raw RL config."""
+RL_ENTRYPOINT_NAMES_BY_MODULE = {module: name for name, module in RL_ENTRYPOINT_MODULES.items()}
+_COLOCATE_ALL_OVERRIDE = "trainer.placement.colocate_all="
+
+
+def _colocate_all(raw: Mapping[str, Any], overrides: Sequence[str]) -> bool:
+    """The placement the trainer will see: the last colocate_all override wins over the YAML."""
+    value = raw.get("trainer", {}).get("placement", {}).get("colocate_all", True)
+    for override in overrides:
+        key, separator, literal = override.lstrip("+").partition("=")
+        if separator and key + separator == _COLOCATE_ALL_OVERRIDE:
+            value = literal.strip().lower() == "true"
+    return value is not False
+
+
+def training_loop_for_entrypoint(
+    entrypoint: RLEntrypoint, raw: Mapping[str, Any], overrides: Sequence[str] = ()
+) -> TrainingLoop | None:
+    """The loop ``entrypoint`` trains with for this RL config, or None for an entrypoint that trains nothing."""
+    if entrypoint in (RLEntrypoint.GENERATE, RLEntrypoint.TERMINAL_BENCH_GENERATE):
+        return None
     if entrypoint is RLEntrypoint.FULLY_ASYNC:
-        return True
-    if entrypoint is RLEntrypoint.TERMINAL_BENCH:
-        return raw.get("trainer", {}).get("placement", {}).get("colocate_all", True) is False
-    return False
+        return TrainingLoop.ASYNC
+    if entrypoint is RLEntrypoint.TERMINAL_BENCH and not _colocate_all(raw, overrides):
+        return TrainingLoop.ASYNC
+    return TrainingLoop.SYNC
 
 
 class HPCGeometry(Protocol):

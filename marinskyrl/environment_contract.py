@@ -90,6 +90,9 @@ RUN_ID_ENV = "SKYRL_RUN_ID"
 TRAINING_LOOP_ENV = "SKYRL_TRAINING_LOOP"
 
 
+EXECUTION_UID_ENV = "SKYRL_EXECUTION_UID"
+
+
 class TrainingLoop(StrEnum):
     """The loop a run trains with, stamped on every telemetry record."""
 
@@ -97,7 +100,6 @@ class TrainingLoop(StrEnum):
     ASYNC = "async"
 
 
-EXECUTION_UID_ENV = "SKYRL_EXECUTION_UID"
 DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 

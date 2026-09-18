@@ -2094,7 +2094,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--training-loop",
         type=TrainingLoop,
-        choices=tuple(TrainingLoop),
+        choices=[loop.value for loop in TrainingLoop],
         default=None,
         help="Which training loop the run uses; telemetry rows carry it so dashboards can tell runs apart.",
     )

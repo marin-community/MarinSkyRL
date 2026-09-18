@@ -21,7 +21,8 @@ from marinskyrl.environment_contract import (  # noqa: E402
     TRAINING_LOOP_ENV,
     TrainingLoop,
 )
-from skyrl_train.telemetry import TelemetryConfig  # noqa: E402
+from cloud.iris import task_runtime  # noqa: E402
+from skyrl_train.telemetry import TelemetryConfig, _resources  # noqa: E402
 
 
 _ATTEMPT_UID = "01JABCDEF0123456789"
@@ -115,3 +116,19 @@ def test_telemetry_environment_rejects_an_unknown_training_loop(monkeypatch) -> 
         telemetry_env.telemetry_environment()
     with pytest.raises(ValueError, match="batch"):
         TelemetryConfig.from_environment()
+
+
+def test_training_loop_lands_in_every_record_resource() -> None:
+    stamped = _resources(TelemetryConfig(run_id="run", execution_uid="x", training_loop=TrainingLoop.ASYNC), "trainer")
+    assert stamped["training_loop"] == "async"
+    assert "training_loop" not in _resources(TelemetryConfig(run_id="run", execution_uid="x"), "trainer")
+
+
+def test_task_runtime_parses_the_training_loop_as_the_enum(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["task_runtime", "--training-loop", "sync", "--", "python", "-m", "x"])
+    args, _ = task_runtime.parse_args()
+    assert args.training_loop is TrainingLoop.SYNC
+
+    monkeypatch.setattr("sys.argv", ["task_runtime", "--training-loop", "batch", "--", "python", "-m", "x"])
+    with pytest.raises(SystemExit):
+        task_runtime.parse_args()

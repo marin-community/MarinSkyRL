@@ -396,6 +396,13 @@ def test_task_command_forwards_driver_liveness_timeout(tmp_path):
         ("entrypoint: terminal_bench\ntrainer:\n  placement:\n    colocate_all: true\n", [], ["sync"]),
         ("entrypoint: standard\n", ["--entrypoint", "skyrl_train.entrypoints.fully_async"], ["async"]),
         ("entrypoint: fully_async\n", ["--entrypoint", "skyrl_train.entrypoints.checkpoint_export"], []),
+        ("entrypoint: generate\n", [], []),
+        ("entrypoint: terminal_bench_generate\n", [], []),
+        (
+            "entrypoint: terminal_bench\ntrainer:\n  placement:\n    colocate_all: true\n",
+            ["--skyrl_override", "++trainer.placement.colocate_all=false"],
+            ["async"],
+        ),
     ],
 )
 def test_task_command_marks_the_training_loop_the_launched_entrypoint_runs(tmp_path, config, extra, expected):
