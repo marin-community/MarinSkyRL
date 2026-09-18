@@ -77,6 +77,7 @@ from contextvars import ContextVar
 
 
 from skyrl_train.inference_engines.base import (
+    PauseMode,
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
@@ -1659,6 +1660,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Store sampling params for OpenAI-style requests (Harbor rollouts)
         self._openai_sampling_params = wrapper_kwargs.pop("openai_sampling_params", {})
         self._validate_rollout_logprob_sampling = wrapper_kwargs.pop(ROLLOUT_LOGPROB_VALIDATION_KEY, False)
+        self._pause_mode = PauseMode(wrapper_kwargs.pop("pause_mode", PauseMode.ABORT))
+        self._clear_kv_cache_on_weight_sync = bool(wrapper_kwargs.pop("clear_kv_cache_on_weight_sync", True))
         if self._openai_sampling_params:
             logger.warning(
                 f"OpenAI API sampling params overridden: "
@@ -2351,16 +2354,21 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         )
 
     async def pause_generation(self) -> None:
-        """Abort outstanding requests and hold the EngineCore scheduler idle for weight reload."""
+        """Hold the EngineCore scheduler idle for a weight reload, aborting or keeping in-flight requests."""
         engine = self._get_engine()
         outstanding_requests = len(engine.output_processor.request_states)
         # vLLM's scheduler-level pause is a utility RPC into EngineCore. In abort
         # mode it aborts running/waiting requests, waits for the scheduler to reach
-        # its paused state, and clears the KV/prefix cache before returning. Unlike
-        # AsyncLLM.abort(), it cannot report success merely because the frontend
-        # output_processor already removed the request IDs.
-        await engine.pause_generation(mode="abort", clear_cache=True)
-        logger.info(f"pause_generation() finished, aborted {outstanding_requests} requests and paused EngineCore")
+        # its paused state, and (with clear_cache) drops the KV/prefix cache before
+        # returning; in keep mode the requests stay queued and resume afterwards.
+        # Unlike AsyncLLM.abort(), it cannot report success merely because the
+        # frontend output_processor already removed the request IDs.
+        await engine.pause_generation(mode=self._pause_mode.value, clear_cache=self._clear_kv_cache_on_weight_sync)
+        logger.info(
+            f"pause_generation() finished: mode={self._pause_mode.value} "
+            f"clear_cache={self._clear_kv_cache_on_weight_sync} outstanding_requests={outstanding_requests}, "
+            "EngineCore paused"
+        )
 
     async def resume_generation(self, policy_version: int | None = None) -> None:
         """Release the scheduler after recording the installed policy version."""

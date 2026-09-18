@@ -294,6 +294,14 @@ trainer:
     # the queue or in its producer); set it to policy_mini_batch_size to keep one update's
     # cohort ready and bound the head-node backlog to that cohort.
     max_buffered_groups: null
+    # What the engines do with requests still generating at each weight sync. abort cancels
+    # them and the client resubmits each prompt with the tokens it already generated, so the
+    # answer continues under the new weights after one prefill; keep freezes them in the
+    # scheduler and resumes them with the cache the old weights built.
+    pause_mode: abort
+    # Drop the engines' KV/prefix cache at the pause, so nothing computed by the old weights
+    # is reused. Set false to keep the cache for a faster resume.
+    clear_kv_cache_on_weight_sync: true
 
     # Bound teacher-scoring work independently for each logical teacher. Queue
     # backpressure is applied when a rollout group is admitted, before learner

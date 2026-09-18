@@ -134,6 +134,8 @@ def create_ray_wrapped_inference_engines_from_config(
     engine_init_kwargs = {
         **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
+        "pause_mode": str(cfg.trainer.fully_async.pause_mode),
+        "clear_kv_cache_on_weight_sync": bool(cfg.trainer.fully_async.clear_kv_cache_on_weight_sync),
     }
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()

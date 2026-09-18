@@ -94,6 +94,8 @@ ADDITIVE_GROUP_ADMISSION_FIELDS = {
 }
 ADDITIVE_FULLY_ASYNC_FIELDS = {
     "max_buffered_groups": None,
+    "pause_mode": "abort",
+    "clear_kv_cache_on_weight_sync": True,
     "teacher_scoring": {
         "max_queued_per_teacher": 8,
         "workers_per_teacher": 1,

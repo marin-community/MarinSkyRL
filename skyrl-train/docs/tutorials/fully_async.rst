@@ -109,6 +109,13 @@ For fully async specifically, the following are the main knobs to tune:
   each worker works on a group of trajectories. It should be ``>= trainer.policy_mini_batch_size`` to avoid wasted throughput, 
   and ``<= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)`` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
+- ``trainer.fully_async.pause_mode``: What the engines do with requests still generating when the weights are
+  reloaded. ``abort`` (the default) cancels them; the client then resubmits each prompt with the tokens it already
+  generated, so the answer continues under the new weights after one prefill. ``keep`` freezes them in the scheduler
+  and resumes them with the cache the old weights built, saving the prefill. Either way one answer can mix policy
+  versions, which the recorded engine logprobs make visible to the ratio diagnostics.
+- ``trainer.fully_async.clear_kv_cache_on_weight_sync``: Drop the engines' KV/prefix cache at the pause so nothing
+  computed by the old weights is reused (default ``true``); ``false`` keeps it for a faster resume.
 - ``trainer.fully_async.max_buffered_groups``: How many finished groups the completed buffer holds before a
   generation worker waits with its finished group in hand. ``null`` (the default) means one slot per generation
   worker, so no worker ever waits. A finished group ages the same whether it waits in the buffer or in its worker,

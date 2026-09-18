@@ -76,6 +76,10 @@ def pop_vllm_wrapper_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     if ROLLOUT_LOGPROB_VALIDATION_KEY in engine_kwargs:
         wrapper_kwargs[ROLLOUT_LOGPROB_VALIDATION_KEY] = engine_kwargs.pop(ROLLOUT_LOGPROB_VALIDATION_KEY)
 
+    for key in ("pause_mode", "clear_kv_cache_on_weight_sync"):
+        if key in engine_kwargs:
+            wrapper_kwargs[key] = engine_kwargs.pop(key)
+
     return wrapper_kwargs
 
 

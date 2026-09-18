@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from enum import StrEnum
 from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
 
 from skyrl_train.policy_version import PolicyVersionSegment
@@ -31,6 +32,13 @@ class InferenceEngineInput(TypedDict):
     chat_completion_params: NotRequired[List[Dict[str, Any]]]
     # Preserve sampled tokens when the backend re-renders a structured assistant turn.
     chat_continuations: NotRequired[List[ChatContinuation | None]]
+
+
+class PauseMode(StrEnum):
+    """What the engines do with in-flight requests while weights are reloaded."""
+
+    ABORT = "abort"
+    KEEP = "keep"
 
 
 class InferenceEngineOutput(TypedDict):
@@ -174,9 +182,10 @@ class InferenceEngineInterface(ABC):
     @abstractmethod
     async def pause_generation(self) -> None:
         """
-        Pause the scheduler for a weight update after aborting all running and waiting
-        requests. Running requests return their generated tokens with stop_reason "abort";
-        waiting requests return zero completion tokens.
+        Pause the scheduler for a weight update. In abort mode running and waiting requests
+        are cancelled first: running requests return their generated tokens with stop_reason
+        "abort" and waiting requests return zero completion tokens. In keep mode they stay
+        queued and resume after the update.
         """
         raise NotImplementedError()
 

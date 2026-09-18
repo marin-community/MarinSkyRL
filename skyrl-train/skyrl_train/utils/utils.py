@@ -52,6 +52,7 @@ from .algorithm_registry import (
 )
 from .logging_utils import format_exception_text
 from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTIONS
+from skyrl_train.inference_engines.base import PauseMode
 from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
@@ -799,6 +800,10 @@ def validate_cfg(cfg: DictConfig):
             "`offload_after_step=False` is not supported for DeepSpeed, please set `offload_after_step` to `true` for both policy and critic"
         )
 
+    if cfg.trainer.fully_async.pause_mode not in tuple(PauseMode):
+        raise ValueError(f"trainer.fully_async.pause_mode must be one of {[mode.value for mode in PauseMode]}")
+    if type(cfg.trainer.fully_async.clear_kv_cache_on_weight_sync) is not bool:
+        raise ValueError("trainer.fully_async.clear_kv_cache_on_weight_sync must be boolean")
     behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"
     if behavior_clip and cfg.trainer.algorithm.use_tis:
         raise ValueError(
