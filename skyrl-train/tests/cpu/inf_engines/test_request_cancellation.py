@@ -35,15 +35,16 @@ class RemoteMethod:
     def __init__(self, result):
         self.result = result
 
-    def remote(self, request_payload):
+    def remote(self, *args, **kwargs):
         return self.result
 
 
 class InferenceActor:
-    def __init__(self, chat_completion_result, stream_result=None, tokenize_result=None):
+    def __init__(self, chat_completion_result, stream_result=None, tokenize_result=None, generate_result=None):
         self.chat_completion = RemoteMethod(chat_completion_result)
         self.chat_completion_stream = RemoteMethod(stream_result)
         self.tokenize = RemoteMethod(tokenize_result)
+        self.generate = RemoteMethod(generate_result)
 
 
 class ResolvedReference:
@@ -106,6 +107,20 @@ async def test_cancelled_tokenization_cancels_ray_actor_task(record_ray_cancella
     engine = RayWrappedInferenceEngine(InferenceActor(PendingReference(), tokenize_result=reference))
 
     request = asyncio.create_task(engine.tokenize({"json": {"messages": []}}))
+    await reference.started.wait()
+    request.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert reference.cancelled
+
+
+@pytest.mark.asyncio
+async def test_cancelled_generate_cancels_ray_actor_task(record_ray_cancellation):
+    reference = PendingReference()
+    engine = RayWrappedInferenceEngine(InferenceActor(PendingReference(), generate_result=reference))
+
+    request = asyncio.create_task(engine.generate({"prompt_token_ids": [[1, 2, 3]], "sampling_params": {}}))
     await reference.started.wait()
     request.cancel()
 
