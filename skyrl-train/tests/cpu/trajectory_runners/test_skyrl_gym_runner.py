@@ -190,6 +190,36 @@ async def test_whole_trajectory_collector_masks_one_agent_loop_failure(generator
 
 
 @pytest.mark.asyncio
+async def test_excluded_nemotron_verifier_masks_group_without_starting_environment(generator_cfg, mock_tokenizer):
+    generator_cfg.batched = False
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        DictConfig({"max_env_workers": 0, "excluded_agents": ["code_gen_simple_agent"]}),
+        MagicMock(),
+        mock_tokenizer,
+    )
+    request = TrajectoryRequestBatch(
+        prompts=[[{"role": "user", "content": "code"}]],
+        env_classes=["nemotron_ultra"],
+        env_extras=[{"extra_info": {"nemotron_ultra": {"agent": "code_gen_simple_agent"}}}],
+        sampling_params=None,
+        trajectory_ids=[TrajectoryID("code", 0)],
+        batch_metadata=BatchMetadata(global_step=1, training_phase="train"),
+    )
+
+    with patch(
+        "skyrl_train.trajectory_runners.skyrl_gym.skyrl_gym.make", side_effect=AssertionError("environment started")
+    ):
+        batch = await runner._run(request, disable_tqdm=True)
+
+    assert_valid_trajectory_batch(1, batch)
+    assert batch["loss_masks"] == [[0]]
+    assert batch["exclude_from_baseline"] == [True]
+    assert batch["exception_types"] == ["ExcludedVerifierAgent"]
+    assert batch["error_treatments"] == ["mask"]
+
+
+@pytest.mark.asyncio
 async def test_whole_trajectory_collector_adapts_masked_scalar_rewards_to_token_level_batch(
     generator_cfg, mock_tokenizer
 ):

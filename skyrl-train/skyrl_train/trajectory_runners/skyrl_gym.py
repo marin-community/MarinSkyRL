@@ -124,6 +124,10 @@ class _CanonicalizedChatPrefix:
     per_step_rewards: List[Tuple[float, Optional[int]]]
 
 
+class ExcludedVerifierAgent(Exception):
+    """A configured verifier is excluded before its environment starts."""
+
+
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
     def __init__(
         self,
@@ -228,8 +232,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         exception_type = type(error).__name__
         trajectory_ids = request.get("trajectory_ids")
         trajectory_id = trajectory_ids[index] if trajectory_ids is not None else None
-        logger.warning(
-            "Trajectory {} failed in the SkyRL-Gym agent loop (NOT fatal; masking row): {}: {}",
+        log = logger.debug if isinstance(error, ExcludedVerifierAgent) else logger.warning
+        log(
+            "Trajectory {} masked in the SkyRL-Gym agent loop: {}: {}",
             trajectory_id.to_string() if trajectory_id is not None else index,
             exception_type,
             error,
@@ -257,7 +262,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 exception_type=exception_type,
             ),
             loss_mask=[0],
-            env_metrics={"agent_loop_error": 1.0},
+            env_metrics={
+                "agent_loop_excluded" if isinstance(error, ExcludedVerifierAgent) else "agent_loop_error": 1.0
+            },
             captured_global_step=self.global_step_fn() if self.global_step_fn is not None else None,
             error_treatment=ErrorTreatment.MASK.value,
         )
@@ -281,6 +288,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         global_step_fn: Optional[Callable[[], int]] = None,
     ) -> AgentLoopOutput:
         """Run one environment loop and always release its environment."""
+        if env_class == "nemotron_ultra":
+            agent = env_extras.get("extra_info", {}).get("nemotron_ultra", {}).get("agent")
+            if agent in self.skyrl_gym_cfg.get("excluded_agents", []):
+                raise ExcludedVerifierAgent(f"verifier {agent!r} excluded by environment.skyrl_gym.excluded_agents")
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
