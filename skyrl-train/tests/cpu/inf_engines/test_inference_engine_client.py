@@ -26,7 +26,6 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from omegaconf import OmegaConf
 import asyncio
-import threading
 import pytest
 import random
 import ray.exceptions
@@ -1712,35 +1711,31 @@ async def test_weight_sync_pause_fails_when_an_engine_never_acknowledges():
         await client.pause_generation()
 
 
-@pytest.mark.asyncio
-async def test_resume_wakes_a_request_parked_on_the_http_threads_event_loop():
-    """The HTTP endpoint serves requests on its own thread and event loop; a request that
-    arrives there during a pause must be released by a resume issued from the trainer's loop."""
+def test_resume_wakes_a_request_parked_on_another_event_loop():
+    """The HTTP endpoint serves requests on its own event loop; a request parked there during a
+    pause must be released by a resume issued from the trainer's loop. Two loops are driven by
+    hand in one thread so the request is provably parked before the resume."""
     engines = [_MockStreamEngine()]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
-    await client.pause_generation()
     payload = {"json": {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}
-    chunks: list[str] = []
-    calling = threading.Event()
+    trainer_loop, server_loop = asyncio.new_event_loop(), asyncio.new_event_loop()
+    try:
+        trainer_loop.run_until_complete(client.pause_generation())
 
-    def serve_on_own_loop():
         async def consume():
-            calling.set()
-            chunks.extend([chunk async for chunk in client.chat_completion_stream(payload)])
+            return [chunk async for chunk in client.chat_completion_stream(payload)]
 
-        asyncio.run(consume())
+        request = server_loop.create_task(consume())
+        # One iteration of the server loop runs the request up to the pause barrier and no further.
+        server_loop.run_until_complete(asyncio.sleep(0))
+        assert not request.done()
+        assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
 
-    server_thread = threading.Thread(target=serve_on_own_loop)
-    server_thread.start()
-    await asyncio.to_thread(calling.wait, 5)
-    # The thread has issued the call; the short sleep covers the race between that call and
-    # the request parking behind the pause, which the client exposes no event for.
-    await asyncio.sleep(0.05)
-    assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
+        trainer_loop.run_until_complete(client.resume_generation())
+        chunks = server_loop.run_until_complete(asyncio.wait_for(request, timeout=5))
+    finally:
+        server_loop.close()
+        trainer_loop.close()
 
-    await client.resume_generation()
-    await asyncio.to_thread(server_thread.join, 5)
-
-    assert not server_thread.is_alive()
     assert engines[0].entered.is_set()
     assert any("[DONE]" in chunk for chunk in chunks)
