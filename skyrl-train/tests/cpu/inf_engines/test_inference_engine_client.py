@@ -26,6 +26,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from omegaconf import OmegaConf
 import asyncio
+import threading
 import pytest
 import random
 import ray.exceptions
@@ -1251,6 +1252,12 @@ class _MockStreamEngine:
     def __init__(self):
         self.entered = asyncio.Event()
 
+    async def pause_generation(self):
+        pass
+
+    async def resume_generation(self):
+        pass
+
     async def chat_completion_stream(self, request_payload):
         self.entered.set()
         yield 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
@@ -1322,9 +1329,7 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
     engines = [_MockStreamEngine()]
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
 
-    # Simulate a weight-sync pause directly (bypass pause_generation()'s 5s grace +
-    # engine scheduler fan-out, which is not needed to exercise the barrier).
-    client.generation_paused_event.set()
+    await client.pause_generation()
 
     payload = {"json": {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}
 
@@ -1333,14 +1338,15 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
 
     task = asyncio.create_task(_consume())
 
-    # While paused, the stream must block before reaching the engine. Wait past the
-    # 0.5s poll interval in _wait_for_generation_to_resume to be sure.
-    await asyncio.sleep(0.6)
+    # While paused, the stream must block before reaching the engine. A parked stream never
+    # runs on a bare yield, so if it were going to reach the engine it would within these turns.
+    for _ in range(10):
+        await asyncio.sleep(0)
     assert not engines[0].entered.is_set(), "stream reached the engine while generation was paused"
     assert not task.done()
 
     # Resume -> the stream should now proceed to the engine and complete.
-    client.generation_paused_event.clear()
+    await client.resume_generation()
     chunks = await asyncio.wait_for(task, timeout=5)
     assert engines[0].entered.is_set()
     assert any("[DONE]" in c for c in chunks)
@@ -1708,3 +1714,34 @@ async def test_weight_sync_pause_fails_when_an_engine_never_acknowledges():
 
     with pytest.raises(TimeoutError, match="weight_sync_pause_timeout_seconds"):
         await client.pause_generation()
+
+
+@pytest.mark.asyncio
+async def test_resume_wakes_a_request_parked_on_the_http_threads_event_loop():
+    """The HTTP endpoint serves requests on its own thread and event loop; a request that
+    arrives there during a pause must be released by a resume issued from the trainer's loop."""
+    engines = [_MockStreamEngine()]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=_make_min_cfg())
+    await client.pause_generation()
+    payload = {"json": {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}
+    chunks: list[str] = []
+
+    def serve_on_own_loop():
+        async def consume():
+            chunks.extend([chunk async for chunk in client.chat_completion_stream(payload)])
+
+        asyncio.run(consume())
+
+    server_thread = threading.Thread(target=serve_on_own_loop)
+    server_thread.start()
+    # Let the thread's loop start and park the request behind the pause before resuming;
+    # resuming first would prove nothing about the cross-loop wake.
+    await asyncio.sleep(0.05)
+    assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
+
+    await client.resume_generation()
+    await asyncio.to_thread(server_thread.join, 5)
+
+    assert not server_thread.is_alive()
+    assert engines[0].entered.is_set()
+    assert any("[DONE]" in chunk for chunk in chunks)
