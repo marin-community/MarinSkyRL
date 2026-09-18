@@ -184,7 +184,7 @@ def test_draft_trainer_publishes_checkpoint_before_latest_pointer(
         completion_uri=completion_uri,
         source_identity=_DRAFT_REVISION,
     )
-    assert _Runtime.instances[0].initial_job.draft_model_source == _initial_model().source_uri
+    assert _Runtime.instances[0].initial_job.initial_draft_model == _initial_model()
 
 
 def test_draft_trainer_restores_latest_checkpoint_once(

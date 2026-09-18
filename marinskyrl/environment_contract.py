@@ -12,7 +12,6 @@ import shlex
 import site
 import socket
 import sys
-from contextlib import contextmanager
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -81,6 +80,7 @@ VLLM_BATCH_INVARIANT_ENV = "VLLM_BATCH_INVARIANT"
 VLLM_ALLOW_INSECURE_SERIALIZATION_ENV = "VLLM_ALLOW_INSECURE_SERIALIZATION"
 WANDB_ENTITY_ENV = "WANDB_ENTITY"
 HF_HUB_OFFLINE_ENV = "HF_HUB_OFFLINE"
+TRANSFORMERS_OFFLINE_ENV = "TRANSFORMERS_OFFLINE"
 LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
 RAY_CLUSTER_OWNER_ENV = "SKYRL_RAY_CLUSTER_OWNER"
@@ -314,7 +314,7 @@ _RUNTIME_BOUNDARIES = {
     "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC",
     "TORCH_NCCL_TRACE_CPP_STACK",
     "TRAIN_FILE",
-    "TRANSFORMERS_OFFLINE",
+    TRANSFORMERS_OFFLINE_ENV,
     "UV_USE_IO_URING",
     "VLLM_ALLOW_INSECURE_SERIALIZATION",
     "VLLM_ALLOW_ROUTED_EXPERTS_DCP",
@@ -545,26 +545,6 @@ class EnvVarManager:
         if artifact_root := values.get(DEBUG_ARTIFACT_DIR_ENV):
             ensure_debug_artifact_directories(artifact_root)
         return values
-
-
-@contextmanager
-def temporarily_unset_managed_environment(
-    name: str,
-    scope: EnvVarScope,
-    *,
-    environ: MutableMapping[str, str] | None = None,
-):
-    """Temporarily remove one registered variable and restore its exact prior state."""
-    spec = _SPECS_BY_NAME.get(name)
-    if spec is None or scope not in spec.scopes:
-        raise ValueError(f"{name!r} is not registered for the {scope.value} environment scope")
-    target = os.environ if environ is None else environ
-    previous = target.pop(name, None)
-    try:
-        yield
-    finally:
-        if previous is not None:
-            target[name] = previous
 
 
 def ensure_debug_artifact_directories(artifact_root: str) -> None:
