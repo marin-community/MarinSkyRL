@@ -111,8 +111,13 @@ class ExpertBlockSender:
         version = update_info["version"]
         state = self.parallel_state
         expert_keys = {item.source_key for item in self.expert_sources.values()}
+        # The groups Megatron's DDP reduces gradients over, so every member must hold the same bytes:
+        # expert weights across their expert-data-parallel replicas, dense weights across data and
+        # context parallelism.
         groups = {
-            name: state.get_expert_data_parallel_group() if name in expert_keys else state.get_data_parallel_group()
+            name: state.get_expert_data_parallel_group()
+            if name in expert_keys
+            else state.get_data_parallel_group(with_context_parallel=True)
             for name in self.sources
         }
         return {
