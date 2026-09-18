@@ -25,7 +25,7 @@ from skyrl_train.models.grug_query_bias import (
     GrugQueryBiasLayerObservation,
     GrugQueryBiasObservation,
 )
-from skyrl_train.models.layers.moe_routing import TokenReorderer, grouped_expert_contributions
+from skyrl_train.models.layers.moe_routing import TokenReorderer, combine_routed_rows, grouped_expert_contributions
 from skyrl_train.models.router_instrumentation import NativeRouterObserverEmitter, emit_router_forward
 from skyrl_train.utils.flash_attention import (
     FLASH_ATTN_IMPORT_ERROR,
@@ -547,22 +547,15 @@ class _GrugGroupedExpertExecution:
         selected_experts: torch.Tensor,
         combine_weights: torch.Tensor,
     ) -> torch.Tensor:
-        routed_indices, routed_output = grouped_expert_contributions(
+        token_indices, routed_output = grouped_expert_contributions(
             experts,
             hidden_states,
             combine_weights.to(hidden_states.dtype),
             selected_experts,
             reorderer,
         )
-        return (
-            torch.zeros_like(hidden_states, dtype=torch.float32)
-            .scatter_add(
-                dim=0,
-                index=routed_indices,
-                src=routed_output.float(),
-            )
-            .to(hidden_states.dtype)
-        )
+        num_tokens, top_k = selected_experts.shape
+        return combine_routed_rows(routed_output, token_indices, num_tokens, top_k).to(hidden_states.dtype)
 
 
 _GRUG_EAGER_EXPERT_EXECUTION = _GrugEagerExpertExecution()
