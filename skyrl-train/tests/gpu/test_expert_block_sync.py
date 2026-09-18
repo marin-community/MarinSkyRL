@@ -131,7 +131,8 @@ def test_expert_block_sync_installs_every_byte_and_the_gate_catches_a_flipped_on
     monkeypatch.setattr(vllm_engine, "AsyncVLLMRayActor", ray.remote(GateEngine))
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path)
+    # Megatron splits the vocabulary across tensor-parallel ranks without padding it.
+    _write_tiny_checkpoint(model_path, vocab_size_multiple=geometry.policy_tp)
     cfg = _config(str(model_path), world_size=geometry.policy_gpus, pp=geometry.policy_pp, ep=geometry.policy_ep)
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = geometry.policy_tp
     cfg.generator.num_inference_engines = geometry.engines
