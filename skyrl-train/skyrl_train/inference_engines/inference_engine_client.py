@@ -1067,11 +1067,10 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def pause_generation(self) -> None:
         """Pause every engine scheduler for an in-flight weight update.
 
-        The engine call is the acknowledgement: vLLM's abort-mode pause replies only once its
-        scheduler has aborted every in-flight request and the engine core has no work, and a
-        request that arrives after that is held in the scheduler's waiting queue until resume.
-        Chat, single-prompt ``generate()`` and single-prompt completion requests wait for the
-        resume; batched ``generate()`` and batched completions are rejected while paused.
+        Returns once every live engine has acknowledged the pause, with no request running and
+        any later arrival held until resume. Chat, single-prompt ``generate()`` and single-prompt
+        completion requests wait for the resume; batched ``generate()`` and batched completions
+        are rejected while paused.
         """
         if self.generation_paused_event.is_set():
             raise RuntimeError("Generation is already paused, cannot pause again.")
