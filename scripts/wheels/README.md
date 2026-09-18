@@ -12,6 +12,9 @@ Reproducible here means that the source, dependencies, and build commands are
 pinned. Independent builds are not guaranteed to produce identical bytes, so
 runtime dependencies pin each published wheel by URL and SHA-256.
 
+`build_native.sh` is a manual release tool. CI and runtime installation do not
+invoke it; they consume the published, hash-pinned wheels.
+
 FlashAttention uses upstream commit
 [`4219765`](https://github.com/Dao-AILab/flash-attention/commit/4219765dfdd8913bfe26134f748dd5ffcedd3c39),
 the merged FA2 and FA4 namespace-coexistence fix. That 2.8.4 source excludes the
