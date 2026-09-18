@@ -5,8 +5,10 @@ driver runs it after each sync:
 
 * every root re-sends exactly what it sent, every receiver lands it in scratch
   and counts bytes that differ from what it installed, and tallies the bytes it
-  compared against every byte of every parameter it holds — so a wrong slot, a
-  skipped tensor or a parameter the schedule never covers all show up;
+  compared against every byte of every parameter it holds (as the receiver
+  installs them: a padded vocabulary tensor counts only its HF rows) — so a
+  wrong slot, a skipped tensor or a parameter the schedule never covers all
+  show up;
 * every trainer rank checks that its data-parallel peers hold byte-identical
   parameters, since roots rotate across those peers.
 

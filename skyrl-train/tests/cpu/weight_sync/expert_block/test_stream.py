@@ -81,8 +81,12 @@ QUALIFIED = Topology(
         ),  # BF16 wire, FP32 installed
         "model.layers.1.mlp.router.weight": (1, (NUM_EXPERTS, 3), "float32", (0,), "column"),
         "model.norm.weight": (1, (3,), "bfloat16", (0,), "column"),
+        "lm_head.weight": (1, (5, 3), "bfloat16", (0,), "column"),
     },
 )
+# The receiver's copy of a vocabulary tensor has more rows than the HF tensor (vLLM pads the
+# vocabulary); the transport sees the leading HF rows and must leave the padded tail alone.
+PADDED_ROWS = {"lm_head.weight": 8}
 # Trainer EP 2 feeding receivers at EP 1 across two receiver stages; the norm is held by both stages.
 UNEQUAL_STAGED = Topology(
     trainer_layers=((0, 1), (2,)),
@@ -231,8 +235,13 @@ def participant_main(rank, topology, port, directory):
                 for expert in range(NUM_EXPERTS)
             )
         held_dense = {name: spec for name, spec in topology.dense.items() if receiver.pp in spec[3]}
+        padded = {}
         for name, (_, shape, dtype, _, _) in held_dense.items():
-            parameters[name] = torch.zeros(shape, dtype=getattr(torch, dtype))
+            if name in PADDED_ROWS:
+                padded[name] = torch.zeros((PADDED_ROWS[name], *shape[1:]), dtype=getattr(torch, dtype))
+                parameters[name] = padded[name].narrow(0, 0, shape[0])
+            else:
+                parameters[name] = torch.zeros(shape, dtype=getattr(torch, dtype))
         kwargs = dict(parameters=parameters, expert_maps=maps, hidden_size=topology.hidden)
     rendezvous = Rendezvous("127.0.0.1", port, "test", TIMEOUT)
     groups = create_groups(rank, plan.groups, rendezvous, backend="gloo")
@@ -264,6 +273,8 @@ def participant_main(rank, topology, port, directory):
             for name in held_dense:
                 expected = torch.tensor(dense_value(name), dtype=torch.bfloat16).to(parameters[name].dtype)
                 assert torch.all(parameters[name] == expected), name
+            for name, whole in padded.items():
+                assert torch.all(whole[parameters[name].shape[0] :] == 0), f"{name}: the padded tail was written"
         # --- The gate: a replay of the same sync matches every installed byte and covers them all ---
         report = replay(stream, 7)
         if rank >= trainer_count:

@@ -20,10 +20,24 @@ class RoutedExperts(torch.nn.Module):
         return expert if expert < 2 else -1
 
 
+class PaddedVocab(torch.nn.Module):
+    """The attributes of vLLM's VocabParallelEmbedding that the receiver reads."""
+
+    def __init__(self, rows=5, padded=8, dim=3, tp_size=1, start=0):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(padded, dim, dtype=torch.bfloat16), requires_grad=False)
+        self.org_vocab_size = rows
+        self.num_embeddings_padded = padded
+        self.tp_size = tp_size
+        self.shard_indices = SimpleNamespace(org_vocab_start_index=start)
+
+
 class Model(torch.nn.Module):
-    def __init__(self, layers=1, backend="TRITON"):
+    def __init__(self, layers=1, backend="TRITON", vocab=None):
         super().__init__()
         self.model = torch.nn.Module()
+        if vocab is not None:
+            self.model.embed_tokens = vocab
         self.model.layers = torch.nn.ModuleList()
         for _ in range(layers):
             layer = torch.nn.Module()
@@ -66,9 +80,16 @@ def test_inventory_reports_the_dense_parameters_and_serving_map():
     assert report["model"]["num_hidden_layers"] == 1
 
 
+def test_padded_vocabulary_tensors_report_their_hf_rows():
+    report = receiver(model=Model(vocab=PaddedVocab(rows=5, padded=8))).inventory()
+    assert report["dense"]["model.embed_tokens.weight"] == [[5, 3], "bfloat16"]
+
+
 @pytest.mark.parametrize(
     "config,model,message",
     [
+        (None, Model(vocab=PaddedVocab(tp_size=2)), "must run TP=1"),
+        (None, Model(vocab=PaddedVocab(start=4)), "must run TP=1"),
         (vllm_config(model_type="qwen3_moe"), None, "supports grug_moe"),
         (vllm_config(quantization="fp8"), None, "unquantised"),
         (vllm_config(tp=2), None, "TP=1"),

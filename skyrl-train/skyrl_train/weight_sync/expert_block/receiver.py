@@ -30,6 +30,24 @@ SUPPORTED_MODEL_TYPE = "grug_moe"
 SUPPORTED_MOE_BACKEND = "TRITON"
 
 
+def installable_parameters(model) -> dict[str, torch.Tensor]:
+    """The model's parameters as the transport writes them: vocabulary tensors trimmed to their HF rows.
+
+    ``VocabParallelEmbedding`` (and the LM head built on it) pads its rows to a multiple of its
+    padding size; its loader writes the ``org_vocab_size`` HF rows first and zeroes the tail. The
+    trainer exports the HF rows, so the transport installs, replays and counts only that leading
+    view of the tensor, and the zero tail stays as the loader left it.
+    """
+    rows = {}
+    for name, module in model.named_modules():
+        if not hasattr(module, "org_vocab_size") or not hasattr(module, "num_embeddings_padded"):
+            continue
+        if module.tp_size != 1 or module.shard_indices.org_vocab_start_index != 0:
+            raise ValueError(f"Vocabulary tensor {name} is tensor-parallel; the receiver must run TP=1")
+        rows[f"{name}.weight"] = int(module.org_vocab_size)
+    return {name: value.narrow(0, 0, rows[name]) if name in rows else value for name, value in model.named_parameters()}
+
+
 class ExpertBlockReceiver:
     def __init__(
         self,
@@ -91,8 +109,8 @@ class ExpertBlockReceiver:
         layers = sorted(int(LAYER_PREFIX.match(name)[1]) for name in maps)
         if self.pp_size == 1 and len(layers) != hf.num_hidden_layers:
             raise ValueError(f"Found {len(layers)} routed-expert layers, expected {hf.num_hidden_layers}")
-        self.parameters = dict(self.model.named_parameters())
-        self.identity = storage_identity(self.parameters)
+        self.parameters = installable_parameters(self.model)
+        self.identity = storage_identity(dict(self.model.named_parameters()))
         self.expert_maps = maps
         dense = {
             name: (tuple(value.shape), str(value.dtype).removeprefix("torch."))
