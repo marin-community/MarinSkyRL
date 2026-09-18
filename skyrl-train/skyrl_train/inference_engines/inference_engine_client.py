@@ -225,8 +225,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         return await self._run_on_all_engines("expert_block_rpc", method, *args)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        if self.generation_paused_event.is_set():
-            raise RuntimeError("pause_generation is unsupported for InferenceEngineClient.generate().")
         # 0. Extract input
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
