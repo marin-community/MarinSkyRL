@@ -493,10 +493,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # cap) workers may wait on the shared queue condition while each still holds ONE
         # completed group, so to fully bound the head-node footprint you should ALSO lower
         # num_parallel_generation_workers toward the engine working set.
-        self.max_buffered_groups = (
-            OmegaConf.select(cfg, "trainer.fully_async.max_buffered_groups", default=None)
-            or self.num_parallel_generation_workers
-        )
+        self.max_buffered_groups = cfg.trainer.fully_async.max_buffered_groups or self.num_parallel_generation_workers
 
         assert (
             # otherwise wasted throughput

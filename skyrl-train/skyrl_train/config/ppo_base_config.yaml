@@ -288,6 +288,12 @@ trainer:
     max_staleness_steps: 4
 
     num_parallel_generation_workers: 768
+    # Finished groups the completed buffer holds before a producer waits with its group in
+    # hand. Null means num_parallel_generation_workers, so no producer ever waits. The queue
+    # depth moves neither staleness nor throughput (a group ages the same whether it waits in
+    # the queue or in its producer); set it to policy_mini_batch_size to keep one update's
+    # cohort ready and bound the head-node backlog to that cohort.
+    max_buffered_groups: null
 
     # Bound teacher-scoring work independently for each logical teacher. Queue
     # backpressure is applied when a rollout group is admitted, before learner

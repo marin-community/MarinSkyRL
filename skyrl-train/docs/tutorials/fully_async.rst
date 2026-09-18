@@ -109,6 +109,11 @@ For fully async specifically, the following are the main knobs to tune:
   each worker works on a group of trajectories. It should be ``>= trainer.policy_mini_batch_size`` to avoid wasted throughput, 
   and ``<= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)`` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
+- ``trainer.fully_async.max_buffered_groups``: How many finished groups the completed buffer holds before a
+  generation worker waits with its finished group in hand. ``null`` (the default) means one slot per generation
+  worker, so no worker ever waits. A finished group ages the same whether it waits in the buffer or in its worker,
+  so this depth changes neither staleness nor throughput; set it to ``trainer.policy_mini_batch_size`` to keep
+  exactly one update's cohort ready and bound the head-node backlog to that cohort.
 - ``trainer.algorithm.group_admission.stall_timeout``: An optional maximum number of seconds without newly admitted groups while
   assembling a training batch. The same progress watchdog applies to synchronous and fully asynchronous entrypoints. The null
   default allows 30 minutes before any step timing exists, then adapts to ``max(5 * recent median step time, 10 minutes)``. Set a

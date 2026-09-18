@@ -93,6 +93,7 @@ ADDITIVE_GROUP_ADMISSION_FIELDS = {
     "stall_timeout": None,
 }
 ADDITIVE_FULLY_ASYNC_FIELDS = {
+    "max_buffered_groups": None,
     "teacher_scoring": {
         "max_queued_per_teacher": 8,
         "workers_per_teacher": 1,
