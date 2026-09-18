@@ -99,6 +99,10 @@ Following ``examples/fully_async/async_run_gsm8k.sh``, select the packaged entry
     uv run --isolated --extra vllm -m skyrl_train.entrypoints.fully_async \
     ...
 
+The RL config's ``entrypoint`` key names the training loop. A launcher ``--entrypoint`` that contradicts it fails,
+and ``trainer.fully_async`` settings written under ``entrypoint: standard`` are reported as inert when the config is
+parsed, since the synchronous trainer never reads them.
+
 For fully async specifically, the following are the main knobs to tune:
 
 - ``trainer.policy_mini_batch_size``: The mini-batch size for policy training. The trainer triggers a training step whenever the generation workers have generated this many groups of trajectories.

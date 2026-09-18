@@ -18,6 +18,7 @@ import binascii
 import copy
 import fsspec
 import json
+import logging
 import math
 import os
 from dataclasses import dataclass, field, replace
@@ -34,6 +35,9 @@ from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 
 # Directory containing the bundled example RL config YAML files.
+logger = logging.getLogger(__name__)
+
+
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
 RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
 RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
@@ -490,6 +494,8 @@ class ParsedRLConfig:
     environment: Dict[str, Any] = field(default_factory=dict)
     trajectory_runner: Dict[str, Any] = field(default_factory=dict)
     terminal_bench: Optional[Dict[str, Any]] = None
+    # Settings the config wrote that the selected entrypoint never reads.
+    inert_settings: tuple[str, ...] = ()
     tensor_parallel_size: int = 1
     # "tasks" (default; terminal_bench task-dir extraction) or "parquet" (single-turn
     # RLVR: an HF id / .parquet is passed through to PromptDataset, NOT task-extracted).
@@ -581,6 +587,17 @@ def materialize_rl_config(
     return str(destination)
 
 
+def inert_fully_async_settings(raw: Dict[str, Any], entrypoint: str) -> tuple[str, ...]:
+    """Return the trainer.fully_async keys a config sets although its entrypoint ignores them."""
+    if entrypoint == RL_ENTRYPOINT_MODULES[RLEntrypoint.FULLY_ASYNC]:
+        return ()
+    trainer = raw.get("trainer")
+    fully_async = trainer.get("fully_async") if isinstance(trainer, dict) else None
+    if not isinstance(fully_async, dict):
+        return ()
+    return tuple(f"trainer.fully_async.{key}" for key in fully_async)
+
+
 def parse_rl_config(
     config_path: str,
     model_override: Optional[str] = None,
@@ -600,6 +617,14 @@ def parse_rl_config(
     context_budget = resolve_context_budget(raw, path)
 
     entrypoint = resolve_rl_entrypoint(raw.get("entrypoint"), config_path=path)
+    inert_settings = inert_fully_async_settings(raw, entrypoint)
+    if inert_settings:
+        logger.warning(
+            "%s: entrypoint %s never reads %s; select entrypoint: fully_async or remove them",
+            path,
+            raw.get("entrypoint") or RLEntrypoint.STANDARD.value,
+            ", ".join(inert_settings),
+        )
     config_groups = raw.get("config_groups", {})
     trainer, generator, terminal_bench, materialized_raw = _materialize_context_budget(raw, context_budget)
     data = dict(raw.get("data", {}))
@@ -643,6 +668,7 @@ def parse_rl_config(
     validate_tp_divides_heads(tensor_parallel_size, raw.get("model_num_attention_heads"), config_path=path)
 
     return ParsedRLConfig(
+        inert_settings=inert_settings,
         config_path=path,
         raw=materialized_raw,
         context_budget=context_budget,

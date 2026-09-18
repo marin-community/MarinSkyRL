@@ -274,7 +274,12 @@ class LocalRLRunner:
             model_override=self.config.model_path,
         )
         parsed, skyrl_overrides = apply_context_budget_overrides(parsed, self.config.skyrl_overrides)
-        entrypoint = self.config.entrypoint or parsed.entrypoint
+        if self.config.entrypoint and self.config.entrypoint != parsed.entrypoint:
+            raise ValueError(
+                f"--entrypoint {self.config.entrypoint} contradicts the RL config's entrypoint "
+                f"({parsed.entrypoint}); the config names the training loop, so change it there"
+            )
+        entrypoint = parsed.entrypoint
         self.config.tensor_parallel_size = parsed.tensor_parallel_size
         self._resolve_data_inputs(parsed.data_kind, exp_args)
         self._resolve_terminal_bench_sidechannel(parsed)
