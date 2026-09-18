@@ -1618,16 +1618,12 @@ class _MockGenerateEngine:
 
 @pytest.mark.asyncio
 async def test_generate_single_prompt_waits_for_resume_then_reaches_engine():
-    """A single-prompt generate() that arrives during a weight-sync pause is held, not rejected.
-
-    Before this, the call raised while the pause was on; the trajectory collector caught the
-    error per row and the row trained fully masked, so every rollout that started a turn inside
-    the pause window was silently lost.
-    """
+    """A single-prompt generate() that arrives during a weight-sync pause is held, not rejected,
+    and reaches the engine unchanged once generation resumes."""
     engine = _MockGenerateEngine()
     client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
-    # Simulate the pause directly, as the streaming and completion tests do: the engine fan-out
-    # is not what this test exercises.
+    # Simulate the pause directly, as the batched-completion test does: the engine fan-out is
+    # not what this test exercises.
     client.generation_paused_event.set()
     engine.scheduler_paused = True
 
@@ -1725,17 +1721,20 @@ async def test_resume_wakes_a_request_parked_on_the_http_threads_event_loop():
     await client.pause_generation()
     payload = {"json": {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]}, "headers": {}}
     chunks: list[str] = []
+    calling = threading.Event()
 
     def serve_on_own_loop():
         async def consume():
+            calling.set()
             chunks.extend([chunk async for chunk in client.chat_completion_stream(payload)])
 
         asyncio.run(consume())
 
     server_thread = threading.Thread(target=serve_on_own_loop)
     server_thread.start()
-    # Let the thread's loop start and park the request behind the pause before resuming;
-    # resuming first would prove nothing about the cross-loop wake.
+    await asyncio.to_thread(calling.wait, 5)
+    # The thread has issued the call; the short sleep covers the race between that call and
+    # the request parking behind the pause, which the client exposes no event for.
     await asyncio.sleep(0.05)
     assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
 
