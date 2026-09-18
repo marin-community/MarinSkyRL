@@ -1141,22 +1141,28 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             raise RuntimeError(f"first-token policy version {bounds[1]} is newer than the installed policy")
         if not self.first_token_admission or not any(trajectory_batch["response_ids"]):
             return captured_step
-        if rows is None:
+        first_token_version = trajectory_batch.get("first_token_policy_version")
+        if first_token_version is not None and first_token_version > self.global_step:
+            raise RuntimeError(f"first-token policy version {first_token_version} is newer than the installed policy")
+        if rows is not None:
+            try:
+                for ids, loss_mask, segments in zip(
+                    trajectory_batch["response_ids"], trajectory_batch["loss_masks"], rows, strict=True
+                ):
+                    validate_policy_version_segments(
+                        segments,
+                        response_length=len(ids),
+                        require_known=True,
+                        # Only sampled tokens need a version; observation tokens carry none.
+                        required_mask=[bool(m) for m in loss_mask],
+                    )
+            except ValueError as error:
+                raise RuntimeError(f"{FIRST_TOKEN_VERSION_MISSING} ({error})") from error
+            return bounds[0] + 1
+        # Re-tokenized chat history carries no spans, only the version that sampled the first token.
+        if first_token_version is None:
             raise RuntimeError(FIRST_TOKEN_VERSION_MISSING)
-        try:
-            for ids, loss_mask, segments in zip(
-                trajectory_batch["response_ids"], trajectory_batch["loss_masks"], rows, strict=True
-            ):
-                validate_policy_version_segments(
-                    segments,
-                    response_length=len(ids),
-                    require_known=True,
-                    # Only sampled tokens need a version; observation tokens carry none.
-                    required_mask=[bool(m) for m in loss_mask],
-                )
-        except ValueError as error:
-            raise RuntimeError(f"{FIRST_TOKEN_VERSION_MISSING} ({error})") from error
-        return bounds[0] + 1
+        return first_token_version + 1
 
     async def _run_generate_for_a_group_loop(self, queues: _GenerationQueues):
         """Generate dataset rows or retries and route only fresh groups to the completed queue."""

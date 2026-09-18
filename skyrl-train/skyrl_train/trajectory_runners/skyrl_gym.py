@@ -20,6 +20,7 @@ from loguru import logger
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.policy_version import (
+    policy_version_bounds,
     BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
     PolicyVersionSegment,
     append_policy_version_span,
@@ -424,6 +425,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         continuation_assistant_index: int | None = None
         behavior_policy_version_segments: list[PolicyVersionSegment] | None = []
         saw_behavior_policy_versions = False
+        # The oldest version that sampled a token, kept apart from the spans because re-tokenized
+        # history cannot align spans to tokens but the version that sampled the first token stands.
+        first_token_policy_version: int | None = None
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -493,6 +497,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     require_known=False,
                 )
                 saw_behavior_policy_versions = True
+                turn_bounds = policy_version_bounds([output_version_segments])
+                if turn_bounds is not None and first_token_policy_version is None:
+                    first_token_policy_version = turn_bounds[0]
             if chat_completion_params is not None:
                 rendered_prompt_ids = engine_output.get("prompt_ids")
                 if rendered_prompt_ids is None:
@@ -779,6 +786,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             loss_mask=loss_mask,
             env_metrics=env_metrics,
             captured_global_step=captured_global_step,
+            first_token_policy_version=first_token_policy_version,
             behavior_policy_version_segments=(
                 tuple(behavior_policy_version_segments)
                 if saw_behavior_policy_versions and behavior_policy_version_segments is not None
@@ -949,6 +957,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 truncate_policy_version_segments(segments, len(response))
                 for segments, response in zip(version_rows, truncated_responses, strict=True)
             ]
+            bounds = policy_version_bounds(version_rows)
+            trajectory_batch["first_token_policy_version"] = None if bounds is None else bounds[0]
         attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
 
         return trajectory_batch

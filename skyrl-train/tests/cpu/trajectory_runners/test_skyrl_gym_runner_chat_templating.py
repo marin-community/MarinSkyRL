@@ -410,3 +410,35 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
         last_token_id_false = out_false["response_ids"][0][-1]
         assert last_token_id_true == tokenizer.eos_token_id
         assert last_token_id_false == tokenizer.encode(mock_text, add_special_tokens=False)[-1]
+
+
+@pytest.mark.asyncio
+async def test_retokenized_chat_history_keeps_the_first_sampled_token_version_without_spans():
+    _register_test_env_if_needed()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    mock_llm = MagicMock()
+    versions = iter([2, 3, 3, 3])
+
+    def mock_generate(input_batch):
+        num_prompts = len(input_batch["prompts"])
+        response_ids = tokenizer.encode("b" + tokenizer.eos_token, add_special_tokens=False)
+        version = next(versions)
+        return {
+            "responses": ["b"] * num_prompts,
+            "stop_reasons": ["stop"] * num_prompts,
+            "response_logprobs": None,
+            "response_ids": [response_ids] * num_prompts,
+            "response_policy_version_segments": [
+                [{"start": 0, "token_count": len(response_ids), "policy_version": version}]
+            ]
+            * num_prompts,
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=mock_generate)
+    runner = _build_runner(tokenizer, {"source": "name", "name_or_path": "qwen3_without_thinking"}, mock_llm)
+    prompt, extras = _default_prompt_and_extras()
+
+    trajectory_batch = await runner.run(_make_input_batch(prompt, extras))
+
+    assert trajectory_batch.get("behavior_policy_version_segments") is None
+    assert trajectory_batch["first_token_policy_version"] == 2

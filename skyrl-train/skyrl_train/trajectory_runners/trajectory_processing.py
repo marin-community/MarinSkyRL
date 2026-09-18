@@ -1277,6 +1277,18 @@ def minimum_captured_global_step(outputs: Iterable[HasCapturedGlobalStep]) -> Op
     )
 
 
+class HasFirstTokenPolicyVersion(Protocol):
+    first_token_policy_version: Optional[int]
+
+
+def minimum_first_token_policy_version(outputs: Iterable[HasFirstTokenPolicyVersion]) -> Optional[int]:
+    """Return the oldest first-token policy version recorded across a rollout group."""
+    return min(
+        (output.first_token_policy_version for output in outputs if output.first_token_policy_version is not None),
+        default=None,
+    )
+
+
 def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None, chat_template_kwargs=None):
     """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 

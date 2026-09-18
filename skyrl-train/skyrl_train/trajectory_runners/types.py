@@ -31,6 +31,8 @@ class AgentLoopOutput:
     loss_mask: List[int]
     env_metrics: Dict[str, Any]
     captured_global_step: Optional[int] = None
+    # Oldest policy version that sampled any of this output's tokens; None when the engine reported none.
+    first_token_policy_version: Optional[int] = None
     behavior_policy_version_segments: tuple[PolicyVersionSegment, ...] | None = None
     token_provenance: TokenProvenance = TokenProvenance.ENGINE
     error_treatment: Optional[str] = None
@@ -112,6 +114,7 @@ class TrajectoryBatch(TypedDict):
     student_topk_indices: Optional[List[List[List[int]]]]
     behavior_topk_logprobs: Optional[List[List[List[float]]]]
     behavior_policy_version_segments: NotRequired[List[List[PolicyVersionSegment]]]
+    first_token_policy_version: NotRequired[Optional[int]]
     rollout_routed_experts: Optional[List[List[List[List[int]]]]]
     teacher_evidence: Optional[TeacherEvidenceBatch]
     distillation: Optional[DistillationInput]

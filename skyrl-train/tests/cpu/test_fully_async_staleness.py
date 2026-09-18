@@ -111,6 +111,21 @@ def test_first_token_admission_needs_a_version_only_for_sampled_tokens():
     assert _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4) == 3
 
 
+def test_first_token_admission_charges_a_retokenized_group_from_its_first_token_version():
+    # Re-tokenized chat history carries no spans; the version that sampled the first token stands alone.
+    batch = _completed_batch(None, captured_step=4)
+    batch["first_token_policy_version"] = 2
+    assert _trainer_at_step(4, first_token_admission=True)._admission_step(batch, fallback_step=4) == 3
+    assert _trainer_at_step(4, first_token_admission=False)._admission_step(batch, fallback_step=4) == 4
+
+
+def test_first_token_admission_rejects_a_first_token_version_newer_than_installed():
+    batch = _completed_batch(None, captured_step=1)
+    batch["first_token_policy_version"] = 3
+    with pytest.raises(RuntimeError, match="newer than the installed policy"):
+        _trainer_at_step(2, first_token_admission=True)._admission_step(batch, fallback_step=1)
+
+
 def test_first_token_admission_rejects_a_sampled_token_without_a_version():
     rows = [[{"start": 0, "token_count": 1, "policy_version": 2}, {"start": 5, "token_count": 2, "policy_version": 3}]]
     batch = _completed_batch(rows, response_ids=(MULTI_TURN_RESPONSE,), loss_masks=(MULTI_TURN_LOSS_MASK,))
