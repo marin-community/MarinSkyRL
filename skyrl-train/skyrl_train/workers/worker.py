@@ -47,6 +47,7 @@ from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
 )
 from skyrl_train.learner_memory import INERT_LEARNER_MEMORY, LearnerMemory
+from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, TelemetryConfig
 from skyrl_train.utils.gradient_direction import (
     NO_GRADIENT_METRICS,
     GradientDirectionTracker,
@@ -99,6 +100,10 @@ def _grug_query_bias_updater(
     target_weight = 1.0 if update.mode is GrugQueryBiasUpdateMode.REPLACE else update.interpolation_weight
     assert target_weight is not None
     return GrugQuantileBiasUpdater(model, valid_tokens, target_weight=target_weight)
+
+
+# Rigging's own shutdown waits two seconds; the extra covers the round trip to every rank.
+TELEMETRY_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -379,7 +384,17 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         configure_progress(cfg.trainer.progress)
+        # An actor inherits only the environment; rigging drops every record until this process
+        # configures it. The actor group drains it through close_telemetry before the kill.
+        self._telemetry = contextlib.ExitStack()
+        telemetry_config = TelemetryConfig.from_environment()
+        if telemetry_config.endpoint is not None:
+            self._telemetry.enter_context(ProcessTelemetry(telemetry_config, WORKER_ROLE))
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
+
+    def close_telemetry(self) -> None:
+        """Record the terminal event and drain queued telemetry; ray.kill would drop both."""
+        self._telemetry.close()
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
@@ -957,6 +972,10 @@ class PPORayActorGroup:
         Args:
             no_restart: If True, prevents Ray from restarting the actors.
         """
+        # ray.kill runs no atexit handler in the actor, so the telemetry drain has to be asked for.
+        # A dead or wedged actor only costs the timeout; ray.wait raises for neither.
+        drains = [actor.close_telemetry.remote() for actor in self._actor_handlers]
+        ray.wait(drains, num_returns=len(drains), timeout=TELEMETRY_DRAIN_TIMEOUT_SECONDS)
         for actor in self._actor_handlers:
             try:
                 ray.kill(actor, no_restart=no_restart)

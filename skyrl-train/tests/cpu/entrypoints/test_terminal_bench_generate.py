@@ -46,6 +46,16 @@ def test_terminal_bench_generate_builds_complete_evaluation_request():
                 },
             },
             "environment": {"env_class": "terminal_bench"},
+            # run() configures progress and enters the trainer telemetry lifecycle before _run().
+            "trainer": {
+                "progress": {
+                    "mode": "tqdm",
+                    "min_interval_seconds": 0.5,
+                    "heartbeat_seconds": 15,
+                    "percent_step": 5,
+                    "count_step": 1000,
+                }
+            },
         }
     )
     experiment.train_dataset = [
