@@ -57,6 +57,30 @@ def test_ray_uni_backend_gate(tp, pp, expected):
     )
 
 
+@pytest.mark.parametrize(
+    "tp,pp,dp,expected",
+    [
+        (1, 1, 1, False),  # single-GPU engines -> flat PACK
+        (1, 1, 4, True),  # DP4xEP4 on 4-GPU nodes -> one STRICT_PACK PG per engine
+        (1, 1, 8, True),  # DP8xEP8 on 8-GPU nodes -> STRICT_PACK
+        (2, 1, 2, True),  # TP2 x DP2
+    ],
+)
+def test_dp_engines_are_multi_gpu_engines(tp, pp, dp, expected):
+    # A DP>1 engine's ranks form one vLLM DP/EP group with a per-decode-step all-to-all;
+    # splitting them across nodes deadlocks every engine at the first forward.
+    assert (
+        use_per_engine_strict_pack_pg(
+            use_hybrid_engine=False,
+            use_mp_backend=False,
+            tensor_parallel_size=tp,
+            pipeline_parallel_size=pp,
+            data_parallel_size=dp,
+        )
+        is expected
+    )
+
+
 def test_tp1_never_strict_pack_so_policy_pg_not_starved():
     # The exact lever1/swesmith regression: multi-node TP=1 must NOT use
     # per-engine STRICT_PACK (which scatters 1-GPU bundles and starves the

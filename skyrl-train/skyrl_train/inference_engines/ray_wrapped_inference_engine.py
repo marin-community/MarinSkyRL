@@ -17,7 +17,7 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
-from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
+from skyrl_train.inference_engines.utils import get_pg_bundle_node_ips, get_rendezvous_addr_port
 from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE, GRUG_MOE_MODEL_TYPE
 from skyrl_train.env_vars import EnvVarScope, VLLM_USE_V2_MODEL_RUNNER_ENV, managed_environment_names
 from skyrl_train.utils import (
@@ -465,6 +465,7 @@ def create_ray_wrapped_inference_engines(
         use_mp_backend=use_mp_backend,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
+        data_parallel_size=data_parallel_size,
     )
     if not use_hybrid_engine:
         if use_mp_backend:
@@ -484,7 +485,7 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
         elif use_per_engine_strict_pack:
-            # ray/uni backend, multi-GPU engines (TP*PP > 1): one STRICT_PACK PG per
+            # ray/uni backend, multi-GPU engines (TP*PP*DP > 1): one STRICT_PACK PG per
             # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
             # guaranteed co-located on a single node (no cross-node TP all-reduce in
             # decode). #232 fix.
@@ -500,7 +501,7 @@ def create_ray_wrapped_inference_engines(
             # re-selects the engine's own PG in the loop.
             shared_pg = per_engine_pgs[0]
         else:
-            # ray/uni backend, single-GPU engines (TP==PP==1): ONE flat PACK PG over
+            # ray/uni backend, single-GPU engines (TP==PP==DP==1): ONE flat PACK PG over
             # all engine {GPU:1} bundles (the original pre-#232 behavior). PACK packs
             # densely -> fills whole nodes -> leaves whole nodes free for the
             # downstream policy/ref PACK PG. Restores the multi-node disaggregated
@@ -508,6 +509,34 @@ def create_ray_wrapped_inference_engines(
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
+
+    if data_parallel_size > 1:
+        # Every DP rank of an engine must sit on one node: the ranks form a single vLLM
+        # DP/EP group whose expert-parallel all-to-all runs every decode step, and a group
+        # split across nodes runs that collective over the fabric and deadlocks silently at
+        # the first forward under CUDA graphs. Fail here instead, with the layout visible.
+        for i in range(num_inference_engines):
+            if use_hybrid_engine:
+                check_pg = shared_pg
+                check_indices = [
+                    colocated_engine_bundles[i * data_parallel_size + r][0] for r in range(data_parallel_size)
+                ]
+            elif per_engine_pgs:
+                check_pg = per_engine_pgs[i]
+                check_indices = [r * tp_pp_size for r in range(data_parallel_size)]
+            elif use_mp_backend:
+                check_pg = shared_pg
+                check_indices = [i * data_parallel_size + r for r in range(data_parallel_size)]
+            else:
+                check_pg = shared_pg
+                check_indices = [i * per_engine_gpu_count + r * tp_pp_size for r in range(data_parallel_size)]
+            node_ips = get_pg_bundle_node_ips(check_pg, check_indices)
+            logger.info(f"inference engine {i}: DP rank -> node {dict(enumerate(node_ips))}")
+            if len(set(node_ips)) > 1:
+                raise RuntimeError(
+                    f"inference engine {i}: its {data_parallel_size} DP ranks were placed on "
+                    f"{len(set(node_ips))} nodes ({dict(enumerate(node_ips))}); a DP/EP group must be node-local"
+                )
 
     allocated_rendezvous_ports: set[int] = set()
     for i in range(num_inference_engines):

@@ -244,6 +244,7 @@ def use_per_engine_strict_pack_pg(
     use_mp_backend: bool,
     tensor_parallel_size: int,
     pipeline_parallel_size: int,
+    data_parallel_size: int = 1,
 ) -> bool:
     """Whether the ray/uni inference backend should build one STRICT_PACK
     placement group PER ENGINE (vs a single flat PACK PG over all engines).
@@ -261,15 +262,24 @@ def use_per_engine_strict_pack_pg(
     multi-node TP=1 lever1/swesmith). The flat PACK fallback packs single-GPU
     bundles densely, freeing whole nodes for the policy PG.
 
-    The gate is ``tp_pp_size > 1`` (NOT ``per_engine_gpu_count > gpus_per_node``):
-    #232 is TP=4 on 4-GPU nodes, and 4 is not > 4, so the latter would wrongly
-    fall back to flat PACK and re-break the cross-node-TP-split. The hybrid
-    (colocate_all) and mp-backend paths never use per-engine STRICT_PACK (the mp
-    path's {GPU:tp_pp_size} bundle is already node-atomic).
+    A DP>1 engine (``inference_engine_data_parallel_size > 1``, one single-GPU
+    actor per DP rank) is a multi-GPU engine too: its DP ranks form one vLLM
+    DP/EP group whose expert-parallel all-to-all runs every decode step, and the
+    flat PACK PG gives them no node affinity either. A DP4xEP4 job on 4-GPU
+    nodes landed every engine's DP rank 0 on one node and ranks 1-3 on another,
+    and the cross-node collective deadlocked at the first forward under CUDA
+    graphs with no error. So the gate is ``tp * pp * dp > 1``, and the per-engine
+    PG holds all ``tp * pp * dp`` bundles of the engine (STRICT_PACK = one node).
+
+    The gate is not ``per_engine_gpu_count > gpus_per_node``: #232 is TP=4 on
+    4-GPU nodes, and 4 is not > 4, so that form would wrongly fall back to flat
+    PACK and re-break the cross-node-TP split. The hybrid (colocate_all) and
+    mp-backend paths never use per-engine STRICT_PACK (the mp path's
+    {GPU:tp_pp_size} bundle is already node-atomic).
     """
     if use_hybrid_engine or use_mp_backend:
         return False
-    return (tensor_parallel_size * pipeline_parallel_size) > 1
+    return (tensor_parallel_size * pipeline_parallel_size * data_parallel_size) > 1
 
 
 class Timer:
