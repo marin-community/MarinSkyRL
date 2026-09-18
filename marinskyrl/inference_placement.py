@@ -71,9 +71,10 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
     """Refuse the expert-block weight-sync transport unless every precondition holds.
 
     The transport pairs each Megatron expert shard with the vLLM worker that serves it, so it
-    needs the megatron strategy with expert_tensor_parallel_size 1, local async vLLM engines at
-    TP=1 placed node-locally, and the NCCL weight-sync backend. Trainer tensor parallelism is
-    allowed; its shards land as regions of the receiver's tensors.
+    needs the megatron strategy without tensor parallelism, local async vLLM engines at TP=1
+    placed node-locally, and the NCCL weight-sync backend. The schedule can land tensor-parallel
+    shards as regions of the receiver's tensors, but a TP2/ETP1 trainer showed expert replicas
+    diverging across the TP pair after one update, so trainer TP stays refused.
     """
     generator = config["generator"]
     transport = generator["weight_sync_transport"]
@@ -88,6 +89,8 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
         problems.append("the policy must train with the megatron strategy")
     else:
         megatron = trainer["policy"]["megatron_config"]
+        if megatron["tensor_model_parallel_size"] != 1:
+            problems.append("the policy must use tensor_model_parallel_size 1")
         if megatron["expert_tensor_parallel_size"] not in (None, 1):
             problems.append("the policy must use expert_tensor_parallel_size 1")
         # Unequal expert-parallel degrees are paired by the schedule; each must divide the

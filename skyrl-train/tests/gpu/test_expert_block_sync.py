@@ -7,7 +7,7 @@ to compare it, byte for byte, with the trainer's exported weights. It then flips
 one installed byte on one worker and requires the gate to name exactly that byte,
 trains a second step and syncs again.
 
-Opt-in (needs six Hopper GPUs at most; the CP2 case uses six). The test-only engine actor lives in this module,
+Opt-in (needs six Hopper GPUs at most). The test-only engine actor lives in this module,
 so Ray workers need ``skyrl-train`` on ``PYTHONPATH``; the Grug gate wrapper exports it:
 
     uv run --frozen --extra vllm --extra megatron --group dev \\
@@ -44,7 +44,6 @@ from tests.gpu.test_grug_megatron import (
     GATED_NORM_NAME,
     PARAMETER_NAMES,
     SERVING_EXPERT_INDEX_BY_NAME,
-    TOY_SHAPE,
     _config,
     _init_policy,
     _padded_batch,
@@ -77,7 +76,6 @@ GEOMETRIES = {
     "two-replicas": Geometry(2, 1, 2, 1, 2, 2, 1),
     "unequal-ep": Geometry(2, 2, 1, 1, 1, 2, 1),
     "receiver-pp2": Geometry(2, 1, 2, 1, 1, 2, 2),
-    "trainer-tp2": Geometry(2, 1, 1, 2, 1, 2, 1),
     # Context parallelism replicates every weight across its ranks; the schedule sees more holders.
     "trainer-cp2": Geometry(4, 1, 2, 1, 1, 2, 1, policy_cp=2),
 }
@@ -135,16 +133,12 @@ def test_expert_block_sync_installs_every_byte_and_the_gate_catches_a_flipped_on
     monkeypatch.setattr(vllm_engine, "AsyncVLLMRayActor", ray.remote(GateEngine))
     model_path = tmp_path / "model"
     model_path.mkdir()
-    # Megatron splits the vocabulary and the KV groups across tensor-parallel ranks without
-    # padding either; the transport refuses a QKV layout with fewer KV groups than TP ranks.
-    _write_tiny_checkpoint(
-        model_path,
-        vocab_size_multiple=geometry.policy_tp,
-        shape={**TOY_SHAPE, "num_key_value_heads": max(TOY_SHAPE["num_key_value_heads"], geometry.policy_tp)},
-    )
+    _write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=geometry.policy_gpus, pp=geometry.policy_pp, ep=geometry.policy_ep)
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = geometry.policy_tp
     cfg.trainer.policy.megatron_config.context_parallel_size = geometry.policy_cp
+    # Megatron's context-parallel forward needs packed sequences.
+    cfg.trainer.use_sample_packing = geometry.policy_cp > 1
     cfg.generator.num_inference_engines = geometry.engines
     cfg.generator.inference_engine_data_parallel_size = geometry.engine_dp
     cfg.generator.inference_engine_expert_parallel_size = geometry.engine_dp

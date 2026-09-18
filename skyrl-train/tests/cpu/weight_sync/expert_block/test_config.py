@@ -41,12 +41,6 @@ def test_unequal_expert_parallel_degrees_are_accepted():
     validate_expert_block_transport(cfg)
 
 
-def test_a_tensor_parallel_trainer_is_accepted():
-    cfg = expert_block_config()
-    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
-    validate_expert_block_transport(cfg)
-
-
 def test_the_default_transport_needs_nothing():
     cfg = example_dummy_config()
     assert cfg.generator.weight_sync_transport == "broadcast"
@@ -57,6 +51,7 @@ def test_the_default_transport_needs_nothing():
     "path,value,message",
     [
         ("trainer.strategy", "fsdp2", "megatron strategy"),
+        ("trainer.policy.megatron_config.tensor_model_parallel_size", 2, "tensor_model_parallel_size 1"),
         ("trainer.policy.megatron_config.expert_tensor_parallel_size", 2, "expert_tensor_parallel_size 1"),
         ("trainer.policy.megatron_config.expert_model_parallel_size", 0, "must be positive"),
         ("generator.backend", "sglang", "local async vLLM"),
