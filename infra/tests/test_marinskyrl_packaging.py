@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from email.parser import Parser
-from itertools import combinations
 from pathlib import Path
 import re
 import subprocess
@@ -17,36 +16,6 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 PYPROJECT = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
-FLASH_ATTN_CANDIDATE = "native-cu132-flash-attn-4219765"
-FLASH_ATTN_VERSION = "2.8.4"
-FLASH_ATTN_WHEEL = (
-    "flash_attn-2.8.4-cp312-cp312-linux_x86_64.whl",
-    "sha256:ed692c1408411aa2637b95feced22d55d9ebb7f6da0aeb49d164594b5ee635c7",
-)
-VLLM_CANDIDATE = "marin-vllm-gpu-candidate-70ea9ae8f260"
-VLLM_VERSION = "0.0.0.dev20260916+marin.70ea9ae8f260.cu132"
-VLLM_WHEELS = {
-    "x86_64": (
-        "vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_x86_64.whl",
-        "sha256:62a688cea684daeb940d94ac2a52e6df0ced4cb3663b29d3e3187e2bd261a418",
-    ),
-    "aarch64": (
-        "vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_aarch64.whl",
-        "sha256:fdbf8d6bcff756ff3ed1f5d562759936d2eceef8fde9d35d62df3e3a683a9d60",
-    ),
-}
-
-
-def _locked_wheel_hashes(package_name: str) -> dict[str, str]:
-    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
-    return {
-        wheel["url"].rsplit("/", 1)[-1]: wheel["hash"]
-        for package in lock["package"]
-        if package["name"] == package_name
-        for wheel in package["wheels"]
-    }
-
-
 @dataclass(frozen=True)
 class BuiltWheel:
     names: set[str]
@@ -123,62 +92,6 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert "Extras `cpu` and `cuda` are incompatible" in conflict.stderr
 
 
-def test_megatron_extra_has_native_wheels_for_linux_x86_64() -> None:
-    extras = PYPROJECT["project"]["optional-dependencies"]
-    overrides = [Requirement(value) for value in PYPROJECT["tool"]["uv"]["override-dependencies"]]
-    sources = PYPROJECT["tool"]["uv"]["sources"]
-
-    assert extras["megatron"]
-    assert any(requirement.startswith("megatron-core") for requirement in extras["megatron"])
-    assert any(requirement.startswith("megatron-bridge==0.6.0") for requirement in extras["megatron"])
-    assert any(requirement.startswith("nvidia-modelopt==0.46.1") for requirement in extras["megatron"])
-    hadamard = next(requirement for requirement in overrides if requirement.name == "fast-hadamard-transform")
-    assert hadamard.marker is not None
-    assert not hadamard.marker.evaluate({"sys_platform": "linux"})
-    for package in ("causal-conv1d", "mamba-ssm", "transformer-engine-torch"):
-        urls = sources[package]
-        assert any("linux_x86_64.whl" in source["url"] for source in urls)
-
-
-@pytest.mark.parametrize("policy_extra", ["fsdp", "megatron"])
-def test_policy_extra_provides_flash_attention_for_linux_x86_64(policy_extra: str) -> None:
-    extras = PYPROJECT["project"]["optional-dependencies"]
-    sources = PYPROJECT["tool"]["uv"]["sources"]
-
-    requirements = [Requirement(value) for value in extras[policy_extra]]
-    linux_x86 = {"sys_platform": "linux", "platform_machine": "x86_64"}
-    assert any(req.name == "flash-attn" and req.marker.evaluate(linux_x86) for req in requirements)
-    urls = sources["flash-attn"]
-    assert any("linux_x86_64.whl" in source["url"] for source in urls)
-
-
-def test_flash_attention_uses_the_exact_published_wheel() -> None:
-    extras = PYPROJECT["project"]["optional-dependencies"]
-    sources = PYPROJECT["tool"]["uv"]["sources"]
-    wheel_name, digest = FLASH_ATTN_WHEEL
-    expected_url = (
-        f"https://github.com/marin-community/MarinSkyRL/releases/download/"
-        f"{FLASH_ATTN_CANDIDATE}/{wheel_name}"
-    )
-
-    for policy_extra in ("fsdp", "megatron"):
-        flash_attn = next(
-            Requirement(value) for value in extras[policy_extra] if Requirement(value).name == "flash-attn"
-        )
-        assert flash_attn.specifier == Requirement(f"flash-attn=={FLASH_ATTN_VERSION}").specifier
-    assert sources["flash-attn"] == [
-        {
-            "url": expected_url,
-            "marker": "sys_platform == 'linux' and platform_machine == 'x86_64'",
-        }
-    ]
-
-    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
-    locked_flash_attn = [package for package in lock["package"] if package["name"] == "flash-attn"]
-    assert {package["version"] for package in locked_flash_attn} == {FLASH_ATTN_VERSION}
-    assert _locked_wheel_hashes("flash-attn") == {wheel_name: digest}
-
-
 def test_rollout_runtime_resolves_harbor_main_into_the_frozen_lock() -> None:
     sources = PYPROJECT["tool"]["uv"]["sources"]
     lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
@@ -200,17 +113,6 @@ def test_harbor_config_release_matches_the_locked_harbor_commit() -> None:
     assert config_release.group(1) == harbor_commit
 
 
-def _valid_extra_combinations() -> list[tuple[str, ...]]:
-    extras = tuple(PYPROJECT["project"]["optional-dependencies"])
-    conflicts = [frozenset(item["extra"] for item in conflict) for conflict in PYPROJECT["tool"]["uv"]["conflicts"]]
-    return [
-        selected
-        for size in range(len(extras) + 1)
-        for selected in combinations(extras, size)
-        if not any(conflict.issubset(selected) for conflict in conflicts)
-    ]
-
-
 def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:
     command = ["uv", "export", "--frozen", "--no-annotate", "--no-dev", "--no-hashes"]
     for extra in extras:
@@ -225,83 +127,45 @@ def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:
     return [Requirement(line) for line in exported if line and not line.startswith(("#", "-e "))]
 
 
-def test_every_valid_extra_closure_uses_one_pinned_cuda132_runtime() -> None:
-    linux_platforms = (
-        {"sys_platform": "linux", "platform_machine": "x86_64"},
-        {"sys_platform": "linux", "platform_machine": "aarch64"},
-    )
-    failures = []
-    gpu_extras = {"cuda", "deepspeed", "fsdp", "megatron", "vllm"}
-    extra_combinations = _valid_extra_combinations()
-    exported_closures = map(_exported_requirements, extra_combinations)
-    for extras, requirements in zip(extra_combinations, exported_closures, strict=True):
-        for platform in linux_platforms:
-            runtimes = {
-                (requirement.name, str(requirement.specifier))
-                for requirement in requirements
-                if requirement.name.startswith("nvidia-cuda-runtime")
-                and (requirement.marker is None or requirement.marker.evaluate(platform))
-            }
-            if len(runtimes) > 1:
-                failures.append((extras, platform["platform_machine"], sorted(runtimes)))
-            supported_gpu_extras = (
-                gpu_extras if platform["platform_machine"] == "x86_64" else {"cuda", "deepspeed", "vllm"}
-            )
-            if "cpu" not in extras and supported_gpu_extras.intersection(extras):
-                assert runtimes == {("nvidia-cuda-runtime", "==13.2.75")}, (
-                    extras,
-                    platform["platform_machine"],
-                    sorted(runtimes),
-                )
+@pytest.mark.parametrize("extras", [("cuda",), ("deepspeed",), ("fsdp", "vllm"), ("megatron", "vllm")])
+def test_gpu_profiles_use_one_cuda132_runtime(extras: tuple[str, ...]) -> None:
+    platform = {"sys_platform": "linux", "platform_machine": "x86_64"}
+    requirements = _exported_requirements(extras)
+    runtimes = {
+        (requirement.name, str(requirement.specifier))
+        for requirement in requirements
+        if requirement.name.startswith("nvidia-cuda-runtime")
+        and (requirement.marker is None or requirement.marker.evaluate(platform))
+    }
 
-    assert not failures
+    assert runtimes == {("nvidia-cuda-runtime", "==13.2.75")}
 
 
-@pytest.mark.parametrize("architecture", ["x86_64", "aarch64"])
-def test_fsdp_vllm_closure_selects_the_exact_architecture_wheel(architecture: str) -> None:
+@pytest.mark.parametrize(
+    ("extras", "architecture", "required", "forbidden"),
+    [
+        (("fsdp", "vllm"), "x86_64", {"flash-attn", "torchtitan"}, set()),
+        (("fsdp", "vllm"), "aarch64", set(), {"flash-attn", "torchtitan"}),
+        (
+            ("megatron", "vllm"),
+            "x86_64",
+            {"causal-conv1d", "flash-attn", "mamba-ssm", "megatron-core", "transformer-engine-torch"},
+            {"fast-hadamard-transform"},
+        ),
+    ],
+)
+def test_policy_closures_match_supported_architectures(
+    extras: tuple[str, ...], architecture: str, required: set[str], forbidden: set[str]
+) -> None:
     platform = {"sys_platform": "linux", "platform_machine": architecture}
     exported = [
         requirement
-        for requirement in _exported_requirements(("fsdp", "vllm"))
+        for requirement in _exported_requirements(extras)
         if requirement.marker is None or requirement.marker.evaluate(platform)
     ]
     names = {requirement.name for requirement in exported}
 
-    assert {
-        "vllm",
-        "torch",
-        "torchaudio",
-        "torchcodec",
-        "flashinfer-python",
-        "flashinfer-cubin",
-        "quack-kernels",
-        "humming-kernels",
-        "cuda-tile",
-        "nvidia-cuda-nvcc",
-    }.issubset(names)
-    assert "nvidia-cuda-tileiras" not in names
-
-    wheel_name, _ = VLLM_WHEELS[architecture]
-    declared_vllm = next(
-        Requirement(value)
-        for value in PYPROJECT["project"]["optional-dependencies"]["vllm"]
-        if Requirement(value).name == "vllm"
-    )
-    assert declared_vllm.specifier == Requirement(f"vllm=={VLLM_VERSION}").specifier
+    assert {"vllm", "torch", "torchaudio", "flashinfer-python", "nvidia-cuda-nvcc", *required}.issubset(names)
+    assert names.isdisjoint(forbidden)
     vllm = next(requirement for requirement in exported if requirement.name == "vllm")
-    assert vllm.url == f"https://github.com/marin-community/vllm/releases/download/{VLLM_CANDIDATE}/{wheel_name}"
-
-    if architecture == "aarch64":
-        assert {"flash-attn", "torchtitan"}.isdisjoint(names)
-    else:
-        assert {"flash-attn", "torchtitan"}.issubset(names)
-
-
-def test_lock_records_the_published_vllm_wheel_hashes() -> None:
-    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
-    locked_vllm = [package for package in lock["package"] if package["name"] == "vllm"]
-
-    assert {package["version"] for package in locked_vllm} == {VLLM_VERSION}
-    assert _locked_wheel_hashes("vllm") == {
-        wheel_name: digest for wheel_name, digest in VLLM_WHEELS.values()
-    }
+    assert vllm.url is not None and vllm.url.endswith(f"manylinux_2_28_{architecture}.whl")

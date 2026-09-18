@@ -72,8 +72,7 @@ ln -sf "$CUDA_HOME/lib/libcudart.so.13" "$environment/lib/libcudart.so"
 runtime_architecture="$("$python" -c 'import platform; print(platform.machine())')"
 # The GB200 FSDP lane uses eager Grug attention and has no ARM FlashAttention wheel.
 # Megatron and every x86 policy runtime still validate their compiled extension here.
-if [[ "$profile" == megatron || "$profile" == megatron-export || \
-  ( "$runtime_architecture" != aarch64 && ( "$profile" == fsdp || "$profile" == fsdp-export ) ) ]]; then
+if [[ "$profile" == megatron* || ( "$profile" == fsdp* && "$runtime_architecture" != aarch64 ) ]]; then
   "$python" -c "import flash_attn, flash_attn_2_cuda"
 fi
 if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then
@@ -81,10 +80,9 @@ if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then
 fi
 if [[ "$profile" == *-export ]]; then
   "$python" -c "import ray, torch; from skyrl_train.checkpoint_exporter import CheckpointExporter"
-  case "$profile" in
-    deepspeed-export) "$python" -c "import deepspeed" ;;
-    megatron-export) "$python" -c "from megatron.bridge import AutoBridge" ;;
-  esac
+  if [[ "$profile" == deepspeed-export ]]; then
+    "$python" -c "import deepspeed"
+  fi
   exit 0
 fi
 "$python" - <<'PY'

@@ -141,19 +141,10 @@ def _build_cpu_offload_numa_diagnostics(rank: int, page_sample: _ParameterPageSa
 def _omit_tied_lm_head_weight(
     params: dict[str, torch.Tensor], config: PretrainedConfig | None
 ) -> dict[str, torch.Tensor]:
-    """Keep only the canonical input embedding when the output head is tied to it.
-
-    vLLM rejects an alias such as ``lm_head.weight`` when a weight-sync chunk does
-    not also contain its canonical ``model.embed_tokens.weight``. The canonical
-    embedding is sufficient because vLLM restores the tied parameter after loading.
-    """
-    if config is None or not config.tie_word_embeddings:
-        return params
-    return type(params)(
-        (name, param)
-        for name, param in params.items()
-        if name != "lm_head.weight" and not name.endswith(".lm_head.weight")
-    )
+    """Omit the output alias that vLLM restores from the tied input embedding."""
+    if getattr(config, "tie_word_embeddings", False):
+        return type(params)((name, param) for name, param in params.items() if name != "lm_head.weight")
+    return params
 
 
 class FSDPWeightExtractor(WeightExtractor):
