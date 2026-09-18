@@ -1262,6 +1262,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self._expert_block_sync is not None:
             timings = await self._expert_block_sync.sync(self.global_step)
             self.all_timings.update(timings.as_metrics())
+            logger.info(
+                "Expert-block sync: step={} install_seconds={:.3f} policy_seconds={:.3f} receiver_seconds={:.3f} "
+                "expert_seconds={:.3f} dense_seconds={:.3f}",
+                self.global_step,
+                timings.install_seconds,
+                timings.policy_seconds,
+                timings.receiver_seconds,
+                timings.expert_seconds,
+                timings.dense_seconds,
+            )
             if self.cfg.generator.expert_block_sync.verify:
                 self.all_timings.update(await self._expert_block_sync.verify(self.global_step))
             return None
