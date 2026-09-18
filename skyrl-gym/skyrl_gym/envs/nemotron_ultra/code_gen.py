@@ -8,6 +8,8 @@ import json
 from typing import Any
 
 from skyrl_gym.envs.lcb.livecodebench import (
+    DEFAULT_MAX_MEMORY_BYTES,
+    DEFAULT_TOTAL_TIMEOUT_SECONDS,
     extract_code_from_model,
     lcb_check_correctness,
     normalize_lcb_ground_truth,
@@ -29,13 +31,26 @@ def grade_code(
     assistant_message: dict[str, Any] | None = None,
     timeout_seconds: int = 10,
     reasoning_format_penalty: float = 0.0,
+    max_memory_bytes: int | None = DEFAULT_MAX_MEMORY_BYTES,
+    total_timeout_seconds: float | None = DEFAULT_TOTAL_TIMEOUT_SECONDS,
 ) -> tuple[float, dict[str, Any]]:
-    """Extract the final fenced program and run every NVIDIA LiveCodeBench test."""
+    """Extract the final fenced program and run every NVIDIA LiveCodeBench test.
+
+    ``max_memory_bytes`` and ``total_timeout_seconds`` bound the verifier child; see
+    ``lcb_test_results``.
+    """
     code = extract_code_from_model(text)
     if not code:
         return 0.0, {"extracted_model_code": None, "result": "missing_code"}
     tests = json.loads(normalize_lcb_ground_truth(record["verifier_metadata"]["unit_tests"]))
-    correct = lcb_check_correctness(tests, code, timeout=timeout_seconds, debug=False)
+    correct = lcb_check_correctness(
+        tests,
+        code,
+        timeout=timeout_seconds,
+        debug=False,
+        max_memory_bytes=max_memory_bytes,
+        total_timeout_seconds=total_timeout_seconds,
+    )
     format_violation = _has_reasoning_format_violation(text, assistant_message)
     reward = reasoning_format_penalty if format_violation else float(correct)
     return reward, {

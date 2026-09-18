@@ -7,6 +7,7 @@ import pytest
 import requests
 from omegaconf import OmegaConf
 
+from skyrl_gym.envs.lcb.livecodebench import DEFAULT_MAX_MEMORY_BYTES, DEFAULT_TOTAL_TIMEOUT_SECONDS
 from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
 from skyrl_gym.envs.nemotron_ultra.code_gen import grade_code
 from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraEnv
@@ -363,6 +364,52 @@ def test_code_gen_reward_runs_every_row_unit_test():
 
     assert grade_code("```python\nprint(int(input()) * 2)\n```", record, timeout_seconds=2)[0] == 1.0
     assert grade_code("```python\nprint(int(input()) + 2)\n```", record, timeout_seconds=2)[0] == 0.0
+
+
+def test_code_gen_verifier_bounds_come_from_env_config(monkeypatch):
+    captured = {}
+
+    def fake_grade_code(_text, _record, **kwargs):
+        captured.update(kwargs)
+        return 1.0, {}
+
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.env.grade_code", fake_grade_code)
+    extras = {
+        "extra_info": {
+            "nemotron_ultra": {
+                "route": "skyrl_gym",
+                "agent": "code_gen_simple_agent",
+                "record_json": "{}",
+                "request_json": "{}",
+            }
+        }
+    }
+    bounded = NemotronUltraEnv(
+        OmegaConf.create(
+            {
+                "code_verifier": {
+                    "per_test_timeout_seconds": 7,
+                    "total_timeout_seconds": 120,
+                    "max_memory_bytes": 2147483648,
+                }
+            }
+        ),
+        extras=extras,
+    )
+
+    bounded.step("```python\nprint(1)\n```")
+
+    assert captured["timeout_seconds"] == 7
+    assert captured["total_timeout_seconds"] == 120
+    assert captured["max_memory_bytes"] == 2147483648
+
+    default = NemotronUltraEnv(OmegaConf.create({}), extras=extras)
+
+    default.step("```python\nprint(1)\n```")
+
+    assert captured["timeout_seconds"] == 10
+    assert captured["total_timeout_seconds"] == DEFAULT_TOTAL_TIMEOUT_SECONDS
+    assert captured["max_memory_bytes"] == DEFAULT_MAX_MEMORY_BYTES
 
 
 def test_code_gen_reward_applies_nvidia_reasoning_format_penalty():
