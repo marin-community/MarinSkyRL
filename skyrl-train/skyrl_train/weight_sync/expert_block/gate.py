@@ -110,8 +110,18 @@ class ReplicaReport:
     mismatched_bytes: int
 
 
+# Bytes compared per collective. Each chunk is widened to int32 twice (the group minimum and
+# maximum), so the working set is eight times this on a GPU the trainer already fills.
+REPLICA_COMPARE_CHUNK_BYTES = 16 << 20
+
+
 def compare_replicas(
-    sources: dict[str, torch.Tensor], groups: dict[str, dist.ProcessGroup], participant: int, version: int
+    sources: dict[str, torch.Tensor],
+    groups: dict[str, dist.ProcessGroup],
+    participant: int,
+    version: int,
+    *,
+    chunk_bytes: int = REPLICA_COMPARE_CHUNK_BYTES,
 ) -> ReplicaReport:
     """Count bytes on which this rank's parameters differ from the peers that hold the same ones.
 
@@ -123,10 +133,11 @@ def compare_replicas(
     with torch.no_grad():
         for name, source in sources.items():
             words = source.detach().contiguous().view(-1).view(torch.uint8)
-            low = words.to(torch.int32)
-            high = low.clone()
-            dist.all_reduce(low, op=dist.ReduceOp.MIN, group=groups[name])
-            dist.all_reduce(high, op=dist.ReduceOp.MAX, group=groups[name])
-            mismatched += int(low.ne(high).sum().item())
+            for start in range(0, words.numel(), chunk_bytes):
+                low = words.narrow(0, start, min(chunk_bytes, words.numel() - start)).to(torch.int32)
+                high = low.clone()
+                dist.all_reduce(low, op=dist.ReduceOp.MIN, group=groups[name])
+                dist.all_reduce(high, op=dist.ReduceOp.MAX, group=groups[name])
+                mismatched += int(low.ne(high).sum().item())
             compared += words.numel()
     return ReplicaReport(participant, version, compared, mismatched)

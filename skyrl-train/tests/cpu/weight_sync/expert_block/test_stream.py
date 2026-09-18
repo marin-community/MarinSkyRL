@@ -300,10 +300,12 @@ def participant_main(rank, topology, port, directory):
             )
             replica_groups = dict.fromkeys(sources, next(iter(peer_group.values())))
             try:
-                assert compare_replicas(sources, replica_groups, rank, 7).mismatched_bytes == 0
+                # A chunk far smaller than any parameter, so every tensor is compared in several pieces.
+                compare = lambda: compare_replicas(sources, replica_groups, rank, 7, chunk_bytes=8)  # noqa: E731
+                assert compare().mismatched_bytes == 0
                 if trainer.dp == 1:
-                    next(iter(sources.values())).view(-1).view(torch.uint8)[0] ^= 0xFF
-                assert compare_replicas(sources, replica_groups, rank, 7).mismatched_bytes == 1
+                    next(iter(sources.values())).view(-1).view(torch.uint8)[-1] ^= 0xFF
+                assert compare().mismatched_bytes == 1
             finally:
                 destroy_groups(peer_group)
     finally:
