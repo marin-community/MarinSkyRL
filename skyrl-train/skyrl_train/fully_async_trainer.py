@@ -721,6 +721,25 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with io.open_file(marker, "r") as f:
             return int(f.read().strip())
 
+    def _bind_empty_generation_buffer_for_completed_resume(self) -> None:
+        """Expose an empty buffer when a resumed run has no training loop.
+
+        A resume at or beyond ``max_steps`` finalizes before the per-epoch queues
+        are created.  The final ``on_save`` callback still runs, so bind an empty
+        queue set to distinguish that valid no-work state from a missing binding
+        during normal training.  An existing remote buffer artifact is left
+        untouched because the empty snapshot is not written.
+        """
+        if self._buffer_checkpoint_callback.has_bound_queues():
+            return
+        self._buffer_checkpoint_callback.bind_queues(
+            _GenerationQueues(
+                completed=asyncio.Queue(maxsize=self.max_buffered_groups),
+                retries=asyncio.Queue(),
+                condition=asyncio.Condition(),
+            )
+        )
+
     async def _flush_generation_buffer_on_shutdown(self) -> None:
         """Attach volatile buffer state to the immediately preceding model checkpoint."""
         callback = getattr(self, "_buffer_checkpoint_callback", None)
@@ -859,6 +878,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         # the checkpoint weights. The loaded global_step is the completed step count;
         # >= treats a resume exactly at max_steps as complete without running gs N+1.
         if self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
+            self._bind_empty_generation_buffer_for_completed_resume()
             await self._handle_resume_at_max_steps()
             return
 
