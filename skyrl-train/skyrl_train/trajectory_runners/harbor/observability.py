@@ -82,7 +82,9 @@ def record_harbor_group(results: Iterable[Any]) -> None:
 
 def record_dispatcher_heartbeat(pending: list[int], last_progress: list[float | None], now: float) -> None:
     stage_work.set(sum(pending), attributes={"stage": "dispatcher_pending"})
-    active_ages = [now - value for value, count in zip(last_progress, pending, strict=True) if value is not None and count]
+    active_ages = [
+        now - value for value, count in zip(last_progress, pending, strict=True) if value is not None and count
+    ]
     last_progress_age.set(max(active_ages, default=0.0), attributes={"subsystem": "harbor_dispatcher"})
     record_telemetry_health()
 

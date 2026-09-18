@@ -35,3 +35,31 @@ def test_trajectory_runner_uses_resolved_served_model_name(monkeypatch):
         tokenizer=tokenizer,
     )
     assert create_runner.call_args.kwargs["model_client"] is model_client
+
+
+def test_trajectory_runner_wraps_gym_with_harbor_for_terminal_bench_data(monkeypatch):
+    cfg = OmegaConf.create(
+        {
+            "generator": {
+                "enable_http_endpoint": True,
+                "use_conversation_multi_turn": True,
+                "http_endpoint_host": "127.0.0.1",
+                "http_endpoint_port": 8000,
+            },
+            "environment": {"skyrl_gym": {}},
+            "data": {"terminal_bench_data": ["tasks.parquet"]},
+        }
+    )
+    inference_engine_client = MagicMock(model_name="served-policy")
+    tokenizer = MagicMock()
+    gym_runner = MagicMock(custom_chat_template="template")
+    mixed_runner = MagicMock()
+    monkeypatch.setattr(fully_async, "OpenAIHTTPModelClient", MagicMock())
+    monkeypatch.setattr(fully_async, "SkyRLGymTrajectoryRunner", MagicMock(return_value=gym_runner))
+    wrap = MagicMock(return_value=mixed_runner)
+    monkeypatch.setattr(fully_async, "build_nemotron_ultra_trajectory_runner", wrap)
+
+    result = fully_async.AsyncPPOExp.get_trajectory_runner(MagicMock(), cfg, tokenizer, inference_engine_client)
+
+    assert result is mixed_runner
+    wrap.assert_called_once_with(cfg, tokenizer, gym_runner)

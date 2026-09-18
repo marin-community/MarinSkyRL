@@ -73,16 +73,19 @@ async def test_executor_cancellation_preserves_work_cleanup(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_harbor_lifecycle_cancellation_missing_phase_and_heartbeat(monkeypatch):
-    recorders = {name: _Recorder() for name in (
-        "transition_count",
-        "stage_work",
-        "pending_age",
-        "last_progress_age",
-        "trial_phase_duration",
-        "trial_results",
-        "trial_retries",
-        "trial_tokens",
-    )}
+    recorders = {
+        name: _Recorder()
+        for name in (
+            "transition_count",
+            "stage_work",
+            "pending_age",
+            "last_progress_age",
+            "trial_phase_duration",
+            "trial_results",
+            "trial_retries",
+            "trial_tokens",
+        )
+    }
     for name, recorder in recorders.items():
         monkeypatch.setattr(harbor_observability, name, recorder)
     monkeypatch.setattr(harbor_observability, "record_telemetry_health", lambda: None)
@@ -109,11 +112,11 @@ async def test_harbor_lifecycle_cancellation_missing_phase_and_heartbeat(monkeyp
         exception_info=None,
         compute_token_cost_totals=lambda: (10, 3, 4, None),
     )
+    await observer(SimpleNamespace(event=SimpleNamespace(value="start"), trial_id="t2", task_name="task", result=None))
     await observer(
-        SimpleNamespace(event=SimpleNamespace(value="start"), trial_id="t2", task_name="task", result=None)
-    )
-    await observer(
-        SimpleNamespace(event=SimpleNamespace(value="result_persistence_start"), trial_id="t2", task_name="task", result=result)
+        SimpleNamespace(
+            event=SimpleNamespace(value="result_persistence_start"), trial_id="t2", task_name="task", result=result
+        )
     )
     await observer(SimpleNamespace(event=SimpleNamespace(value="end"), trial_id="t2", task_name="task", result=result))
     failed_result = SimpleNamespace(
@@ -150,9 +153,7 @@ async def test_harbor_lifecycle_cancellation_missing_phase_and_heartbeat(monkeyp
         (1, {"outcome": "success", "exception_class": "none"}),
         (1, {"outcome": "failure", "exception_class": "SandboxError"}),
     ]
-    assert recorders["trial_retries"].calls == [
-        (1, {"reason": "SandboxError", "subsystem": "harbor"})
-    ]
+    assert recorders["trial_retries"].calls == [(1, {"reason": "SandboxError", "subsystem": "harbor"})]
 
 
 def test_harbor_group_tail_math_ignores_exception_results(monkeypatch):
