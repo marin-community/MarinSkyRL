@@ -41,6 +41,7 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedR
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from dataclasses import dataclass, field
 from skyrl_train.utils.data_tracker import DataConsumptionTracker
+from skyrl_train.callbacks.base import TrainerState
 from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpointCallback
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Literal, Tuple, TypeVar
@@ -640,6 +641,34 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 t.cancel()
         self._active_trajectory_tasks = []
 
+    async def _quiesce_trajectory_tasks(self, tasks: List[asyncio.Task], *, reason: str) -> None:
+        """Cancel and drain generation tasks before a lifecycle boundary.
+
+        Awaiting the tasks is load-bearing for terminal evaluation: trajectory runners use
+        cancellation to unwind provider work and Harbor RPCs.  Merely calling ``cancel()`` would
+        let evaluation race the still-running remote work that it is meant to replace.
+        """
+        n_running = sum(1 for task in tasks if not task.done())
+        if n_running:
+            logger.info(f"Quiescing {n_running} trajectory tasks before {reason}")
+            for task in tasks:
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        assert all(task.done() for task in tasks), f"Trajectory tasks remained live after {reason}"
+        if self._active_trajectory_tasks is tasks:
+            self._active_trajectory_tasks = []
+
+    async def _quiesce_terminal_trajectory_tasks(
+        self,
+        state: TrainerState,
+        tasks: List[asyncio.Task],
+    ) -> None:
+        """Stop speculative training work before terminal-step callbacks can evaluate."""
+        if state.is_last_step:
+            with Timer("terminal_generation_quiescence", self.all_timings):
+                await self._quiesce_trajectory_tasks(tasks, reason="terminal-step callbacks")
+
     def _restore_buffer_from_checkpoint(self, queues: _GenerationQueues, checkpoint_path: str) -> None:
         """Restore completed, admitted, and retryable rollout work from a checkpoint."""
         retention_observer = queues.retention_observer
@@ -1076,6 +1105,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     logger.info(status)
                     self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                     step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
+                    await self._quiesce_terminal_trajectory_tasks(step_state, trajectory_tasks)
                     await self._run_step_end_callbacks(step_state)
 
                 if self._training_metrics_enabled:
@@ -1161,14 +1191,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 with Timer("update_ref_with_policy", self.all_timings):
                     await asyncio.to_thread(self.update_ref_with_policy)
 
-            # Cancel generation tasks for this epoch
-            for t in trajectory_tasks:
-                t.cancel()
-            try:
-                await asyncio.gather(*trajectory_tasks, return_exceptions=True)
-            except Exception:
-                pass
-            self._active_trajectory_tasks = []
+            # Cancel generation tasks for this epoch. Terminal steps already quiesced them before
+            # evaluation; this remains the normal non-terminal epoch boundary path.
+            await self._quiesce_trajectory_tasks(trajectory_tasks, reason="epoch boundary")
 
             # Per-epoch reset/validation for data loading and staleness management
             assert all(t.done() for t in trajectory_tasks), (

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,6 +45,7 @@ def _bare_trainer(
     trainer.group_admission_stall_timeout = admission_stall_timeout
     trainer._active_trajectory_tasks = tasks or []
     trainer.global_step = 0
+    trainer.all_timings = {}
     trainer.all_metrics = {}
     trainer._groups_rejected_since_step = 0
     trainer._rejection_reasons_since_step = collections.Counter()
@@ -146,3 +148,42 @@ async def test_get_admitted_batch_returns_complete_group_set():
 
     batch = await trainer._get_admitted_generation_group_mini_batch(queues)
     assert len(batch) == 2
+
+
+@pytest.mark.asyncio
+async def test_terminal_step_quiesces_generation_before_callbacks():
+    trainer = _bare_trainer()
+    stopped = asyncio.Event()
+
+    async def producer():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    task = asyncio.create_task(producer())
+    await asyncio.sleep(0)
+    tasks = [task]
+    trainer._active_trajectory_tasks = tasks
+
+    await trainer._quiesce_terminal_trajectory_tasks(SimpleNamespace(is_last_step=True), tasks)
+
+    assert stopped.is_set()
+    assert task.done()
+    assert trainer._active_trajectory_tasks == []
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_step_preserves_async_generation_overlap():
+    trainer = _bare_trainer()
+    task = asyncio.create_task(asyncio.Event().wait())
+    tasks = [task]
+    trainer._active_trajectory_tasks = tasks
+    try:
+        await trainer._quiesce_terminal_trajectory_tasks(SimpleNamespace(is_last_step=False), tasks)
+
+        assert not task.done()
+        assert trainer._active_trajectory_tasks is tasks
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

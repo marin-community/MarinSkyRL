@@ -495,9 +495,27 @@ class RolloutDispatcher:
                 self._actor_last_progress[coordinator_index] = loop.time()
                 outcome = "success"
                 return output
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancellation:
             outcome = "cancelled"
-            raise
+            # Cancellation of the local await does not cancel a Ray ObjectRef. Keep the
+            # coordinator counted as pending until cooperative remote cancellation has settled,
+            # otherwise terminal evaluation can replace its orchestrator while training trials
+            # are still live on the same shard.
+            if not rpc_future.done():
+                try:
+                    ray.cancel(rpc, force=False, recursive=True)
+                except Exception:
+                    _log().exception(f"[RolloutDispatcher] failed to cancel coordinator {coordinator_index} RPC")
+                else:
+                    try:
+                        await asyncio.shield(rpc_future)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        # Cancellation is the expected terminal state. The original local
+                        # CancelledError remains authoritative even if remote cleanup fails.
+                        pass
+            raise cancellation
         except RolloutCoordinatorRPCTimeoutError:
             outcome = "timeout"
             raise
