@@ -53,12 +53,18 @@ class RatioDiagnosticsSettings:
 def ratio_diagnostics_settings(algorithm_cfg) -> RatioDiagnosticsSettings:
     """Read the ratio-diagnostics section; the single fallback for an absent one.
 
-    ``pooled`` is null in the shipped config until validate_cfg resolves it from the strategy.
+    ``pooled`` is null in the shipped config until validate_cfg resolves it from the strategy; reading
+    it unresolved is an error rather than a silent second default.
     """
     section = algorithm_cfg.get("ratio_diagnostics") or {}
+    pooled = section.get("pooled", False)
+    if pooled is None:
+        raise ValueError(
+            "trainer.algorithm.ratio_diagnostics.pooled is null; validate_cfg resolves it from the strategy first"
+        )
     return RatioDiagnosticsSettings(
         position_window=int(section.get("position_window", DEFAULT_POSITION_WINDOW)),
-        pooled=bool(section.get("pooled") or False),
+        pooled=bool(pooled),
         exact_quantiles=bool(section.get("exact_quantiles", False)),
     )
 

@@ -678,6 +678,7 @@ def validate_cfg(cfg: DictConfig):
     if cfg.generator.gdn_backend not in set(GDNBackend):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
     validate_generator_cfg(cfg)
+    resolve_ratio_diagnostics_pooled(cfg)
     validate_telemetry_gates(cfg)
     validate_batch_invariant_config(cfg)
     validate_moe_router_replay_config(cfg)
@@ -890,12 +891,19 @@ def validate_telemetry_gates(cfg: DictConfig) -> None:
         cfg.trainer.strategy != "megatron" or not cfg.trainer.policy_train_spans
     ):
         raise ValueError("optimizer_state_metrics requires Megatron and policy_train_spans for phase memory peaks")
+    if ratio_diagnostics_settings(cfg.trainer.algorithm).pooled and cfg.trainer.strategy != "megatron":
+        raise ValueError(
+            "trainer.algorithm.ratio_diagnostics.pooled reduces across Megatron data-parallel ranks; "
+            "FSDP has no such path"
+        )
+
+
+def resolve_ratio_diagnostics_pooled(cfg: DictConfig) -> None:
+    """Write the strategy's pooling default where the config left ``pooled`` null."""
     ratio_diagnostics = cfg.trainer.algorithm.get("ratio_diagnostics")
     if ratio_diagnostics is not None and ratio_diagnostics.get("pooled") is None:
-        # null follows the strategy: Megatron's data-parallel ranks can pool, FSDP has no such path.
+        # Megatron's data-parallel ranks can pool; FSDP has no such path.
         ratio_diagnostics["pooled"] = cfg.trainer.strategy == "megatron"
-    if ratio_diagnostics_settings(cfg.trainer.algorithm).pooled and cfg.trainer.strategy != "megatron":
-        raise ValueError("ratio_diagnostics.pooled reduces across Megatron data-parallel ranks; FSDP has no such path")
 
 
 def validate_batch_invariant_config(cfg: DictConfig) -> None:

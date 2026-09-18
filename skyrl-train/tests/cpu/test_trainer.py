@@ -43,7 +43,7 @@ import numpy as np
 from skyrl_train.distillation import SampledReverseKLInput, SparseForwardKLInput, TopKTeacherEvidence
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
-from skyrl_train.utils.utils import validate_batch_sizes
+from skyrl_train.utils.utils import validate_batch_sizes, resolve_ratio_diagnostics_pooled
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
 from tests.grug_training_parity import ORACLE_FIXTURE_DIR
@@ -1974,6 +1974,7 @@ def test_default_grug_ppo_train_keeps_query_bias_exact_across_optimizer_steps():
     causal_lm.set_query_bias(frozen_bias)
 
     cfg = get_default_config()
+    resolve_ratio_diagnostics_pooled(cfg)  # validate_cfg does this in the driver; the worker reads the resolved value
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.algorithm.loss_reduction = "token_mean"
@@ -2008,6 +2009,7 @@ def _grug_query_bias_after_policy_training(mode, interpolation_weight=None, upda
     initial_bias = torch.stack([layer.mlp.router.bias for layer in causal_lm.model.layers]).clone()
 
     cfg = get_default_config()
+    resolve_ratio_diagnostics_pooled(cfg)  # validate_cfg does this in the driver; the worker reads the resolved value
     cfg.trainer.policy.grug_query_bias_update_mode = mode
     cfg.trainer.policy.grug_query_bias_interpolation_weight = interpolation_weight
     cfg.trainer.policy.grug_query_bias_update_rate = update_rate

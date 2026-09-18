@@ -12,7 +12,7 @@ import torch
 
 from omegaconf import OmegaConf
 
-from skyrl_train.utils.utils import validate_telemetry_gates
+from skyrl_train.utils.utils import resolve_ratio_diagnostics_pooled, validate_telemetry_gates
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
     QUANTILE_ELEMENT_LIMIT,
@@ -250,14 +250,17 @@ def test_exact_quantiles_gate_decides_whether_tokens_are_retained():
 def test_shipped_ratio_diagnostics_pool_on_megatron_and_cost_nothing_elsewhere():
     config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
     assert config.trainer.algorithm.ratio_diagnostics.pooled is None
-    unresolved = ratio_diagnostics_settings(config.trainer.algorithm)
-    assert not unresolved.pooled and not unresolved.exact_quantiles and unresolved.position_window == 256
-    assert ratio_diagnostics_settings(OmegaConf.create({})) == unresolved
+    with pytest.raises(ValueError, match="pooled is null"):
+        ratio_diagnostics_settings(config.trainer.algorithm)
+    absent = ratio_diagnostics_settings(OmegaConf.create({}))
+    assert not absent.pooled and not absent.exact_quantiles and absent.position_window == 256
 
     fsdp = OmegaConf.merge(config, {"trainer": {"strategy": "fsdp2"}})
+    resolve_ratio_diagnostics_pooled(fsdp)
     validate_telemetry_gates(fsdp)
     assert fsdp.trainer.algorithm.ratio_diagnostics.pooled is False
     megatron = OmegaConf.merge(config, {"trainer": {"strategy": "megatron"}})
+    resolve_ratio_diagnostics_pooled(megatron)
     validate_telemetry_gates(megatron)
     assert megatron.trainer.algorithm.ratio_diagnostics.pooled is True
 
