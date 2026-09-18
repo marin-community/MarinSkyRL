@@ -260,8 +260,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def pause_generation(self) -> None:
         return await self.inference_engine_actor.pause_generation.remote()
 
-    async def resume_generation(self) -> None:
-        return await self.inference_engine_actor.resume_generation.remote()
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        return await self.inference_engine_actor.resume_generation.remote(policy_version=policy_version)
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]):
         return await self.inference_engine_actor.begin_online_eagle_capture.remote(config)

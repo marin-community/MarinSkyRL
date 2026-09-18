@@ -91,6 +91,9 @@ def mock_llm():
             # say response gets tokenized to 3 tokens
             "response_logprobs": [[0.1] * len(MOCK_LLM_OUTPUT_IDS)] * num_prompts,
             "response_ids": [MOCK_LLM_OUTPUT_IDS.copy()] * num_prompts,
+            "response_policy_version_segments": [
+                [{"start": 0, "token_count": len(MOCK_LLM_OUTPUT_IDS), "policy_version": 0}] for _ in range(num_prompts)
+            ],
         }
 
     mock.generate = AsyncMock(side_effect=mock_generate)
@@ -787,6 +790,7 @@ async def test_non_batched_terminal_assembly_masks_unsampled_tokens(
         "stop_reasons": [stop_reason],
         "response_ids": [response_ids],
         "response_logprobs": [response_logprobs],
+        "response_policy_version_segments": [[{"start": 0, "token_count": len(response_ids), "policy_version": 0}]],
     }
 
     trajectory_runner = SkyRLGymTrajectoryRunner(
@@ -814,6 +818,9 @@ async def test_non_batched_terminal_assembly_masks_unsampled_tokens(
         if trainable
     ]
     assert sampled_trainable_logprobs == response_logprobs
+    assert list(output.behavior_policy_version_segments or ()) == [
+        {"start": 0, "token_count": len(response_ids), "policy_version": 0}
+    ]
 
 
 @pytest.mark.asyncio
@@ -841,6 +848,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "response_logprobs": [[-0.1, -0.2]],
             "student_topk_indices": [[[11, 12], [13, 14]]],
             "behavior_topk_logprobs": [[[-0.1, -2.0], [-0.2, -1.9]]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 0}]],
         },
         {
             "responses": ["second"],
@@ -849,6 +857,7 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
             "response_logprobs": [[-0.3, -0.4]],
             "student_topk_indices": [[[21, 22], [23, 24]]],
             "behavior_topk_logprobs": [[[-0.3, -1.8], [-0.4, -1.7]]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 1}]],
         },
     ]
 
@@ -891,6 +900,12 @@ async def test_generate_non_batched_multiturn_aligns_rollout_logprobs(
     assert work.request.student_selected_mask.tolist() == [[True, True, False, False, False, False, True, True]]
     assert work.request.student_topk_indices[0, 2:6].tolist() == [[-1, -1]] * 4
     assert np.isnan(work.request.behavior_topk_logprobs[0, 2:6].numpy()).all()
+    assert output["behavior_policy_version_segments"] == [
+        [
+            {"start": 0, "token_count": 2, "policy_version": 0},
+            {"start": 6, "token_count": 2, "policy_version": 1},
+        ]
+    ]
 
 
 @pytest.mark.asyncio
@@ -916,12 +931,14 @@ async def test_generate_non_batched_single_message_multiturn_aligns_rollout_logp
             "stop_reasons": ["stop"],
             "response_ids": [[10, 4]],
             "response_logprobs": [[-0.1, -0.2]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 0}]],
         },
         {
             "responses": ["second"],
             "stop_reasons": ["stop"],
             "response_ids": [[20, 4]],
             "response_logprobs": [[-0.3, -0.4]],
+            "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 1}]],
         },
     ]
 
@@ -942,6 +959,12 @@ async def test_generate_non_batched_single_message_multiturn_aligns_rollout_logp
     assert output["response_ids"] == [[10, *MOCK_TOKENIZER_ENCODED_IDS, 20, 4]]
     assert output["loss_masks"] == [[1, 0, 0, 0, 0, 1, 1]]
     assert output["rollout_logprobs"] == [[-0.1, 0.0, 0.0, 0.0, 0.0, -0.3, -0.4]]
+    assert output["behavior_policy_version_segments"] == [
+        [
+            {"start": 0, "token_count": 1, "policy_version": 0},
+            {"start": 5, "token_count": 2, "policy_version": 1},
+        ]
+    ]
 
 
 @pytest.mark.asyncio
@@ -975,6 +998,7 @@ async def test_non_batched_postprocessed_action_discards_stale_logprobs(
 
     assert output["response_ids"] == [MOCK_TOKENIZER_ENCODED_IDS]
     assert output["rollout_logprobs"] is None
+    assert output.get("behavior_policy_version_segments") is None
 
 
 @pytest.mark.asyncio
@@ -1010,6 +1034,9 @@ async def test_non_batched_postprocessed_action_preserves_aligned_logprobs(
 
     assert output["response_ids"] == [MOCK_LLM_OUTPUT_IDS]
     assert output["rollout_logprobs"] == [[0.1] * len(MOCK_LLM_OUTPUT_IDS)]
+    assert output["behavior_policy_version_segments"] == [
+        [{"start": 0, "token_count": len(MOCK_LLM_OUTPUT_IDS), "policy_version": 0}]
+    ]
 
 
 @pytest.mark.asyncio

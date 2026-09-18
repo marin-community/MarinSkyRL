@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
 
+from skyrl_train.policy_version import PolicyVersionSegment
+
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 OnlineEagleResult = Dict[str, Any] | List[Dict[str, Any]]
@@ -48,6 +50,9 @@ class InferenceEngineOutput(TypedDict):
     # also be returned by vLLM, but is not forced into these top-K rows.
     student_topk_indices: NotRequired[List[List[List[int]]]]
     behavior_topk_logprobs: NotRequired[List[List[List[float]]]]
+    # Compact spans aligned with response_ids. A None version is explicit missing
+    # receiver evidence and must be rejected by learner-backed async training.
+    response_policy_version_segments: NotRequired[List[List[PolicyVersionSegment]]]
     # prompt_logprobs: per-prompt-token top-K logprobs from vLLM (for teacher scoring).
     # Format: List[List[Optional[Dict[int, float]]]] — outer list is batch,
     # inner list is prompt positions, dict maps token_id → logprob.
@@ -176,8 +181,8 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def resume_generation(self) -> None:
-        """Resume the scheduler after a weight update."""
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        """Resume after a weight update, optionally naming the installed policy."""
         raise NotImplementedError()
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> OnlineEagleResult:

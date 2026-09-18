@@ -7,6 +7,7 @@ from omegaconf import DictConfig
 
 from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
+from skyrl_train.policy_version import BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY
 from skyrl_gym.verification import RewardResult, TrainingDisposition
 from skyrl_train.trajectory_runners.types import (
     AgentLoopOutput,
@@ -92,6 +93,7 @@ class WholeTrajectoryProjection:
             actual_global_step=minimum_captured_global_step(outputs),
         )
         attach_student_topk(batch, outputs, responses, loss_masks)
+        _attach_behavior_policy_versions(batch, outputs)
         attach_terminal_classifications(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
         return batch
@@ -153,6 +155,7 @@ class StepWiseTrajectoryProjection:
             actual_global_step=minimum_captured_global_step(steps),
         )
         attach_student_topk(batch, steps, responses, loss_masks)
+        _attach_behavior_policy_versions(batch, steps)
         attach_terminal_classifications(batch, steps)
         _attach_reward_channels(batch, steps, responses)
         return batch
@@ -230,6 +233,15 @@ def _loss_masks(outputs, responses, runner_cfg: DictConfig, tokenizer):
     if runner_cfg.apply_overlong_filtering:
         return apply_overlong_filtering(loss_masks, responses, tokenizer.eos_token_id)
     return loss_masks
+
+
+def _attach_behavior_policy_versions(batch: TrajectoryBatch, outputs: Sequence[AgentLoopOutput]) -> None:
+    """Project only receiver-observed spans; unknown transports keep the key absent."""
+
+    rows = [output.behavior_policy_version_segments for output in outputs]
+    if not any(row is not None for row in rows):
+        return
+    batch[BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY] = [list(row) if row is not None else [] for row in rows]
 
 
 def project_loss_mask(output: TrainableInteraction, response: Sequence[int]) -> list[int]:

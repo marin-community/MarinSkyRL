@@ -1,11 +1,12 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
 
 
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
 from skyrl_train.distillation import DistillationInput, TeacherEvidenceBatch
 from skyrl_train.inference_engines.base import ConversationType
+from skyrl_train.policy_version import PolicyVersionSegment
 
 
 TrainingPhase = Literal["train", "eval"]
@@ -30,6 +31,7 @@ class AgentLoopOutput:
     loss_mask: List[int]
     env_metrics: Dict[str, Any]
     captured_global_step: Optional[int] = None
+    behavior_policy_version_segments: tuple[PolicyVersionSegment, ...] | None = None
     token_provenance: TokenProvenance = TokenProvenance.ENGINE
     error_treatment: Optional[str] = None
 
@@ -109,6 +111,7 @@ class TrajectoryBatch(TypedDict):
     rollout_logprobs: Optional[List[List[float]]]
     student_topk_indices: Optional[List[List[List[int]]]]
     behavior_topk_logprobs: Optional[List[List[List[float]]]]
+    behavior_policy_version_segments: NotRequired[List[List[PolicyVersionSegment]]]
     rollout_routed_experts: Optional[List[List[List[List[int]]]]]
     teacher_evidence: Optional[TeacherEvidenceBatch]
     distillation: Optional[DistillationInput]

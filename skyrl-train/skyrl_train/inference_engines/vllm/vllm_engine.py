@@ -18,6 +18,7 @@ from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
+from skyrl_train.policy_version import PolicyVersionHistory
 from skyrl_train.config.behavior_logprobs import (
     ROLLOUT_LOGPROB_VALIDATION_KEY,
     validate_behavior_logprob_sampling,
@@ -1206,7 +1207,8 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     async def pause_generation(self) -> None:
         raise NotImplementedError("Pausing generation is only supported for AsyncVLLMInferenceEngine.")
 
-    async def resume_generation(self) -> None:
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        del policy_version
         raise NotImplementedError("Resuming generation is only supported for AsyncVLLMInferenceEngine.")
 
 
@@ -1632,6 +1634,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Generate unique engine ID before calling super().__init__() which calls _create_engine
         self._stats_engine_id = uuid4().hex
         self._stats_attributes: Dict[str, str] = {}
+        self._policy_versions = PolicyVersionHistory()
         super().__init__(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
 
@@ -2014,7 +2017,18 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 )
             raise
 
-        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
+        result = self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
+        versions = [
+            self._policy_versions.at_first_token(
+                output.metrics.first_token_ts if output is not None and output.metrics is not None else None
+            )
+            for output in outputs
+        ]
+        result["response_policy_version_segments"] = [
+            ([{"start": 0, "token_count": len(token_ids), "policy_version": policy_version}] if token_ids else [])
+            for token_ids, policy_version in zip(result["response_ids"], versions, strict=True)
+        ]
+        return result
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
@@ -2348,9 +2362,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         await engine.pause_generation(mode="abort", clear_cache=True)
         logger.info(f"pause_generation() finished, aborted {outstanding_requests} requests and paused EngineCore")
 
-    async def resume_generation(self) -> None:
-        """Release the EngineCore scheduler after the weight reload completes."""
-        await self._get_engine().resume_generation()
+    async def resume_generation(self, policy_version: int | None = None) -> None:
+        """Release the scheduler after recording the installed policy version."""
+        engine = self._get_engine()
+        if policy_version is not None:
+            if not await engine.is_paused():
+                raise RuntimeError("cannot install a policy version while the vLLM scheduler is running")
+            # Record before release: first tokens may be emitted while the resume RPC returns.
+            self._policy_versions.record_resume(time.monotonic(), policy_version)
+        await engine.resume_generation()
         logger.info("resume_generation() finished, EngineCore scheduler released")
 
 

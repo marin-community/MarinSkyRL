@@ -19,6 +19,13 @@ from loguru import logger
 
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
+from skyrl_train.policy_version import (
+    BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY,
+    PolicyVersionSegment,
+    append_policy_version_span,
+    truncate_policy_version_segments,
+    validate_policy_version_segments,
+)
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from skyrl_train.error_treatment import ErrorTreatment
@@ -415,6 +422,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         captured_global_step: Optional[int] = None
         token_provenance = TokenProvenance.ENGINE
         continuation_assistant_index: int | None = None
+        behavior_policy_version_segments: list[PolicyVersionSegment] | None = []
+        saw_behavior_policy_versions = False
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -450,6 +459,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             engine_output = await self.model_client.generate(engine_input)
             if engine_output["token_provenance"] == TokenProvenance.RECONSTRUCTED:
                 token_provenance = TokenProvenance.RECONSTRUCTED
+                behavior_policy_version_segments = None
             # Capture global_step after first inference returns — at this point the vLLM
             # engine has definitively served the request with its current weights.
             if captured_global_step is None and global_step_fn is not None:
@@ -471,6 +481,18 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     generated_ids.extend(output_ids)
                     generated_topk_ids.extend(topk_ids)
                     generated_topk_scores.extend(topk_scores)
+            sampled_output_length = len(output_ids)
+            version_rows = engine_output.get("response_policy_version_segments")
+            output_version_segments = list(version_rows[0]) if version_rows is not None else None
+            if version_rows is not None:
+                if len(version_rows) != 1:
+                    raise ValueError("single-response agent loops require one policy-version segment row")
+                validate_policy_version_segments(
+                    output_version_segments,
+                    response_length=sampled_output_length,
+                    require_known=False,
+                )
+                saw_behavior_policy_versions = True
             if chat_completion_params is not None:
                 rendered_prompt_ids = engine_output.get("prompt_ids")
                 if rendered_prompt_ids is None:
@@ -508,6 +530,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         per_step_rewards = canonical_prefix.per_step_rewards
                         token_provenance = TokenProvenance.RECONSTRUCTED
                         selected_capture_possible = False
+                        behavior_policy_version_segments = None
                     else:
                         observation_token_count = len(rendered_prompt_ids[0]) - len(input_ids)
                         loss_mask += [0] * observation_token_count
@@ -562,6 +585,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 initial_prompt_length = 0
                 loss_mask = []
                 rollout_logprobs = [] if collect_logprobs else None
+                behavior_policy_version_segments = []
+                saw_behavior_policy_versions = False
                 per_step_rewards = []
                 verification_results = []
                 continuation_assistant_index = None
@@ -587,9 +612,30 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     rollout_logprobs = None
                 if postprocessed_output_ids != output_ids:
                     selected_capture_possible = False
+                    output_version_segments = None
+                    behavior_policy_version_segments = None
                 output_ids = postprocessed_output_ids
 
             # 3. Update states: input ids, loss_mask, chat_history, etc.
+            response_offset = len(input_ids) - initial_prompt_length
+            if behavior_policy_version_segments is not None and output_version_segments is not None:
+                retained_sampled_length = sampled_output_length
+                if (
+                    chat_completion_params is None
+                    and not retokenize_chat_history
+                    and not self.use_conversation_multi_turn
+                    and not done
+                    and output_ids
+                    and output_ids[-1] == self.tokenizer.eos_token_id
+                ):
+                    retained_sampled_length -= 1
+                for segment in truncate_policy_version_segments(output_version_segments, retained_sampled_length):
+                    append_policy_version_span(
+                        behavior_policy_version_segments,
+                        start=response_offset + segment["start"],
+                        token_count=segment["token_count"],
+                        policy_version=segment["policy_version"],
+                    )
             # Three ways of managing input
             if chat_completion_params is not None:
                 input_ids += output_ids
@@ -613,6 +659,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 # Re-tokenizing text can change token boundaries, so engine logprobs no
                 # longer have an exact position in the returned response.
                 rollout_logprobs = None
+                behavior_policy_version_segments = None
                 # TODO(tgriggs): Support turn-level rewards for multi-turn chat template
                 per_step_rewards.append((step_reward, None))
             elif self.use_conversation_multi_turn:
@@ -732,6 +779,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             loss_mask=loss_mask,
             env_metrics=env_metrics,
             captured_global_step=captured_global_step,
+            behavior_policy_version_segments=(
+                tuple(behavior_policy_version_segments)
+                if saw_behavior_policy_versions and behavior_policy_version_segments is not None
+                else None
+            ),
             token_provenance=token_provenance,
         )
 
@@ -789,6 +841,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             len(selected_indices) != len(responses) or len(selected_logprobs) != len(responses)
         ):
             raise ValueError("Inference engine student top-K rows must align with responses")
+        version_rows = engine_output.get("response_policy_version_segments")
 
         truncated_responses = []
         rewards = []
@@ -889,6 +942,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if selected_indices is not None:
             trajectory_batch["student_topk_indices"] = truncated_selected_indices
             trajectory_batch["behavior_topk_logprobs"] = truncated_selected_logprobs
+        if version_rows is not None:
+            if len(version_rows) != len(truncated_responses):
+                raise ValueError("policy-version rows must align with batched responses")
+            trajectory_batch[BEHAVIOR_POLICY_VERSION_SEGMENTS_KEY] = [
+                truncate_policy_version_segments(segments, len(response))
+                for segments, response in zip(version_rows, truncated_responses, strict=True)
+            ]
         attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
 
         return trajectory_batch

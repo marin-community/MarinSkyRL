@@ -37,7 +37,6 @@ from skyrl_train.callbacks.builtin import DataTrackingCallback, BufferCheckpoint
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Literal, Tuple, TypeVar
 from enum import Enum, auto
-from omegaconf import OmegaConf
 from skyrl_train.telemetry import (
     critical_phase,
     record_generated_work,
