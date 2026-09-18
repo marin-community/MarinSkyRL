@@ -142,7 +142,7 @@ def _omit_tied_lm_head_weight(
     params: dict[str, torch.Tensor], config: PretrainedConfig | None
 ) -> dict[str, torch.Tensor]:
     """Omit the output alias that vLLM restores from the tied input embedding."""
-    if getattr(config, "tie_word_embeddings", False):
+    if config is not None and config.tie_word_embeddings:
         return type(params)((name, param) for name, param in params.items() if name != "lm_head.weight")
     return params
 

@@ -41,10 +41,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest, TokenizeResponse
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 
-try:
-    from vllm.v1.metrics.loggers import LoggingStatLogger
-except ImportError:
-    LoggingStatLogger = None  # Not available in all vLLM versions
+from vllm.v1.metrics.loggers import LoggingStatLogger
 from vllm.lora.request import LoRARequest
 from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
@@ -83,7 +80,6 @@ from skyrl_train.inference_engines.vllm.stats import (
 )
 from skyrl_train.utils import get_tcp_url, str_to_torch_dtype, torch_dtype_to_str
 import time
-from packaging import version
 
 
 _exact_chat_prompt_token_ids: ContextVar[list[int] | None] = ContextVar("exact_chat_prompt_token_ids", default=None)
@@ -113,14 +109,6 @@ class SkyRLOpenAIServingChat(OpenAIServingChat):
             return await super().create_chat_completion(request, raw_request)
         finally:
             _exact_chat_prompt_token_ids.reset(token)
-
-
-def _parse_vllm_version() -> version.Version:
-    """Parse vllm.__version__, treating 'dev' or other invalid strings as 999.0.0."""
-    try:
-        return version.Version(vllm.__version__)
-    except version.InvalidVersion:
-        return version.parse("999.0.0")
 
 
 def _build_error_response(message: str, type_phrase: str, code: int) -> Dict[str, Any]:
@@ -1624,13 +1612,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Use factory to inject engine ID into stat logger
         stat_loggers = [self._create_stat_logger_factory()]
 
-        # vLLM >= 0.10 renamed AsyncEngineArgs' `disable_log_requests=True` to
-        # `enable_log_requests=False` (and removed the old kwarg). Gate on the
-        # ACTUAL field set rather than a parsed version number: source-built
-        # vLLM forks report PEP 440-valid dev versions like "0.1.dev16611+g..."
-        # which parse as 0.1 (< 0.10.0) even though they ship the NEW signature,
-        # so `_parse_vllm_version() >= 0.10.0` wrongly took the old branch and
-        # crashed with `unexpected keyword argument 'disable_log_requests'`.
+        # Source-built vLLM forks can report misleading version strings, so use
+        # the installed constructor fields as the compatibility boundary.
         try:
             _engine_arg_fields = {f.name for f in _dataclass_fields(vllm.AsyncEngineArgs)}
         except TypeError:
