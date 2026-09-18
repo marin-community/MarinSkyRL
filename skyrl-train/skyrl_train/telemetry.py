@@ -446,6 +446,14 @@ def record_telemetry_health() -> None:
         record()
 
 
+def _event_body(fields: Mapping[str, object]):
+    """Use Rigging's bounded event payload when that optional surface is installed."""
+    bounded_fields = {name: value for name, value in fields.items() if value is not None}
+    serialization = getattr(telemetry, "serialization", None)
+    event_body = getattr(serialization, "EventBody", None)
+    return event_body(bounded_fields) if event_body is not None else bounded_fields
+
+
 class ProcessTelemetry:
     def __init__(self, config: TelemetryConfig, role: str) -> None:
         self._config = config
@@ -468,7 +476,11 @@ class ProcessTelemetry:
         )
         self._configured = telemetry.runtime_status().configured
         if self._configured:
-            telemetry.event("lifecycle", {"state": "started"}, attributes={"role": self._role})
+            telemetry.event(
+                "lifecycle",
+                _event_body({"state": "started"}),
+                attributes={"role": self._role},
+            )
             telemetry_smoke.set(1, attributes={"role": self._role, "state": "started"})
             record_telemetry_health()
         return self
@@ -483,16 +495,18 @@ class ProcessTelemetry:
             export = telemetry.runtime_status()
             telemetry.event(
                 "terminal",
-                {
-                    "status": "completed" if exc_type is None else "failed",
-                    "reason": "normal_exit" if exc_type is None else getattr(exc_type, "__name__", "exception"),
-                    "export_queued_records": export.queued_records,
-                    "export_lost_records": export.lost_records,
-                    "policy_step": _process_state.policy_step,
-                    "last_progress_time_seconds": _process_state.last_progress_timestamp,
-                    "queue_depth": _process_state.queue_depth,
-                    "queue_capacity": _process_state.queue_capacity,
-                },
+                _event_body(
+                    {
+                        "status": "completed" if exc_type is None else "failed",
+                        "reason": "normal_exit" if exc_type is None else getattr(exc_type, "__name__", "exception"),
+                        "export_queued_records": export.queued_records,
+                        "export_lost_records": export.lost_records,
+                        "policy_step": _process_state.policy_step,
+                        "last_progress_time_seconds": _process_state.last_progress_timestamp,
+                        "queue_depth": _process_state.queue_depth,
+                        "queue_capacity": _process_state.queue_capacity,
+                    }
+                ),
                 attributes={"role": self._role},
             )
             telemetry.shutdown(SHUTDOWN_TIMEOUT_SECONDS)

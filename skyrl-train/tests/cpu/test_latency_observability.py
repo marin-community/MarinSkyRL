@@ -40,6 +40,53 @@ def test_tracker_forwards_only_finite_numeric_metrics_with_step(monkeypatch):
     ]
 
 
+def test_process_lifecycle_uses_bounded_event_bodies(monkeypatch):
+    class EventBody:
+        def __init__(self, fields):
+            assert all(value is not None for value in fields.values())
+            self.fields = fields
+
+    events = []
+    health = []
+    shutdowns = []
+    fake_telemetry = SimpleNamespace(
+        serialization=SimpleNamespace(EventBody=EventBody),
+        configure=lambda **_kwargs: None,
+        runtime_status=lambda: SimpleNamespace(
+            configured=True,
+            queued_records=0,
+            lost_records=0,
+        ),
+        event=lambda name, body, *, attributes: events.append((name, body, attributes)),
+        record_runtime_health=lambda: health.append(True),
+        shutdown=lambda timeout: shutdowns.append(timeout),
+    )
+    smoke = _Recorder()
+    monkeypatch.setattr(trainer_telemetry, "telemetry", fake_telemetry)
+    monkeypatch.setattr(trainer_telemetry, "telemetry_smoke", smoke)
+
+    config = trainer_telemetry.TelemetryConfig(endpoint="http://telemetry", run_id="run", execution_uid="exec")
+    with trainer_telemetry.ProcessTelemetry(config, trainer_telemetry.TRAINER_ROLE):
+        pass
+
+    assert [(name, body.fields, attributes) for name, body, attributes in events] == [
+        ("lifecycle", {"state": "started"}, {"role": "trainer"}),
+        (
+            "terminal",
+            {
+                "status": "completed",
+                "reason": "normal_exit",
+                "export_queued_records": 0,
+                "export_lost_records": 0,
+            },
+            {"role": "trainer"},
+        ),
+    ]
+    assert smoke.calls == [(1, {"role": "trainer", "state": "started"})]
+    assert len(health) == 2
+    assert shutdowns == [trainer_telemetry.SHUTDOWN_TIMEOUT_SECONDS]
+
+
 @pytest.mark.asyncio
 async def test_executor_cancellation_preserves_work_cleanup(monkeypatch):
     work = _Recorder()
