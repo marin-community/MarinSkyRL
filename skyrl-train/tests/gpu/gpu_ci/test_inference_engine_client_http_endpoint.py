@@ -63,6 +63,7 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> DictConfig:
         # Override specific parameters
         cfg.trainer.policy.model.path = model
         cfg.trainer.critic.model.path = ""
+        cfg.trainer.flash_attn = True
         cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
         cfg.generator.async_engine = True
         cfg.generator.num_inference_engines = num_inference_engines
@@ -96,7 +97,7 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend):
         if test_type != "litellm":
             # Cannot check for litellm because it returns it has its own pydantic object
             if backend == "vllm":
-                from vllm.entrypoints.openai.protocol import ChatCompletionResponse
+                from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
 
                 ChatCompletionResponse.model_validate(response_data)  # will raise error if invalid
             else:
@@ -149,7 +150,7 @@ def _check_completions_outputs(prompts, outputs, test_type, backend):
 
         if test_type != "litellm":
             if backend == "vllm":
-                from vllm.entrypoints.openai.protocol import CompletionResponse
+                from vllm.entrypoints.openai.completion.protocol import CompletionResponse
 
                 CompletionResponse.model_validate(response_data)
             else:
@@ -364,7 +365,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
             for conv in test_prompts_conv_list[: num_samples // 2]
         ] + [
-            tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=True)
+            tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=True, return_dict=False)
             for conv in test_prompts_conv_list[num_samples // 2 :]
         ]
 
@@ -531,7 +532,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
             for conv in test_prompts_conv_list[: num_samples // 2]
         ] + [
-            tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=True)
+            tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=True, return_dict=False)
             for conv in test_prompts_conv_list[num_samples // 2 :]
         ]
 
