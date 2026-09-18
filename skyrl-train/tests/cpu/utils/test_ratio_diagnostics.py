@@ -12,6 +12,8 @@ import torch
 
 from omegaconf import OmegaConf
 
+from skyrl_train.utils.utils import validate_telemetry_gates
+
 from skyrl_train.utils.importance_ratio_diagnostics import (
     QUANTILE_ELEMENT_LIMIT,
     LogRatioMonitor,
@@ -245,9 +247,30 @@ def test_exact_quantiles_gate_decides_whether_tokens_are_retained():
     assert off["log_ratio_abs_mean"] == on["log_ratio_abs_mean"]
 
 
-def test_shipped_ratio_diagnostics_defaults_cost_nothing():
+def test_shipped_ratio_diagnostics_pool_on_megatron_and_cost_nothing_elsewhere():
     config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
-    settings = ratio_diagnostics_settings(config.trainer.algorithm)
-    assert not settings.pooled and not settings.exact_quantiles
-    assert settings.position_window == 256
-    assert ratio_diagnostics_settings(OmegaConf.create({})) == settings
+    assert config.trainer.algorithm.ratio_diagnostics.pooled is None
+    unresolved = ratio_diagnostics_settings(config.trainer.algorithm)
+    assert not unresolved.pooled and not unresolved.exact_quantiles and unresolved.position_window == 256
+    assert ratio_diagnostics_settings(OmegaConf.create({})) == unresolved
+
+    fsdp = OmegaConf.merge(config, {"trainer": {"strategy": "fsdp2"}})
+    validate_telemetry_gates(fsdp)
+    assert fsdp.trainer.algorithm.ratio_diagnostics.pooled is False
+    megatron = OmegaConf.merge(config, {"trainer": {"strategy": "megatron"}})
+    validate_telemetry_gates(megatron)
+    assert megatron.trainer.algorithm.ratio_diagnostics.pooled is True
+
+
+def test_an_explicit_pooled_setting_is_kept_and_rejected_where_it_cannot_pool():
+    config = OmegaConf.load(Path(__file__).parents[3] / "skyrl_train/config/ppo_base_config.yaml")
+    off_on_megatron = OmegaConf.merge(
+        config, {"trainer": {"strategy": "megatron", "algorithm": {"ratio_diagnostics": {"pooled": False}}}}
+    )
+    validate_telemetry_gates(off_on_megatron)
+    assert off_on_megatron.trainer.algorithm.ratio_diagnostics.pooled is False
+    on_fsdp = OmegaConf.merge(
+        config, {"trainer": {"strategy": "fsdp2", "algorithm": {"ratio_diagnostics": {"pooled": True}}}}
+    )
+    with pytest.raises(ValueError, match="pooled"):
+        validate_telemetry_gates(on_fsdp)

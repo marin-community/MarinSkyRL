@@ -890,6 +890,10 @@ def validate_telemetry_gates(cfg: DictConfig) -> None:
         cfg.trainer.strategy != "megatron" or not cfg.trainer.policy_train_spans
     ):
         raise ValueError("optimizer_state_metrics requires Megatron and policy_train_spans for phase memory peaks")
+    ratio_diagnostics = cfg.trainer.algorithm.get("ratio_diagnostics")
+    if ratio_diagnostics is not None and ratio_diagnostics.get("pooled") is None:
+        # null follows the strategy: Megatron's data-parallel ranks can pool, FSDP has no such path.
+        ratio_diagnostics["pooled"] = cfg.trainer.strategy == "megatron"
     if ratio_diagnostics_settings(cfg.trainer.algorithm).pooled and cfg.trainer.strategy != "megatron":
         raise ValueError("ratio_diagnostics.pooled reduces across Megatron data-parallel ranks; FSDP has no such path")
 

@@ -213,8 +213,10 @@ trainer:
     ratio_diagnostics:
       # Absolute position buckets the dashboard reads as pos_first256/pos_last256.
       position_window: 256
-      # Pooling across data-parallel ranks costs collectives per optimizer minibatch.
-      pooled: false
+      # Pool the mismatch statistics across data-parallel ranks, about eight collectives per
+      # optimizer minibatch. null follows the strategy: on for Megatron, off for FSDP, which has
+      # no pooling path; true/false overrides, and true is rejected on FSDP.
+      pooled: null
       # Exact pooled |log ratio| p50/p95 and clip pressure for the stale family.
       # Retains up to 4M float32 values per rank and syncs once per micro-batch.
       exact_quantiles: false

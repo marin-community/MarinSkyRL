@@ -51,11 +51,14 @@ class RatioDiagnosticsSettings:
 
 
 def ratio_diagnostics_settings(algorithm_cfg) -> RatioDiagnosticsSettings:
-    """Read the ratio-diagnostics section; the single fallback for an absent one."""
+    """Read the ratio-diagnostics section; the single fallback for an absent one.
+
+    ``pooled`` is null in the shipped config until validate_cfg resolves it from the strategy.
+    """
     section = algorithm_cfg.get("ratio_diagnostics") or {}
     return RatioDiagnosticsSettings(
         position_window=int(section.get("position_window", DEFAULT_POSITION_WINDOW)),
-        pooled=bool(section.get("pooled", False)),
+        pooled=bool(section.get("pooled") or False),
         exact_quantiles=bool(section.get("exact_quantiles", False)),
     )
 
