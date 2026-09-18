@@ -74,8 +74,8 @@ from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_lo
 
 FIRST_TOKEN_VERSION_MISSING = (
     "trainer.fully_async.first_token_admission=true needs the version that sampled each rollout's first "
-    "token, which only the direct vLLM generate() path reports; this trajectory runner or model client "
-    "carries none"
+    "token; the vLLM generate() path and the OpenAI chat route through InferenceEngineClient report it, "
+    "and this trajectory runner or model client carried none"
 )
 
 _QueueItem = TypeVar("_QueueItem")

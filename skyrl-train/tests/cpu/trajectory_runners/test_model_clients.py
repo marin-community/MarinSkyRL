@@ -228,12 +228,24 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
 
 
 @pytest.mark.asyncio
-async def test_http_model_client_normalizes_chat_completion():
+async def test_http_model_client_returns_the_engines_tokens_logprobs_and_version_spans():
     requests = []
 
     async def complete(request):
         requests.append(await request.json())
-        return web.json_response({"choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}]})
+        return web.json_response(
+            {
+                "choices": [
+                    {
+                        "message": {"content": "answer"},
+                        "finish_reason": "stop",
+                        "token_ids": [7, 8],
+                        "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+                        "policy_version_segments": [{"start": 0, "token_count": 2, "policy_version": 3}],
+                    }
+                ]
+            }
+        )
 
     app = web.Application()
     app.router.add_post("/v1/chat/completions", complete)
@@ -243,19 +255,13 @@ async def test_http_model_client_normalizes_chat_completion():
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
 
-    class Tokenizer:
-        def encode(self, text, add_special_tokens=False):
-            assert text == "answer"
-            assert add_special_tokens is False
-            return [7, 8]
-
     try:
-        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=Tokenizer())
+        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=object())
         output = await client.generate(
             {
                 "prompts": [[{"role": "user", "content": "question"}]],
                 "session_ids": ["trajectory-1"],
-                "sampling_params": {"temperature": 0.7, "max_generate_length": 256},
+                "sampling_params": {"temperature": 0.7, "max_generate_length": 256, "logprobs": 0},
             }
         )
     finally:
@@ -268,16 +274,42 @@ async def test_http_model_client_normalizes_chat_completion():
             "session_id": "trajectory-1",
             "temperature": 0.7,
             "max_completion_tokens": 256,
+            "return_token_ids": True,
+            "logprobs": True,
         }
     ]
     assert output == {
         "responses": ["answer"],
         "response_ids": [[7, 8]],
         "stop_reasons": ["stop"],
-        "response_logprobs": None,
+        "response_logprobs": [[-0.1, -0.2]],
         "prompt_logprobs": None,
-        "token_provenance": "reconstructed",
+        "token_provenance": "engine",
+        "response_policy_version_segments": [[{"start": 0, "token_count": 2, "policy_version": 3}]],
     }
+
+
+@pytest.mark.asyncio
+async def test_http_model_client_refuses_a_response_without_exact_tokens():
+    async def complete(request):
+        return web.json_response({"choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}]})
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", complete)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+
+    try:
+        client = OpenAIHTTPModelClient(base_url=f"http://127.0.0.1:{port}", model_name="policy", tokenizer=object())
+        with pytest.raises(RuntimeError, match="exact response token IDs"):
+            await client.generate(
+                {"prompts": [[{"role": "user", "content": "question"}]], "sampling_params": {"max_generate_length": 8}}
+            )
+    finally:
+        await runner.cleanup()
 
 
 @pytest.mark.asyncio

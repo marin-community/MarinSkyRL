@@ -125,9 +125,10 @@ For fully async specifically, the following are the main knobs to tune:
   counts from the trainer's step at submission, which can be earlier than the version that actually sampled the
   group when a request waited in the engine's queue across a weight sync. ``true`` counts from the oldest policy
   version that sampled any of the group's tokens, plus one — the engines stamp every sampled span with the version
-  they had installed, and a span sampled after a weight sync carries the newer one. Only the direct vLLM
-  ``generate()`` path carries the stamp; a run whose rollouts go through the OpenAI chat route fails at its first
-  admission with this on.
+  they had installed, and a span sampled after a weight sync carries the newer one. On the OpenAI chat route the
+  client stamps each attempt with the version installed when it was sent, which is the sampling version under
+  ``pause_mode: abort`` and at most one version old under ``keep``; other engines carry no version, and a run
+  sampling through them fails at its first admission with this on.
 - ``trainer.fully_async.max_buffered_groups``: How many finished groups the completed buffer holds before a
   generation worker waits with its finished group in hand. ``null`` (the default) means one slot per generation
   worker, so no worker ever waits. A finished group ages the same whether it waits in the buffer or in its worker,

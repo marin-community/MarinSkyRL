@@ -82,6 +82,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.http_endpoint_port = full_config.generator.http_endpoint_port
         self.enable_opencode_exact_continuation = opencode_exact_continuation_enabled(full_config)
         self.generation_paused_event = threading.Event()
+        # The policy version the trainer named at the last resume; None until it names one.
+        self._installed_policy_version: Optional[int] = None
         self._dead_engines: set[int] = set()
 
         # ---- Load-aware session routing state ----
@@ -671,6 +673,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 1. Loop until the generation is completed.
         while finish_reason == ABORT_FINISH_REASON:
             await self._wait_for_generation_to_resume()
+            # Under abort mode an attempt that produced tokens ran entirely between two weight
+            # syncs: the pause cancels every request in flight and new attempts wait for the
+            # resume. The version installed when the attempt is sent is therefore the version
+            # that sampled every token it returns. Under keep mode a frozen request continues
+            # under the next version, so this stamp can be one version old, never too new.
+            attempt_version = self._installed_policy_version
 
             # 1.1. Prepare the request payload.
             cur_request_json = _prepare_retry_request(
@@ -730,6 +738,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 return partial_response
 
             # 1.3. Parse partial response and in-place update accumulators.
+            tokens_before = accum.completion_tokens
             finish_reason, stop_reason, response_role, aborted_without_generating = (
                 _parse_partial_response_and_inplace_update_accum(
                     partial_response=partial_response,
@@ -741,6 +750,12 @@ class InferenceEngineClient(InferenceEngineInterface):
             # 1.4. Aborted without generating tokens, so partial_response is useless.
             if aborted_without_generating:
                 continue
+            if attempt_version is not None:
+                append_policy_version_segment(
+                    accum.policy_version_segments,
+                    token_count=accum.completion_tokens - tokens_before,
+                    policy_version=attempt_version,
+                )
 
             # At this point, either some tokens were generated and/or request completed with a non-"abort" finish_reason
 
@@ -749,6 +764,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if finish_reason != ABORT_FINISH_REASON:
                     # If we only made one request and it is not aborted, return the partial result directly.
                     # This is the codepath that will hit when we do not use `pause_generation()` or `resume_generation()`.
+                    if accum.policy_version_segments:
+                        partial_response["choices"][0]["policy_version_segments"] = accum.policy_version_segments
                     return partial_response
                 # NOTE(Charlie): not doing deepcopy here to avoid copying large logprobs, so be careful when modifying this.
                 base_response = partial_response.copy()
@@ -1109,6 +1126,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         if policy_version is None:
             await self._run_on_all_engines("resume_generation")
         else:
+            # Recorded before the waiters are released, so every chat attempt sent after this
+            # resume reads the version the engines now serve.
+            self._installed_policy_version = policy_version
             await self._run_on_all_engines("resume_generation", policy_version=policy_version)
         self.generation_paused_event.clear()
 
@@ -1237,6 +1257,8 @@ class AccumulatedResponse:
     logprobs_content: List[Any] = field(default_factory=list)
     token_ids: List[int] = field(default_factory=list)
     completion_tokens: int = 0
+    # One span per attempt that produced tokens, stamped with the version installed when it was sent.
+    policy_version_segments: List[PolicyVersionSegment] = field(default_factory=list)
 
 
 def _prepare_retry_request(
@@ -1366,6 +1388,8 @@ def _build_final_response(
         final_choice["logprobs"]["content"] = accum.logprobs_content
     if final_choice.get("token_ids", None) is not None:
         final_choice["token_ids"] = accum.token_ids
+    if accum.policy_version_segments:
+        final_choice["policy_version_segments"] = accum.policy_version_segments
 
     # Set last response's finish_reason and stop_reason.
     final_choice["finish_reason"] = finish_reason

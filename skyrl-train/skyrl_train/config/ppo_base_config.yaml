@@ -296,9 +296,11 @@ trainer:
     max_buffered_groups: null
     # Count a group's staleness from the policy version installed when its first token was
     # sampled (plus one, the step that version trains) instead of the trainer's step when its
-    # first generate() call returned. Needs the direct vLLM generate() path; the OpenAI chat
-    # route and other engines carry no first-token version, and a run whose rollouts sample
-    # through them fails at its first admission with this on.
+    # first generate() call returned. The vLLM generate() path stamps from the engine's
+    # first-token clock; the OpenAI chat route stamps each attempt with the version installed
+    # when it was sent, exact under pause_mode abort and at most one version old under keep.
+    # Other engines carry no version, and a run sampling through them fails at its first
+    # admission with this on.
     first_token_admission: false
     # What the engines do with requests still generating at each weight sync. abort cancels
     # them and the client resubmits each prompt with the tokens it already generated, so the

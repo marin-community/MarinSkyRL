@@ -1645,3 +1645,114 @@ async def test_resume_names_the_installed_version_on_every_live_engine():
     await client.resume_generation()
 
     assert [engine.resumed_with for engine in engines] == [[7, None], [7, None]]
+
+
+# -------------------------------------------
+# chat attempts stamped with the installed policy version
+# --------------------------------------------
+
+
+def _chat_partial(content, finish_reason, token_ids):
+    return {
+        "id": "cmpl",
+        "object": "chat.completion",
+        "model": "dummy-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
+                "token_ids": list(token_ids),
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": len(token_ids), "total_tokens": 5 + len(token_ids)},
+    }
+
+
+class _StampedChatEngine:
+    """Engine that replays scripted chat partials and can run a weight sync during an attempt."""
+
+    def __init__(self, responses, during_attempt=None):
+        self.responses = list(responses)
+        self.calls = []
+        self.during_attempt = during_attempt
+
+    async def chat_completion(self, request_payload):
+        self.calls.append(deepcopy(request_payload))
+        attempt = len(self.calls) - 1
+        if self.during_attempt is not None:
+            await self.during_attempt(attempt)
+        return deepcopy(self.responses[attempt])
+
+    async def pause_generation(self):
+        pass
+
+    async def resume_generation(self, policy_version=None):
+        pass
+
+
+def _chat_request():
+    return {
+        "json": {
+            "model": "dummy-model",
+            "messages": [{"role": "user", "content": "q"}],
+            "max_tokens": 16,
+            "session_id": "s",
+        },
+        "headers": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_chat_attempts_are_stamped_with_the_version_installed_when_they_were_sent(monkeypatch):
+    """A weight sync aborts the first attempt after one token; the continuation is sent after the
+    resume and carries the new version, so the response records both spans in order."""
+    monkeypatch.setattr(
+        "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
+    )
+    client = None
+
+    async def sync_during(attempt):
+        if attempt == 0:
+            await client.pause_generation()
+            await client.resume_generation(policy_version=4)
+
+    engine = _StampedChatEngine(
+        [_chat_partial("A", "abort", [11]), _chat_partial("BC", "stop", [12, 13])], during_attempt=sync_during
+    )
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    await client.pause_generation()
+    await client.resume_generation(policy_version=3)
+
+    out = await client.chat_completion(_chat_request())
+
+    assert out["choices"][0]["token_ids"] == [11, 12, 13]
+    assert out["choices"][0]["policy_version_segments"] == [
+        {"start": 0, "token_count": 1, "policy_version": 3},
+        {"start": 1, "token_count": 2, "policy_version": 4},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_single_attempt_carries_one_span_of_the_installed_version(monkeypatch):
+    monkeypatch.setattr(
+        "skyrl_train.inference_engines.inference_engine_client.ABORT_GENERATION_GRACE_PERIOD_SECONDS", 0
+    )
+    engine = _StampedChatEngine([_chat_partial("AB", "stop", [11, 12])])
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+    await client.pause_generation()
+    await client.resume_generation(policy_version=5)
+
+    out = await client.chat_completion(_chat_request())
+
+    assert out["choices"][0]["policy_version_segments"] == [{"start": 0, "token_count": 2, "policy_version": 5}]
+
+
+@pytest.mark.asyncio
+async def test_chat_responses_carry_no_span_until_a_version_is_named():
+    engine = _StampedChatEngine([_chat_partial("AB", "stop", [11, 12])])
+    client = InferenceEngineClient(engines=[engine], tokenizer=object(), full_config=_make_min_cfg())
+
+    out = await client.chat_completion(_chat_request())
+
+    assert "policy_version_segments" not in out["choices"][0]
