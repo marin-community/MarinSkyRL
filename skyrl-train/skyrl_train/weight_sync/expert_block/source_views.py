@@ -16,6 +16,7 @@ import torch
 from skyrl_train.weight_sync.expert_block.schedule import BF16, DenseSlice, ExpertEntry, TrainerRank
 
 EXPERT_HF_NAME = re.compile(r"model\.layers\.(\d+)\.mlp\.experts\.(gate|up|down)_proj\.weight")
+LAYER_PREFIX = re.compile(r"model\.layers\.(\d+)\.")
 ROUTED_EXPERTS = "mlp.experts.routed_experts"
 ROUTER_WEIGHT_SUFFIX = ".mlp.router.weight"
 EXPERT_MAPPINGS = ("GrugStackedExpertMapping", "GrugStackedGatedExpertMapping")

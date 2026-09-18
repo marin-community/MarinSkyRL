@@ -14,7 +14,7 @@ import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
-from vllm.distributed.parallel_state import get_dp_group, get_ep_group
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_pp_group
 from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
@@ -1053,12 +1053,15 @@ class WorkerWrap:
         receiver = getattr(self, "_expert_block_receiver", None)
         if receiver is None:
             placement = self._device_placement()
+            pp = get_pp_group()
             receiver = self._expert_block_receiver = ExpertBlockReceiver(
                 self.vllm_config,
                 self.device,
                 self.model_runner.model,
                 ep_rank=placement.ep_rank,
                 ep_size=placement.ep_world_size,
+                pp_rank=pp.rank_in_group,
+                pp_size=pp.world_size,
                 gpu_uuid=placement.gpu_uuid,
             )
         return getattr(receiver, method)(*args)

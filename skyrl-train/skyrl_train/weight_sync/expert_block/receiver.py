@@ -19,7 +19,7 @@ import torch
 
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, from_wire
-from skyrl_train.weight_sync.expert_block.source_views import ROUTED_EXPERTS
+from skyrl_train.weight_sync.expert_block.source_views import LAYER_PREFIX, ROUTED_EXPERTS
 from skyrl_train.weight_sync.expert_block.stream import Stream, storage_identity
 
 SUPPORTED_MODEL_TYPE = "grug_moe"
@@ -30,12 +30,25 @@ SUPPORTED_MOE_BACKEND = "TRITON"
 
 
 class ExpertBlockReceiver:
-    def __init__(self, vllm_config, device, model, *, ep_rank: int, ep_size: int, gpu_uuid: str):
+    def __init__(
+        self,
+        vllm_config,
+        device,
+        model,
+        *,
+        ep_rank: int,
+        ep_size: int,
+        pp_rank: int,
+        pp_size: int,
+        gpu_uuid: str,
+    ):
         self.vllm_config = vllm_config
         self.device = device
         self.model = model
         self.ep_rank = ep_rank
         self.ep_size = ep_size
+        self.pp_rank = pp_rank
+        self.pp_size = pp_size
         self.gpu_uuid = gpu_uuid
         self.participant: int | None = None
         self.parameters: dict[str, torch.Tensor] = {}
@@ -56,10 +69,11 @@ class ExpertBlockReceiver:
             raise ValueError(f"Expert-block sync supports {SUPPORTED_MODEL_TYPE}, not {hf.model_type}")
         if self.vllm_config.model_config.quantization is not None:
             raise ValueError("Expert-block sync requires unquantised weights")
-        if parallel.tensor_parallel_size != 1 or parallel.pipeline_parallel_size != 1:
-            raise ValueError("Expert-block sync requires TP=PP=1 inference engines")
+        if parallel.tensor_parallel_size != 1:
+            raise ValueError("Expert-block sync requires TP=1 inference engines")
         if parallel.enable_eplb:
             raise ValueError("Expert-block sync requires a static expert placement (no EPLB)")
+        # --- Receiver pipeline stages: this worker holds only its stage's layers ---
         maps = {}
         for name, module in self.model.named_modules():
             if not name.endswith(ROUTED_EXPERTS):
@@ -73,8 +87,9 @@ class ExpertBlockReceiver:
             maps[name] = tuple(
                 int(module._map_global_expert_id_to_local_expert_id(expert)) for expert in range(hf.num_experts)
             )
-        if len(maps) != hf.num_hidden_layers:
-            raise ValueError(f"Found {len(maps)} routed-expert layers, expected {hf.num_hidden_layers}")
+        layers = sorted(int(LAYER_PREFIX.match(name)[1]) for name in maps)
+        if self.pp_size == 1 and len(layers) != hf.num_hidden_layers:
+            raise ValueError(f"Found {len(layers)} routed-expert layers, expected {hf.num_hidden_layers}")
         self.parameters = dict(self.model.named_parameters())
         self.identity = storage_identity(self.parameters)
         self.expert_maps = maps
@@ -87,6 +102,9 @@ class ExpertBlockReceiver:
             "gpu_uuid": self.gpu_uuid,
             "ep_rank": self.ep_rank,
             "expert_parallel_size": self.ep_size,
+            "pp_rank": self.pp_rank,
+            "pp_size": self.pp_size,
+            "layers": layers,
             "model": {
                 "num_experts": hf.num_experts,
                 "hidden_size": hf.hidden_size,

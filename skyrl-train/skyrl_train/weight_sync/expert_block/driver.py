@@ -24,7 +24,6 @@ from skyrl_train.weight_sync.expert_block.schedule import (
     ReceiverRank,
     Schedule,
     TrainerRank,
-    UnequalExpertParallelism,
     build_schedule,
     from_wire,
     receiver_participant,
@@ -44,7 +43,7 @@ class SyncTimings:
 def plan_from_inventories(policy: list[dict], receivers: list[tuple[dict, object]]) -> tuple[Schedule, dict[str, int]]:
     """Build the schedule from every trainer's and receiver's report; returns it with the GPU-to-participant map.
 
-    ``receivers`` pairs each engine's report with its verified node-local placement.
+    ``receivers`` pairs each engine worker's report with its verified node-local placement.
     """
     trainers = sorted((from_wire(TrainerRank, row["trainer"]) for row in policy), key=lambda row: row.rank)
     by_rank = {row.rank: row for row in trainers}
@@ -71,56 +70,74 @@ def plan_from_inventories(policy: list[dict], receivers: list[tuple[dict, object
     dense = [from_wire(DenseSlice, item) for pp in sorted(stages) for item in stages[pp]["dense"]]
 
     receiver_ranks, participants_by_gpu = [], {}
-    receiver_models, installed = set(), {}
+    receiver_eps, receiver_models = set(), set()
+    receiver_stages: dict[int, dict] = {}
     for report, placement in receivers:
         worker = placement.worker
         if report["gpu_uuid"] != worker.gpu_uuid or report["ep_rank"] != worker.ep_rank:
             raise ValueError(f"Receiver on {report['gpu_uuid']} does not match its verified placement {placement}")
-        if report["expert_parallel_size"] != trainer_ep:
-            raise UnequalExpertParallelism(
-                f"trainer EP {trainer_ep} differs from receiver EP {report['expert_parallel_size']}"
-            )
-        receiver = ReceiverRank(placement.replica * trainer_ep + worker.ep_rank, placement.replica, worker.ep_rank)
+        receiver_eps.add(report["expert_parallel_size"])
+        receiver_models.add(tuple(sorted(report["model"].items())))
+        stage = report["pp_rank"]
+        reference = receiver_stages.setdefault(stage, report)
+        if (reference["layers"], reference["dense"], reference["pp_size"]) != (
+            report["layers"],
+            report["dense"],
+            report["pp_size"],
+        ):
+            raise ValueError(f"Receivers of stage {stage} disagree on their layers or dense parameters")
+        receiver = ReceiverRank(
+            (placement.replica * report["pp_size"] + stage) * report["expert_parallel_size"] + worker.ep_rank,
+            placement.replica,
+            worker.ep_rank,
+            stage,
+        )
         receiver_ranks.append(receiver)
         participants_by_gpu[worker.gpu_uuid] = receiver_participant(len(trainers), receiver)
-        receiver_models.add(tuple(sorted(report["model"].items())))
-        installed[receiver.rank] = report["dense"]
-    if len(receiver_models) != 1:
-        raise ValueError("Receivers disagree on model dimensions")
+    if len(receiver_eps) != 1 or len(receiver_models) != 1:
+        raise ValueError("Receivers disagree on expert-parallel size or model dimensions")
+    receiver_ep = receiver_eps.pop()
     receiver_model = dict(receiver_models.pop())
     if any(receiver_model[key] != model[key] for key in model) or receiver_model["num_hidden_layers"] != sum(
         map(len, layers_by_pp)
     ):
         raise ValueError(f"Receiver model {receiver_model} differs from trainer model {model}")
-    reference = next(iter(installed.values()))
-    if any(value != reference for value in installed.values()):
-        raise ValueError("Receivers disagree on their dense parameters")
-    _check_dense_coverage(dense, reference)
+    if sorted(receiver_stages) != list(range(next(iter(receiver_stages.values()))["pp_size"])):
+        raise ValueError("Receiver pipeline stages are incomplete")
+    receiver_layers_by_pp = tuple(tuple(receiver_stages[stage]["layers"]) for stage in sorted(receiver_stages))
+    dense_holders: dict[str, list[int]] = {}
+    for stage in sorted(receiver_stages):
+        _check_dense_coverage(dense, receiver_stages[stage]["dense"])
+        for name in receiver_stages[stage]["dense"]:
+            dense_holders.setdefault(name, []).append(stage)
+    exported = {item.hf_name for item in dense}
+    if set(dense_holders) != exported:
+        raise ValueError(f"Dense weights differ: no receiver stage holds {sorted(exported - set(dense_holders))}")
     schedule = build_schedule(
         trainers,
         sorted(receiver_ranks, key=lambda row: row.rank),
         entries,
         dense,
         trainer_ep=trainer_ep,
-        receiver_ep=trainer_ep,
+        receiver_ep=receiver_ep,
         layers_by_pp=layers_by_pp,
         num_experts=model["num_experts"],
+        receiver_layers_by_pp=receiver_layers_by_pp,
+        dense_holders=dense_holders,
     )
     return schedule, participants_by_gpu
 
 
 def _check_dense_coverage(dense: list[DenseSlice], installed: dict[str, list]) -> None:
-    """Every dense parameter on the receiver is fully covered by trainer slices of a compatible dtype."""
+    """Every dense parameter a receiver stage holds is fully covered by trainer slices of a compatible dtype."""
     numel = Counter()
     dtypes = {}
     for item in dense:
         numel[item.hf_name] += item.numel
         dtypes.setdefault(item.hf_name, item.wire_dtype)
-    if set(numel) != set(installed):
-        raise ValueError(
-            f"Dense weights differ: trainer {sorted(set(numel) - set(installed))}, receiver {sorted(set(installed) - set(numel))}"
-        )
     for name, (shape, dtype) in installed.items():
+        if name not in numel:
+            raise ValueError(f"Dense weights differ: the receiver holds {name}, which no trainer rank exports")
         expected = 1
         for dimension in shape:
             expected *= dimension
@@ -197,6 +214,7 @@ class ExpertBlockSync:
         policy = [InstallReport(**row) for row in policy_rows]
         receivers = [InstallReport(**row) for row in receiver_rows]
         expected_bytes = dict(self.schedule.receiver_bytes)
+        expected_experts = dict(self.schedule.receiver_experts)
         if sorted(report.participant for report in receivers) != sorted(expected_bytes):
             raise RuntimeError("Not every planned receiver reported this sync")
         for report in receivers:
@@ -204,13 +222,11 @@ class ExpertBlockSync:
                 raise RuntimeError(
                     f"Receiver {report.participant} installed version {report.version}, expected {version}"
                 )
-            if (
-                report.expert_matrices != self.schedule.receiver_expert_count
-                or report.wire_bytes != expected_bytes[report.participant]
-            ):
+            expected = (expected_experts[report.participant], expected_bytes[report.participant])
+            if (report.expert_matrices, report.wire_bytes) != expected:
                 raise RuntimeError(
-                    f"Receiver {report.participant} landed {report.expert_matrices} expert matrices and {report.wire_bytes} bytes, "
-                    f"expected {self.schedule.receiver_expert_count} and {expected_bytes[report.participant]}"
+                    f"Receiver {report.participant} landed {report.expert_matrices} expert matrices and "
+                    f"{report.wire_bytes} bytes, expected {expected[0]} and {expected[1]}"
                 )
         for report in policy:
             if report.version != version or report.wire_bytes != self.root_bytes.get(report.participant, 0):

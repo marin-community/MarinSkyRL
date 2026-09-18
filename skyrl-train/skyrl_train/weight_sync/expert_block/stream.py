@@ -65,9 +65,12 @@ class Stream:
         self.parameters = None if self.trainer else parameters
         self.expert_maps = None if self.trainer else expert_maps
         self.device = device
+        self.local = self.local_group()
         scratch_bytes = 0
         if not self.trainer:
             for item in schedule.dense:
+                if not self.lands(item):
+                    continue
                 view = dense_destination_view(item.source, self.parameters)
                 if view.dtype != torch.bfloat16 and item.source.wire_dtype == BF16:
                     scratch_bytes = max(scratch_bytes, item.source.nbytes)
@@ -81,8 +84,12 @@ class Stream:
         for item in schedule.dense:
             if item.root == participant:
                 dense_source_view(item.source, self.sources)
-            elif not self.trainer:
+            elif self.lands(item):
                 dense_destination_view(item.source, self.parameters)
+
+    def lands(self, item) -> bool:
+        """Whether this receiver installs a dense slice: only the receivers of a stage holding the tensor do."""
+        return not self.trainer and self.local is not None and self.local[0] in item.local_groups
 
     def run(self, version: int) -> InstallReport:
         with torch.no_grad():
@@ -103,18 +110,17 @@ class Stream:
             dist.broadcast(tensor, src=0, group=self.groups[broadcast.group])
             matrices += 1
             wire_bytes += broadcast.entry.nbytes
-        local = self.local_group()
         for item in self.schedule.dense:
             if item.root == self.participant:
                 dist.broadcast(dense_source_view(item.source, self.sources), src=0, group=self.groups[item.group])
                 wire_bytes += item.source.nbytes
-            elif not self.trainer:
+            elif self.lands(item):
                 destination = dense_destination_view(item.source, self.parameters)
                 widened = destination.dtype != torch.bfloat16 and item.source.wire_dtype == BF16
                 landing = self.scratch.narrow(0, 0, item.source.nbytes).view(torch.bfloat16) if widened else destination
                 if self.participant in item.landings:
                     dist.broadcast(landing, src=0, group=self.groups[item.group])
-                local_name, members = local
+                local_name, members = self.local
                 origin = next(rank for rank in item.landings if rank in members)
                 dist.broadcast(landing, src=members.index(origin), group=self.groups[local_name])
                 if widened:

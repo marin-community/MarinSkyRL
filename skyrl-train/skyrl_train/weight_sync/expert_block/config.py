@@ -21,11 +21,10 @@ def validate_expert_block_transport(cfg: DictConfig) -> None:
             problems.append("the policy must use tensor_model_parallel_size 1")
         if megatron.expert_tensor_parallel_size not in (None, 1):
             problems.append("the policy must use expert_tensor_parallel_size 1")
-        if megatron.expert_model_parallel_size != generator.inference_engine_expert_parallel_size:
-            problems.append(
-                f"the policy's expert_model_parallel_size ({megatron.expert_model_parallel_size}) must equal "
-                f"generator.inference_engine_expert_parallel_size ({generator.inference_engine_expert_parallel_size})"
-            )
+        # Unequal expert-parallel degrees are paired by the schedule; each must divide the
+        # expert count, which is checked against the model when the ranks report.
+        if megatron.expert_model_parallel_size < 1 or generator.inference_engine_expert_parallel_size < 1:
+            problems.append("expert-parallel sizes must be positive")
     if generator.backend != "vllm" or not generator.async_engine or not generator.run_engines_locally:
         problems.append("the engines must be local async vLLM engines")
     if cfg.trainer.placement.colocate_all:

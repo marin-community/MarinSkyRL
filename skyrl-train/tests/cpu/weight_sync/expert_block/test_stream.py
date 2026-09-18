@@ -1,14 +1,17 @@
 """Real gloo broadcasts over the expert-block schedule: bytes land where the schedule says, and nowhere else.
 
-Twelve processes: a PP2 x EP2 x DP2 trainer and two EP2 inference replicas. Every
-tensor is filled from its identity, so a receiver can check what it installed
-against what the owning trainer must have sent without any side channel.
+Every process is one participant. Every tensor is filled from its identity, so a
+receiver can check what it installed against what the owning trainer must have
+sent without any side channel. Two topologies: the qualified shape (equal EP, one
+receiver stage, two replicas) and an unequal-EP, two-stage one.
 """
 
+from dataclasses import dataclass
 from datetime import timedelta
 from itertools import product
 import os
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -24,23 +27,58 @@ from skyrl_train.weight_sync.expert_block.schedule import (
 from skyrl_train.weight_sync.expert_block.source_views import ExpertSource
 from skyrl_train.weight_sync.expert_block.stream import Stream
 
-LAYERS_BY_PP = ((0,), (1,))
 NUM_EXPERTS = 4
-EP = 2
-DP = 2
-REPLICAS = 2
 HIDDEN, INTERMEDIATE = 3, 2
 TIMEOUT = 60
 
 
-def trainers():
-    return tuple(
-        TrainerRank(index, dp, pp, ep) for index, (dp, pp, ep) in enumerate(product(range(DP), range(2), range(EP)))
-    )
+@dataclass(frozen=True)
+class Topology:
+    trainer_layers: tuple[tuple[int, ...], ...]
+    trainer_ep: int
+    trainer_dp: int
+    replicas: int
+    receiver_layers: tuple[tuple[int, ...], ...]
+    receiver_ep: int
+    # dense HF name -> (trainer stage, shape, installed dtype, receiver stages holding it)
+    dense: dict
+
+    def trainers(self):
+        coordinates = product(range(self.trainer_dp), range(len(self.trainer_layers)), range(self.trainer_ep))
+        return tuple(TrainerRank(index, dp, pp, ep) for index, (dp, pp, ep) in enumerate(coordinates))
+
+    def receivers(self):
+        coordinates = product(range(self.replicas), range(len(self.receiver_layers)), range(self.receiver_ep))
+        return tuple(ReceiverRank(index, replica, ep, stage) for index, (replica, stage, ep) in enumerate(coordinates))
 
 
-def receivers():
-    return tuple(ReceiverRank(replica * EP + ep, replica, ep) for replica in range(REPLICAS) for ep in range(EP))
+QUALIFIED = Topology(
+    trainer_layers=((0,), (1,)),
+    trainer_ep=2,
+    trainer_dp=2,
+    replicas=2,
+    receiver_layers=((0, 1),),
+    receiver_ep=2,
+    dense={
+        "model.layers.0.mlp.router.weight": (0, (NUM_EXPERTS, HIDDEN), "float32", (0,)),  # BF16 wire, FP32 installed
+        "model.layers.1.mlp.router.weight": (1, (NUM_EXPERTS, HIDDEN), "float32", (0,)),
+        "model.norm.weight": (1, (HIDDEN,), "bfloat16", (0,)),
+    },
+)
+# Trainer EP 2 feeding receivers at EP 1 across two receiver stages; the norm is held by both stages.
+UNEQUAL_STAGED = Topology(
+    trainer_layers=((0, 1), (2,)),
+    trainer_ep=2,
+    trainer_dp=1,
+    replicas=1,
+    receiver_layers=((0,), (1, 2)),
+    receiver_ep=1,
+    dense={
+        "model.layers.0.mlp.router.weight": (0, (NUM_EXPERTS, HIDDEN), "float32", (0,)),
+        "model.layers.2.mlp.router.weight": (1, (NUM_EXPERTS, HIDDEN), "float32", (1,)),
+        "model.norm.weight": (1, (HIDDEN,), "bfloat16", (0, 1)),
+    },
+)
 
 
 def expert_value(layer, expert, projection):
@@ -51,64 +89,51 @@ def dense_value(name):
     return float(sum(map(ord, name)) % 97)
 
 
-DENSE = {
-    "model.layers.0.mlp.router.weight": (0, (NUM_EXPERTS, HIDDEN), "float32"),  # BF16 on the wire, FP32 installed
-    "model.layers.1.mlp.router.weight": (1, (NUM_EXPERTS, HIDDEN), "float32"),
-    "model.norm.weight": (1, (HIDDEN,), "bfloat16"),
-}
-
-
-def expert_sources_for(trainer):
+def expert_sources_for(topology, trainer):
     """Every expert matrix a trainer owns, as its own parameter, filled from its identity."""
-    per_block = NUM_EXPERTS // EP
+    per_block = NUM_EXPERTS // topology.trainer_ep
     sources, experts = {}, {}
-    for layer in LAYERS_BY_PP[trainer.pp]:
+    for layer in topology.trainer_layers[trainer.pp]:
         for expert in range(trainer.ep * per_block, (trainer.ep + 1) * per_block):
             for projection in ("fc1", "fc2"):
                 shape = (2 * INTERMEDIATE, HIDDEN) if projection == "fc1" else (HIDDEN, INTERMEDIATE)
                 key = f"decoder.layers.{layer}.mlp.experts.linear_{projection}.weight{expert}"
                 sources[key] = torch.full(shape, expert_value(layer, expert, projection), dtype=torch.bfloat16)
-                entry = ExpertEntry(
-                    f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}",
-                    layer,
-                    trainer.pp,
-                    expert,
-                    projection,
-                    sources[key].numel() * 2,
-                )
-                experts[entry.name] = ExpertSource(entry, key, shape)
+                name = f"model.layers.{layer}.mlp.experts.{projection}.expert{expert}"
+                entry = ExpertEntry(name, layer, trainer.pp, expert, projection, sources[key].numel() * 2)
+                experts[name] = ExpertSource(entry, key, shape)
     return sources, experts
 
 
-def dense_slices_for(pp):
+def dense_slices_for(topology, pp):
     slices = []
-    for name, (owner_pp, shape, _) in sorted(DENSE.items()):
-        if owner_pp != pp:
-            continue
-        numel = int(torch.Size(shape).numel())
-        slices.append(DenseSlice(name, 0, numel, "bfloat16", f"source.{name}", 0, pp))
+    for name, (owner_pp, shape, _, _) in sorted(topology.dense.items()):
+        if owner_pp == pp:
+            slices.append(DenseSlice(name, 0, int(torch.Size(shape).numel()), "bfloat16", f"source.{name}", 0, pp))
     return slices
 
 
-def schedule():
+def schedule(topology):
     entries = []
-    for trainer in trainers():
+    for trainer in topology.trainers():
         if trainer.dp == 0:
-            entries.extend(source.entry for source in expert_sources_for(trainer)[1].values())
-    dense = dense_slices_for(0) + dense_slices_for(1)
+            entries.extend(source.entry for source in expert_sources_for(topology, trainer)[1].values())
+    dense = [item for pp in range(len(topology.trainer_layers)) for item in dense_slices_for(topology, pp)]
     return build_schedule(
-        trainers(),
-        receivers(),
+        topology.trainers(),
+        topology.receivers(),
         entries,
         dense,
-        trainer_ep=EP,
-        receiver_ep=EP,
-        layers_by_pp=LAYERS_BY_PP,
+        trainer_ep=topology.trainer_ep,
+        receiver_ep=topology.receiver_ep,
+        layers_by_pp=topology.trainer_layers,
         num_experts=NUM_EXPERTS,
+        receiver_layers_by_pp=topology.receiver_layers,
+        dense_holders={name: holders for name, (_, _, _, holders) in topology.dense.items()},
     )
 
 
-def participant_main(rank, port, directory):
+def participant_main(rank, topology, port, directory):
     dist.init_process_group(
         "gloo",
         init_method=f"file://{directory}/default-{rank}",
@@ -116,21 +141,22 @@ def participant_main(rank, port, directory):
         world_size=1,
         timeout=timedelta(seconds=TIMEOUT),
     )
-    plan = schedule()
+    plan = schedule(topology)
     trainer_count = plan.trainer_count
     device = torch.device("cpu")
     if rank < trainer_count:
-        trainer = trainers()[rank]
-        sources, experts = expert_sources_for(trainer)
-        for item in dense_slices_for(trainer.pp):
+        trainer = topology.trainers()[rank]
+        sources, experts = expert_sources_for(topology, trainer)
+        for item in dense_slices_for(topology, trainer.pp):
             sources[item.source_key] = torch.full((item.numel,), dense_value(item.hf_name), dtype=torch.bfloat16)
         before = {key: value.clone() for key, value in sources.items()}
         kwargs = dict(sources=sources, expert_sources=experts)
     else:
-        receiver = receivers()[rank - trainer_count]
+        receiver = topology.receivers()[rank - trainer_count]
         parameters, maps = {}, {}
-        per_block = NUM_EXPERTS // EP
-        for layer in range(2):
+        per_block = NUM_EXPERTS // topology.receiver_ep
+        held_layers = topology.receiver_layers[receiver.pp]
+        for layer in held_layers:
             prefix = f"model.layers.{layer}.mlp.experts.routed_experts"
             parameters[f"{prefix}.w13_weight"] = torch.zeros(
                 (per_block, 2 * INTERMEDIATE, HIDDEN), dtype=torch.bfloat16
@@ -140,7 +166,8 @@ def participant_main(rank, port, directory):
                 expert - receiver.ep * per_block if expert // per_block == receiver.ep else -1
                 for expert in range(NUM_EXPERTS)
             )
-        for name, (_, shape, dtype) in DENSE.items():
+        held_dense = {name: spec for name, spec in topology.dense.items() if receiver.pp in spec[3]}
+        for name, (_, shape, dtype, _) in held_dense.items():
             parameters[name] = torch.zeros(shape, dtype=getattr(torch, dtype))
         kwargs = dict(parameters=parameters, expert_maps=maps)
     rendezvous = Rendezvous("127.0.0.1", port, "test", TIMEOUT)
@@ -160,9 +187,9 @@ def participant_main(rank, port, directory):
             # Sending never writes a source.
             assert all(torch.equal(before[key], sources[key]) for key in sources)
         else:
-            assert report.expert_matrices == plan.receiver_expert_count
+            assert report.expert_matrices == dict(plan.receiver_experts)[rank]
             assert report.wire_bytes == dict(plan.receiver_bytes)[rank]
-            for layer in range(2):
+            for layer in held_layers:
                 prefix = f"model.layers.{layer}.mlp.experts.routed_experts"
                 for expert in range(NUM_EXPERTS):
                     local = maps[prefix][expert]
@@ -170,19 +197,19 @@ def participant_main(rank, port, directory):
                         continue
                     assert torch.all(parameters[f"{prefix}.w13_weight"][local] == expert_value(layer, expert, "fc1"))
                     assert torch.all(parameters[f"{prefix}.w2_weight"][local] == expert_value(layer, expert, "fc2"))
-            for name in DENSE:
+            for name in held_dense:
                 expected = torch.tensor(dense_value(name), dtype=torch.bfloat16).to(parameters[name].dtype)
                 assert torch.all(parameters[name] == expected), name
-            assert parameters["model.layers.0.mlp.router.weight"].dtype == torch.float32
     finally:
         destroy_groups(groups)
         dist.destroy_process_group()
 
 
-def test_every_receiver_installs_exactly_its_experts_and_all_dense_weights(tmp_path):
+@pytest.mark.parametrize("topology", [QUALIFIED, UNEQUAL_STAGED], ids=["equal-ep-one-stage", "unequal-ep-two-stages"])
+def test_every_receiver_installs_exactly_its_experts_and_the_dense_weights_its_stage_holds(topology, tmp_path):
     store = dist.TCPStore(
         "127.0.0.1", 0, world_size=None, is_master=True, timeout=timedelta(seconds=TIMEOUT), wait_for_workers=False
     )
-    world = len(trainers()) + len(receivers())
+    world = len(topology.trainers()) + len(topology.receivers())
     os.environ.setdefault("OMP_NUM_THREADS", "1")
-    mp.spawn(participant_main, args=(store.port, str(tmp_path)), nprocs=world, join=True)
+    mp.spawn(participant_main, args=(topology, store.port, str(tmp_path)), nprocs=world, join=True)

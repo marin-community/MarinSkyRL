@@ -9,7 +9,7 @@ import pytest
 
 from marinskyrl.inference_placement import InferenceReplicaPlacement, InferenceWorkerPlacement
 from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync, plan_from_inventories
-from skyrl_train.weight_sync.expert_block.schedule import UnequalExpertParallelism, receiver_participant, to_wire
+from skyrl_train.weight_sync.expert_block.schedule import receiver_participant, to_wire
 from skyrl_train.weight_sync.expert_block.stream import InstallReport
 from tests.cpu.weight_sync.expert_block.test_schedule import (
     EP,
@@ -59,6 +59,9 @@ def receiver_inventory(row):
         "gpu_uuid": f"GPU-{row.replica}-{row.ep}",
         "ep_rank": row.ep,
         "expert_parallel_size": EP,
+        "pp_rank": 0,
+        "pp_size": 1,
+        "layers": [0, 1, 2],
         "model": {**MODEL, "num_hidden_layers": 3},
         "dense": installed_dense(),
     }
@@ -84,8 +87,9 @@ def test_plan_pairs_each_receiver_with_its_verified_gpu():
 @pytest.mark.parametrize(
     "change,error",
     [
-        (lambda report: report.update(expert_parallel_size=4), UnequalExpertParallelism),
-        (lambda report: report["dense"].pop("model.norm.weight"), "Dense weights differ"),
+        (lambda report: report.update(expert_parallel_size=3), "do not split evenly"),
+        (lambda report: report["dense"].pop("model.norm.weight"), "no receiver stage holds"),
+        (lambda report: report.update(pp_size=2), "stages are incomplete"),
         (lambda report: report["dense"].update({"model.norm.weight": [[9], "bfloat16"]}), "cover 8 of 9"),
         (
             lambda report: report["dense"].update({"model.norm.weight": [[8], "float32"]}),
@@ -114,7 +118,7 @@ def test_a_receiver_whose_report_disagrees_with_its_verified_gpu_is_refused():
 def test_receivers_that_disagree_with_each_other_are_refused():
     rows = [(receiver_inventory(row), placement(row)) for row in receivers()]
     rows[1][0]["dense"].pop("model.norm.weight")
-    with pytest.raises(ValueError, match="Receivers disagree on their dense parameters"):
+    with pytest.raises(ValueError, match="Receivers of stage 0 disagree"):
         plan_from_inventories(policy_inventories(), rows)
 
 
@@ -139,7 +143,7 @@ class FakeRanks:
         expected = dict(self.schedule.receiver_bytes)
         if participant in expected:
             report = InstallReport(
-                participant, version, self.schedule.receiver_expert_count, expected[participant], 0.1
+                participant, version, dict(self.schedule.receiver_experts)[participant], expected[participant], 0.1
             )
         else:
             sent = sum(item.entry.nbytes for item in self.schedule.experts if item.root == participant)

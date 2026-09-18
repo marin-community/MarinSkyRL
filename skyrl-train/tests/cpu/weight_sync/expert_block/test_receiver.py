@@ -36,7 +36,9 @@ class Model(torch.nn.Module):
 
 
 def vllm_config(model_type="grug_moe", quantization=None, tp=1, eplb=False, layers=1):
-    hf = SimpleNamespace(model_type=model_type, num_experts=4, hidden_size=3, moe_intermediate_size=2, num_hidden_layers=layers)
+    hf = SimpleNamespace(
+        model_type=model_type, num_experts=4, hidden_size=3, moe_intermediate_size=2, num_hidden_layers=layers
+    )
     return SimpleNamespace(
         model_config=SimpleNamespace(hf_config=hf, quantization=quantization),
         parallel_config=SimpleNamespace(tensor_parallel_size=tp, pipeline_parallel_size=1, enable_eplb=eplb),
@@ -45,13 +47,21 @@ def vllm_config(model_type="grug_moe", quantization=None, tp=1, eplb=False, laye
 
 def receiver(config=None, model=None):
     return ExpertBlockReceiver(
-        config or vllm_config(), torch.device("cpu"), model or Model(), ep_rank=0, ep_size=2, gpu_uuid="GPU-0"
+        config or vllm_config(),
+        torch.device("cpu"),
+        model or Model(),
+        ep_rank=0,
+        ep_size=2,
+        pp_rank=0,
+        pp_size=1,
+        gpu_uuid="GPU-0",
     )
 
 
 def test_inventory_reports_the_dense_parameters_and_serving_map():
     report = receiver().inventory()
     assert report["ep_rank"] == 0 and report["expert_parallel_size"] == 2
+    assert (report["pp_rank"], report["pp_size"], report["layers"]) == (0, 1, [0])
     assert list(report["dense"]) == ["model.layers.0.mlp.router.weight"]
     assert report["model"]["num_hidden_layers"] == 1
 
@@ -61,7 +71,7 @@ def test_inventory_reports_the_dense_parameters_and_serving_map():
     [
         (vllm_config(model_type="qwen3_moe"), None, "supports grug_moe"),
         (vllm_config(quantization="fp8"), None, "unquantised"),
-        (vllm_config(tp=2), None, "TP=PP=1"),
+        (vllm_config(tp=2), None, "TP=1"),
         (vllm_config(eplb=True), None, "no EPLB"),
         (None, Model(backend="FLASHINFER_CUTLASS"), "requires the TRITON MoE backend"),
         (vllm_config(layers=2), None, "Found 1 routed-expert layers, expected 2"),
