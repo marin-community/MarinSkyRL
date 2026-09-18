@@ -1,0 +1,96 @@
+"""NCCL groups that span trainer and receiver processes, rendezvoused through one TCP store.
+
+Trainers and receivers have different default process groups, so every sync
+group is a standalone communicator. The driver hosts one ``TCPStore``; each
+participant creates only the groups it belongs to, under a per-group prefix, in
+the schedule's order. A four-byte broadcast then forces NCCL's lazy connection
+setup to happen at startup rather than inside the first timed sync.
+"""
+
+from dataclasses import dataclass
+from datetime import timedelta
+import time
+
+import ray
+import torch
+import torch.distributed as dist
+
+from skyrl_train.distributed.utils import init_custom_process_group
+from skyrl_train.weight_sync.expert_block.schedule import Group
+
+WARMUP_VALUE = 1729
+
+
+@dataclass(frozen=True)
+class Rendezvous:
+    address: str
+    port: int
+    namespace: str
+    timeout_seconds: int
+
+
+class RendezvousStore:
+    """The driver-side store; stays open until every group has been destroyed."""
+
+    def __init__(self, namespace: str, *, timeout_seconds: int):
+        self.address = ray.util.get_node_ip_address()
+        self.store = dist.TCPStore(
+            self.address, 0, world_size=None, is_master=True, timeout=timedelta(seconds=timeout_seconds), wait_for_workers=False
+        )
+        self.rendezvous = Rendezvous(self.address, self.store.port, namespace, timeout_seconds)
+
+    def close(self) -> None:
+        self.store = None
+
+
+def create_groups(
+    participant: int, groups: tuple[Group, ...], rendezvous: Rendezvous, *, backend: str = "nccl"
+) -> dict[str, dist.ProcessGroup]:
+    """Create this participant's communicators; on any failure, destroy the ones already made."""
+    client = dist.TCPStore(
+        rendezvous.address,
+        rendezvous.port,
+        world_size=None,
+        is_master=False,
+        timeout=timedelta(seconds=rendezvous.timeout_seconds),
+        wait_for_workers=False,
+    )
+    created: dict[str, dist.ProcessGroup] = {}
+    try:
+        for group in groups:
+            if participant not in group.members:
+                continue
+            created[group.name] = init_custom_process_group(
+                backend,
+                store=dist.PrefixStore(f"{rendezvous.namespace}/{group.name}", client),
+                rank=group.members.index(participant),
+                world_size=len(group.members),
+                group_name=group.name,
+                timeout=timedelta(seconds=rendezvous.timeout_seconds),
+            )
+    except BaseException:
+        destroy_groups(created)
+        raise
+    return created
+
+
+def warm_groups(participant: int, groups: tuple[Group, ...], created: dict[str, dist.ProcessGroup], device) -> dict[str, float]:
+    """Broadcast a known value on every owned group and check it arrived; returns seconds per group."""
+    wire = torch.empty(1, dtype=torch.int32, device=device)
+    seconds = {}
+    for index, group in enumerate(groups):
+        if group.name not in created:
+            continue
+        started = time.monotonic()
+        expected = WARMUP_VALUE + index
+        wire.fill_(expected if group.members[0] == participant else -1)
+        dist.broadcast(wire, src=0, group=created[group.name])
+        if wire.item() != expected:
+            raise RuntimeError(f"Warm-up broadcast on group {group.name} delivered {wire.item()}, expected {expected}")
+        seconds[group.name] = time.monotonic() - started
+    return seconds
+
+
+def destroy_groups(created: dict[str, dist.ProcessGroup]) -> None:
+    for name in reversed(list(created)):
+        dist.destroy_process_group(created.pop(name))
