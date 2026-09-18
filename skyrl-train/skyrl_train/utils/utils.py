@@ -39,6 +39,7 @@ from marinskyrl.distillation import (
     compile_distillation_plan_from_config,
     validate_distillation_runtime_support,
 )
+from marinskyrl.inference_placement import validate_node_local_config
 from marinskyrl.runtime_options import GDNBackend, R3Transport
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
@@ -850,6 +851,7 @@ def validate_cfg(cfg: DictConfig):
         )
 
     # Validate placement
+    validate_node_local_config(cfg)
     if cfg.trainer.placement.colocate_all:
         tp_pp_size = (
             cfg.generator.inference_engine_tensor_parallel_size * cfg.generator.inference_engine_pipeline_parallel_size
